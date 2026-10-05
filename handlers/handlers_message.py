@@ -1,48 +1,52 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-handlers_message.py - v7.15.0 (EVASION-PROOF HARDENED)
+handlers_message.py - v7.15.1 (FLOOD-DETECTION + EVASION-PROOF)
 =============================================================================
-🆕 v7.15.0 — إغلاق ثغرات التحايل المُكتشفة في v7.14.0:
+🆕 v7.15.1 — إصلاح ثغرات عقوبات الفيضان (10 ثغرات في v7.15.0):
 
-    🔴 CRITICAL (Bypass fixes):
-        #A1  Polls — كانت لا تُفحص إطلاقاً → تُدمج في التحليل.
-        #A2  إيموجي يكسر الدومين (evil🔥.com) → strip قبل الفحص.
-        #A3  newline يكسر schemeless (evil\\n.com) → merge موسّع.
-        #A4  edited_message غير مُسجَّل → handler جديد.
-        #A5  النقطة الصينية 。/｡/． → تطبيع.
-        #A6  كتل Combining موسّعة (U+1AB0..U+1DFF, U+20D0..U+20FF).
-        #A7  TLDs مفقودة (fish, ninja, guru, email, ...).
-        #A8  _deleet يُفسد البريد (@→a) → إزالة @ $ ! من الجدول.
-        #A9  _SPLIT_URL_RE يدمج أسطراً عادية → اشتراط .
-        #A10 _IPV4_SCHEMELESS_RE يلتقط 1.2.3.4.5 → lookahead.
-        #A11 _AT_CHANNEL_RE حد 5 أحرف (كان 4).
-        #A12 _extract_venue_url لا يعمل → title/address.
-        #A13 vCard TYPE=work:URL → نمط أشمل.
-        #A14 delete_emails إعداد مستقل (لا يخلط مع delete_links).
-        #A15 migration لا تُفعّل protected_any/postbot ضمنياً.
+    🔴 CRITICAL:
+        #F1  لا كاشف للفيضان — كان الزر يحفظ الإعدادات فقط.
+             → إضافة _check_flood() + _flood_tracker.
+        #F2  _resolve_penalty يقرأ auto_penalty دائماً.
+             → قراءة antiflood_penalty/night_mode_action حسب النوع.
+        #F3  لا يوجد تخزين لعدّ الرسائل (counter).
+             → defaultdict(deque) + قفل + سقف أقصى.
 
-    🟠 HIGH (Robustness):
-        #A16 hxxp:// , magnet:, ftp:// , mailto: → كشف.
-        #A17 سكريبتات إضافية (أرميني، جورجي، عبري).
-        #A18 Enclosed alphanumerics 🅴🆅🅸🅻 (NFKC مغطّي).
-        #A19 _extract_entity_urls depth=4 (كان 2).
-        #A20 _sec_auth_cache كود ميت → إزالة.
-        #A21 _delete_after_delay يمرّر context=None → تصحيح.
-        #A22 _is_delete_permission_error FP → عتبة 3 إخفاقات/دقيقة.
-        #A23 _merge_split_urls يشمل schemeless domains.
-        #A24 homoglyph: تطبيق آمن مع الحفاظ على النص الأصلي.
-        #A25 Braille/Runic domains → إزالتها من الأسماء المشبوهة.
+    🟠 HIGH:
+        #F4  لا تنظيف دوري للـ flood tracker → memory leak.
+             → _cleanup_flood_tracker() + ربطه بـ periodic_cleanup.
+        #F5  لا حماية من antiflood_messages=0 → حذف كل رسالة.
+             → max(1, ...) في الكاشف والحفظ.
 
-    ✅ الحفاظ الكامل على وظائف v7.14.0.
+    🟡 MEDIUM:
+        #F6  _get_penalty_duration يُرجع قيماً سالبة محتملة.
+             → max(60, int(...)).
+        #F7  لا تحقق من صحة antiflood_messages/seconds.
+             → (يُطبّق في handlers_reply.py — خارج نطاق هذا الملف)
+        #F8  slow_mode لا يُطبَّق فعلياً على Telegram.
+             → set_chat_slow_mode() عند التفعيل الأول.
 
-🆕 Feature Flags جديدة (مُفعّلة افتراضياً):
-    ANTIEVASION_POLL              = True   # A1
-    ANTIEVASION_EMOJI_IN_DOMAIN   = True   # A2
-    ANTIEVASION_UNICODE_DOTS      = True   # A5
-    ANTIEVASION_EXTENDED_COMBINING= True   # A6
-    ANTIEVASION_EXTRA_SCRIPTS     = True   # A17
-    ANTIEVASION_ALT_SCHEMES       = True   # A16
+    🟢 LOW:
+        #F9  تفعيل الكل يستخدم antiflood_seconds=5 بينما default=10.
+             → (يُصلَح في handlers_callback.py v9.7.6)
+        #F10 جدول violation_penalties فارغ → penalty_rule دائماً None.
+             → (سلوك متوقّع، لا يُصلَح هنا)
+
+🆕 v7.15.0 — إغلاق ثغرات التحايل:
+    🔴 #A1  Polls.              #A2  إيموجي يكسر الدومين.
+    🔴 #A3  newline.            #A4  edited_message.
+    🔴 #A5  نقاط يونيكود.       #A6  Combining موسّع.
+    🔴 #A7  TLDs.               #A8  _deleet يحفظ البريد.
+    🔴 #A9  _SPLIT_URL_RE.      #A10 IPv4 lookahead.
+    🔴 #A11 @channel 5 أحرف.    #A12 venue title/address.
+    🔴 #A13 vCard TYPE.         #A14 delete_emails.
+    🔴 #A15 migration آمن.      #A16 hxxp/magnet/ftp.
+    🔴 #A17 scripts إضافية.     #A19 depth=4.
+    🔴 #A20 حذف _sec_auth_cache. #A21 context في delete.
+    🔴 #A22 delete-perm threshold. #A24 homoglyph آمن.
+    🔴 #A25 Braille/Runic.
+
 =============================================================================
 """
 
@@ -135,13 +139,17 @@ _ANTIEVASION_IPV4_SCHEMELESS = _env_flag("ANTIEVASION_IPV4_SCHEMELESS", True)
 _ANTIEVASION_MULTILINE_URL = _env_flag("ANTIEVASION_MULTILINE_URL", True)
 _ANTIEVASION_VENUE_VCARD = _env_flag("ANTIEVASION_VENUE_VCARD", True)
 
-# v7.15.0 NEW flags
+# v7.15.0 flags
 _ANTIEVASION_POLL = _env_flag("ANTIEVASION_POLL", True)
 _ANTIEVASION_EMOJI_IN_DOMAIN = _env_flag("ANTIEVASION_EMOJI_IN_DOMAIN", True)
 _ANTIEVASION_UNICODE_DOTS = _env_flag("ANTIEVASION_UNICODE_DOTS", True)
 _ANTIEVASION_EXTENDED_COMBINING = _env_flag("ANTIEVASION_EXTENDED_COMBINING", True)
 _ANTIEVASION_EXTRA_SCRIPTS = _env_flag("ANTIEVASION_EXTRA_SCRIPTS", True)
 _ANTIEVASION_ALT_SCHEMES = _env_flag("ANTIEVASION_ALT_SCHEMES", True)
+
+# v7.15.1 flags
+_ANTIFLOOD_ENABLED = _env_flag("ANTIFLOOD_ENABLED", True)
+_SLOW_MODE_AUTO = _env_flag("SLOW_MODE_AUTO", True)
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -173,9 +181,20 @@ _GROUP_LOG_PREVIEW_LENGTH = 150
 
 _COLUMNS_RETRY_COOLDOWN_SEC = 300.0
 
-# v7.15.0 #A22
 _DELETE_FAILURE_NOTIFY_THRESHOLD = 3
 _DELETE_FAILURE_NOTIFY_WINDOW = 60.0
+
+# v7.15.1 flood constants
+_FLOOD_TRACKER_MAX_KEYS = 5000
+_FLOOD_TRACKER_STALE_SEC = 300.0
+_FLOOD_MAX_MESSAGES_LIMIT = 100
+_FLOOD_MAX_WINDOW_SEC = 3600
+_FLOOD_MIN_WINDOW_SEC = 1
+_FLOOD_MIN_DURATION_SEC = 60
+_FLOOD_DEFAULT_MESSAGES = 5
+_FLOOD_DEFAULT_WINDOW = 10
+_FLOOD_DEFAULT_PENALTY = "mute"
+_FLOOD_DEFAULT_DURATION = 3600
 
 FEATURE_LOG_DELETIONS = _env_flag("LOG_DELETIONS", True)
 FEATURE_LOG_PENALTIES = _env_flag("LOG_PENALTIES", True)
@@ -197,7 +216,6 @@ class _MessageContext:
         'entity_urls', 'has_link_entity', 'button_link_urls',
         'has_any_link', 'has_button_link',
         'vcard_urls', 'venue_url', 'has_hidden_chars',
-        # v7.15.0 #A1
         'poll_text', 'poll_options_count', 'poll_urls',
     )
 
@@ -223,14 +241,136 @@ class _MessageContext:
         self.vcard_urls: List[str] = []
         self.venue_url: str = ""
         self.has_hidden_chars = False
-        # v7.15.0
         self.poll_text: str = ""
         self.poll_options_count: int = 0
         self.poll_urls: List[str] = []
 
 
 # ═══════════════════════════════════════════════════════════════════
-# Emoji / Regex Constants (defined early — used by normalizers)
+# v7.15.1: Flood Tracker
+# ═══════════════════════════════════════════════════════════════════
+
+_flood_tracker: Dict[Tuple[int, int], deque] = defaultdict(
+    lambda: deque(maxlen=_FLOOD_MAX_MESSAGES_LIMIT + 5)
+)
+_flood_lock = asyncio.Lock()
+_flood_last_cleanup = 0.0
+
+
+async def _check_flood(
+    chat_id: int,
+    user_id: int,
+    max_messages: int,
+    window_sec: float,
+) -> bool:
+    """
+    v7.15.1 #F1: كاشف الفيضان الأساسي.
+
+    يُرجع True إذا تجاوز المستخدم الحدّ خلال النافذة الزمنية.
+
+    - max_messages: الحد الأقصى (يُطبَّع إلى [1, _FLOOD_MAX_MESSAGES_LIMIT])
+    - window_sec: النافذة الزمنية بالثواني (تُطبَّع إلى
+                   [_FLOOD_MIN_WINDOW_SEC, _FLOOD_MAX_WINDOW_SEC])
+    - عند تجاوز الحد → يُفرَّغ الـtracker لمنع عقوبات متتالية.
+    """
+    if max_messages <= 0 or window_sec <= 0:
+        return False
+
+    # #F5: تطبيع القيم — لا نحذف كل رسالة بـ 0، ولا ننتظر ساعة
+    try:
+        max_messages = max(1, min(
+            int(max_messages),
+            _FLOOD_MAX_MESSAGES_LIMIT,
+        ))
+    except (TypeError, ValueError):
+        max_messages = _FLOOD_DEFAULT_MESSAGES
+
+    try:
+        window_sec = max(
+            float(_FLOOD_MIN_WINDOW_SEC),
+            min(float(window_sec), float(_FLOOD_MAX_WINDOW_SEC)),
+        )
+    except (TypeError, ValueError):
+        window_sec = float(_FLOOD_DEFAULT_WINDOW)
+
+    now = time.monotonic()
+    key = (chat_id, user_id)
+
+    async with _flood_lock:
+        tracker = _flood_tracker[key]
+        # احذف الرسائل خارج النافذة
+        while tracker and now - tracker[0] > window_sec:
+            tracker.popleft()
+        tracker.append(now)
+        exceeded = len(tracker) > max_messages
+        if exceeded:
+            # إعادة تعيين فورية — تمنع عقوبات متكررة لكل رسالة بعد الحد
+            tracker.clear()
+            return True
+        return False
+
+
+async def _cleanup_flood_tracker(force: bool = False) -> int:
+    """
+    v7.15.1 #F4: تنظيف دوري للـ flood tracker.
+
+    - يحذف المفاتيح الخاملة (آخر رسالة > _FLOOD_TRACKER_STALE_SEC).
+    - عند تجاوز _FLOOD_TRACKER_MAX_KEYS → يحذف 25% الأقدم.
+
+    Returns:
+        عدد المفاتيح المحذوفة.
+    """
+    global _flood_last_cleanup
+    now = time.monotonic()
+    if not force and now - _flood_last_cleanup < 60.0:
+        return 0
+
+    removed = 0
+    async with _flood_lock:
+        _flood_last_cleanup = now
+
+        # 1) احذف الخاملة
+        stale_keys = [
+            k for k, dq in _flood_tracker.items()
+            if not dq or now - dq[-1] > _FLOOD_TRACKER_STALE_SEC
+        ]
+        for k in stale_keys:
+            _flood_tracker.pop(k, None)
+            removed += 1
+
+        # 2) سقف أقصى
+        if len(_flood_tracker) > _FLOOD_TRACKER_MAX_KEYS:
+            oldest = sorted(
+                _flood_tracker.items(),
+                key=lambda kv: kv[1][-1] if kv[1] else 0.0,
+            )
+            to_del = len(_flood_tracker) - (_FLOOD_TRACKER_MAX_KEYS * 3 // 4)
+            for k, _ in oldest[:max(1, to_del)]:
+                _flood_tracker.pop(k, None)
+                removed += 1
+
+    if removed > 0:
+        logger.debug(
+            "🧹 flood_tracker cleanup: أُزيل %d (المتبقي %d)",
+            removed, len(_flood_tracker),
+        )
+    return removed
+
+
+def _flood_tracker_stats() -> Dict[str, int]:
+    """إحصاءات للتشخيص (اختياري)."""
+    try:
+        return {
+            "keys": len(_flood_tracker),
+            "max_keys": _FLOOD_TRACKER_MAX_KEYS,
+            "stale_sec": int(_FLOOD_TRACKER_STALE_SEC),
+        }
+    except Exception:
+        return {}
+
+
+# ═══════════════════════════════════════════════════════════════════
+# Emoji / Regex Constants
 # ═══════════════════════════════════════════════════════════════════
 
 _EMOJI_SEP_RE = re.compile(
@@ -250,31 +390,29 @@ _HIDDEN_CHARS = (
     '\u206a', '\u206b', '\u206c', '\u206d', '\u206e', '\u206f',
     '\u180e',
     '\u3164',
-    '\u2800',           # Braille Pattern Blank
+    '\u2800',
     '\u115f', '\u1160',
-    '\u00ad',           # Soft Hyphen
-    '\u034f',           # Combining Grapheme Joiner
-    '\u17b4', '\u17b5', # Khmer inherent vowels (invisible)
+    '\u00ad',
+    '\u034f',
+    '\u17b4', '\u17b5',
     '\ufeff',
 )
 
 _HIDDEN_TRANSLATE_TABLE = {ord(c): None for c in _HIDDEN_CHARS}
 
-# v7.15.0 #A5: Unicode dot variants
 _UNICODE_DOT_TABLE = str.maketrans({
-    '\u3002': '.',   # 。 ideographic full stop
-    '\uff61': '.',   # ｡ halfwidth ideographic full stop
-    '\uff0e': '.',   # ． fullwidth full stop
-    '\ufe52': '.',   # ﹒ small full stop
-    '\u2024': '.',   # ․ one dot leader
+    '\u3002': '.',
+    '\uff61': '.',
+    '\uff0e': '.',
+    '\ufe52': '.',
+    '\u2024': '.',
 })
 
 _WS_RE = re.compile(
     r'[\s\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]+'
 )
 
-# v7.14.0: Homoglyphs (Cyrillic + Greek → Latin)
-# v7.15.0 #A17: + Armenian/Georgian minimal
+# Homoglyphs (Cyrillic + Greek → Latin) + Armenian/Georgian/Hebrew
 _HOMOGLYPH_MAP = str.maketrans({
     # Cyrillic lower
     '\u0430': 'a', '\u0431': 'b', '\u0432': 'b', '\u0433': 'r',
@@ -313,26 +451,20 @@ _HOMOGLYPH_MAP = str.maketrans({
     '\u039d': 'N', '\u039e': 'E', '\u039f': 'O', '\u03a0': 'N',
     '\u03a1': 'P', '\u03a3': 'S', '\u03a4': 'T', '\u03a5': 'Y',
     '\u03a6': 'F', '\u03a7': 'X', '\u03a8': 'Y', '\u03a9': 'W',
-    # v7.15.0 #A17: Armenian (visually confusable)
+    # Armenian
     '\u0561': 'a', '\u0570': 'h', '\u0578': 'n', '\u057d': 'u',
-    '\u0585': 'o', '\u057d': 's', '\u0584': 'p',
-    # v7.15.0 #A17: Georgian
+    '\u0585': 'o', '\u0584': 'p',
+    # Georgian
     '\u10d0': 'a', '\u10dd': 'o', '\u10d8': 'i', '\u10d2': 'g',
     '\u10d4': 'e', '\u10d6': 'z',
-    # v7.15.0 #A17: Hebrew (some confusables)
+    # Hebrew
     '\u05d0': 'N', '\u05d5': 'l',
 })
 
-# v7.15.0 #A8: Leetspeak (بدون @ $ ! — لحماية البريد)
+# Leetspeak (بدون @ $ !)
 _LEET_TRANSLATE = str.maketrans({
-    '0': 'o',
-    '1': 'i',
-    '3': 'e',
-    '4': 'a',
-    '5': 's',
-    '7': 't',
-    '8': 'b',
-    '9': 'g',
+    '0': 'o', '1': 'i', '3': 'e', '4': 'a', '5': 's',
+    '7': 't', '8': 'b', '9': 'g',
 })
 
 _LEET_CANDIDATE_RE = re.compile(
@@ -340,7 +472,6 @@ _LEET_CANDIDATE_RE = re.compile(
     re.IGNORECASE,
 )
 
-# v7.15.0 #A6: combining marks موسّعة
 _COMBINING_MARKS_RANGE = frozenset(
     list(range(0x0300, 0x0370))
     + list(range(0x1AB0, 0x1B00))
@@ -349,23 +480,12 @@ _COMBINING_MARKS_RANGE = frozenset(
     + list(range(0xFE20, 0xFE30))
 )
 
-# v7.15.0 #A25: Braille / Runic — detection chars (تُرفض كنص مشبوه)
-_SUSPICIOUS_SCRIPT_CHARS = frozenset(
-    '\u2800'  # braille blank (already hidden)
-)
-
-# لاتيني + أي سكريبت آخر → homoglyph attack محتمل
 _LATIN_RANGE = frozenset(
     'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ'
 )
 
 
-# ═══════════════════════════════════════════════════════════════════
-# Unicode normalization functions
-# ═══════════════════════════════════════════════════════════════════
-
 def _strip_combining_marks(text: str) -> str:
-    """يحذف Combining Marks (نطاقات موسّعة)."""
     if not text:
         return text
     try:
@@ -378,10 +498,6 @@ def _strip_combining_marks(text: str) -> str:
 
 
 def _deleet(text: str) -> str:
-    """
-    v7.15.0 #A8: يحوّل leetspeak فقط للأرقام (لا يلمس @ $ !).
-    ✅ آمن للبريد الإلكتروني.
-    """
     if not text:
         return text
     try:
@@ -393,12 +509,6 @@ def _deleet(text: str) -> str:
 
 
 def _apply_homoglyphs_safe(text: str) -> str:
-    """
-    v7.15.0 #A24: يطبّق homoglyph map بشكل آمن.
-    - إذا النص لاتيني خالص → لا يلمسه.
-    - إذا النص سكريبت واحد غير لاتيني (سيريلي خالص مثلاً) → لا يلمسه (يمنع FP).
-    - إذا مختلط (lat+cyr أو lat+grk) → يطبّق الخريطة (احتمال homoglyph attack).
-    """
     if not text or not _ANTIEVASION_HOMOGLYPH:
         return text
     try:
@@ -407,62 +517,44 @@ def _apply_homoglyphs_safe(text: str) -> str:
         has_grk = any('\u0370' <= c <= '\u03FF' for c in text)
         has_arm = any('\u0530' <= c <= '\u058F' for c in text)
         has_geo = any('\u10A0' <= c <= '\u10FF' for c in text)
-
-        # تطبيق فقط إذا: نص لاتيني مختلط مع سكريبت آخر
         if has_latin and (has_cyr or has_grk or has_arm or has_geo):
             return text.translate(_HOMOGLYPH_MAP)
-
-        # إضافة: نص بلا لاتيني لكن سكريبت مشبوه → للتحليل فقط
-        # (لا نطبّق الخريطة هنا؛ المحارف ستُترك كما هي وسيتم فحصها كنص عادي)
         return text
     except Exception:
         return text
 
 
 def _normalize_text(text: str) -> str:
-    """
-    v7.15.0: NFKC → Hidden → Unicode dots → Homoglyph → Combining → Leet → WS.
-    """
     if not text:
         return ""
-
     try:
         text = unicodedata.normalize('NFKC', text)
     except Exception:
         pass
-
-    # v7.15.0 #A5
     if _ANTIEVASION_UNICODE_DOTS:
         try:
             text = text.translate(_UNICODE_DOT_TABLE)
         except Exception:
             pass
-
     text = text.translate(_HIDDEN_TRANSLATE_TABLE)
-
-    # v7.15.0 #A24
     try:
         text = _apply_homoglyphs_safe(text)
     except Exception:
         pass
-
     if _ANTIEVASION_COMBINING:
         try:
             text = _strip_combining_marks(text)
         except Exception:
             pass
-
     if _ANTIEVASION_LEETSPEAK:
         try:
             text = _deleet(text)
         except Exception:
             pass
-
     return _WS_RE.sub(' ', text).strip()
 
 
 def _strip_emoji_for_domain(text: str) -> str:
-    """v7.15.0 #A2: يزيل الإيموجي قبل فحص الدومين."""
     if not text or not _ANTIEVASION_EMOJI_IN_DOMAIN:
         return text
     try:
@@ -512,18 +604,16 @@ def _as_bool(value, default=False) -> bool:
 
 
 # ═══════════════════════════════════════════════════════════════════
-# Link detection — v7.15.0
+# Link detection
 # ═══════════════════════════════════════════════════════════════════
 
 _URL_RE = re.compile(r'https?://[^\s<>"]+', re.IGNORECASE)
 
-# v7.15.0 #A16: بدائل schemes
 _ALT_SCHEME_RE = re.compile(
     r'\b(?:hxxps?|ftps?|magnet|mailto|tel|sms|file):[^\s<>"]+',
     re.IGNORECASE,
 )
 
-# v7.15.0 #A16 + v7.14
 _DOMAIN_HTTP_RE = re.compile(
     r'(?:https?://|hxxps?://|ftps?://|www\.|t\.me/|telegram\.me/)'
     r'\S+',
@@ -532,7 +622,6 @@ _DOMAIN_HTTP_RE = re.compile(
 
 _TG_SCHEME_RE = re.compile(r'\btg://\S+', re.IGNORECASE)
 
-# v7.15.0 #A11: حد 5 أحرف (كان 4)
 _AT_CHANNEL_RE = re.compile(
     r'(?<![\w@/])@([A-Za-z][A-Za-z0-9_]{4,31})(?![\w@])',
 )
@@ -551,7 +640,6 @@ _PUNYCODE_RE = re.compile(
     re.IGNORECASE,
 )
 
-# v7.15.0 #A10: lookahead لمنع 1.2.3.4.5
 _IPV4_SCHEMELESS_RE = re.compile(
     r'(?<![\w.\-])'
     r'(?:\d{1,3}\.){3}\d{1,3}'
@@ -560,28 +648,21 @@ _IPV4_SCHEMELESS_RE = re.compile(
     r'(?![\w.\-])',
 )
 
-# v7.15.0 #A7: TLDs موسّعة
 _TLD_PATTERN = (
-    # Generic / sponsored
     r'com|net|org|edu|gov|mil|int|info|biz|name|mobi|asia|xxx|tel|'
     r'travel|jobs|cat|coop|aero|pro|museum|'
-    # Tech / popular
     r'io|ai|co|me|tv|cc|app|dev|xyz|top|site|website|space|store|club|'
     r'live|life|world|online|shop|blog|wiki|win|cloud|host|tech|fun|'
     r'link|click|work|today|news|media|agency|company|solutions|'
-    # v7.15.0 #A7: missing
     r'fish|ninja|guru|email|rest|cafe|pizza|beer|coffee|kitchen|recipes|'
     r'menu|bar|pub|fitness|yoga|academy|school|institute|foundation|'
     r'services|tools|systems|software|science|engineering|health|care|'
     r'clinic|hospital|doctor|taxi|delivery|food|zone|city|gallery|studio|'
     r'design|graphics|photos|pics|video|audio|radio|fm|movie|games|play|'
-    r'music|tv|book|library|press|magazine|review|guide|directory|'
-    # URL shorteners
+    r'music|book|library|press|magazine|review|guide|directory|'
     r'ly|at|gg|gy|sh|to|so|pw|su|gd|vc|ws|tk|ml|ga|cf|gq|fyi|zip|mov|'
     r're|yt|be|nu|im|st|am|is|it|'
-    # Crypto / new
     r'crypto|nft|dao|eth|blockchain|exchange|finance|money|'
-    # Country codes
     r'ru|uk|de|fr|it|es|nl|pl|tr|jp|cn|in|br|mx|ar|ir|sa|ae|eg|ma|dz|'
     r'pk|bd|id|th|vn|ph|my|sg|hk|kr|tw|'
     r'us|ca|au|nz|za|ng|ke|gh|tz|ug|zw|zm|'
@@ -612,7 +693,6 @@ _SCHEMELESS_DOMAIN_RE = re.compile(
     re.IGNORECASE,
 )
 
-# v7.15.0 #A3 + #A9: merge أسطر (schemeless + scheme)
 _SPLIT_URL_RE = re.compile(
     r'((?:https?://|hxxps?://|www\.)?'
     r'[a-z0-9][a-z0-9\-\.]*?)'
@@ -623,11 +703,6 @@ _SPLIT_URL_RE = re.compile(
 
 
 def _merge_split_urls(text: str) -> str:
-    """
-    v7.15.0 #A3: يدمج روابط مقطوعة على أسطر:
-      - https://evil\n.com  → https://evil.com
-      - evil\n.com          → evil.com
-    """
     if not text or not _ANTIEVASION_MULTILINE_URL:
         return text
     if '\n' not in text:
@@ -649,13 +724,9 @@ _ENTITY_URL_TYPES = frozenset({'url', 'text_link'})
 
 
 def _extract_entity_urls(message, depth: int = 0) -> List[str]:
-    """
-    v7.15.0 #A19: يعبر reply_to_message حتى عمق 4 (كان 2).
-    """
     urls: List[str] = []
     if message is None or depth > 4:
         return urls
-
     try:
         for attr in ('entities', 'caption_entities'):
             ents = getattr(message, attr, None) or []
@@ -670,7 +741,6 @@ def _extract_entity_urls(message, depth: int = 0) -> List[str]:
                     continue
     except Exception:
         pass
-
     if depth < 4:
         try:
             rtm = getattr(message, 'reply_to_message', None)
@@ -678,7 +748,6 @@ def _extract_entity_urls(message, depth: int = 0) -> List[str]:
                 urls.extend(_extract_entity_urls(rtm, depth + 1))
         except Exception:
             pass
-
     return urls
 
 
@@ -702,14 +771,12 @@ def _extract_url_from_button(button) -> List[str]:
     urls: List[str] = []
     if button is None:
         return urls
-
     try:
         u = getattr(button, 'url', None)
         if isinstance(u, str) and u:
             urls.append(u)
     except Exception:
         pass
-
     if _ANTIEVASION_BUTTON_WEBAPP:
         try:
             wa = getattr(button, 'web_app', None)
@@ -719,7 +786,6 @@ def _extract_url_from_button(button) -> List[str]:
                     urls.append(wau)
         except Exception:
             pass
-
     if _ANTIEVASION_BUTTON_LOGINURL:
         try:
             lu = getattr(button, 'login_url', None)
@@ -729,27 +795,22 @@ def _extract_url_from_button(button) -> List[str]:
                     urls.append(luu)
         except Exception:
             pass
-
     return urls
 
 
 def _extract_button_context(message) -> Tuple[int, List[str], List[str]]:
     if message is None:
         return 0, [], []
-
     count = 0
     urls: List[str] = []
     texts: List[str] = []
-
     try:
         markup = getattr(message, 'reply_markup', None)
         if not markup:
             return 0, [], []
-
         keyboard = getattr(markup, 'inline_keyboard', None)
         if not keyboard:
             return 0, [], []
-
         for row in keyboard:
             if not row:
                 continue
@@ -757,7 +818,6 @@ def _extract_button_context(message) -> Tuple[int, List[str], List[str]]:
                 if button is None:
                     continue
                 count += 1
-
                 try:
                     b_text = getattr(button, 'text', None)
                     if isinstance(b_text, str):
@@ -766,19 +826,16 @@ def _extract_button_context(message) -> Tuple[int, List[str], List[str]]:
                             texts.append(b_text)
                 except Exception:
                     pass
-
                 try:
                     urls.extend(_extract_url_from_button(button))
                 except Exception:
                     pass
     except Exception:
         pass
-
     return count, urls, texts
 
 
 def _extract_vcard_urls(message) -> List[str]:
-    """v7.15.0 #A13: نمط أشمل يدعم TYPE= و CHARSET=."""
     if not _ANTIEVASION_VENUE_VCARD:
         return []
     urls: List[str] = []
@@ -789,8 +846,6 @@ def _extract_vcard_urls(message) -> List[str]:
         vcard = getattr(contact, 'vcard', None)
         if not vcard or not isinstance(vcard, str):
             return urls
-
-        # v7.15.0: URL;TYPE=work:https://... | URL:https://... | URL;X=Y;Z=W:...
         for m in re.finditer(
             r'(?im)^URL(?:;[^:\r\n]*)?[:;]\s*([^\r\n]+)$',
             vcard,
@@ -804,19 +859,15 @@ def _extract_vcard_urls(message) -> List[str]:
 
 
 def _extract_venue_url(message) -> str:
-    """v7.15.0 #A12: بعض إصدارات API لا تُوفّر venue.url → نفحص title/address."""
     if not _ANTIEVASION_VENUE_VCARD:
         return ""
     try:
         venue = getattr(message, 'venue', None)
         if venue is None:
             return ""
-
         u = getattr(venue, 'url', None)
         if isinstance(u, str) and u:
             return u
-
-        # v7.15.0: fallback
         for field in ('title', 'address'):
             v = getattr(venue, field, None)
             if isinstance(v, str) and v:
@@ -830,26 +881,19 @@ def _extract_venue_url(message) -> str:
 
 
 def _extract_poll_text(message) -> Tuple[str, int, List[str]]:
-    """
-    v7.15.0 #A1: يستخرج نص الاستفتاء + خياراته + أي روابط داخلها.
-    يعيد (text, options_count, urls).
-    """
     if not _ANTIEVASION_POLL:
         return "", 0, []
     try:
         poll = getattr(message, 'poll', None)
         if poll is None:
             return "", 0, []
-
         parts: List[str] = []
         urls: List[str] = []
-
         q = getattr(poll, 'question', None)
         if q:
             parts.append(str(q))
             if _DOMAIN_HTTP_RE.search(str(q)):
                 urls.append(str(q))
-
         opts = getattr(poll, 'options', None) or []
         for o in opts:
             t = getattr(o, 'text', None)
@@ -857,30 +901,22 @@ def _extract_poll_text(message) -> Tuple[str, int, List[str]]:
                 parts.append(str(t))
                 if _DOMAIN_HTTP_RE.search(str(t)):
                     urls.append(str(t))
-
-        # بعض الاستفتاءات (quiz) بها explanation
         expl = getattr(poll, 'explanation', None)
         if expl:
             parts.append(str(expl))
             if _DOMAIN_HTTP_RE.search(str(expl)):
                 urls.append(str(expl))
-
         return " ".join(parts), len(opts), urls
     except Exception:
         return "", 0, []
 
 
 def _has_domain_pattern(text: str) -> bool:
-    """
-    v7.15.0 #A2: strip emoji + hidden قبل الفحص.
-    v7.15.0 #A3: كشف schemeless حتى مع newlines.
-    """
     if not text:
         return False
     try:
         cleaned = _strip_emoji_for_domain(text)
         cleaned = cleaned.translate(_HIDDEN_TRANSLATE_TABLE)
-
         for m in _SCHEMELESS_DOMAIN_RE.finditer(cleaned):
             full = m.group(0).lower()
             if '/' not in full and ':' not in full:
@@ -894,32 +930,23 @@ def _has_domain_pattern(text: str) -> bool:
 
 
 def _contains_link_enhanced(text: str) -> bool:
-    """
-    v7.15.0: كشف شامل للروابط الحقيقية فقط
-      (استُثني email و @channel منه — صارا مستقلّين).
-    """
     if not text:
         return False
     try:
         if _DOMAIN_HTTP_RE.search(text):
             return True
-
         if _ANTIEVASION_ALT_SCHEMES:
             if _ALT_SCHEME_RE.search(text):
                 return True
-
         if _ANTIEVASION_SCHEMELESS_URL:
             if _has_domain_pattern(text):
                 return True
-
         if _ANTIEVASION_TG_SCHEME:
             if _TG_SCHEME_RE.search(text):
                 return True
-
         if _ANTIEVASION_PUNYCODE:
             if _PUNYCODE_RE.search(text):
                 return True
-
         if _ANTIEVASION_IPV4_SCHEMELESS:
             for m in _IPV4_SCHEMELESS_RE.finditer(text):
                 try:
@@ -934,7 +961,6 @@ def _contains_link_enhanced(text: str) -> bool:
 
 
 def _contains_email(text: str) -> bool:
-    """v7.15.0 #A14: كشف البريد منفصل."""
     if not text or not _ANTIEVASION_EMAIL:
         return False
     try:
@@ -944,7 +970,6 @@ def _contains_email(text: str) -> bool:
 
 
 def _contains_at_channel(text: str) -> bool:
-    """v7.15.0: كشف @channel منفصل."""
     if not text or not _ANTIEVASION_AT_CHANNEL:
         return False
     try:
@@ -1037,7 +1062,6 @@ _SPAM_EMOJIS = (
 )
 
 _WORD_SEP_CLASS = r'[\s\-_.|/*+=~^´`°•●○◦▪▫■□♦♢※]'
-
 _WORD_RE = re.compile(r"[a-zA-Z][a-zA-Z0-9_-]*", re.IGNORECASE)
 _CAPS_WORD_RE = re.compile(r'\b[A-Z]{4,}\b')
 
@@ -1106,30 +1130,20 @@ _POSTBOT_HARD_KEYWORDS = re.compile(
 
 
 def _extract_spam_words(text: str) -> List[str]:
-    """
-    v7.14.0 #17 (محفوظ): 3 نسخ (regular/compact/spaced).
-    v7.15.0: يعمل على نص يُمرَّر إليه — لا strip emoji داخلياً
-              (المعالجة في _normalize).
-    """
     if not text:
         return []
-
     try:
         regular = [m.group(0).lower() for m in _WORD_RE.finditer(text)]
-
         if not _ANTIEVASION_EMOJI_SEPARATOR:
             return list(set(regular))
-
         no_emoji = _EMOJI_SEP_RE.sub('', text)
         fully_compact = re.sub(r'[^a-zA-Z0-9]', '', no_emoji).lower()
         compact_words = re.findall(r'[a-z]{3,}', fully_compact)
-
         spaced_compact = re.sub(_WORD_SEP_CLASS, ' ', no_emoji)
         spaced_compact = re.sub(r'[^a-zA-Z0-9 ]', ' ', spaced_compact)
         spaced_words = [
             w.lower() for w in spaced_compact.split() if len(w) >= 3
         ]
-
         return list(set(regular + compact_words + spaced_words))
     except Exception:
         return []
@@ -1151,8 +1165,6 @@ def _count_text_urls(text: str) -> List[str]:
         return []
 
 
-# ═══ Backward-compat wrappers ═══
-
 def _get_message_button_data(message):
     count, urls, _ = _extract_button_context(message)
     return count, urls
@@ -1166,9 +1178,7 @@ def _get_message_button_texts(message):
 def _get_message_analysis_text(message) -> str:
     if message is None:
         return ""
-
     parts: List[str] = []
-
     for attr in ('text', 'caption'):
         try:
             v = getattr(message, attr, None)
@@ -1176,41 +1186,34 @@ def _get_message_analysis_text(message) -> str:
                 parts.append(str(v))
         except Exception:
             pass
-
     try:
         _, _, bts = _extract_button_context(message)
         if bts:
             parts.extend(bts)
     except Exception:
         pass
-
     try:
         for u in _extract_entity_urls(message):
             parts.append(str(u))
     except Exception:
         pass
-
     try:
         for u in _extract_vcard_urls(message):
             parts.append(str(u))
     except Exception:
         pass
-
     try:
         vu = _extract_venue_url(message)
         if vu:
             parts.append(vu)
     except Exception:
         pass
-
-    # v7.15.0 #A1
     try:
         pt, _, _ = _extract_poll_text(message)
         if pt:
             parts.append(pt)
     except Exception:
         pass
-
     return _normalize_text(" ".join(parts))
 
 
@@ -1226,7 +1229,6 @@ def _compute_spam_score(
 ) -> Tuple[int, List[str]]:
     if message is None:
         return 0, []
-
     if (
         _button_count is not None
         and _button_urls is not None
@@ -1237,7 +1239,6 @@ def _compute_spam_score(
         button_texts = _button_texts
     else:
         button_count, button_urls, button_texts = _extract_button_context(message)
-
     if _normalized is not None:
         normalized = _normalized
     else:
@@ -1250,7 +1251,6 @@ def _compute_spam_score(
         except Exception:
             body_text = ""
         normalized = _normalize_text(body_text) if body_text else ""
-
     if _analysis_text is not None:
         analysis_text = _analysis_text
     elif button_texts:
@@ -1261,17 +1261,13 @@ def _compute_spam_score(
         )
     else:
         analysis_text = normalized
-
     if not analysis_text and not button_urls:
         return 0, []
-
     if _entity_urls is None:
         _entity_urls = _extract_entity_urls(message)
-
     score = 0
     reasons: List[str] = []
     text_lower = analysis_text.lower()
-
     try:
         if button_count >= 6:
             score += 3
@@ -1282,17 +1278,14 @@ def _compute_spam_score(
         elif button_count >= 3:
             score += 1
             reasons.append(f"buttons={button_count}")
-
         has_photo = bool(getattr(message, 'photo', None))
         has_video = bool(getattr(message, 'video', None))
         if (has_photo or has_video) and button_count >= 1:
             score += 1
             reasons.append("media+buttons")
-
         emoji_count = 0
         for emoji in _SPAM_EMOJIS:
             emoji_count += analysis_text.count(emoji)
-
         if emoji_count >= 8:
             score += 3
             reasons.append(f"emoji={emoji_count}")
@@ -1302,19 +1295,15 @@ def _compute_spam_score(
         elif emoji_count >= 3:
             score += 1
             reasons.append(f"emoji={emoji_count}")
-
         words = _extract_spam_words(analysis_text)
-
         strong_matches = _count_unique_matches(words, _SPAM_STRONG_KEYWORDS)
         medium_matches = _count_unique_matches(words, _SPAM_MEDIUM_KEYWORDS)
         context_matches = _count_unique_matches(words, _SPAM_CONTEXT_KEYWORDS)
         cta_matches = _count_unique_matches(words, _CTA_KEYWORDS)
-
         context_only_matches = [
             w for w in context_matches
             if w not in strong_matches and w not in medium_matches
         ]
-
         if strong_matches:
             score += min(5, len(strong_matches) * 2)
             reasons.append("strong=" + ",".join(strong_matches[:8]))
@@ -1324,7 +1313,6 @@ def _compute_spam_score(
         if context_only_matches and (strong_matches or medium_matches):
             score += min(2, len(context_only_matches))
             reasons.append("context=" + ",".join(context_only_matches[:8]))
-
         cta_only_matches = [
             w for w in cta_matches
             if w not in strong_matches and w not in medium_matches
@@ -1332,30 +1320,24 @@ def _compute_spam_score(
         if cta_only_matches and (strong_matches or medium_matches):
             score += 1
             reasons.append("cta=" + ",".join(cta_only_matches[:6]))
-
         matched_patterns: List[str] = []
         for pattern, weight, label in _SPAM_CONTEXT_PATTERNS:
             if pattern.search(text_lower):
                 score += weight
                 matched_patterns.append(label)
-
         if matched_patterns:
             reasons.append("patterns=" + ",".join(matched_patterns))
-
         button_cta_matches: List[str] = []
         for bt in button_texts:
             if _POSTBOT_BUTTON_PATTERN.search(bt):
                 button_cta_matches.append(_normalize_text(bt))
-
         if button_cta_matches and (
             strong_matches or medium_matches or matched_patterns
         ):
             score += min(3, len(button_cta_matches))
             reasons.append("button_cta=" + ",".join(button_cta_matches[:4]))
-
         tme_button_count = 0
         external_button_count = 0
-
         for url in button_urls:
             try:
                 parsed = urlparse(url)
@@ -1366,7 +1348,6 @@ def _compute_spam_score(
                     external_button_count += 1
             except Exception:
                 continue
-
         if tme_button_count >= 4:
             score += 4
             reasons.append(f"tme_buttons={tme_button_count}")
@@ -1381,7 +1362,6 @@ def _compute_spam_score(
         ):
             score += 1
             reasons.append(f"tme_buttons={tme_button_count}")
-
         if external_button_count >= 3:
             score += 2
             reasons.append(f"external_buttons={external_button_count}")
@@ -1391,7 +1371,6 @@ def _compute_spam_score(
         ):
             score += 1
             reasons.append(f"external_buttons={external_button_count}")
-
         if _entity_urls:
             entity_count = len(_entity_urls)
             if entity_count >= 3:
@@ -1403,7 +1382,6 @@ def _compute_spam_score(
             elif entity_count >= 1:
                 score += 1
                 reasons.append(f"entity_urls={entity_count}")
-
         text_urls = _count_text_urls(normalized)
         schemeless_hit = False
         if _ANTIEVASION_SCHEMELESS_URL and not text_urls:
@@ -1412,7 +1390,6 @@ def _compute_spam_score(
                     schemeless_hit = True
             except Exception:
                 pass
-
         effective_text_url_count = len(text_urls) + (1 if schemeless_hit else 0)
         if effective_text_url_count >= 3:
             score += 3
@@ -1427,7 +1404,6 @@ def _compute_spam_score(
             reasons.append("text_urls=1")
         elif schemeless_hit:
             reasons.append("text_urls=scheme-less")
-
         body_len = len(normalized)
         if body_len < 60 and button_count >= 5 and (
             strong_matches or medium_matches or matched_patterns
@@ -1444,7 +1420,6 @@ def _compute_spam_score(
         ):
             score += 1
             reasons.append("short_text+buttons")
-
         caps_n = len(_CAPS_WORD_RE.findall(analysis_text))
         if caps_n >= 8 and (
             strong_matches or medium_matches or matched_patterns
@@ -1459,7 +1434,6 @@ def _compute_spam_score(
         elif caps_n >= 4 and (strong_matches or matched_patterns):
             score += 1
             reasons.append(f"CAPS={caps_n}")
-
         promo_count = (
             len(strong_matches) + len(medium_matches) + len(cta_only_matches)
         )
@@ -1472,27 +1446,22 @@ def _compute_spam_score(
         elif promo_count >= 4:
             score += 1
             reasons.append(f"promo_density={promo_count}")
-
         if len(strong_matches) >= 2 and (
             button_count >= 2 or cta_only_matches or button_cta_matches
         ):
             score += 3
             reasons.append("strong+cta/buttons")
-
         if 'leak' in strong_matches and (
             'viral' in strong_matches or 'mega' in strong_matches
         ):
             score += 2
             reasons.append("leak+viral/mega")
-
         if 'viral' in strong_matches and button_cta_matches:
             score += 2
             reasons.append("viral+button_cta")
-
         if _entity_urls and (strong_matches or matched_patterns):
             score += 2
             reasons.append("entity_url+keywords")
-
         # Anti-FP guard
         if (
             not strong_matches
@@ -1507,13 +1476,10 @@ def _compute_spam_score(
         ):
             score = 0
             reasons = []
-
         score = min(max(score, 0), 20)
-
     except Exception as e:
         logger.debug("_compute_spam_score: %s", e)
         return 0, []
-
     return score, reasons
 
 
@@ -1522,23 +1488,19 @@ def _is_postbot_pattern(
 ) -> bool:
     if not text or len(text) < 10:
         return False
-
     hard_match = bool(_POSTBOT_HARD_KEYWORDS.search(text))
     if not hard_match and not has_urls and button_count < 2:
         return False
-
     try:
         if _POSTBOT_PATTERN.search(text):
             if hard_match or has_urls or button_count >= 2:
                 return True
-
         if (
             hard_match
             and (has_urls or button_count >= 2)
             and _POSTBOT_PATTERN_LOOSE.search(text)
         ):
             return True
-
         if (
             len(text) < 200
             and hard_match
@@ -1548,7 +1510,6 @@ def _is_postbot_pattern(
             return True
     except Exception:
         pass
-
     return False
 
 
@@ -1568,13 +1529,12 @@ _DELETE_IGNORED_PATTERNS = (
     "message is not found",
 )
 
-# v7.15.0 #A22: فصل دقيق — لا نُنبّه إلا على أخطاء صلاحيات حقيقية
 _DELETE_PERMISSION_PATTERNS = (
     "not enough rights",
     "have no rights",
     "bot is not a member",
     "chat_admin_required",
-    "message can't be deleted",  # ← FP محتمل
+    "message can't be deleted",
 )
 
 _MEDIA_SETTINGS_MAP = (
@@ -1612,7 +1572,7 @@ def _reset_shutdown_for_tests():
 
 
 # ═══════════════════════════════════════════════════════════════════
-# Database Migration — v7.15.0 #A15 (لا auto-enable)
+# Database Migration
 # ═══════════════════════════════════════════════════════════════════
 
 _columns_initialized = False
@@ -1643,7 +1603,7 @@ async def _lazy_init_columns():
         _columns_last_attempt_ts = now
 
         db_type = getattr(DB, "DB_TYPE", "sqlite")
-        logger.info("🔧 v7.15.0: Auto-migration (DB_TYPE=%s)", db_type)
+        logger.info("🔧 v7.15.1: Auto-migration (DB_TYPE=%s)", db_type)
 
         cols = [
             ("delete_protected_any", "INTEGER DEFAULT 0", "TINYINT(1) DEFAULT 0"),
@@ -1652,9 +1612,7 @@ async def _lazy_init_columns():
             ("delete_at_channel", "INTEGER DEFAULT 0", "TINYINT(1) DEFAULT 0"),
             ("delete_tg_scheme", "INTEGER DEFAULT 1", "TINYINT(1) DEFAULT 1"),
             ("delete_button_links", "INTEGER DEFAULT 1", "TINYINT(1) DEFAULT 1"),
-            # v7.15.0 #A14
             ("delete_emails", "INTEGER DEFAULT 0", "TINYINT(1) DEFAULT 0"),
-            # v7.15.0 #A1
             ("delete_polls", "INTEGER DEFAULT 0", "TINYINT(1) DEFAULT 0"),
         ]
 
@@ -1693,10 +1651,6 @@ async def _lazy_init_columns():
                 migration_ok = False
                 logger.warning("⚠️ auto-migration %s: %s", col_name, e)
 
-        # v7.15.0 #A15: NO auto-enable UPDATE.
-        # السبب: تغيير سلوك المستخدمين القدامى بصمت — مرفوض.
-        # القيم الافتراضية (0) صحيحة. المشرف يُفعّلها يدوياً.
-
         try:
             await internal_cache.clear()
             logger.info("✅ internal_cache cleared")
@@ -1732,7 +1686,6 @@ async def _get_dev_log_channel_cached():
         now = time.monotonic()
         if _dev_log_cache is not None and now - _dev_log_cache_ts < DEV_LOG_CACHE_TTL:
             return _dev_log_cache
-
         try:
             ch = await DB.get_log_channel()
             _dev_log_cache = ch
@@ -1767,7 +1720,6 @@ async def _can_send_log(chat_id) -> bool:
     async with _log_rate_lock:
         now = time.monotonic()
         tracker = _log_rate_tracker[chat_id]
-
         if (
             len(tracker) >= LOG_RATE_LIMIT_PER_MIN
             and now - tracker[0] < LOG_RATE_WINDOW_SEC
@@ -1779,7 +1731,6 @@ async def _can_send_log(chat_id) -> bool:
             else:
                 logger.debug("🚫 LOG-RATE-LIMIT (silent) | chat=%s", chat_id)
             return False
-
         tracker.append(now)
         return True
 
@@ -1801,21 +1752,18 @@ async def _cleanup_log_rate_tracker():
     async with _log_rate_lock:
         now = time.monotonic()
         cutoff = LOG_RATE_WINDOW_SEC * 5
-
         stale = [
             cid for cid, dq in _log_rate_tracker.items()
             if (not dq) or (now - dq[-1] > cutoff)
         ]
         for cid in stale:
             _log_rate_tracker.pop(cid, None)
-
         stale_warn = [
             cid for cid, ts in _log_rate_warn_last.items()
             if now - ts > _LOG_RATE_WARN_COOLDOWN * 2
         ]
         for cid in stale_warn:
             _log_rate_warn_last.pop(cid, None)
-
         return len(stale)
 
 
@@ -1825,16 +1773,13 @@ async def _notify_dev_log(context, text):
             return
     except Exception:
         pass
-
     try:
         log_ch = await _get_dev_log_channel_cached()
         if not log_ch:
             return
-
         ch_str = str(log_ch).strip()
         if not ch_str:
             return
-
         if ch_str.lstrip('-').isdigit():
             target = int(ch_str)
         elif ch_str.startswith('@'):
@@ -1850,7 +1795,6 @@ async def _notify_dev_log(context, text):
             )
         else:
             target = f"@{ch_str}"
-
         await context.bot.send_message(
             chat_id=target, text=text, parse_mode='HTML',
             disable_web_page_preview=True,
@@ -1880,7 +1824,6 @@ async def _dispatch_log(
             except Exception:
                 pass
         return
-
     if not callable(factory):
         if inspect.iscoroutine(factory):
             try:
@@ -1894,7 +1837,6 @@ async def _dispatch_log(
         global _log_dispatch_failures
         attempt = 0
         last_exc = None
-
         while attempt <= max(0, retries):
             try:
                 await factory()
@@ -1916,7 +1858,6 @@ async def _dispatch_log(
                     attempt += 1
                     continue
                 break
-
         _log_dispatch_failures += 1
         logger.error(
             "❌ [%s] failed بعد %d محاولات (total=%d): %s",
@@ -1941,12 +1882,10 @@ async def shutdown_log_dispatcher(timeout: float = 5.0):
     _mark_shutdown_started()
     if not _running_log_tasks:
         return
-
     tasks = list(_running_log_tasks)
     for t in tasks:
         if not t.done():
             t.cancel()
-
     try:
         await asyncio.wait_for(
             asyncio.gather(*tasks, return_exceptions=True), timeout=timeout
@@ -1955,7 +1894,6 @@ async def shutdown_log_dispatcher(timeout: float = 5.0):
         logger.warning("⏱️ shutdown_log_dispatcher: مهلة")
     except Exception as e:
         logger.debug("shutdown_log_dispatcher: %s", e)
-
     _running_log_tasks.clear()
 
 
@@ -1974,7 +1912,6 @@ def _spawn_tracked_task(coro, *, label: str = "bg-task"):
         except Exception:
             pass
         return None
-
     try:
         task = asyncio.create_task(coro)
     except Exception as e:
@@ -1985,7 +1922,6 @@ def _spawn_tracked_task(coro, *, label: str = "bg-task"):
         except Exception:
             pass
         return None
-
     _running_bg_tasks.add(task)
 
     def _cleanup(t):
@@ -2004,12 +1940,10 @@ async def shutdown_bg_tasks(timeout: float = 3.0):
     _mark_shutdown_started()
     if not _running_bg_tasks:
         return
-
     tasks = list(_running_bg_tasks)
     for t in tasks:
         if not t.done():
             t.cancel()
-
     try:
         await asyncio.wait_for(
             asyncio.gather(*tasks, return_exceptions=True), timeout=timeout
@@ -2018,7 +1952,6 @@ async def shutdown_bg_tasks(timeout: float = 3.0):
         logger.debug("⏱️ shutdown_bg_tasks: مهلة")
     except Exception:
         pass
-
     _running_bg_tasks.clear()
 
 
@@ -2030,7 +1963,6 @@ _running_delete_tasks: set = set()
 
 
 async def _delete_after_delay(bot, chat_id, message_id, delay=10, context=None):
-    """v7.15.0 #A21: يمرّر context بشكل صحيح (كان None)."""
     try:
         if delay > 0:
             await asyncio.sleep(delay)
@@ -2047,14 +1979,12 @@ async def _delete_after_delay(bot, chat_id, message_id, delay=10, context=None):
 def _spawn_delete_after_delay(bot, chat_id, message_id, delay=10, context=None):
     if _is_shutting_down():
         return
-
     try:
         d = float(delay)
     except (TypeError, ValueError):
         d = 0.0
     if d < 0:
         d = 0.0
-
     task = asyncio.create_task(
         _delete_after_delay(bot, chat_id, message_id, d, context=context)
     )
@@ -2075,12 +2005,10 @@ async def shutdown_delete_tasks(timeout: float = 3.0):
     _mark_shutdown_started()
     if not _running_delete_tasks:
         return
-
     tasks = list(_running_delete_tasks)
     for t in tasks:
         if not t.done():
             t.cancel()
-
     try:
         await asyncio.wait_for(
             asyncio.gather(*tasks, return_exceptions=True), timeout=timeout
@@ -2089,14 +2017,12 @@ async def shutdown_delete_tasks(timeout: float = 3.0):
         pass
     except Exception:
         pass
-
     _running_delete_tasks.clear()
 
 
 def register_shutdown_handlers(application):
     if getattr(application, '_msh_shutdown_registered', False):
         return
-
     try:
         original_post_shutdown = getattr(application, 'post_shutdown', None)
 
@@ -2114,7 +2040,6 @@ def register_shutdown_handlers(application):
                 await shutdown_delete_tasks(timeout=3.0)
             except Exception as e:
                 logger.debug("shutdown del: %s", e)
-
             if callable(original_post_shutdown):
                 try:
                     await original_post_shutdown(app)
@@ -2166,9 +2091,11 @@ _VIOLATION_LABELS_AR = {
     'button_link': '🔘 زر برابط',
     'vcard_url': '📇 بطاقة اتصال',
     'venue_url': '📍 موقع',
-    # v7.15.0
     'email': '📧 بريد إلكتروني',
     'poll_link': '📊 رابط في استفتاء',
+    # v7.15.1
+    'antiflood': '🌊 فيضان رسائل',
+    'flood': '🌊 فيضان رسائل',
 }
 
 _FORWARD_TYPE_LABELS_AR = {
@@ -2213,23 +2140,23 @@ _DEFAULT_VIOLATION_MESSAGES = {
     'venue_url': '📍 يُمنع إرسال مواقع',
     'email': '📧 يُمنع إرسال البريد الإلكتروني هنا',
     'poll_link': '📊 يُمنع إرسال استفتاءات بروابط',
+    # v7.15.1
+    'antiflood': '🌊 يُمنع إرسال رسائل بسرعة (فيضان)',
+    'flood': '🌊 يُمنع إرسال رسائل بسرعة (فيضان)',
 }
 
 
 def _format_duration(seconds):
     if not seconds or seconds <= 0:
         return "دائم"
-
     try:
         seconds = int(seconds)
     except (TypeError, ValueError):
         return "—"
-
     days = seconds // 86400
     hours = (seconds % 86400) // 3600
     minutes = (seconds % 3600) // 60
     secs = seconds % 60
-
     parts = []
     if days:
         parts.append(f"{days} يوم")
@@ -2239,7 +2166,6 @@ def _format_duration(seconds):
         parts.append(f"{minutes} دقيقة")
     if secs and not parts:
         parts.append(f"{secs} ثانية")
-
     return " و ".join(parts) if parts else f"{seconds} ثانية"
 
 
@@ -2252,14 +2178,11 @@ async def notify_group_log(context, chat_id, text, disable_preview=True):
         getter = getattr(DB, 'get_group_log_channel', None)
         if not callable(getter):
             return False
-
         channel_id = await getter(chat_id)
         if not channel_id:
             return False
-
         if isinstance(channel_id, str) and channel_id.lstrip('-').isdigit():
             channel_id = int(channel_id)
-
         await context.bot.send_message(
             chat_id=channel_id, text=text, parse_mode='HTML',
             disable_web_page_preview=disable_preview,
@@ -2283,7 +2206,6 @@ def _build_delete_log_text(
     is_anonymous=False
 ):
     label = _VIOLATION_LABELS_AR.get(violation_type, violation_type)
-
     if is_anonymous:
         user_display_lnk = "👻 <b>مشرف مجهول</b>"
     else:
@@ -2298,50 +2220,41 @@ def _build_delete_log_text(
             user_display_lnk = (
                 f"<a href='tg://user?id={user_id}'>{user_display}</a>"
             )
-
     lines = [
         "🗑️ <b>حذف رسالة</b>",
         "━━━━━━━━━━━━━━━━━━━━",
         f"📌 النوع: {label}",
         f"👤 المستخدم: {user_display_lnk}",
     ]
-
     if not is_anonymous:
         lines.append(f"🆔 المعرّف: <code>{user_id}</code>")
     else:
         lines.append(f"🆔 المجموعة: <code>{chat_id}</code>")
-
     if message_preview:
         preview = message_preview.strip().replace("\n", " ")
         if len(preview) > _GROUP_LOG_PREVIEW_LENGTH:
             preview = preview[:_GROUP_LOG_PREVIEW_LENGTH] + "…"
         lines.append(f"💬 النص: <i>{escape(preview)}</i>")
-
     if forward_info:
         ftype = forward_info.get('type') or '؟'
         ftype_label = _FORWARD_TYPE_LABELS_AR.get(ftype, ftype)
         lines.append("")
         lines.append("📤 <b>المصدر:</b>")
         lines.append(f"   • النوع: {ftype_label}")
-
         fname = forward_info.get('name')
         if fname:
             fname_str = str(fname)
             if len(fname_str) > 60:
                 fname_str = fname_str[:60] + "…"
             lines.append(f"   • الاسم: {escape(fname_str)}")
-
         if forward_info.get('id'):
             lines.append(f"   • المعرّف: <code>{forward_info['id']}</code>")
-
     try:
         now_str = TimeUtils.mecca_now().strftime('%Y-%m-%d %H:%M:%S')
     except Exception:
         now_str = datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
-
     lines.append("")
     lines.append(f"🕐 {now_str}")
-
     return "\n".join(lines)
 
 
@@ -2352,7 +2265,6 @@ def _build_penalty_log_text(
 ):
     ptype_label = _PENALTY_LABELS_AR.get(penalty_type, penalty_type)
     target_display = escape(target_first_name or 'User')
-
     if target_username:
         target_lnk = (
             f"<a href='tg://user?id={target_user_id}'>"
@@ -2363,9 +2275,7 @@ def _build_penalty_log_text(
         target_lnk = (
             f"<a href='tg://user?id={target_user_id}'>{target_display}</a>"
         )
-
     source_label = "🤖 تلقائي" if source == "auto" else "👮 يدوي"
-
     lines = [
         f"{ptype_label}",
         "━━━━━━━━━━━━━━━━━━━━",
@@ -2376,11 +2286,9 @@ def _build_penalty_log_text(
         f"👤 المستهدف: {target_lnk}",
         f"🆔 المعرّف: <code>{target_user_id}</code>",
     ]
-
     if source == "auto" and violation_type:
         vlabel = _VIOLATION_LABELS_AR.get(violation_type, violation_type)
         lines.append(f"⚠️ المخالفة: {vlabel}")
-
     if source == "manual" and moderator_id:
         mod_display = escape(moderator_name or "Admin")
         lines.append("")
@@ -2388,17 +2296,13 @@ def _build_penalty_log_text(
             f"👮 المشرف: <a href='tg://user?id={moderator_id}'>"
             f"{mod_display}</a>"
         )
-
     lines.append(f"💬 المجموعة: <code>{chat_id}</code>")
-
     try:
         now_str = TimeUtils.mecca_now().strftime('%Y-%m-%d %H:%M:%S')
     except Exception:
         now_str = datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
-
     lines.append("")
     lines.append(f"🕐 {now_str}")
-
     return "\n".join(lines)
 
 
@@ -2409,14 +2313,12 @@ async def _notify_group_log_penalty(
 ):
     if not FEATURE_LOG_PENALTIES:
         return
-
     try:
         if not await _can_send_log(chat_id):
             return
     except Exception as e:
         logger.debug("_notify_group_log_penalty: %s", e)
         return
-
     try:
         text = _build_penalty_log_text(
             chat_id, target_user_id, target_first_name,
@@ -2432,10 +2334,9 @@ async def _notify_group_log_penalty(
 
 
 # ═══════════════════════════════════════════════════════════════════
-# Delete Failure Notifier — v7.15.0 #A22
+# Delete Failure Notifier
 # ═══════════════════════════════════════════════════════════════════
 
-# v7.15.0 #A22: نعدّ الإخفاقات ثم نُنبّه — لتجنّب FP
 _delete_failure_counter: Dict[int, Tuple[int, float]] = {}
 _delete_failure_counter_lock = asyncio.Lock()
 
@@ -2461,23 +2362,15 @@ def _is_delete_permission_error(exc) -> bool:
 
 
 async def _record_delete_failure(chat_id) -> bool:
-    """
-    v7.15.0 #A22: يُسجّل إخفاقاً.
-    يعيد True إذا وصلنا للعتبة (يجب التنبيه).
-    """
     try:
         async with _delete_failure_counter_lock:
             now = time.monotonic()
             cnt, first_ts = _delete_failure_counter.get(chat_id, (0, now))
-
             if now - first_ts > _DELETE_FAILURE_NOTIFY_WINDOW:
                 cnt = 0
                 first_ts = now
-
             cnt += 1
             _delete_failure_counter[chat_id] = (cnt, first_ts)
-
-            # تنظيف
             if len(_delete_failure_counter) > 5000:
                 stale = [
                     k for k, (_, ts) in _delete_failure_counter.items()
@@ -2485,7 +2378,6 @@ async def _record_delete_failure(chat_id) -> bool:
                 ]
                 for k in stale:
                     _delete_failure_counter.pop(k, None)
-
             return cnt >= _DELETE_FAILURE_NOTIFY_THRESHOLD
     except Exception:
         return False
@@ -2499,11 +2391,9 @@ async def _notify_delete_permission_failure(context, chat_id):
             if now - last < _DELETE_FAILURE_NOTIFY_COOLDOWN:
                 return
             _delete_failure_notified[chat_id] = now
-
         owner_id = int(getattr(CONFIG, 'PRIMARY_OWNER_ID', 0) or 0)
         if not owner_id:
             return
-
         msg = (
             "⚠️ <b>تحذير حرج — الحماية معطّلة!</b>\n"
             "━━━━━━━━━━━━━━━━━━━━\n"
@@ -2516,7 +2406,6 @@ async def _notify_delete_permission_failure(context, chat_id):
             "2. امنحه صلاحية <code>can_delete_messages</code>\n"
             "3. تأكد من أن البوت عضو في المجموعة\n"
         )
-
         try:
             await safe_send(context.bot, owner_id, msg, parse_mode='HTML')
         except Exception as e:
@@ -2550,10 +2439,8 @@ async def _safe_delete_message(
                 except Exception:
                     pass
             return False
-
         if _is_delete_ignore_error(e):
             return True
-
         logger.warning("⚠️ DELETE failed | chat=%s msg=%s", chat_id, message_id)
         return False
     except asyncio.CancelledError:
@@ -2595,22 +2482,18 @@ def is_forwarded(
 ) -> bool:
     if message is None:
         return False
-
     for attr in (
         'forward_origin', 'forward_date', 'forward_from',
         'forward_from_chat', 'forward_sender_name',
     ):
         if getattr(message, attr, None) is not None:
             return True
-
     is_protected = _as_bool(
         getattr(message, 'has_protected_content', False), False
     )
     is_auto = _as_bool(getattr(message, 'is_automatic_forward', False), False)
-
     if allow_protected_any and is_protected and not is_auto:
         return True
-
     if allow_protected_fallback and is_protected:
         caption = (
             getattr(message, 'caption', None)
@@ -2625,7 +2508,6 @@ def is_forwarded(
 def get_forward_detection_reason(message) -> Dict[str, Any]:
     if message is None:
         return {"error": "message is None"}
-
     fields = {}
     for name in (
         'forward_origin', 'forward_date', 'forward_from',
@@ -2637,7 +2519,6 @@ def get_forward_detection_reason(message) -> Dict[str, Any]:
             "type": type(value).__name__ if value is not None else None,
             "repr_short": str(value)[:80] if value is not None else None,
         }
-
     any_present = any(f["present"] for f in fields.values())
     protected = _as_bool(
         getattr(message, 'has_protected_content', False), False
@@ -2651,7 +2532,6 @@ def get_forward_detection_reason(message) -> Dict[str, Any]:
     auto_fwd = _as_bool(
         getattr(message, 'is_automatic_forward', False), False
     )
-
     return {
         "is_forwarded": any_present,
         "is_protected": protected,
@@ -2669,7 +2549,6 @@ def _extract_legacy_forward_info(message):
         fwd_sender_name = getattr(message, 'forward_sender_name', None)
         fwd_date = getattr(message, 'forward_date', None)
         fwd_signature = getattr(message, 'forward_signature', None)
-
         if fwd_from is not None:
             try:
                 full_name = (
@@ -2685,7 +2564,6 @@ def _extract_legacy_forward_info(message):
                 'name': full_name or str(getattr(fwd_from, 'id', 'User')),
                 'date': fwd_date, 'signature': None, 'message_id': None,
             }
-
         if fwd_from_chat is not None:
             chat_type = getattr(fwd_from_chat, 'type', '') or ''
             is_channel = chat_type == 'channel'
@@ -2700,7 +2578,6 @@ def _extract_legacy_forward_info(message):
                 'date': fwd_date, 'signature': fwd_signature,
                 'message_id': None,
             }
-
         if fwd_sender_name:
             return {
                 'type': 'hidden_user', 'id': None,
@@ -2715,9 +2592,7 @@ def _extract_legacy_forward_info(message):
 def extract_forward_info(message):
     if message is None:
         return None
-
     origin = getattr(message, 'forward_origin', None)
-
     if origin is not None and _HAS_MESSAGE_ORIGIN:
         try:
             if isinstance(origin, MessageOriginUser):
@@ -2735,7 +2610,6 @@ def extract_forward_info(message):
                     'name': name, 'date': getattr(origin, 'date', None),
                     'signature': None, 'message_id': None,
                 }
-
             if isinstance(origin, MessageOriginHiddenUser):
                 return {
                     'type': 'hidden_user', 'id': None,
@@ -2745,7 +2619,6 @@ def extract_forward_info(message):
                     'date': getattr(origin, 'date', None),
                     'signature': None, 'message_id': None,
                 }
-
             if isinstance(origin, MessageOriginChat):
                 chat = origin.sender_chat
                 return {
@@ -2759,7 +2632,6 @@ def extract_forward_info(message):
                     'signature': getattr(origin, 'author_signature', None),
                     'message_id': None,
                 }
-
             if isinstance(origin, MessageOriginChannel):
                 chat = origin.chat
                 return {
@@ -2775,15 +2647,12 @@ def extract_forward_info(message):
                 }
         except Exception:
             pass
-
     info = _extract_legacy_forward_info(message)
     if info:
         return info
-
     is_protected = _as_bool(
         getattr(message, 'has_protected_content', False), False
     )
-
     if is_protected:
         caption = (
             getattr(message, 'caption', None)
@@ -2816,7 +2685,6 @@ async def _notify_admin_about_forward(context, admin_id, info):
             'protected_any': '🛡️ محتوى محمي',
         }
         label = type_labels.get(info.get('type', ''), f"❔ {info.get('type')}")
-
         lines = ["↩️ <b>رسالة معاد توجيهها</b>", "", f"📌 النوع: {label}"]
         if info.get('id'):
             lines.append(f"🆔 المصدر: <code>{info['id']}</code>")
@@ -2826,7 +2694,6 @@ async def _notify_admin_about_forward(context, admin_id, info):
             lines.append(f"🔢 رقم الرسالة: <code>{info['message_id']}</code>")
         if info.get('date'):
             lines.append(f"📅 التاريخ: <code>{info['date']}</code>")
-
         await safe_send(
             context.bot, admin_id, "\n".join(lines), parse_mode='HTML'
         )
@@ -2839,7 +2706,6 @@ def _should_notify_forward(context, chat_id) -> bool:
         bot_data = getattr(context, 'bot_data', None)
         if not isinstance(bot_data, dict):
             return False
-
         key = f"_forward_notify_{chat_id}"
         now = time.monotonic()
         last = bot_data.get(key, 0.0)
@@ -2847,7 +2713,6 @@ def _should_notify_forward(context, chat_id) -> bool:
             last = 0.0
         if now - last < _FORWARD_NOTIFY_COOLDOWN_SECONDS:
             return False
-
         fwd_keys = [
             k for k in bot_data.keys()
             if isinstance(k, str) and k.startswith("_forward_notify_")
@@ -2856,7 +2721,6 @@ def _should_notify_forward(context, chat_id) -> bool:
             remove_count = max(1, len(fwd_keys) // 2)
             for k in fwd_keys[:remove_count]:
                 bot_data.pop(k, None)
-
         bot_data[key] = now
         return True
     except Exception:
@@ -2877,15 +2741,12 @@ async def _invalidate_after_channel_change(
     ]
     if channel_db_id is not None:
         keys.append(f"channel_info_{channel_db_id}")
-
     await _safe_invalidate(*keys)
-
     try:
         from cache import invalidate_user_cache
         await invalidate_user_cache(user_id)
     except Exception:
         pass
-
     if invalidate_posts and channel_db_id is not None:
         try:
             await posts_cache.invalidate(channel_db_id)
@@ -2915,7 +2776,6 @@ class GroupRateLimiterManager:
                 for cid, _ in to_remove:
                     cls._limiters.pop(cid, None)
                     cls._last_access.pop(cid, None)
-
             if chat_id not in cls._limiters:
                 cls._limiters[chat_id] = RateLimiter(
                     max_concurrent=5, max_per_second=10
@@ -2940,6 +2800,13 @@ class GroupRateLimiterManager:
 
                 await _cleanup_log_rate_tracker()
                 await _cleanup_delete_failure_counter()
+
+                # v7.15.1 #F4: تنظيف flood tracker
+                try:
+                    await _cleanup_flood_tracker(force=True)
+                except Exception as e:
+                    logger.debug("flood cleanup: %s", e)
+
             except asyncio.CancelledError:
                 raise
             except Exception as e:
@@ -2947,7 +2814,6 @@ class GroupRateLimiterManager:
 
 
 async def _cleanup_delete_failure_counter():
-    """v7.15.0 #A22: تنظيف دوري."""
     try:
         async with _delete_failure_counter_lock:
             now = time.monotonic()
@@ -3019,7 +2885,6 @@ async def _ensure_lang(update, context) -> str:
     lang = context.user_data.get('lang')
     if lang:
         return lang
-
     try:
         user_id = (
             update.effective_user.id
@@ -3027,7 +2892,6 @@ async def _ensure_lang(update, context) -> str:
         )
     except Exception:
         user_id = None
-
     if user_id:
         try:
             from cache import user_cache
@@ -3038,7 +2902,6 @@ async def _ensure_lang(update, context) -> str:
                 return lang
         except Exception:
             pass
-
         try:
             lang = await asyncio.wait_for(
                 DB.get_user_language(user_id), timeout=2.0
@@ -3068,7 +2931,6 @@ async def get_security_settings_cached(chat_id) -> dict:
     cached = await settings_cache.get_security(chat_id)
     if cached is not None:
         return cached
-
     settings = await DB.get_security_settings(chat_id)
     if settings is None:
         settings = {}
@@ -3080,7 +2942,6 @@ async def get_auto_reply_settings_cached(chat_id) -> dict:
     cached = await settings_cache.get_auto_reply_settings(chat_id)
     if cached is not None:
         return cached
-
     settings = await DB.get_auto_reply_settings(chat_id)
     if settings is None:
         settings = {}
@@ -3112,13 +2973,11 @@ async def _detect_and_translate(update, context, chat_id, user_id, text):
         stripped = text.strip()
         if stripped.startswith(('http://', 'https://', 'www.')):
             return None
-
         is_arabic = TranslationManager.detect_arabic(text)
         if lang == 'ar' and is_arabic:
             return None
         if lang != 'ar' and not is_arabic:
             return None
-
         translated = TranslationManager.translate(text, lang)
         if translated and translated != text:
             return translated
@@ -3137,7 +2996,6 @@ async def _send_translation_reply(
         )
     except Exception:
         label = "🌐 <b>Translation:</b>"
-
     try:
         kwargs = {
             "chat_id": chat_id,
@@ -3146,7 +3004,6 @@ async def _send_translation_reply(
         }
         if original_message_id:
             kwargs["reply_to_message_id"] = original_message_id
-
         sent = await bot.send_message(**kwargs)
         if sent and getattr(sent, 'message_id', None):
             _spawn_delete_after_delay(
@@ -3178,7 +3035,6 @@ async def apply_violation_penalty(
                 chat_name = update.effective_chat.title or ""
         except Exception:
             pass
-
         return await apply_penalty(
             context.bot, chat_id, user_id, penalty_type, duration_seconds,
             f"violation: {violation_type}",
@@ -3288,7 +3144,6 @@ async def _verify_bot_in_log_channel(context, channel_id):
         return False, "bot_id_unavailable"
     if not bot_id:
         return False, "bot_id_missing"
-
     try:
         member = await asyncio.wait_for(
             context.bot.get_chat_member(channel_id, bot_id), timeout=10.0
@@ -3308,7 +3163,6 @@ async def _verify_bot_in_log_channel(context, channel_id):
     except Exception as e:
         logger.warning("_verify_bot_in_log_channel: %s", e)
         return False, "unknown_error"
-
     status = getattr(member, "status", None)
     if status not in ("administrator", "creator"):
         return False, "not_admin"
@@ -3356,7 +3210,7 @@ except ImportError:
 
 
 # ═══════════════════════════════════════════════════════════════════
-# Banned Word Matching — v7.15.0
+# Banned Word Matching
 # ═══════════════════════════════════════════════════════════════════
 
 _compiled_banned_patterns: "OrderedDict[str, re.Pattern]" = OrderedDict()
@@ -3368,7 +3222,6 @@ def _get_banned_pattern(banned_word: str) -> Optional[re.Pattern]:
     if cached is not None:
         _compiled_banned_patterns.move_to_end(banned_word)
         return cached
-
     try:
         escaped = re.escape(banned_word).replace(r'\ ', r'\s+')
         pattern = re.compile(
@@ -3376,7 +3229,6 @@ def _get_banned_pattern(banned_word: str) -> Optional[re.Pattern]:
         )
     except Exception:
         return None
-
     _compiled_banned_patterns[banned_word] = pattern
     if len(_compiled_banned_patterns) > MAX_COMPILED_BANNED_PATTERNS:
         _compiled_banned_patterns.popitem(last=False)
@@ -3388,7 +3240,6 @@ def _get_spaced_banned_pattern(banned_word: str) -> Optional[re.Pattern]:
     if cached is not None:
         _compiled_spaced_patterns.move_to_end(banned_word)
         return cached
-
     try:
         if len(banned_word) < 3 or len(banned_word) > 15:
             return None
@@ -3401,7 +3252,6 @@ def _get_spaced_banned_pattern(banned_word: str) -> Optional[re.Pattern]:
         )
     except Exception:
         return None
-
     _compiled_spaced_patterns[banned_word] = pattern
     if len(_compiled_spaced_patterns) > MAX_COMPILED_BANNED_PATTERNS:
         _compiled_spaced_patterns.popitem(last=False)
@@ -3413,17 +3263,14 @@ def _contains_banned_word(text, banned_word) -> bool:
         return False
     if len(text) > 4000:
         text = text[:4000]
-
     try:
         normalized_text = _normalize_text(text).lower()
         normalized_word = _normalize_text(str(banned_word)).lower()
         if not normalized_word:
             return False
-
         pattern = _get_banned_pattern(normalized_word)
         if pattern is not None and pattern.search(normalized_text):
             return True
-
         if _ANTIEVASION_COMPACT_WORDS and len(normalized_word) >= 3:
             compact_text = re.sub(_WORD_SEP_CLASS, '', normalized_text)
             compact_word = re.sub(_WORD_SEP_CLASS, '', normalized_word)
@@ -3455,7 +3302,6 @@ def _accepts_state_arg(handler, handler_name: str) -> bool:
     cached = _private_handler_signature_cache.get(handler_name)
     if cached is not None:
         return cached
-
     try:
         sig = inspect.signature(handler)
         params = [
@@ -3468,7 +3314,6 @@ def _accepts_state_arg(handler, handler_name: str) -> bool:
         result = len(params) >= 3
     except (TypeError, ValueError):
         result = False
-
     _private_handler_signature_cache[handler_name] = result
     return result
 
@@ -3482,11 +3327,9 @@ class MessageHandlers:
         if (not update or not update.effective_chat
                 or not update.effective_message):
             return
-
         chat_id = update.effective_chat.id
         limiter = None
         limiter_acquired = False
-
         try:
             limiter, limiter_acquired = await _acquire_group_limiter(chat_id)
             await MessageHandlers._handle_group_impl(update, context)
@@ -3499,29 +3342,19 @@ class MessageHandlers:
 
     @staticmethod
     async def handle_edited(update, context):
-        """
-        v7.15.0 #A4: رسائل مُعدَّلة — يعاد فحصها بالكامل.
-        """
         if (not update or not update.effective_chat
                 or not update.edited_message):
             return
-
-        # نُعيد استخدام _handle_group_impl مع ربط الـ message الصحيح
         chat_id = update.effective_chat.id
         limiter = None
         limiter_acquired = False
-
         try:
             limiter, limiter_acquired = await _acquire_group_limiter(chat_id)
-
-            # في PTB، edited_message و effective_message كلاهما يشير للرسالة المُعدَّلة
-            # لكننا نتأكد صراحةً
             if update.effective_message is None and update.edited_message is not None:
                 try:
                     update.effective_message = update.edited_message
                 except Exception:
                     return
-
             await MessageHandlers._handle_group_impl(update, context)
         except asyncio.CancelledError:
             raise
@@ -3531,10 +3364,53 @@ class MessageHandlers:
             await _release_group_limiter(limiter, limiter_acquired)
 
     @staticmethod
+    async def _apply_slow_mode(context, chat_id, settings):
+        """
+        v7.15.1 #F8: تطبيق slow_mode فعلياً على Telegram عند التفعيل الأول.
+        """
+        if not _SLOW_MODE_AUTO:
+            return
+        try:
+            slow_on = _as_bool(settings.get('slow_mode', 0), False)
+            try:
+                slow_secs = int(settings.get('slow_mode_seconds', 0) or 0)
+            except (TypeError, ValueError):
+                slow_secs = 0
+
+            cache_key = f"_slow_applied_{chat_id}"
+            last_applied = context.bot_data.get(cache_key, -1)
+
+            target = slow_secs if (slow_on and slow_secs > 0) else 0
+            if target < 0:
+                target = 0
+            if target > 3600:
+                target = 3600
+
+            if target == last_applied:
+                return
+            if target == 0 and last_applied in (0, -1):
+                return
+
+            try:
+                await context.bot.set_chat_slow_mode(chat_id, target)
+                context.bot_data[cache_key] = target
+                logger.info(
+                    "🐌 SLOW-MODE | chat=%s seconds=%d",
+                    chat_id, target,
+                )
+            except Exception as e:
+                logger.debug(
+                    "set_chat_slow_mode(%s, %d): %s",
+                    chat_id, target, e,
+                )
+                context.bot_data[cache_key] = target
+        except Exception as e:
+            logger.debug("_apply_slow_mode: %s", e)
+
+    @staticmethod
     async def _handle_group_impl(update, context):
         if not update.effective_chat or not update.effective_message:
             return
-
         chat_id = update.effective_chat.id
         await _lazy_init_columns()
 
@@ -3554,7 +3430,6 @@ class MessageHandlers:
         ctx.text = message.text or ""
         ctx.caption = message.caption or ""
 
-        # v7.15.0 #A1: poll text
         try:
             pt, pc, pu = _extract_poll_text(message)
             ctx.poll_text = pt
@@ -3582,7 +3457,6 @@ class MessageHandlers:
         ctx.vcard_urls = _extract_vcard_urls(message)
         ctx.venue_url = _extract_venue_url(message)
 
-        # has_any_link — يشمل poll_urls الآن
         has_text_link = _contains_link_enhanced(ctx.normalized_text)
         ctx.has_any_link = bool(
             has_text_link
@@ -3664,9 +3538,57 @@ class MessageHandlers:
         _button_links_enabled = _as_bool(
             settings.get('delete_button_links', 1), True
         )
-        # v7.15.0 new
         _emails_enabled = _as_bool(settings.get('delete_emails', 0), False)
         _polls_enabled = _as_bool(settings.get('delete_polls', 0), False)
+
+        # ═══════════════════════════════════════════════════════
+        # v7.15.1 #F1: كاشف الفيضان (قبل كل شيء آخر غير الخدمة)
+        # ═══════════════════════════════════════════════════════
+        _antiflood_enabled = _as_bool(
+            settings.get('antiflood_enabled', 0), False
+        )
+        if _antiflood_enabled and _ANTIFLOOD_ENABLED and not is_anonymous:
+            try:
+                _af_max_raw = settings.get(
+                    'antiflood_messages', _FLOOD_DEFAULT_MESSAGES
+                )
+                _af_win_raw = settings.get(
+                    'antiflood_seconds', _FLOOD_DEFAULT_WINDOW
+                )
+                try:
+                    _af_max = int(_af_max_raw or _FLOOD_DEFAULT_MESSAGES)
+                except (TypeError, ValueError):
+                    _af_max = _FLOOD_DEFAULT_MESSAGES
+                try:
+                    _af_win = float(_af_win_raw or _FLOOD_DEFAULT_WINDOW)
+                except (TypeError, ValueError):
+                    _af_win = float(_FLOOD_DEFAULT_WINDOW)
+
+                _is_flood = await _check_flood(
+                    chat_id, user_id, _af_max, _af_win,
+                )
+                if _is_flood:
+                    if _DEBUG_DIAG:
+                        logger.warning(
+                            "🌊 FLOOD | chat=%s user=%s "
+                            "max=%d win=%.1fs",
+                            chat_id, user_id, _af_max, _af_win,
+                        )
+                    await MessageHandlers._delete_and_warn(
+                        update, context, chat_id, user_id,
+                        "antiflood", settings, is_anonymous=False,
+                    )
+                    return
+            except Exception as e:
+                logger.debug("flood check: %s", e)
+
+        # ═══ v7.15.1 #F8: تطبيق slow_mode فعلياً (خارج مسار الفيضان) ═══
+        try:
+            await MessageHandlers._apply_slow_mode(
+                context, chat_id, settings
+            )
+        except Exception as e:
+            logger.debug("slow_mode apply: %s", e)
 
         det = get_forward_detection_reason(message)
         ctx.is_forwarded = _as_bool(det.get('is_forwarded', False), False)
@@ -3736,7 +3658,8 @@ class MessageHandlers:
                 "spam_en=%s score=%d is_spam=%s | "
                 "postbot_en=%s match=%s | "
                 "has_link=%s btn_links=%d ent_links=%d | "
-                "vcard=%d venue=%s poll_urls=%d hidden=%s",
+                "vcard=%d venue=%s poll_urls=%d hidden=%s | "
+                "antiflood_en=%s",
                 chat_id, user_id, message.message_id,
                 " [ANON]" if is_anonymous else "",
                 bool(ctx.text), bool(ctx.caption),
@@ -3754,6 +3677,7 @@ class MessageHandlers:
                 bool(ctx.venue_url),
                 len(ctx.poll_urls),
                 ctx.has_hidden_chars,
+                _antiflood_enabled,
             )
             if ctx.button_texts:
                 logger.info("   🔘 BTN | %s", ctx.button_texts[:12])
@@ -3801,7 +3725,7 @@ class MessageHandlers:
             )
             return
 
-        # 3b) Poll links — v7.15.0 #A1
+        # 3b) Poll links
         if _polls_enabled and ctx.poll_urls:
             await MessageHandlers._delete_and_warn(
                 update, context, chat_id, user_id,
@@ -3809,7 +3733,7 @@ class MessageHandlers:
             )
             return
 
-        # ═══ 4) Links ═══
+        # 4) Links
         if _as_bool(settings.get('delete_links'), False):
             if ctx.has_any_link:
                 await MessageHandlers._delete_and_warn(
@@ -3818,7 +3742,7 @@ class MessageHandlers:
                 )
                 return
 
-        # 4b) @channel — v7.15.0
+        # 4b) @channel
         if _at_channel_enabled and _contains_at_channel(ctx.normalized_text):
             await MessageHandlers._delete_and_warn(
                 update, context, chat_id, user_id,
@@ -3826,7 +3750,7 @@ class MessageHandlers:
             )
             return
 
-        # 4c) tg:// — v7.15.0
+        # 4c) tg://
         if _tg_scheme_enabled and _contains_tg_scheme(ctx.normalized_text):
             await MessageHandlers._delete_and_warn(
                 update, context, chat_id, user_id,
@@ -3834,7 +3758,7 @@ class MessageHandlers:
             )
             return
 
-        # 4d) Button links — v7.15.0
+        # 4d) Button links
         if _button_links_enabled and ctx.has_button_link:
             await MessageHandlers._delete_and_warn(
                 update, context, chat_id, user_id,
@@ -3842,7 +3766,7 @@ class MessageHandlers:
             )
             return
 
-        # 4e) Emails — v7.15.0 #A14 (منفصل)
+        # 4e) Emails
         if _emails_enabled and _contains_email(ctx.normalized_text):
             await MessageHandlers._delete_and_warn(
                 update, context, chat_id, user_id,
@@ -3929,11 +3853,22 @@ class MessageHandlers:
 
     @staticmethod
     def _get_penalty_duration(settings, violation_type):
-        if violation_type in ('flood', 'antiflood'):
-            return settings.get('antiflood_penalty_duration', 3600)
-        if violation_type in ('night', 'night_mode'):
-            return settings.get('night_mode_action_duration', 3600)
-        return settings.get('auto_mute_duration', 3600)
+        """
+        v7.15.1 #F6: حماية من القيم السالبة/الصفرية.
+        """
+        try:
+            if violation_type in ('flood', 'antiflood'):
+                raw = settings.get(
+                    'antiflood_penalty_duration', _FLOOD_DEFAULT_DURATION
+                )
+                return max(_FLOOD_MIN_DURATION_SEC, int(raw or _FLOOD_DEFAULT_DURATION))
+            if violation_type in ('night', 'night_mode'):
+                raw = settings.get('night_mode_action_duration', 3600)
+                return max(_FLOOD_MIN_DURATION_SEC, int(raw or 3600))
+            raw = settings.get('auto_mute_duration', 3600)
+            return max(_FLOOD_MIN_DURATION_SEC, int(raw or 3600))
+        except (TypeError, ValueError):
+            return _FLOOD_DEFAULT_DURATION
 
     @staticmethod
     async def _get_violation_message(violation_type, lang):
@@ -3993,6 +3928,12 @@ class MessageHandlers:
 
     @staticmethod
     async def _resolve_penalty(chat_id, violation_type, settings):
+        """
+        v7.15.1 #F2: قراءة antiflood_penalty/night_mode_action حسب النوع.
+
+        قبل الإصلاح: كان يقرأ auto_penalty دائماً، فتجاهل
+        المستخدم اختيار "ban" للفيضان.
+        """
         penalty_rule = None
         try:
             penalty_rule = await DB.get_violation_penalty(
@@ -4002,13 +3943,41 @@ class MessageHandlers:
             pass
 
         if penalty_rule:
-            ptype = penalty_rule['penalty_type']
+            try:
+                ptype = penalty_rule['penalty_type']
+            except (TypeError, KeyError):
+                ptype = None
             if ptype == 'none':
                 return None, 0
-            return ptype, penalty_rule['duration_seconds']
+            if ptype in ('mute', 'ban', 'restrict', 'kick', 'warn'):
+                try:
+                    dur = int(
+                        penalty_rule.get('duration_seconds', 0) or 0
+                    )
+                except (TypeError, ValueError, AttributeError):
+                    dur = 0
+                return ptype, dur
 
-        ptype = settings.get('auto_penalty', 'none')
-        if ptype == 'none':
+        # ✅ إصلاح v7.15.1: قراءة الإعداد الصحيح لكل نوع
+        if violation_type in ('flood', 'antiflood'):
+            ptype = settings.get(
+                'antiflood_penalty', _FLOOD_DEFAULT_PENALTY
+            )
+        elif violation_type in ('night', 'night_mode'):
+            ptype = settings.get('night_mode_action', 'mute')
+        elif violation_type in ('violation', 'violation_penalty'):
+            ptype = settings.get(
+                'violation_penalty',
+                settings.get('auto_penalty', 'none'),
+            )
+        elif violation_type == 'delete_penalty':
+            ptype = settings.get('delete_penalty', 'none')
+        elif violation_type == 'warn_penalty':
+            ptype = settings.get('warn_penalty', 'mute')
+        else:
+            ptype = settings.get('auto_penalty', 'none')
+
+        if ptype == 'none' or ptype is None:
             return None, 0
         if ptype not in ('mute', 'ban', 'restrict', 'kick', 'warn'):
             ptype = 'mute'
@@ -4023,11 +3992,9 @@ class MessageHandlers:
         violation_type, settings, is_anonymous=False
     ):
         lang = await _ensure_lang(update, context)
-
         message = update.effective_message
         if message is None:
             return
-
         message_preview = None
         try:
             message_preview = (
@@ -4035,7 +4002,6 @@ class MessageHandlers:
             )
         except Exception:
             pass
-
         forward_info = None
         if violation_type == 'forwarded':
             try:
@@ -4055,7 +4021,9 @@ class MessageHandlers:
             delete_ok = False
 
         if not delete_ok:
-            logger.error("⏭️ توقف — الحذف فشل (%s)", violation_type)
+            logger.error(
+                "⏭️ توقف — الحذف فشل (%s)", violation_type
+            )
             return
 
         if FEATURE_LOG_DELETIONS:
@@ -4075,7 +4043,6 @@ class MessageHandlers:
                     else:
                         user_first = "Unknown"
                         user_username = None
-
                     log_text = _build_delete_log_text(
                         chat_id=chat_id, user_id=user_id,
                         user_first_name=user_first,
@@ -4085,7 +4052,6 @@ class MessageHandlers:
                         message_preview=message_preview,
                         is_anonymous=is_anonymous,
                     )
-
                     await _dispatch_log(
                         partial(
                             notify_group_log, context, chat_id, log_text
@@ -4177,7 +4143,6 @@ class MessageHandlers:
             if update.effective_user:
                 target_first = update.effective_user.first_name or ""
                 target_username = update.effective_user.username
-
             await _notify_group_log_penalty(
                 context,
                 chat_id=chat_id, target_user_id=user_id,
@@ -4214,18 +4179,15 @@ class MessageHandlers:
             ars = await get_auto_reply_settings_cached(chat_id)
             if not _as_bool(ars.get('enabled', False), False):
                 return False
-
             if _as_bool(ars.get('ignore_bots', True), True):
                 eff_user = getattr(update, 'effective_user', None)
                 if eff_user and getattr(eff_user, 'is_bot', False):
                     return False
-
             if _as_bool(ars.get('only_admins', False), False):
                 if not await is_authorized_in_group(
                     context.bot, chat_id, user_id or 0
                 ):
                     return False
-
             reply = await DB.get_auto_reply(text, chat_id)
             if reply:
                 reply_text = reply.get('reply', '') or ''
@@ -4233,7 +4195,6 @@ class MessageHandlers:
                     await safe_send(context.bot, chat_id, reply_text)
                 await _increment_usage_async(chat_id, text)
                 return True
-
             file_reply = get_reply_from_file(text)
             if file_reply:
                 await safe_send(context.bot, chat_id, file_reply)
@@ -4269,7 +4230,6 @@ class MessageHandlers:
             return
         chat_id = update.effective_chat.id
         message = update.effective_message
-
         is_service = any([
             message.new_chat_members,
             message.left_chat_member,
@@ -4289,7 +4249,6 @@ class MessageHandlers:
         ])
         if not is_service:
             return
-
         try:
             settings = await get_security_settings_cached(chat_id)
             if _as_bool(settings.get('delete_service'), False):
@@ -4306,7 +4265,6 @@ class MessageHandlers:
         chat_id = update.effective_chat.id
         user_id = update.effective_user.id
         settings = await get_security_settings_cached(chat_id)
-
         if _as_bool(settings.get('auto_reject_join'), False):
             try:
                 await asyncio.sleep(0.05)
@@ -4314,7 +4272,6 @@ class MessageHandlers:
                 return
             except Exception as e:
                 logger.warning("decline join: %s", e)
-
         if _as_bool(settings.get('auto_approve_join'), False):
             try:
                 await asyncio.sleep(0.05)
@@ -4395,4 +4352,16 @@ __all__ = [
     "_apply_homoglyphs_safe",
     "_strip_emoji_for_domain",
     "_cleanup_delete_failure_counter",
+    # v7.15.1 exports
+    "_check_flood",
+    "_cleanup_flood_tracker",
+    "_flood_tracker_stats",
+    "_flood_tracker",
+    "_flood_lock",
+    "_FLOOD_TRACKER_MAX_KEYS",
+    "_FLOOD_TRACKER_STALE_SEC",
+    "_FLOOD_DEFAULT_MESSAGES",
+    "_FLOOD_DEFAULT_WINDOW",
+    "_FLOOD_DEFAULT_PENALTY",
+    "_FLOOD_DEFAULT_DURATION",
 ]
