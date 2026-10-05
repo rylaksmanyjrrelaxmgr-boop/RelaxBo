@@ -1,4 +1,3 @@
-
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
@@ -31,6 +30,7 @@ v2.2.0:
     ✅ compact/fingerprint-style evasion detection
     ✅ false-positive guards
     ✅ fail-safe exception handling
+    ✅ v2.2.0.b: سطر تشخيصي عند التحميل (Load beacon)
 
 مهم:
     هذا الملف لا يحذف ولا يحظر المستخدم.
@@ -44,11 +44,21 @@ v2.2.0:
 from __future__ import annotations
 
 import html
+import logging
 import os
 import re
 import unicodedata
 from collections import Counter
 from typing import Any, Iterable, List, Optional, Sequence, Tuple
+
+
+# =============================================================================
+# LOAD BEACON (v2.2.0.b)
+# =============================================================================
+
+logger = logging.getLogger(__name__)
+
+_DETECTORS_VERSION = "2.2.0 HARDENED+"
 
 
 # =============================================================================
@@ -1573,6 +1583,7 @@ def _get_message_analysis_text(message: Any) -> str:
 class _MessageContext:
 
     __slots__ = (
+        "__weakref__",
         "text", "caption", "full_text",
         "normalized_text", "analysis_text",
         "button_count", "button_urls",
@@ -1595,6 +1606,7 @@ class _MessageContext:
         "arabic_spam_count", "generic_word_count",
         "suspicious_separator_count",
         "repeated_char_count", "repeated_word_count",
+        "forward_hint",
     )
 
     def __init__(
@@ -1660,8 +1672,11 @@ class _MessageContext:
         self.repeated_char_count = 0
         self.repeated_word_count = 0
 
+        # v2.2.0.b: حقل منفصل للتلميح الأمامي (لا يتعارض مع has_hint)
+        self.forward_hint = False
+
         for key, value in kwargs.items():
-            if hasattr(self, key):
+            if key in self.__slots__:
                 setattr(self, key, value)
 
         if message is not None:
@@ -1855,6 +1870,8 @@ class _MessageContext:
                 getattr(message, "forward_origin", None)
                 or getattr(message, "forward_from", None)
                 or getattr(message, "forward_from_chat", None)
+                or getattr(message, "forward_date", None)
+                or getattr(message, "forward_sender_name", None)
                 or getattr(message, "is_automatic_forward", False)
             )
 
@@ -1878,6 +1895,16 @@ class _MessageContext:
                 self.button_count
                 or self.has_any_link
                 or self.has_link_entity
+            )
+
+            # forward_hint: تلميح نصي لرسالة forward مخفية
+            self.forward_hint = bool(
+                getattr(message, "has_protected_content", False)
+                and (
+                    "محولة من" in self.full_text
+                    or "محوّل من" in self.full_text
+                    or "Forwarded from" in self.full_text
+                )
             )
 
         except Exception as exc:
@@ -3517,3 +3544,20 @@ __all__ = [
     "is_critical_spam",
     "should_ignore_as_low_signal",
 ]
+
+
+# =============================================================================
+# LOAD BEACON — سطر تشخيصي يُسجَّل عند تحميل الملف (v2.2.0.b)
+# =============================================================================
+try:
+    logger.info(
+        "🛡️ handlers_message_detectors %s loaded | "
+        "SPAM_THRESHOLD=%d POSTBOT_CONF=%d HARD=%d CRITICAL=%d",
+        _DETECTORS_VERSION,
+        SPAM_SCORE_THRESHOLD,
+        POSTBOT_AUTO_BLOCK_CONFIDENCE,
+        SPAM_HARD_THRESHOLD,
+        SPAM_CRITICAL_THRESHOLD,
+    )
+except Exception:
+    pass
