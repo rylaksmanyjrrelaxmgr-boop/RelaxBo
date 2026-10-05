@@ -2,8 +2,27 @@
 # -*- coding: utf-8 -*-
 
 """
-utils.py - الأدوات المساعدة للبوت (v7.9.17 - Deep Review Fixes)
+utils.py - الأدوات المساعدة للبوت (v7.9.18 - Deep Review Fixes R2)
 =================================================================================
+🆕 v7.9.18 (SECOND-REVIEW FIXES):
+    ✅ RR1  SmartCache._inflight_by_task — قفل داخلي لتفادي تعديل متزامن
+    ✅ RR2  TranslationManager.translate — (?<!\w)...(?!\w) بدل \b
+            (مطابقة عربية/مختلطة أكثر أماناً)
+    ✅ RR3  _flush_usage_updates — _flush_in_progress يمنع التداخل
+    ✅ RR4  _group_admins_cache — إخلاء حسب access_count (لا random)
+    ✅ RR5  _read_pg_activity + _dump_idle_tx_details — فلترة
+            usename = current_user
+    ✅ RR6  _send_media (voice/sticker/video_note) — reply_to_message_id
+            للـcaption المرفق
+    ✅ RR7  get_available_languages — ثابت على مستوى الوحدة (لا dict
+            جديد في كل استدعاء)
+    ✅ RR8  _DEFAULT_REJECTION = .get("ar", {}) بدل ["ar"]
+    ✅ RR9  warmup_all — asyncio.to_thread للـI/O المتزامن
+    ✅ RR10 _auto_publish_tasks_lock (ميت) — أُزيل
+    ✅ RR11 get_banned_words_cached (no-cache) — يُعيد [] بدل قراءة كاش
+    ✅ RR12 _read_pool_stats — توثيق freesize كـfallback
+    ✅ RR13 auto_publish — حذف has_sub الميت
+
 🆕 v7.9.17 (DEEP REVIEW FIXES):
     ✅ #1  webhook_handler: إعادة تسمية _webhook_app → _telegram_app
     ✅ #2  SmartCache: حماية من deadlock عند الاستدعاء المتكرر
@@ -18,25 +37,6 @@ utils.py - الأدوات المساعدة للبوت (v7.9.17 - Deep Review Fix
     ✅ #15 METRICS.record_error: مفعّل في ErrorHandler
     ✅ #24 monitor_pool: مستوى debug / on-change
     ✅ #22 تطبيع عربي: NFKC + إزالة التطويل
-
-🆕 v7.9.16 (POOL-ALERTS-ENHANCED):
-    ✅ PA-1: monitor_pool_alert v2 — يكتشف الآن:
-             - util >= 85%
-             - idle_tx >= 3
-             - lock_waits >= 5
-    ✅ PA-2: cooldown مستقل لكل نوع
-    ✅ PA-3: _read_pg_activity() — قراءة آمنة
-    ✅ PA-4: _send_pool_alert() — رسائل موحّدة
-
-🆕 v7.9.15 (CRITICAL INTEGRATION FIXES):
-    ✅ setup_webhook يُرفق site بـ runner
-    ✅ apply_penalty — حماية DB.VALID_PENALTY_TYPES
-    ✅ ErrorHandler.handle_error — fallback لـ stderr
-    ✅ safe_send — عند RateLimiter timeout → report_429
-    ✅ _publish_single_channel — تسجيل عند فشل mark_published
-    ✅ fetch_json_from_url — حماية SSRF (whitelist hosts)
-    ✅ _group_admins_cache — حذف عشوائي بدل sort
-    ✅ webhook_handler — content-type مع charset tolerance
 =================================================================================
 """
 
@@ -79,7 +79,7 @@ from database import DB
 logger = logging.getLogger(__name__)
 
 # ═══════════════════════════════════════════════════════════════════
-# ✅ v7.9.15 (#6): whitelist لـ fetch_json_from_url (حماية SSRF)
+# whitelist لـ fetch_json_from_url (حماية SSRF)
 # ═══════════════════════════════════════════════════════════════════
 _ALLOWED_JSON_HOSTS: frozenset = frozenset({
     "raw.githubusercontent.com",
@@ -89,14 +89,14 @@ _ALLOWED_JSON_HOSTS: frozenset = frozenset({
 })
 
 # ═══════════════════════════════════════════════════════════════════
-# ✅ v7.9.15 (#2): fallback لمعرّفات العقوبات الصالحة
+# fallback لمعرّفات العقوبات الصالحة
 # ═══════════════════════════════════════════════════════════════════
 _FALLBACK_PENALTY_TYPES: frozenset = frozenset({
     "ban", "mute", "kick", "warn", "restrict", "unban",
 })
 
 # ═══════════════════════════════════════════════════════════════════
-# ✅ v7.9.17 (#22): تطبيع عربي موحّد
+# تطبيع عربي موحّد
 # ═══════════════════════════════════════════════════════════════════
 _ARABIC_TATWEEL = '\u0640'
 _HIDDEN_CHARS = (
@@ -123,21 +123,37 @@ def _normalize_unicode(text: str) -> str:
     return text
 
 
+# ═══════════════════════════════════════════════════════════════════
+# قائمة اللغات الثابتة (RR7)
+# ═══════════════════════════════════════════════════════════════════
+_AVAILABLE_LANGUAGES: Dict[str, str] = {
+    "ar": "العربية 🇸🇦", "en": "English 🇬🇧", "fr": "Français 🇫🇷",
+    "tr": "Türkçe 🇹🇷", "zh": "中文 🇨🇳", "ru": "Русский 🇷🇺",
+    "de": "Deutsch 🇩🇪", "es": "Español 🇪🇸", "it": "Italiano 🇮🇹",
+    "pt": "Português 🇵🇹", "ja": "日本語 🇯🇵", "ko": "한국어 🇰🇷",
+    "fa": "فارسی 🇮🇷", "ur": "اردو 🇵🇰", "nl": "Nederlands 🇳🇱",
+    "pl": "Polski 🇵🇱", "hi": "हिन्दी 🇮🇳",
+}
+
+
 # =====================================================================
 # 0. 🧠 SmartCache
 # =====================================================================
 
 class SmartCache:
     """
-    ✅ v7.9.17 (#2): حماية من deadlock عند إعادة الدخول لنفس المفتاح.
+    حماية من deadlock عند إعادة الدخول لنفس المفتاح.
 
     آلية: نتتبّع المفاتيح التي يحمّلها كل Task حالياً. لو أعاد
     نفس الـTask استدعاء get_or_set لنفس المفتاح، نستدعي loader مباشرة
     بدل الانتظار (وإلا deadlock).
+
+    ✅ RR1: قفل داخلي `_inflight_lock` يحمي `_inflight_by_task` من
+    التعديل المتزامن في السيناريوهات المتقدمة (to_thread + async mix).
     """
     __slots__ = (
         '_cache', '_ttl_default', '_max_size', '_lock',
-        '_stampede_locks', '_inflight_by_task',
+        '_stampede_locks', '_inflight_by_task', '_inflight_lock',
     )
 
     def __init__(self, ttl: int = 60, max_size: int = 5000):
@@ -148,6 +164,8 @@ class SmartCache:
         self._stampede_locks: Dict[str, asyncio.Lock] = {}
         # task_id → set(keys) قيد التحميل
         self._inflight_by_task: Dict[int, set] = {}
+        # ✅ RR1: قفل منفصل لحالة الـinflight (لا يتداخل مع _lock)
+        self._inflight_lock = asyncio.Lock()
 
     async def get(self, key: str, default=None):
         async with self._lock:
@@ -173,19 +191,25 @@ class SmartCache:
         task = asyncio.current_task()
         task_id = id(task) if task is not None else 0
 
-        # ✅ إعادة دخول لنفس المفتاح من نفس الـTask → استدعِ loader مباشرة
-        inflight = self._inflight_by_task.get(task_id)
-        if inflight is not None and key in inflight:
+        # ✅ RR1: تحديث _inflight_by_task تحت قفل
+        async with self._inflight_lock:
+            inflight = self._inflight_by_task.get(task_id)
+            if inflight is not None and key in inflight:
+                # إعادة دخول لنفس المفتاح من نفس الـTask
+                reentrant = True
+            else:
+                reentrant = False
+                if inflight is None:
+                    inflight = set()
+                    self._inflight_by_task[task_id] = inflight
+                inflight.add(key)
+
+        if reentrant:
             logger.debug(
                 f"SmartCache: re-entrance detected for key={key} — "
                 f"calling loader directly"
             )
             return await loader()
-
-        if inflight is None:
-            inflight = set()
-            self._inflight_by_task[task_id] = inflight
-        inflight.add(key)
 
         try:
             async with self._lock:
@@ -209,9 +233,12 @@ class SmartCache:
                         if self._stampede_locks.get(key) is lock:
                             self._stampede_locks.pop(key, None)
         finally:
-            inflight.discard(key)
-            if not inflight:
-                self._inflight_by_task.pop(task_id, None)
+            async with self._inflight_lock:
+                current = self._inflight_by_task.get(task_id)
+                if current is not None:
+                    current.discard(key)
+                    if not current:
+                        self._inflight_by_task.pop(task_id, None)
 
     async def set(self, key: str, value, ttl: int = None):
         effective_ttl = ttl if ttl is not None else self._ttl_default
@@ -244,6 +271,7 @@ class SmartCache:
 _auth_cache_smart = SmartCache(ttl=60, max_size=2000)
 _auth_neg_cache = SmartCache(ttl=15, max_size=1000)
 _security_stats_cache = SmartCache(ttl=60, max_size=500)
+
 
 # =====================================================================
 # 1. TimeUtils
@@ -303,6 +331,7 @@ class TimeUtils:
         except (ValueError, TypeError):
             return None
 
+
 # =====================================================================
 # 2. TextUtils
 # =====================================================================
@@ -320,10 +349,9 @@ class TextUtils:
     @staticmethod
     def contains_mention(text: Optional[str]) -> bool:
         """
-        ✅ v7.9.17 (#10): لا يطابق البريد الإلكتروني.
+        لا يطابق البريد الإلكتروني.
 
         نستخدم lookbehind يمنع أن يسبق @ حرف/رقم/نقطة/شرطة سفلية.
-        وبذلك:
           "hello @user" ✅
           "user@example.com" ❌
           "@user" ✅
@@ -339,7 +367,6 @@ class TextUtils:
     def sanitize(text: str, max_len: int = 4096) -> str:
         if not text:
             return ""
-        # ✅ v7.9.17 (#22): NFKC + إزالة المحارف المخفية + التطويل
         text = _normalize_unicode(text)
         return text[:max_len]
 
@@ -358,6 +385,7 @@ class TextUtils:
     @staticmethod
     def truncate(text: str, max_len: int = 200) -> str:
         return text[:max_len] + ("..." if len(text) > max_len else "")
+
 
 # =====================================================================
 # 3. RateLimiter
@@ -409,6 +437,7 @@ class RateLimiter:
 RATE_LIMITER = RateLimiter(max_concurrent=15, max_per_second=30)
 PUBLISH_RATE_LIMITER = RateLimiter(max_concurrent=5, max_per_second=10)
 
+
 # =====================================================================
 # 4. MetricsCollector
 # =====================================================================
@@ -424,7 +453,6 @@ class MetricsCollector:
         self.api_calls.append((time.time(), method, duration))
 
     def record_error(self, error_type: str, context: str = ""):
-        """✅ v7.9.17 (#15): مفعّلة الآن من ErrorHandler."""
         self.errors.append((time.time(), error_type, context))
 
     def get_stats(self) -> dict:
@@ -443,6 +471,7 @@ class MetricsCollector:
 
 
 METRICS = MetricsCollector()
+
 
 # =====================================================================
 # 5. AutoReplyCache
@@ -469,6 +498,7 @@ class AutoReplyCache:
 
 
 _auto_reply_cache = AutoReplyCache(maxsize=300, ttl=300)
+
 
 # =====================================================================
 # 5.1 _COMMON_PHRASES
@@ -602,6 +632,7 @@ _COMMON_PHRASES: Dict[str, Dict[str, str]] = {
 
 _ARABIC_TEXT_PATTERN = re.compile(r'[\u0600-\u06FF]')
 
+
 # =====================================================================
 # 6. TranslationManager
 # =====================================================================
@@ -694,20 +725,14 @@ class TranslationManager:
 
     @classmethod
     def get_available_languages(cls) -> Dict[str, str]:
-        return {
-            "ar": "العربية 🇸🇦", "en": "English 🇬🇧", "fr": "Français 🇫🇷",
-            "tr": "Türkçe 🇹🇷", "zh": "中文 🇨🇳", "ru": "Русский 🇷🇺",
-            "de": "Deutsch 🇩🇪", "es": "Español 🇪🇸", "it": "Italiano 🇮🇹",
-            "pt": "Português 🇵🇹", "ja": "日本語 🇯🇵", "ko": "한국어 🇰🇷",
-            "fa": "فارسی 🇮🇷", "ur": "اردو 🇵🇰", "nl": "Nederlands 🇳🇱",
-            "pl": "Polski 🇵🇱", "hi": "हिन्दी 🇮🇳"
-        }
+        # ✅ RR7: dict ثابت — لا بناء جديد كل استدعاء
+        return _AVAILABLE_LANGUAGES
 
     @classmethod
     def is_supported(cls, lang: str) -> bool:
         if not lang or lang == 'off':
             return False
-        return lang in cls.get_available_languages()
+        return lang in _AVAILABLE_LANGUAGES
 
     @classmethod
     def translate(cls, text: str, target_lang: str) -> Optional[str]:
@@ -729,9 +754,11 @@ class TranslationManager:
         if normalized in phrases:
             return phrases[normalized]
 
+        # ✅ RR2: (?<!\w)...(?!\w) بدل \b — أكثر أماناً مع خلط
+        # العربي/الإنجليزي وعلامات التشكيل
         for src, dst in phrases.items():
             try:
-                pattern = r"\b" + re.escape(src) + r"\b"
+                pattern = r"(?<!\w)" + re.escape(src) + r"(?!\w)"
                 if re.search(pattern, stripped, flags=re.IGNORECASE):
                     return re.sub(
                         pattern, dst, stripped, count=1,
@@ -751,7 +778,7 @@ class TranslationManager:
     @classmethod
     def stats(cls) -> Dict[str, Any]:
         return {
-            "available_languages": list(cls.get_available_languages().keys()),
+            "available_languages": list(_AVAILABLE_LANGUAGES.keys()),
             "loaded_translations": list(cls._translations.keys()),
             "common_phrases_count": {
                 lang: len(phrases)
@@ -763,6 +790,7 @@ class TranslationManager:
 
 async def get_text(lang: str, key: str, **kwargs) -> str:
     return TranslationManager.get_text(lang, key, **kwargs)
+
 
 # =====================================================================
 # 7. UserState + StateManager
@@ -864,6 +892,7 @@ class StateManager:
     def is_expired(cls, user_id: int, timeout: int = None) -> bool:
         with cls._lock:
             return user_id not in cls._cache
+
 
 # =====================================================================
 # 8. CB
@@ -1034,6 +1063,7 @@ class CB:
     AUTO_REPLY_ADD = "auto_reply_add"
     AUTO_REPLY_DEL = "auto_reply_del"
     AUTO_REPLY_LIST = "auto_reply_list"
+
 
 # =====================================================================
 # 9. KeyboardFactory
@@ -1324,7 +1354,7 @@ class KeyboardFactory:
 
     @classmethod
     def preload_all(cls) -> int:
-        langs = list(TranslationManager.get_available_languages().keys())
+        langs = list(_AVAILABLE_LANGUAGES.keys())
         count = 0
         for lang in langs:
             try:
@@ -1847,6 +1877,7 @@ class KeyboardFactory:
             f"{T('security_disabled_footer', '🔴 معطّل')}</i>"
         )
 
+
 # =====================================================================
 # 10. كاش الكلمات المحظورة
 # =====================================================================
@@ -1866,9 +1897,7 @@ _GLOBAL_WORDS_TTL = 1800
 
 
 def _normalize_word(word: Any) -> Optional[str]:
-    """
-    ✅ v7.9.17 (#22): NFKC + إزالة التطويل + طي المسافات.
-    """
+    """NFKC + إزالة التطويل + طي المسافات."""
     if not isinstance(word, str):
         return None
     word = word.strip().lower()
@@ -1891,7 +1920,6 @@ async def _get_or_create_banned_words_lock(chat_id: int) -> asyncio.Lock:
             return existing
 
         if len(_banned_words_locks) >= _BANNED_WORDS_LOCKS_MAX:
-            # ✅ v7.9.17 (#13): نزيل فقط الأقفال غير المستخدمة
             to_remove = [
                 cid for cid, lk in _banned_words_locks.items()
                 if cid != chat_id and not lk.locked()
@@ -1966,6 +1994,7 @@ async def get_banned_words_cached(chat_id: int) -> List[str]:
                 logger.error(f"❌ فشل جلب الكلمات المحظورة: {e}")
                 return _banned_words_cache.get(chat_id, [])
     else:
+        # ✅ RR11: عند تعطيل الكاش لا نقرأ _banned_words_cache (لن تُكتب فيه)
         try:
             local_words = await DB.get_banned_words(chat_id) or []
             if chat_id != -1:
@@ -1981,7 +2010,7 @@ async def get_banned_words_cached(chat_id: int) -> List[str]:
             return list(normalized_set)
         except Exception as e:
             logger.error(f"❌ فشل جلب الكلمات المحظورة: {e}")
-            return _banned_words_cache.get(chat_id, [])
+            return []
 
 
 def _clear_db_banned_words_cache(chat_id: int = None) -> None:
@@ -2040,6 +2069,7 @@ async def get_min_publish_interval() -> int:
         return max(1, int(val))
     except (ValueError, TypeError):
         return CONFIG.MIN_PUBLISH_INTERVAL
+
 
 # =====================================================================
 # 11. دوال الصلاحيات
@@ -2156,12 +2186,16 @@ async def check_bot_permissions(bot, chat_id: int) -> dict:
     except Exception as e:
         return {'can_act': False, 'reason': str(e)[:50]}
 
+
 # =====================================================================
 # 12. إرسال آمن
 # =====================================================================
 
 async def _send_media(bot, chat_id, media_type, media_file_id,
                       caption=None, reply_markup=None, parse_mode=None, **kwargs):
+    # ✅ RR6: استخراج reply_to_message_id مرة واحدة للاستخدام في الكابشن
+    _reply_to = kwargs.get('reply_to_message_id')
+
     if media_type == 'photo':
         return await bot.send_photo(chat_id, media_file_id, caption=caption,
                                     reply_markup=reply_markup,
@@ -2181,7 +2215,13 @@ async def _send_media(bot, chat_id, media_type, media_file_id,
     elif media_type == 'voice':
         sent = await bot.send_voice(chat_id, media_file_id, reply_markup=reply_markup, **kwargs)
         if caption:
-            await bot.send_message(chat_id, caption, parse_mode=parse_mode)
+            caption_kwargs = {}
+            if _reply_to is not None:
+                caption_kwargs['reply_to_message_id'] = _reply_to
+            with suppress(Exception):
+                await bot.send_message(
+                    chat_id, caption, parse_mode=parse_mode, **caption_kwargs
+                )
         return sent
     elif media_type == 'animation':
         return await bot.send_animation(chat_id, media_file_id, caption=caption,
@@ -2190,12 +2230,24 @@ async def _send_media(bot, chat_id, media_type, media_file_id,
     elif media_type == 'sticker':
         sent = await bot.send_sticker(chat_id, media_file_id, reply_markup=reply_markup)
         if caption:
-            await bot.send_message(chat_id, caption, parse_mode=parse_mode)
+            caption_kwargs = {}
+            if _reply_to is not None:
+                caption_kwargs['reply_to_message_id'] = _reply_to
+            with suppress(Exception):
+                await bot.send_message(
+                    chat_id, caption, parse_mode=parse_mode, **caption_kwargs
+                )
         return sent
     elif media_type == 'video_note':
         sent = await bot.send_video_note(chat_id, media_file_id, reply_markup=reply_markup)
         if caption:
-            await bot.send_message(chat_id, caption, parse_mode=parse_mode)
+            caption_kwargs = {}
+            if _reply_to is not None:
+                caption_kwargs['reply_to_message_id'] = _reply_to
+            with suppress(Exception):
+                await bot.send_message(
+                    chat_id, caption, parse_mode=parse_mode, **caption_kwargs
+                )
         return sent
     else:
         return await bot.send_message(chat_id, caption or ".", reply_markup=reply_markup,
@@ -2318,6 +2370,7 @@ def get_ram_usage() -> dict:
         logger.error(f"❌ فشل جلب إحصائيات الرام: {e}")
         return {'total': 0, 'used': 0, 'percent': 0}
 
+
 # =====================================================================
 # 13. دوال حظر/فك حظر المستخدمين
 # =====================================================================
@@ -2374,6 +2427,7 @@ async def unban_user_by_id(user_id: int) -> Tuple[bool, str]:
     except Exception as e:
         logger.error(f"❌ unban_user_by_id({user_id}): {e}", exc_info=True)
         return False, f"❌ فشل فك الحظر: {str(e)[:100]}"
+
 
 # =====================================================================
 # 14. نظام العقوبات
@@ -2883,7 +2937,7 @@ _PENALTY_I18N: Dict[str, Dict[str, str]] = {
     },
 }
 
-# ✅ v7.9.17 (#8): رسائل رفض صريحة
+# ✅ RR8: رسائل رفض صريحة
 _REJECTION_MESSAGES: Dict[str, Dict[str, str]] = {
     "ar": {
         "on_owner": "❌ لا يمكن تطبيق العقوبة على المالك",
@@ -2901,7 +2955,8 @@ _REJECTION_MESSAGES: Dict[str, Dict[str, str]] = {
     },
 }
 
-_DEFAULT_REJECTION = _REJECTION_MESSAGES["ar"]
+# ✅ RR8: .get("ar", {}) بدل ["ar"] — يمنع KeyError عند تعديل الجدول
+_DEFAULT_REJECTION = _REJECTION_MESSAGES.get("ar", {})
 
 
 def _reject(key: str, lang: str = "ar") -> str:
@@ -2967,7 +3022,6 @@ async def apply_penalty(bot, chat_id: int, user_id: int, penalty: str,
     except (TypeError, ValueError, AttributeError):
         primary_id = None
 
-    # ✅ v7.9.17 (#8): رسائل رفض دقيقة
     if primary_id is not None and user_id == primary_id:
         return False, _reject("on_owner", lang)
     if user_id == bot.id:
@@ -3053,6 +3107,7 @@ async def apply_penalty(bot, chat_id: int, user_id: int, penalty: str,
 
     return True, full_msg
 
+
 # =====================================================================
 # 15. الردود التلقائية
 # =====================================================================
@@ -3061,6 +3116,8 @@ _usage_updates: Dict[Tuple[int, str], int] = {}
 _USAGE_FLUSH_LIMIT = 50
 _USAGE_FLUSH_INTERVAL = 60
 _usage_lock = asyncio.Lock()
+# ✅ RR3: flag لمنع تداخل flush
+_flush_in_progress = False
 
 
 async def _increment_usage_async(chat_id: int, keyword: str):
@@ -3074,34 +3131,42 @@ async def _increment_usage_async(chat_id: int, keyword: str):
 
 async def _flush_usage_updates():
     """
-    ✅ v7.9.17 (#16): لا مضاعفة عند فشل جزئي.
+    ✅ RR3: `_flush_in_progress` يمنع استدعاءين متزامنين من تفريغ
+    نفس الدفعة مرتين (race في نافذة الـawait الطويلة).
 
     نتتبّع الصفوف الفاشلة فقط ونعيدها للمخزن.
     """
+    global _flush_in_progress
+
     async with _usage_lock:
-        if not _usage_updates:
+        if _flush_in_progress or not _usage_updates:
             return
+        _flush_in_progress = True
         data = list(_usage_updates.items())
         _usage_updates.clear()
 
-    failed: Dict[Tuple[int, str], int] = {}
-    for (chat_id, keyword), count in data:
-        try:
-            await DB.execute(
-                "UPDATE auto_replies SET usage_count = usage_count + ? "
-                "WHERE chat_id=? AND keyword=?",
-                (count, chat_id, keyword)
-            )
-        except Exception as e:
-            logger.error(
-                f"❌ فشل تحديث usage_count ({chat_id}, {keyword}): {e}"
-            )
-            failed[(chat_id, keyword)] = count
+    try:
+        failed: Dict[Tuple[int, str], int] = {}
+        for (chat_id, keyword), count in data:
+            try:
+                await DB.execute(
+                    "UPDATE auto_replies SET usage_count = usage_count + ? "
+                    "WHERE chat_id=? AND keyword=?",
+                    (count, chat_id, keyword)
+                )
+            except Exception as e:
+                logger.error(
+                    f"❌ فشل تحديث usage_count ({chat_id}, {keyword}): {e}"
+                )
+                failed[(chat_id, keyword)] = count
 
-    if failed:
+        if failed:
+            async with _usage_lock:
+                for key, count in failed.items():
+                    _usage_updates[key] = _usage_updates.get(key, 0) + count
+    finally:
         async with _usage_lock:
-            for key, count in failed.items():
-                _usage_updates[key] = _usage_updates.get(key, 0) + count
+            _flush_in_progress = False
 
 
 async def export_auto_replies(chat_id: int, file_path: str = None) -> int:
@@ -3193,6 +3258,7 @@ async def fetch_json_from_url(url: str) -> Optional[Union[list, dict]]:
         logger.error(f"❌ Fetch JSON error: {e}")
         return None
 
+
 # =====================================================================
 # 16. الردود من ملف
 # =====================================================================
@@ -3281,6 +3347,7 @@ def reload_replies_from_file() -> dict:
         logger.info(f"✅ تم إعادة تحميل ملف الردود: {len(_REPLIES_FROM_FILE)} رد")
     return _REPLIES_FROM_FILE
 
+
 # =====================================================================
 # 17. المهام الخلفية
 # =====================================================================
@@ -3298,12 +3365,10 @@ class BackgroundTasks:
     POOL_IDLE_TX_ALERT = 3
     POOL_LOCK_WAITS_ALERT = 5
 
-    # ✅ v7.9.17 (#3, #24): تسجيل فقط عند تغيّر الحالة
     _pool_last_logged_bucket: Optional[str] = None
 
-    # ✅ v7.9.17 (#7): مرجع لـ tasks النشر التلقائي
+    # ✅ RR10: حذف _auto_publish_tasks_lock (كان ميتاً)
     _auto_publish_tasks: Dict[int, asyncio.Task] = {}
-    _auto_publish_tasks_lock: Optional[asyncio.Lock] = None
 
     @staticmethod
     def _adaptive_ttl(chat_id: int) -> int:
@@ -3320,6 +3385,15 @@ class BackgroundTasks:
 
     @staticmethod
     def _read_pool_stats() -> Optional[Dict[str, Any]]:
+        """
+        يقرأ إحصائيات pool من asyncpg / aiomysql.
+
+        ✅ RR12: بعض drivers لا تُوفّر get_idle_size()، لذا نجرّب
+        بالتسلسل:
+          1) get_idle_size()
+          2) freesize        (aiomysql / psycopg_pool)
+          3) 0               (fallback)
+        """
         try:
             if not (getattr(DB, 'USE_POSTGRES', False) or getattr(DB, 'USE_MYSQL', False)):
                 return None
@@ -3335,6 +3409,7 @@ class BackgroundTasks:
                 max_size = getattr(pool, 'maxsize', None)
             if current_size is None:
                 current_size = getattr(pool, 'size', None)
+            # ✅ RR12: freesize هو اسم بديل في بعض libraries
             if idle_size is None:
                 idle_size = getattr(pool, 'freesize', None)
 
@@ -3359,6 +3434,10 @@ class BackgroundTasks:
 
     @staticmethod
     async def _read_pg_activity() -> Optional[Dict[str, int]]:
+        """
+        ✅ RR5: فلترة `usename = current_user` لتجنّب قراءة اتصالات
+        تطبيقات أخرى تشترك في نفس القاعدة.
+        """
         try:
             if not getattr(DB, 'USE_POSTGRES', False):
                 return None
@@ -3377,6 +3456,7 @@ class BackgroundTasks:
                     ) AS waiting
                 FROM pg_stat_activity
                 WHERE datname = current_database()
+                  AND usename = current_user
                 """
             )
             if isinstance(row, dict):
@@ -3422,7 +3502,7 @@ class BackgroundTasks:
 
     @staticmethod
     def _pool_util_bucket(util: float) -> str:
-        """✅ v7.9.17 (#3): bucket لتفادي السجلات المتكررة."""
+        """bucket لتفادي السجلات المتكررة."""
         if util < 50:
             return "low"
         if util < 80:
@@ -3438,7 +3518,6 @@ class BackgroundTasks:
             try:
                 stats = BackgroundTasks._read_pool_stats()
                 if stats is not None:
-                    # ✅ v7.9.17 (#3, #24): سجّل فقط عند تغيّر الـbucket
                     bucket = BackgroundTasks._pool_util_bucket(
                         stats["utilization_pct"]
                     )
@@ -3460,7 +3539,6 @@ class BackgroundTasks:
         pg_activity: Optional[Dict[str, int]],
         alert_type: str,
     ) -> None:
-        """✅ v7.9.16: إرسال تنبيه موحّد للمالك."""
         try:
             lines: List[str] = []
             if alert_type == "util" and stats is not None:
@@ -3492,8 +3570,6 @@ class BackgroundTasks:
 
             lines.append(f"\n🕐 {TimeUtils.mecca_iso()}")
 
-            # ✅ v7.9.17: استخدام bot.send_message مباشرة لتجنّب RATE_LIMITER
-            # (تنبيهات إدارية نادرة، يجب ألا تتأخر بسبب flood control)
             if bot is None:
                 return
             await bot.send_message(
@@ -3569,7 +3645,7 @@ class BackgroundTasks:
             admins = await bot.get_chat_administrators(chat_id)
             admin_ids = [a.user.id for a in admins if a.user and not a.user.is_bot]
 
-            # ✅ v7.9.17 (#11): لا نخزّن/نمسح DB عند رجوع قائمة فارغة
+            # لا نخزّن/نمسح DB عند رجوع قائمة فارغة
             if not admin_ids:
                 logger.warning(
                     f"⚠️ get_chat_administrators({chat_id}) رجعت فارغة "
@@ -3580,13 +3656,17 @@ class BackgroundTasks:
                 return []
 
             if len(BackgroundTasks._group_admins_cache) >= BackgroundTasks._GROUP_ADMINS_CACHE_MAX_SIZE:
+                # ✅ RR4: إخلاء حسب access_count (الأقل استخداماً) بدل random
                 evict_count = max(1, BackgroundTasks._GROUP_ADMINS_CACHE_MAX_SIZE // 5)
-                candidates = [k for k in BackgroundTasks._group_admins_cache.keys()
-                              if k != chat_id]
+                candidates = [
+                    k for k in BackgroundTasks._group_admins_cache.keys()
+                    if k != chat_id
+                ]
                 if candidates:
-                    to_remove = random.sample(
-                        candidates, min(evict_count, len(candidates))
+                    candidates.sort(
+                        key=lambda k: BackgroundTasks._group_admins_access_count.get(k, 0)
                     )
+                    to_remove = candidates[:evict_count]
                     for k in to_remove:
                         BackgroundTasks._group_admins_cache.pop(k, None)
                         BackgroundTasks._group_admins_access_count.pop(k, None)
@@ -3677,7 +3757,6 @@ class BackgroundTasks:
                 return False
             success = await BackgroundTasks._publish_post(bot, ch['channel_id'], post)
             if success:
-                # ✅ v7.9.17 (#6): retry + طابور pending بدل الاعتماد على الأمل
                 mark_ok = False
                 last_err = None
                 for attempt in range(3):
@@ -3696,7 +3775,6 @@ class BackgroundTasks:
                         f"mark_published_and_advance بعد 3 محاولات: {last_err} — "
                         f"محاولة وضع العلامة في طابور"
                     )
-                    # نحاول حفظ pending
                     try:
                         if hasattr(DB, 'mark_post_published_pending'):
                             await DB.mark_post_published_pending(
@@ -3734,7 +3812,6 @@ class BackgroundTasks:
                 return 5
             return 8
 
-        # ✅ v7.9.17 (#7): استخدام المراجع من الفئة
         BackgroundTasks._auto_publish_tasks = {}
 
         try:
@@ -3756,17 +3833,15 @@ class BackgroundTasks:
                         if channel_id in active and not active[channel_id].done():
                             continue
                         published_count = ch.get('published_count', 0)
-                        has_sub = None
 
                         async def run_publish(ch=ch, bot=bot,
                                               sleep_seconds=sleep_seconds,
                                               published_count=published_count,
-                                              semaphore=semaphore,
-                                              has_sub=has_sub):
+                                              semaphore=semaphore):
                             try:
                                 async with semaphore:
                                     success = await BackgroundTasks._publish_single_channel(
-                                        bot, ch, published_count, has_sub=has_sub
+                                        bot, ch, published_count
                                     )
                                 if success:
                                     logger.info(
@@ -3800,12 +3875,11 @@ class BackgroundTasks:
                     logger.error(f"❌ خطأ في auto_publish: {e}")
                     await asyncio.sleep(60)
         finally:
-            # ✅ v7.9.17 (#7): تنظيف الـTasks عند الإلغاء
             await BackgroundTasks.shutdown_auto_publish()
 
     @staticmethod
     async def shutdown_auto_publish(timeout: float = 5.0) -> None:
-        """✅ v7.9.17 (#7): إلغاء كل tasks النشر التلقائي بأمان."""
+        """إلغاء كل tasks النشر التلقائي بأمان."""
         active = BackgroundTasks._auto_publish_tasks
         if not active:
             return
@@ -3998,7 +4072,6 @@ class BackgroundTasks:
                             admin_ids = await BackgroundTasks._get_admin_ids_cached(
                                 bot, chat_id
                             )
-                            # ✅ v7.9.17 (#11): لا نمسح DB لو رجعت فارغة
                             if admin_ids:
                                 await DB.sync_group_admins(chat_id, admin_ids)
                                 updated_count += 1
@@ -4041,7 +4114,6 @@ class BackgroundTasks:
                 BackgroundTasks._group_admins_cache.clear()
                 BackgroundTasks._group_admins_access_count.clear()
 
-                # ✅ v7.9.17 (#13): لا نمسح إلا الأقفال غير المستخدمة
                 async with _banned_words_locks_guard:
                     to_remove = [
                         cid for cid, lk in _banned_words_locks.items()
@@ -4070,11 +4142,16 @@ class BackgroundTasks:
             except Exception as e:
                 logger.error(f"❌ فشل تنظيف قاعدة البيانات: {e}")
 
+
 # =====================================================================
 # 18. Warmup
 # =====================================================================
 
 async def warmup_all() -> Dict[str, Any]:
+    """
+    ✅ RR9: I/O المتزامن (تحميل الترجمات + أزرار + replies)
+    يُنفَّذ في threads منفصلة عبر asyncio.to_thread.
+    """
     result = {
         'translations_loaded': 0,
         'buttons_loaded': 0,
@@ -4086,8 +4163,13 @@ async def warmup_all() -> Dict[str, Any]:
     t_start = time.monotonic()
 
     try:
-        result['translations_loaded'] = TranslationManager.preload_all()
-        result['buttons_loaded'] = KeyboardFactory.preload_all()
+        # ✅ RR9: نقل التحميل المتزامن إلى thread
+        result['translations_loaded'] = await asyncio.to_thread(
+            TranslationManager.preload_all
+        )
+        result['buttons_loaded'] = await asyncio.to_thread(
+            KeyboardFactory.preload_all
+        )
 
         try:
             words = await asyncio.wait_for(_get_global_words_cached(), timeout=5)
@@ -4120,11 +4202,11 @@ async def warmup_all() -> Dict[str, Any]:
     )
     return result
 
+
 # =====================================================================
 # 19. خادم الويب
 # =====================================================================
 
-# ✅ v7.9.17 (#1): اسم صريح — هذا هو telegram.ext.Application
 _telegram_app = None
 
 
@@ -4134,9 +4216,6 @@ async def setup_webhook(app, port: int):
 
     المعامل `app` هنا هو telegram.ext.Application.
     يتم تخزينه في `_telegram_app` ليستخدمه webhook_handler.
-
-    ✅ v7.9.15 (#1): يُرفق `site` (TCPSite) بكائن `runner` ليتمكّن
-       `_watch_runner` في bot.py من مراقبة انهيار/تعليق الخادم.
     """
     global _telegram_app
     _telegram_app = app
@@ -4164,7 +4243,7 @@ async def setup_webhook(app, port: int):
 
 
 async def webhook_handler(request):
-    """✅ v7.9.17 (#1): استخدام الاسم الصريح `_telegram_app`."""
+    """استخدام الاسم الصريح `_telegram_app`."""
     if _telegram_app is None or not hasattr(_telegram_app, 'bot'):
         logger.error("❌ Telegram app not initialized")
         return web.Response(status=503, text="Service Unavailable")
@@ -4183,9 +4262,9 @@ async def webhook_handler(request):
         )
         return web.Response(status=200, text="OK")
     except Exception as e:
-        # ✅ نُعيد 200 لتجنّب إغراق Telegram بإعادة الإرسال
         logger.error(f"❌ Webhook error: {e}")
         return web.Response(status=200, text="OK")
+
 
 # =====================================================================
 # 20. معالج الأخطاء
@@ -4197,7 +4276,6 @@ class ErrorHandler:
         try:
             error_msg = str(context.error)
 
-            # ✅ v7.9.17 (#15): تفعيل METRICS.record_error
             try:
                 METRICS.record_error(
                     type(context.error).__name__ if context.error else "Unknown",
@@ -4238,6 +4316,7 @@ class ErrorHandler:
                 )
             except Exception:
                 pass
+
 
 # =====================================================================
 # تصدير
