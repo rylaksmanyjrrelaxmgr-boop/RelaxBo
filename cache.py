@@ -2,41 +2,32 @@
 # -*- coding: utf-8 -*-
 
 """
-cache.py - نظام الكاش المتقدم للبوت (v7.6.3)
+cache.py - نظام الكاش المتقدم للبوت (v7.6.4)
 ================================================================================
+🆕 v7.6.4 (FIX-CANCELLED-PROPAGATION):
+    🔴 FIX: cache_cleanup_task — استبدال `break` بـ `raise`
+       - المشكلة: عند SIGTERM، `break` يحوّل CancelledError إلى
+         return نظيف → `run_task_with_retry` في main.py يعتبره
+         "انهيار صامت" → يعيد جدولة المهمة (تحذير: "عادت بدون
+         استثناء — إعادة بعد 5s").
+       - الأثر: مهمة تنظيف إضافية تُشغَّل أثناء الإغلاق، ضوضاء
+         في السجلات، تأخير الإغلاق.
+       - الإصلاح: `raise` يُمرّر CancelledError لأعلى بشكل صحيح
+         → `run_task_with_retry` يعالجه كإلغاء طبيعي.
+
 🆕 v7.6.3 (تحسينات وقائية):
     ✅ UserDataCache.get_or_load: finally block محصّن
-       - كان: async with self._lock قد يفشل → my_event.set() يُتجاهل
-              → waiters ينتظرون حتى timeout (10s)
-       - صار: try/finally يضمن set() دائماً
     ✅ get_cache_stats: fallback كامل الإحصائيات
-       - كان: {'size': 0, 'stampede_locks': 0} فقط عند فشل
-       - صار: كل الحقول موجودة (توافق أفضل مع health_snapshot)
-    ✅ توافق كامل مع:
-       - handlers_message.py v7.15.1 (flood detection)
-       - handlers_callback.py v9.7.6 (antiflood buttons)
-       - database.py v7.7.53
 
-🆕 v7.6.2 (تحسين get_cache_stats — تمرير واحد):
-    ✅ get_cache_stats: تمرير واحد على _ALL_CACHES (بدل اثنين)
-       - كان: 13× size() + 13× get_stats() = 26 lock acquisition
-       - صار: 13× get_stats() فقط = 13 lock acquisition
-       - الأثر: ~30% أسرع عند /health و health_snapshot
-       - لا تغيير في المخرجات (نفس البنية تماماً)
-
-🆕 v7.6.1 (إصلاح تسريب stampede locks):
-    ✅ TTLCache.get_or_set: try/finally يضمن تحرير _stampede_locks
-       حتى عند فشل loader (كان يتراكم → memory leak)
-    ✅ get_cache_stats: يشمل _stampede_locks في الإحصائيات
-    ✅ توثيق: has() لا يحسب hits/misses (مقصود)
-
+🆕 v7.6.2 (تحسين get_cache_stats — تمرير واحد)
+🆕 v7.6.1 (إصلاح تسريب stampede locks)
 🚀 v7.6.0 (تحسينات أداء وحماية من الانهيار):
-    ✅ TTLCache: TTL jitter (±10%) — منع thundering herd
+    ✅ TTLCache: TTL jitter (±10%)
     ✅ TTLCache.get_or_set(): حماية من cache stampede
-    ✅ TTLCache.has(): يُحدّث _expired (إصلاح إحصائي)
-    ✅ invalidate_user_cache: invalidate متوازٍ (3× أسرع)
-    ✅ cache_cleanup_task: فاصل ديناميكي (حسب TTL)
-    ✅ health_snapshot(): فحص صحة شامل جديد
+    ✅ TTLCache.has(): يُحدّث _expired
+    ✅ invalidate_user_cache: invalidate متوازٍ
+    ✅ cache_cleanup_task: فاصل ديناميكي
+    ✅ health_snapshot(): فحص صحة شامل
     ✅ get_cache_stats: إجمالي hits/misses/expired
 
 🆕 v7.5.21 (إصلاح سباق invalidation + تنظيف API):
@@ -927,6 +918,12 @@ async def cache_cleanup_task():
 
     ✅ v7.6.0: تستدعي cleanup(force=False) فيعتمد التنظيف الفعلي
     على _cleanup_interval الخاص بكل cache (تنظيف ذكي).
+
+    ✅ v7.6.4 FIX: `raise` بدل `break` عند CancelledError
+       - السبب: `break` يُنهي الحلقة كـreturn نظيف → يُخدع
+         `run_task_with_retry` في main.py → يعيد جدولة المهمة
+         (تحذير: "عادت بدون استثناء — إعادة بعد 5s") أثناء الإغلاق.
+       - الإصلاح: `raise` يُمرِّر الإلغاء لأعلى بشكل صحيح.
     """
     while True:
         try:
@@ -938,7 +935,8 @@ async def cache_cleanup_task():
                 logger.debug(f"🧹 تنظيف الكاش: {total} عنصر")
         except asyncio.CancelledError:
             logger.info("🛑 cache_cleanup_task تم إلغاؤه")
-            break
+            # ✅ v7.6.4: raise بدل break — يُمرِّر الإلغاء لأعلى
+            raise
         except Exception as e:
             logger.error(f"❌ خطأ تنظيف الكاش: {e}")
 
