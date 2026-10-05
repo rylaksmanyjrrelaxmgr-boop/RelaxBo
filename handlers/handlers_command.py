@@ -2,33 +2,45 @@
 # -*- coding: utf-8 -*-
 
 """
-handlers_command.py - معالجات الأوامر (CommandHandlers) - v7.6.8
+handlers_command.py - معالجات الأوامر (CommandHandlers) - v7.7.0
 ===================================================================================
-🆕 v7.6.8 (R9 REVIEW FIXES — FINAL POLISH):
+🆕 v7.7.0 (POST-REVIEW POLISH):
     🟡 Medium:
-        ✅ I1  redeem_gift: elif not success and days_int == -1
-               (كان (True, -1) نظرياً يعرض "كودك الخاص")
-        ✅ I2  _notify_dev_log: كشف t.me/c/... وإرجاع بصمت
-               (كان t.me/c/123/456 → '@c')
-        ✅ I3  _trans: debug بدل warning (تقليل ضجيج السجلات)
-        ✅ I4  _pct: clamp max(0.0, ...) للقيم السالبة
-        ✅ I5  _safe_send_message: حذف return None غير القابل للوصول
-        ✅ I6  security(): cache _security_supports_lang()
+        ✅ K1  _truncate_grapheme_safe: حلقة قطع آمنة حقيقية
+               (كان fallback لا يُعيد تطبيق منطق ZWJ عند انهيار cut)
+        ✅ K2  start(): إزالة `if not ref_code: pass else:` الزائد
+        ✅ K3  start(): حماية ref_msg.format من KeyError/IndexError
+        ✅ K4  mood: round() قبل int() على total_words (منع الفقدان الصامت)
+        ✅ K5  _safe_send_message: timeouts أقصر للـ fallback + تعليق واضح
+               على parse_mode=None (سلوك مقصود)
+        ✅ K6  _send_long_report: تعليق H9 — layer 3 دفاعية
+        ✅ K7  _spawn_auto_delete: تعليق متوافق مع _delete_message_after
+        ✅ K8  db_diag / db_vacuum: فحص نتيجة _safe_edit_or_send
+        ✅ K9  _pct: debug log عند clamp (كشف بيانات مشوّهة)
+        ✅ K10 syncgroup: تعليق يوضّح أن anonymous_ids تشمل bot admins
+        ✅ K11 _trans: تعليق يوضّح العلاقة TranslationManager vs get_text
+        ✅ K12 remove_hidden_admin: تعليق حول استخدام raw SQL
+        ✅ K13 _notify_dev_log: توثيق أن parts[3]='' مُعالَج أصلاً
 
-🆕 v7.6.7:
-    ✅ H1-H9
+🆕 v7.6.9 (DEEP REVIEW FIXES):
+    🔴 Critical:
+        ✅ J1  _moderation_command: invalidate_auth_cache بدون await + positional
+    🟡 Medium:
+        ✅ J2  contests: قطع grapheme-safe نهائي
+        ✅ J3  _notify_dev_log: كشف t.me/joinchat|addstickers|addemoji|s
+        ✅ J4  start: حماية KeyboardFactory.get_menu من None
+        ✅ J5  trial: فحص type على DB.activate_trial
+    🟢 Low:
+        ✅ J6-J13
 
-🆕 v7.6.6:
-    ✅ G1-G10
+🆕 v7.6.8 (R9 REVIEW FIXES — FINAL POLISH):
+    🟡 I1-I6
 
-🆕 v7.6.5:
-    ✅ F1-F12
-
-🆕 v7.6.4:
-    ✅ R1-R9 + C1-C5
-
-🆕 v7.6.3:
-    ✅ C1 _resolve_target_id, C2 _spawn_notify_dev_log, M1-M6, m1-m17
+🆕 v7.6.7: H1-H9
+🆕 v7.6.6: G1-G10
+🆕 v7.6.5: F1-F12
+🆕 v7.6.4: R1-R9 + C1-C5
+🆕 v7.6.3: C1, C2, M1-M6, m1-m17
 ===================================================================================
 """
 
@@ -91,6 +103,14 @@ _SEND_TIMEOUT_KWARGS = {
     "pool_timeout": SEND_POOL_TIMEOUT,
 }
 
+# ✅ K5: timeouts أقصر للـ parse-fallback (لا نضاعف الانتظار)
+_SEND_FALLBACK_TIMEOUT_KWARGS = {
+    "read_timeout": 10.0,
+    "write_timeout": 10.0,
+    "connect_timeout": 8.0,
+    "pool_timeout": 5.0,
+}
+
 CONTEST_DESC_DISPLAY_MAX = 80
 CONTEST_QUESTION_DISPLAY_MAX = 60
 
@@ -102,6 +122,12 @@ _HTML_STRIP_RE = re.compile(r'<[^>]+>')
 # ✅ H1: regex لأسماء الوسوم
 _HTML_OPEN_NAME_RE = re.compile(r'<([a-zA-Z][a-zA-Z0-9]*)')
 _HTML_CLOSE_NAME_RE = re.compile(r'</([a-zA-Z][a-zA-Z0-9]*)')
+
+# ✅ J6: void tags في HTML — لا تحتاج إغلاقاً
+_VOID_HTML_TAGS = frozenset({
+    'br', 'hr', 'img', 'input', 'meta', 'link', 'area', 'base',
+    'col', 'embed', 'source', 'track', 'wbr',
+})
 
 _PARSE_ERROR_KEYWORDS = (
     "can't parse",
@@ -132,20 +158,20 @@ def _strip_html_tags(s: str) -> str:
 
 def _find_last_unclosed_lt(s: str) -> int:
     """
-    ✅ H1: يرجع موضع '<' لآخر وسم HTML غير مغلق.
+    ✅ H1 + J6: يرجع موضع '<' لآخر وسم HTML غير مغلق.
 
     يستخدم stack يحفظ (position, tag_name) لمطابقة فعلية:
         <b>text</b>       → depth = 0 ✓
         <b>text</i>more   → </i> لا يطابق <b> → depth = 1 ✓
         <a href="...">x   → depth = 1 (مفتوح)
         <img src=""/>x    → depth = 0 (self-closing)
+        <br>x             → depth = 0 (void tag — ✅ J6)
 
     لا يخطئ في '5 < 3' (لأن ما بعد < ليس اسم وسم).
     """
     if not s:
         return -1
 
-    # ✅ H1: stack = [(start_pos, tag_name_lower), ...]
     stack: List[Tuple[int, str]] = []
     try:
         for m in _HTML_TAG_RE.finditer(s):
@@ -170,7 +196,11 @@ def _find_last_unclosed_lt(s: str) -> int:
             else:
                 open_match = _HTML_OPEN_NAME_RE.match(tag)
                 if open_match:
-                    stack.append((m.start(), open_match.group(1).lower()))
+                    name = open_match.group(1).lower()
+                    # ✅ J6: void tags لا تُضاف للـ stack
+                    if name in _VOID_HTML_TAGS:
+                        continue
+                    stack.append((m.start(), name))
     except Exception:
         return -1
 
@@ -202,7 +232,7 @@ def _is_chat_id(s: str) -> bool:
     ✅ H6: يتحقق إن كانت السلسلة معرف قناة رقمي.
     - "123456"     → True
     - "-1001234"   → True
-    - "---1234"    → False (ليس معرفاً معقولاً)
+    - "---1234"    → False
     - "@chan"      → False
     - "mychannel"  → False
     """
@@ -215,9 +245,9 @@ def _is_chat_id(s: str) -> bool:
 
 def _pct(v, default: float = 0.0) -> float:
     """
-    ✅ H3 + I4: يحوّل قيمة إلى float بأمان.
-    None / str غير رقمي / أي شيء آخر → default.
-    القيم السالبة تُقصّ إلى 0.0 (دفاعي).
+    ✅ H3 + I4 + K9: يحوّل قيمة إلى float بأمان.
+    None / str غير رقمي → default.
+    القيم السالبة تُقصّ إلى 0.0 (مع debug log — كشف بيانات مشوّهة).
     """
     if v is None:
         return default
@@ -225,26 +255,29 @@ def _pct(v, default: float = 0.0) -> float:
         result = float(v)
     except (TypeError, ValueError):
         return default
-    # ✅ I4: clamp القيم السالبة
-    return max(0.0, result)
+    # ✅ K9: سجّل عند clamp لمراقبة جودة البيانات
+    if result < 0:
+        logger.debug(f"_pct: negative value clamped | raw={v!r}")
+        return 0.0
+    return result
 
 
 async def _safe_fetchall(query: str, params: tuple = ()) -> list:
     """
-    ✅ H4: fetchall مع try/except موحّد.
+    ✅ H4 + J7: fetchall مع try/except موحّد.
+    السجل لا يكشف بنية قاعدة البيانات.
     """
     try:
         result = await DB.fetchall(query, params)
         return list(result) if result else []
     except Exception as e:
-        logger.warning(f"_safe_fetchall failed: {e} | q={query[:60]}")
+        # ✅ J7: debug + بدون query
+        logger.debug(f"_safe_fetchall failed: {type(e).__name__}")
         return []
 
 
 def _security_supports_lang() -> bool:
-    """
-    ✅ I6: cache نتيجة فحص دعم lang.
-    """
+    """✅ I6: cache نتيجة فحص دعم lang."""
     global _SECURITY_LANG_SUPPORT
     if _SECURITY_LANG_SUPPORT is None:
         try:
@@ -277,11 +310,11 @@ _STALE_KEYS_ON_START = (
 
 
 def _clear_stale_state(user_id: int, context) -> None:
-    """✅ v7.5.26 + C4: يمسح الحالة المعلقة (حماية user_data=None)."""
+    """✅ v7.5.26 + C4 + J9: يمسح الحالة المعلقة (حماية user_data=None)."""
     try:
         StateManager.clear(user_id)
     except Exception as e:
-        logger.debug(f"StateManager.clear({user_id}): {e}")
+        logger.debug(f"StateManager.clear({user_id}) failed: {e}")
 
     ud = getattr(context, 'user_data', None)
     if ud is None:
@@ -289,15 +322,12 @@ def _clear_stale_state(user_id: int, context) -> None:
 
     try:
         for k in _STALE_KEYS_ON_START:
-            try:
-                ud.pop(k, None)
-            except Exception:
-                pass
+            ud.pop(k, None)
         for k in list(ud.keys()):
             if isinstance(k, str) and k.startswith('last_cb_'):
                 ud.pop(k, None)
     except Exception as e:
-        logger.debug(f"_clear_stale_state user_data: {e}")
+        logger.debug(f"_clear_stale_state user_data failed: {e}")
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -341,14 +371,13 @@ def _safe_mtime(p):
 
 
 def _get_field(row, key, default=None):
+    """
+    ✅ J8: تنظيف — sqlite3.Row يدعم indexing فقط.
+    """
     if row is None:
         return default
     if isinstance(row, dict):
         return row.get(key, default)
-    try:
-        return row.get(key, default)
-    except AttributeError:
-        pass
     try:
         return row[key]
     except (KeyError, TypeError, IndexError):
@@ -429,7 +458,7 @@ def _resolve_target_id(
 
 
 # ═══════════════════════════════════════════════════════════════════
-# إرسال آمن — ✅ G4 + H8 + I5
+# إرسال آمن — ✅ G4 + H8 + I5 + J10 + K5
 # ═══════════════════════════════════════════════════════════════════
 
 async def _safe_send_message(bot, chat_id, text, **extra):
@@ -439,8 +468,12 @@ async def _safe_send_message(bot, chat_id, text, **extra):
     ✅ G4: عند BadRequest بسبب parse_mode:
         - يُرسل plain text (بدون parse_mode)
         - ✅ H8: retry على TimedOut في الـ fallback أيضاً
+        - ✅ K5: timeouts أقصر للـ fallback (لا نضاعف الانتظار)
 
-    ✅ I5: هيكل أنظف بدون return غير قابل للوصول.
+    ✅ I5 + J10: return None صريح في كل المسارات النهائية.
+
+    ✅ K5: `parse_mode=None` صراحةً يعني "أرسل بدون parse_mode"
+    → لا يُفعّل fallback (سلوك مقصود — المطوّر يعرف ما يفعل).
 
     ✅ C4: extra قد يطغى على _SEND_TIMEOUT_KWARGS (مقصود).
     """
@@ -455,7 +488,7 @@ async def _safe_send_message(bot, chat_id, text, **extra):
             )
         except BadRequest as e:
             if parse_mode and _is_parse_error(str(e)):
-                # ✅ G4 + H8: fallback مع retry على TimedOut
+                # ✅ G4 + H8 + K5: fallback مع retry + timeouts أقصر
                 plain = _strip_html_tags(text)
                 fallback_kwargs_base = {
                     k: v for k, v in extra.items()
@@ -463,7 +496,7 @@ async def _safe_send_message(bot, chat_id, text, **extra):
                 }
                 for fb_attempt in range(SEND_MAX_RETRIES + 1):
                     try:
-                        kwargs = dict(_SEND_TIMEOUT_KWARGS)
+                        kwargs = dict(_SEND_FALLBACK_TIMEOUT_KWARGS)
                         kwargs.update(fallback_kwargs_base)
                         return await bot.send_message(
                             chat_id=chat_id, text=plain, **kwargs
@@ -487,7 +520,6 @@ async def _safe_send_message(bot, chat_id, text, **extra):
                             f"❌ send_message parse fallback failed: {inner_e}"
                         )
                         return None
-                # ✅ I5: unreachable فعلياً (كل الفروع تُعيد)
                 return None
             logger.error(f"❌ send_message BadRequest (non-parse): {e}")
             return None
@@ -500,15 +532,15 @@ async def _safe_send_message(bot, chat_id, text, **extra):
                     f"retrying in {wait:.1f}s..."
                 )
                 await asyncio.sleep(wait)
-            else:
-                logger.error(
-                    f"❌ send_message FAILED after "
-                    f"{SEND_MAX_RETRIES+1} attempts: {e}"
-                )
+                continue
+            logger.error(
+                f"❌ send_message FAILED after "
+                f"{SEND_MAX_RETRIES+1} attempts: {e}"
+            )
+            return None
         except Exception as e:
             logger.error(f"❌ send_message error (non-timeout): {e}")
             return None
-    # ✅ I5: مسار إنهاء واحد بعد استنفاد retries
     return None
 
 
@@ -518,11 +550,12 @@ async def _safe_send_message(bot, chat_id, text, **extra):
 
 async def _notify_dev_log(context, text: str) -> None:
     """
-    ✅ v7.6.0 + R8 + F3 + G1 + I2:
+    ✅ v7.6.0 + R8 + F3 + G1 + I2 + J3 + K13:
     يرسل إشعاراً لقناة سجل المطور.
 
     ✅ I2: كشف t.me/c/... (روابط قنوات خاصة) وإرجاع بصمت
-           (لا يمكن استخراج username منها).
+    ✅ J3: كشف t.me/joinchat|addstickers|addemoji|s وإرجاع بصمت
+    ✅ K13: parts[3]='' لرابط https://t.me/ مُعالَج بـ `if not tail`.
     """
     try:
         log_ch = ''
@@ -567,16 +600,18 @@ async def _notify_dev_log(context, text: str) -> None:
                 )
                 return
 
-            # ✅ I2: كشف روابط القنوات الخاصة t.me/c/...
-            if parts[3].lower() == 'c':
+            # ✅ I2 + J3: كشف مسارات داخلية
+            seg = parts[3].lower()
+            if seg in ('c', 'joinchat', 'addstickers', 'addemoji', 's'):
                 logger.debug(
-                    "notify_dev_log: رابط قناة خاصة | %s", ch_str
+                    "notify_dev_log: مسار داخلي (%s) | %s",
+                    seg, ch_str,
                 )
                 return
 
-            # ✅ G1: parts[3] دائماً أول segment بعد الـ host
             tail = parts[3]
 
+            # ✅ K13: parts[3]='' (رابط https://t.me/) مُعالَج هنا
             if not tail or tail.startswith('+'):
                 logger.debug(
                     "notify_dev_log: invite أو فارغ | %s", ch_str
@@ -610,6 +645,8 @@ async def _trans(key: str, lang: str, default: str = "") -> str:
     """
     ترجمة آمنة مع fallback عربي.
     ✅ I3: debug بدل warning (تقليل ضجيج السجلات).
+    ✅ K11: TranslationManager.get_text (sync, cache) تُجرَّب أولاً،
+            ثم get_text (async, DB-backed) كطبقة ثانية.
     """
     if not key:
         return default or ""
@@ -656,6 +693,7 @@ async def _get_lang(user_id: int) -> str:
 # ═══════════════════════════════════════════════════════════════════
 
 async def _delete_message_after(bot, chat_id: int, message_id: int, delay: int = 10):
+    """✅ K7: debug كافٍ — فشل الحذف شائع (رسالة محذوفة أصلاً)."""
     try:
         safe_delay = max(0, int(delay))
         if safe_delay > 0:
@@ -666,7 +704,11 @@ async def _delete_message_after(bot, chat_id: int, message_id: int, delay: int =
 
 
 def _spawn_auto_delete(bot, chat_id: int, message_id: int, delay: int) -> None:
-    """✅ C7: warning بدل debug (توحيد)."""
+    """
+    ✅ C7 + K7: تتبّع + cleanup.
+    ملاحظة: _delete_message_after يستخدم debug، أما فشل create_task هنا
+    فيستخدم warning (خلل بنيوي وليس شبكي).
+    """
     try:
         task = asyncio.create_task(
             _delete_message_after(bot, chat_id, message_id, delay)
@@ -905,7 +947,7 @@ def _invalidate_force_sub_cache(user_id: int = None):
 
 
 # ═══════════════════════════════════════════════════════════════════
-# _send_long_report — ✅ F1 + G9 + H9
+# _send_long_report — ✅ F1 + G9 + H9 + K6
 # ═══════════════════════════════════════════════════════════════════
 
 async def _send_long_report(
@@ -919,7 +961,8 @@ async def _send_long_report(
     """
     ✅ F1: عند fallback بدون parse_mode، يرسل النص بدون وسوم HTML.
     ✅ G9: dead code — شرط len(body) > max_body_len لا يُنفَّذ عادة.
-    ✅ H9: elif parse_mode أصبح طبقة ثالثة دفاعية (بعد G4).
+    ✅ K6: الطبقة الثالثة (H9) دفاعية — نادرة بعد G4، لكن نحتفظ بها
+           لو فشل _safe_send_message لأسباب أخرى ثم نجح fallback يدوياً.
     """
     if not text:
         return 0
@@ -961,7 +1004,7 @@ async def _send_long_report(
         if msg:
             sent += 1
         elif parse_mode:
-            # ✅ H9: طبقة ثالثة دفاعية (نادرة جداً بعد G4)
+            # ✅ K6: طبقة ثالثة دفاعية (لا ضرر — فقط عند فشل شبكي/إذن)
             msg = await _safe_send_message(
                 context.bot, chat_id, plain_full, parse_mode=None,
             )
@@ -1016,7 +1059,7 @@ def _split_text_for_telegram(
 
 
 # ═══════════════════════════════════════════════════════════════════
-# مساعد قطع نص الزر
+# مساعد قطع نص الزر — ✅ J2 + J12 + K1
 # ═══════════════════════════════════════════════════════════════════
 
 _ZWJ = '\u200d'
@@ -1027,12 +1070,40 @@ _EMOJI_MODIFIERS = frozenset((
 ))
 
 
+def _truncate_grapheme_safe(text: str, max_len: int) -> str:
+    """
+    ✅ K1: قطع آمن عند حدود grapheme — لا يكسر ZWJ/emoji sequences.
+
+    ✅ K1 إصلاح: نبحث عن آخر موضع قطع آمن ≤ max_len (بحث من الأعلى للأسفل).
+    لا انهيار لـ 0 → لا fallback معطوب.
+    """
+    if not text or max_len <= 0:
+        return ""
+    if len(text) <= max_len:
+        return text
+
+    # ✅ K1: ابحث عن آخر موضع قطع آمن (من max_len نزولاً)
+    for candidate in range(max_len, 0, -1):
+        ch = text[candidate - 1]
+        nxt = text[candidate] if candidate < len(text) else ''
+        # الموضع آمن لو: الحرف الأخير ليس ZWJ/modifier، والحرف التالي ليس ZWJ
+        if ch == _ZWJ or ch in _EMOJI_MODIFIERS or nxt == _ZWJ:
+            continue
+        return text[:candidate].rstrip()
+
+    # كل النص [0, max_len) هو ZWJ/modifiers → لا شيء قابل للاستخدام
+    return ""
+
+
 def _safe_truncate_button_title(
     raw_title: str,
     join_text: str,
     max_len: int = TELEGRAM_BUTTON_TEXT_LIMIT,
 ) -> str:
-    """✅ R6: قطع آمن — يضمن len(button_label) ≤ max_len."""
+    """
+    ✅ R6 + J12: قطع آمن — يضمن len(button_label) ≤ max_len
+    ولا يكسر emoji/ZWJ sequences.
+    """
     if not raw_title:
         return ""
 
@@ -1042,22 +1113,7 @@ def _safe_truncate_button_title(
     if available <= 0:
         return ""
 
-    if len(raw_title) <= available:
-        return raw_title
-
-    cut = available
-    while cut > 0:
-        ch = raw_title[cut - 1]
-        nxt = raw_title[cut] if cut < len(raw_title) else ''
-        if ch == _ZWJ or ch in _EMOJI_MODIFIERS or nxt == _ZWJ:
-            cut -= 1
-        else:
-            break
-
-    if cut <= 0:
-        cut = available
-
-    return raw_title[:cut].rstrip()
+    return _truncate_grapheme_safe(raw_title, available)
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -1067,7 +1123,7 @@ def _safe_truncate_button_title(
 class CommandHandlers:
 
     # ═══════════════════════════════════════════════════════════════
-    # start — ✅ G2 + H2
+    # start — ✅ G2 + H2 + J4 + K2 + K3
     # ═══════════════════════════════════════════════════════════════
 
     @staticmethod
@@ -1092,11 +1148,10 @@ class CommandHandlers:
                 pass
 
         args = context.args or []
+        # ✅ K2: تبسيط — إزالة `if not ref_code: pass else:`
         if args and args[0].startswith('ref_'):
             ref_code = args[0][4:]
-            if not ref_code:
-                pass
-            else:
+            if ref_code:
                 referrer = await DB.get_user_by_referral_code(ref_code)
                 if referrer and referrer != user_id and not await DB.is_user_banned(referrer):
                     existing = await DB.fetchone(
@@ -1111,10 +1166,14 @@ class CommandHandlers:
                                     'referral_notification', ref_lang,
                                     "🎁 تمت إحالة {referred}. لديك {available} يوم متاح للصرف."
                                 )
-                                ref_msg = ref_msg.format(
-                                    referred=f"<code>{_mask_id(user_id)}</code>",
-                                    available=reward.get('available', 0)
-                                )
+                                # ✅ K3: حماية من ترجمة مع placeholders مختلفة
+                                try:
+                                    ref_msg = ref_msg.format(
+                                        referred=f"<code>{_mask_id(user_id)}</code>",
+                                        available=reward.get('available', 0)
+                                    )
+                                except (KeyError, IndexError):
+                                    pass
                                 await _safe_send_message(
                                     context.bot, referrer, ref_msg,
                                     parse_mode='HTML',
@@ -1215,7 +1274,8 @@ class CommandHandlers:
         recycle_text = await _trans('enabled', lang, "مفعل") if recycle \
             else await _trans('disabled', lang, "معطل")
 
-        kb_rows = KeyboardFactory.get_menu("main_menu", lang)
+        # ✅ J4: حماية get_menu من None
+        kb_rows = KeyboardFactory.get_menu("main_menu", lang) or []
         keyboard = []
         for row in kb_rows:
             btn_row = []
@@ -1262,6 +1322,7 @@ class CommandHandlers:
 
     @staticmethod
     async def trial(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """✅ J5: type-safe على activate_trial."""
         user_id = update.effective_user.id
         username = update.effective_user.username or ""
         first_name = update.effective_user.first_name or ""
@@ -1275,7 +1336,13 @@ class CommandHandlers:
             )
             return
 
-        days = await DB.activate_trial(user_id)
+        # ✅ J5: فحص نوع آمن
+        days_raw = await DB.activate_trial(user_id)
+        try:
+            days = int(days_raw) if days_raw is not None else 0
+        except (TypeError, ValueError):
+            days = 0
+
         if days > 0:
             msg = await _trans('trial_activated', lang,
                                "✅ تم تفعيل التجربة المجانية لمدة {days} يوم")
@@ -1456,7 +1523,7 @@ class CommandHandlers:
         )
 
     # ═══════════════════════════════════════════════════════════════
-    # contests
+    # contests — ✅ J2
     # ═══════════════════════════════════════════════════════════════
 
     @staticmethod
@@ -1533,11 +1600,14 @@ class CommandHandlers:
 
             text += f"  👥 {participants_label}: {participants}\n\n"
 
+            # ✅ J2: قطع نهائي grapheme-safe
             if title_btn:
-                button_label = f"{join_text} {title_btn}"
+                full_label = f"{join_text} {title_btn}"
             else:
-                button_label = join_text
-            button_label = button_label[:TELEGRAM_BUTTON_TEXT_LIMIT]
+                full_label = join_text
+            button_label = _truncate_grapheme_safe(
+                full_label, TELEGRAM_BUTTON_TEXT_LIMIT
+            )
 
             kb.append([InlineKeyboardButton(
                 button_label,
@@ -1553,7 +1623,7 @@ class CommandHandlers:
         )
 
     # ═══════════════════════════════════════════════════════════════
-    # mood — ✅ H3 + I4
+    # mood — ✅ H3 + I4 + K4
     # ═══════════════════════════════════════════════════════════════
 
     @staticmethod
@@ -1616,7 +1686,8 @@ class CommandHandlers:
         # ✅ H3 + I4: _pct آمِن ضد None/str والسالبة
         pos_pct = _pct(result.get('positive_percent'))
         neg_pct = _pct(result.get('negative_percent'))
-        tot_words = int(_pct(result.get('total_words')))
+        # ✅ K4: round قبل int (منع الفقدان الصامت للعشري)
+        tot_words = int(round(_pct(result.get('total_words'))))
 
         response = (
             f"{emoji_val} <b>{mood_analysis}</b>\n\n"
@@ -1789,6 +1860,7 @@ class CommandHandlers:
 
     @staticmethod
     async def restore(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """✅ J13: فحص path traversal على اسم الملف."""
         user_id = update.effective_user.id
         if not CONFIG.is_developer(user_id):
             return
@@ -1807,10 +1879,28 @@ class CommandHandlers:
             kb = []
             for b in backups[:10]:
                 fname = b.name
+                # ✅ J13: منع path traversal
+                if (
+                    '/' in fname
+                    or '\\' in fname
+                    or '..' in fname
+                    or fname.startswith('.')
+                ):
+                    logger.warning(
+                        f"⚠️ restore: اسم ملف مشبوه مرفوض: {fname!r}"
+                    )
+                    continue
                 kb.append([InlineKeyboardButton(
                     f"📁 {fname}",
                     callback_data=f"admin_restore_file:{fname}"
                 )])
+            if not kb:
+                await _safe_edit_or_send(
+                    update, context,
+                    await _trans('no_backups_full', lang, "📭 لا توجد نسخ"),
+                    parse_mode=None,
+                )
+                return
             kb.append([InlineKeyboardButton(back_label, callback_data=CB.ADMIN)])
             await _safe_edit_or_send(
                 update, context,
@@ -1909,13 +1999,13 @@ class CommandHandlers:
         await _safe_edit_or_send(update, context, text, parse_mode='HTML')
 
     # ═══════════════════════════════════════════════════════════════
-    # أوامر المجموعات
+    # أوامر المجموعات — ✅ J11
     # ═══════════════════════════════════════════════════════════════
 
     @staticmethod
     async def security(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """
-        ✅ H7 + I6: inspect.signature + cache.
+        ✅ H7 + I6 + J11: inspect.signature + cache + حماية user_data.
         """
         if not update.effective_chat or update.effective_chat.type not in ['group', 'supergroup']:
             return
@@ -1929,7 +2019,11 @@ class CommandHandlers:
                 parse_mode=None,
             )
             return
-        context.user_data['security_chat_id'] = chat_id
+
+        # ✅ J11: حماية user_data من None
+        if context.user_data is not None:
+            context.user_data['security_chat_id'] = chat_id
+
         settings = await DB.get_security_settings(chat_id)
         if not isinstance(settings, dict):
             settings = _row_to_dict(settings)
@@ -2083,6 +2177,10 @@ class CommandHandlers:
 
     @staticmethod
     async def remove_hidden_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """
+        ✅ K12: يستخدم raw SQL للتناسق مع الجدول hidden_admins.
+        ملاحظة: لو DB.remove_hidden_admin موجود مستقبلاً، استبدل.
+        """
         user_id = update.effective_user.id
         chat_id = update.effective_chat.id
         is_owner = user_id == CONFIG.PRIMARY_OWNER_ID
@@ -2122,7 +2220,6 @@ class CommandHandlers:
         if not is_owner:
             return
 
-        # ✅ H4: موحّد
         owners = await _safe_fetchall(
             "SELECT owner_id FROM hidden_owner_groups WHERE chat_id=?",
             (chat_id,)
@@ -2156,7 +2253,13 @@ class CommandHandlers:
 
     @staticmethod
     async def syncgroup(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """✅ F11: perms.get('can_act', False)."""
+        """
+        ✅ F11: perms.get('can_act', False).
+        ✅ K10: anonymous_ids تشمل أي bot مشرف (ليس فقط Anonymous/Channel).
+        التسمية مأخوذة من جدول anonymous_admins — Bots مع is_bot=True
+        و status='administrator' تُسجَّل كـ"مجهولين" لأنها ترسل رسائل
+        باسم المجموعة (sender_chat) وليس باسم مستخدم.
+        """
         if not update.effective_chat or update.effective_chat.type not in ['group', 'supergroup']:
             return
 
@@ -2259,6 +2362,7 @@ class CommandHandlers:
         except Exception:
             admin_count = 0
 
+        # ✅ K10: anonymous_ids = بوتات مشرفة (باسم المجموعة)
         anonymous_ids = []
         user_id_map = {}
         for admin in all_admins:
@@ -2316,7 +2420,7 @@ class CommandHandlers:
         )
 
     # ═══════════════════════════════════════════════════════════════
-    # أوامر الإشراف
+    # أوامر الإشراف — ✅ J1
     # ═══════════════════════════════════════════════════════════════
 
     @staticmethod
@@ -2371,6 +2475,7 @@ class CommandHandlers:
     @staticmethod
     async def _moderation_command(update: Update, context: ContextTypes.DEFAULT_TYPE,
                                    action: str) -> None:
+        """✅ J1: إصلاح invalidate_auth_cache (بدون await + positional)."""
         if not update.effective_chat or update.effective_chat.type not in ['group', 'supergroup']:
             return
         chat_id = update.effective_chat.id
@@ -2463,10 +2568,11 @@ class CommandHandlers:
         )
         await _safe_edit_or_send(update, context, msg, parse_mode='HTML')
         if success:
+            # ✅ J1: بدون await + positional args
             try:
-                await invalidate_auth_cache(chat_id=chat_id, user_id=target)
-            except Exception:
-                pass
+                invalidate_auth_cache(chat_id, target)
+            except Exception as e:
+                logger.debug(f"invalidate_auth_cache failed: {e}")
 
     # ═══════════════════════════════════════════════════════════════
     # أوامر المطور
@@ -2755,12 +2861,12 @@ class CommandHandlers:
             )
 
     # ═══════════════════════════════════════════════════════════════
-    # db_diag — ✅ F12
+    # db_diag — ✅ F12 + K8
     # ═══════════════════════════════════════════════════════════════
 
     @staticmethod
     async def db_diag(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """✅ /db_diag — تشخيص قاعدة البيانات."""
+        """✅ /db_diag — تشخيص قاعدة البيانات (✅ K8: فحص نتيجة edit)."""
         user_id = update.effective_user.id
         if not CONFIG.is_developer(user_id):
             return
@@ -2769,12 +2875,15 @@ class CommandHandlers:
         if target_chat is None:
             return
 
-        await _safe_edit_or_send(
+        # ✅ K8: فحص نتيجة الإشعار الأولي
+        ok = await _safe_edit_or_send(
             update, context,
             "⏳ <b>جاري التشخيص...</b>\n\n"
             "<i>قد يستغرق 5-10 ثواني</i>",
             parse_mode='HTML',
         )
+        if not ok:
+            logger.debug("db_diag: failed to show initial message, continuing anyway")
 
         try:
             from db_diagnostics import diagnose_db_split
@@ -2856,12 +2965,12 @@ class CommandHandlers:
             )
 
     # ═══════════════════════════════════════════════════════════════
-    # db_vacuum — ✅ F12
+    # db_vacuum — ✅ F12 + K8
     # ═══════════════════════════════════════════════════════════════
 
     @staticmethod
     async def db_vacuum(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """✅ /db_vacuum — VACUUM ANALYZE."""
+        """✅ /db_vacuum — VACUUM ANALYZE (✅ K8)."""
         user_id = update.effective_user.id
         if not CONFIG.is_developer(user_id):
             return
@@ -2870,12 +2979,15 @@ class CommandHandlers:
         if target_chat is None:
             return
 
-        await _safe_edit_or_send(
+        # ✅ K8: فحص نتيجة الإشعار الأولي
+        ok = await _safe_edit_or_send(
             update, context,
             "⏳ <b>جاري تنظيف قاعدة البيانات...</b>\n\n"
             "<i>قد يستغرق 30-60 ثانية. البوت سيبقى مستجيباً.</i>",
             parse_mode='HTML',
         )
+        if not ok:
+            logger.debug("db_vacuum: failed to show initial message, continuing anyway")
 
         try:
             from db_diagnostics import vacuum_analyze_tables
