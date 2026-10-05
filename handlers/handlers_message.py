@@ -1,45 +1,50 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-handlers_message.py - v7.12.4 (CORRECTNESS + PERF + SHUTDOWN)
+handlers_message.py - v7.14.0 (ZERO-EVASION HARDENED)
 =============================================================================
-📌 CHANGELOG / BEHAVIOR CHANGE — يرجى القراءة:
-    ⚠️ delete_spam_score الافتراضي في DB هو 1 (مُفعَّل).
-       الترقية من v7.11.x إلى v7.12.x تُفعِّل spam detection
-       تلقائياً على كل مجموعة لم يُعطِّلها المالك يدوياً.
-       تحقّق من DEBUG_SPAM=1 لمراقبة القرارات قبل النشر الواسع.
+🆕 v7.14.0 — إغلاق 17 ثغرة تجاوز مُكتشفة في v7.13.0:
 
-🆕 v7.12.4 (REVIEW R3 FINAL):
-    🟡 Cleanup:
-        ✅ O1  _dispatch_log: warning صريح عند coroutine أثناء shutdown
-        ✅ O5  حذف _MEDIA_REPLY_TYPES (كود ميت)
-        ✅ O6  analyze_sentiment مُضاف إلى __all__
-        ✅ N9/P2 _reset_shutdown_for_tests() — للاختبارات فقط
+    🔴 CRITICAL:
+        #1  web_app / login_url داخل الأزرار — كان لا يُفحص.
+        #2  @username / tg:// / البريد الإلكتروني — كان لا يُفحص.
+        #3  TLDs ناقصة (.ly, .at, .gg, .gy, cutt.ly, ...).
+        #4  روابط مقسّمة على أسطر (https://evil.\ncom/x).
+        #5  فشل الحذف الصامت — لا يُنبَّه المالك عند فقدان الصلاحيات.
 
-🆕 v7.12.3 (REVIEW R3 FIXES):
-    🐛 Bug Fixes:
-        ✅ N1  حذف imports غير مستخدمة (Update, ContextTypes)
-        ✅ N4  _lazy_init_columns: إعادة محاولة بعد 300s عند فشل
-               الـmigration (كانت تُقفل نهائياً)
-        ✅ N5  tracker منفصل لـdev-log rate limit (فصل عن المجموعات)
-        ✅ N9  _shutdown_started flag يرفض spawns بعد بدء الإغلاق
-        ✅ N10 إزالة max(0, delay) الزائد في _delete_after_delay
-        ✅ N11 حماية صريحة لـupdate.effective_user في _delete_and_warn
-        ✅ M3+ عدّ مفاتيح _forward_notify_ فقط بدل كل bot_data
+    🟠 HIGH:
+        #6  Leetspeak (p0rn, v1ral, n00ds).
+        #7  Hidden chars ناقصة (U+2066-2069, U+3164, U+2800, ...).
+        #8  Homoglyphs سيريلية/يونانية ناقصة.
+        #9  reply_to_message.entities غير مفحوصة (G10 وهمي سابقاً).
+        #10 FP في schemeless — تم اشتراط سياق (path/فاصلة).
+        #11 Punycode/IDN (xn--*).
+        #12 IPv4 scheme-less (1.2.3.4/admin).
+        #13 vCard يحتوي URL.
+        #14 Venue يحتوي URL.
+        #16 ReDoS في _get_spaced_banned_pattern.
+        #17 منطق _extract_spam_words معطوب (helloworld bug).
 
-    ⚡ Performance:
-        ✅ N7  cache لـinspect.signature في handle_private
+    ✅ الحفاظ الكامل على وظائف v7.13.0.
 
-🆕 v7.12.2 (REVIEW R2 FIXES):
-    🐛 Critical:
-        ✅ C1  _get_banned_pattern: إصلاح فعلي صحيح
-    🟠 Medium:
-        ✅ M1  register_shutdown_handlers: idempotency guard
-        ✅ M2  _notify_admin_about_forward: تتبّع عبر _spawn_tracked_task
-        ✅ M3  _should_notify_forward: cap على مفاتيح forward
-    🟡 Minor:
-        ✅ m2  _normalize_text: str.translate بدل حلقة for
-        ✅ m4  _dispatch_log: رسالة أوضح عند استلام coroutine مباشر
+🆕 Feature Flags (كل التحسينات مُفعَّلة افتراضياً):
+    ANTIEVASION_ENTITY_LINK       = True
+    ANTIEVASION_BUTTON_LINK       = True
+    ANTIEVASION_BUTTON_WEBAPP     = True   # جديد #1
+    ANTIEVASION_BUTTON_LOGINURL   = True   # جديد #1
+    ANTIEVASION_SCHEMELESS_URL    = True
+    ANTIEVASION_HOMOGLYPH         = True
+    ANTIEVASION_COMBINING         = True
+    ANTIEVASION_COMPACT_WORDS     = True
+    ANTIEVASION_EMOJI_SEPARATOR   = True
+    ANTIEVASION_LEETSPEAK         = True   # جديد #6
+    ANTIEVASION_TG_SCHEME         = True   # جديد #2
+    ANTIEVASION_AT_CHANNEL        = True   # جديد #2 (قد يُنتج FP)
+    ANTIEVASION_EMAIL             = True   # جديد #2
+    ANTIEVASION_PUNYCODE          = True   # جديد #11
+    ANTIEVASION_IPV4_SCHEMELESS   = True   # جديد #12
+    ANTIEVASION_MULTILINE_URL     = True   # جديد #4
+    ANTIEVASION_VENUE_VCARD       = True   # جديد #13/#14
 =============================================================================
 """
 
@@ -111,6 +116,27 @@ def _env_flag(name: str, default: bool = True) -> bool:
 _DEBUG_DIAG = _env_flag("DEBUG_DIAG", False)
 _DEBUG_SPAM = _env_flag("DEBUG_SPAM", False)
 
+# v7.13.0 flags
+_ANTIEVASION_ENTITY_LINK = _env_flag("ANTIEVASION_ENTITY_LINK", True)
+_ANTIEVASION_BUTTON_LINK = _env_flag("ANTIEVASION_BUTTON_LINK", True)
+_ANTIEVASION_SCHEMELESS_URL = _env_flag("ANTIEVASION_SCHEMELESS_URL", True)
+_ANTIEVASION_HOMOGLYPH = _env_flag("ANTIEVASION_HOMOGLYPH", True)
+_ANTIEVASION_COMBINING = _env_flag("ANTIEVASION_COMBINING", True)
+_ANTIEVASION_COMPACT_WORDS = _env_flag("ANTIEVASION_COMPACT_WORDS", True)
+_ANTIEVASION_EMOJI_SEPARATOR = _env_flag("ANTIEVASION_EMOJI_SEPARATOR", True)
+
+# v7.14.0 NEW flags
+_ANTIEVASION_BUTTON_WEBAPP = _env_flag("ANTIEVASION_BUTTON_WEBAPP", True)
+_ANTIEVASION_BUTTON_LOGINURL = _env_flag("ANTIEVASION_BUTTON_LOGINURL", True)
+_ANTIEVASION_LEETSPEAK = _env_flag("ANTIEVASION_LEETSPEAK", True)
+_ANTIEVASION_TG_SCHEME = _env_flag("ANTIEVASION_TG_SCHEME", True)
+_ANTIEVASION_AT_CHANNEL = _env_flag("ANTIEVASION_AT_CHANNEL", True)
+_ANTIEVASION_EMAIL = _env_flag("ANTIEVASION_EMAIL", True)
+_ANTIEVASION_PUNYCODE = _env_flag("ANTIEVASION_PUNYCODE", True)
+_ANTIEVASION_IPV4_SCHEMELESS = _env_flag("ANTIEVASION_IPV4_SCHEMELESS", True)
+_ANTIEVASION_MULTILINE_URL = _env_flag("ANTIEVASION_MULTILINE_URL", True)
+_ANTIEVASION_VENUE_VCARD = _env_flag("ANTIEVASION_VENUE_VCARD", True)
+
 
 # ═══════════════════════════════════════════════════════════════════
 # Constants
@@ -139,7 +165,6 @@ _FORWARD_NOTIFY_COOLDOWN_SECONDS = 300.0
 _FORWARD_NOTIFY_MAX_KEYS = 5000
 _GROUP_LOG_PREVIEW_LENGTH = 150
 
-# ✅ N4: cooldown لإعادة محاولة migrations
 _COLUMNS_RETRY_COOLDOWN_SEC = 300.0
 
 
@@ -160,6 +185,10 @@ class _MessageContext:
         'analysis_text',
         'button_count', 'button_urls', 'button_texts', 'button_urls_raw',
         'is_forwarded', 'is_protected', 'has_hint', 'is_auto_fwd',
+        'entity_urls', 'has_link_entity', 'button_link_urls',
+        'has_any_link', 'has_button_link',
+        # v7.14.0 new
+        'vcard_urls', 'venue_url', 'has_hidden_chars',
     )
 
     def __init__(self):
@@ -176,16 +205,33 @@ class _MessageContext:
         self.is_protected = False
         self.has_hint = False
         self.is_auto_fwd = False
+        self.entity_urls: List[str] = []
+        self.has_link_entity = False
+        self.button_link_urls: List[str] = []
+        self.has_any_link = False
+        self.has_button_link = False
+        # v7.14.0
+        self.vcard_urls: List[str] = []
+        self.venue_url: str = ""
+        self.has_hidden_chars = False
 
 
 # ═══════════════════════════════════════════════════════════════════
-# Unicode Normalization
+# Unicode Normalization — v7.14.0 (Hidden + Homoglyph + Leet + Combining)
 # ═══════════════════════════════════════════════════════════════════
 
+# v7.14.0 #7: قائمة موسّعة للمحارف المخفية
 _HIDDEN_CHARS = (
     '\u200b', '\u200c', '\u200d', '\u200e', '\u200f',
     '\u202a', '\u202b', '\u202c', '\u202d', '\u202e',
     '\u2060', '\u2061', '\u2062', '\u2063', '\u2064',
+    '\u2066', '\u2067', '\u2068', '\u2069',   # LRI/RLI/FSI/PDI
+    '\u180e',                                  # Mongolian Vowel Sep
+    '\u3164',                                  # Hangul Filler
+    '\u2800',                                  # Braille Blank
+    '\u115f', '\u1160',                        # Hangul Fillers
+    '\u00ad',                                  # Soft Hyphen
+    '\u034f',                                  # Combining Grapheme Joiner
     '\ufeff',
 )
 
@@ -195,8 +241,202 @@ _WS_RE = re.compile(
     r'[\s\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]+'
 )
 
+# v7.14.0 #8: Homoglyphs موسّعة (Cyrillic + Greek → Latin)
+_HOMOGLYPH_MAP = str.maketrans({
+    # ─── Cyrillic → Latin (lowercase) ───
+    '\u0430': 'a',   # а
+    '\u0431': 'b',   # б
+    '\u0432': 'b',   # в
+    '\u0433': 'r',   # г  (بصرياً)
+    '\u0434': 'a',   # д  (في بعض الخطوط)
+    '\u0435': 'e',   # е
+    '\u0436': 'x',   # ж
+    '\u0437': '3',   # з
+    '\u0438': 'u',   # и
+    '\u0439': 'u',   # й
+    '\u043A': 'k',   # к
+    '\u043B': 'n',   # л
+    '\u043C': 'm',   # м
+    '\u043D': 'h',   # н
+    '\u043E': 'o',   # о
+    '\u043F': 'n',   # п
+    '\u0440': 'p',   # р
+    '\u0441': 'c',   # с
+    '\u0442': 't',   # т
+    '\u0443': 'y',   # у
+    '\u0444': 'f',   # ф
+    '\u0445': 'x',   # х
+    '\u0446': 'u',   # ц
+    '\u0447': 'y',   # ч
+    '\u0448': 'w',   # ш
+    '\u0449': 'w',   # щ
+    '\u044A': 'b',   # ъ
+    '\u044B': 'b',   # ы
+    '\u044C': 'b',   # ь
+    '\u044D': 'e',   # э
+    '\u044E': 'o',   # ю
+    '\u044F': 'r',   # я
+    '\u0456': 'i',   # і (Ukrainian i)
+    '\u0455': 's',   # ѕ
+    '\u0458': 'j',   # ј
+    '\u0457': 'i',   # ї
+    '\u0451': 'e',   # ё
+
+    # ─── Cyrillic → Latin (uppercase) ───
+    '\u0410': 'A',   # А
+    '\u0411': 'B',   # Б
+    '\u0412': 'B',   # В
+    '\u0413': 'R',   # Г
+    '\u0414': 'A',   # Д
+    '\u0415': 'E',   # Е
+    '\u0416': 'X',   # Ж
+    '\u0417': '3',   # З
+    '\u0418': 'U',   # И
+    '\u0419': 'U',   # Й
+    '\u041A': 'K',   # К
+    '\u041B': 'N',   # Л
+    '\u041C': 'M',   # М
+    '\u041D': 'H',   # Н
+    '\u041E': 'O',   # О
+    '\u041F': 'N',   # П
+    '\u0420': 'P',   # Р
+    '\u0421': 'C',   # С
+    '\u0422': 'T',   # Т
+    '\u0423': 'Y',   # У
+    '\u0424': 'F',   # Ф
+    '\u0425': 'X',   # Х
+    '\u0426': 'U',   # Ц
+    '\u0427': 'Y',   # Ч
+    '\u0428': 'W',   # Ш
+    '\u0429': 'W',   # Щ
+    '\u042A': 'B',   # Ъ
+    '\u042B': 'B',   # Ы
+    '\u042C': 'B',   # Ь
+    '\u042D': 'E',   # Э
+    '\u042E': 'O',   # Ю
+    '\u042F': 'R',   # Я
+    '\u0406': 'I',   # І
+    '\u0407': 'I',   # Ї
+    '\u0405': 'S',   # Ѕ
+    '\u0408': 'J',   # Ј
+    '\u0401': 'E',   # Ё
+
+    # ─── Greek → Latin (lowercase) ───
+    '\u03B1': 'a',   # α
+    '\u03B2': 'b',   # β
+    '\u03B3': 'y',   # γ
+    '\u03B4': 'd',   # δ
+    '\u03B5': 'e',   # ε
+    '\u03B6': 'z',   # ζ
+    '\u03B7': 'n',   # η
+    '\u03B8': 'o',   # θ
+    '\u03B9': 'i',   # ι
+    '\u03BA': 'k',   # κ
+    '\u03BB': 'l',   # λ
+    '\u03BC': 'u',   # μ
+    '\u03BD': 'v',   # ν
+    '\u03BE': 'e',   # ξ
+    '\u03BF': 'o',   # ο
+    '\u03C0': 'n',   # π
+    '\u03C1': 'p',   # ρ
+    '\u03C2': 's',   # ς
+    '\u03C3': 'o',   # σ
+    '\u03C4': 't',   # τ
+    '\u03C5': 'u',   # υ
+    '\u03C6': 'f',   # φ
+    '\u03C7': 'x',   # χ
+    '\u03C8': 'y',   # ψ
+    '\u03C9': 'w',   # ω
+
+    # ─── Greek → Latin (uppercase) ───
+    '\u0391': 'A',   # Α
+    '\u0392': 'B',   # Β
+    '\u0393': 'Y',   # Γ
+    '\u0394': 'A',   # Δ
+    '\u0395': 'E',   # Ε
+    '\u0396': 'Z',   # Ζ
+    '\u0397': 'H',   # Η
+    '\u0398': 'O',   # Θ
+    '\u0399': 'I',   # Ι
+    '\u039A': 'K',   # Κ
+    '\u039B': 'L',   # Λ
+    '\u039C': 'M',   # Μ
+    '\u039D': 'N',   # Ν
+    '\u039E': 'E',   # Ξ
+    '\u039F': 'O',   # Ο
+    '\u03A0': 'N',   # Π
+    '\u03A1': 'P',   # Ρ
+    '\u03A3': 'S',   # Σ
+    '\u03A4': 'T',   # Τ
+    '\u03A5': 'Y',   # Υ
+    '\u03A6': 'F',   # Φ
+    '\u03A7': 'X',   # Χ
+    '\u03A8': 'Y',   # Ψ
+    '\u03A9': 'W',   # Ω
+})
+
+# v7.14.0 #6: Leetspeak — تُطبَّق فقط على "كلمات تحتوي حروفاً+أرقام"
+_LEET_TRANSLATE = str.maketrans({
+    '0': 'o',
+    '1': 'i',
+    '3': 'e',
+    '4': 'a',
+    '5': 's',
+    '7': 't',
+    '8': 'b',
+    '9': 'g',
+    '@': 'a',
+    '$': 's',
+    '!': 'i',
+})
+
+# كلمة تحتوي حرفاً وأرقاماً/رموزاً (وليس رقماً صرفاً)
+_LEET_CANDIDATE_RE = re.compile(
+    r'\b(?=[a-z0-9@$!]*[a-z])'
+    r'(?=[a-z0-9@$!]*[0-9@$!])'
+    r'[a-z0-9@$!]{3,}\b',
+    re.IGNORECASE,
+)
+
+# v7.14.0 #7: Combining Diacritical Marks (Latin) — فقط هذه الكتلة
+_COMBINING_MARKS_RANGE = frozenset(range(0x0300, 0x0370))
+
+
+def _strip_combining_marks(text: str) -> str:
+    """يحذف Combining Marks في كتلة U+0300–U+036F."""
+    if not text:
+        return text
+    return ''.join(
+        c for c in text
+        if ord(c) not in _COMBINING_MARKS_RANGE
+    )
+
+
+def _deleet(text: str) -> str:
+    """
+    v7.14.0 #6: يحوّل leetspeak للاتينية.
+    مثال: "p0rn v1ral n00ds" → "porn viral noods".
+    ✅ آمن للأرقام الصرفة (تواريخ/هواتف) — لا يلمسها.
+    """
+    if not text:
+        return text
+    try:
+        def _replace(m):
+            return m.group(0).lower().translate(_LEET_TRANSLATE)
+        return _LEET_CANDIDATE_RE.sub(_replace, text)
+    except Exception:
+        return text
+
 
 def _normalize_text(text: str) -> str:
+    """
+    v7.14.0:
+      1) NFKC normalize
+      2) إزالة المحارف المخفية (موسّعة)
+      3) تحويل Homoglyphs (Cyrillic/Greek → Latin)
+      4) إزالة Combining Marks
+      5) Leetspeak → Latin
+    """
     if not text:
         return ""
 
@@ -207,7 +447,34 @@ def _normalize_text(text: str) -> str:
 
     text = text.translate(_HIDDEN_TRANSLATE_TABLE)
 
+    if _ANTIEVASION_HOMOGLYPH:
+        try:
+            text = text.translate(_HOMOGLYPH_MAP)
+        except Exception:
+            pass
+
+    if _ANTIEVASION_COMBINING:
+        try:
+            text = _strip_combining_marks(text)
+        except Exception:
+            pass
+
+    if _ANTIEVASION_LEETSPEAK:
+        try:
+            text = _deleet(text)
+        except Exception:
+            pass
+
     return _WS_RE.sub(' ', text).strip()
+
+
+def _has_hidden_chars(text: str) -> bool:
+    if not text:
+        return False
+    try:
+        return any(c in text for c in _HIDDEN_CHARS)
+    except Exception:
+        return False
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -230,21 +497,437 @@ _FALSE_STRINGS = frozenset({
 def _as_bool(value, default=False) -> bool:
     if value is None:
         return default
-
     if isinstance(value, bool):
         return value
-
     if isinstance(value, (int, float)):
         return value != 0
-
     if isinstance(value, str):
         v = value.strip().lower()
         if v in _TRUE_STRINGS:
             return True
         if v in _FALSE_STRINGS:
             return False
-
     return default
+
+
+# ═══════════════════════════════════════════════════════════════════
+# Link detection — v7.14.0 (ALL GAPS CLOSED)
+# ═══════════════════════════════════════════════════════════════════
+
+_URL_RE = re.compile(r'https?://[^\s<>"]+', re.IGNORECASE)
+_DOMAIN_HTTP_RE = re.compile(
+    r'(?:https?://|www\.|t\.me/|telegram\.me/)\S+',
+    re.IGNORECASE,
+)
+
+# v7.14.0 #2: Telegram scheme
+_TG_SCHEME_RE = re.compile(
+    r'\btg://\S+',
+    re.IGNORECASE,
+)
+
+# v7.14.0 #2: @channel mention (يحتاج سياق — ليس @user)
+_AT_CHANNEL_RE = re.compile(
+    r'(?<![\w@/])@([A-Za-z][A-Za-z0-9_]{3,31})(?![\w@])',
+)
+
+# v7.14.0 #2: Email
+_EMAIL_RE = re.compile(
+    r'(?<![\w.\-])'
+    r'[\w.\-+]{1,64}@'
+    r'(?:[a-z0-9\-]{1,63}\.)+'
+    r'[a-z]{2,24}'
+    r'(?![\w\-])',
+    re.IGNORECASE,
+)
+
+# v7.14.0 #11: Punycode
+_PUNYCODE_RE = re.compile(
+    r'(?<![\w\-])'
+    r'xn--[a-z0-9\-]{2,}(?:\.[a-z0-9\-]+)*',
+    re.IGNORECASE,
+)
+
+# v7.14.0 #12: IPv4 scheme-less
+_IPV4_SCHEMELESS_RE = re.compile(
+    r'(?<![\w.\-])'
+    r'(?:\d{1,3}\.){3}\d{1,3}'
+    r'(?::\d{1,5})?'
+    r'(?:/[^\s<>"\']*)?',
+)
+
+# v7.14.0 #3: امتدادات ملفات شائعة (لتقليل FP)
+_COMMON_FILE_EXTS = frozenset({
+    'txt', 'pdf', 'doc', 'docx', 'xls', 'xlsx', 'ppt', 'pptx',
+    'zip', 'rar', '7z', 'tar', 'gz', 'bz2', 'xz',
+    'png', 'jpg', 'jpeg', 'gif', 'bmp', 'svg', 'webp', 'ico',
+    'mp3', 'mp4', 'wav', 'ogg', 'flac', 'avi', 'mkv', 'mov', 'webm',
+    'py', 'js', 'ts', 'java', 'cpp', 'c', 'h', 'rb', 'go', 'rs', 'php',
+    'html', 'css', 'scss', 'json', 'xml', 'yaml', 'yml', 'toml', 'ini', 'cfg',
+    'md', 'rst', 'csv', 'tsv', 'log', 'bat', 'ps1',
+    'exe', 'dll', 'so', 'dylib', 'apk', 'ipa', 'deb', 'rpm',
+})
+
+# v7.14.0 #3: قائمة موسّعة جداً للـTLDs
+_TLD_PATTERN = (
+    # Generic / sponsored
+    r'com|net|org|edu|gov|mil|int|info|biz|name|mobi|asia|xxx|tel|'
+    r'travel|jobs|cat|coop|aero|pro|museum|'
+    # Tech / popular
+    r'io|ai|co|me|tv|cc|app|dev|xyz|top|site|website|space|store|club|'
+    r'live|life|world|online|shop|blog|wiki|win|cloud|host|tech|fun|'
+    r'link|click|work|today|news|media|agency|company|solutions|'
+    # URL shorteners
+    r'ly|at|gg|gy|sh|to|so|pw|su|gd|vc|ws|tk|ml|ga|cf|gq|fyi|zip|mov|'
+    r're|yt|be|gd|nu|im|st|am|is|it|me|'
+    # Crypto / new
+    r'crypto|nft|dao|eth|blockchain|exchange|finance|money|'
+    # Country codes (extensive)
+    r'ru|uk|de|fr|it|es|nl|pl|tr|jp|cn|in|br|mx|ar|ir|sa|ae|eg|ma|dz|'
+    r'pk|bd|id|th|vn|ph|my|sg|hk|kr|tw|'
+    r'us|ca|au|nz|za|ng|ke|gh|tz|ug|zw|zm|'
+    r'be|ch|se|no|dk|fi|is|ie|pt|gr|cz|sk|hu|ro|bg|hr|si|rs|ua|by|'
+    r'lt|lv|ee|md|al|mk|ba|'
+    r'il|jo|lb|sy|iq|kw|qa|bh|om|ye|sd|tn|'
+    r'mr|ne|td|cm|ci|sn|bf|bj|tg|gn|sl|lr|gm|gw|cv|st'
+)
+
+# v7.14.0 #3 + #10: schemeless مع اشتراط سياق (path أو فاصلة)
+_SCHEMELESS_DOMAIN_RE = re.compile(
+    r'(?<![\w@/])'
+    r'(?:'
+    r'[a-z0-9](?:[a-z0-9\-]{0,61}[a-z0-9])?'
+    r'\.'
+    r'(?:' + _TLD_PATTERN + r')'
+    r'(?::\d{1,5})?'
+    r'(?:/[^\s<>"\']+|(?=\s|$|[,،.!?;:\)\]]))'
+    r')',
+    re.IGNORECASE,
+)
+
+# v7.14.0 #4: روابط مقسّمة على أسطر
+_SPLIT_URL_RE = re.compile(
+    r'(https?://[^\s]+?)\s*\n\s*([a-z0-9\.\-/][^\s]*)',
+    re.IGNORECASE,
+)
+
+
+def _merge_split_urls(text: str) -> str:
+    """v7.14.0 #4: يدمج روابط مقطوعة على أسطر."""
+    if not text or not _ANTIEVASION_MULTILINE_URL:
+        return text
+    if '\n' not in text:
+        return text
+    try:
+        # كرر مرتين لالتقاط حالات متعددة
+        for _ in range(2):
+            new_text = _SPLIT_URL_RE.sub(r'\1\2', text)
+            if new_text == text:
+                break
+            text = new_text
+    except Exception:
+        pass
+    return text
+
+
+# ─── Entity types ───
+_ENTITY_LINK_TYPES = frozenset({'url', 'text_link'})
+_ENTITY_URL_TYPES = frozenset({'url', 'text_link'})
+
+
+def _extract_entity_urls(message, depth: int = 0) -> List[str]:
+    """
+    v7.14.0:
+      - يفحص message.entities + caption_entities
+      - ✅ #9: يعبر reply_to_message حتى عمق 2
+    """
+    urls: List[str] = []
+    if message is None or depth > 2:
+        return urls
+
+    try:
+        for attr in ('entities', 'caption_entities'):
+            ents = getattr(message, attr, None) or []
+            for e in ents:
+                try:
+                    et = getattr(e, 'type', None)
+                    if et not in _ENTITY_LINK_TYPES:
+                        continue
+                    u = getattr(e, 'url', None)
+                    if isinstance(u, str) and u:
+                        urls.append(u)
+                except Exception:
+                    continue
+    except Exception:
+        pass
+
+    # v7.14.0 #9
+    if depth < 2:
+        try:
+            rtm = getattr(message, 'reply_to_message', None)
+            if rtm is not None:
+                urls.extend(_extract_entity_urls(rtm, depth + 1))
+        except Exception:
+            pass
+
+    return urls
+
+
+def _has_link_entity(message) -> bool:
+    if not _ANTIEVASION_ENTITY_LINK:
+        return False
+    if message is None:
+        return False
+    try:
+        for attr in ('entities', 'caption_entities'):
+            ents = getattr(message, attr, None) or []
+            for e in ents:
+                try:
+                    if getattr(e, 'type', None) in _ENTITY_URL_TYPES:
+                        return True
+                except Exception:
+                    continue
+    except Exception:
+        pass
+    return False
+
+
+# v7.14.0 #1: استخراج شامل من زر واحد
+def _extract_url_from_button(button) -> List[str]:
+    """v7.14.0 #1: url + web_app.url + login_url.url + callback_game."""
+    urls: List[str] = []
+    if button is None:
+        return urls
+
+    try:
+        u = getattr(button, 'url', None)
+        if isinstance(u, str) and u:
+            urls.append(u)
+    except Exception:
+        pass
+
+    if _ANTIEVASION_BUTTON_WEBAPP:
+        try:
+            wa = getattr(button, 'web_app', None)
+            if wa is not None:
+                wau = getattr(wa, 'url', None)
+                if isinstance(wau, str) and wau:
+                    urls.append(wau)
+        except Exception:
+            pass
+
+    if _ANTIEVASION_BUTTON_LOGINURL:
+        try:
+            lu = getattr(button, 'login_url', None)
+            if lu is not None:
+                luu = getattr(lu, 'url', None)
+                if isinstance(luu, str) and luu:
+                    urls.append(luu)
+        except Exception:
+            pass
+
+    return urls
+
+
+def _extract_button_context(message) -> Tuple[int, List[str], List[str]]:
+    """v7.14.0: يعيد (count, urls, texts) — يشمل web_app/login_url."""
+    if message is None:
+        return 0, [], []
+
+    count = 0
+    urls: List[str] = []
+    texts: List[str] = []
+
+    try:
+        markup = getattr(message, 'reply_markup', None)
+        if not markup:
+            return 0, [], []
+
+        keyboard = getattr(markup, 'inline_keyboard', None)
+        if not keyboard:
+            return 0, [], []
+
+        for row in keyboard:
+            if not row:
+                continue
+            for button in row:
+                if button is None:
+                    continue
+
+                count += 1
+
+                try:
+                    b_text = getattr(button, 'text', None)
+                    if isinstance(b_text, str):
+                        b_text = b_text.strip()
+                        if b_text:
+                            texts.append(b_text)
+                except Exception:
+                    pass
+
+                # v7.14.0 #1
+                try:
+                    urls.extend(_extract_url_from_button(button))
+                except Exception:
+                    pass
+
+    except Exception:
+        pass
+
+    return count, urls, texts
+
+
+# v7.14.0 #13/#14: استخراج من vCard + Venue
+def _extract_vcard_urls(message) -> List[str]:
+    if not _ANTIEVASION_VENUE_VCARD:
+        return []
+    urls: List[str] = []
+    try:
+        contact = getattr(message, 'contact', None)
+        if contact is None:
+            return urls
+        vcard = getattr(contact, 'vcard', None)
+        if not vcard or not isinstance(vcard, str):
+            return urls
+        for match in re.findall(
+            r'(?:URL|url)[:;]([^\r\n;]+)', vcard, re.IGNORECASE
+        ):
+            u = match.strip()
+            if u:
+                urls.append(u)
+    except Exception:
+        pass
+    return urls
+
+
+def _extract_venue_url(message) -> str:
+    if not _ANTIEVASION_VENUE_VCARD:
+        return ""
+    try:
+        venue = getattr(message, 'venue', None)
+        if venue is None:
+            return ""
+        # بعض الإصدارات تحوي venue.url
+        u = getattr(venue, 'url', None)
+        if isinstance(u, str) and u:
+            return u
+    except Exception:
+        pass
+    return ""
+
+
+def _has_domain_pattern(text: str) -> bool:
+    """v7.14.0 #3+#10: كشف schemeless مع تقليل FP."""
+    if not text:
+        return False
+    try:
+        for m in _SCHEMELESS_DOMAIN_RE.finditer(text):
+            full = m.group(0).lower()
+            # لو كانت نهاية الملف (بدون path)، تحقق من الامتداد
+            if '/' not in full and ':' not in full:
+                ext = full.rsplit('.', 1)[-1].split('?')[0]
+                if ext in _COMMON_FILE_EXTS:
+                    continue
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def _contains_link_enhanced(text: str) -> bool:
+    """
+    v7.14.0: كشف شامل للروابط:
+      - http(s)://
+      - www.
+      - schemeless domains
+      - tg://
+      - @channel
+      - email
+      - punycode
+      - IPv4 schemeless
+    """
+    if not text:
+        return False
+    try:
+        # 1) نمط HTTP الأصلي
+        if _DOMAIN_HTTP_RE.search(text):
+            return True
+
+        # 2) schemeless domains
+        if _ANTIEVASION_SCHEMELESS_URL:
+            if _has_domain_pattern(text):
+                return True
+
+        # 3) tg:// scheme (#2)
+        if _ANTIEVASION_TG_SCHEME:
+            if _TG_SCHEME_RE.search(text):
+                return True
+
+        # 4) @channel (#2) — قد يُنتج FP
+        if _ANTIEVASION_AT_CHANNEL:
+            if _AT_CHANNEL_RE.search(text):
+                return True
+
+        # 5) Email (#2)
+        if _ANTIEVASION_EMAIL:
+            if _EMAIL_RE.search(text):
+                return True
+
+        # 6) Punycode (#11)
+        if _ANTIEVASION_PUNYCODE:
+            if _PUNYCODE_RE.search(text):
+                return True
+
+        # 7) IPv4 (#12)
+        if _ANTIEVASION_IPV4_SCHEMELESS:
+            for m in _IPV4_SCHEMELESS_RE.finditer(text):
+                try:
+                    ip_str = m.group(0).split('/')[0].split(':')[0]
+                    ipaddress.ip_address(ip_str)
+                    return True
+                except Exception:
+                    continue
+
+    except Exception:
+        pass
+    return False
+
+
+def _has_button_link(ctx: "_MessageContext") -> bool:
+    if not _ANTIEVASION_BUTTON_LINK:
+        return False
+    try:
+        for url in ctx.button_urls_raw:
+            if not isinstance(url, str) or not url:
+                continue
+            if _DOMAIN_HTTP_RE.search(url):
+                return True
+            if _ANTIEVASION_SCHEMELESS_URL and _has_domain_pattern(url):
+                return True
+            if _ANTIEVASION_TG_SCHEME and _TG_SCHEME_RE.search(url):
+                return True
+    except Exception:
+        pass
+    return False
+
+
+def _extract_button_link_urls(ctx: "_MessageContext") -> List[str]:
+    if not _ANTIEVASION_BUTTON_LINK:
+        return []
+    result: List[str] = []
+    try:
+        for url in ctx.button_urls_raw:
+            if not isinstance(url, str) or not url:
+                continue
+            if _DOMAIN_HTTP_RE.search(url):
+                result.append(url)
+            elif _ANTIEVASION_SCHEMELESS_URL and _has_domain_pattern(url):
+                result.append(url)
+            elif _ANTIEVASION_TG_SCHEME and _TG_SCHEME_RE.search(url):
+                result.append(url)
+    except Exception:
+        pass
+    return result
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -280,7 +963,14 @@ _SPAM_EMOJIS = (
     '🔴', '🟢', '🔵', '🟡', '🟣', '🟠',
 )
 
-_URL_RE = re.compile(r'https?://[^\s<>"]+', re.IGNORECASE)
+_EMOJI_SEP_RE = re.compile(
+    r'[\U0001F300-\U0001FAFF\U00002600-\U000027BF'
+    r'\U0001F000-\U0001F2FF\U000024C2-\U0001F251]',
+    re.UNICODE,
+)
+
+_WORD_SEP_CLASS = r'[\s\-_.|/*+=~^´`°•●○◦▪▫■□♦♢※]'
+
 _WORD_RE = re.compile(r"[a-zA-Z][a-zA-Z0-9_-]*", re.IGNORECASE)
 _CAPS_WORD_RE = re.compile(r'\b[A-Z]{4,}\b')
 
@@ -361,10 +1051,36 @@ _POSTBOT_HARD_KEYWORDS = re.compile(
 
 
 def _extract_spam_words(text: str) -> List[str]:
+    """
+    v7.14.0 #17: إصلاح منطق compact.
+      - نستخرج كلمات من النص الأصلي
+      - + نسخة مضغوطة كاملة (v🔥i🔥r🔥a🔥l → viral)
+      - + نسخة مضغوطة بمسافات (hello world → hello, world)
+    """
     if not text:
         return []
+
     try:
-        return [m.group(0).lower() for m in _WORD_RE.finditer(text)]
+        regular = [m.group(0).lower() for m in _WORD_RE.finditer(text)]
+
+        if not _ANTIEVASION_EMOJI_SEPARATOR:
+            return list(set(regular))
+
+        # 1) إزالة الإيموجي
+        no_emoji = _EMOJI_SEP_RE.sub('', text)
+
+        # 2) نسخة مضغوطة بالكامل (بلا أي فاصل)
+        fully_compact = re.sub(r'[^a-zA-Z0-9]', '', no_emoji).lower()
+        compact_words = re.findall(r'[a-z]{3,}', fully_compact)
+
+        # 3) نسخة مضغوطة بمسافات (لاستخراج كلمات منفصلة)
+        spaced_compact = re.sub(_WORD_SEP_CLASS, ' ', no_emoji)
+        spaced_compact = re.sub(r'[^a-zA-Z0-9 ]', ' ', spaced_compact)
+        spaced_words = [
+            w.lower() for w in spaced_compact.split() if len(w) >= 3
+        ]
+
+        return list(set(regular + compact_words + spaced_words))
     except Exception:
         return []
 
@@ -383,55 +1099,6 @@ def _count_text_urls(text: str) -> List[str]:
         return _URL_RE.findall(text)
     except Exception:
         return []
-
-
-def _extract_button_context(message) -> Tuple[int, List[str], List[str]]:
-    """مرور واحد بدل 3 استدعاءات منفصلة."""
-    if message is None:
-        return 0, [], []
-
-    count = 0
-    urls: List[str] = []
-    texts: List[str] = []
-
-    try:
-        markup = getattr(message, 'reply_markup', None)
-        if not markup:
-            return 0, [], []
-
-        keyboard = getattr(markup, 'inline_keyboard', None)
-        if not keyboard:
-            return 0, [], []
-
-        for row in keyboard:
-            if not row:
-                continue
-            for button in row:
-                if button is None:
-                    continue
-
-                count += 1
-
-                try:
-                    b_text = getattr(button, 'text', None)
-                    if isinstance(b_text, str):
-                        b_text = b_text.strip()
-                        if b_text:
-                            texts.append(b_text)
-                except Exception:
-                    pass
-
-                try:
-                    url = getattr(button, 'url', None)
-                    if isinstance(url, str) and url:
-                        urls.append(url)
-                except Exception:
-                    pass
-
-    except Exception:
-        pass
-
-    return count, urls, texts
 
 
 # ═══ Backward-compat wrappers ═══
@@ -473,6 +1140,26 @@ def _get_message_analysis_text(message) -> str:
     except Exception:
         pass
 
+    try:
+        for u in _extract_entity_urls(message):
+            parts.append(str(u))
+    except Exception:
+        pass
+
+    # v7.14.0 #13/#14
+    try:
+        for u in _extract_vcard_urls(message):
+            parts.append(str(u))
+    except Exception:
+        pass
+
+    try:
+        vu = _extract_venue_url(message)
+        if vu:
+            parts.append(vu)
+    except Exception:
+        pass
+
     return _normalize_text(" ".join(parts))
 
 
@@ -484,12 +1171,8 @@ def _compute_spam_score(
     _button_texts: Optional[List[str]] = None,
     _normalized: Optional[str] = None,
     _analysis_text: Optional[str] = None,
+    _entity_urls: Optional[List[str]] = None,
 ) -> Tuple[int, List[str]]:
-    """
-    Spam scoring engine.
-
-    ✅ R10: يقبل _analysis_text (نص+أزرار) لتوفير pass إضافي.
-    """
     if message is None:
         return 0, []
 
@@ -534,6 +1217,9 @@ def _compute_spam_score(
 
     if not analysis_text and not button_urls:
         return 0, []
+
+    if _entity_urls is None:
+        _entity_urls = _extract_entity_urls(message)
 
     score = 0
     reasons: List[str] = []
@@ -655,19 +1341,48 @@ def _compute_spam_score(
         if external_button_count >= 3:
             score += 2
             reasons.append(f"external_buttons={external_button_count}")
+        elif external_button_count >= 1 and (
+            strong_matches or medium_matches or matched_patterns
+            or button_cta_matches
+        ):
+            score += 1
+            reasons.append(f"external_buttons={external_button_count}")
+
+        if _entity_urls:
+            entity_count = len(_entity_urls)
+            if entity_count >= 3:
+                score += 3
+                reasons.append(f"entity_urls={entity_count}")
+            elif entity_count >= 2:
+                score += 2
+                reasons.append(f"entity_urls={entity_count}")
+            elif entity_count >= 1:
+                score += 1
+                reasons.append(f"entity_urls={entity_count}")
 
         text_urls = _count_text_urls(normalized)
-        if len(text_urls) >= 3:
+        schemeless_hit = False
+        if _ANTIEVASION_SCHEMELESS_URL and not text_urls:
+            try:
+                if _has_domain_pattern(normalized):
+                    schemeless_hit = True
+            except Exception:
+                pass
+
+        effective_text_url_count = len(text_urls) + (1 if schemeless_hit else 0)
+        if effective_text_url_count >= 3:
             score += 3
-            reasons.append(f"text_urls={len(text_urls)}")
-        elif len(text_urls) >= 2:
+            reasons.append(f"text_urls={effective_text_url_count}")
+        elif effective_text_url_count >= 2:
             score += 2
-            reasons.append(f"text_urls={len(text_urls)}")
-        elif len(text_urls) == 1 and (
+            reasons.append(f"text_urls={effective_text_url_count}")
+        elif effective_text_url_count == 1 and (
             strong_matches or medium_matches or matched_patterns
         ):
             score += 1
             reasons.append("text_urls=1")
+        elif schemeless_hit:
+            reasons.append("text_urls=scheme-less")
 
         body_len = len(normalized)
         if body_len < 60 and button_count >= 5 and (
@@ -730,13 +1445,21 @@ def _compute_spam_score(
             score += 2
             reasons.append("viral+button_cta")
 
+        if _entity_urls and (strong_matches or matched_patterns):
+            score += 2
+            reasons.append("entity_url+keywords")
+
+        # Anti-FP guard
         if (
             not strong_matches
             and not medium_matches
             and not matched_patterns
             and not text_urls
+            and not schemeless_hit
             and tme_button_count == 0
+            and external_button_count == 0
             and not button_cta_matches
+            and not _entity_urls
         ):
             score = 0
             reasons = []
@@ -790,7 +1513,7 @@ def _is_postbot_pattern(
 
 
 # ═══════════════════════════════════════════════════════════════════
-# Feature constants — ✅ O5: حذف _MEDIA_REPLY_TYPES (كود ميت)
+# Feature constants
 # ═══════════════════════════════════════════════════════════════════
 
 _PROTECTED_FORWARD_HINTS = (
@@ -811,7 +1534,6 @@ _DELETE_IGNORED_PATTERNS = (
 
 _DELETE_PERMISSION_ERROR = "message can't be deleted"
 
-# ترتيب الوسائط للفحص الموحّد
 _MEDIA_SETTINGS_MAP = (
     ('video', 'delete_videos', 'video'),
     ('audio', 'delete_audio', 'audio'),
@@ -825,14 +1547,13 @@ _MEDIA_SETTINGS_MAP = (
 
 
 # ═══════════════════════════════════════════════════════════════════
-# Shutdown State — ✅ N9 + N9/P2
+# Shutdown State
 # ═══════════════════════════════════════════════════════════════════
 
 _shutdown_started: bool = False
 
 
 def _mark_shutdown_started():
-    """✅ N9: يُستدعى عند بدء الإغلاق — يمنع spawns جديدة."""
     global _shutdown_started
     _shutdown_started = True
 
@@ -842,17 +1563,13 @@ def _is_shutting_down() -> bool:
 
 
 def _reset_shutdown_for_tests():
-    """
-    ✅ N9/P2: إعادة تصفير العلم — للاختبارات فقط.
-    لا تستدعِها في production code.
-    """
     global _shutdown_started
     _shutdown_started = False
     logger.debug("🧪 _shutdown_started reset (test mode)")
 
 
 # ═══════════════════════════════════════════════════════════════════
-# Database Migration — ✅ N4: retry مع cooldown
+# Database Migration
 # ═══════════════════════════════════════════════════════════════════
 
 _columns_initialized = False
@@ -872,7 +1589,6 @@ async def _lazy_init_columns():
 
         now = time.monotonic()
 
-        # ✅ N4: إن فشلت محاولة سابقة، انتظر cooldown قبل إعادة المحاولة
         if (
             _columns_last_attempt_ts > 0
             and now - _columns_last_attempt_ts < _COLUMNS_RETRY_COOLDOWN_SEC
@@ -886,12 +1602,16 @@ async def _lazy_init_columns():
         _columns_last_attempt_ts = now
 
         db_type = getattr(DB, "DB_TYPE", "sqlite")
-        logger.info("🔧 v7.12.4: Auto-migration (DB_TYPE=%s)", db_type)
+        logger.info("🔧 v7.14.0: Auto-migration (DB_TYPE=%s)", db_type)
 
         cols = [
             ("delete_protected_any", "INTEGER DEFAULT 0", "TINYINT(1) DEFAULT 0"),
             ("delete_postbot_pattern", "INTEGER DEFAULT 0", "TINYINT(1) DEFAULT 0"),
             ("delete_spam_score", "INTEGER DEFAULT 1", "TINYINT(1) DEFAULT 1"),
+            # v7.14.0: new settings
+            ("delete_at_channel", "INTEGER DEFAULT 0", "TINYINT(1) DEFAULT 0"),
+            ("delete_tg_scheme", "INTEGER DEFAULT 1", "TINYINT(1) DEFAULT 1"),
+            ("delete_button_links", "INTEGER DEFAULT 1", "TINYINT(1) DEFAULT 1"),
         ]
 
         migration_ok = True
@@ -930,28 +1650,26 @@ async def _lazy_init_columns():
                 migration_ok = False
                 logger.warning("⚠️ auto-migration %s: %s", col_name, e)
 
-        try:
-            await DB.execute(
+        for update_sql, label in (
+            (
                 "UPDATE group_security SET delete_protected_any = 1 "
                 "WHERE delete_forwarded = 1 "
-                "AND (delete_protected_any IS NULL OR delete_protected_any = 0)"
-            )
-            logger.info("✅ delete_protected_any")
-        except Exception as e:
-            migration_ok = False
-            logger.warning("⚠️ UPDATE protected_any: %s", e)
-
-        try:
-            await DB.execute(
+                "AND (delete_protected_any IS NULL OR delete_protected_any = 0)",
+                "delete_protected_any",
+            ),
+            (
                 "UPDATE group_security SET delete_postbot_pattern = 1 "
                 "WHERE delete_forwarded = 1 "
-                "AND (delete_postbot_pattern IS NULL "
-                "OR delete_postbot_pattern = 0)"
-            )
-            logger.info("✅ delete_postbot_pattern")
-        except Exception as e:
-            migration_ok = False
-            logger.warning("⚠️ UPDATE postbot_pattern: %s", e)
+                "AND (delete_postbot_pattern IS NULL OR delete_postbot_pattern = 0)",
+                "delete_postbot_pattern",
+            ),
+        ):
+            try:
+                await DB.execute(update_sql)
+                logger.info("✅ %s", label)
+            except Exception as e:
+                migration_ok = False
+                logger.warning("⚠️ UPDATE %s: %s", label, e)
 
         try:
             await internal_cache.clear()
@@ -959,7 +1677,6 @@ async def _lazy_init_columns():
         except Exception as e:
             logger.debug("cache clear: %s", e)
 
-        # ✅ N4: لا نقفل نهائياً عند الفشل — نسمح بإعادة المحاولة
         if migration_ok:
             _columns_initialized = True
         else:
@@ -1013,7 +1730,7 @@ def _invalidate_dev_log_cache():
 
 
 # ═══════════════════════════════════════════════════════════════════
-# Log Rate Limit — Group + Dev log (منفصلان — ✅ N5)
+# Log Rate Limit
 # ═══════════════════════════════════════════════════════════════════
 
 _log_rate_tracker = defaultdict(
@@ -1024,7 +1741,6 @@ _log_rate_lock = asyncio.Lock()
 _log_rate_warn_last: Dict[Any, float] = {}
 _LOG_RATE_WARN_COOLDOWN = 300.0
 
-# ✅ N5: tracker منفصل لـdev log (لا يلوّث tracker المجموعات)
 _dev_log_rate_tracker: deque = deque(maxlen=LOG_RATE_LIMIT_PER_MIN)
 _dev_log_rate_lock = asyncio.Lock()
 
@@ -1051,7 +1767,6 @@ async def _can_send_log(chat_id) -> bool:
 
 
 async def _can_send_dev_log() -> bool:
-    """✅ N5: rate-limit منفصل لـdev log."""
     async with _dev_log_rate_lock:
         now = time.monotonic()
         if (
@@ -1087,7 +1802,6 @@ async def _cleanup_log_rate_tracker():
 
 
 async def _notify_dev_log(context, text):
-    # ✅ N5: rate-limit مستقل
     try:
         if not await _can_send_dev_log():
             return
@@ -1130,7 +1844,7 @@ async def _notify_dev_log(context, text):
 
 
 # ═══════════════════════════════════════════════════════════════════
-# Dispatch Log — F1: factory + O1: warning أثناء shutdown
+# Dispatch Log
 # ═══════════════════════════════════════════════════════════════════
 
 _running_log_tasks: set = set()
@@ -1143,19 +1857,10 @@ async def _dispatch_log(
     *,
     retries: int = LOG_RETRY_ATTEMPTS
 ):
-    """
-    F1: نستقبل factory (callable) بدل coroutine جاهز.
-    m4: رسالة أوضح عند استلام coroutine مباشر.
-    N9: يرفض spawns بعد بدء الإغلاق.
-    O1: warning عند coroutine أثناء shutdown (يساعد التشخيص).
-    """
-    # ✅ N9: رفض تسجيل logs جديدة بعد بدء الإغلاق
     if _is_shutting_down():
         if inspect.iscoroutine(factory):
-            # ✅ O1: تسجيل warning للمطوّر — coroutine مباشر خطأ
             logger.warning(
-                "⚠️ _dispatch_log[%s]: shutdown + coroutine مباشر "
-                "(الأصل استخدم factory). سيُغلق.",
+                "⚠️ _dispatch_log[%s]: shutdown + coroutine مباشر. سيُغلق.",
                 label,
             )
             try:
@@ -1235,7 +1940,7 @@ async def _dispatch_log(
 
 
 async def shutdown_log_dispatcher(timeout: float = 5.0):
-    _mark_shutdown_started()  # ✅ N9
+    _mark_shutdown_started()
 
     if not _running_log_tasks:
         return
@@ -1266,8 +1971,6 @@ _running_bg_tasks: set = set()
 
 
 def _spawn_tracked_task(coro, *, label: str = "bg-task"):
-    """M2 + N9: تتبّع + رفض بعد بدء الإغلاق."""
-    # ✅ N9: رفض spawns بعد بدء الإغلاق
     if _is_shutting_down():
         try:
             if inspect.iscoroutine(coro):
@@ -1303,7 +2006,7 @@ def _spawn_tracked_task(coro, *, label: str = "bg-task"):
 
 
 async def shutdown_bg_tasks(timeout: float = 3.0):
-    _mark_shutdown_started()  # ✅ N9
+    _mark_shutdown_started()
 
     if not _running_bg_tasks:
         return
@@ -1334,7 +2037,6 @@ _running_delete_tasks: set = set()
 
 
 async def _delete_after_delay(bot, chat_id, message_id, delay=10):
-    # ✅ N10: delay مُضمون >= 0 من _spawn_delete_after_delay
     try:
         if delay > 0:
             await asyncio.sleep(delay)
@@ -1346,11 +2048,6 @@ async def _delete_after_delay(bot, chat_id, message_id, delay=10):
 
 
 def _spawn_delete_after_delay(bot, chat_id, message_id, delay=10):
-    """
-    R3: وحّد المسارين (delay<=0 و delay>0) داخل _running_delete_tasks.
-    N9: رفض spawns بعد بدء الإغلاق.
-    """
-    # ✅ N9: رفض بعد الإغلاق
     if _is_shutting_down():
         logger.debug(
             "⏭️ _spawn_delete_after_delay: shutdown — تجاهل"
@@ -1383,7 +2080,7 @@ def _spawn_delete_after_delay(bot, chat_id, message_id, delay=10):
 
 
 async def shutdown_delete_tasks(timeout: float = 3.0):
-    _mark_shutdown_started()  # ✅ N9
+    _mark_shutdown_started()
 
     if not _running_delete_tasks:
         return
@@ -1406,13 +2103,7 @@ async def shutdown_delete_tasks(timeout: float = 3.0):
     _running_delete_tasks.clear()
 
 
-# ✅ H1 + R1 + M1: تسجيل shutdown idempotent
 def register_shutdown_handlers(application):
-    """
-    H1: تسجيل تلقائي.
-    R1: يحفظ أي post_shutdown أصلي.
-    M1: idempotency guard.
-    """
     if getattr(application, '_msh_shutdown_registered', False):
         logger.debug(
             "register_shutdown_handlers: مُسجَّل مسبقاً — تخطي"
@@ -1425,7 +2116,7 @@ def register_shutdown_handlers(application):
         )
 
         async def _post_shutdown(app):
-            _mark_shutdown_started()  # ✅ N9: قبل أي تنظيف
+            _mark_shutdown_started()
 
             try:
                 await shutdown_log_dispatcher(timeout=5.0)
@@ -1486,6 +2177,11 @@ _VIOLATION_LABELS_AR = {
     'video_note': '🎥 فيديو نوت',
     'postbot_pattern': '🤖 نمط Post Bot',
     'spam_score': '🚫 رسالة Spam',
+    'at_channel': '📢 منشن قناة',
+    'tg_scheme': '🔗 رابط Telegram',
+    'button_link': '🔘 زر برابط',
+    'vcard_url': '📇 بطاقة اتصال',
+    'venue_url': '📍 موقع',
 }
 
 _FORWARD_TYPE_LABELS_AR = {
@@ -1523,6 +2219,11 @@ _DEFAULT_VIOLATION_MESSAGES = {
     'postbot_pattern': '🤖 رُصدت رسالتك كنمط Post Bot مزعج',
     'spam_score': '🚫 رُصدت رسالتك كرسالة دعائية/Spam',
     'service': '🗑️ رسائل الخدمة محذوفة تلقائياً',
+    'at_channel': '📢 يُمنع منشن القنوات هنا',
+    'tg_scheme': '🔗 يُمنع إرسال روابط Telegram هنا',
+    'button_link': '🔘 يُمنع إرسال أزرار بروابط',
+    'vcard_url': '📇 يُمنع إرسال بطاقات اتصال تحوي روابط',
+    'venue_url': '📍 يُمنع إرسال مواقع',
 }
 
 
@@ -1754,7 +2455,7 @@ async def _notify_group_log_penalty(
 
 
 # ═══════════════════════════════════════════════════════════════════
-# Security Auth Cache
+# Security Auth Cache + Delete Failure Notifier (v7.14.0 #5)
 # ═══════════════════════════════════════════════════════════════════
 
 _sec_auth_cache: Dict[Any, Tuple[Any, float]] = {}
@@ -1799,7 +2500,54 @@ def _is_delete_permission_error(exc) -> bool:
         return False
 
 
-async def _safe_delete_message(bot, chat_id, message_id) -> bool:
+# v7.14.0 #5: قائمة تجنّب إرسال التنبيه أكثر من مرة لكل مجموعة
+_delete_failure_notified: Dict[int, float] = {}
+_DELETE_FAILURE_NOTIFY_COOLDOWN = 3600.0
+_delete_failure_notify_lock = asyncio.Lock()
+
+
+async def _notify_delete_permission_failure(context, chat_id):
+    """
+    v7.14.0 #5: يُنبّه المالك مرة واحدة عند فشل الحذف بسبب الصلاحيات.
+    يمنع تكرار التنبيه لمدّة ساعة.
+    """
+    try:
+        async with _delete_failure_notify_lock:
+            now = time.monotonic()
+            last = _delete_failure_notified.get(chat_id, 0.0)
+            if now - last < _DELETE_FAILURE_NOTIFY_COOLDOWN:
+                return
+            _delete_failure_notified[chat_id] = now
+
+        owner_id = int(getattr(CONFIG, 'PRIMARY_OWNER_ID', 0) or 0)
+        if not owner_id:
+            return
+
+        msg = (
+            "⚠️ <b>تحذير حرج — الحماية معطّلة!</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            f"البوت لا يستطيع حذف الرسائل في المجموعة "
+            f"<code>{chat_id}</code>.\n\n"
+            "🔴 <b>جميع إعدادات الحماية معطّلة فعلياً</b> — "
+            "أي رسالة مخالفة لن تُحذف!\n\n"
+            "✅ <b>الحل:</b>\n"
+            "1. ارفع البوت لمشرف في المجموعة\n"
+            "2. امنحه صلاحية <code>can_delete_messages</code>\n"
+            "3. تأكد من أن البوت عضو في المجموعة\n"
+        )
+
+        try:
+            await safe_send(context.bot, owner_id, msg, parse_mode='HTML')
+        except Exception as e:
+            logger.warning("_notify_delete_permission_failure send: %s", e)
+    except Exception as e:
+        logger.debug("_notify_delete_permission_failure: %s", e)
+
+
+async def _safe_delete_message(
+    bot, chat_id, message_id, *,
+    context=None, notify_owner=True
+) -> bool:
     try:
         await bot.delete_message(chat_id, message_id)
         logger.debug("✅ DELETE OK | chat=%s msg=%s", chat_id, message_id)
@@ -1811,6 +2559,15 @@ async def _safe_delete_message(bot, chat_id, message_id) -> bool:
                 "❌ DELETE FAILED (permission) | chat=%s msg=%s",
                 chat_id, message_id,
             )
+            # v7.14.0 #5
+            if notify_owner and context is not None:
+                try:
+                    _spawn_tracked_task(
+                        _notify_delete_permission_failure(context, chat_id),
+                        label="delete-perm-notify"
+                    )
+                except Exception:
+                    pass
             return False
 
         if _is_delete_ignore_error(e):
@@ -1826,6 +2583,14 @@ async def _safe_delete_message(bot, chat_id, message_id) -> bool:
 
     except Exception as e:
         if _is_delete_permission_error(e):
+            if notify_owner and context is not None:
+                try:
+                    _spawn_tracked_task(
+                        _notify_delete_permission_failure(context, chat_id),
+                        label="delete-perm-notify"
+                    )
+                except Exception:
+                    pass
             return False
         if _is_delete_ignore_error(e):
             return True
@@ -2134,9 +2899,6 @@ async def _notify_admin_about_forward(context, admin_id, info):
 
 
 def _should_notify_forward(context, chat_id) -> bool:
-    """
-    M3+: عدّ مفاتيح _forward_notify_ فقط (لا كل bot_data).
-    """
     try:
         bot_data = getattr(context, 'bot_data', None)
         if not isinstance(bot_data, dict):
@@ -2152,7 +2914,6 @@ def _should_notify_forward(context, chat_id) -> bool:
         if now - last < _FORWARD_NOTIFY_COOLDOWN_SECONDS:
             return False
 
-        # ✅ M3+: عدّ المفاتيح الخاصة فقط
         fwd_keys = [
             k for k in bot_data.keys()
             if isinstance(k, str) and k.startswith("_forward_notify_")
@@ -2703,21 +3464,14 @@ except ImportError:
 
 
 # ═══════════════════════════════════════════════════════════════════
-# Banned Word Matching — C1 FINAL
+# Banned Word Matching — v7.14.0 (C1 + G7 + #16 ReDoS fix)
 # ═══════════════════════════════════════════════════════════════════
 
 _compiled_banned_patterns: "OrderedDict[str, re.Pattern]" = OrderedDict()
+_compiled_spaced_patterns: "OrderedDict[str, re.Pattern]" = OrderedDict()
 
 
 def _get_banned_pattern(banned_word: str) -> Optional[re.Pattern]:
-    """
-    C1 FIX (نهائي):
-        re.escape(" ") يُعيد r"\\ " (backslash+space) منذ Python 3.7،
-        لذا نستبدل التسلسل الكامل "\\ " (backslash+space) بـ"\\s+".
-
-        re.escape("foo bar") → "foo\\ bar"
-        .replace(r'\\ ', r'\\s+') → "foo\\s+bar"  ✓
-    """
     cached = _compiled_banned_patterns.get(banned_word)
     if cached is not None:
         _compiled_banned_patterns.move_to_end(banned_word)
@@ -2739,9 +3493,47 @@ def _get_banned_pattern(banned_word: str) -> Optional[re.Pattern]:
     return pattern
 
 
+def _get_spaced_banned_pattern(banned_word: str) -> Optional[re.Pattern]:
+    """
+    v7.14.0 #16: مقيّد بشدة لمنع ReDoS.
+      - حد أقصى 15 حرفاً.
+      - الفاصل بين الحروف {1,2} فقط (لا {0,3}).
+      - لا يُطبَّق على نصوص أطول من 4000 حرف.
+    """
+    cached = _compiled_spaced_patterns.get(banned_word)
+    if cached is not None:
+        _compiled_spaced_patterns.move_to_end(banned_word)
+        return cached
+
+    try:
+        if len(banned_word) < 3 or len(banned_word) > 15:
+            return None
+        chars = list(banned_word)
+        # v7.14.0 #16: {1,2} فقط بين الحروف
+        body = r'[\s\-_.|/*+=~^`•●○▪▫■□♦♢※]{1,2}'.join(
+            re.escape(c) for c in chars
+        )
+        pattern = re.compile(
+            rf'(?<!\w){body}(?!\w)',
+            re.IGNORECASE | re.UNICODE
+        )
+    except Exception:
+        return None
+
+    _compiled_spaced_patterns[banned_word] = pattern
+    if len(_compiled_spaced_patterns) > MAX_COMPILED_BANNED_PATTERNS:
+        _compiled_spaced_patterns.popitem(last=False)
+
+    return pattern
+
+
 def _contains_banned_word(text, banned_word) -> bool:
     if not text or not banned_word:
         return False
+
+    # v7.14.0 #16: حماية ضد ReDoS
+    if len(text) > 4000:
+        text = text[:4000]
 
     try:
         normalized_text = _normalize_text(text).lower()
@@ -2751,10 +3543,25 @@ def _contains_banned_word(text, banned_word) -> bool:
             return False
 
         pattern = _get_banned_pattern(normalized_word)
-        if pattern is None:
-            return normalized_word == normalized_text.strip()
+        if pattern is not None and pattern.search(normalized_text):
+            return True
 
-        return bool(pattern.search(normalized_text))
+        if _ANTIEVASION_COMPACT_WORDS and len(normalized_word) >= 3:
+            compact_text = re.sub(
+                _WORD_SEP_CLASS, '', normalized_text
+            )
+            compact_word = re.sub(
+                _WORD_SEP_CLASS, '', normalized_word
+            )
+            if compact_word and compact_word in compact_text:
+                return True
+
+            spaced_pattern = _get_spaced_banned_pattern(normalized_word)
+            if spaced_pattern is not None:
+                if spaced_pattern.search(normalized_text):
+                    return True
+
+        return False
     except Exception:
         try:
             return (
@@ -2766,14 +3573,13 @@ def _contains_banned_word(text, banned_word) -> bool:
 
 
 # ═══════════════════════════════════════════════════════════════════
-# Message Handlers — ✅ N7: signature cache
+# Message Handlers
 # ═══════════════════════════════════════════════════════════════════
 
 _private_handler_signature_cache: Dict[str, bool] = {}
 
 
 def _accepts_state_arg(handler, handler_name: str) -> bool:
-    """✅ N7: cache لنتيجة فحص signature."""
     cached = _private_handler_signature_cache.get(handler_name)
     if cached is not None:
         return cached
@@ -2845,17 +3651,42 @@ class MessageHandlers:
         else:
             return
 
+        # ═══ بناء _MessageContext ═══
         ctx = _MessageContext()
         ctx.text = message.text or ""
         ctx.caption = message.caption or ""
         ctx.full_text = f"{ctx.text} {ctx.caption}".strip()
-        ctx.normalized_text = _normalize_text(ctx.full_text)
+
+        # v7.14.0 #4: دمج روابط مقطوعة قبل التطبيع
+        merged_text = _merge_split_urls(ctx.full_text)
+        ctx.normalized_text = _normalize_text(merged_text)
+        ctx.has_hidden_chars = _has_hidden_chars(ctx.full_text)
 
         (
             ctx.button_count,
             ctx.button_urls_raw,
             ctx.button_texts,
         ) = _extract_button_context(message)
+
+        ctx.entity_urls = _extract_entity_urls(message)
+        ctx.has_link_entity = _has_link_entity(message)
+        ctx.button_link_urls = _extract_button_link_urls(ctx)
+        ctx.has_button_link = bool(ctx.button_link_urls)
+
+        # v7.14.0 #13/#14
+        ctx.vcard_urls = _extract_vcard_urls(message)
+        ctx.venue_url = _extract_venue_url(message)
+
+        # has_any_link — تحقّق موحَّد شامل
+        has_text_link = _contains_link_enhanced(ctx.normalized_text)
+        ctx.has_any_link = bool(
+            has_text_link
+            or ctx.has_link_entity
+            or ctx.has_button_link
+            or ctx.entity_urls
+            or ctx.vcard_urls
+            or ctx.venue_url
+        )
 
         if ctx.button_texts:
             btn_joined = _normalize_text(" ".join(ctx.button_texts))
@@ -2866,6 +3697,28 @@ class MessageHandlers:
             )
         else:
             ctx.analysis_text = ctx.normalized_text
+
+        if ctx.entity_urls:
+            ent_joined = _normalize_text(" ".join(
+                str(u)[:200] for u in ctx.entity_urls[:10]
+            ))
+            if ent_joined:
+                ctx.analysis_text = (
+                    f"{ctx.analysis_text} {ent_joined}".strip()
+                    if ctx.analysis_text else ent_joined
+                )
+
+        if ctx.vcard_urls:
+            vc_joined = _normalize_text(" ".join(ctx.vcard_urls[:5]))
+            if vc_joined:
+                ctx.analysis_text = (
+                    f"{ctx.analysis_text} {vc_joined}".strip()
+                )
+
+        if ctx.venue_url:
+            ctx.analysis_text = (
+                f"{ctx.analysis_text} {ctx.venue_url}".strip()
+            )
 
         ctx.button_urls = [str(u)[:120] for u in ctx.button_urls_raw[:10]]
 
@@ -2892,6 +3745,16 @@ class MessageHandlers:
         _postbot_enabled = _as_bool(
             settings.get('delete_postbot_pattern', 0), False
         )
+        # v7.14.0 new settings
+        _at_channel_enabled = _as_bool(
+            settings.get('delete_at_channel', 0), False
+        )
+        _tg_scheme_enabled = _as_bool(
+            settings.get('delete_tg_scheme', 1), True
+        )
+        _button_links_enabled = _as_bool(
+            settings.get('delete_button_links', 1), True
+        )
 
         det = get_forward_detection_reason(message)
         ctx.is_forwarded = _as_bool(det.get('is_forwarded', False), False)
@@ -2915,6 +3778,7 @@ class MessageHandlers:
             and not is_protected_forward
         )
 
+        # ═══ Spam score ═══
         _spam_score = 0
         _spam_reasons: List[str] = []
 
@@ -2927,6 +3791,7 @@ class MessageHandlers:
                     _button_texts=ctx.button_texts,
                     _normalized=ctx.normalized_text,
                     _analysis_text=ctx.analysis_text,
+                    _entity_urls=ctx.entity_urls,
                 )
             except Exception as e:
                 logger.debug("spam_score: %s", e)
@@ -2939,7 +3804,7 @@ class MessageHandlers:
                 _postbot_match = _is_postbot_pattern(
                     ctx.analysis_text,
                     button_count=ctx.button_count,
-                    has_urls=bool(ctx.button_urls_raw),
+                    has_urls=bool(ctx.button_urls_raw) or bool(ctx.entity_urls),
                 )
             except Exception:
                 _postbot_match = False
@@ -2962,7 +3827,9 @@ class MessageHandlers:
                 "photo=%s video=%s | btns=%d | "
                 "prot=%s auto_fwd=%s | df=%r/%s | "
                 "spam_en=%s score=%d is_spam=%s | "
-                "postbot_en=%s match=%s",
+                "postbot_en=%s match=%s | "
+                "has_link=%s btn_links=%d ent_links=%d | "
+                "vcard=%d venue=%s hidden=%s",
                 chat_id, user_id, message.message_id,
                 " [ANON]" if is_anonymous else "",
                 bool(ctx.text), bool(ctx.caption),
@@ -2973,22 +3840,33 @@ class MessageHandlers:
                 _df_raw, _df_bool,
                 _spam_enabled, _spam_score, _is_spam,
                 _postbot_enabled, _postbot_match,
+                ctx.has_any_link,
+                len(ctx.button_link_urls),
+                len(ctx.entity_urls),
+                len(ctx.vcard_urls),
+                bool(ctx.venue_url),
+                ctx.has_hidden_chars,
             )
 
             if ctx.button_texts:
                 logger.info("   🔘 BTN | %s", ctx.button_texts[:12])
             if ctx.button_urls:
                 logger.info("   🔗 URL | %s", ctx.button_urls[:5])
+            if ctx.entity_urls:
+                logger.info("   🎭 ENT | %s", ctx.entity_urls[:5])
             if _spam_score > 0:
                 logger.warning("   🎯 SPAM=%d | %s", _spam_score, _spam_reasons)
 
+        # 0) Service
         if _as_bool(settings.get('delete_service'), False):
             if message.new_chat_members or message.left_chat_member:
                 await _safe_delete_message(
-                    context.bot, chat_id, message.message_id
+                    context.bot, chat_id, message.message_id,
+                    context=context,
                 )
                 return
 
+        # 1) Forwarded
         if _df_bool:
             effective_forwarded = (
                 ctx.is_forwarded or ctx.is_auto_fwd
@@ -3014,6 +3892,7 @@ class MessageHandlers:
                 )
                 return
 
+        # 2) Spam Score
         if _is_spam:
             if _DEBUG_SPAM:
                 logger.warning(
@@ -3027,6 +3906,7 @@ class MessageHandlers:
             )
             return
 
+        # 3) PostBot Pattern
         if _postbot_enabled and _postbot_match:
             if _DEBUG_SPAM:
                 logger.warning(
@@ -3039,19 +3919,60 @@ class MessageHandlers:
             )
             return
 
+        # ═══ 4) Links — v7.14.0: فحص شامل ═══
         if _as_bool(settings.get('delete_links'), False):
-            try:
-                has_link = TextUtils.contains_link(ctx.normalized_text)
-            except Exception:
-                has_link = False
+            if ctx.has_any_link:
+                # v7.14.0: قد نفرّق حسب النوع للتنبيه الدقيق
+                if _DEBUG_DIAG:
+                    logger.warning(
+                        "🔗 LINK-DELETE | chat=%s user=%s | "
+                        "text=%s btns=%d entities=%d vcard=%d venue=%s",
+                        chat_id, user_id, has_text_link,
+                        len(ctx.button_link_urls),
+                        len(ctx.entity_urls),
+                        len(ctx.vcard_urls),
+                        bool(ctx.venue_url),
+                    )
 
-            if has_link:
                 await MessageHandlers._delete_and_warn(
                     update, context, chat_id, user_id,
                     "link", settings, is_anonymous=is_anonymous
                 )
                 return
 
+        # 4b) @channel (منفصل) — v7.14.0
+        if _at_channel_enabled and _ANTIEVASION_AT_CHANNEL:
+            try:
+                if _AT_CHANNEL_RE.search(ctx.normalized_text):
+                    await MessageHandlers._delete_and_warn(
+                        update, context, chat_id, user_id,
+                        "at_channel", settings, is_anonymous=is_anonymous
+                    )
+                    return
+            except Exception:
+                pass
+
+        # 4c) tg:// scheme (منفصل) — v7.14.0
+        if _tg_scheme_enabled and _ANTIEVASION_TG_SCHEME:
+            try:
+                if _TG_SCHEME_RE.search(ctx.normalized_text):
+                    await MessageHandlers._delete_and_warn(
+                        update, context, chat_id, user_id,
+                        "tg_scheme", settings, is_anonymous=is_anonymous
+                    )
+                    return
+            except Exception:
+                pass
+
+        # 4d) Button links (منفصل) — v7.14.0
+        if _button_links_enabled and ctx.has_button_link:
+            await MessageHandlers._delete_and_warn(
+                update, context, chat_id, user_id,
+                "button_link", settings, is_anonymous=is_anonymous
+            )
+            return
+
+        # 5) Mentions
         if _as_bool(settings.get('mentions'), False):
             try:
                 has_mention = TextUtils.contains_mention(ctx.normalized_text)
@@ -3065,6 +3986,7 @@ class MessageHandlers:
                 )
                 return
 
+        # 6) Banned Words
         if _as_bool(settings.get('delete_banned_words'), False):
             banned_words = await get_banned_words_cached(chat_id)
 
@@ -3085,6 +4007,7 @@ class MessageHandlers:
                     )
                     return
 
+        # 7) Max Length
         try:
             max_len = int(settings.get('max_message_length', 0) or 0)
         except (TypeError, ValueError):
@@ -3097,6 +4020,7 @@ class MessageHandlers:
             )
             return
 
+        # 8) Media
         for attr, setting_key, vtype in _MEDIA_SETTINGS_MAP:
             media = getattr(message, attr, None)
             if not media:
@@ -3110,6 +4034,7 @@ class MessageHandlers:
             )
             return
 
+        # 9) Translation
         translate_source = ctx.text or ctx.caption
         if translate_source and not is_anonymous:
             try:
@@ -3125,6 +4050,7 @@ class MessageHandlers:
             except Exception:
                 pass
 
+        # 10) Auto Reply
         if ctx.text:
             await MessageHandlers._process_auto_reply(
                 update, context, chat_id, ctx.text, user_id
@@ -3264,7 +4190,8 @@ class MessageHandlers:
         try:
             if message.message_id:
                 delete_ok = await _safe_delete_message(
-                    context.bot, chat_id, message.message_id
+                    context.bot, chat_id, message.message_id,
+                    context=context, notify_owner=True,
                 )
         except Exception as e:
             logger.error("delete exception: %s", e)
@@ -3358,7 +4285,6 @@ class MessageHandlers:
         except Exception:
             pass
 
-        # ✅ N11: حماية صريحة لـeffective_user
         eff_user = update.effective_user
         first_name = getattr(eff_user, 'first_name', None) if eff_user else None
         user_name = escape(first_name or "User")
@@ -3477,10 +4403,6 @@ class MessageHandlers:
 
     @staticmethod
     async def handle_private(update, context):
-        """
-        R2: inspect.signature بدل try/TypeError.
-        N7: cache للنتيجة (private handlers نادرة).
-        """
         try:
             if not update.effective_user:
                 return
@@ -3496,7 +4418,6 @@ class MessageHandlers:
             if handler is None:
                 return
 
-            # ✅ N7: cache
             if _accepts_state_arg(handler, handler_name):
                 await handler(update, context, state)
             else:
@@ -3540,7 +4461,8 @@ class MessageHandlers:
             settings = await get_security_settings_cached(chat_id)
             if _as_bool(settings.get('delete_service'), False):
                 await _safe_delete_message(
-                    context.bot, chat_id, message.message_id
+                    context.bot, chat_id, message.message_id,
+                    context=context,
                 )
         except Exception:
             pass
@@ -3579,7 +4501,7 @@ class MessageHandlers:
 
 
 # ═══════════════════════════════════════════════════════════════════
-# Public API — ✅ O6: analyze_sentiment + N9/P2 helper
+# Public API
 # ═══════════════════════════════════════════════════════════════════
 
 __all__ = [
@@ -3615,8 +4537,29 @@ __all__ = [
     "_DEFAULT_VIOLATION_MESSAGES",
     "_DEBUG_DIAG",
     "_DEBUG_SPAM",
-    # ✅ O6: مُصدَّر للاستخدام الخارجي (قد يكون None لو replies غير موجود)
     "analyze_sentiment",
-    # ✅ N9/P2: helper اختباري
     "_reset_shutdown_for_tests",
+    # v7.14.0 exports
+    "_extract_entity_urls",
+    "_has_link_entity",
+    "_contains_link_enhanced",
+    "_has_button_link",
+    "_extract_button_link_urls",
+    "_extract_url_from_button",
+    "_extract_vcard_urls",
+    "_extract_venue_url",
+    "_strip_combining_marks",
+    "_deleet",
+    "_merge_split_urls",
+    "_has_hidden_chars",
+    "_has_domain_pattern",
+    "_HOMOGLYPH_MAP",
+    "_HIDDEN_CHARS",
+    "_LEET_TRANSLATE",
+    "_TG_SCHEME_RE",
+    "_AT_CHANNEL_RE",
+    "_EMAIL_RE",
+    "_PUNYCODE_RE",
+    "_IPV4_SCHEMELESS_RE",
+    "_notify_delete_permission_failure",
 ]
