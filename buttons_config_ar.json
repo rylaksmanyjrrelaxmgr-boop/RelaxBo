@@ -387,6 +387,13 @@
     "security_restrict_icon": "🔒",
     "security_restrict_short": "تقييد",
 
+    "antiflood_messages_title": "🔢 <b>عدد الرسائل المسموحة</b>",
+    "antiflood_messages_current": "📊 <b>القيمة الحالية:</b> <code>{count}</code> رسالة",
+    "antiflood_messages_choose": "اختر الحد الأقصى للرسائل خلال النافذة الزمنية:",
+    "antiflood_seconds_title": "⏱️ <b>النافذة الزمنية (ثواني)</b>",
+    "antiflood_seconds_current": "⏱️ <b>القيمة الحالية:</b> <code>{count}</code> ثانية",
+    "antiflood_seconds_choose": "اختر النافذة الزمنية لعدّ الرسائل:",
+
     "unit_seconds": "ث",
     "unit_minutes": "د",
     "unit_hours": "س",
