@@ -5,9 +5,17 @@
 handlers_message_detectors.py
 ===============================================================================
 🛡️ Relax Manager — Advanced Spam / Anti-Evasion Detection Engine
-Version: 2.3.0 HARDENED++
+Version: 2.3.1 HARDENED++
 
 محرك كشف مستقل عن handlers_message.py.
+
+v2.3.1 HARDENED++ (perf):
+    🟢 FIX-1: _deleet — إزالة any(...) الزائد
+              (`in` على set يفحص المساواة بالفعل)
+    🟢 FIX-2: _compute_spam_score — استخدام link_detected المحسوب
+              بدل إعادة استدعاء _contains_link_enhanced
+              (توفير ~10 regexes على كل رسالة)
+    🟢 FIX-3: تحديث ثابت الإصدار إلى 2.3.1
 
 v2.3.0 HARDENED++:
     ✅ الحفاظ على API والدوال العامة الموجودة في v2.0/v2.1/v2.2
@@ -62,7 +70,7 @@ from typing import Any, Iterable, List, Optional, Sequence, Tuple
 
 logger = logging.getLogger(__name__)
 
-_DETECTORS_VERSION = "2.3.0 HARDENED++"
+_DETECTORS_VERSION = "2.3.1 HARDENED++"
 
 
 # =============================================================================
@@ -183,15 +191,6 @@ MAX_REASON_COUNT = 80
 # =============================================================================
 # CATEGORY CAPS
 # =============================================================================
-#
-# الهدف:
-#   لا نسمح لعشرات الإشارات التي تصف نفس الظاهرة
-#   برفع النتيجة بشكل غير منطقي.
-#
-# مثال:
-#   URL + URL count + domain + telegram URL
-#   كلها دليل URL واحد في الأساس.
-#
 
 _SCORE_CAP_LINK = 8
 _SCORE_CAP_CONTENT = 9
@@ -313,38 +312,14 @@ _LEET_MAP = str.maketrans({
 })
 
 
-# كلمات نريد أن يكون تحويل leet مفيدًا لها.
-# لا يتم تحويل كل token رقمي/حرفي عشوائي.
 _LEET_TARGETS = {
-    "spam",
-    "scam",
-    "porn",
-    "porno",
-    "xxx",
-    "nude",
-    "nudes",
-    "leak",
-    "leaked",
-    "leaks",
-    "viral",
-    "mega",
-    "megapack",
-    "pack",
-    "packs",
-    "premium",
-    "private",
-    "secret",
-    "hidden",
-    "uncensored",
-    "uncut",
-    "download",
-    "click",
-    "watch",
-    "open",
-    "join",
-    "subscribe",
-    "unlock",
-    "exclusive",
+    "spam", "scam", "porn", "porno", "xxx",
+    "nude", "nudes", "leak", "leaked", "leaks",
+    "viral", "mega", "megapack", "pack", "packs",
+    "premium", "private", "secret", "hidden",
+    "uncensored", "uncut", "download", "click",
+    "watch", "open", "join", "subscribe",
+    "unlock", "exclusive",
 }
 
 
@@ -517,20 +492,12 @@ _LONG_DOMAIN_LABEL_RE = re.compile(
     r"\b[a-z0-9-]{35,}\.[a-z]{2,63}\b"
 )
 
-# يسمح بإعادة بناء:
-# h t t p s : / /
-# hxxps://
-# example . com
-# example
-# .
-# com
 _MULTILINE_URL_SCHEME_RE = re.compile(
     r"(?is)"
     r"\b(?:h\s*t\s*t\s*p\s*s?|hxxps?|ftp)"
     r"\s*[:]\s*[/\\]\s*[/\\]"
 )
 
-# "example [dot] com" / "example dot com"
 _DOT_WORD_RE = re.compile(
     r"(?i)"
     r"\b[a-z0-9_-]{2,50}"
@@ -925,16 +892,8 @@ def _deleet(text: str) -> str:
     """
     تحويل Leetspeak بشكل محافظ.
 
-    الإصدار القديم كان يحوّل أي token يحتوي أرقامًا:
-        room123 -> roomize
-        v2update -> vzupdate
-
-    وهذا قد يسبب false positives.
-
-    الإصدار الحالي:
-      1. يكوّن نسخة leet.
-      2. يتحقق هل الناتج يطابق كلمة spam معروفة.
-      3. لا يغيّر token الطبيعي لمجرد وجود رقم.
+    v2.3.1:
+        - إزالة any(...) الزائد (كان مكرراً مع `in`).
     """
 
     if not text or not ANTIEVASION_LEETSPEAK:
@@ -975,13 +934,9 @@ def _deleet(text: str) -> str:
             candidate,
         )
 
-        if (
-            compact_candidate in _LEET_TARGETS
-            or any(
-                compact_candidate == target
-                for target in _LEET_TARGETS
-            )
-        ):
+        # v2.3.1 FIX-1: `in` على set يفحص المساواة —
+        # الـany(...) كان زائداً تماماً.
+        if compact_candidate in _LEET_TARGETS:
             return candidate
 
         return token
@@ -1148,7 +1103,6 @@ def _merge_split_urls(text: str) -> str:
 
     value = str(text)
 
-    # h t t p s : / /
     value = re.sub(
         r"(?i)"
         r"h\s*t\s*t\s*p\s*s?"
@@ -1157,7 +1111,6 @@ def _merge_split_urls(text: str) -> str:
         value,
     )
 
-    # h t t p : / /
     value = re.sub(
         r"(?i)"
         r"\bh\s*t\s*t\s*p\s*s?"
@@ -1166,14 +1119,12 @@ def _merge_split_urls(text: str) -> str:
         value,
     )
 
-    # hxxps://
     value = re.sub(
         r"(?i)\bhxxps?\s*:\s*/\s*/",
         "https://",
         value,
     )
 
-    # t . me / t [dot] me
     value = re.sub(
         r"(?i)"
         r"\bt\s*[\.\[\(\{]?\s*m\s*"
@@ -1197,8 +1148,6 @@ def _merge_split_urls(text: str) -> str:
         value
     )
 
-    # لا نزيل newline هنا بشكل عام.
-    # يتم ذلك فقط داخل أنماط URL لاحقًا.
     value = re.sub(
         r"[ \t]*\.[ \t]*",
         ".",
@@ -1291,9 +1240,6 @@ def _extract_possible_urls(
             )
         )
 
-    # مهم:
-    # Email لا يضاف هنا حتى لا يصبح email + URL
-    # دليلين مستقلين لنفس الشيء.
     return _unique_strings(
         candidates
     )
@@ -2717,7 +2663,6 @@ def _compact_target_present(
     if compact_text == target:
         return True
 
-    # exact boundary-like match at beginning/end
     if compact_text.startswith(
         target
     ) or compact_text.endswith(
@@ -2725,8 +2670,6 @@ def _compact_target_present(
     ):
         return True
 
-    # target separated by known CTA/content boundaries
-    # لا نستخدم substring blindly داخل كلمة طويلة.
     return bool(
         re.search(
             rf"(?:^|(?:click|watch|view|open|check|"
@@ -3730,8 +3673,6 @@ def _compute_spam_score(
                 "telegram_link"
             )
 
-        # Email is separate evidence,
-        # but does not become a second URL.
         if _contains_email(
             text
         ):
@@ -3777,7 +3718,6 @@ def _compute_spam_score(
                 "ipv4_link"
             )
 
-        # Username alone is deliberately weak.
         if _contains_at_channel(
             text
         ):
@@ -4126,8 +4066,6 @@ def _compute_spam_score(
             )
         )
 
-        # Postbot is contextual evidence,
-        # not another unlimited score source.
         if postbot_confidence >= 6:
             context_score = _cap_score(
                 context_score,
@@ -4447,8 +4385,6 @@ def _compute_spam_score(
         # FORWARDED CONTEXT
         # ==================================================================
 
-        # Forwarded message is not spam by itself.
-        # It only adds a small amount when strong evidence already exists.
         preliminary_score = (
             link_score
             + content_score
@@ -4500,16 +4436,16 @@ def _compute_spam_score(
         # ==================================================================
         # PACK + NUMBER + EXTERNAL
         # ==================================================================
+        # v2.3.1 FIX-2: `link_detected` محسوب أعلى الدالة —
+        # نستخدمه بدل إعادة استدعاء `_contains_link_enhanced`
+        # (توفير ~10 regexes على كل رسالة).
 
         if (
             has_pack
             and has_number_pack
             and (
                 ctx.button_link_urls
-                or _contains_link_enhanced(
-                    text,
-                    include_usernames=False,
-                )
+                or link_detected
             )
         ):
             context_score = _cap_score(
@@ -4669,15 +4605,6 @@ def _compute_spam_score(
         # ==================================================================
         # INDEPENDENT EVIDENCE BONUS
         # ==================================================================
-        #
-        # لا نضيف bonus إلا عندما توجد فئات مستقلة فعلًا.
-        #
-        # هذا يسمح:
-        #   محتوى + CTA + رابط
-        #
-        # أن يكون أقوى بكثير من:
-        #   5 أنواع من إشارات الرابط نفسه.
-        #
 
         independent_signals = len(
             independent_categories
@@ -4704,9 +4631,6 @@ def _compute_spam_score(
         # ==================================================================
         # STRONG DECISION GATES
         # ==================================================================
-        #
-        # منع الحذف القوي بسبب إشارة منفردة ضعيفة.
-        #
 
         only_weak_username = (
             _contains_at_channel(text)
@@ -4724,8 +4648,6 @@ def _compute_spam_score(
                 1,
             )
 
-        # رابط عادي بدون أي محتوى/CTA مشبوه:
-        # يبقى Spam-capable لكن لا يتحول تلقائيًا إلى Hard.
         if (
             link_score > 0
             and content_score == 0
