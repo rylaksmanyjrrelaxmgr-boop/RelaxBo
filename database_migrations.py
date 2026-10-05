@@ -1,8 +1,26 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-database_migrations.py - Migrations extracted from database.py (v1.0.0)
+database_migrations.py - Migrations extracted from database.py (v1.1.0)
 ================================================================================
+🆕 v1.1.0 (NEW-SECURITY-COLUMNS):
+  ✅ NC1: group_security — إضافة 8 أعمدة جديدة لدعم الأزرار الأمنية الجديدة:
+      - delete_at_channel          (INTEGER DEFAULT 0)
+      - delete_tg_scheme           (INTEGER DEFAULT 1)
+      - delete_button_links        (INTEGER DEFAULT 1)
+      - delete_emails              (INTEGER DEFAULT 0)
+      - delete_protected_any       (INTEGER DEFAULT 0)
+      - delete_protected_forward   (INTEGER DEFAULT 0)
+      - delete_postbot_pattern     (INTEGER DEFAULT 0)
+      - delete_spam_score          (INTEGER DEFAULT 1)
+
+      تُستخدم في:
+        • handlers_message.py v7.15.0
+        • handlers_callback.py v9.7.5
+        • utils.py v7.10.0 (_format_security_text)
+
+  ✅ NC2: توثيق شامل لكل عمود جديد (المصدر + القيمة الافتراضية + السبب).
+
 🎯 الهدف:
     فصل منطق ترحيل Schema من database.py لتقليل حجمه وتنظيم الكود،
     مع الحفاظ على السلوك 100% عبر نمط Mixin.
@@ -172,6 +190,7 @@ def _validate_column_def(col_name: str, col_def: str) -> bool:
 
 _MIGRATIONS_TYPES: Dict[str, List[Tuple[str, str]]] = {
     "group_security": [
+        # ═══ مدد العقوبات (v7.7.0) ═══
         ("antiflood_penalty_duration", "INTEGER DEFAULT 3600"),
         ("night_mode_action_duration", "INTEGER DEFAULT 3600"),
         ("warn_penalty_duration", "INTEGER DEFAULT 3600"),
@@ -181,8 +200,12 @@ _MIGRATIONS_TYPES: Dict[str, List[Tuple[str, str]]] = {
         ("restrict_default_duration", "INTEGER DEFAULT 1800"),
         ("enable_timed_penalties", "INTEGER DEFAULT 1"),
         ("auto_remove_penalties", "INTEGER DEFAULT 1"),
+
+        # ═══ المخالفات (v7.7.x) ═══
         ("violation_strikes", "INTEGER DEFAULT 3"),
         ("violation_duration", "INTEGER DEFAULT 60"),
+
+        # ═══ أزرار الأمان الأساسية ═══
         ("delete_links", "INTEGER DEFAULT 0"),
         ("mentions", "INTEGER DEFAULT 0"),
         ("delete_videos", "INTEGER DEFAULT 0"),
@@ -198,29 +221,43 @@ _MIGRATIONS_TYPES: Dict[str, List[Tuple[str, str]]] = {
         ("delete_video_note", "INTEGER DEFAULT 0"),
         ("delete_photos", "INTEGER DEFAULT 0"),
         ("delete_banned_words", "INTEGER DEFAULT 0"),
+
+        # ═══ الحماية من الفيضان ═══
         ("antiflood_enabled", "INTEGER DEFAULT 0"),
         ("antiflood_messages", "INTEGER DEFAULT 5"),
         ("antiflood_seconds", "INTEGER DEFAULT 10"),
         ("antiflood_penalty", "TEXT DEFAULT 'mute'"),
+
+        # ═══ الوضع الليلي ═══
         ("night_mode_enabled", "INTEGER DEFAULT 0"),
         ("night_mode_start", "TEXT DEFAULT '23:00'"),
         ("night_mode_end", "TEXT DEFAULT '07:00'"),
         ("night_mode_action", "TEXT DEFAULT 'mute'"),
+
+        # ═══ التحذيرات ═══
         ("warn_enabled", "INTEGER DEFAULT 0"),
         ("max_warnings", "INTEGER DEFAULT 3"),
         ("warn_penalty", "TEXT DEFAULT 'mute'"),
+
+        # ═══ الترحيب والوداع ═══
         ("welcome_enabled", "INTEGER DEFAULT 0"),
         ("welcome_text", "TEXT DEFAULT ''"),
         ("goodbye_enabled", "INTEGER DEFAULT 0"),
         ("goodbye_text", "TEXT DEFAULT ''"),
+
+        # ═══ الانضمام ═══
         ("auto_approve_join", "INTEGER DEFAULT 0"),
         ("auto_reject_join", "INTEGER DEFAULT 0"),
+
+        # ═══ الوضع البطيء / الطول / NSFW ═══
         ("slow_mode", "INTEGER DEFAULT 0"),
         ("slow_mode_seconds", "INTEGER DEFAULT 0"),
         ("max_message_length", "INTEGER DEFAULT 0"),
         ("nsfw_enabled", "INTEGER DEFAULT 0"),
         ("nsfw_threshold", "REAL DEFAULT 0.8"),
         ("nsfw_filter", "INTEGER DEFAULT 0"),
+
+        # ═══ العقوبات التلقائية ═══
         ("auto_penalty", "TEXT DEFAULT 'mute'"),
         ("auto_mute_duration", "INTEGER DEFAULT 3600"),
         ("delete_penalty", "TEXT DEFAULT 'none'"),
@@ -228,6 +265,44 @@ _MIGRATIONS_TYPES: Dict[str, List[Tuple[str, str]]] = {
         ("delete_penalty_messages", "INTEGER DEFAULT 0"),
         ("violation_penalty_duration", "INTEGER DEFAULT 3600"),
         ("violation_penalty", "TEXT DEFAULT 'none'"),
+
+        # ═══════════════════════════════════════════════════════════
+        # 🆕 v1.1.0: أعمدة الأزرار الأمنية الجديدة
+        #    تُستخدم في handlers_message v7.15.0 + handlers_callback v9.7.5
+        #    + utils v7.10.0 (_format_security_text)
+        # ═══════════════════════════════════════════════════════════
+
+        # sec_at_channel — منشن القنوات (@channel)
+        # افتراضي 0: FP عالٍ لأن @username شائع في النقاشات الطبيعية
+        ("delete_at_channel", "INTEGER DEFAULT 0"),
+
+        # sec_tg_scheme — روابط tg://
+        # افتراضي 1: روابط tg:// دعائية بحتة بلا سياق مشروع
+        ("delete_tg_scheme", "INTEGER DEFAULT 1"),
+
+        # sec_button_links — أزرار بروابط خارجية
+        # افتراضي 1: أزرار بروابط = نمط Spam شائع
+        ("delete_button_links", "INTEGER DEFAULT 1"),
+
+        # sec_emails — البريد الإلكتروني
+        # افتراضي 0: FP عالٍ — البريد شائع في النقاش الطبيعي
+        ("delete_emails", "INTEGER DEFAULT 0"),
+
+        # sec_protected_any — المحتوى المحمي بدون سياق forward
+        # افتراضي 0: يمنع رسائل من قنوات شريكة إن فُعّل
+        ("delete_protected_any", "INTEGER DEFAULT 0"),
+
+        # delete_protected_forward — المحتوى المحمي مع hint (legacy من v7.13)
+        # افتراضي 0: يُفعَّل جنباً إلى جنب مع delete_forwarded عبر sec_forward
+        ("delete_protected_forward", "INTEGER DEFAULT 0"),
+
+        # sec_postbot — كاشف نمط PostBot المزعج
+        # افتراضي 0: يحتاج ثقة — قد يُنتج FP
+        ("delete_postbot_pattern", "INTEGER DEFAULT 0"),
+
+        # delete_spam_score — كاشف spam score (يُحذف تلقائياً)
+        # افتراضي 1: ميزة أساسية مُفعّلة افتراضياً
+        ("delete_spam_score", "INTEGER DEFAULT 1"),
     ],
     "users": [
         ("active_channel", "INTEGER DEFAULT NULL")
