@@ -2,8 +2,21 @@
 # -*- coding: utf-8 -*-
 
 """
-cache.py - نظام الكاش المتقدم للبوت (v7.6.2)
+cache.py - نظام الكاش المتقدم للبوت (v7.6.3)
 ================================================================================
+🆕 v7.6.3 (تحسينات وقائية):
+    ✅ UserDataCache.get_or_load: finally block محصّن
+       - كان: async with self._lock قد يفشل → my_event.set() يُتجاهل
+              → waiters ينتظرون حتى timeout (10s)
+       - صار: try/finally يضمن set() دائماً
+    ✅ get_cache_stats: fallback كامل الإحصائيات
+       - كان: {'size': 0, 'stampede_locks': 0} فقط عند فشل
+       - صار: كل الحقول موجودة (توافق أفضل مع health_snapshot)
+    ✅ توافق كامل مع:
+       - handlers_message.py v7.15.1 (flood detection)
+       - handlers_callback.py v9.7.6 (antiflood buttons)
+       - database.py v7.7.53
+
 🆕 v7.6.2 (تحسين get_cache_stats — تمرير واحد):
     ✅ get_cache_stats: تمرير واحد على _ALL_CACHES (بدل اثنين)
        - كان: 13× size() + 13× get_stats() = 26 lock acquisition
@@ -14,7 +27,7 @@ cache.py - نظام الكاش المتقدم للبوت (v7.6.2)
 🆕 v7.6.1 (إصلاح تسريب stampede locks):
     ✅ TTLCache.get_or_set: try/finally يضمن تحرير _stampede_locks
        حتى عند فشل loader (كان يتراكم → memory leak)
-    ✅ get_cache_stats: يشمل _stampede_locks في الإحصائيات (توافق مع health_snapshot)
+    ✅ get_cache_stats: يشمل _stampede_locks في الإحصائيات
     ✅ توثيق: has() لا يحسب hits/misses (مقصود)
 
 🚀 v7.6.0 (تحسينات أداء وحماية من الانهيار):
@@ -25,7 +38,6 @@ cache.py - نظام الكاش المتقدم للبوت (v7.6.2)
     ✅ cache_cleanup_task: فاصل ديناميكي (حسب TTL)
     ✅ health_snapshot(): فحص صحة شامل جديد
     ✅ get_cache_stats: إجمالي hits/misses/expired
-    ✅ توافق كامل مع v7.5.21 (لا تغييرات في الواجهات)
 
 🆕 v7.5.21 (إصلاح سباق invalidation + تنظيف API):
     ✅ UserDataCache: generation counter
@@ -598,6 +610,7 @@ class UserDataCache:
 
     ✅ v7.5.21: generation counter + retry ذكي
     ✅ v7.6.0: محافظ على التوافق
+    ✅ v7.6.3: finally block محصّن (try/finally مزدوج)
     """
 
     _LOAD_TIMEOUT = 10.0
@@ -699,10 +712,18 @@ class UserDataCache:
             await self.set(user_id, data)
             return data
         finally:
-            async with self._lock:
-                self._loading.pop(user_id, None)
-            if my_event is not None:
-                my_event.set()
+            # ✅ v7.6.3: try/finally مزدوج — set() مضمون دائماً
+            try:
+                async with self._lock:
+                    self._loading.pop(user_id, None)
+            finally:
+                if my_event is not None:
+                    try:
+                        my_event.set()
+                    except Exception as e:
+                        logger.debug(
+                            f"my_event.set() لـ user {user_id}: {e}"
+                        )
 
     async def _load_user_full_data(self, db, user_id: int) -> Dict:
         """استدعاء واحد ذكي + متوازي."""
@@ -926,12 +947,28 @@ async def cache_cleanup_task():
 # 12. إحصائيات الكاش
 # =====================================================================
 
+def _empty_stats() -> Dict:
+    """✅ v7.6.3: قالب فارغ متوافق مع get_stats()."""
+    return {
+        'size': 0,
+        'maxsize': 0,
+        'default_ttl': 0,
+        'hits': 0,
+        'misses': 0,
+        'expired': 0,
+        'hit_rate': 0.0,
+        'usage': 0.0,
+        'stampede_locks': 0,
+    }
+
+
 async def get_cache_stats() -> Dict:
     """
     جلب إحصائيات الكاش (للمطورين) — يستخدم API عام.
 
     ✅ v7.6.1: يشمل _stampede_locks في الإحصائيات (توافق مع health_snapshot).
     ✅ v7.6.2: تحسين الأداء — تمرير واحد على _ALL_CACHES (بدل اثنين).
+    ✅ v7.6.3: fallback كامل الحقول عند فشل أي cache.
     """
     # ✅ v7.6.2: تمرير واحد فقط لجمع كل الإحصائيات بالتوازي
     stats_results = await asyncio.gather(
@@ -947,7 +984,8 @@ async def get_cache_stats() -> Dict:
         s = stats_results[_idx]
         _idx += 1
         if isinstance(s, BaseException):
-            return {'size': 0, 'stampede_locks': 0}
+            # ✅ v7.6.3: fallback كامل بدل قالب جزئي
+            return _empty_stats()
         return s
 
     sec_s = _next_stat()
