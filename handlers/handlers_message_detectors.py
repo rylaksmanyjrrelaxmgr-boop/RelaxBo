@@ -5,47 +5,28 @@
 handlers_message_detectors.py
 ===============================================================================
 🛡️ Relax Manager — Advanced Spam / Anti-Evasion Detection Engine
-Version: 3.0.0 UNIFIED (7 Layers)
+Version: 3.0.1 UNIFIED (7 Layers)
 
 محرك كشف مستقل عن handlers_message.py.
 
 ===============================================================================
-الطبقات (كلها في ملف واحد):
+🆕 v3.0.1 (BUTTON-LINK-DETECTION-FIX):
+    🔴 FIX-1: _extract_url_from_button يدعم الآن:
+              url / web_app / login_url / copy_text /
+              switch_inline_query / callback_data
+    🔴 FIX-2: _compute_spam_score — لا يُقصّ score إلى 4 عندما
+              الروابط موجودة كأزرار (is_button_only_case)
+    🔴 FIX-3: _MessageContext._populate — كشف أوسع للأزرار
+              (فحص مباشر لـ reply_markup.inline_keyboard[*].url)
+    🟢 FIX-4: Log تشخيصي 🔘 BUTTONS_DETECTED في _populate
 ===============================================================================
-    Layer 0: TEXT         — نصوص + روابط + Unicode evasion (الأساس)
+    Layer 0: TEXT         — نصوص + روابط + Unicode evasion
     Layer 1: OCR          — Tesseract + QR codes
     Layer 2: AUDIO        — Whisper / Google Speech-to-Text
     Layer 3: URL          — Safe Browsing + WHOIS + expansion
     Layer 4: METADATA     — Bio / Channel / Name
     Layer 5: OBFUSCATION  — Base64 / ROT13 / Hex / URL encode
     Layer 6: BEHAVIORAL   — Rate limit + Cross-message + Edits
-===============================================================================
-
-v3.0.0 UNIFIED (7 layers):
-    ✅ دمج كل الطبقات في ملف واحد
-    ✅ الحفاظ على API الكامل لـ v2.3.3 (توافق عكسي 100%)
-    ✅ L0 Text = v2.3.3 كاملاً بدون تغيير سلوكي
-    ✅ L1 OCR (اختياري، graceful)
-    ✅ L2 Audio STT (اختياري، graceful)
-    ✅ L3 URL Enrichment (Safe Browsing + WHOIS)
-    ✅ L4 Metadata (Bio / Channel)
-    ✅ L5 Obfuscation Breaker (Base64/ROT13/Hex)
-    ✅ L6 Behavioral (Rate limit + Split URL)
-    ✅ Orchestrator موحّد (analyze_message_full)
-    ✅ أوزان مرجّحة لكل طبقة
-    ✅ Export متوافق مع v2.3.3
-
-v2.3.3 HARDENED++ (TLD expansion):
-    🟢 FIX-P: توسيع _COMMON_TLDS
-    🟢 FIX-Q: TLDs Adult/Spam جديدة
-    🟢 FIX-R: تحديث الإصدار
-    🟢 FIX-S: _is_random_domain() heuristic
-
-v2.3.2 HARDENED++ (bugfix + perf):
-    🟢 FIX-A..O: (انظر changelog السابق)
-
-التوافق:
-    يحافظ على كل أسماء الدوال العامة والخاصة من v2.3.3.
 ===============================================================================
 """
 
@@ -78,7 +59,7 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
-_DETECTORS_VERSION = "3.0.0 UNIFIED"
+_DETECTORS_VERSION = "3.0.1 UNIFIED"
 
 
 # =============================================================================
@@ -100,9 +81,7 @@ def _env_bool(name: str, default: bool = True) -> bool:
 DEBUG_DIAG = _env_bool("DEBUG_DIAG", False)
 DEBUG_SPAM = _env_bool("DEBUG_SPAM", False)
 
-# -----------------------------------------------------------------------------
-# Layer toggles (v3.0.0)
-# -----------------------------------------------------------------------------
+# Layer toggles
 TEXT_LAYER_ENABLED = _env_bool("TEXT_LAYER_ENABLED", True)
 OCR_LAYER_ENABLED = _env_bool("OCR_LAYER_ENABLED", True)
 AUDIO_LAYER_ENABLED = _env_bool("AUDIO_LAYER_ENABLED", True)
@@ -111,9 +90,7 @@ METADATA_LAYER_ENABLED = _env_bool("METADATA_LAYER_ENABLED", True)
 OBFUSCATION_LAYER_ENABLED = _env_bool("OBFUSCATION_LAYER_ENABLED", True)
 BEHAVIORAL_LAYER_ENABLED = _env_bool("BEHAVIORAL_LAYER_ENABLED", True)
 
-# -----------------------------------------------------------------------------
-# Text-layer antievasion toggles (v2.3.x)
-# -----------------------------------------------------------------------------
+# Text-layer antievasion
 ANTIEVASION_ENTITY_LINK = _env_bool("ANTIEVASION_ENTITY_LINK", True)
 ANTIEVASION_BUTTON_LINK = _env_bool("ANTIEVASION_BUTTON_LINK", True)
 ANTIEVASION_SCHEMELESS_URL = _env_bool("ANTIEVASION_SCHEMELESS_URL", True)
@@ -139,9 +116,7 @@ ANTIEVASION_EXTRA_SCRIPTS = _env_bool("ANTIEVASION_EXTRA_SCRIPTS", True)
 ANTIEVASION_ALT_SCHEMES = _env_bool("ANTIEVASION_ALT_SCHEMES", True)
 ANTIEVASION_RANDOM_DOMAIN = _env_bool("ANTIEVASION_RANDOM_DOMAIN", True)
 
-# -----------------------------------------------------------------------------
-# URL enrichment (Layer 3)
-# -----------------------------------------------------------------------------
+# URL enrichment
 SAFE_BROWSING_API_KEY = os.getenv("SAFE_BROWSING_API_KEY", "")
 URL_ENRICH_ENABLED = _env_bool("URL_ENRICH_ENABLED", True)
 URL_EXPAND_TIMEOUT = int(os.getenv("URL_EXPAND_TIMEOUT", "5"))
@@ -150,9 +125,7 @@ URL_ENRICH_MAX_URLS = int(os.getenv("URL_ENRICH_MAX_URLS", "5"))
 WHOIS_ENABLED = _env_bool("WHOIS_ENABLED", True)
 WHOIS_NEW_DOMAIN_DAYS = int(os.getenv("WHOIS_NEW_DOMAIN_DAYS", "30"))
 
-# -----------------------------------------------------------------------------
-# Audio layer (Layer 2)
-# -----------------------------------------------------------------------------
+# Audio
 AUDIO_USE_WHISPER = _env_bool("AUDIO_USE_WHISPER", False)
 
 
@@ -222,16 +195,12 @@ MAX_REASON_COUNT = 80
 RANDOM_DOMAIN_MIN_LENGTH = 10
 RANDOM_DOMAIN_MAX_VOWEL_RATIO = 0.35
 
-# -----------------------------------------------------------------------------
-# OCR (Layer 1)
-# -----------------------------------------------------------------------------
+# OCR
 OCR_MIN_CONFIDENCE = 40
 OCR_MAX_IMAGE_SIZE = (2000, 2000)
 OCR_LANGUAGES = os.getenv("OCR_LANGUAGES", "ara+eng+fas+rus")
 
-# -----------------------------------------------------------------------------
-# Behavioral (Layer 6)
-# -----------------------------------------------------------------------------
+# Behavioral
 RATE_WINDOW_SECONDS = 60
 RATE_MAX_MESSAGES = 15
 RATE_MAX_SHORT = 10
@@ -239,9 +208,7 @@ RATE_MAX_URLS = 5
 CROSS_MSG_WINDOW = 30
 CROSS_MSG_MAX_PARTS = 3
 
-# -----------------------------------------------------------------------------
-# Final aggregation
-# -----------------------------------------------------------------------------
+# Aggregation
 FINAL_THRESHOLD = 5
 
 LAYER_WEIGHTS = {
@@ -254,11 +221,7 @@ LAYER_WEIGHTS = {
     "behavioral": 1.0,
 }
 
-
-# =============================================================================
-# CATEGORY CAPS (text layer)
-# =============================================================================
-
+# Category caps
 _SCORE_CAP_LINK = 8
 _SCORE_CAP_CONTENT = 9
 _SCORE_CAP_CTA = 5
@@ -268,15 +231,13 @@ _SCORE_CAP_CONTEXT = 8
 
 
 # =============================================================================
-# TLD WHITELIST (v2.3.3)
+# TLD WHITELIST
 # =============================================================================
 
 _COMMON_TLDS = frozenset({
-    # generic legacy
     "com", "net", "org", "io", "me", "co", "cc",
     "info", "gov", "edu", "biz", "name", "mobi",
     "asia", "tel",
-    # generic modern
     "xyz", "top", "site", "online", "live", "vip", "pro",
     "tv", "app", "dev", "link", "click", "shop", "store",
     "club", "work", "space", "website", "fun", "art",
@@ -302,7 +263,6 @@ _COMMON_TLDS = frozenset({
     "systems", "tech", "technology",
     "software", "codes", "run", "mobile",
     "icu", "bond", "cyou", "zip", "mov",
-    # Arab region
     "ru", "cn", "de", "fr", "uk", "us",
     "eg", "sa", "ae", "kw", "qa", "bh",
     "om", "jo", "lb", "sy", "iq", "ma",
@@ -354,7 +314,7 @@ _COMBINING_RANGES = (
 
 
 # =============================================================================
-# HOMOGLYPHS
+# HOMOGLYPHS / LEETSPEAK
 # =============================================================================
 
 _HOMOGLYPH_MAP = {
@@ -370,11 +330,6 @@ _HOMOGLYPH_MAP = {
     "μ": "m", "ν": "n", "ο": "o", "ρ": "p", "τ": "t", "χ": "x",
     "υ": "y", "ζ": "z",
 }
-
-
-# =============================================================================
-# LEETSPEAK
-# =============================================================================
 
 _LEET_MAP = str.maketrans({
     "0": "o", "1": "i", "2": "z", "3": "e", "4": "a",
@@ -493,7 +448,7 @@ _MULTILINE_URL_SCHEME_RE = re.compile(
 
 
 # =============================================================================
-# REGEX — OBFUSCATION LAYER
+# REGEX — OBFUSCATION / URL
 # =============================================================================
 
 _BASE64_RE = re.compile(r"^[A-Za-z0-9+/]{16,}={0,2}$")
@@ -503,11 +458,6 @@ _URL_SIGNATURES = (
     "http://", "https://", "www.", "t.me/", "telegram.me/",
     ".com", ".net", ".org", ".io", ".xyz", ".digital",
 )
-
-
-# =============================================================================
-# REGEX — URL LAYER
-# =============================================================================
 
 _URL_IN_TEXT_RE = re.compile(
     r"(?i)\b(?:https?://|www\.|t\.me/|telegram\.me/)\S+"
@@ -645,7 +595,7 @@ _POSTBOT_REGEXES = [
 
 
 # =============================================================================
-# RANDOM DOMAIN HEURISTIC (v2.3.3)
+# RANDOM DOMAIN HEURISTIC
 # =============================================================================
 
 _NATURAL_VOWEL_SEQUENCES = (
@@ -1270,25 +1220,61 @@ def _has_link_entity(message: Any) -> bool:
     return bool(_extract_entity_urls(message))
 
 
+# ═══════════════════════════════════════════════════════════════════
+# 🆕 v3.0.1 FIX-1: زر شامل — يدعم كل الأنواع
+# ═══════════════════════════════════════════════════════════════════
+
 def _extract_url_from_button(button: Any) -> Optional[str]:
+    """
+    v3.0.1: يدعم كل أنواع أزرار PTB التي قد تحتوي على رابط:
+      - url           (InlineKeyboardButton الأساسي)
+      - web_app       (WebAppInfo.url)
+      - login_url     (LoginUrl.url)
+      - copy_text     (v20.8+ — الزر ينسخ نصاً)
+      - switch_inline_query
+      - callback_data (نادراً ما يخفي رابطاً)
+    """
     if button is None:
         return None
     try:
+        # 1) url مباشر (الأكثر شيوعاً)
         url = getattr(button, "url", None)
         if url:
             return str(url)
+
+        # 2) web_app
         web_app = getattr(button, "web_app", None)
         if web_app is not None:
             web_url = getattr(web_app, "url", None)
             if web_url:
                 return str(web_url)
             return "web_app://button"
+
+        # 3) login_url
         login_url = getattr(button, "login_url", None)
         if login_url is not None:
             login_web_url = getattr(login_url, "url", None)
             if login_web_url:
                 return str(login_web_url)
             return "login_url://button"
+
+        # 4) copy_text (v20.8+)
+        copy_text = getattr(button, "copy_text", None)
+        if copy_text is not None:
+            text = getattr(copy_text, "text", None)
+            if text and _URL_IN_TEXT_RE.search(str(text)):
+                return str(text)
+
+        # 5) switch_inline_query
+        switch_q = getattr(button, "switch_inline_query", None)
+        if switch_q and _URL_IN_TEXT_RE.search(str(switch_q)):
+            return str(switch_q)
+
+        # 6) callback_data (نادر)
+        cb = getattr(button, "callback_data", None)
+        if cb and isinstance(cb, str) and _URL_IN_TEXT_RE.search(cb):
+            return cb
+
     except Exception:
         pass
     return None
@@ -1302,6 +1288,7 @@ def _button_is_external(button: Any) -> bool:
             getattr(button, "url", None)
             or getattr(button, "web_app", None) is not None
             or getattr(button, "login_url", None) is not None
+            or getattr(button, "copy_text", None) is not None
         )
     except Exception:
         return False
@@ -1642,10 +1629,33 @@ class _MessageContext:
                 self.analysis_text
             )
             self.has_random_domain = bool(self.random_domains)
+
+            # ═══════════════════════════════════════════════════════
+            # 🆕 v3.0.1 FIX-3: كشف أوسع للأزرار
+            # ═══════════════════════════════════════════════════════
+            direct_button_urls = False
+            try:
+                _markup = getattr(message, "reply_markup", None)
+                _rows = getattr(_markup, "inline_keyboard", None) or []
+                for _row in _rows:
+                    for _b in (_row or []):
+                        _u = getattr(_b, "url", None)
+                        if isinstance(_u, str) and _u.strip():
+                            direct_button_urls = True
+                            break
+                    if direct_button_urls:
+                        break
+            except Exception:
+                pass
+
             self.has_button_link = bool(
                 self.button_link_urls
-                or any("://button" in str(x) for x in self.button_urls_raw)
+                or any(
+                    "://button" in str(x) for x in self.button_urls_raw
+                )
+                or direct_button_urls
             )
+
             self.has_any_link = bool(
                 self.has_link_entity
                 or self.has_button_link
@@ -1684,6 +1694,22 @@ class _MessageContext:
                     or "Forwarded from" in self.full_text
                 )
             )
+
+            # 🆕 v3.0.1 FIX-4: تشخيص فوري للأزرار
+            if DEBUG_DIAG and self.button_count > 0:
+                try:
+                    logger.info(
+                        "🔘 BUTTONS_DETECTED | count=%d "
+                        "urls=%d raw=%d has_link=%s texts=%s",
+                        self.button_count,
+                        len(self.button_urls),
+                        len(self.button_urls_raw),
+                        self.has_button_link,
+                        self.button_texts[:5],
+                    )
+                except Exception:
+                    pass
+
         except Exception as exc:
             if DEBUG_DIAG:
                 try:
@@ -2142,6 +2168,7 @@ def _compute_spam_score(
                 "postbot_confidence": 0,
                 "signal_categories": [], "independent_signals": 0,
                 "random_domains": [], "has_random_domain": False,
+                "is_button_only_case": False,
             }
             return result if return_diagnostics else (0, [])
 
@@ -2588,6 +2615,22 @@ def _compute_spam_score(
         if only_weak_username:
             score = min(score, 1)
 
+        # ═══════════════════════════════════════════════════════════
+        # 🆕 v3.0.1 FIX-2: لا نُطبّق سقف "الرابط فقط" على الأزرار
+        # ═══════════════════════════════════════════════════════════
+        #
+        # قبل: كان السقف يُطبّق حتى على الرسائل التي تحتوي 3 أزرار
+        #       بروابط → score=4 → لا يُحذف.
+        #
+        # بعد: نستثني الحالة التي تكون الروابط فيها أزراراً
+        #      (is_button_only_case) — الأزرار دليل قوي بحد ذاتها.
+        #
+        is_button_only_case = bool(
+            link_score > 0
+            and ctx.has_button_link
+            and not link_detected
+        )
+
         if (
             link_score > 0
             and content_score == 0
@@ -2595,8 +2638,10 @@ def _compute_spam_score(
             and evasion_score == 0
             and context_score == 0
             and structure_score == 0
+            and not is_button_only_case  # ← الاستثناء الجديد
         ):
             score = min(score, 4)
+            reasons.append("link_only_capped")
 
         # ---- CLAMP ----
         score = max(0, min(MAX_SPAM_SCORE, int(score)))
@@ -2630,6 +2675,11 @@ def _compute_spam_score(
                     and ctx.has_random_domain
                     and (cta >= 1 or promo >= 1)
                 )
+                or (
+                    # 🆕 v3.0.1: أزرار كثيرة = evidence كافٍ
+                    is_button_only_case
+                    and external_buttons >= 3
+                )
             )
         )
 
@@ -2650,9 +2700,12 @@ def _compute_spam_score(
         if DEBUG_SPAM:
             try:
                 logger.debug(
-                    "[SPAM] score=%s confidence=%s categories=%s reasons=%s",
+                    "[SPAM] score=%s confidence=%s categories=%s "
+                    "button_only=%s reasons=%s",
                     score, confidence,
-                    sorted(independent_categories), reasons,
+                    sorted(independent_categories),
+                    is_button_only_case,
+                    reasons,
                 )
             except Exception:
                 pass
@@ -2673,6 +2726,7 @@ def _compute_spam_score(
             },
             "random_domains": list(ctx.random_domains),
             "has_random_domain": ctx.has_random_domain,
+            "is_button_only_case": is_button_only_case,
         }
 
         return result if return_diagnostics else (score, reasons)
@@ -2690,6 +2744,7 @@ def _compute_spam_score(
                 "postbot_confidence": 0, "signal_categories": [],
                 "independent_signals": 0,
                 "random_domains": [], "has_random_domain": False,
+                "is_button_only_case": False,
             }
         return 0, []
 
@@ -2723,8 +2778,6 @@ def extract_text_from_image(
     *,
     languages: str = OCR_LANGUAGES,
 ) -> str:
-    """استخراج النص من صورة (Layer 1)."""
-
     if not _OCR_AVAILABLE or not image_bytes:
         return ""
     try:
@@ -2746,8 +2799,6 @@ def extract_text_from_image(
 
 
 def extract_qr_codes(image_bytes: bytes) -> List[str]:
-    """استخراج QR codes من صورة (Layer 1)."""
-
     if not _QR_AVAILABLE or not image_bytes:
         return []
     results: List[str] = []
@@ -2786,17 +2837,10 @@ def extract_image_content(
     message: Any,
     bot: Any = None,
 ) -> Tuple[str, List[str]]:
-    """
-    Layer 1: استخراج نص + QR من صور الرسالة.
-    Returns: (text, qr_codes)
-    """
-
     if not OCR_LAYER_ENABLED or not _OCR_AVAILABLE:
         return "", []
-
     text_parts: List[str] = []
     qr_parts: List[str] = []
-
     try:
         photo = getattr(message, "photo", None)
         if photo:
@@ -2839,7 +2883,6 @@ def extract_image_content(
                 text_parts.append(str(emoji))
     except Exception as exc:
         logger.debug("extract_image_content error: %r", exc)
-
     return "\n".join(text_parts), qr_parts
 
 
@@ -2910,8 +2953,6 @@ def _transcribe_with_google(wav_bytes: bytes) -> str:
 
 
 def transcribe_audio(audio_bytes: bytes, *, use_whisper: bool = False) -> str:
-    """Layer 2: تحويل صوت → نص."""
-
     if not audio_bytes:
         return ""
     wav_bytes = _ogg_to_wav_bytes(audio_bytes)
@@ -2925,8 +2966,6 @@ def transcribe_audio(audio_bytes: bytes, *, use_whisper: bool = False) -> str:
 
 
 def extract_audio_content(message: Any, bot: Any = None) -> str:
-    """Layer 2: استخراج نص من voice/audio/video_note."""
-
     if not AUDIO_LAYER_ENABLED or not _AUDIO_AVAILABLE:
         return ""
     text_parts: List[str] = []
@@ -2956,8 +2995,6 @@ def extract_audio_content(message: Any, bot: Any = None) -> str:
 # =============================================================================
 
 def expand_url(url: str, *, max_hops: int = URL_EXPAND_MAX_HOPS) -> str:
-    """Layer 3: متابعة redirects للحصول على URL النهائي."""
-
     if not _REQUESTS_AVAILABLE or not url:
         return url
     current = url
@@ -2985,8 +3022,6 @@ def expand_url(url: str, *, max_hops: int = URL_EXPAND_MAX_HOPS) -> str:
 
 
 def is_shortener(url: str) -> bool:
-    """Layer 3: هل الرابط من خدمة اختصار؟"""
-
     try:
         domain = urlparse(url).netloc.lower()
         domain = re.sub(r"^www\.", "", domain)
@@ -2996,8 +3031,6 @@ def is_shortener(url: str) -> bool:
 
 
 def check_safe_browsing(url: str) -> Dict[str, Any]:
-    """Layer 3: Google Safe Browsing API."""
-
     if not SAFE_BROWSING_API_KEY or not _REQUESTS_AVAILABLE:
         return {"safe": True, "checked": False, "reason": "no_api_key"}
     try:
@@ -3043,8 +3076,6 @@ def check_safe_browsing(url: str) -> Dict[str, Any]:
 
 
 def get_domain_age_days(url: str) -> Optional[int]:
-    """Layer 3: عمر النطاق بالأيام (WHOIS)."""
-
     if not _WHOIS_AVAILABLE or not WHOIS_ENABLED:
         return None
     try:
@@ -3066,8 +3097,6 @@ def get_domain_age_days(url: str) -> Optional[int]:
 
 
 def analyze_url(url: str) -> Dict[str, Any]:
-    """Layer 3: تحليل شامل لرابط واحد."""
-
     result: Dict[str, Any] = {
         "original": url,
         "is_shortener": is_shortener(url),
@@ -3103,8 +3132,6 @@ def analyze_url(url: str) -> Dict[str, Any]:
 
 
 def analyze_urls(urls: List[str]) -> List[Dict[str, Any]]:
-    """Layer 3: تحليل قائمة روابط (بحد أقصى URL_ENRICH_MAX_URLS)."""
-
     return [analyze_url(u) for u in urls[:URL_ENRICH_MAX_URLS]]
 
 
@@ -3113,8 +3140,6 @@ def analyze_urls(urls: List[str]) -> List[Dict[str, Any]]:
 # =============================================================================
 
 def extract_metadata_text(message: Any) -> str:
-    """Layer 4: جمع كل النصوص من بيانات المرسل والاسم."""
-
     parts: List[str] = []
     try:
         from_user = getattr(message, "from_user", None)
@@ -3144,8 +3169,6 @@ def extract_metadata_text(message: Any) -> str:
 
 
 def metadata_has_suspicious_content(message: Any) -> bool:
-    """Layer 4: فحص سريع لبيانات المرسل."""
-
     text = extract_metadata_text(message)
     if not text:
         return False
@@ -3156,8 +3179,6 @@ def metadata_has_suspicious_content(message: Any) -> bool:
 
 
 def extract_metadata_urls(message: Any) -> List[str]:
-    """Layer 4: استخراج روابط من بيانات المرسل."""
-
     text = extract_metadata_text(message)
     if not text:
         return []
@@ -3181,8 +3202,6 @@ def _has_url_signature(text: str) -> bool:
 
 
 def try_decode_base64(text: str) -> str:
-    """Layer 5: محاولة فك Base64."""
-
     for pattern in (_BASE64_RE, _BASE64_URLSAFE_RE):
         if not pattern.match(text):
             continue
@@ -3200,8 +3219,6 @@ def try_decode_base64(text: str) -> str:
 
 
 def try_decode_rot13(text: str) -> str:
-    """Layer 5: محاولة فك ROT13."""
-
     try:
         decoded = codecs.decode(text, "rot_13")
         if _looks_like_text(decoded) and _has_url_signature(decoded):
@@ -3212,8 +3229,6 @@ def try_decode_rot13(text: str) -> str:
 
 
 def try_decode_hex(text: str) -> str:
-    """Layer 5: محاولة فك Hex."""
-
     cleaned = re.sub(r"[\s:,-]", "", text)
     if len(cleaned) < 16 or len(cleaned) % 2 != 0:
         return ""
@@ -3229,8 +3244,6 @@ def try_decode_hex(text: str) -> str:
 
 
 def try_decode_url(text: str) -> str:
-    """Layer 5: محاولة فك URL encoding."""
-
     if "%" not in text:
         return ""
     try:
@@ -3243,8 +3256,6 @@ def try_decode_url(text: str) -> str:
 
 
 def try_decode_reverse(text: str) -> str:
-    """Layer 5: محاولة فك النص المعكوس."""
-
     if len(text) < 10:
         return ""
     reversed_text = text[::-1]
@@ -3254,8 +3265,6 @@ def try_decode_reverse(text: str) -> str:
 
 
 def find_obfuscated_payloads(text: str) -> List[Tuple[str, str]]:
-    """Layer 5: إرجاع قائمة (نوع التشفير، النص المفكوك)."""
-
     results: List[Tuple[str, str]] = []
     if not text:
         return results
@@ -3282,8 +3291,6 @@ def find_obfuscated_payloads(text: str) -> List[Tuple[str, str]]:
 
 
 def has_any_obfuscation(text: str) -> bool:
-    """Layer 5: فحص سريع."""
-
     return bool(find_obfuscated_payloads(text))
 
 
@@ -3308,8 +3315,6 @@ CLEANUP_INTERVAL = 300
 
 
 def record_message(user_id: int, text: str, has_url: bool = False) -> None:
-    """Layer 6: تسجيل رسالة للمستخدم."""
-
     now = time.time()
     _user_message_times[user_id].append(now)
     if len(text) < 20:
@@ -3319,8 +3324,6 @@ def record_message(user_id: int, text: str, has_url: bool = False) -> None:
 
 
 def check_rate_limit(user_id: int) -> Tuple[bool, Optional[str]]:
-    """Layer 6: فحص rate limit. Returns: (is_suspicious, reason)."""
-
     now = time.time()
     cutoff = now - RATE_WINDOW_SECONDS
     times = _user_message_times[user_id]
@@ -3337,8 +3340,6 @@ def check_rate_limit(user_id: int) -> Tuple[bool, Optional[str]]:
 def check_split_url_pattern(
     user_id: int, current_text: str
 ) -> Tuple[bool, Optional[str]]:
-    """Layer 6: كشف رابط مقسم على عدة رسائل."""
-
     now = time.time()
     cutoff = now - CROSS_MSG_WINDOW
     recent = _user_short_messages[user_id]
@@ -3363,8 +3364,6 @@ def track_edit(
     original_text: str,
     new_text: str,
 ) -> Tuple[bool, Optional[str]]:
-    """Layer 6: تسجيل تعديل رسالة والتحقق من نمط مشبوه."""
-
     key = (chat_id, message_id)
     now = time.time()
     if key in _edited_messages:
@@ -3379,8 +3378,6 @@ def track_edit(
 
 
 def cleanup_old_data() -> None:
-    """Layer 6: تنظيف البيانات القديمة."""
-
     global _last_cleanup
     now = time.time()
     if now - _last_cleanup < CLEANUP_INTERVAL:
@@ -3398,7 +3395,7 @@ def cleanup_old_data() -> None:
 
 
 # =============================================================================
-# ORCHESTRATOR (v3.0.0)
+# ORCHESTRATOR (v3.0.1)
 # =============================================================================
 
 @dataclass
@@ -3425,10 +3422,7 @@ class SpamVerdict:
         }
 
 
-def _run_text_layer(
-    message: Any,
-    verdict: SpamVerdict,
-) -> Dict[str, Any]:
+def _run_text_layer(message: Any, verdict: SpamVerdict) -> Dict[str, Any]:
     if not TEXT_LAYER_ENABLED:
         return {}
     try:
@@ -3441,11 +3435,7 @@ def _run_text_layer(
         return {}
 
 
-def _run_ocr_layer(
-    message: Any,
-    bot: Any,
-    verdict: SpamVerdict,
-) -> None:
+def _run_ocr_layer(message: Any, bot: Any, verdict: SpamVerdict) -> None:
     if not OCR_LAYER_ENABLED or not _OCR_AVAILABLE:
         return
     try:
@@ -3455,20 +3445,14 @@ def _run_ocr_layer(
         combined = "\n".join(filter(None, [ocr_text] + qr_codes))
         verdict.extracted_content["ocr"] = combined
         ocr_ctx = _MessageContext.from_text(combined)
-        ocr_result = _compute_spam_score(
-            ocr_ctx, return_diagnostics=True
-        )
+        ocr_result = _compute_spam_score(ocr_ctx, return_diagnostics=True)
         verdict.layer_scores["ocr"] = ocr_result.get("score", 0)
         verdict.layer_reasons["ocr"] = ocr_result.get("reasons", [])
     except Exception as exc:
         logger.debug("L1 error: %r", exc)
 
 
-def _run_audio_layer(
-    message: Any,
-    bot: Any,
-    verdict: SpamVerdict,
-) -> None:
+def _run_audio_layer(message: Any, bot: Any, verdict: SpamVerdict) -> None:
     if not AUDIO_LAYER_ENABLED or not _AUDIO_AVAILABLE:
         return
     try:
@@ -3477,19 +3461,14 @@ def _run_audio_layer(
             return
         verdict.extracted_content["audio"] = audio_text
         audio_ctx = _MessageContext.from_text(audio_text)
-        audio_result = _compute_spam_score(
-            audio_ctx, return_diagnostics=True
-        )
+        audio_result = _compute_spam_score(audio_ctx, return_diagnostics=True)
         verdict.layer_scores["audio"] = audio_result.get("score", 0)
         verdict.layer_reasons["audio"] = audio_result.get("reasons", [])
     except Exception as exc:
         logger.debug("L2 error: %r", exc)
 
 
-def _run_url_layer(
-    text_result: Dict[str, Any],
-    verdict: SpamVerdict,
-) -> None:
+def _run_url_layer(text_result: Dict[str, Any], verdict: SpamVerdict) -> None:
     if not URL_LAYER_ENABLED or not URL_ENRICH_ENABLED:
         return
     try:
@@ -3520,10 +3499,7 @@ def _run_url_layer(
         logger.debug("L3 error: %r", exc)
 
 
-def _run_metadata_layer(
-    message: Any,
-    verdict: SpamVerdict,
-) -> None:
+def _run_metadata_layer(message: Any, verdict: SpamVerdict) -> None:
     if not METADATA_LAYER_ENABLED:
         return
     try:
@@ -3532,19 +3508,14 @@ def _run_metadata_layer(
             return
         verdict.extracted_content["metadata"] = meta_text
         meta_ctx = _MessageContext.from_text(meta_text)
-        meta_result = _compute_spam_score(
-            meta_ctx, return_diagnostics=True
-        )
+        meta_result = _compute_spam_score(meta_ctx, return_diagnostics=True)
         verdict.layer_scores["metadata"] = meta_result.get("score", 0)
         verdict.layer_reasons["metadata"] = meta_result.get("reasons", [])
     except Exception as exc:
         logger.debug("L4 error: %r", exc)
 
 
-def _run_obfuscation_layer(
-    message: Any,
-    verdict: SpamVerdict,
-) -> None:
+def _run_obfuscation_layer(message: Any, verdict: SpamVerdict) -> None:
     if not OBFUSCATION_LAYER_ENABLED:
         return
     try:
@@ -3557,9 +3528,7 @@ def _run_obfuscation_layer(
         for method, decoded in payloads:
             obf_reasons.append(f"decoded_{method}")
             dec_ctx = _MessageContext.from_text(decoded)
-            dec_result = _compute_spam_score(
-                dec_ctx, return_diagnostics=True
-            )
+            dec_result = _compute_spam_score(dec_ctx, return_diagnostics=True)
             obf_score += dec_result.get("score", 0)
         verdict.layer_scores["obfuscation"] = obf_score
         verdict.layer_reasons["obfuscation"] = obf_reasons
@@ -3623,21 +3592,9 @@ def _aggregate_verdict(verdict: SpamVerdict) -> None:
 
 
 def analyze_message_full(message: Any, bot: Any = None) -> SpamVerdict:
-    """
-    v3.0.0: تحليل شامل عبر كل الطبقات السبع.
-
-    Args:
-        message: رسالة Telegram.
-        bot: instance الـ Bot (مطلوب لـ OCR/Audio).
-
-    Returns:
-        SpamVerdict يحتوي على total_score + تفاصيل كل طبقة.
-    """
-
     verdict = SpamVerdict(
         is_spam=False, total_score=0.0, confidence="none"
     )
-
     text_result = _run_text_layer(message, verdict)
     _run_ocr_layer(message, bot, verdict)
     _run_audio_layer(message, bot, verdict)
@@ -3645,7 +3602,6 @@ def analyze_message_full(message: Any, bot: Any = None) -> SpamVerdict:
     _run_metadata_layer(message, verdict)
     _run_obfuscation_layer(message, verdict)
     _run_behavioral_layer(message, text_result, verdict)
-
     _aggregate_verdict(verdict)
 
     if DEBUG_SPAM:
@@ -3667,10 +3623,6 @@ def analyze_message_full(message: Any, bot: Any = None) -> SpamVerdict:
 # =============================================================================
 
 def analyze_message(message: Any) -> Dict[str, Any]:
-    """
-    تحليل نصي (Layer 0) — API متوافق مع v2.3.3.
-    """
-
     ctx = _MessageContext(message)
     result = _compute_spam_score(ctx, return_diagnostics=True)
     result.update({
@@ -3700,29 +3652,21 @@ def analyze_message(message: Any) -> Dict[str, Any]:
 
 
 def is_spam(message: Any) -> bool:
-    """فحص سريع Layer 0 فقط (متوافق v2.3.3)."""
-
     score, _ = _compute_spam_score(message)
     return score >= SPAM_SCORE_THRESHOLD
 
 
 def is_high_confidence_spam(message: Any) -> bool:
-    """فحص Layer 0 فقط (متوافق v2.3.3)."""
-
     score, _ = _compute_spam_score(message)
     return score >= SPAM_HARD_THRESHOLD
 
 
 def is_critical_spam(message: Any) -> bool:
-    """فحص Layer 0 فقط (متوافق v2.3.3)."""
-
     score, _ = _compute_spam_score(message)
     return score >= SPAM_CRITICAL_THRESHOLD
 
 
 def should_ignore_as_low_signal(message: Any) -> bool:
-    """فحص Layer 0 فقط (متوافق v2.3.3)."""
-
     try:
         ctx = _MessageContext(message)
         if not ctx.analysis_text:
@@ -3736,8 +3680,6 @@ def should_ignore_as_low_signal(message: Any) -> bool:
 
 
 def get_spam_diagnostics(message: Any) -> Dict[str, Any]:
-    """تشخيص شامل (متوافق v2.3.3)."""
-
     try:
         ctx = _MessageContext(message)
         score_info = _compute_spam_score(ctx, return_diagnostics=True)
@@ -3835,9 +3777,6 @@ def get_spam_diagnostics(message: Any) -> Dict[str, Any]:
 # =============================================================================
 
 __all__ = [
-    # -------------------------------------------------------------------------
-    # Config / toggles
-    # -------------------------------------------------------------------------
     "DEBUG_DIAG", "DEBUG_SPAM",
     "TEXT_LAYER_ENABLED", "OCR_LAYER_ENABLED", "AUDIO_LAYER_ENABLED",
     "URL_LAYER_ENABLED", "METADATA_LAYER_ENABLED",
@@ -3858,23 +3797,14 @@ __all__ = [
     "ANTIEVASION_EXTENDED_COMBINING", "ANTIEVASION_EXTRA_SCRIPTS",
     "ANTIEVASION_ALT_SCHEMES", "ANTIEVASION_RANDOM_DOMAIN",
 
-    # -------------------------------------------------------------------------
-    # Thresholds
-    # -------------------------------------------------------------------------
     "SPAM_SCORE_THRESHOLD", "POSTBOT_AUTO_BLOCK_CONFIDENCE",
     "SPAM_HARD_THRESHOLD", "SPAM_CRITICAL_THRESHOLD",
     "RANDOM_DOMAIN_MIN_LENGTH", "RANDOM_DOMAIN_MAX_VOWEL_RATIO",
     "FINAL_THRESHOLD", "LAYER_WEIGHTS",
 
-    # -------------------------------------------------------------------------
-    # Dataclasses / contexts
-    # -------------------------------------------------------------------------
     "SpamVerdict",
     "_MessageContext",
 
-    # -------------------------------------------------------------------------
-    # Layer 0 (Text) — compatibility
-    # -------------------------------------------------------------------------
     "_strip_combining_marks", "_deleet", "_apply_homoglyphs_safe",
     "_normalize_text", "_strip_emoji_for_domain",
     "_has_hidden_chars", "_merge_split_urls",
@@ -3900,45 +3830,24 @@ __all__ = [
     "_is_random_domain", "_has_random_domain",
     "_extract_random_domains", "_shannon_entropy",
 
-    # -------------------------------------------------------------------------
-    # Layer 1 (OCR)
-    # -------------------------------------------------------------------------
     "extract_text_from_image", "extract_qr_codes",
     "extract_image_content",
 
-    # -------------------------------------------------------------------------
-    # Layer 2 (Audio)
-    # -------------------------------------------------------------------------
     "transcribe_audio", "extract_audio_content",
 
-    # -------------------------------------------------------------------------
-    # Layer 3 (URL)
-    # -------------------------------------------------------------------------
     "expand_url", "is_shortener", "check_safe_browsing",
     "get_domain_age_days", "analyze_url", "analyze_urls",
 
-    # -------------------------------------------------------------------------
-    # Layer 4 (Metadata)
-    # -------------------------------------------------------------------------
     "extract_metadata_text", "metadata_has_suspicious_content",
     "extract_metadata_urls",
 
-    # -------------------------------------------------------------------------
-    # Layer 5 (Obfuscation)
-    # -------------------------------------------------------------------------
     "try_decode_base64", "try_decode_rot13", "try_decode_hex",
     "try_decode_url", "try_decode_reverse",
     "find_obfuscated_payloads", "has_any_obfuscation",
 
-    # -------------------------------------------------------------------------
-    # Layer 6 (Behavioral)
-    # -------------------------------------------------------------------------
     "record_message", "check_rate_limit",
     "check_split_url_pattern", "track_edit", "cleanup_old_data",
 
-    # -------------------------------------------------------------------------
-    # Orchestrator / high-level API
-    # -------------------------------------------------------------------------
     "analyze_message_full",
     "analyze_message",
     "get_spam_diagnostics",
