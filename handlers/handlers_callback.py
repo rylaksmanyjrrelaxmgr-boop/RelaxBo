@@ -1,26 +1,29 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-handlers_callback.py - معالج الأزرار (v9.7.4-corrected)
+handlers_callback.py - معالج الأزرار (v9.7.5)
 =====================================================================
+🆕 v9.7.5 (NEW SECURITY BUTTONS):
+    ✅ NC1: toggle_map — 6 أزرار أمان جديدة
+        sec_at_channel     → delete_at_channel
+        sec_tg_scheme      → delete_tg_scheme
+        sec_button_links   → delete_button_links
+        sec_emails         → delete_emails
+        sec_protected_any  → delete_protected_any
+        sec_postbot        → delete_postbot_pattern
+    ✅ NC2: activate_all/deactivate_all تشمل الأعمدة الجديدة
+    ✅ NC3: _KNOWN_CB_PREFIXES لم تتغيّر — الأزرار تحت sec_*
+    ✅ الحفاظ الكامل على سلوك v9.7.4
+
 🆕 v9.7.4 (SECOND REVIEW FIXES):
     🔴 C1: admin_toggle_gr — فشل DB يمنع leave_chat
-           (كان قد يترك Telegram و DB غير متزامنين بالعكس تماماً).
     🔴 C2: admin_restore_file — فشل صريح عند غياب دالة إعادة اتصال
-           (كان قد يترك DB مغلقاً بصمت).
     🔴 C3: _load_stats_and_edit — token بدل expected_msg_id
-           (message_id لا يتغيّر — الفحص كان لا يمنع السباق فعلياً).
     🔴 C4: _publish_single — release_half_open على early returns
-           (كان قد يترك نصف-فتح عالقاً 60s بعد post فارغ).
     🔴 C5: admin_toggle_ch — CASE WHEN COALESCE بدل 1 - banned
-           (كان يفشل مع NULL).
-
-    🟠 M1: حذف imports غير مستخدمة (Update, ContextTypes, Optional, Any).
-    🟡 N2: _safe_answer — show_alert يعمل حتى مع text فارغ.
-    🟡 N5: _handle_parameterized — startswith+slicing بدل .replace(
-           "penalty_",...).
-
-    ✅ الحفاظ الكامل على سلوك v9.7.3
+    🟠 M1: حذف imports غير مستخدمة
+    🟡 N2: _safe_answer — show_alert يعمل حتى مع text فارغ
+    🟡 N5: _handle_parameterized — startswith+slicing
 
 🆕 v9.7.3 (REVIEW FIXES):
     🔴 FIX-ADV-1: _handle_advanced_actions — startswith+slicing
@@ -28,11 +31,6 @@ handlers_callback.py - معالج الأزرار (v9.7.4-corrected)
     🟠 FIX-UPD-1: admin_send_update — فحص قناة التحديثات
     🟠 FIX-ACT-1: sec_activate_all_confirm — لا fallback غير ذرّي
     🟡 FIX-ANS-1: _safe_answer — logger.debug
-    ✅ ملاحظة DB: يجب وجود delete_protected_forward / delete_protected_any
-       في group_security.
-
-🆕 v9.7.2-final:
-    ✅ FIX-FWD-1: sec_forward يبدّل 3 أعمدة معاً
 =====================================================================
 """
 import asyncio, importlib, logging, json, time, shutil, os, re
@@ -718,13 +716,8 @@ async def _get_log_channel_menu_data(chat_id):
 
 
 async def _safe_answer(query, text=None, show_alert=False):
-    """
-    ✅ FIX-ANS-1 (v9.7.3): logger.debug بدل ابتلاع صامت.
-    ✅ N2 (v9.7.4): show_alert يعمل حتى مع text فارغ.
-    """
     if not query: return False
     try:
-        # N2: مرّر text كسلسلة (فارغة أو لا) دائماً مع show_alert
         await query.answer(text or "", show_alert=show_alert)
         return True
     except Exception as e:
@@ -1785,13 +1778,7 @@ class CallbackHandlers:
     @staticmethod
     async def _load_stats_and_edit(query, context, chat_id, lang, settings,
                                     expected_token=None):
-        """
-        ✅ C3 (v9.7.4): token بدل expected_msg_id.
-        السبب: query.message.message_id لا يتغيّر عند إعادة التحرير،
-        فكان الفحص السابق لا يمنع أي سباق فعلي.
-        """
         try:
-            # ✅ C3: فحص token
             if expected_token is not None:
                 if context.user_data.get('_sec_view_token') != expected_token:
                     logger.debug(
@@ -1805,7 +1792,6 @@ class CallbackHandlers:
                 stats = await KeyboardFactory._get_security_stats(chat_id) or {}
                 await _security_stats_cache_local.set(cache_key, stats,
                                                        ttl=SEC_STATS_CACHE_TTL)
-            # ✅ C3: تحقّق ثانٍ بعد الـawait (قد يتغيّر token أثناء الجلب)
             if expected_token is not None:
                 if context.user_data.get('_sec_view_token') != expected_token:
                     return
@@ -1835,13 +1821,10 @@ class CallbackHandlers:
             kb = KeyboardFactory.build("security", chat_id=chat_id, lang=lang)
             await safe_edit(query, text_no_stats, reply_markup=kb,
                 parse_mode='HTML', bot=context.bot)
-
-            # ✅ C3: توليد token وحفظه في user_data
             token = time.monotonic()
             try:
                 context.user_data['_sec_view_token'] = token
             except Exception: pass
-
             task = asyncio.create_task(
                 CallbackHandlers._load_stats_and_edit(
                     query, context, chat_id, lang, settings,
@@ -2208,7 +2191,6 @@ class CallbackHandlers:
                         bot=context.bot); return True
                 action = (parts[0][4:] if parts[0].startswith("sec_")
                           else parts[0])
-                # ✅ N5: startswith+slicing بدل .replace()
                 if action.startswith("penalty_"):
                     action = action[len("penalty_"):]
                 if action in ('ban', 'mute', 'kick', 'restrict', 'none'):
@@ -2979,10 +2961,6 @@ class CallbackHandlers:
 
     @staticmethod
     async def _publish_single(context, bot, ch_db_id, ch_tele, post):
-        """
-        ✅ C4 (v9.7.4): release_half_open على كل early return
-        (كان نصف-فتح يبقى عالقاً 60s بعد post فارغ أو media غير صالح).
-        """
         if isinstance(post, tuple) and len(post) == 2:
             post, _ = CallbackHandlers._unwrap_get_next_post(post)
         if not isinstance(post, dict):
@@ -2993,14 +2971,12 @@ class CallbackHandlers:
         if circuit.is_open():
             _metrics_inc('circuit_blocked'); return False
 
-        # ✅ C4: release_half_open في كل مسار خروج مبكر بعد is_open()
         post_id = post.get('id')
         try:
             text = post.get('text', '') or ''
             media_type = post.get('media_type')
             media_file_id = post.get('media_file_id')
             if not text and not media_type and not media_file_id:
-                # ✅ C4: early return → حرّر النصف-فتح
                 circuit.release_half_open()
                 return False
             caption = text[:MAX_CAPTION_LENGTH] if text else None
@@ -3367,6 +3343,9 @@ class CallbackHandlers:
                     bot=context.bot); return
             if action in ("activate_all_confirm", "deactivate_all_confirm"):
                 is_activate = (action == "activate_all_confirm")
+                # ═══════════════════════════════════════════════════
+                # v9.7.5: يضم الأعمدة الـ6 الجديدة
+                # ═══════════════════════════════════════════════════
                 activate_values = dict(
                     delete_links=1, delete_mentions=1, slow_mode=1,
                     slow_mode_seconds=5, delete_videos=1, delete_audio=1,
@@ -3384,7 +3363,11 @@ class CallbackHandlers:
                     warn_penalty_duration=3600, delete_banned_words=1,
                     auto_penalty="mute", delete_penalty="mute",
                     delete_penalty_duration=3600, violation_strikes=3,
-                    violation_duration=60)
+                    violation_duration=60,
+                    # 🆕 v9.7.5: الأعمدة الجديدة
+                    delete_at_channel=1, delete_tg_scheme=1,
+                    delete_button_links=1, delete_emails=1,
+                    delete_protected_any=1, delete_postbot_pattern=1)
                 deactivate_values = dict(
                     delete_links=0, delete_mentions=0, slow_mode=0,
                     slow_mode_seconds=0, delete_videos=0, delete_audio=0,
@@ -3402,7 +3385,11 @@ class CallbackHandlers:
                     warn_penalty_duration=0, delete_banned_words=0,
                     auto_penalty="none", delete_penalty="none",
                     delete_penalty_duration=0, violation_strikes=0,
-                    violation_duration=0)
+                    violation_duration=0,
+                    # 🆕 v9.7.5: الأعمدة الجديدة
+                    delete_at_channel=0, delete_tg_scheme=0,
+                    delete_button_links=0, delete_emails=0,
+                    delete_protected_any=0, delete_postbot_pattern=0)
                 values = (activate_values if is_activate
                           else deactivate_values)
                 action_name = (f"{'activate' if is_activate else 'deactivate'}"
@@ -3452,6 +3439,9 @@ class CallbackHandlers:
                 ACTIVE_TASKS.add(task)
                 task.add_done_callback(ACTIVE_TASKS.discard)
                 return
+            # ═══════════════════════════════════════════════════════
+            # v9.7.5: toggle_map موسّع (6 أزرار جديدة)
+            # ═══════════════════════════════════════════════════════
             toggle_map = {
                 "links": "delete_links", "mentions": "delete_mentions",
                 "slow": "slow_mode", "video": "delete_videos",
@@ -3463,7 +3453,14 @@ class CallbackHandlers:
                 "welcome": "welcome_enabled", "goodbye": "goodbye_enabled",
                 "flood": "antiflood_enabled", "night": "night_mode_enabled",
                 "approve_join": "auto_approve_join",
-                "reject_join": "auto_reject_join", "nsfw": "nsfw_enabled"}
+                "reject_join": "auto_reject_join", "nsfw": "nsfw_enabled",
+                # 🆕 v9.7.5: أزرار الأمان الجديدة
+                "at_channel": "delete_at_channel",
+                "tg_scheme": "delete_tg_scheme",
+                "button_links": "delete_button_links",
+                "emails": "delete_emails",
+                "protected_any": "delete_protected_any",
+                "postbot": "delete_postbot_pattern"}
             if action in toggle_map:
                 col = toggle_map[action]
                 settings = (await CallbackHandlers.
@@ -3471,6 +3468,7 @@ class CallbackHandlers:
                 new_val = 1 - _coerce_int(settings.get(col, 0))
                 update_data = {col: new_val}
 
+                # sec_forward: يُبدّل 3 أعمدة (backward compat)
                 if action == "forward":
                     update_data['delete_protected_forward'] = new_val
                     update_data['delete_protected_any'] = new_val
@@ -3484,6 +3482,15 @@ class CallbackHandlers:
                     update_data['auto_reject_join'] = 0
                 elif action == "reject_join" and new_val:
                     update_data['auto_approve_join'] = 0
+
+                # 🆕 v9.7.5: تسجيل للـdebug
+                if action in ("at_channel", "tg_scheme", "button_links",
+                              "emails", "protected_any", "postbot"):
+                    logger.info(
+                        f"🆕 SEC-NEW-TOGGLE | chat={chat_id} "
+                        f"action={action} col={col} new_val={new_val}"
+                    )
+
                 await DB.update_security_settings(chat_id, **update_data)
                 await CallbackHandlers.\
                     _invalidate_security_settings_cache(chat_id)
@@ -4162,7 +4169,6 @@ class CallbackHandlers:
                     await safe_edit(query,
                         await _trans('invalid_data', lang, "❌"),
                         bot=context.bot); return
-                # ✅ C5: CASE WHEN COALESCE — آمن مع NULL
                 await DB.execute(
                     "UPDATE user_channels SET banned = "
                     "  CASE WHEN COALESCE(banned, 0) = 1 THEN 0 ELSE 1 END "
@@ -4174,7 +4180,6 @@ class CallbackHandlers:
                 context.user_data['adm_gr_page'] = 0
                 await CallbackHandlers._show_admin_groups(
                     update, context, query, user_id, lang); return
-            # ✅ C1: DB أولاً — لا leave_chat إن فشل DB
             if data.startswith("admin_toggle_gr:"):
                 chat_id = _coerce_int(data.split(":")[-1])
                 if chat_id == 0:
@@ -4197,7 +4202,6 @@ class CallbackHandlers:
                         logger.warning(
                             f"admin_toggle_gr: DB update failed for "
                             f"{chat_id}: {e}")
-                    # ✅ C1: leave_chat فقط إذا نجح DB
                     if new_val == 1 and db_ok:
                         try:
                             await context.bot.leave_chat(chat_id)
@@ -4307,7 +4311,6 @@ class CallbackHandlers:
                     except Exception: pass
                     shutil.copy2(backup_file, PATHS.DB)
 
-                    # ✅ C2: إعادة الاتصال — فشل صريح عند غياب الدوال
                     if db_closed:
                         reconnected = False
                         try:
@@ -5503,9 +5506,6 @@ class CallbackHandlers:
 
     @staticmethod
     async def _handle_advanced_actions(update, context, query, user_id):
-        """
-        FIX-ADV-1 (v9.7.3): startswith + slicing بدل .replace() المتسلسل.
-        """
         lang = await DB.get_user_language(user_id) or 'ar'
         data = query.data; parts = data.split(":")
         if len(parts) < 2:
