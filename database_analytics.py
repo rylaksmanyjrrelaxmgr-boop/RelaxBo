@@ -1,39 +1,57 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-database_analytics.py - دوال التحليلات المتقدمة (v1.0.2)
+database_analytics.py - دوال التحليلات المتقدمة (v1.0.3)
 ================================================================================
 AnalyticsMixin:
-  - get_user_growth          : نمو المستخدمين آخر N يوم
-  - get_top_channels         : أفضل N قناة (نجاح + إنجاز)
-  - get_publish_stats        : متوسط + نسبة النجاح + نسبة الإنجاز
-  - get_channel_success_rate : نسبة نجاح كل قناة
-  - get_subscription_rate    : اشتراكات شهرية
-  - get_slow_queries         : أبطأ الاستعلامات
-  - get_pool_live            : حالة Pool مباشرة
+  - get_user_growth               : نمو المستخدمين آخر N يوم
+  - get_top_channels              : أفضل N قناة (نجاح + إنجاز)
+  - get_channel_success_rate      : 🆕 v1.0.3: نسبة نجاح القنوات (alias + فلترة)
+  - get_publish_stats             : متوسط + نسبة النجاح + نسبة الإنجاز
+  - get_subscription_rate         : اشتراكات شهرية
+  - get_slow_queries              : أبطأ الاستعلامات (الأبطأ أولاً)
+  - get_slowest_queries           : 🆕 v1.0.3: alias موثّق للأبطأ أولاً
+  - get_pool_live                 : حالة Pool مباشرة
   🆕 Diagnostics:
-  - get_db_diagnostics       : 🔬 تقرير تشخيص DB شامل
-  - get_dead_tuples          : Dead Tuples لكل جدول
-  - get_table_sizes          : أحجام الجداول
-  - get_indexes_info         : الفهارس
-  - get_autovacuum_settings  : إعدادات Autovacuum
+  - get_db_diagnostics            : 🔬 تقرير تشخيص DB شامل
+  - get_dead_tuples               : Dead Tuples لكل جدول
+  - get_table_sizes               : أحجام الجداول
+  - get_indexes_info              : الفهارس
+  - get_autovacuum_settings       : إعدادات Autovacuum
   - get_maintenance_recommendations : توصيات SQL عملية
 ================================================================================
-🆕 v1.0.2 — تشخيص قاعدة البيانات:
+🆕 v1.0.3 — إصلاحات ما بعد المراجعة النهائية:
+  ✅ get_channel_success_rate: مُضافة فعلياً (كانت في docstring فقط)
+  ✅ get_slowest_queries: alias موثّق — يتفادى التعارض مع database.py
+  ✅ get_db_diagnostics: تمرير البيانات المحسوبة (تجنّب 4 استعلامات → 2)
+  ✅ get_maintenance_recommendations: يقبل dead_tables/table_sizes
+                                      اختيارياً لتفادي التكرار
+  ✅ n_mod_since_analyze: مُعاد في result (كان مُحدَّداً في SQL فقط)
+  ✅ _format_kb: أُزيلت (غير مُستخدَمة)
+  ✅ import time: أُزيل (غير مُستخدَم)
+
+✅ v1.0.2 — تشخيص قاعدة البيانات:
   ✅ _dead_tuple_color: ألوان ذكية (حجم + نسبة)
   ✅ _dead_tuple_advice: توصية SQL بجانب كل جدول
   ✅ get_db_diagnostics: تقرير موحّد
   ✅ get_maintenance_recommendations: DELETE + VACUUM جاهز
-================================================================================
+
 ✅ v1.0.1 — إصلاحات ما بعد التدقيق:
   ✅ get_top_channels: تمييز نسبة النجاح عن نسبة الإنجاز
   ✅ get_subscription_rate: إصلاح MySQL (DATE_FORMAT)
   ✅ get_pool_live: دعم asyncmy
+
+⚠️ ملاحظة توافق مهمة:
+    database.py يحتوي على:
+        get_slow_queries = get_slow_queries_report
+    مما يُستبدل نسخة الـMixin عند استدعاء get_slow_queries().
+    للوصول إلى السلوك "الأبطأ أولاً" من الـMixin استخدم:
+        await DB.get_slowest_queries(limit)
+    أو أزل الـalias من database.py.
 ================================================================================
 """
 
 import logging
-import time
 from datetime import datetime, timedelta
 from typing import Dict, List, Any, Optional
 
@@ -163,19 +181,6 @@ def _format_bytes(num_bytes) -> str:
     return f"{b / (1024 * 1024 * 1024):.2f} GB"
 
 
-def _format_kb(num_kb) -> str:
-    """📏 KB → صيغة مقروءة."""
-    try:
-        k = float(num_kb or 0)
-    except (TypeError, ValueError):
-        return "0 KB"
-    if k < 1024:
-        return f"{k:.1f} KB"
-    if k < 1024 * 1024:
-        return f"{k / 1024:.2f} MB"
-    return f"{k / (1024 * 1024):.2f} GB"
-
-
 # =====================================================================
 # 🎯 حساب نسب النجاح/الإنجاز لقناة
 # =====================================================================
@@ -300,6 +305,21 @@ class AnalyticsMixin:
         except Exception as e:
             logger.error(f"❌ get_top_channels: {e}", exc_info=True)
             return []
+
+    # =================================================================
+    # 2.b) 🆕 v1.0.3: نسبة نجاح القنوات (alias موثّق)
+    # =================================================================
+
+    async def get_channel_success_rate(
+        self, limit: int = 20
+    ) -> List[Dict[str, Any]]:
+        """
+        🎯 نسبة نجاح كل قناة — alias واضح لـ get_top_channels.
+
+        يُستخدم في handlers_callback.py → analytics → channels_rate
+        حيث يُرتَّب تصاعدياً بـ success_rate (الأقل نجاحاً أولاً).
+        """
+        return await self.get_top_channels(limit)
 
     # =================================================================
     # 3) متوسط النشر + نسبة النجاح العامة
@@ -469,26 +489,46 @@ class AnalyticsMixin:
             return {"available": False, "type": "error", "error": str(e)}
 
     # =================================================================
-    # 7) الاستعلامات البطيئة
+    # 7) الاستعلامات البطيئة (الأبطأ أولاً)
     # =================================================================
 
     async def get_slow_queries(self, limit: int = 20) -> List[Dict[str, Any]]:
-        """🐌 قائمة أبطأ الاستعلامات (من الذاكرة)."""
+        """
+        🐌 قائمة أبطأ الاستعلامات (من الذاكرة) — الأبطأ أولاً.
+
+        ⚠️ ملاحظة:
+            database.py يعرّف alias يُستبدل هذه النسخة:
+                get_slow_queries = get_slow_queries_report
+            استخدم `get_slowest_queries()` للوصول المضمون.
+        """
+        return await self.get_slowest_queries(limit)
+
+    async def get_slowest_queries(self, limit: int = 20) -> List[Dict[str, Any]]:
+        """
+        🐌 قائمة أبطأ الاستعلامات (الأبطأ أولاً).
+
+        ✅ v1.0.3: اسم موثّق يتفادى التعارض مع database.py alias.
+        """
         try:
             limit = max(1, min(int(limit), 100))
             log = getattr(self, "_slow_queries_log", None)
             if not log:
                 return []
+
             lock = getattr(self, "_slow_queries_lock", None)
             if lock is not None:
                 async with lock:
                     snapshot = list(log)
             else:
                 snapshot = list(log)
-            snapshot.sort(key=lambda x: x.get('elapsed', 0), reverse=True)
+
+            snapshot.sort(
+                key=lambda x: x.get('elapsed', 0),
+                reverse=True,
+            )
             return snapshot[:limit]
         except Exception as e:
-            logger.warning(f"⚠️ get_slow_queries: {e}")
+            logger.warning(f"⚠️ get_slowest_queries: {e}")
             return []
 
     # =================================================================
@@ -502,7 +542,8 @@ class AnalyticsMixin:
         Returns:
             [{name, live, dead, dead_ratio, color, advice,
               last_vacuum, last_autovacuum,
-              last_analyze, last_autoanalyze}, ...]
+              last_analyze, last_autoanalyze,
+              n_mod_since_analyze}, ...]
         """
         if not getattr(self, "USE_POSTGRES", False):
             return []
@@ -533,6 +574,12 @@ class AnalyticsMixin:
                 total = live + dead
                 ratio = (dead / total) if total > 0 else 0.0
 
+                # ✅ v1.0.3: n_mod_since_analyze مُعاد فعلياً
+                try:
+                    n_mod = int(rd.get('n_mod_since_analyze', 0) or 0)
+                except (TypeError, ValueError):
+                    n_mod = 0
+
                 result.append({
                     'name': name,
                     'live': live,
@@ -541,6 +588,7 @@ class AnalyticsMixin:
                     'dead_ratio': round(ratio, 4),
                     'color': _dead_tuple_color(dead, live),
                     'advice': _dead_tuple_advice(dead, live, name),
+                    'n_mod_since_analyze': n_mod,
                     'last_vacuum': rd.get('last_vacuum'),
                     'last_autovacuum': rd.get('last_autovacuum'),
                     'last_analyze': rd.get('last_analyze'),
@@ -608,8 +656,9 @@ class AnalyticsMixin:
     # 🆕 v1.0.2: 10) معلومات الفهارس
     # =================================================================
 
-    async def get_indexes_info(self, tables: Optional[List[str]] = None
-                                ) -> Dict[str, List[Dict[str, Any]]]:
+    async def get_indexes_info(
+        self, tables: Optional[List[str]] = None
+    ) -> Dict[str, List[Dict[str, Any]]]:
         """
         🗂️ معلومات الفهارس (PostgreSQL فقط).
 
@@ -622,7 +671,9 @@ class AnalyticsMixin:
 
         try:
             if tables:
-                placeholders = ",".join(f"${i+1}" for i in range(len(tables)))
+                placeholders = ",".join(
+                    f"${i+1}" for i in range(len(tables))
+                )
                 query = f"""
                     SELECT
                         t.relname                      AS table_name,
@@ -713,27 +764,32 @@ class AnalyticsMixin:
                 setting = rd.get('setting')
                 unit = rd.get('unit') or ''
                 if name:
-                    result[name] = f"{setting}{unit}" if unit else str(setting)
+                    result[name] = (
+                        f"{setting}{unit}" if unit else str(setting)
+                    )
             return result
         except Exception as e:
             logger.error(f"❌ get_autovacuum_settings: {e}", exc_info=True)
             return {}
 
     # =================================================================
-    # 🆕 v1.0.2: 12) توصيات الصيانة
+    # 🆕 v1.0.2/1.0.3: 12) توصيات الصيانة
     # =================================================================
 
-    async def get_maintenance_recommendations(self) -> List[str]:
+    async def get_maintenance_recommendations(
+        self,
+        dead_tables: Optional[List[Dict[str, Any]]] = None,
+        table_sizes: Optional[List[Dict[str, Any]]] = None,
+    ) -> List[str]:
         """
-        🧹 توصيات صيانة عملية (تُرجع قائمة أسطر SQL/text جاهزة).
+        🧹 توصيات صيانة عملية (قائمة أسطر SQL/text جاهزة).
 
-        تشمل:
-        - DELETE لـ admin_logs القديمة
-        - DELETE لـ penalty_archive القديمة
-        - DELETE لـ user_violations المنتهية
-        - VACUUM للجداول ذات dead_ratio مرتفع
-        - فحص تكرار الفهارس
-        - فحص أحجام الجداول الكبيرة
+        ✅ v1.0.3: يقبل `dead_tables` و `table_sizes` اختيارياً
+        لتفادي إعادة الاستعلام عند الاستدعاء من get_db_diagnostics.
+
+        Args:
+            dead_tables: إن مرَّرت، يُستخدَم بدل استدعاء get_dead_tuples()
+            table_sizes: إن مرَّرت، يُستخدَم بدل استدعاء get_table_sizes()
         """
         recs: List[str] = []
 
@@ -780,7 +836,8 @@ class AnalyticsMixin:
             pa_count = int(pa_count)
             if pa_count > 0:
                 recs.append(
-                    f"🗑️ <b>penalty_archive</b> = {pa_count} سجل قديم (&gt; 90 يوم)\n"
+                    f"🗑️ <b>penalty_archive</b> = {pa_count} سجل قديم "
+                    f"(&gt; 90 يوم)\n"
                     f"<code>DELETE FROM penalty_archive "
                     f"WHERE created_at &lt; NOW() - INTERVAL '90 days';</code>"
                 )
@@ -789,14 +846,16 @@ class AnalyticsMixin:
 
         # --- 4) VACUUM للجداول ذات dead_ratio مرتفع ---
         try:
-            dead_tables = await self.get_dead_tuples(20)
+            if dead_tables is None:
+                dead_tables = await self.get_dead_tuples(20)
             for t in dead_tables:
-                if t['dead_ratio'] >= 0.10:
+                if t.get('dead_ratio', 0) >= 0.10:
                     ratio_pct = t['dead_ratio'] * 100
                     recs.append(
                         f"🟠 <b>{t['name']}</b> — dead={t['dead']} "
                         f"({ratio_pct:.1f}%)\n"
-                        f"<code>VACUUM (ANALYZE, VERBOSE) {t['name']};</code>"
+                        f"<code>VACUUM (ANALYZE, VERBOSE) "
+                        f"{t['name']};</code>"
                     )
         except Exception as e:
             logger.debug(f"vacuum recs: {e}")
@@ -835,36 +894,44 @@ class AnalyticsMixin:
 
         # --- 6) الجداول الكبيرة جداً ---
         try:
-            sizes = await self.get_table_sizes(10)
-            for s in sizes:
-                if s['total_bytes'] >= TABLE_SIZE_CRITICAL_KB * 1024:
+            if table_sizes is None:
+                table_sizes = await self.get_table_sizes(10)
+            for s in table_sizes:
+                if s.get('total_bytes', 0) >= TABLE_SIZE_CRITICAL_KB * 1024:
                     recs.append(
-                        f"🔴 <b>{s['name']}</b> حجم كبير: {s['total_display']}\n"
+                        f"🔴 <b>{s['name']}</b> حجم كبير: "
+                        f"{s['total_display']}\n"
                         f"💡 راقب النمو أو فكّر في archiving"
                     )
         except Exception as e:
             logger.debug(f"big tables check: {e}")
 
         if not recs:
-            recs.append("✅ لا توجد توصيات — قاعدة البيانات في حالة ممتازة")
+            recs.append(
+                "✅ لا توجد توصيات — قاعدة البيانات في حالة ممتازة"
+            )
         return recs
 
     # =================================================================
-    # 🆕 v1.0.2: 13) تقرير التشخيص الشامل
+    # 🆕 v1.0.2/1.0.3: 13) تقرير التشخيص الشامل
     # =================================================================
 
     async def get_db_diagnostics(self, top_n: int = 10) -> Dict[str, Any]:
         """
         🔬 تقرير تشخيص شامل لقاعدة البيانات.
 
+        ✅ v1.0.3: تمرير البيانات المحسوبة لـget_maintenance_recommendations
+        → استعلامان بدل 4 (تحسين ~50% عند الفتح).
+
         Returns dict:
-          - dead_tuples    : list
-          - table_sizes    : list
-          - indexes        : dict
-          - autovacuum     : dict
-          - recommendations: list[str]
-          - available      : bool
-          - summary        : dict (dead_total, live_total, worst_table, ...)
+          - available       : bool
+          - db_type         : str
+          - dead_tuples     : list
+          - table_sizes     : list
+          - indexes         : dict
+          - autovacuum      : dict
+          - recommendations : list[str]
+          - summary         : dict
         """
         result = {
             'available': False,
@@ -897,7 +964,9 @@ class AnalyticsMixin:
 
         # Indexes (فقط الأكثر نشاطاً)
         try:
-            active_tables = [t['name'] for t in result['table_sizes'][:8]]
+            active_tables = [
+                t['name'] for t in result['table_sizes'][:8]
+            ]
             result['indexes'] = await self.get_indexes_info(active_tables)
         except Exception as e:
             logger.warning(f"get_indexes_info in diagnostics: {e}")
@@ -906,26 +975,38 @@ class AnalyticsMixin:
         try:
             result['autovacuum'] = await self.get_autovacuum_settings()
         except Exception as e:
-            logger.warning(f"get_autovacuum_settings in diagnostics: {e}")
+            logger.warning(
+                f"get_autovacuum_settings in diagnostics: {e}"
+            )
 
-        # Recommendations
+        # ✅ v1.0.3: Recommendations — تمرير البيانات المحسوبة
         try:
-            result['recommendations'] = await self.get_maintenance_recommendations()
+            result['recommendations'] = (
+                await self.get_maintenance_recommendations(
+                    dead_tables=result['dead_tuples'],
+                    table_sizes=result['table_sizes'],
+                )
+            )
         except Exception as e:
-            logger.warning(f"get_maintenance_recommendations in diagnostics: {e}")
+            logger.warning(
+                f"get_maintenance_recommendations in diagnostics: {e}"
+            )
 
         # Summary
         try:
-            dead_total = sum(t['dead'] for t in result['dead_tuples'])
-            live_total = sum(t['live'] for t in result['dead_tuples'])
+            dead_total = sum(
+                t.get('dead', 0) for t in result['dead_tuples']
+            )
+            live_total = sum(
+                t.get('live', 0) for t in result['dead_tuples']
+            )
             worst = None
             worst_ratio = 0.0
             for t in result['dead_tuples']:
-                if t['dead_ratio'] > worst_ratio:
+                if t.get('dead_ratio', 0) > worst_ratio:
                     worst_ratio = t['dead_ratio']
                     worst = t['name']
 
-            # الحالة العامة
             overall_color = "🟢"
             if live_total > 0:
                 global_ratio = dead_total / (live_total + dead_total)
