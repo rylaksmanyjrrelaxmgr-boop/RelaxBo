@@ -1,16 +1,20 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-handlers_callback.py - معالج الأزرار (v9.7.5)
+handlers_callback.py - معالج الأزرار (v9.7.6)
 =====================================================================
+🆕 v9.7.6 (ANTIFLOOD-BUTTONS):
+    ✅ NF1: sec_set_antiflood_messages → أزرار بدل إدخال نصي
+        [3, 5, 7] [10, 15, 20] [30]
+    ✅ NF2: sec_set_antiflood_seconds → أزرار بدل إدخال نصي
+        [3s, 5s, 10s] [15s, 30s, 60s] [120s]
+    ✅ NF3: set_antiflood_messages:{chat_id}:{value} — يحفظ مباشرة
+    ✅ NF4: set_antiflood_seconds:{chat_id}:{value} — يحفظ مباشرة
+    ✅ NF5: الأزرار تُظهر ✅ على القيمة الحالية
+    ✅ الحفاظ على WAIT_ANTIFLOOD_* كـ fallback (backward compat)
+
 🆕 v9.7.5 (NEW SECURITY BUTTONS):
     ✅ NC1: toggle_map — 6 أزرار أمان جديدة
-        sec_at_channel     → delete_at_channel
-        sec_tg_scheme      → delete_tg_scheme
-        sec_button_links   → delete_button_links
-        sec_emails         → delete_emails
-        sec_protected_any  → delete_protected_any
-        sec_postbot        → delete_postbot_pattern
     ✅ NC2: activate_all/deactivate_all تشمل الأعمدة الجديدة
     ✅ NC3: _KNOWN_CB_PREFIXES لم تتغيّر — الأزرار تحت sec_*
     ✅ الحفاظ الكامل على سلوك v9.7.4
@@ -140,6 +144,13 @@ except ImportError:
         _group_number, _is_primary_owner, _row_to_dict, _coerce_int,
         _coerce_float, _safe_str, _md_to_html, _log_channel_cache_key,
         _is_valid_url, _mask_id, _make_user_cache_keys)
+
+
+# ═══════════════ v9.7.6: Antiflood Button Options ═══════════════
+_ANTIFLOOD_MESSAGES_OPTIONS: List[int] = [3, 5, 7, 10, 15, 20, 30]
+_ANTIFLOOD_SECONDS_OPTIONS: List[int] = [3, 5, 10, 15, 30, 60, 120]
+_ANTIFLOOD_MESSAGES_MAX = 100
+_ANTIFLOOD_SECONDS_MAX = 3600
 
 
 # ═══════════════ حالة مشتركة ═══════════════
@@ -1514,6 +1525,129 @@ class CallbackHandlers:
                 context.user_data.pop(k, None)
         except Exception: pass
 
+    # ═════════════════════════════════════════════════════════════
+    # v9.7.6: Antiflood button-based UI
+    # ═════════════════════════════════════════════════════════════
+
+    @staticmethod
+    async def _show_antiflood_messages_buttons(
+        update, context, query, chat_id, lang
+    ):
+        """
+        v9.7.6 NF1: أزرار لاختيار عدد الرسائل المسموحة.
+        """
+        try:
+            settings = await CallbackHandlers._get_security_settings_cached(
+                chat_id
+            )
+            current = _coerce_int(
+                settings.get('antiflood_messages'), 5
+            )
+            title = await _trans('antiflood_messages_title', lang,
+                "🔢 <b>عدد الرسائل المسموحة</b>")
+            current_label = _fmt(await _trans(
+                'antiflood_messages_current', lang,
+                "📊 <b>القيمة الحالية:</b> <code>{count}</code> رسالة"),
+                count=current)
+            choose = await _trans('antiflood_messages_choose', lang,
+                "اختر الحد الأقصى للرسائل خلال النافذة الزمنية:")
+
+            text = f"{title}\n━━━━━━━━━━━━━━━━━━━━━━\n\n" \
+                   f"{current_label}\n\n{choose}"
+
+            kb = []
+            row = []
+            for n in _ANTIFLOOD_MESSAGES_OPTIONS:
+                icon = "✅" if n == current else "▫️"
+                row.append(InlineKeyboardButton(
+                    f"{icon} {n}",
+                    callback_data=f"set_antiflood_messages:{chat_id}:{n}"
+                ))
+                if len(row) == 3:
+                    kb.append(row); row = []
+            if row:
+                kb.append(row)
+
+            kb.append([InlineKeyboardButton(
+                KeyboardFactory.get_text("back", lang),
+                callback_data=f"sec_antiflood_settings:{chat_id}"
+            )])
+
+            await safe_edit(query, text,
+                reply_markup=InlineKeyboardMarkup(kb),
+                parse_mode='HTML', bot=context.bot)
+        except Exception as e:
+            logger.error(
+                f"_show_antiflood_messages_buttons: {e}",
+                exc_info=True,
+            )
+            await safe_edit(query,
+                await _trans('error_occurred', lang, "❌"),
+                bot=context.bot)
+
+    @staticmethod
+    async def _show_antiflood_seconds_buttons(
+        update, context, query, chat_id, lang
+    ):
+        """
+        v9.7.6 NF2: أزرار لاختيار النافذة الزمنية.
+        """
+        try:
+            settings = await CallbackHandlers._get_security_settings_cached(
+                chat_id
+            )
+            current = _coerce_int(
+                settings.get('antiflood_seconds'), 10
+            )
+            title = await _trans('antiflood_seconds_title', lang,
+                "⏱️ <b>النافذة الزمنية (ثواني)</b>")
+            current_label = _fmt(await _trans(
+                'antiflood_seconds_current', lang,
+                "⏱️ <b>القيمة الحالية:</b> <code>{count}</code> ثانية"),
+                count=current)
+            choose = await _trans('antiflood_seconds_choose', lang,
+                "اختر النافذة الزمنية لعدّ الرسائل:")
+
+            text = f"{title}\n━━━━━━━━━━━━━━━━━━━━━━\n\n" \
+                   f"{current_label}\n\n{choose}"
+
+            kb = []
+            row = []
+            for n in _ANTIFLOOD_SECONDS_OPTIONS:
+                icon = "✅" if n == current else "▫️"
+                # عرض بصيغة مقروءة: 60s → 1m، 120s → 2m
+                if n < 60:
+                    label = f"{icon} {n}s"
+                elif n % 60 == 0:
+                    label = f"{icon} {n // 60}m"
+                else:
+                    label = f"{icon} {n}s"
+                row.append(InlineKeyboardButton(
+                    label,
+                    callback_data=f"set_antiflood_seconds:{chat_id}:{n}"
+                ))
+                if len(row) == 3:
+                    kb.append(row); row = []
+            if row:
+                kb.append(row)
+
+            kb.append([InlineKeyboardButton(
+                KeyboardFactory.get_text("back", lang),
+                callback_data=f"sec_antiflood_settings:{chat_id}"
+            )])
+
+            await safe_edit(query, text,
+                reply_markup=InlineKeyboardMarkup(kb),
+                parse_mode='HTML', bot=context.bot)
+        except Exception as e:
+            logger.error(
+                f"_show_antiflood_seconds_buttons: {e}",
+                exc_info=True,
+            )
+            await safe_edit(query,
+                await _trans('error_occurred', lang, "❌"),
+                bot=context.bot)
+
     @staticmethod
     async def _show_metrics_dashboard(query, context, user_id, lang):
         try:
@@ -1936,6 +2070,89 @@ class CallbackHandlers:
                     chat_id)
                 await CallbackHandlers._refresh_security_view(
                     query, context, chat_id, lang); return True
+
+            # ═════════════════════════════════════════════════════
+            # v9.7.6 NF3: تعيين عدد رسائل الفيضان (من الأزرار)
+            # ═════════════════════════════════════════════════════
+            if data.startswith("set_antiflood_messages:"):
+                parts = data.split(":")
+                if len(parts) != 3:
+                    await safe_edit(query,
+                        await _trans('invalid_data', lang, "❌"),
+                        bot=context.bot); return True
+                chat_id = _coerce_int(parts[1])
+                value = _coerce_int(parts[2])
+                if not await _check_sec_auth(context, user_id, chat_id):
+                    await safe_edit(query,
+                        await _trans('no_permission', lang, "❌"),
+                        bot=context.bot); return True
+                if value < 1 or value > _ANTIFLOOD_MESSAGES_MAX:
+                    await safe_edit(query,
+                        await _trans('invalid_number', lang, "❌"),
+                        bot=context.bot); return True
+                try:
+                    await DB.update_security_settings(
+                        chat_id, antiflood_messages=value
+                    )
+                except Exception as e:
+                    logger.warning(
+                        f"set_antiflood_messages DB error: {e}"
+                    )
+                    await safe_edit(query,
+                        await _trans('error_occurred', lang, "❌"),
+                        bot=context.bot); return True
+                await CallbackHandlers.\
+                    _invalidate_security_settings_cache(chat_id)
+                logger.info(
+                    "🌊 ANTIFLOOD-MESSAGES | chat=%s value=%d by=%s",
+                    chat_id, value, user_id,
+                )
+                await CallbackHandlers._show_antiflood_messages_buttons(
+                    update, context, query, chat_id, lang
+                )
+                return True
+
+            # ═════════════════════════════════════════════════════
+            # v9.7.6 NF4: تعيين نافذة الفيضان بالثواني (من الأزرار)
+            # ═════════════════════════════════════════════════════
+            if data.startswith("set_antiflood_seconds:"):
+                parts = data.split(":")
+                if len(parts) != 3:
+                    await safe_edit(query,
+                        await _trans('invalid_data', lang, "❌"),
+                        bot=context.bot); return True
+                chat_id = _coerce_int(parts[1])
+                value = _coerce_int(parts[2])
+                if not await _check_sec_auth(context, user_id, chat_id):
+                    await safe_edit(query,
+                        await _trans('no_permission', lang, "❌"),
+                        bot=context.bot); return True
+                if value < 1 or value > _ANTIFLOOD_SECONDS_MAX:
+                    await safe_edit(query,
+                        await _trans('invalid_number', lang, "❌"),
+                        bot=context.bot); return True
+                try:
+                    await DB.update_security_settings(
+                        chat_id, antiflood_seconds=value
+                    )
+                except Exception as e:
+                    logger.warning(
+                        f"set_antiflood_seconds DB error: {e}"
+                    )
+                    await safe_edit(query,
+                        await _trans('error_occurred', lang, "❌"),
+                        bot=context.bot); return True
+                await CallbackHandlers.\
+                    _invalidate_security_settings_cache(chat_id)
+                logger.info(
+                    "🌊 ANTIFLOOD-SECONDS | chat=%s value=%ds by=%s",
+                    chat_id, value, user_id,
+                )
+                await CallbackHandlers._show_antiflood_seconds_buttons(
+                    update, context, query, chat_id, lang
+                )
+                return True
+
             if data == f"{CB.POST_CLEAR}_confirm":
                 active = await DB.get_active_channel(user_id)
                 if not active:
@@ -2205,27 +2422,46 @@ class CallbackHandlers:
                         await _trans('invalid_penalty_type', lang, "❌"),
                         bot=context.bot)
                 return True
-            for prefix, state, prompt_key, prompt_default in (
-                ("sec_set_antiflood_messages:",
-                 UserState.WAIT_ANTIFLOOD_MESSAGES,
-                 "send_antiflood_messages", "📊 Send allowed messages:"),
-                ("sec_set_antiflood_seconds:",
-                 UserState.WAIT_ANTIFLOOD_SECONDS,
-                 "send_antiflood_seconds", "⏱️ Send seconds:")):
-                if data.startswith(prefix):
-                    parts = data.split(":")
-                    if len(parts) != 2:
-                        await safe_edit(query, await _trans('invalid_data',
-                            lang, "❌"), bot=context.bot); return True
-                    chat_id = _coerce_int(parts[1])
-                    if not await _check_sec_auth(context, user_id, chat_id):
-                        await safe_edit(query,
-                            await _trans('no_permission', lang, "❌"),
-                            bot=context.bot); return True
-                    StateManager.set(user_id, state)
-                    _set_sec_chat(context, chat_id)
-                    await safe_edit(query, await _trans(prompt_key, lang,
-                        prompt_default), bot=context.bot); return True
+
+            # ═════════════════════════════════════════════════════
+            # v9.7.6 NF1/NF2: استبدال المسار النصي بأزرار
+            # ═════════════════════════════════════════════════════
+            if data.startswith("sec_set_antiflood_messages:"):
+                parts = data.split(":")
+                if len(parts) != 2:
+                    await safe_edit(query,
+                        await _trans('invalid_data', lang, "❌"),
+                        bot=context.bot); return True
+                chat_id = _coerce_int(parts[1])
+                if not await _check_sec_auth(context, user_id, chat_id):
+                    await safe_edit(query,
+                        await _trans('no_permission', lang, "❌"),
+                        bot=context.bot); return True
+                # ✅ v9.7.6: أزرار بدل إدخال نصي
+                StateManager.clear(user_id)
+                await CallbackHandlers._show_antiflood_messages_buttons(
+                    update, context, query, chat_id, lang
+                )
+                return True
+
+            if data.startswith("sec_set_antiflood_seconds:"):
+                parts = data.split(":")
+                if len(parts) != 2:
+                    await safe_edit(query,
+                        await _trans('invalid_data', lang, "❌"),
+                        bot=context.bot); return True
+                chat_id = _coerce_int(parts[1])
+                if not await _check_sec_auth(context, user_id, chat_id):
+                    await safe_edit(query,
+                        await _trans('no_permission', lang, "❌"),
+                        bot=context.bot); return True
+                # ✅ v9.7.6: أزرار بدل إدخال نصي
+                StateManager.clear(user_id)
+                await CallbackHandlers._show_antiflood_seconds_buttons(
+                    update, context, query, chat_id, lang
+                )
+                return True
+
             if data.startswith("sec_antiflood_penalty:"):
                 parts = data.split(":")
                 if len(parts) != 2:
@@ -3343,9 +3579,6 @@ class CallbackHandlers:
                     bot=context.bot); return
             if action in ("activate_all_confirm", "deactivate_all_confirm"):
                 is_activate = (action == "activate_all_confirm")
-                # ═══════════════════════════════════════════════════
-                # v9.7.5: يضم الأعمدة الـ6 الجديدة
-                # ═══════════════════════════════════════════════════
                 activate_values = dict(
                     delete_links=1, delete_mentions=1, slow_mode=1,
                     slow_mode_seconds=5, delete_videos=1, delete_audio=1,
@@ -3353,7 +3586,7 @@ class CallbackHandlers:
                     delete_stickers=1, delete_forwarded=1, delete_polls=1,
                     delete_games=1, delete_voice=1, delete_video_note=1,
                     welcome_enabled=1, goodbye_enabled=1, antiflood_enabled=1,
-                    antiflood_messages=5, antiflood_seconds=5,
+                    antiflood_messages=5, antiflood_seconds=10,
                     antiflood_penalty="mute", antiflood_penalty_duration=60,
                     night_mode_enabled=1, night_mode_start="22:00",
                     night_mode_end="06:00", night_mode_action="mute",
@@ -3364,7 +3597,6 @@ class CallbackHandlers:
                     auto_penalty="mute", delete_penalty="mute",
                     delete_penalty_duration=3600, violation_strikes=3,
                     violation_duration=60,
-                    # 🆕 v9.7.5: الأعمدة الجديدة
                     delete_at_channel=1, delete_tg_scheme=1,
                     delete_button_links=1, delete_emails=1,
                     delete_protected_any=1, delete_postbot_pattern=1)
@@ -3386,7 +3618,6 @@ class CallbackHandlers:
                     auto_penalty="none", delete_penalty="none",
                     delete_penalty_duration=0, violation_strikes=0,
                     violation_duration=0,
-                    # 🆕 v9.7.5: الأعمدة الجديدة
                     delete_at_channel=0, delete_tg_scheme=0,
                     delete_button_links=0, delete_emails=0,
                     delete_protected_any=0, delete_postbot_pattern=0)
@@ -3439,9 +3670,6 @@ class CallbackHandlers:
                 ACTIVE_TASKS.add(task)
                 task.add_done_callback(ACTIVE_TASKS.discard)
                 return
-            # ═══════════════════════════════════════════════════════
-            # v9.7.5: toggle_map موسّع (6 أزرار جديدة)
-            # ═══════════════════════════════════════════════════════
             toggle_map = {
                 "links": "delete_links", "mentions": "delete_mentions",
                 "slow": "slow_mode", "video": "delete_videos",
@@ -3454,7 +3682,6 @@ class CallbackHandlers:
                 "flood": "antiflood_enabled", "night": "night_mode_enabled",
                 "approve_join": "auto_approve_join",
                 "reject_join": "auto_reject_join", "nsfw": "nsfw_enabled",
-                # 🆕 v9.7.5: أزرار الأمان الجديدة
                 "at_channel": "delete_at_channel",
                 "tg_scheme": "delete_tg_scheme",
                 "button_links": "delete_button_links",
@@ -3468,7 +3695,6 @@ class CallbackHandlers:
                 new_val = 1 - _coerce_int(settings.get(col, 0))
                 update_data = {col: new_val}
 
-                # sec_forward: يُبدّل 3 أعمدة (backward compat)
                 if action == "forward":
                     update_data['delete_protected_forward'] = new_val
                     update_data['delete_protected_any'] = new_val
@@ -3483,7 +3709,6 @@ class CallbackHandlers:
                 elif action == "reject_join" and new_val:
                     update_data['auto_approve_join'] = 0
 
-                # 🆕 v9.7.5: تسجيل للـdebug
                 if action in ("at_channel", "tg_scheme", "button_links",
                               "emails", "protected_any", "postbot"):
                     logger.info(
@@ -5850,4 +6075,8 @@ __all__ = [
     "_TOP_CALLBACKS_MAX",
     "ACTIVE_TASKS", "settings_cache", "user_cache", "posts_cache",
     "_sec_auth_cache", "_sec_auth_neg_cache", "_sec_auth_locks",
-    "_security_stats_cache_local", "_post_count_cache"]
+    "_security_stats_cache_local", "_post_count_cache",
+    # v9.7.6
+    "_ANTIFLOOD_MESSAGES_OPTIONS", "_ANTIFLOOD_SECONDS_OPTIONS",
+    "_ANTIFLOOD_MESSAGES_MAX", "_ANTIFLOOD_SECONDS_MAX",
+]
