@@ -1,4 +1,3 @@
-
 python-telegram-bot==22.8
 aiosqlite
 python-dotenv
@@ -20,3 +19,9 @@ python-multipart
 pandas
 openpyxl
 asyncpg
+pytesseract
+pyzbar
+SpeechRecognition
+pydub
+requests
+python-whois
