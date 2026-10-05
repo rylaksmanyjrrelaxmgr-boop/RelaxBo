@@ -1,52 +1,50 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-handlers_message.py - v7.15.1 (FLOOD-DETECTION + EVASION-PROOF)
+handlers_message.py - v7.16.0 (PRIVATE-HANDLERS + FLOOD HARDENING)
 =============================================================================
-🆕 v7.15.1 — إصلاح ثغرات عقوبات الفيضان (10 ثغرات في v7.15.0):
+🆕 v7.16.0 — إصلاح معالجات الحالة الخاصة + تحصين الفيضان:
 
     🔴 CRITICAL:
-        #F1  لا كاشف للفيضان — كان الزر يحفظ الإعدادات فقط.
-             → إضافة _check_flood() + _flood_tracker.
-        #F2  _resolve_penalty يقرأ auto_penalty دائماً.
-             → قراءة antiflood_penalty/night_mode_action حسب النوع.
-        #F3  لا يوجد تخزين لعدّ الرسائل (counter).
-             → defaultdict(deque) + قفل + سقف أقصى.
+        #P1  _PRIVATE_HANDLERS_MAP كان فارغاً → معالج النص لا يعمل.
+             → تعبئة + بحث مرن (str/enum/name/value).
+        #P2  لا معالجات لإضافة/إزالة الكلمات المحظورة.
+             → handle_add_banned_word / handle_add_global_banned_word
+                / handle_remove_banned_word / handle_remove_global_banned_word
+        #P3  لا يوجد /cancel → الحالة تبقى معلّقة.
+             → handle_cancel().
+        #P4  لا إعادة فحص صلاحيات عند إرسال الكلمة.
+             → _check_admin_in_chat قبل الحفظ.
 
     🟠 HIGH:
-        #F4  لا تنظيف دوري للـ flood tracker → memory leak.
-             → _cleanup_flood_tracker() + ربطه بـ periodic_cleanup.
-        #F5  لا حماية من antiflood_messages=0 → حذف كل رسالة.
-             → max(1, ...) في الكاشف والحفظ.
+        #P5  لا rate-limit على إضافة الكلمات.
+             → _check_flood(user_id, -1, 10, 60.0).
+        #P6  لا إبطال كاش بعد الإضافة → cache stale.
+             → _invalidate_banned_words_cache() مع 4 fallbacks.
+        #P7  _cleanup_flood_tracker يُفرز داخل القفل.
+             → الفرز خارج القفل + إعادة إدراج آمنة.
+        #P8  _apply_slow_mode يُراكم مفاتيح bot_data.
+             → تنظيف تلقائي عند تجاوز 10k مفتاح.
 
     🟡 MEDIUM:
-        #F6  _get_penalty_duration يُرجع قيماً سالبة محتملة.
-             → max(60, int(...)).
-        #F7  لا تحقق من صحة antiflood_messages/seconds.
-             → (يُطبّق في handlers_reply.py — خارج نطاق هذا الملف)
-        #F8  slow_mode لا يُطبَّق فعلياً على Telegram.
-             → set_chat_slow_mode() عند التفعيل الأول.
+        #P9   _reset_shutdown_for_tests لا يمسح signature cache.
+              → إضافته.
+        #P10  رسائل عربية صريحة → i18n عبر _trans + _fmt.
 
-    🟢 LOW:
-        #F9  تفعيل الكل يستخدم antiflood_seconds=5 بينما default=10.
-             → (يُصلَح في handlers_callback.py v9.7.6)
-        #F10 جدول violation_penalties فارغ → penalty_rule دائماً None.
-             → (سلوك متوقّع، لا يُصلَح هنا)
+🆕 v7.15.1 — إصلاح ثغرات عقوبات الفيضان (10 ثغرات في v7.15.0):
+    #F1 كاشف الفيضان.  #F2 قراءة العقوبة الصحيحة.
+    #F3 تخزين العدّاد.  #F4 تنظيف دوري.
+    #F5 حماية antiflood_messages=0.  #F6 حماية المدة السالبة.
+    #F8 slow_mode فعلي.
 
 🆕 v7.15.0 — إغلاق ثغرات التحايل:
-    🔴 #A1  Polls.              #A2  إيموجي يكسر الدومين.
-    🔴 #A3  newline.            #A4  edited_message.
-    🔴 #A5  نقاط يونيكود.       #A6  Combining موسّع.
-    🔴 #A7  TLDs.               #A8  _deleet يحفظ البريد.
-    🔴 #A9  _SPLIT_URL_RE.      #A10 IPv4 lookahead.
-    🔴 #A11 @channel 5 أحرف.    #A12 venue title/address.
-    🔴 #A13 vCard TYPE.         #A14 delete_emails.
-    🔴 #A15 migration آمن.      #A16 hxxp/magnet/ftp.
-    🔴 #A17 scripts إضافية.     #A19 depth=4.
-    🔴 #A20 حذف _sec_auth_cache. #A21 context في delete.
-    🔴 #A22 delete-perm threshold. #A24 homoglyph آمن.
-    🔴 #A25 Braille/Runic.
-
+    🔴 #A1 Polls. #A2 إيموجي يكسر الدومين. #A3 newline. #A4 edited_message.
+    🔴 #A5 نقاط يونيكود. #A6 Combining موسّع. #A7 TLDs. #A8 _deleet يحفظ البريد.
+    🔴 #A9 _SPLIT_URL_RE. #A10 IPv4 lookahead. #A11 @channel 5 أحرف.
+    🔴 #A12 venue title/address. #A13 vCard TYPE. #A14 delete_emails.
+    🔴 #A15 migration آمن. #A16 hxxp/magnet/ftp. #A17 scripts إضافية.
+    🔴 #A19 depth=4. #A20 حذف _sec_auth_cache. #A21 context في delete.
+    🔴 #A22 delete-perm threshold. #A24 homoglyph آمن. #A25 Braille/Runic.
 =============================================================================
 """
 
@@ -151,6 +149,12 @@ _ANTIEVASION_ALT_SCHEMES = _env_flag("ANTIEVASION_ALT_SCHEMES", True)
 _ANTIFLOOD_ENABLED = _env_flag("ANTIFLOOD_ENABLED", True)
 _SLOW_MODE_AUTO = _env_flag("SLOW_MODE_AUTO", True)
 
+# v7.16.0 flags
+_BAN_ADD_RATE_LIMIT = _env_flag("BAN_ADD_RATE_LIMIT", True)
+_BAN_ADD_RATE_MAX = 10
+_BAN_ADD_RATE_WINDOW = 60.0
+_BOT_DATA_SLOW_MODE_PRUNE_THRESHOLD = 10000
+
 
 # ═══════════════════════════════════════════════════════════════════
 # Constants
@@ -195,6 +199,10 @@ _FLOOD_DEFAULT_MESSAGES = 5
 _FLOOD_DEFAULT_WINDOW = 10
 _FLOOD_DEFAULT_PENALTY = "mute"
 _FLOOD_DEFAULT_DURATION = 3600
+
+# v7.16.0 banned-word validation
+_BAN_WORD_MIN_LEN = 2
+_BAN_WORD_MAX_LEN = 100
 
 FEATURE_LOG_DELETIONS = _env_flag("LOG_DELETIONS", True)
 FEATURE_LOG_PENALTIES = _env_flag("LOG_PENALTIES", True)
@@ -265,18 +273,10 @@ async def _check_flood(
 ) -> bool:
     """
     v7.15.1 #F1: كاشف الفيضان الأساسي.
+    v7.16.0 #P5: يُعاد استخدامه كـrate-limiter عام.
 
     يُرجع True إذا تجاوز المستخدم الحدّ خلال النافذة الزمنية.
-
-    - max_messages: الحد الأقصى (يُطبَّع إلى [1, _FLOOD_MAX_MESSAGES_LIMIT])
-    - window_sec: النافذة الزمنية بالثواني (تُطبَّع إلى
-                   [_FLOOD_MIN_WINDOW_SEC, _FLOOD_MAX_WINDOW_SEC])
-    - عند تجاوز الحد → يُفرَّغ الـtracker لمنع عقوبات متتالية.
     """
-    if max_messages <= 0 or window_sec <= 0:
-        return False
-
-    # #F5: تطبيع القيم — لا نحذف كل رسالة بـ 0، ولا ننتظر ساعة
     try:
         max_messages = max(1, min(
             int(max_messages),
@@ -298,13 +298,11 @@ async def _check_flood(
 
     async with _flood_lock:
         tracker = _flood_tracker[key]
-        # احذف الرسائل خارج النافذة
         while tracker and now - tracker[0] > window_sec:
             tracker.popleft()
         tracker.append(now)
         exceeded = len(tracker) > max_messages
         if exceeded:
-            # إعادة تعيين فورية — تمنع عقوبات متكررة لكل رسالة بعد الحد
             tracker.clear()
             return True
         return False
@@ -312,13 +310,11 @@ async def _check_flood(
 
 async def _cleanup_flood_tracker(force: bool = False) -> int:
     """
-    v7.15.1 #F4: تنظيف دوري للـ flood tracker.
+    v7.15.1 #F4 + v7.16.0 #P7: تنظيف دوري للـ flood tracker.
 
     - يحذف المفاتيح الخاملة (آخر رسالة > _FLOOD_TRACKER_STALE_SEC).
     - عند تجاوز _FLOOD_TRACKER_MAX_KEYS → يحذف 25% الأقدم.
-
-    Returns:
-        عدد المفاتيح المحذوفة.
+    - الفرز يحدث خارج القفل لتقليل الاحتجاب.
     """
     global _flood_last_cleanup
     now = time.monotonic()
@@ -326,10 +322,11 @@ async def _cleanup_flood_tracker(force: bool = False) -> int:
         return 0
 
     removed = 0
+    overflow_snapshot: List[Tuple[Tuple[int, int], deque]] = []
+
     async with _flood_lock:
         _flood_last_cleanup = now
 
-        # 1) احذف الخاملة
         stale_keys = [
             k for k, dq in _flood_tracker.items()
             if not dq or now - dq[-1] > _FLOOD_TRACKER_STALE_SEC
@@ -338,16 +335,23 @@ async def _cleanup_flood_tracker(force: bool = False) -> int:
             _flood_tracker.pop(k, None)
             removed += 1
 
-        # 2) سقف أقصى
         if len(_flood_tracker) > _FLOOD_TRACKER_MAX_KEYS:
-            oldest = sorted(
-                _flood_tracker.items(),
-                key=lambda kv: kv[1][-1] if kv[1] else 0.0,
-            )
-            to_del = len(_flood_tracker) - (_FLOOD_TRACKER_MAX_KEYS * 3 // 4)
-            for k, _ in oldest[:max(1, to_del)]:
-                _flood_tracker.pop(k, None)
-                removed += 1
+            overflow_snapshot = list(_flood_tracker.items())
+
+    if overflow_snapshot:
+        oldest = sorted(
+            overflow_snapshot,
+            key=lambda kv: kv[1][-1] if kv[1] else 0.0,
+        )
+        async with _flood_lock:
+            current_size = len(_flood_tracker)
+            if current_size > _FLOOD_TRACKER_MAX_KEYS:
+                target_size = _FLOOD_TRACKER_MAX_KEYS * 3 // 4
+                to_del = current_size - target_size
+                for k, _ in oldest[:max(1, to_del)]:
+                    if k in _flood_tracker:
+                        _flood_tracker.pop(k, None)
+                        removed += 1
 
     if removed > 0:
         logger.debug(
@@ -412,9 +416,7 @@ _WS_RE = re.compile(
     r'[\s\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]+'
 )
 
-# Homoglyphs (Cyrillic + Greek → Latin) + Armenian/Georgian/Hebrew
 _HOMOGLYPH_MAP = str.maketrans({
-    # Cyrillic lower
     '\u0430': 'a', '\u0431': 'b', '\u0432': 'b', '\u0433': 'r',
     '\u0434': 'd', '\u0435': 'e', '\u0436': 'x', '\u0437': '3',
     '\u0438': 'u', '\u0439': 'u', '\u043a': 'k', '\u043b': 'n',
@@ -425,7 +427,6 @@ _HOMOGLYPH_MAP = str.maketrans({
     '\u044c': 'b', '\u044d': 'e', '\u044e': 'o', '\u044f': 'r',
     '\u0456': 'i', '\u0455': 's', '\u0458': 'j', '\u0457': 'i',
     '\u0451': 'e',
-    # Cyrillic upper
     '\u0410': 'A', '\u0411': 'B', '\u0412': 'B', '\u0413': 'R',
     '\u0414': 'D', '\u0415': 'E', '\u0416': 'X', '\u0417': '3',
     '\u0418': 'U', '\u0419': 'U', '\u041a': 'K', '\u041b': 'N',
@@ -436,7 +437,6 @@ _HOMOGLYPH_MAP = str.maketrans({
     '\u042c': 'B', '\u042d': 'E', '\u042e': 'O', '\u042f': 'R',
     '\u0406': 'I', '\u0407': 'I', '\u0405': 'S', '\u0408': 'J',
     '\u0401': 'E',
-    # Greek lower
     '\u03b1': 'a', '\u03b2': 'b', '\u03b3': 'y', '\u03b4': 'd',
     '\u03b5': 'e', '\u03b6': 'z', '\u03b7': 'n', '\u03b8': 'o',
     '\u03b9': 'i', '\u03ba': 'k', '\u03bb': 'l', '\u03bc': 'u',
@@ -444,24 +444,19 @@ _HOMOGLYPH_MAP = str.maketrans({
     '\u03c1': 'p', '\u03c2': 's', '\u03c3': 'o', '\u03c4': 't',
     '\u03c5': 'u', '\u03c6': 'f', '\u03c7': 'x', '\u03c8': 'y',
     '\u03c9': 'w',
-    # Greek upper
     '\u0391': 'A', '\u0392': 'B', '\u0393': 'Y', '\u0394': 'A',
     '\u0395': 'E', '\u0396': 'Z', '\u0397': 'H', '\u0398': 'O',
     '\u0399': 'I', '\u039a': 'K', '\u039b': 'L', '\u039c': 'M',
     '\u039d': 'N', '\u039e': 'E', '\u039f': 'O', '\u03a0': 'N',
     '\u03a1': 'P', '\u03a3': 'S', '\u03a4': 'T', '\u03a5': 'Y',
     '\u03a6': 'F', '\u03a7': 'X', '\u03a8': 'Y', '\u03a9': 'W',
-    # Armenian
     '\u0561': 'a', '\u0570': 'h', '\u0578': 'n', '\u057d': 'u',
     '\u0585': 'o', '\u0584': 'p',
-    # Georgian
     '\u10d0': 'a', '\u10dd': 'o', '\u10d8': 'i', '\u10d2': 'g',
     '\u10d4': 'e', '\u10d6': 'z',
-    # Hebrew
     '\u05d0': 'N', '\u05d5': 'l',
 })
 
-# Leetspeak (بدون @ $ !)
 _LEET_TRANSLATE = str.maketrans({
     '0': 'o', '1': 'i', '3': 'e', '4': 'a', '5': 's',
     '7': 't', '8': 'b', '9': 'g',
@@ -718,7 +713,6 @@ def _merge_split_urls(text: str) -> str:
     return text
 
 
-# ─── Entity types ───
 _ENTITY_LINK_TYPES = frozenset({'url', 'text_link'})
 _ENTITY_URL_TYPES = frozenset({'url', 'text_link'})
 
@@ -1462,7 +1456,6 @@ def _compute_spam_score(
         if _entity_urls and (strong_matches or matched_patterns):
             score += 2
             reasons.append("entity_url+keywords")
-        # Anti-FP guard
         if (
             not strong_matches
             and not medium_matches
@@ -1566,9 +1559,14 @@ def _is_shutting_down() -> bool:
 
 
 def _reset_shutdown_for_tests():
+    """v7.16.0 #P9: مسح جميع الكاشات المرتبطة."""
     global _shutdown_started
     _shutdown_started = False
-    logger.debug("🧪 _shutdown_started reset (test mode)")
+    try:
+        _private_handler_signature_cache.clear()
+    except Exception:
+        pass
+    logger.debug("🧪 _shutdown_started + signature cache reset (test mode)")
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -1603,7 +1601,7 @@ async def _lazy_init_columns():
         _columns_last_attempt_ts = now
 
         db_type = getattr(DB, "DB_TYPE", "sqlite")
-        logger.info("🔧 v7.15.1: Auto-migration (DB_TYPE=%s)", db_type)
+        logger.info("🔧 v7.16.0: Auto-migration (DB_TYPE=%s)", db_type)
 
         cols = [
             ("delete_protected_any", "INTEGER DEFAULT 0", "TINYINT(1) DEFAULT 0"),
@@ -2066,6 +2064,81 @@ async def _safe_invalidate(*keys):
             pass
 
 
+async def _invalidate_banned_words_cache(chat_id=None) -> bool:
+    """
+    v7.16.0 #P6: إبطال كاش الكلمات المحظورة بعد الإضافة/الإزالة.
+
+    يحاول 4 مسارات مختلفة لتجنب ImportError عند تغيّر أسماء الدوال.
+    """
+    # 1) utils.invalidate_banned_words_cache_async (async)
+    try:
+        from utils import invalidate_banned_words_cache_async as _inv
+        result = _inv(chat_id)
+        if asyncio.iscoroutine(result):
+            await result
+        return True
+    except ImportError:
+        pass
+    except Exception as e:
+        logger.debug("invalidate_banned_words (utils.async): %s", e)
+
+    # 2) utils.invalidate_banned_words_cache (sync أو async)
+    try:
+        from utils import invalidate_banned_words_cache as _inv2
+        result = _inv2(chat_id) if chat_id is not None else _inv2()
+        if asyncio.iscoroutine(result):
+            await result
+        return True
+    except ImportError:
+        pass
+    except TypeError:
+        # دالة لا تقبل معامل
+        try:
+            from utils import invalidate_banned_words_cache as _inv2
+            result = _inv2()
+            if asyncio.iscoroutine(result):
+                await result
+            return True
+        except Exception:
+            pass
+    except Exception as e:
+        logger.debug("invalidate_banned_words (utils.sync): %s", e)
+
+    # 3) cache.banned_words_cache
+    try:
+        from cache import banned_words_cache
+        if hasattr(banned_words_cache, 'invalidate'):
+            result = banned_words_cache.invalidate(chat_id)
+            if asyncio.iscoroutine(result):
+                await result
+            return True
+    except ImportError:
+        pass
+    except Exception as e:
+        logger.debug("invalidate_banned_words (cache.banned_words_cache): %s", e)
+
+    # 4) internal_cache fallback
+    try:
+        keys = []
+        if chat_id is not None:
+            keys = [
+                f"banned_words_{chat_id}",
+                f"banned_words:{chat_id}",
+            ]
+        else:
+            keys = ["banned_words", "banned_words_all"]
+        for k in keys:
+            try:
+                await internal_cache.invalidate(k)
+            except Exception:
+                pass
+        return True
+    except Exception:
+        pass
+
+    return False
+
+
 # ═══════════════════════════════════════════════════════════════════
 # Labels
 # ═══════════════════════════════════════════════════════════════════
@@ -2093,7 +2166,6 @@ _VIOLATION_LABELS_AR = {
     'venue_url': '📍 موقع',
     'email': '📧 بريد إلكتروني',
     'poll_link': '📊 رابط في استفتاء',
-    # v7.15.1
     'antiflood': '🌊 فيضان رسائل',
     'flood': '🌊 فيضان رسائل',
 }
@@ -2140,7 +2212,6 @@ _DEFAULT_VIOLATION_MESSAGES = {
     'venue_url': '📍 يُمنع إرسال مواقع',
     'email': '📧 يُمنع إرسال البريد الإلكتروني هنا',
     'poll_link': '📊 يُمنع إرسال استفتاءات بروابط',
-    # v7.15.1
     'antiflood': '🌊 يُمنع إرسال رسائل بسرعة (فيضان)',
     'flood': '🌊 يُمنع إرسال رسائل بسرعة (فيضان)',
 }
@@ -3320,7 +3391,13 @@ def _accepts_state_arg(handler, handler_name: str) -> bool:
 
 class MessageHandlers:
 
-    _PRIVATE_HANDLERS_MAP: Dict[Any, str] = {}
+    # v7.16.0 #P1: تعبئة الخريطة بمعالجات الحالة الخاصة
+    _PRIVATE_HANDLERS_MAP: Dict[Any, str] = {
+        "WAIT_GROUP_BAN": "handle_add_banned_word",
+        "WAIT_GLOBAL_BAN": "handle_add_global_banned_word",
+        "WAIT_REM_GROUP_BAN": "handle_remove_banned_word",
+        "WAIT_REM_GLOBAL_BAN": "handle_remove_global_banned_word",
+    }
 
     @staticmethod
     async def handle_group(update, context):
@@ -3366,7 +3443,8 @@ class MessageHandlers:
     @staticmethod
     async def _apply_slow_mode(context, chat_id, settings):
         """
-        v7.15.1 #F8: تطبيق slow_mode فعلياً على Telegram عند التفعيل الأول.
+        v7.15.1 #F8: تطبيق slow_mode فعلياً على Telegram.
+        v7.16.0 #P8: تنظيف تلقائي لمفاتيح bot_data عند التراكم.
         """
         if not _SLOW_MODE_AUTO:
             return
@@ -3376,6 +3454,20 @@ class MessageHandlers:
                 slow_secs = int(settings.get('slow_mode_seconds', 0) or 0)
             except (TypeError, ValueError):
                 slow_secs = 0
+
+            # v7.16.0 #P8: prune
+            try:
+                bd = context.bot_data
+                if isinstance(bd, dict) and len(bd) > _BOT_DATA_SLOW_MODE_PRUNE_THRESHOLD:
+                    prefix = "_slow_applied_"
+                    stale = [
+                        k for k in list(bd.keys())
+                        if isinstance(k, str) and k.startswith(prefix)
+                    ]
+                    for k in stale[:max(1, len(stale) // 2)]:
+                        bd.pop(k, None)
+            except Exception:
+                pass
 
             cache_key = f"_slow_applied_{chat_id}"
             last_applied = context.bot_data.get(cache_key, -1)
@@ -3425,7 +3517,6 @@ class MessageHandlers:
         else:
             return
 
-        # ═══ بناء _MessageContext ═══
         ctx = _MessageContext()
         ctx.text = message.text or ""
         ctx.caption = message.caption or ""
@@ -3541,9 +3632,7 @@ class MessageHandlers:
         _emails_enabled = _as_bool(settings.get('delete_emails', 0), False)
         _polls_enabled = _as_bool(settings.get('delete_polls', 0), False)
 
-        # ═══════════════════════════════════════════════════════
-        # v7.15.1 #F1: كاشف الفيضان (قبل كل شيء آخر غير الخدمة)
-        # ═══════════════════════════════════════════════════════
+        # v7.15.1 #F1: كاشف الفيضان
         _antiflood_enabled = _as_bool(
             settings.get('antiflood_enabled', 0), False
         )
@@ -3582,7 +3671,7 @@ class MessageHandlers:
             except Exception as e:
                 logger.debug("flood check: %s", e)
 
-        # ═══ v7.15.1 #F8: تطبيق slow_mode فعلياً (خارج مسار الفيضان) ═══
+        # v7.15.1 #F8: slow_mode
         try:
             await MessageHandlers._apply_slow_mode(
                 context, chat_id, settings
@@ -3607,7 +3696,6 @@ class MessageHandlers:
             and not is_protected_forward
         )
 
-        # ═══ Spam score ═══
         _spam_score = 0
         _spam_reasons: List[str] = []
         if _spam_enabled:
@@ -3853,9 +3941,7 @@ class MessageHandlers:
 
     @staticmethod
     def _get_penalty_duration(settings, violation_type):
-        """
-        v7.15.1 #F6: حماية من القيم السالبة/الصفرية.
-        """
+        """v7.15.1 #F6: حماية من القيم السالبة/الصفرية."""
         try:
             if violation_type in ('flood', 'antiflood'):
                 raw = settings.get(
@@ -3928,12 +4014,7 @@ class MessageHandlers:
 
     @staticmethod
     async def _resolve_penalty(chat_id, violation_type, settings):
-        """
-        v7.15.1 #F2: قراءة antiflood_penalty/night_mode_action حسب النوع.
-
-        قبل الإصلاح: كان يقرأ auto_penalty دائماً، فتجاهل
-        المستخدم اختيار "ban" للفيضان.
-        """
+        """v7.15.1 #F2: قراءة العقوبة الصحيحة لكل نوع."""
         penalty_rule = None
         try:
             penalty_rule = await DB.get_violation_penalty(
@@ -3958,7 +4039,6 @@ class MessageHandlers:
                     dur = 0
                 return ptype, dur
 
-        # ✅ إصلاح v7.15.1: قراءة الإعداد الصحيح لكل نوع
         if violation_type in ('flood', 'antiflood'):
             ptype = settings.get(
                 'antiflood_penalty', _FLOOD_DEFAULT_PENALTY
@@ -4021,9 +4101,7 @@ class MessageHandlers:
             delete_ok = False
 
         if not delete_ok:
-            logger.error(
-                "⏭️ توقف — الحذف فشل (%s)", violation_type
-            )
+            logger.error("⏭️ توقف — الحذف فشل (%s)", violation_type)
             return
 
         if FEATURE_LOG_DELETIONS:
@@ -4204,25 +4282,531 @@ class MessageHandlers:
             logger.error("❌ auto_reply: %s", e)
             return False
 
+    # ───────────────────────────────────────────────────────────────
+    # v7.16.0: Private-state handlers
+    # ───────────────────────────────────────────────────────────────
+
     @staticmethod
     async def handle_private(update, context):
+        """v7.16.0: بحث مرن عن المعالج (str/enum/name/value)."""
         try:
             if not update.effective_user:
                 return
             user_id = update.effective_user.id
             state = StateManager.get(user_id)
+            if state is None:
+                return
+
             handler_name = MessageHandlers._PRIVATE_HANDLERS_MAP.get(state)
             if not handler_name:
+                for candidate in (
+                    getattr(state, 'name', None),
+                    getattr(state, 'value', None),
+                    str(state),
+                ):
+                    if candidate is None:
+                        continue
+                    handler_name = MessageHandlers._PRIVATE_HANDLERS_MAP.get(
+                        candidate
+                    )
+                    if handler_name:
+                        break
+            if not handler_name:
                 return
+
             handler = getattr(MessageHandlers, handler_name, None)
             if handler is None:
+                logger.warning(
+                    "⚠️ _PRIVATE_HANDLERS_MAP يشير إلى %s غير موجود",
+                    handler_name,
+                )
                 return
+
             if _accepts_state_arg(handler, handler_name):
                 await handler(update, context, state)
             else:
                 await handler(update, context)
         except Exception:
             logger.exception("handle_private error")
+
+    @staticmethod
+    async def handle_cancel(update, context):
+        """v7.16.0 #P3: إلغاء أي حالة معلّقة."""
+        try:
+            if not update.effective_user:
+                return
+            user_id = update.effective_user.id
+            StateManager.clear(user_id)
+            context.user_data.pop('ban_chat', None)
+            lang = await _ensure_lang(update, context)
+            msg = await _trans(
+                'action_cancelled', lang, "✅ تم إلغاء العملية."
+            )
+            await safe_send(context.bot, user_id, msg)
+        except Exception as e:
+            logger.debug("handle_cancel: %s", e)
+
+    @staticmethod
+    async def _validate_and_get_word(update, context, lang):
+        """
+        v7.16.0: تحقق مشترك — يُرجع (word, error_sent).
+        """
+        message = update.effective_message
+        if not message or not message.text:
+            return None, True
+        word = (message.text or "").strip()
+        if not word:
+            return None, True
+        if len(word) < _BAN_WORD_MIN_LEN or len(word) > _BAN_WORD_MAX_LEN:
+            user_id = update.effective_user.id
+            try:
+                err = await _trans(
+                    'ban_word_invalid_length',
+                    lang,
+                    f"❌ يجب أن تكون الكلمة بين {_BAN_WORD_MIN_LEN} "
+                    f"و {_BAN_WORD_MAX_LEN} حرف.",
+                )
+                await safe_send(context.bot, user_id, err)
+            except Exception:
+                pass
+            return None, True
+        return word, False
+
+    @staticmethod
+    async def _apply_ban_add_rate_limit(update, context, lang) -> bool:
+        """
+        v7.16.0 #P5: rate-limit لإضافة الكلمات.
+
+        Returns:
+            True إذا تجاوز الحد (يجب رفض الطلب).
+        """
+        if not _BAN_ADD_RATE_LIMIT:
+            return False
+        try:
+            user_id = update.effective_user.id
+            exceeded = await _check_flood(
+                user_id, -1,
+                _BAN_ADD_RATE_MAX, _BAN_ADD_RATE_WINDOW,
+            )
+            if exceeded:
+                msg = await _trans(
+                    'ban_word_rate_limited',
+                    lang,
+                    "⏱️ تمهّل قليلاً — تجاوزت الحد المسموح.",
+                )
+                try:
+                    await safe_send(context.bot, user_id, msg)
+                except Exception:
+                    pass
+                return True
+        except Exception as e:
+            logger.debug("ban_add rate limit: %s", e)
+        return False
+
+    @staticmethod
+    async def _finalize_ban_add(context, user_id, success: bool):
+        """v7.16.0: مسح الحالة عند النجاح فقط."""
+        if not success:
+            return
+        try:
+            StateManager.clear(user_id)
+        except Exception:
+            pass
+        try:
+            context.user_data.pop('ban_chat', None)
+        except Exception:
+            pass
+
+    @staticmethod
+    async def handle_add_banned_word(update, context):
+        """
+        v7.16.0 #P2: إضافة كلمة محظورة لمجموعة.
+
+        يقرأ chat_id من context.user_data['ban_chat'].
+        - إذا كانت القيمة -1 → يفوّض لـhandle_add_global_banned_word.
+        - يتحقق من الصلاحيات مجدداً قبل الحفظ.
+        """
+        user_id = update.effective_user.id if update.effective_user else None
+        if not user_id:
+            return
+        message = update.effective_message
+        if not message or not message.text:
+            return
+        lang = await _ensure_lang(update, context)
+
+        chat_id = context.user_data.get('ban_chat')
+        if chat_id is None:
+            StateManager.clear(user_id)
+            return
+
+        if chat_id == -1:
+            return await MessageHandlers.handle_add_global_banned_word(
+                update, context
+            )
+
+        # v7.16.0 #P4: إعادة فحص الصلاحيات
+        try:
+            is_admin = await _check_admin_in_chat(
+                context, chat_id, user_id
+            )
+        except Exception:
+            is_admin = False
+        if not is_admin:
+            try:
+                msg = await _trans(
+                    'ban_add_no_perms', lang,
+                    "❌ لم تعد مشرفاً في هذه المجموعة.",
+                )
+                await safe_send(context.bot, user_id, msg)
+            except Exception:
+                pass
+            StateManager.clear(user_id)
+            context.user_data.pop('ban_chat', None)
+            return
+
+        # v7.16.0 #P5: rate-limit
+        if await MessageHandlers._apply_ban_add_rate_limit(
+            update, context, lang
+        ):
+            return
+
+        word, err = await MessageHandlers._validate_and_get_word(
+            update, context, lang
+        )
+        if err:
+            return
+
+        success = False
+        try:
+            added = await DB.add_banned_word(chat_id, word, user_id)
+            if added:
+                await _invalidate_banned_words_cache(chat_id)
+                tmpl = await _trans(
+                    'ban_word_added', lang,
+                    "✅ تمت إضافة الكلمة: <code>{word}</code>",
+                )
+                await safe_send(
+                    context.bot, user_id,
+                    _fmt(tmpl, word=escape(word)),
+                    parse_mode='HTML',
+                )
+                success = True
+            else:
+                msg = await _trans(
+                    'ban_word_duplicate', lang,
+                    "❌ الكلمة موجودة مسبقاً.",
+                )
+                await safe_send(context.bot, user_id, msg)
+                success = True
+        except Exception as e:
+            logger.error("add_banned_word(%s): %s", chat_id, e)
+            try:
+                msg = await _trans(
+                    'ban_word_add_failed', lang,
+                    "❌ فشل الحفظ — حاول مجدداً.",
+                )
+                await safe_send(context.bot, user_id, msg)
+            except Exception:
+                pass
+        finally:
+            await MessageHandlers._finalize_ban_add(
+                context, user_id, success
+            )
+
+    @staticmethod
+    async def handle_add_global_banned_word(update, context):
+        """
+        v7.16.0 #P2: إضافة كلمة عالمية (للمطورين فقط).
+        """
+        user_id = update.effective_user.id if update.effective_user else None
+        if not user_id:
+            return
+        lang = await _ensure_lang(update, context)
+
+        # فحص المطور
+        try:
+            is_dev = False
+            for attr in ('is_developer', 'is_dev', 'is_owner'):
+                fn = getattr(CONFIG, attr, None)
+                if callable(fn) and fn(user_id):
+                    is_dev = True
+                    break
+            if not is_dev and user_id == getattr(
+                CONFIG, 'PRIMARY_OWNER_ID', -1
+            ):
+                is_dev = True
+        except Exception:
+            is_dev = False
+
+        if not is_dev:
+            try:
+                msg = await _trans(
+                    'ban_add_no_perms', lang,
+                    "❌ صلاحيات غير كافية.",
+                )
+                await safe_send(context.bot, user_id, msg)
+            except Exception:
+                pass
+            StateManager.clear(user_id)
+            context.user_data.pop('ban_chat', None)
+            return
+
+        if await MessageHandlers._apply_ban_add_rate_limit(
+            update, context, lang
+        ):
+            return
+
+        word, err = await MessageHandlers._validate_and_get_word(
+            update, context, lang
+        )
+        if err:
+            return
+
+        success = False
+        try:
+            added = await DB.add_banned_word(-1, word, user_id)
+            if added:
+                await _invalidate_banned_words_cache(None)
+                tmpl = await _trans(
+                    'ban_word_added_global', lang,
+                    "✅ تمت إضافة الكلمة العالمية: <code>{word}</code>",
+                )
+                await safe_send(
+                    context.bot, user_id,
+                    _fmt(tmpl, word=escape(word)),
+                    parse_mode='HTML',
+                )
+                success = True
+            else:
+                msg = await _trans(
+                    'ban_word_duplicate', lang,
+                    "❌ الكلمة موجودة مسبقاً.",
+                )
+                await safe_send(context.bot, user_id, msg)
+                success = True
+        except Exception as e:
+            logger.error("add_global_banned_word: %s", e)
+            try:
+                msg = await _trans(
+                    'ban_word_add_failed', lang,
+                    "❌ فشل الحفظ — حاول مجدداً.",
+                )
+                await safe_send(context.bot, user_id, msg)
+            except Exception:
+                pass
+        finally:
+            await MessageHandlers._finalize_ban_add(
+                context, user_id, success
+            )
+
+    @staticmethod
+    async def handle_remove_banned_word(update, context):
+        """
+        v7.16.0 #P2: إزالة كلمة محظورة من مجموعة.
+        """
+        user_id = update.effective_user.id if update.effective_user else None
+        if not user_id:
+            return
+        message = update.effective_message
+        if not message or not message.text:
+            return
+        lang = await _ensure_lang(update, context)
+
+        chat_id = context.user_data.get('ban_chat')
+        if chat_id is None:
+            StateManager.clear(user_id)
+            return
+
+        if chat_id == -1:
+            return await MessageHandlers.handle_remove_global_banned_word(
+                update, context
+            )
+
+        try:
+            is_admin = await _check_admin_in_chat(
+                context, chat_id, user_id
+            )
+        except Exception:
+            is_admin = False
+        if not is_admin:
+            try:
+                msg = await _trans(
+                    'ban_add_no_perms', lang,
+                    "❌ لم تعد مشرفاً في هذه المجموعة.",
+                )
+                await safe_send(context.bot, user_id, msg)
+            except Exception:
+                pass
+            StateManager.clear(user_id)
+            context.user_data.pop('ban_chat', None)
+            return
+
+        if await MessageHandlers._apply_ban_add_rate_limit(
+            update, context, lang
+        ):
+            return
+
+        word, err = await MessageHandlers._validate_and_get_word(
+            update, context, lang
+        )
+        if err:
+            return
+
+        success = False
+        try:
+            # نجرّب دوال الحذف المحتملة
+            removed = False
+            for method_name in (
+                'remove_banned_word', 'delete_banned_word',
+                'remove_banned_word_by_text',
+            ):
+                fn = getattr(DB, method_name, None)
+                if not callable(fn):
+                    continue
+                try:
+                    result = fn(chat_id, word)
+                    if asyncio.iscoroutine(result):
+                        result = await result
+                    removed = bool(result)
+                    break
+                except Exception as e:
+                    logger.debug("DB.%s failed: %s", method_name, e)
+                    continue
+
+            if removed:
+                await _invalidate_banned_words_cache(chat_id)
+                tmpl = await _trans(
+                    'ban_word_removed', lang,
+                    "✅ تمت إزالة الكلمة: <code>{word}</code>",
+                )
+                await safe_send(
+                    context.bot, user_id,
+                    _fmt(tmpl, word=escape(word)),
+                    parse_mode='HTML',
+                )
+                success = True
+            else:
+                msg = await _trans(
+                    'ban_word_not_found', lang,
+                    "❌ الكلمة غير موجودة في القائمة.",
+                )
+                await safe_send(context.bot, user_id, msg)
+                success = True
+        except Exception as e:
+            logger.error("remove_banned_word(%s): %s", chat_id, e)
+            try:
+                msg = await _trans(
+                    'ban_word_remove_failed', lang,
+                    "❌ فشلت الإزالة — حاول مجدداً.",
+                )
+                await safe_send(context.bot, user_id, msg)
+            except Exception:
+                pass
+        finally:
+            await MessageHandlers._finalize_ban_add(
+                context, user_id, success
+            )
+
+    @staticmethod
+    async def handle_remove_global_banned_word(update, context):
+        """
+        v7.16.0 #P2: إزالة كلمة عالمية (للمطورين فقط).
+        """
+        user_id = update.effective_user.id if update.effective_user else None
+        if not user_id:
+            return
+        lang = await _ensure_lang(update, context)
+
+        try:
+            is_dev = False
+            for attr in ('is_developer', 'is_dev', 'is_owner'):
+                fn = getattr(CONFIG, attr, None)
+                if callable(fn) and fn(user_id):
+                    is_dev = True
+                    break
+            if not is_dev and user_id == getattr(
+                CONFIG, 'PRIMARY_OWNER_ID', -1
+            ):
+                is_dev = True
+        except Exception:
+            is_dev = False
+
+        if not is_dev:
+            try:
+                msg = await _trans(
+                    'ban_add_no_perms', lang,
+                    "❌ صلاحيات غير كافية.",
+                )
+                await safe_send(context.bot, user_id, msg)
+            except Exception:
+                pass
+            StateManager.clear(user_id)
+            context.user_data.pop('ban_chat', None)
+            return
+
+        if await MessageHandlers._apply_ban_add_rate_limit(
+            update, context, lang
+        ):
+            return
+
+        word, err = await MessageHandlers._validate_and_get_word(
+            update, context, lang
+        )
+        if err:
+            return
+
+        success = False
+        try:
+            removed = False
+            for method_name in (
+                'remove_banned_word', 'delete_banned_word',
+                'remove_banned_word_by_text',
+            ):
+                fn = getattr(DB, method_name, None)
+                if not callable(fn):
+                    continue
+                try:
+                    result = fn(-1, word)
+                    if asyncio.iscoroutine(result):
+                        result = await result
+                    removed = bool(result)
+                    break
+                except Exception:
+                    continue
+
+            if removed:
+                await _invalidate_banned_words_cache(None)
+                tmpl = await _trans(
+                    'ban_word_removed_global', lang,
+                    "✅ تمت إزالة الكلمة العالمية: <code>{word}</code>",
+                )
+                await safe_send(
+                    context.bot, user_id,
+                    _fmt(tmpl, word=escape(word)),
+                    parse_mode='HTML',
+                )
+                success = True
+            else:
+                msg = await _trans(
+                    'ban_word_not_found', lang,
+                    "❌ الكلمة غير موجودة في القائمة.",
+                )
+                await safe_send(context.bot, user_id, msg)
+                success = True
+        except Exception as e:
+            logger.error("remove_global_banned_word: %s", e)
+            try:
+                msg = await _trans(
+                    'ban_word_remove_failed', lang,
+                    "❌ فشلت الإزالة — حاول مجدداً.",
+                )
+                await safe_send(context.bot, user_id, msg)
+            except Exception:
+                pass
+        finally:
+            await MessageHandlers._finalize_ban_add(
+                context, user_id, success
+            )
 
     @staticmethod
     async def handle_service(update, context):
@@ -4364,4 +4948,14 @@ __all__ = [
     "_FLOOD_DEFAULT_WINDOW",
     "_FLOOD_DEFAULT_PENALTY",
     "_FLOOD_DEFAULT_DURATION",
+    # v7.16.0 exports
+    "_invalidate_banned_words_cache",
+    "_check_admin_in_chat",
+    "_BAN_WORD_MIN_LEN",
+    "_BAN_WORD_MAX_LEN",
+    "_BAN_ADD_RATE_LIMIT",
+    "_BAN_ADD_RATE_MAX",
+    "_BAN_ADD_RATE_WINDOW",
+    "_private_handler_signature_cache",
+    "_accepts_state_arg",
 ]
