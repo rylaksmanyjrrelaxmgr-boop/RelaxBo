@@ -2,58 +2,25 @@
 # -*- coding: utf-8 -*-
 
 """
-🌿 Relax Manager – البوت الرئيسي (v5.6.2)
+🌿 Relax Manager – البوت الرئيسي (v5.6.3)
 ================================================================================
+🆕 v5.6.3 (EDITED-MESSAGE-HOOK + MAINTENANCE-COMMANDS + POST-INIT-FIX):
+    🔴 F1: تسجيل MessageHandlers.handle_edited — يُفعِّل Fix #A4
+           (كان أي تعديل على رسالة يتجاوز كل فلاتر الحماية).
+    🔴 F2: تسجيل أوامر db_maintenance_commands
+           (/db_diag_quick, /db_maintenance, /db_weekly).
+    🔴 F3: _start_polling_mode / _stop_polling_mode —
+           تعامل صحيح مع post_init/post_stop (callable أو list).
+    🟠 F4: timeout عند إلغاء المهام الخلفية (10s) لمنع تعليق الإغلاق.
+    🟠 F5: استبدال datetime.utcnow() بـ TimeUtils.utc_now().
+    🟡 F6: إضافة الأوامر الجديدة إلى ADMIN_COMMANDS.
+    🟡 F7: فحص وجود handle_edited في CommandHandlers._verify.
+
 🆕 v5.6.2 (POLLING-MODE CORRECTNESS + SHUTDOWN ORDER):
-    🔴 F1-fix: تصحيح جوهري لـ Polling Mode —
-           الإصدار السابق v5.6.1 استخدم:
-               await app.updater.start_polling(...)
-               await app.start()
-           وهذا يؤدي إلى RuntimeError لأن app.start() تنادي
-           updater.start_polling() مرة ثانية داخلياً.
-           الحل: نضبط app._running=True يدوياً + نُنفّذ post_init
-           hooks بأنفسنا (نُحاكي app.start() بدقة مع تمرير
-           allowed_updates/drop_pending_updates).
-
-    🔴 F2-fix: app_shutdown_done — لا نضبطه في polling mode،
-           حتى يتولّى الـfinally الخارجي استدعاء app.shutdown()
-           الذي يستدعي post_shutdown (بما فيها original_post_shutdown
-           و handlers_message shutdown).
-
-    🟠 F7: _verify_db_config يستخدم CONFIG.DATABASE_URL بدل
-           os.getenv المباشر (توحيد المصدر).
-
-    🟡 F8: إضافة تسجيل تشخيصي أوضح في polling mode.
-
-🆕 v5.6.1 (POLLING-MODE FIX + CLEANUP):
-    ✅ F2: نقل تهيئة _shutdown_event و signal handlers إلى ما قبل الفروع.
-    ✅ F3: contest_cleanup يستقبل app كوسيط.
-    ✅ F4: _MEMBERSHIP_IMPORT_ERROR or "unknown".
-    ✅ F5: _validate_invoice_for_payment يتحقق من invoice['number'].
-    ✅ F6: حذف PATHS غير المستخدم + تنظيف imports.
-
-🆕 v5.6.0 (SHUTDOWN + TASK MANAGER + INTEGRATION):
-    ✅ M1: _spawn_notify_dev_log — تتبّع الاستثناءات + تنظيف ذكي
-    ✅ M2: كل المهام الدائمة داخل run_task_with_retry (موحّد)
-    ✅ M3: register_shutdown_handlers(handlers_message)
-    ✅ M4: import aiohttp في المستوى الأعلى
-    ✅ M5: run_task_with_retry — تأخير وقائي عند خروج مفاجئ
-    ✅ M6: تسلسل إغلاق واضح
-    ✅ M7: SIGTERM handler لـ polling mode أيضاً
-    ✅ M8: تسجيل shutdown handlers قبل app.initialize()
-    ✅ M9: إحصاء مهام دقيق + log تفصيلي عند البدء
-    ✅ M10: cleanup_removed_channels_periodically — بارامترات
-    ✅ M11: حماية من task crash-looping (backoff تصاعدي)
-    ✅ M12: تحسينات أداء صغيرة
-
-🆕 v5.5.23 (POOL-MONITOR-V2)
-🆕 v5.5.22 (SOFT-DELETE-INTEGRATION)
-🆕 v5.5.21 (ADMIN_LOGS-AUTO-CLEANUP)
-🆕 v5.5.20 (MEMBERSHIP UPGRADE)
-🆕 v5.5.19 (MEMBERSHIP INTEGRATION)
-🆕 v5.5.18 (CRITICAL FIXES)
-🆕 v5.5.17 (REVIEW FIXES)
-🆕 v5.5.16 (GRACEFUL SHUTDOWN + SAFETY)
+    🔴 F1-fix: تصحيح جوهري لـ Polling Mode
+    🔴 F2-fix: app_shutdown_done — لا نضبطه في polling mode
+    🟠 F7: _verify_db_config يستخدم CONFIG.DATABASE_URL
+    🟡 F8: تسجيل تشخيصي أوضح في polling mode
 ================================================================================
 """
 
@@ -95,7 +62,7 @@ from handlers import (
 )
 
 # ═════════════════════════════════════════════════════════════════════
-# MembershipHandler (v5.5.20)
+# MembershipHandler
 # ═════════════════════════════════════════════════════════════════════
 register_membership_handlers = None
 _MEMBERSHIP_AVAILABLE = False
@@ -138,11 +105,12 @@ except ImportError as _e1:
                 _MEMBERSHIP_AVAILABLE = False
                 _MEMBERSHIP_SOURCE = None
                 _MEMBERSHIP_IMPORT_ERROR = (
-                    f"standalone: {_e2} | embedded: {_e4}"
+                    f"standalone: {_e1} / {_e2} | "
+                    f"embedded: {_e3} / {_e4}"
                 )
 
 # ═════════════════════════════════════════════════════════════════════
-# admin_logs cleanup (v5.5.21)
+# admin_logs cleanup
 # ═════════════════════════════════════════════════════════════════════
 try:
     from database_tables import (
@@ -164,7 +132,7 @@ except ImportError as _e:
     _ADMIN_LOGS_CLEANUP_IMPORT_ERROR = str(_e)
 
 # ═════════════════════════════════════════════════════════════════════
-# handlers_channels_delete (v5.5.22)
+# handlers_channels_delete
 # ═════════════════════════════════════════════════════════════════════
 register_delete_confirmation = None
 _CH_DELETE_AVAILABLE = False
@@ -198,6 +166,28 @@ from handlers.handlers_message import (
 )
 
 # ═════════════════════════════════════════════════════════════════════
+# 🆕 v5.6.3: db_maintenance_commands
+# ═════════════════════════════════════════════════════════════════════
+register_maintenance_commands = None
+start_weekly_diagnostic_task = None
+stop_weekly_diagnostic_task = None
+_MAINT_CMDS_AVAILABLE = False
+_MAINT_CMDS_IMPORT_ERROR = None
+
+try:
+    from db_maintenance_commands import (
+        register_maintenance_commands as _reg_maint,
+        start_weekly_diagnostic_task as _start_weekly,
+        stop_weekly_diagnostic_task as _stop_weekly,
+    )
+    register_maintenance_commands = _reg_maint
+    start_weekly_diagnostic_task = _start_weekly
+    stop_weekly_diagnostic_task = _stop_weekly
+    _MAINT_CMDS_AVAILABLE = True
+except ImportError as _e:
+    _MAINT_CMDS_IMPORT_ERROR = str(_e)
+
+# ═════════════════════════════════════════════════════════════════════
 # _notify_dev_log
 # ═════════════════════════════════════════════════════════════════════
 try:
@@ -209,7 +199,6 @@ except ImportError:
         _DEV_LOG_AVAILABLE = True
     except ImportError:
         async def _notify_dev_log(context, text: str) -> None:
-            """fallback — لا يفشل أبداً"""
             pass
         _DEV_LOG_AVAILABLE = False
 
@@ -279,6 +268,7 @@ logger = logging.getLogger(__name__)
 # ═══════════════════════════════════════════════════════════════════
 
 _NOTIFY_SHUTDOWN_TIMEOUT = 5.0
+_BG_TASKS_SHUTDOWN_TIMEOUT = 10.0  # 🆕 v5.6.3
 
 _WATCHER_INTERVAL = 10.0
 _WATCHER_HEALTH_TIMEOUT = 5.0
@@ -449,6 +439,19 @@ else:
         _CH_DELETE_IMPORT_ERROR or "unknown",
     )
 
+# 🆕 v5.6.3
+if _MAINT_CMDS_AVAILABLE:
+    logger.info(
+        "✅ db_maintenance_commands متاح — "
+        "/db_diag_quick, /db_maintenance, /db_weekly مُفعّلة"
+    )
+else:
+    logger.warning(
+        "⚠️ db_maintenance_commands غير متاح: %s — "
+        "أوامر الصيانة معطّلة",
+        _MAINT_CMDS_IMPORT_ERROR or "unknown",
+    )
+
 
 # ═══════════════════════════════════════════════════════════════════
 # Allowed updates
@@ -456,6 +459,7 @@ else:
 
 ALLOWED_UPDATES = [
     "message",
+    "edited_message",  # 🆕 v5.6.3: ضروري لـ handle_edited
     "callback_query",
     "chat_join_request",
     "pre_checkout_query",
@@ -506,6 +510,10 @@ ADMIN_COMMANDS = [
     ("restore", "🔄 عرض النسخ"),
     ("db_diag", "🔬 تشخيص قاعدة البيانات"),
     ("db_vacuum", "🧹 تنظيف قاعدة البيانات"),
+    # 🆕 v5.6.3
+    ("db_diag_quick", "🔬 تقرير صحي مختصر"),
+    ("db_maintenance", "🧹 صيانة قاعدة البيانات"),
+    ("db_weekly", "📅 التقرير الأسبوعي"),
 ]
 
 GROUP_COMMANDS = [
@@ -706,13 +714,20 @@ def _verify_command_handlers() -> bool:
         return False
 
     logger.info("✅ كل %d دالة CommandHandlers موجودة", len(required))
+
+    # 🆕 v5.6.3: فحص handle_edited (اختياري — يُنبّه فقط)
+    if not hasattr(MessageHandlers, "handle_edited"):
+        logger.warning(
+            "⚠️ MessageHandlers.handle_edited مفقود — "
+            "تعديل الرسائل لن يُفحص! حدّث handlers_message.py إلى v7.15.1+"
+        )
+    else:
+        logger.info("✅ MessageHandlers.handle_edited متاح")
+
     return True
 
 
 def _verify_db_config() -> bool:
-    """
-    ✅ F7: يستخدم CONFIG.DATABASE_URL بدل os.getenv المباشر.
-    """
     try:
         db_type = getattr(DB, "DB_TYPE", "unknown")
         db_url = getattr(CONFIG, "DATABASE_URL", "") or ""
@@ -921,7 +936,8 @@ async def cleanup_removed_channels_periodically() -> None:
             deleted = 0
 
             if hasattr(DB, 'hard_delete_removed_channels_before'):
-                cutoff_dt = datetime.utcnow() - timedelta(days=GRACE_DAYS)
+                # 🆕 v5.6.3: TimeUtils.utc_now بدل datetime.utcnow
+                cutoff_dt = TimeUtils.utc_now() - timedelta(days=GRACE_DAYS)
                 deleted = await DB.hard_delete_removed_channels_before(
                     cutoff_dt
                 )
@@ -1006,7 +1022,7 @@ async def _validate_invoice_for_payment(user_id: int, payload: str):
         not invoice
         or invoice.get('user_id') != user_id
         or invoice.get('status') != 'pending'
-        or not invoice.get('number')   # ✅ F5
+        or not invoice.get('number')
     ):
         logger.warning(
             "❌ Invoice invalid or not pending for user %s", user_id
@@ -1262,7 +1278,7 @@ async def keep_alive():
 
 
 # ═══════════════════════════════════════════════════════════════════
-# Pool health monitor (v5.5.23)
+# Pool health monitor
 # ═══════════════════════════════════════════════════════════════════
 
 async def _dump_idle_tx_details() -> None:
@@ -1306,17 +1322,7 @@ async def _dump_idle_tx_details() -> None:
 
 
 async def pool_health_monitor() -> None:
-    """
-    يراقب Pool + الاتصالات كل 5 دقائق.
-
-    قواعد التصنيف:
-      • idle_tx >= 3 في أي دورة → ERROR + تفاصيل
-      • util >= 95%             → ERROR
-      • lock_waits >= 1         → WARNING
-      • waiting >= 3            → WARNING
-      • util >= 80%             → WARNING
-      • idle_tx >= 1 لدورتين    → WARNING
-    """
+    """يراقب Pool + الاتصالات كل 5 دقائق."""
     _task_start_mono = time.monotonic()
     _idle_tx_streak = 0
     _last_details_dump_mono = 0.0
@@ -1704,10 +1710,7 @@ async def cleanup_locks():
 
 
 async def contest_cleanup(app: Application):
-    """
-    ✅ F3: يستقبل app بدل استخدام app_global.
-    يُعلن الفائزين تلقائياً للمسابقات المنتهية (كل ساعة).
-    """
+    """يُعلن الفائزين تلقائياً للمسابقات المنتهية (كل ساعة)."""
     try:
         await asyncio.sleep(300)
     except asyncio.CancelledError:
@@ -1764,7 +1767,59 @@ async def contest_cleanup(app: Application):
 
 
 # ═══════════════════════════════════════════════════════════════════
-# Polling mode helpers (F1-fix)
+# Post-init / Post-stop hook helpers (🆕 v5.6.3 — F3)
+# ═══════════════════════════════════════════════════════════════════
+
+async def _run_post_init_hooks(app: Application) -> None:
+    """
+    ✅ F3: تنفيذ post_init hooks بشكل صحيح — يدعم:
+      - callable مفرد (PTB v20+)
+      - list/tuple من callables (توافق أوسع)
+    """
+    _post_init = getattr(app, "post_init", None)
+    if _post_init is None:
+        return
+
+    if callable(_post_init):
+        try:
+            await _post_init(app)
+        except Exception as _e:
+            logger.warning("post_init hook failed: %s", _e)
+    elif isinstance(_post_init, (list, tuple)):
+        for hook in _post_init:
+            if callable(hook):
+                try:
+                    await hook(app)
+                except Exception as _e:
+                    logger.warning("post_init hook failed: %s", _e)
+
+
+async def _run_post_stop_hooks(app: Application) -> None:
+    """
+    ✅ F3: تنفيذ post_stop hooks بشكل صحيح — يدعم:
+      - callable مفرد
+      - list/tuple من callables
+    """
+    _post_stop = getattr(app, "post_stop", None)
+    if _post_stop is None:
+        return
+
+    if callable(_post_stop):
+        try:
+            await _post_stop(app)
+        except Exception as _e:
+            logger.warning("post_stop hook failed: %s", _e)
+    elif isinstance(_post_stop, (list, tuple)):
+        for hook in _post_stop:
+            if callable(hook):
+                try:
+                    await hook(app)
+                except Exception as _e:
+                    logger.warning("post_stop hook failed: %s", _e)
+
+
+# ═══════════════════════════════════════════════════════════════════
+# Polling mode helpers (F1-fix + v5.6.3)
 # ═══════════════════════════════════════════════════════════════════
 
 async def _start_polling_mode(app: Application) -> None:
@@ -1773,10 +1828,7 @@ async def _start_polling_mode(app: Application) -> None:
     drop_pending_updates — بدون استدعاء app.start() (الذي كان
     يفشل لأن Updater.start_polling() تُنادَى مرتين).
 
-    خطوات المُحاكاة:
-      1. app._running = True
-      2. await app.updater.start_polling(allowed_updates=..., ...)
-      3. تنفيذ post_init hooks يدوياً
+    ✅ v5.6.3: يستخدم _run_post_init_hooks بدل iteration مباشر.
     """
     if app.updater is None:
         raise RuntimeError(
@@ -1787,43 +1839,33 @@ async def _start_polling_mode(app: Application) -> None:
     if getattr(app, "_running", False):
         raise RuntimeError("Application is already running!")
 
-    # 1. اضبط العلم يدوياً
     app._running = True
 
-    # 2. ابدأ polling مع الوسائط المطلوبة
     try:
         await app.updater.start_polling(
             drop_pending_updates=True,
             allowed_updates=ALLOWED_UPDATES,
         )
     except Exception:
-        # في حال فشل start_polling، أعد العلم
         app._running = False
         raise
 
-    # 3. نفّذ post_init hooks (كما تفعل app.start())
-    for hook in getattr(app, "post_init", []) or []:
-        try:
-            await hook(app)
-        except Exception as _e:
-            logger.warning("post_init hook failed: %s", _e)
+    # ✅ F3: استخدام helper
+    await _run_post_init_hooks(app)
 
 
 async def _stop_polling_mode(app: Application) -> None:
     """
     ✅ F1-fix: يُحاكي app.stop() بدقة:
-      1. تنفيذ post_stop hooks يدوياً
+      1. تنفيذ post_stop hooks (عبر helper)
       2. await app.updater.stop()
       3. app._running = False
     """
     if not getattr(app, "_running", False):
         return
 
-    for hook in getattr(app, "post_stop", []) or []:
-        try:
-            await hook(app)
-        except Exception as _e:
-            logger.warning("post_stop hook failed: %s", _e)
+    # ✅ F3
+    await _run_post_stop_hooks(app)
 
     if app.updater is not None:
         try:
@@ -2068,6 +2110,29 @@ async def main():
     app.add_handler(CommandHandler("db_diag", CommandHandlers.db_diag))
     app.add_handler(CommandHandler("db_vacuum", CommandHandlers.db_vacuum))
 
+    # 🆕 v5.6.3: تسجيل أوامر الصيانة الجديدة
+    if _MAINT_CMDS_AVAILABLE and callable(register_maintenance_commands):
+        try:
+            if register_maintenance_commands(app):
+                logger.info(
+                    "✅ db_maintenance_commands: "
+                    "الأوامر الثلاثة مُسجَّلة"
+                )
+            else:
+                logger.warning(
+                    "⚠️ بعض أوامر الصيانة فشلت في التسجيل"
+                )
+        except Exception as _e:
+            logger.error(
+                "❌ فشل تسجيل db_maintenance_commands: %s", _e,
+                exc_info=True,
+            )
+    else:
+        logger.warning(
+            "⚠️ db_maintenance_commands غير متاح: %s",
+            _MAINT_CMDS_IMPORT_ERROR or "unknown",
+        )
+
     app.add_handler(PreCheckoutQueryHandler(pre_checkout))
     app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, successful_payment))
 
@@ -2125,13 +2190,45 @@ async def main():
         MessageHandlers.handle_private
     ))
 
-    app.add_handler(MessageHandler(
+    # ═══ v5.6.3: تسجيل handle_group للرسائل العادية ═══
+    _group_msg_filter = (
         (filters.TEXT | filters.PHOTO | filters.VIDEO | filters.Document.ALL |
-         filters.AUDIO | filters.VOICE | filters.ANIMATION | filters.Sticker.ALL |
-         filters.VIDEO_NOTE) &
-        filters.ChatType.GROUPS & ~filters.COMMAND,
+         filters.AUDIO | filters.VOICE | filters.ANIMATION |
+         filters.Sticker.ALL | filters.VIDEO_NOTE) &
+        filters.ChatType.GROUPS &
+        ~filters.COMMAND
+    )
+
+    app.add_handler(MessageHandler(
+        _group_msg_filter,
         MessageHandlers.handle_group
     ))
+
+    # ═══ 🆕 v5.6.3 F1: handle_edited للرسائل المُعدَّلة ═══
+    if hasattr(MessageHandlers, "handle_edited"):
+        try:
+            app.add_handler(MessageHandler(
+                (filters.TEXT | filters.PHOTO | filters.VIDEO |
+                 filters.Document.ALL | filters.AUDIO | filters.VOICE |
+                 filters.ANIMATION | filters.Sticker.ALL |
+                 filters.VIDEO_NOTE) &
+                filters.ChatType.GROUPS &
+                filters.UpdateType.EDITED_MESSAGE,
+                MessageHandlers.handle_edited
+            ))
+            logger.info(
+                "✅ handle_edited مُسجَّل — تعديل الرسائل يُفحص الآن "
+                "(Fix #A4 مُفعّل)"
+            )
+        except Exception as _e:
+            logger.error(
+                "❌ فشل تسجيل handle_edited: %s", _e, exc_info=True
+            )
+    else:
+        logger.warning(
+            "⚠️ MessageHandlers.handle_edited مفقود — "
+            "تعديل الرسائل لن يُفحص! حدّث handlers_message.py"
+        )
 
     app.add_handler(MessageHandler(
         filters.StatusUpdate.ALL & filters.ChatType.GROUPS,
@@ -2169,7 +2266,7 @@ async def main():
         )
 
     # ═════════════════════════════════════════════════════════════
-    # المهام الخلفية — كلها موحّدة عبر run_task_with_retry
+    # المهام الخلفية
     # ═════════════════════════════════════════════════════════════
     tasks: List[asyncio.Task] = []
 
@@ -2224,6 +2321,23 @@ async def main():
             _MAINTENANCE_IMPORT_ERROR or "module missing",
         )
 
+    # 🆕 v5.6.3: بدء المهمة الأسبوعية من db_maintenance_commands
+    if _MAINT_CMDS_AVAILABLE and callable(start_weekly_diagnostic_task):
+        try:
+            if start_weekly_diagnostic_task(app):
+                logger.info(
+                    "✅ weekly diagnostic task بدأت "
+                    "(تُرسل التقرير كل 7 أيام إن كان مُفعّلاً)"
+                )
+            else:
+                logger.warning(
+                    "⚠️ start_weekly_diagnostic_task أعادت False"
+                )
+        except Exception as _e:
+            logger.error(
+                "❌ فشل بدء weekly diagnostic: %s", _e, exc_info=True
+            )
+
     logger.info("✅ تم تشغيل %d مهمة خلفية", len(tasks))
     if _ADMIN_LOGS_CLEANUP_AVAILABLE:
         logger.info(
@@ -2238,7 +2352,7 @@ async def main():
     )
 
     # ═════════════════════════════════════════════════════════════
-    # ✅ F2: _shutdown_event + signal handlers قبل الفرعين
+    # _shutdown_event + signal handlers
     # ═════════════════════════════════════════════════════════════
     _shutdown_event = asyncio.Event()
 
@@ -2265,10 +2379,6 @@ async def main():
     # ═════════════════════════════════════════════════════════════
     # بدء التشغيل — Webhook أو Polling
     # ═════════════════════════════════════════════════════════════
-    # ✅ F2-fix: لا نضبط app_shutdown_done إلا في Webhook
-    # (في Polling نتركه False ليستدعي الـfinally الخارجي app.shutdown()
-    #  ويُفعِّل post_shutdown hooks — بما فيها original_post_shutdown
-    #  و handlers_message shutdown).
     app_shutdown_done = False
 
     try:
@@ -2331,8 +2441,6 @@ async def main():
 
         else:
             # ══════════ POLLING MODE ══════════
-            # ✅ F1-fix: نستخدم start_polling() + محاكاة app.start()
-            # بدل app.start() نفسه (الذي يُنادي start_polling() مرة ثانية).
             logger.info(
                 "⚠️ وضع Polling (لا يوجد hostname) — "
                 "باستخدام start_polling() + محاكاة app.start()"
@@ -2352,15 +2460,11 @@ async def main():
                 )
 
             finally:
-                # ✅ F1-fix: نُحاكي app.stop() يدوياً (post_stop + updater.stop)
                 try:
                     await _stop_polling_mode(app)
                     logger.info("✅ polling mode: تم الإيقاف")
                 except Exception as _e:
                     logger.debug("_stop_polling_mode: %s", _e)
-
-                # ✅ F2-fix: لا نضبط app_shutdown_done = True
-                # ليتولّى الـfinally الخارجي app.shutdown() (post_shutdown)
 
                 try:
                     await runner.cleanup()
@@ -2405,13 +2509,33 @@ async def main():
             except asyncio.CancelledError:
                 raise
 
-        # 3) background tasks
+        # 3) 🆕 v5.6.3 F4: background tasks مع timeout
         for t in tasks:
-            t.cancel()
-        await asyncio.gather(*tasks, return_exceptions=True)
+            if not t.done():
+                t.cancel()
+        try:
+            await asyncio.wait_for(
+                asyncio.gather(*tasks, return_exceptions=True),
+                timeout=_BG_TASKS_SHUTDOWN_TIMEOUT,
+            )
+            logger.info("✅ background tasks: أُلغيت بشكل نظيف")
+        except asyncio.TimeoutError:
+            remaining = sum(1 for t in tasks if not t.done())
+            logger.warning(
+                "⚠️ %d مهمة خلفية لم تنته خلال %.1fs — استمرار الإغلاق",
+                remaining, _BG_TASKS_SHUTDOWN_TIMEOUT,
+            )
+        except asyncio.CancelledError:
+            raise
+
+        # 3.b) 🆕 v5.6.3: إيقاف weekly diagnostic task
+        if _MAINT_CMDS_AVAILABLE and callable(stop_weekly_diagnostic_task):
+            try:
+                await stop_weekly_diagnostic_task(timeout=3.0)
+            except Exception as _e:
+                logger.debug("stop_weekly_diagnostic_task: %s", _e)
 
         # 4) handlers_message: log dispatcher + delayed delete
-        #    (استدعاء احتياطي في حال فشل app.shutdown — idempotent)
         try:
             await _shutdown_log_dispatcher(timeout=5.0)
         except Exception as _e:
@@ -2421,9 +2545,7 @@ async def main():
         except Exception as _e:
             logger.debug("shutdown_delete_tasks: %s", _e)
 
-        # 5) app shutdown — فقط إن لم يُنفَّذ بعد (webhook mode)
-        #    ✅ F2-fix: في polling mode، app_shutdown_done=False،
-        #    فنستدعي app.shutdown() هنا لتفعيل post_shutdown hooks.
+        # 5) app shutdown
         if not app_shutdown_done:
             try:
                 await app.shutdown()
