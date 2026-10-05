@@ -1,30 +1,45 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-handlers_message.py - v7.12.2 (CORRECTNESS + PERF + SHUTDOWN)
+handlers_message.py - v7.12.4 (CORRECTNESS + PERF + SHUTDOWN)
 =============================================================================
+📌 CHANGELOG / BEHAVIOR CHANGE — يرجى القراءة:
+    ⚠️ delete_spam_score الافتراضي في DB هو 1 (مُفعَّل).
+       الترقية من v7.11.x إلى v7.12.x تُفعِّل spam detection
+       تلقائياً على كل مجموعة لم يُعطِّلها المالك يدوياً.
+       تحقّق من DEBUG_SPAM=1 لمراقبة القرارات قبل النشر الواسع.
+
+🆕 v7.12.4 (REVIEW R3 FINAL):
+    🟡 Cleanup:
+        ✅ O1  _dispatch_log: warning صريح عند coroutine أثناء shutdown
+        ✅ O5  حذف _MEDIA_REPLY_TYPES (كود ميت)
+        ✅ O6  analyze_sentiment مُضاف إلى __all__
+        ✅ N9/P2 _reset_shutdown_for_tests() — للاختبارات فقط
+
+🆕 v7.12.3 (REVIEW R3 FIXES):
+    🐛 Bug Fixes:
+        ✅ N1  حذف imports غير مستخدمة (Update, ContextTypes)
+        ✅ N4  _lazy_init_columns: إعادة محاولة بعد 300s عند فشل
+               الـmigration (كانت تُقفل نهائياً)
+        ✅ N5  tracker منفصل لـdev-log rate limit (فصل عن المجموعات)
+        ✅ N9  _shutdown_started flag يرفض spawns بعد بدء الإغلاق
+        ✅ N10 إزالة max(0, delay) الزائد في _delete_after_delay
+        ✅ N11 حماية صريحة لـupdate.effective_user في _delete_and_warn
+        ✅ M3+ عدّ مفاتيح _forward_notify_ فقط بدل كل bot_data
+
+    ⚡ Performance:
+        ✅ N7  cache لـinspect.signature في handle_private
+
 🆕 v7.12.2 (REVIEW R2 FIXES):
     🐛 Critical:
         ✅ C1  _get_banned_pattern: إصلاح فعلي صحيح
-               re.escape(" ") يُعيد r"\ " (backslash+space) منذ Py3.7،
-               لذا .replace(r'\ ', r'\s+') يعمل. إصلاح v7.12.1 كان
-               خاطئاً واستبدل الفراغ الحقيقي فقط بعد رؤية "\ ".
-               → الآن: re.escape(x).replace(r'\ ', r'\s+')
-
     🟠 Medium:
         ✅ M1  register_shutdown_handlers: idempotency guard
-               (يمنع سلاسل post_shutdown لا نهائية عند hot-reload)
         ✅ M2  _notify_admin_about_forward: تتبّع عبر _spawn_tracked_task
-               (لم يُبتَر عند الإغلاق بعد الآن)
-        ✅ M3  _should_notify_forward: cap على عدد مفاتيح bot_data
-               (يمنع تسريب ذاكرة بطيء عند مجموعات كثيرة)
-
+        ✅ M3  _should_notify_forward: cap على مفاتيح forward
     🟡 Minor:
-        ✅ m2  _normalize_text: str.translate بدل حلقة for على 16 محرفاً
-               (~3× أسرع في المسار الساخن)
+        ✅ m2  _normalize_text: str.translate بدل حلقة for
         ✅ m4  _dispatch_log: رسالة أوضح عند استلام coroutine مباشر
-
-    ✅ الحفاظ الكامل على وظائف v7.12.1
 =============================================================================
 """
 
@@ -43,8 +58,6 @@ from datetime import datetime
 from urllib.parse import urlparse
 from collections import defaultdict, deque, OrderedDict
 
-from telegram import Update
-from telegram.ext import ContextTypes
 from telegram.error import BadRequest
 
 from config import CONFIG
@@ -123,8 +136,11 @@ TRANSLATION_MIN_TEXT_LENGTH = 2
 PENALTY_MESSAGE_DELETE_DELAY = 10
 
 _FORWARD_NOTIFY_COOLDOWN_SECONDS = 300.0
-_FORWARD_NOTIFY_MAX_KEYS = 5000  # ✅ M3
+_FORWARD_NOTIFY_MAX_KEYS = 5000
 _GROUP_LOG_PREVIEW_LENGTH = 150
+
+# ✅ N4: cooldown لإعادة محاولة migrations
+_COLUMNS_RETRY_COOLDOWN_SEC = 300.0
 
 
 FEATURE_LOG_DELETIONS = _env_flag("LOG_DELETIONS", True)
@@ -173,7 +189,6 @@ _HIDDEN_CHARS = (
     '\ufeff',
 )
 
-# ✅ m2: str.translate أسرع ~3× من حلقة for
 _HIDDEN_TRANSLATE_TABLE = {ord(c): None for c in _HIDDEN_CHARS}
 
 _WS_RE = re.compile(
@@ -190,7 +205,6 @@ def _normalize_text(text: str) -> str:
     except Exception:
         pass
 
-    # ✅ m2: استدعاء translate بلا فحص مسبق (O(n) في C، أسرع من any())
     text = text.translate(_HIDDEN_TRANSLATE_TABLE)
 
     return _WS_RE.sub(' ', text).strip()
@@ -776,7 +790,7 @@ def _is_postbot_pattern(
 
 
 # ═══════════════════════════════════════════════════════════════════
-# Feature constants
+# Feature constants — ✅ O5: حذف _MEDIA_REPLY_TYPES (كود ميت)
 # ═══════════════════════════════════════════════════════════════════
 
 _PROTECTED_FORWARD_HINTS = (
@@ -797,11 +811,7 @@ _DELETE_IGNORED_PATTERNS = (
 
 _DELETE_PERMISSION_ERROR = "message can't be deleted"
 
-_MEDIA_REPLY_TYPES = frozenset({
-    'photo', 'video', 'document', 'audio',
-    'animation', 'voice', 'sticker', 'video_note',
-})
-
+# ترتيب الوسائط للفحص الموحّد
 _MEDIA_SETTINGS_MAP = (
     ('video', 'delete_videos', 'video'),
     ('audio', 'delete_audio', 'audio'),
@@ -814,16 +824,44 @@ _MEDIA_SETTINGS_MAP = (
 )
 
 
+# ═══════════════════════════════════════════════════════════════════
+# Shutdown State — ✅ N9 + N9/P2
+# ═══════════════════════════════════════════════════════════════════
+
+_shutdown_started: bool = False
+
+
+def _mark_shutdown_started():
+    """✅ N9: يُستدعى عند بدء الإغلاق — يمنع spawns جديدة."""
+    global _shutdown_started
+    _shutdown_started = True
+
+
+def _is_shutting_down() -> bool:
+    return _shutdown_started
+
+
+def _reset_shutdown_for_tests():
+    """
+    ✅ N9/P2: إعادة تصفير العلم — للاختبارات فقط.
+    لا تستدعِها في production code.
+    """
+    global _shutdown_started
+    _shutdown_started = False
+    logger.debug("🧪 _shutdown_started reset (test mode)")
+
+
+# ═══════════════════════════════════════════════════════════════════
+# Database Migration — ✅ N4: retry مع cooldown
+# ═══════════════════════════════════════════════════════════════════
+
 _columns_initialized = False
 _columns_init_lock = asyncio.Lock()
+_columns_last_attempt_ts = 0.0
 
-
-# ═══════════════════════════════════════════════════════════════════
-# Database Migration
-# ═══════════════════════════════════════════════════════════════════
 
 async def _lazy_init_columns():
-    global _columns_initialized
+    global _columns_initialized, _columns_last_attempt_ts
 
     if _columns_initialized:
         return
@@ -832,8 +870,23 @@ async def _lazy_init_columns():
         if _columns_initialized:
             return
 
+        now = time.monotonic()
+
+        # ✅ N4: إن فشلت محاولة سابقة، انتظر cooldown قبل إعادة المحاولة
+        if (
+            _columns_last_attempt_ts > 0
+            and now - _columns_last_attempt_ts < _COLUMNS_RETRY_COOLDOWN_SEC
+        ):
+            logger.debug(
+                "⏸️ _lazy_init_columns: في cooldown (آخر محاولة قبل %.1fs)",
+                now - _columns_last_attempt_ts,
+            )
+            return
+
+        _columns_last_attempt_ts = now
+
         db_type = getattr(DB, "DB_TYPE", "sqlite")
-        logger.info("🔧 v7.12.2: Auto-migration (DB_TYPE=%s)", db_type)
+        logger.info("🔧 v7.12.4: Auto-migration (DB_TYPE=%s)", db_type)
 
         cols = [
             ("delete_protected_any", "INTEGER DEFAULT 0", "TINYINT(1) DEFAULT 0"),
@@ -906,11 +959,13 @@ async def _lazy_init_columns():
         except Exception as e:
             logger.debug("cache clear: %s", e)
 
-        _columns_initialized = True
-
-        if not migration_ok:
+        # ✅ N4: لا نقفل نهائياً عند الفشل — نسمح بإعادة المحاولة
+        if migration_ok:
+            _columns_initialized = True
+        else:
             logger.warning(
-                "⚠️ Auto-migration لم يكتمل — لن يُعاد تلقائياً."
+                "⚠️ Auto-migration لم يكتمل — ستُعاد المحاولة بعد %ds",
+                int(_COLUMNS_RETRY_COOLDOWN_SEC),
             )
 
 
@@ -957,10 +1012,84 @@ def _invalidate_dev_log_cache():
     _dev_log_cache_ts = 0.0
 
 
+# ═══════════════════════════════════════════════════════════════════
+# Log Rate Limit — Group + Dev log (منفصلان — ✅ N5)
+# ═══════════════════════════════════════════════════════════════════
+
+_log_rate_tracker = defaultdict(
+    lambda: deque(maxlen=LOG_RATE_LIMIT_PER_MIN)
+)
+_log_rate_lock = asyncio.Lock()
+
+_log_rate_warn_last: Dict[Any, float] = {}
+_LOG_RATE_WARN_COOLDOWN = 300.0
+
+# ✅ N5: tracker منفصل لـdev log (لا يلوّث tracker المجموعات)
+_dev_log_rate_tracker: deque = deque(maxlen=LOG_RATE_LIMIT_PER_MIN)
+_dev_log_rate_lock = asyncio.Lock()
+
+
+async def _can_send_log(chat_id) -> bool:
+    async with _log_rate_lock:
+        now = time.monotonic()
+        tracker = _log_rate_tracker[chat_id]
+
+        if (
+            len(tracker) >= LOG_RATE_LIMIT_PER_MIN
+            and now - tracker[0] < LOG_RATE_WINDOW_SEC
+        ):
+            last = _log_rate_warn_last.get(chat_id, 0.0)
+            if now - last >= _LOG_RATE_WARN_COOLDOWN:
+                _log_rate_warn_last[chat_id] = now
+                logger.warning("🚫 LOG-RATE-LIMIT | chat=%s", chat_id)
+            else:
+                logger.debug("🚫 LOG-RATE-LIMIT (silent) | chat=%s", chat_id)
+            return False
+
+        tracker.append(now)
+        return True
+
+
+async def _can_send_dev_log() -> bool:
+    """✅ N5: rate-limit منفصل لـdev log."""
+    async with _dev_log_rate_lock:
+        now = time.monotonic()
+        if (
+            len(_dev_log_rate_tracker) >= LOG_RATE_LIMIT_PER_MIN
+            and now - _dev_log_rate_tracker[0] < LOG_RATE_WINDOW_SEC
+        ):
+            logger.debug("🚫 DEV-LOG-RATE-LIMIT")
+            return False
+        _dev_log_rate_tracker.append(now)
+        return True
+
+
+async def _cleanup_log_rate_tracker():
+    async with _log_rate_lock:
+        now = time.monotonic()
+        cutoff = LOG_RATE_WINDOW_SEC * 5
+
+        stale = [
+            cid for cid, dq in _log_rate_tracker.items()
+            if (not dq) or (now - dq[-1] > cutoff)
+        ]
+        for cid in stale:
+            _log_rate_tracker.pop(cid, None)
+
+        stale_warn = [
+            cid for cid, ts in _log_rate_warn_last.items()
+            if now - ts > _LOG_RATE_WARN_COOLDOWN * 2
+        ]
+        for cid in stale_warn:
+            _log_rate_warn_last.pop(cid, None)
+
+        return len(stale)
+
+
 async def _notify_dev_log(context, text):
-    # ✅ R5: rate-limit للـdev log
+    # ✅ N5: rate-limit مستقل
     try:
-        if not await _can_send_log("__dev_log__"):
+        if not await _can_send_dev_log():
             return
     except Exception:
         pass
@@ -1001,63 +1130,7 @@ async def _notify_dev_log(context, text):
 
 
 # ═══════════════════════════════════════════════════════════════════
-# Log Rate Limit
-# ═══════════════════════════════════════════════════════════════════
-
-_log_rate_tracker = defaultdict(
-    lambda: deque(maxlen=LOG_RATE_LIMIT_PER_MIN)
-)
-_log_rate_lock = asyncio.Lock()
-
-_log_rate_warn_last: Dict[Any, float] = {}
-_LOG_RATE_WARN_COOLDOWN = 300.0
-
-
-async def _can_send_log(chat_id) -> bool:
-    async with _log_rate_lock:
-        now = time.monotonic()
-        tracker = _log_rate_tracker[chat_id]
-
-        if (
-            len(tracker) >= LOG_RATE_LIMIT_PER_MIN
-            and now - tracker[0] < LOG_RATE_WINDOW_SEC
-        ):
-            last = _log_rate_warn_last.get(chat_id, 0.0)
-            if now - last >= _LOG_RATE_WARN_COOLDOWN:
-                _log_rate_warn_last[chat_id] = now
-                logger.warning("🚫 LOG-RATE-LIMIT | chat=%s", chat_id)
-            else:
-                logger.debug("🚫 LOG-RATE-LIMIT (silent) | chat=%s", chat_id)
-            return False
-
-        tracker.append(now)
-        return True
-
-
-async def _cleanup_log_rate_tracker():
-    async with _log_rate_lock:
-        now = time.monotonic()
-        cutoff = LOG_RATE_WINDOW_SEC * 5
-
-        stale = [
-            cid for cid, dq in _log_rate_tracker.items()
-            if (not dq) or (now - dq[-1] > cutoff)
-        ]
-        for cid in stale:
-            _log_rate_tracker.pop(cid, None)
-
-        stale_warn = [
-            cid for cid, ts in _log_rate_warn_last.items()
-            if now - ts > _LOG_RATE_WARN_COOLDOWN * 2
-        ]
-        for cid in stale_warn:
-            _log_rate_warn_last.pop(cid, None)
-
-        return len(stale)
-
-
-# ═══════════════════════════════════════════════════════════════════
-# Dispatch Log — ✅ F1: factory للسماح بـ retry فعلي
+# Dispatch Log — F1: factory + O1: warning أثناء shutdown
 # ═══════════════════════════════════════════════════════════════════
 
 _running_log_tasks: set = set()
@@ -1071,12 +1144,32 @@ async def _dispatch_log(
     retries: int = LOG_RETRY_ATTEMPTS
 ):
     """
-    ✅ F1: نستقبل factory (callable) بدل coroutine جاهز.
-    ✅ m4: رسالة أوضح عند استلام coroutine مباشر.
+    F1: نستقبل factory (callable) بدل coroutine جاهز.
+    m4: رسالة أوضح عند استلام coroutine مباشر.
+    N9: يرفض spawns بعد بدء الإغلاق.
+    O1: warning عند coroutine أثناء shutdown (يساعد التشخيص).
     """
+    # ✅ N9: رفض تسجيل logs جديدة بعد بدء الإغلاق
+    if _is_shutting_down():
+        if inspect.iscoroutine(factory):
+            # ✅ O1: تسجيل warning للمطوّر — coroutine مباشر خطأ
+            logger.warning(
+                "⚠️ _dispatch_log[%s]: shutdown + coroutine مباشر "
+                "(الأصل استخدم factory). سيُغلق.",
+                label,
+            )
+            try:
+                factory.close()
+            except Exception:
+                pass
+        else:
+            logger.debug(
+                "⏭️ _dispatch_log[%s]: shutdown — تجاهل", label
+            )
+        return
+
     if not callable(factory):
         _factory_type = type(factory).__name__
-        # ✅ m4: إن كانت coroutine، نُغلقها لتجنّب warning
         if inspect.iscoroutine(factory):
             try:
                 factory.close()
@@ -1142,6 +1235,8 @@ async def _dispatch_log(
 
 
 async def shutdown_log_dispatcher(timeout: float = 5.0):
+    _mark_shutdown_started()  # ✅ N9
+
     if not _running_log_tasks:
         return
 
@@ -1164,23 +1259,28 @@ async def shutdown_log_dispatcher(timeout: float = 5.0):
 
 
 # ═══════════════════════════════════════════════════════════════════
-# General Tracked Background Tasks — ✅ M2
+# General Tracked Background Tasks
 # ═══════════════════════════════════════════════════════════════════
 
 _running_bg_tasks: set = set()
 
 
 def _spawn_tracked_task(coro, *, label: str = "bg-task"):
-    """
-    ✅ M2: تشغيل مهمة خلفية مع تتبّع + إغلاق نظيف.
+    """M2 + N9: تتبّع + رفض بعد بدء الإغلاق."""
+    # ✅ N9: رفض spawns بعد بدء الإغلاق
+    if _is_shutting_down():
+        try:
+            if inspect.iscoroutine(coro):
+                coro.close()
+        except Exception:
+            pass
+        logger.debug("⏭️ _spawn_tracked_task[%s]: shutdown — تجاهل", label)
+        return None
 
-    يضمن ألا تُبتَر المهام القصيرة (مثل إشعار المالك) عند shutdown.
-    """
     try:
         task = asyncio.create_task(coro)
     except Exception as e:
         logger.debug("_spawn_tracked_task(%s) فشل الإنشاء: %s", label, e)
-        # إنشاء coroutine بلا task يُنتج RuntimeWarning — نُغلقه يدوياً
         try:
             if inspect.iscoroutine(coro):
                 coro.close()
@@ -1203,7 +1303,8 @@ def _spawn_tracked_task(coro, *, label: str = "bg-task"):
 
 
 async def shutdown_bg_tasks(timeout: float = 3.0):
-    """إغلاق نظيف لكل المهام المُتتبَّعة (forward notify وغيره)."""
+    _mark_shutdown_started()  # ✅ N9
+
     if not _running_bg_tasks:
         return
 
@@ -1233,8 +1334,10 @@ _running_delete_tasks: set = set()
 
 
 async def _delete_after_delay(bot, chat_id, message_id, delay=10):
+    # ✅ N10: delay مُضمون >= 0 من _spawn_delete_after_delay
     try:
-        await asyncio.sleep(max(0, delay))
+        if delay > 0:
+            await asyncio.sleep(delay)
         await _safe_delete_message(bot, chat_id, message_id)
     except asyncio.CancelledError:
         raise
@@ -1244,8 +1347,16 @@ async def _delete_after_delay(bot, chat_id, message_id, delay=10):
 
 def _spawn_delete_after_delay(bot, chat_id, message_id, delay=10):
     """
-    ✅ R3: وحّد المسارين (delay<=0 و delay>0) داخل _running_delete_tasks.
+    R3: وحّد المسارين (delay<=0 و delay>0) داخل _running_delete_tasks.
+    N9: رفض spawns بعد بدء الإغلاق.
     """
+    # ✅ N9: رفض بعد الإغلاق
+    if _is_shutting_down():
+        logger.debug(
+            "⏭️ _spawn_delete_after_delay: shutdown — تجاهل"
+        )
+        return
+
     try:
         d = float(delay)
     except (TypeError, ValueError):
@@ -1272,6 +1383,8 @@ def _spawn_delete_after_delay(bot, chat_id, message_id, delay=10):
 
 
 async def shutdown_delete_tasks(timeout: float = 3.0):
+    _mark_shutdown_started()  # ✅ N9
+
     if not _running_delete_tasks:
         return
 
@@ -1296,15 +1409,10 @@ async def shutdown_delete_tasks(timeout: float = 3.0):
 # ✅ H1 + R1 + M1: تسجيل shutdown idempotent
 def register_shutdown_handlers(application):
     """
-    يُسجّل shutdown handlers على تطبيق Telegram لتنظيف:
-      - log dispatch tasks
-      - general bg tasks (forward notify)
-      - delayed delete tasks
-
-    ✅ R1: يحفظ أي post_shutdown أصلي ويستدعيه بعد التنظيف.
-    ✅ M1: idempotency guard — استدعاء متعدد لا يبني سلاسل.
+    H1: تسجيل تلقائي.
+    R1: يحفظ أي post_shutdown أصلي.
+    M1: idempotency guard.
     """
-    # ✅ M1: idempotency — يمنع السلاسل اللانهائية
     if getattr(application, '_msh_shutdown_registered', False):
         logger.debug(
             "register_shutdown_handlers: مُسجَّل مسبقاً — تخطي"
@@ -1317,6 +1425,8 @@ def register_shutdown_handlers(application):
         )
 
         async def _post_shutdown(app):
+            _mark_shutdown_started()  # ✅ N9: قبل أي تنظيف
+
             try:
                 await shutdown_log_dispatcher(timeout=5.0)
             except Exception as e:
@@ -1330,7 +1440,6 @@ def register_shutdown_handlers(application):
             except Exception as e:
                 logger.debug("shutdown del: %s", e)
 
-            # ✅ R1: استدعاء الأصلي إن وُجد
             if callable(original_post_shutdown):
                 try:
                     await original_post_shutdown(app)
@@ -1338,7 +1447,7 @@ def register_shutdown_handlers(application):
                     logger.debug("original post_shutdown: %s", e)
 
         application.post_shutdown = _post_shutdown
-        application._msh_shutdown_registered = True  # ✅ M1
+        application._msh_shutdown_registered = True
     except Exception as e:
         logger.warning("register_shutdown_handlers: %s", e)
 
@@ -2026,7 +2135,7 @@ async def _notify_admin_about_forward(context, admin_id, info):
 
 def _should_notify_forward(context, chat_id) -> bool:
     """
-    ✅ M3: cap على حجم bot_data لتفادي تسريب الذاكرة.
+    M3+: عدّ مفاتيح _forward_notify_ فقط (لا كل bot_data).
     """
     try:
         bot_data = getattr(context, 'bot_data', None)
@@ -2043,20 +2152,20 @@ def _should_notify_forward(context, chat_id) -> bool:
         if now - last < _FORWARD_NOTIFY_COOLDOWN_SECONDS:
             return False
 
-        # ✅ M3: عند تجاوز الحد — أزل نصف المفاتيح المُتعلّقة بالـforward
-        if len(bot_data) >= _FORWARD_NOTIFY_MAX_KEYS:
-            fwd_keys = [
-                k for k in bot_data.keys()
-                if isinstance(k, str) and k.startswith("_forward_notify_")
-            ]
-            if fwd_keys:
-                remove_count = max(1, len(fwd_keys) // 2)
-                for k in fwd_keys[:remove_count]:
-                    bot_data.pop(k, None)
-                logger.debug(
-                    "🧹 _forward_notify keys cleanup: أُزيل %d (متبقٍ %d)",
-                    remove_count, len(fwd_keys) - remove_count,
-                )
+        # ✅ M3+: عدّ المفاتيح الخاصة فقط
+        fwd_keys = [
+            k for k in bot_data.keys()
+            if isinstance(k, str) and k.startswith("_forward_notify_")
+        ]
+
+        if len(fwd_keys) >= _FORWARD_NOTIFY_MAX_KEYS:
+            remove_count = max(1, len(fwd_keys) // 2)
+            for k in fwd_keys[:remove_count]:
+                bot_data.pop(k, None)
+            logger.debug(
+                "🧹 _forward_notify keys cleanup: أُزيل %d (متبقٍ %d)",
+                remove_count, len(fwd_keys) - remove_count,
+            )
 
         bot_data[key] = now
         return True
@@ -2556,12 +2665,7 @@ async def _verify_bot_in_log_channel(context, channel_id):
 
 
 def _verify_bot_in_log_channel_error_text(reason, lang) -> str:
-    """
-    ✅ R11: lang محفوظ للتوافق. الترجمة الكاملة عبر TranslationManager
-    مُخطط لها v7.13.
-    """
     _ = lang
-
     mapping = {
         "invalid_channel_id": "❌ معرّف القناة غير صالح.",
         "timeout": "⏱️ انتهت مهلة الاتصال.",
@@ -2599,7 +2703,7 @@ except ImportError:
 
 
 # ═══════════════════════════════════════════════════════════════════
-# Banned Word Matching — ✅ C1 FIX
+# Banned Word Matching — C1 FINAL
 # ═══════════════════════════════════════════════════════════════════
 
 _compiled_banned_patterns: "OrderedDict[str, re.Pattern]" = OrderedDict()
@@ -2607,18 +2711,12 @@ _compiled_banned_patterns: "OrderedDict[str, re.Pattern]" = OrderedDict()
 
 def _get_banned_pattern(banned_word: str) -> Optional[re.Pattern]:
     """
-    ✅ C1 FIX:
-        re.escape(" ") يُعيد "\\ " (backslash+space) منذ Python 3.7،
-        لأن _special_chars_map يحتوي على ' ' صريحاً.
+    C1 FIX (نهائي):
+        re.escape(" ") يُعيد r"\\ " (backslash+space) منذ Python 3.7،
+        لذا نستبدل التسلسل الكامل "\\ " (backslash+space) بـ"\\s+".
 
-        لذا نحتاج استبدال تسلسل "\\ " (backslash+space) كاملاً بـ"\\s+".
-        الطريقة الآمنة:
-            re.escape(x).replace(r'\\ ', r'\\s+')
-
-        مثال: "foo bar" →
-            re.escape → "foo\\ bar"
-            .replace  → "foo\\s+bar"
-            regex يطابق: "foo bar", "foo  bar", "foo\\tbar", إلخ. ✓
+        re.escape("foo bar") → "foo\\ bar"
+        .replace(r'\\ ', r'\\s+') → "foo\\s+bar"  ✓
     """
     cached = _compiled_banned_patterns.get(banned_word)
     if cached is not None:
@@ -2626,7 +2724,6 @@ def _get_banned_pattern(banned_word: str) -> Optional[re.Pattern]:
         return cached
 
     try:
-        # ✅ C1: استبدال "\\ " (backslash + space) ككيان كامل
         escaped = re.escape(banned_word).replace(r'\ ', r'\s+')
         pattern = re.compile(
             rf'(?<!\w){escaped}(?!\w)',
@@ -2669,8 +2766,34 @@ def _contains_banned_word(text, banned_word) -> bool:
 
 
 # ═══════════════════════════════════════════════════════════════════
-# Message Handlers
+# Message Handlers — ✅ N7: signature cache
 # ═══════════════════════════════════════════════════════════════════
+
+_private_handler_signature_cache: Dict[str, bool] = {}
+
+
+def _accepts_state_arg(handler, handler_name: str) -> bool:
+    """✅ N7: cache لنتيجة فحص signature."""
+    cached = _private_handler_signature_cache.get(handler_name)
+    if cached is not None:
+        return cached
+
+    try:
+        sig = inspect.signature(handler)
+        params = [
+            p for p in sig.parameters.values()
+            if p.kind in (
+                inspect.Parameter.POSITIONAL_ONLY,
+                inspect.Parameter.POSITIONAL_OR_KEYWORD,
+            )
+        ]
+        result = len(params) >= 3
+    except (TypeError, ValueError):
+        result = False
+
+    _private_handler_signature_cache[handler_name] = result
+    return result
+
 
 class MessageHandlers:
 
@@ -3147,7 +3270,6 @@ class MessageHandlers:
             logger.error("delete exception: %s", e)
             delete_ok = False
 
-        # ✅ R6: إذا فشل الحذف، لا نُشعر المالك
         if not delete_ok:
             logger.error(
                 "⏭️ توقف — الحذف فشل (%s)", violation_type
@@ -3192,7 +3314,6 @@ class MessageHandlers:
             except Exception as e:
                 logger.warning("group_log spawn: %s", e)
 
-        # ✅ M2: تتبّع إشعار المالك عبر _spawn_tracked_task
         if (
             forward_info
             and not is_anonymous
@@ -3237,7 +3358,11 @@ class MessageHandlers:
         except Exception:
             pass
 
-        user_name = escape(update.effective_user.first_name or "User")
+        # ✅ N11: حماية صريحة لـeffective_user
+        eff_user = update.effective_user
+        first_name = getattr(eff_user, 'first_name', None) if eff_user else None
+        user_name = escape(first_name or "User")
+
         await MessageHandlers._send_user_warning(
             context, chat_id, user_name,
             violation_type, lang, violation_count
@@ -3353,7 +3478,8 @@ class MessageHandlers:
     @staticmethod
     async def handle_private(update, context):
         """
-        ✅ R2: inspect.signature بدل try/TypeError.
+        R2: inspect.signature بدل try/TypeError.
+        N7: cache للنتيجة (private handlers نادرة).
         """
         try:
             if not update.effective_user:
@@ -3370,20 +3496,8 @@ class MessageHandlers:
             if handler is None:
                 return
 
-            try:
-                sig = inspect.signature(handler)
-                params = [
-                    p for p in sig.parameters.values()
-                    if p.kind in (
-                        inspect.Parameter.POSITIONAL_ONLY,
-                        inspect.Parameter.POSITIONAL_OR_KEYWORD,
-                    )
-                ]
-                accepts_state = len(params) >= 3
-            except (TypeError, ValueError):
-                accepts_state = False
-
-            if accepts_state:
+            # ✅ N7: cache
+            if _accepts_state_arg(handler, handler_name):
                 await handler(update, context, state)
             else:
                 await handler(update, context)
@@ -3465,7 +3579,7 @@ class MessageHandlers:
 
 
 # ═══════════════════════════════════════════════════════════════════
-# Public API
+# Public API — ✅ O6: analyze_sentiment + N9/P2 helper
 # ═══════════════════════════════════════════════════════════════════
 
 __all__ = [
@@ -3501,4 +3615,8 @@ __all__ = [
     "_DEFAULT_VIOLATION_MESSAGES",
     "_DEBUG_DIAG",
     "_DEBUG_SPAM",
+    # ✅ O6: مُصدَّر للاستخدام الخارجي (قد يكون None لو replies غير موجود)
+    "analyze_sentiment",
+    # ✅ N9/P2: helper اختباري
+    "_reset_shutdown_for_tests",
 ]
