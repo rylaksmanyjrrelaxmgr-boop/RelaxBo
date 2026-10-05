@@ -2,21 +2,24 @@
 # -*- coding: utf-8 -*-
 
 """
-🌿 Relax Manager – البوت الرئيسي (v5.6.4)
+🌿 Relax Manager – البوت الرئيسي (v5.6.5)
 ================================================================================
-🆕 v5.6.4 (FIX-CANCELLED-PROPAGATION — الإصلاح الحرج):
+🆕 v5.6.5 (CRITICAL-HANDLER-ORDER-FIX):
+    🔴 FIX-1: نقل handle_group/handle_edited/handle_service إلى group=-1
+              (كانت متأخرة بعد register_nav_fix/register_group_log_handlers
+               فتُبتلع الرسائل قبل وصولها إليها)
+    🔴 FIX-2: إضافة filters.PAID_MEDIA للفلتر عند توفره (PTB v20.7+)
+    🟠 FIX-3: TypeHandler تشخيصي (DIAG_INCOMING=1) — يطبع كل رسالة
+              واردة للمجموعة قبل أي handler
+    🟡 FIX-4: ربط الإصدار بـ handlers_message v7.17.1
+
+🆕 v5.6.4 (FIX-CANCELLED-PROPAGATION):
     🔴 FIX-1: pool_health_monitor — مسار "قبل البدء"
               `return` → `raise` عند CancelledError
-              (كان يُسبِّب: "⚠️ المهمة pool_health_monitor عادت
-               بدون استثناء — إعادة بعد 5s")
-
     🔴 FIX-2: pool_health_monitor — فرع SQLite (DB غير Postgres)
               `return` → `raise` عند CancelledError
-
     🔴 FIX-3: pool_health_monitor — حلقة النوم الرئيسية (300s)
               `return` → `raise` عند CancelledError
-
-    ✅ الأثر: إغلاق نظيف تماماً بدون تحذيرات spurious في السجلات.
 
 🆕 v5.6.3 (EDITED-MESSAGE-HOOK + MAINTENANCE-COMMANDS):
     🔴 F1: تسجيل MessageHandlers.handle_edited (Fix #A4)
@@ -26,12 +29,6 @@
     🟠 F5: استبدال datetime.utcnow() بـ TimeUtils.utc_now()
     🟡 F6: إضافة الأوامر الجديدة إلى ADMIN_COMMANDS
     🟡 F7: فحص handle_edited في CommandHandlers._verify
-
-🆕 v5.6.2 (POLLING-MODE CORRECTNESS + SHUTDOWN ORDER):
-    🔴 F1-fix: تصحيح جوهري لـ Polling Mode
-    🔴 F2-fix: app_shutdown_done — لا نضبطه في polling mode
-    🟠 F7: _verify_db_config يستخدم CONFIG.DATABASE_URL
-    🟡 F8: تسجيل تشخيصي أوضح في polling mode
 ================================================================================
 """
 
@@ -58,8 +55,15 @@ from telegram import (
 from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler,
     MessageHandler, ChatJoinRequestHandler, filters,
-    PreCheckoutQueryHandler
+    PreCheckoutQueryHandler,
 )
+
+try:
+    from telegram.ext import TypeHandler
+    _HAS_TYPE_HANDLER = True
+except ImportError:
+    TypeHandler = None
+    _HAS_TYPE_HANDLER = False
 
 from config import CONFIG
 
@@ -296,6 +300,11 @@ _PM_UTIL_CRITICAL_PCT = 95.0
 _PM_LOCK_WAIT_WARN = 1
 _PM_WAITING_WARN = 3
 _PM_ALERT_COOLDOWN_SEC = 600.0
+
+# 🆕 v5.6.5: تشخيص الرسائل الواردة
+_DIAG_INCOMING = os.getenv("DIAG_INCOMING", "0").strip().lower() in (
+    "1", "true", "yes", "on", "enabled",
+)
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -1891,6 +1900,87 @@ async def _stop_polling_mode(app: Application) -> None:
 
 
 # ═══════════════════════════════════════════════════════════════════
+# 🆕 v5.6.5: Group message filters + diagnostic handler
+# ═══════════════════════════════════════════════════════════════════
+
+def _build_group_content_filter():
+    """
+    بناء فلتر محتوى الرسائل للمجموعات بشكل شامل.
+
+    يشمل:
+      - TEXT, PHOTO, VIDEO, Document.ALL, AUDIO, VOICE, ANIMATION,
+        Sticker.ALL, VIDEO_NOTE
+      - PAID_MEDIA إن كان PTB v20.7+
+    """
+    content = (
+        filters.TEXT
+        | filters.PHOTO
+        | filters.VIDEO
+        | filters.Document.ALL
+        | filters.AUDIO
+        | filters.VOICE
+        | filters.ANIMATION
+        | filters.Sticker.ALL
+        | filters.VIDEO_NOTE
+    )
+
+    # 🆕 v5.6.5 FIX-2: PAID_MEDIA (PTB v20.7+)
+    try:
+        content = content | filters.PAID_MEDIA
+    except AttributeError:
+        pass
+
+    return content
+
+
+async def _diag_incoming(update, context):
+    """🆕 v5.6.5: TypeHandler تشخيصي — يُطبع كل رسالة واردة للمجموعة."""
+    try:
+        msg = update.effective_message
+        chat = update.effective_chat
+        if not msg or not chat:
+            return
+        if chat.type not in ("group", "supergroup"):
+            return
+
+        try:
+            markup = getattr(msg, "reply_markup", None)
+            rows = getattr(markup, "inline_keyboard", None) or []
+            btn_count = sum(len(r or []) for r in rows)
+        except Exception:
+            btn_count = 0
+
+        fwd_origin = getattr(msg, "forward_origin", None)
+        fwd_chat = getattr(msg, "forward_from_chat", None)
+
+        logger.warning(
+            "📥 INCOMING | chat=%s msg=%s | "
+            "text=%s caption=%s photo=%s video=%s doc=%s "
+            "audio=%s voice=%s anim=%s sticker=%s vn=%s poll=%s | "
+            "fwd_origin=%s fwd_chat=%s auto_fwd=%s | "
+            "btn_count=%d",
+            chat.id, msg.message_id,
+            bool(getattr(msg, "text", None)),
+            bool(getattr(msg, "caption", None)),
+            bool(getattr(msg, "photo", None)),
+            bool(getattr(msg, "video", None)),
+            bool(getattr(msg, "document", None)),
+            bool(getattr(msg, "audio", None)),
+            bool(getattr(msg, "voice", None)),
+            bool(getattr(msg, "animation", None)),
+            bool(getattr(msg, "sticker", None)),
+            bool(getattr(msg, "video_note", None)),
+            bool(getattr(msg, "poll", None)),
+            type(fwd_origin).__name__ if fwd_origin is not None else None,
+            getattr(fwd_chat, "id", None) if fwd_chat is not None else None,
+            bool(getattr(msg, "is_automatic_forward", False)),
+            btn_count,
+        )
+    except Exception as _e:
+        logger.debug("_diag_incoming error: %s", _e)
+
+
+# ═══════════════════════════════════════════════════════════════════
 # Main
 # ═══════════════════════════════════════════════════════════════════
 
@@ -1910,6 +2000,7 @@ async def main():
 
     logger.info("🌿 %s", CONFIG.BOT_NAME)
     logger.info("👨‍💼 المالك: %s", CONFIG.PRIMARY_OWNER_ID)
+    logger.info("📦 main.py: v5.6.5 (CRITICAL-HANDLER-ORDER-FIX)")
 
     if not _verify_command_handlers():
         logger.error("❌ فشل فحص دوال الأوامر — الخروج")
@@ -2068,7 +2159,89 @@ async def main():
     )
 
     # ═════════════════════════════════════════════════════════════
-    # تسجيل المعالجات
+    # 🆕 v5.6.5: DIAGNOSTIC TypeHandler (group=-100 — أول كل شيء)
+    # ═════════════════════════════════════════════════════════════
+    if _DIAG_INCOMING and _HAS_TYPE_HANDLER:
+        try:
+            app.add_handler(
+                TypeHandler(object, _diag_incoming),
+                group=-100,
+            )
+            logger.warning(
+                "🔔 DIAG_INCOMING=1 — TypeHandler تشخيصي مُسجّل "
+                "(group=-100). سيُطبع كل رسالة واردة للمجموعة."
+            )
+        except Exception as _e:
+            logger.error("❌ فشل تسجيل DIAG handler: %s", _e)
+    elif _DIAG_INCOMING and not _HAS_TYPE_HANDLER:
+        logger.warning(
+            "⚠️ DIAG_INCOMING=1 لكن TypeHandler غير متاح في هذا الإصدار"
+        )
+
+    # ═════════════════════════════════════════════════════════════
+    # 🆕 v5.6.5 FIX-1: تسجيل معالجات المجموعات في group=-1
+    # تُشغَّل قبل كل handlers group=0 — تمنع "ابتلاع" الرسائل
+    # ═════════════════════════════════════════════════════════════
+    _group_content_filter = _build_group_content_filter()
+
+    _group_msg_filter = (
+        _group_content_filter
+        & filters.ChatType.GROUPS
+        & ~filters.COMMAND
+    )
+
+    # ✅ handle_group — الأول
+    try:
+        app.add_handler(
+            MessageHandler(_group_msg_filter, MessageHandlers.handle_group),
+            group=-1,
+        )
+        logger.info(
+            "✅ handle_group مُسجَّل في group=-1 (أولوية عالية)"
+        )
+    except Exception as _e:
+        logger.error("❌ فشل تسجيل handle_group: %s", _e, exc_info=True)
+
+    # ✅ handle_edited
+    if hasattr(MessageHandlers, "handle_edited"):
+        try:
+            app.add_handler(
+                MessageHandler(
+                    _group_content_filter
+                    & filters.ChatType.GROUPS
+                    & filters.UpdateType.EDITED_MESSAGE,
+                    MessageHandlers.handle_edited,
+                ),
+                group=-1,
+            )
+            logger.info(
+                "✅ handle_edited مُسجَّل في group=-1 (Fix #A4)"
+            )
+        except Exception as _e:
+            logger.error(
+                "❌ فشل تسجيل handle_edited: %s", _e, exc_info=True
+            )
+    else:
+        logger.warning(
+            "⚠️ MessageHandlers.handle_edited مفقود — "
+            "تعديل الرسائل لن يُفحص! حدّث handlers_message.py إلى v7.15.1+"
+        )
+
+    # ✅ handle_service
+    try:
+        app.add_handler(
+            MessageHandler(
+                filters.StatusUpdate.ALL & filters.ChatType.GROUPS,
+                MessageHandlers.handle_service,
+            ),
+            group=-1,
+        )
+        logger.info("✅ handle_service مُسجَّل في group=-1")
+    except Exception as _e:
+        logger.error("❌ فشل تسجيل handle_service: %s", _e, exc_info=True)
+
+    # ═════════════════════════════════════════════════════════════
+    # تسجيل بقية handlers في group=0 (الافتراضي)
     # ═════════════════════════════════════════════════════════════
     app.add_handler(CommandHandler("start", CommandHandlers.start))
     app.add_handler(CommandHandler("help", CommandHandlers.help_command))
@@ -2202,48 +2375,8 @@ async def main():
         MessageHandlers.handle_private
     ))
 
-    _group_msg_filter = (
-        (filters.TEXT | filters.PHOTO | filters.VIDEO | filters.Document.ALL |
-         filters.AUDIO | filters.VOICE | filters.ANIMATION |
-         filters.Sticker.ALL | filters.VIDEO_NOTE) &
-        filters.ChatType.GROUPS &
-        ~filters.COMMAND
-    )
-
-    app.add_handler(MessageHandler(
-        _group_msg_filter,
-        MessageHandlers.handle_group
-    ))
-
-    if hasattr(MessageHandlers, "handle_edited"):
-        try:
-            app.add_handler(MessageHandler(
-                (filters.TEXT | filters.PHOTO | filters.VIDEO |
-                 filters.Document.ALL | filters.AUDIO | filters.VOICE |
-                 filters.ANIMATION | filters.Sticker.ALL |
-                 filters.VIDEO_NOTE) &
-                filters.ChatType.GROUPS &
-                filters.UpdateType.EDITED_MESSAGE,
-                MessageHandlers.handle_edited
-            ))
-            logger.info(
-                "✅ handle_edited مُسجَّل — تعديل الرسائل يُفحص الآن "
-                "(Fix #A4 مُفعّل)"
-            )
-        except Exception as _e:
-            logger.error(
-                "❌ فشل تسجيل handle_edited: %s", _e, exc_info=True
-            )
-    else:
-        logger.warning(
-            "⚠️ MessageHandlers.handle_edited مفقود — "
-            "تعديل الرسائل لن يُفحص! حدّث handlers_message.py"
-        )
-
-    app.add_handler(MessageHandler(
-        filters.StatusUpdate.ALL & filters.ChatType.GROUPS,
-        MessageHandlers.handle_service
-    ))
+    # ⚠️ handle_group/handle_edited/handle_service مُسجّلة الآن في group=-1
+    # لا نُعيد تسجيلها هنا.
 
     app.add_handler(ChatJoinRequestHandler(MessageHandlers.handle_join_request))
     app.add_error_handler(ErrorHandler.handle_error)
