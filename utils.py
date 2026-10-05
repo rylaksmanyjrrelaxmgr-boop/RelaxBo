@@ -2,8 +2,23 @@
 # -*- coding: utf-8 -*-
 
 """
-utils.py - الأدوات المساعدة للبوت (v7.9.19 - Production Fixes)
+utils.py - الأدوات المساعدة للبوت (v7.10.0 - Production Fixes + New Security Buttons)
 =================================================================================
+🆕 v7.10.0 (NEW SECURITY BUTTONS):
+    ✅ NC1  CB: 6 ثوابت جديدة لأزرار الأمان الجديدة
+    ✅ NC2  _default_texts: 6 نصوص عربية للأزرار الجديدة
+    ✅ NC3  security menu: 3 صفوف جديدة (6 أزرار)
+    ✅ NC4  _format_security_text: عرض القيم الجديدة
+    ✅ NC5  _NO_CHAT_ID_BUTTONS: تأكيد عدم إضافة الجديدة (تحتاج chat_id)
+
+    الأزرار الجديدة:
+        sec_at_channel     → delete_at_channel     (default: 0)
+        sec_tg_scheme      → delete_tg_scheme      (default: 1)
+        sec_button_links   → delete_button_links   (default: 1)
+        sec_emails         → delete_emails         (default: 0)
+        sec_protected_any  → delete_protected_any  (default: 0)
+        sec_postbot        → delete_postbot_pattern (default: 0)
+
 🆕 v7.9.19 (REVIEW R3 FIXES):
     🔴 Critical:
         ✅ C1  fetch_json_from_url: allow_redirects=False
@@ -30,37 +45,6 @@ utils.py - الأدوات المساعدة للبوت (v7.9.19 - Production Fixe
         ✅ m11 _publish_single_channel: has_sub يُحسب مرة واحدة
         ✅ m15 _reject: fallback إلى TranslationManager
         ✅ m17 safe_send: إزالة [:4096] الزائد
-
-🆕 v7.9.18 (SECOND-REVIEW FIXES):
-    ✅ RR1  SmartCache._inflight_by_task — قفل داخلي لتفادي تعديل متزامن
-    ✅ RR2  TranslationManager.translate — (?<!\w)...(?!\w) بدل \b
-    ✅ RR3  _flush_usage_updates — _flush_in_progress يمنع التداخل
-    ✅ RR4  _group_admins_cache — إخلاء حسب access_count (لا random)
-    ✅ RR5  _read_pg_activity + _dump_idle_tx_details — فلترة
-            usename = current_user
-    ✅ RR6  _send_media (voice/sticker/video_note) — reply_to_message_id
-    ✅ RR7  get_available_languages — ثابت على مستوى الوحدة
-    ✅ RR8  _DEFAULT_REJECTION = .get("ar", {}) بدل ["ar"]
-    ✅ RR9  warmup_all — asyncio.to_thread للـI/O المتزامن
-    ✅ RR10 _auto_publish_tasks_lock (ميت) — أُزيل
-    ✅ RR11 get_banned_words_cached (no-cache) — يُعيد [] بدل قراءة كاش
-    ✅ RR12 _read_pool_stats — توثيق freesize كـfallback
-    ✅ RR13 auto_publish — حذف has_sub الميت
-
-🆕 v7.9.17 (DEEP REVIEW FIXES):
-    ✅ #1  webhook_handler: إعادة تسمية _webhook_app → _telegram_app
-    ✅ #2  SmartCache: حماية من deadlock عند الاستدعاء المتكرر
-    ✅ #6  _publish_single_channel: منع ازدواجية النشر عند فشل mark
-    ✅ #7  auto_publish: إدارة نظيفة للـTasks + shutdown()
-    ✅ #10 contains_mention: لم يعد يطابق البريد الإلكتروني
-    ✅ #11 _get_admin_ids_cached: لا يمسح DB عند رجوع قائمة فارغة
-    ✅ #13 banned_words_locks: منع race عند التنظيف
-    ✅ #16 _flush_usage_updates: لا مضاعفة عند فشل جزئي
-    ✅ #3  monitor_pool: تسجيل فقط عند تغيّر الحالة
-    ✅ #8  apply_penalty: رسائل رفض دقيقة بدل no_reason
-    ✅ #15 METRICS.record_error: مفعّل في ErrorHandler
-    ✅ #24 monitor_pool: مستوى debug / on-change
-    ✅ #22 تطبيع عربي: NFKC + إزالة التطويل
 =================================================================================
 """
 
@@ -999,6 +983,16 @@ class CB:
     SEC_ANTIFLOOD_PENALTY = "sec_antiflood_penalty"
     SEC_NIGHT_ACTION = "sec_night_action"
 
+    # ══════════════════════════════════════════════════════════════
+    # v7.10.0: أزرار الأمان الجديدة
+    # ══════════════════════════════════════════════════════════════
+    SEC_AT_CHANNEL = "sec_at_channel"          # منشن القنوات (@channel)
+    SEC_TG_SCHEME = "sec_tg_scheme"            # روابط tg://
+    SEC_BUTTON_LINKS = "sec_button_links"      # أزرار بروابط
+    SEC_EMAILS = "sec_emails"                  # البريد الإلكتروني
+    SEC_PROTECTED_ANY = "sec_protected_any"    # محمي متعدد (protected content)
+    SEC_POSTBOT = "sec_postbot"                # نمط PostBot
+
     BAN_ADD = "ban_add"
     BAN_LIST = "ban_list"
     BAN_REM = "ban_rem"
@@ -1176,6 +1170,9 @@ class KeyboardFactory:
         "refresh_btn",
         "gift_plans", "redeem_gift",
         "rem_lang",
+        # ملاحظة v7.10.0: الأزرار الجديدة (sec_at_channel, sec_tg_scheme,
+        # sec_button_links, sec_emails, sec_protected_any, sec_postbot)
+        # تحتاج chat_id — لا تُضاف هنا.
     }
 
     _default_texts = {
@@ -1240,6 +1237,17 @@ class KeyboardFactory:
         "sec_forward": "📨 معاد",
         "sec_poll": "📊 تصويت",
         "sec_game": "🎮 لعبة",
+
+        # ══════════════════════════════════════════════════════════
+        # v7.10.0: نصوص الأزرار الجديدة
+        # ══════════════════════════════════════════════════════════
+        "sec_at_channel": "📢 منشن قناة",
+        "sec_tg_scheme": "🔗 روابط tg://",
+        "sec_button_links": "🔘 أزرار بروابط",
+        "sec_emails": "📧 البريد الإلكتروني",
+        "sec_protected_any": "🛡️ محمي متعدد",
+        "sec_postbot": "🤖 نمط PostBot",
+
         "sec_voice": "🎤 صوتي",
         "sec_videonote": "🎥 فيديو نوت",
         "sec_banned_words": "🚫 كلمات محظورة",
@@ -1504,11 +1512,20 @@ class KeyboardFactory:
             "translation": [["trans_off"], ["back"]],
             "referral": [["ref_claim", "ref_list"], ["back"]],
             "contests": [["contest_winners"], ["back"]],
+            # ══════════════════════════════════════════════════════════
+            # v7.10.0: security menu — 6 أزرار جديدة مضافة
+            # ══════════════════════════════════════════════════════════
             "security": [
+                # الحذف الأساسي
                 ["sec_links", "sec_mentions", "sec_forward"],
                 ["sec_video", "sec_audio", "sec_anim"],
                 ["sec_doc", "sec_sticker", "sec_service"],
                 ["sec_poll", "sec_game", "sec_videonote"],
+                # v7.10.0: صفوف الأزرار الجديدة
+                ["sec_at_channel", "sec_tg_scheme"],
+                ["sec_button_links", "sec_emails"],
+                ["sec_protected_any", "sec_postbot"],
+                # الأمان المتقدم
                 ["sec_flood", "sec_slow", "sec_night"],
                 ["sec_slow_mode_seconds"],
                 ["sec_welcome", "sec_goodbye"],
@@ -1790,6 +1807,16 @@ class KeyboardFactory:
         polls = d(settings.get('delete_polls', 0))
         service = d(settings.get('delete_service', 0))
 
+        # ══════════════════════════════════════════════════════════
+        # v7.10.0: قيم الأزرار الجديدة
+        # ══════════════════════════════════════════════════════════
+        at_ch = d(settings.get('delete_at_channel', 0))
+        tg_sch = d(settings.get('delete_tg_scheme', 1))
+        btn_links = d(settings.get('delete_button_links', 1))
+        emails = d(settings.get('delete_emails', 0))
+        prot_any = d(settings.get('delete_protected_any', 0))
+        postbot = d(settings.get('delete_postbot_pattern', 0))
+
         flood_on = d(settings.get('antiflood_enabled', 0))
         flood_n = settings.get('antiflood_messages', 5)
         flood_s = settings.get('antiflood_seconds', 10)
@@ -1884,6 +1911,21 @@ class KeyboardFactory:
             f"{T('sec_poll_short', 'تصويت')} {polls}      "
             f"{T('sec_service_icon', '🗑️')} "
             f"{T('sec_service_short', 'خدمة')} {service}\n"
+            # ══════════════════════════════════════════════════════════
+            # v7.10.0: صفوف الأزرار الجديدة
+            # ══════════════════════════════════════════════════════════
+            f"  {T('sec_at_channel_icon', '📢')} "
+            f"{T('sec_at_channel_short', 'قناة')} {at_ch}      "
+            f"{T('sec_tg_scheme_icon', '🔗')} "
+            f"{T('sec_tg_scheme_short', 'tg://')} {tg_sch}\n"
+            f"  {T('sec_email_icon', '📧')} "
+            f"{T('sec_email_short', 'بريد')} {emails}      "
+            f"{T('sec_button_link_icon', '🔘')} "
+            f"{T('sec_button_link_short', 'أزرار')} {btn_links}\n"
+            f"  {T('sec_protected_any_icon', '🛡️')} "
+            f"{T('sec_protected_any_short', 'محمي')} {prot_any}      "
+            f"{T('sec_postbot_icon', '🤖')} "
+            f"{T('sec_postbot_short', 'PostBot')} {postbot}\n"
             f"\n"
             f"{T('security_advanced_section', '⚙️ <b>الأمان المتقدم</b>')}\n"
             f"  {T('sec_flood_icon', '🌊')} "
@@ -4402,6 +4444,65 @@ class ErrorHandler:
 
 
 # =====================================================================
+# 21. خريطة أزرار الأمان → حقول DB (v7.10.0)
+# =====================================================================
+
+# ═══════════════════════════════════════════════════════════════════
+# تُستخدم في handlers_callbacks.py للـtoggle تلقائياً
+# ═══════════════════════════════════════════════════════════════════
+SECURITY_TOGGLE_MAP: Dict[str, str] = {
+    # الحذف الأساسي
+    "sec_links": "delete_links",
+    "sec_mentions": "mentions",
+    "sec_forward": "delete_forwarded",
+    "sec_video": "delete_videos",
+    "sec_audio": "delete_voice",
+    "sec_anim": "delete_animation",
+    "sec_doc": "delete_documents",
+    "sec_sticker": "delete_stickers",
+    "sec_service": "delete_service",
+    "sec_poll": "delete_polls",
+    "sec_game": "delete_games",
+    "sec_voice": "delete_voice_notes",
+    "sec_videonote": "delete_video_note",
+    "sec_nsfw": "nsfw_enabled",
+
+    # ══════════════════════════════════════════════════════════════
+    # v7.10.0: الأزرار الجديدة
+    # ══════════════════════════════════════════════════════════════
+    "sec_at_channel": "delete_at_channel",
+    "sec_tg_scheme": "delete_tg_scheme",
+    "sec_button_links": "delete_button_links",
+    "sec_emails": "delete_emails",
+    "sec_protected_any": "delete_protected_any",
+    "sec_postbot": "delete_postbot_pattern",
+
+    # الأمان المتقدم
+    "sec_flood": "antiflood_enabled",
+    "sec_slow": "slow_mode_enabled",
+    "sec_night": "night_mode_enabled",
+    "sec_welcome": "welcome_enabled",
+    "sec_goodbye": "goodbye_enabled",
+    "sec_approve_join": "auto_approve_join",
+    "sec_reject_join": "auto_reject_join",
+    "sec_banned_words": "delete_banned_words",
+    "sec_warn": "warn_enabled",
+}
+
+# ═══════════════════════════════════════════════════════════════════
+# القيم الافتراضية للأزرار الجديدة (للاستخدام عند التهيئة)
+# ═══════════════════════════════════════════════════════════════════
+NEW_SECURITY_DEFAULTS: Dict[str, int] = {
+    "delete_at_channel": 0,       # FP عالٍ — @username شائع
+    "delete_tg_scheme": 1,        # روابط tg:// دعائية بحتة
+    "delete_button_links": 1,     # أزرار بروابط خارجية = spam
+    "delete_emails": 0,           # FP عالٍ — بريد شائع في نقاش
+    "delete_protected_any": 0,    # يمنع رسائل من قنوات شريكة إن فُعّل
+    "delete_postbot_pattern": 0,  # كاشف نمط PostBot — يحتاج ثقة
+}
+
+
+# =====================================================================
 # تصدير
 # =====================================================================
 
@@ -4425,4 +4526,6 @@ __all__ = [
     'BackgroundTasks', 'setup_webhook', 'webhook_handler', 'ErrorHandler',
     'SmartCache', 'warmup_all',
     '_normalize_unicode', '_normalize_word',
+    # v7.10.0: exports جديدة
+    'SECURITY_TOGGLE_MAP', 'NEW_SECURITY_DEFAULTS',
 ]
