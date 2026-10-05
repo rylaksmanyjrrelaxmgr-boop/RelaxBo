@@ -1,31 +1,31 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-db_maintenance_commands.py - أوامر صيانة قاعدة البيانات (v1.0.1)
+db_maintenance_commands.py - أوامر صيانة قاعدة البيانات (v1.0.2)
 ================================================================================
+🆕 v1.0.2 — توافقية مع db_diagnostics v6.5.1:
+    ✅ FIX-COMPAT: يشترط db_diagnostics >= 6.5.1
+       (v6.5.1 أصلحت عمود user_violations: created_at → last_violation_time)
+    ✅ تحقق إضافي: إذا preview_maintenance فشل جزئياً (count = -1)
+       → يعرض تحذيراً للمستخدم بدل عرض "لا شيء للحذف".
+    ✅ توثيق صريح في docstring عن الاعتماد على v6.5.1.
+
 🆕 v1.0.1 — إصلاحات ما بعد المراجعة:
-  ✅ إزالة imports غير مستخدمة (TimeUtils)
-  ✅ حماية status_msg إذا فشل reply_text (كان قد يُسبِّب AttributeError)
-  ✅ تنظيف _maint_pending القديمة داخل /db_maintenance (يمنع تسريب user_data)
-  ✅ توثيق مشكلة job_queue.run_repeating vs while True:
-       - job_queue.run_repeating ينشئ حلقة خارجية
-       - scheduled_weekly_diagnostic يحتوي while True داخلياً
-       - النتيجة: double loop + task لا ينتهي
-       - الحل: استخدام start_weekly_diagnostic_task بدلاً من job_queue
-  ✅ إضافة start_weekly_diagnostic_task() / stop_weekly_diagnostic_task()
-     — الطريقة الصحيحة لبدء/إيقاف المهمة الأسبوعية
-  ✅ تحسين معالجة الأخطاء في معاينة/تنفيذ الصيانة
+    ✅ إزالة imports غير مستخدمة (TimeUtils)
+    ✅ حماية status_msg إذا فشل reply_text
+    ✅ تنظيف _maint_pending القديمة داخل /db_maintenance
+    ✅ توثيق مشكلة job_queue.run_repeating vs while True
+    ✅ إضافة start_weekly_diagnostic_task() / stop_weekly_diagnostic_task()
 
 3 أوامر:
   /db_diag_quick   — تقرير صحي مختصر (4 أسطر)
   /db_maintenance  — معاينة + تنفيذ الصيانة (DELETE + VACUUM)
   /db_weekly       — تفعيل/تعطيل التقرير الأسبوعي التلقائي
 
-دوال مساعدة:
-  scheduled_weekly_diagnostic()      — المهمة الدورية (long-running)
-  start_weekly_diagnostic_task()     — 🆕 بدء كـasyncio background
-  stop_weekly_diagnostic_task()      — 🆕 إيقاف نظيف
-  register_maintenance_commands()    — تسجيل الأوامر
+⚠️ الاعتماديات:
+    • db_diagnostics >= v6.5.1
+      (إن كان < 6.5.1 → خطأ "column created_at does not exist"
+       في preview_maintenance + run_maintenance)
 
 ⚠️ الصلاحيات:
   - كل الأوامر تتطلب PRIMARY_OWNER_ID أو is_developer
@@ -43,6 +43,13 @@ from telegram.ext import CommandHandler, ContextTypes
 from config import CONFIG
 from database import DB
 
+# ═══════════════════════════════════════════════════════════════════
+# استيراد db_diagnostics — مع تحقق من الإصدار (v1.0.2)
+# ═══════════════════════════════════════════════════════════════════
+
+_DB_DIAGNOSTICS_VERSION = "0.0.0"
+_DB_DIAGNOSTICS_MIN_VERSION = (6, 5, 1)
+
 try:
     from db_diagnostics import (
         diagnose_db_quick,
@@ -51,12 +58,35 @@ try:
         format_maintenance_preview,
         format_maintenance_result,
     )
+    try:
+        from db_diagnostics import VERSION as _DB_DIAGNOSTICS_VERSION
+    except ImportError:
+        _DB_DIAGNOSTICS_VERSION = "unknown"
+
+    def _parse_version(v):
+        try:
+            return tuple(int(x) for x in str(v).split("."))
+        except Exception:
+            return (0, 0, 0)
+
+    _parsed = _parse_version(_DB_DIAGNOSTICS_VERSION)
+    if _parsed < _DB_DIAGNOSTICS_MIN_VERSION:
+        logging.getLogger(__name__).warning(
+            f"⚠️ db_diagnostics الإصدار {_DB_DIAGNOSTICS_VERSION} "
+            f"أقدم من المطلوب "
+            f"{'.'.join(map(str, _DB_DIAGNOSTICS_MIN_VERSION))} — "
+            f"قد يظهر خطأ "
+            f"'column created_at does not exist' في user_violations. "
+            f"الرجاء ترقية db_diagnostics.py إلى v6.5.1+."
+        )
+
 except ImportError:
     diagnose_db_quick = None
     preview_maintenance = None
     run_maintenance = None
     format_maintenance_preview = None
     format_maintenance_result = None
+    _DB_DIAGNOSTICS_VERSION = "missing"
 
 try:
     from utils import safe_send
@@ -130,6 +160,30 @@ def _cleanup_stale_pending(context) -> bool:
         if age > _CONFIRMATION_TIMEOUT_SEC:
             context.user_data.pop('_maint_pending', None)
             return True
+    except Exception:
+        pass
+    return False
+
+
+# ═══════════════════════════════════════════════════════════════════
+# v1.0.2: فحص صحة preview (كشف فشل الاستعلامات)
+# ═══════════════════════════════════════════════════════════════════
+
+def _preview_has_errors(preview) -> bool:
+    """
+    ✅ v1.0.2: هل المعاينة تحتوي على استعلامات فشلت (count = -1)؟
+
+    يُستخدم لعرض تحذير بدل عرض "لا شيء للحذف" بشكل مضلل.
+    """
+    try:
+        if not preview or not isinstance(preview, dict):
+            return False
+        plan = preview.get('plan', [])
+        for item in plan:
+            if not isinstance(item, dict):
+                continue
+            if item.get('count') == -1:
+                return True
     except Exception:
         pass
     return False
@@ -228,6 +282,17 @@ async def db_maintenance_command(
                 f"❌ فشل التنسيق: {str(e)[:150]}"
             )
             return
+
+        # ✅ v1.0.2: تحذير إذا فشلت بعض الاستعلامات
+        if _preview_has_errors(preview):
+            text += (
+                "\n\n⚠️ <b>تحذير:</b> بعض استعلامات العدّ فشلت.\n"
+                "💡 السبب المحتمل: "
+                "<code>db_diagnostics</code> إصدار أقدم من v6.5.1 "
+                "(يعرف فقط عمود <code>created_at</code> "
+                "في <code>user_violations</code>).\n"
+                "الرجاء ترقية <code>db_diagnostics.py</code>."
+            )
 
         context.user_data['_maint_pending'] = {
             'user_id': user_id,
@@ -534,7 +599,7 @@ async def scheduled_weekly_diagnostic(bot):
 
 
 # ═══════════════════════════════════════════════════════════════════
-# 🆕 v1.0.1: إدارة المهمة الأسبوعية
+# ✅ v1.0.1: إدارة المهمة الأسبوعية
 # ═══════════════════════════════════════════════════════════════════
 
 def start_weekly_diagnostic_task(application) -> bool:
