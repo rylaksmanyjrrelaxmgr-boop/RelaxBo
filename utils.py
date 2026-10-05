@@ -2,8 +2,20 @@
 # -*- coding: utf-8 -*-
 
 """
-utils.py - الأدوات المساعدة للبوت (v7.10.0 - Production Fixes + New Security Buttons)
+utils.py - الأدوات المساعدة للبوت (v7.10.1 — TIMEOUT-FIX for Publish)
 =================================================================================
+🆕 v7.10.1 (PUBLISH-TIMEOUT-FIX):
+    🔴 FIX-CRITICAL: BackgroundTasks._publish_post
+        - المشكلة: `bot.send_photo/video/...` بلا timeout مخصص → يستخدم
+          default PTB (20s) → يظهر "❌ Publish error: Timed out"
+          في سجلات الإنتاج عند إرسال وسائط ثقيلة أو شبكة بطيئة.
+        - الحل:
+          ✅ timeouts مخصصة: read=60s, write=60s, connect=30s, pool=15s
+          ✅ retry تلقائي 2 مرات على TimedOut مع backoff (3s، 6s)
+          ✅ fallback نهائي: إعادة الإرسال بدون caption إن فشل الـcaption
+          ✅ سجلات مفصلة (attempt/retry/success-without-caption)
+          ✅ fail-fast للأخطاء غير-timeout (لا داعي لـretry)
+
 🆕 v7.10.0 (NEW SECURITY BUTTONS):
     ✅ NC1  CB: 6 ثوابت جديدة لأزرار الأمان الجديدة
     ✅ NC2  _default_texts: 6 نصوص عربية للأزرار الجديدة
@@ -22,17 +34,12 @@ utils.py - الأدوات المساعدة للبوت (v7.10.0 - Production Fixe
 🆕 v7.9.19 (REVIEW R3 FIXES):
     🔴 Critical:
         ✅ C1  fetch_json_from_url: allow_redirects=False
-               (يمنع SSRF عبر redirects إلى 169.254.* / localhost)
         ✅ C2  webhook_handler: X-Telegram-Bot-Api-Secret-Token check
-               (يمنع تحديثات مزيفة عند تسريب المسار)
-
     🟠 Medium:
         ✅ M1  حذف _auth_cache (TTL=30 كان يُبطل _auth_neg_cache TTL=15)
         ✅ M2  TranslationManager.translate: cache compiled patterns
-               (كان يُبنى ~30+ regex في كل استدعاء)
         ✅ M3  invalidate_banned_words_cache: توثيق single-thread
         ✅ M5  StateManager.is_expired: .get() بدل `in`
-
     🟡 Cleanup:
         ✅ m1  get_available_languages: return dict copy
         ✅ m2  _normalize_unicode: str.translate بدل حلقة for
@@ -3774,51 +3781,150 @@ class BackgroundTasks:
                 return BackgroundTasks._group_admins_cache[chat_id][1]
             return []
 
+    # ✅ v7.10.1: TIMEOUT-FIX — timeouts مخصصة + retry + fallback
     @staticmethod
     async def _publish_post(bot, channel_id: int, post: dict) -> bool:
-        try:
-            text = post.get('text', '')
-            media_type = post.get('media_type')
-            media_file_id = post.get('media_file_id')
-            caption = text[:1024] if text else None
+        """
+        🆕 v7.10.1 (TIMEOUT-FIX):
+          - يمرر timeouts مخصصة لكل استدعاء (read/write/connect/pool)
+          - يعيد المحاولة 2 مرات على TimedOut مع backoff
+          - يحاول مرة أخيرة بدون caption إذا فشل الـ caption
+        """
+        _SEND_KWARGS = {
+            "read_timeout": 60.0,
+            "write_timeout": 60.0,
+            "connect_timeout": 30.0,
+            "pool_timeout": 15.0,
+        }
+        _MAX_RETRIES = 2
+        _RETRY_DELAY = 3.0
+
+        text = post.get('text', '') or ''
+        media_type = post.get('media_type')
+        media_file_id = post.get('media_file_id')
+        caption = text[:1024] if text else None
+
+        async def _send(with_caption: bool = True):
+            _cap = caption if with_caption else None
 
             if media_type == 'photo' and media_file_id:
-                await bot.send_photo(channel_id, media_file_id, caption=caption)
+                return await bot.send_photo(
+                    channel_id, media_file_id,
+                    caption=_cap, **_SEND_KWARGS
+                )
             elif media_type == 'video' and media_file_id:
-                await bot.send_video(channel_id, media_file_id, caption=caption)
+                return await bot.send_video(
+                    channel_id, media_file_id,
+                    caption=_cap, **_SEND_KWARGS
+                )
             elif media_type == 'document' and media_file_id:
-                await bot.send_document(channel_id, media_file_id, caption=caption)
+                return await bot.send_document(
+                    channel_id, media_file_id,
+                    caption=_cap, **_SEND_KWARGS
+                )
             elif media_type == 'audio' and media_file_id:
-                await bot.send_audio(channel_id, media_file_id, caption=caption)
+                return await bot.send_audio(
+                    channel_id, media_file_id,
+                    caption=_cap, **_SEND_KWARGS
+                )
             elif media_type == 'voice' and media_file_id:
-                await bot.send_voice(channel_id, media_file_id)
-                if text:
+                sent = await bot.send_voice(
+                    channel_id, media_file_id, **_SEND_KWARGS
+                )
+                if text and with_caption:
                     with suppress(Exception):
-                        await bot.send_message(channel_id, text)
+                        await bot.send_message(
+                            channel_id, text, **_SEND_KWARGS
+                        )
+                return sent
             elif media_type == 'animation' and media_file_id:
-                await bot.send_animation(channel_id, media_file_id, caption=caption)
+                return await bot.send_animation(
+                    channel_id, media_file_id,
+                    caption=_cap, **_SEND_KWARGS
+                )
             elif media_type == 'sticker' and media_file_id:
-                await bot.send_sticker(channel_id, media_file_id)
-                if text:
+                sent = await bot.send_sticker(
+                    channel_id, media_file_id, **_SEND_KWARGS
+                )
+                if text and with_caption:
                     with suppress(Exception):
-                        await bot.send_message(channel_id, text)
+                        await bot.send_message(
+                            channel_id, text, **_SEND_KWARGS
+                        )
+                return sent
             elif media_type == 'video_note' and media_file_id:
-                await bot.send_video_note(channel_id, media_file_id)
-                if text:
+                sent = await bot.send_video_note(
+                    channel_id, media_file_id, **_SEND_KWARGS
+                )
+                if text and with_caption:
                     with suppress(Exception):
-                        await bot.send_message(channel_id, text)
+                        await bot.send_message(
+                            channel_id, text, **_SEND_KWARGS
+                        )
+                return sent
             else:
                 if text and len(text) > 4096:
-                    # ✅ m7: تأخير بين الدفعات لتفادي flood-wait
+                    sent = None
                     for i in range(0, len(text), 4096):
-                        await bot.send_message(channel_id, text[i:i+4096])
+                        sent = await bot.send_message(
+                            channel_id, text[i:i + 4096], **_SEND_KWARGS
+                        )
                         await asyncio.sleep(0.3)
+                    return sent
                 else:
-                    await bot.send_message(channel_id, text if text else ".")
-            return True
-        except Exception as e:
-            logger.error(f"❌ Publish error: {e}")
-            return False
+                    return await bot.send_message(
+                        channel_id, text if text else ".",
+                        **_SEND_KWARGS
+                    )
+
+        # ═══ محاولة الإرسال مع retry ═══
+        last_error = None
+        for attempt in range(_MAX_RETRIES + 1):
+            try:
+                await _send(with_caption=True)
+                return True
+
+            except TimedOut as e:
+                last_error = e
+                if attempt < _MAX_RETRIES:
+                    delay = _RETRY_DELAY * (attempt + 1)
+                    logger.warning(
+                        f"⏱️ Publish timed out (attempt "
+                        f"{attempt + 1}/{_MAX_RETRIES + 1}) — "
+                        f"retry in {delay:.1f}s | ch={channel_id}"
+                    )
+                    await asyncio.sleep(delay)
+                    continue
+                logger.warning(
+                    f"⚠️ Publish timed out {_MAX_RETRIES + 1}x — "
+                    f"trying without caption | ch={channel_id}"
+                )
+                try:
+                    await _send(with_caption=False)
+                    logger.info(
+                        f"✅ Publish succeeded without caption | "
+                        f"ch={channel_id}"
+                    )
+                    return True
+                except Exception as final_e:
+                    logger.error(
+                        f"❌ Publish error (no-caption fallback): "
+                        f"{final_e} | ch={channel_id}"
+                    )
+                    return False
+
+            except Exception as e:
+                logger.error(
+                    f"❌ Publish error: {e} | ch={channel_id}",
+                    exc_info=True,
+                )
+                return False
+
+        if last_error:
+            logger.error(
+                f"❌ Publish error: {last_error} | ch={channel_id}"
+            )
+        return False
 
     @staticmethod
     def _unwrap_get_next_post(result) -> Tuple[Optional[Dict], bool]:
@@ -4528,4 +4634,14 @@ __all__ = [
     '_normalize_unicode', '_normalize_word',
     # v7.10.0: exports جديدة
     'SECURITY_TOGGLE_MAP', 'NEW_SECURITY_DEFAULTS',
+    # v7.10.1: تصدير ثوابت timeout للنشر (للاستخدام من ملفات أخرى إن لزم)
+    '_PUBLISH_TIMEOUTS',
 ]
+
+# v7.10.1: ثوابت timeouts مُصدَّرة (للاستخدام من ملفات أخرى إن لزم)
+_PUBLISH_TIMEOUTS = {
+    "read_timeout": 60.0,
+    "write_timeout": 60.0,
+    "connect_timeout": 30.0,
+    "pool_timeout": 15.0,
+}
