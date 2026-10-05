@@ -1,8 +1,16 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-database.py - قاعدة البيانات المتكاملة (v7.7.52 — REVIEW-FIXES-2)
+database.py - قاعدة البيانات المتكاملة (v7.7.53 — NEW-SECURITY-TYPES)
 ================================================================================
+🆕 v7.7.53 (NEW-SECURITY-TYPES — دعم الأزرار الجديدة):
+  ✅ NC1: VALID_VIOLATION_TYPES — إضافة 10 أنواع جديدة:
+      forwarded, spam_score, postbot_pattern, poll_link,
+      at_channel, tg_scheme, button_link, email, vcard_url, venue_url
+      (كانت تُستخدم في handlers_message.py v7.15.0 بدون تعريف → TypeError).
+
+  ✅ NC2: _normalize_params — تحذير من frozenset + توثيق أفضل.
+
 🆕 v7.7.52 (REVIEW-FIXES-2 — DEEP AUDIT):
   🔴 FIX-CRITICAL:
     ✅ mark_published_and_advance: إزالة subquery خام
@@ -703,10 +711,14 @@ def _normalize_params(params: Any) -> tuple:
         ()                → ()
         scalar (int/str)  → (scalar,)
         list              → tuple(items)
-        set / frozenset   → tuple(items)
+        set               → tuple(items)
+        frozenset         → tuple(items) + تحذير (ترتيب غير مضمون)
         tuple             → كما هو
 
     ⚠️ v7.7.51: dict يُعامل كـ scalar (param واحد).
+
+    ⚠️ v7.7.53: frozenset يُنتج تحذيراً — الترتيب غير مضمون
+        عبر Python runs المختلفة. استخدم tuple/list.
 
     أمثلة:
         execute("SELECT $1::jsonb", {"a": 1})   # dict كـ param واحد
@@ -717,7 +729,14 @@ def _normalize_params(params: Any) -> tuple:
         return ()
     if isinstance(params, tuple):
         return params
-    if isinstance(params, (list, set, frozenset)):
+    if isinstance(params, frozenset):
+        # ⚠️ v7.7.53: frozenset غير مرتب — خطر أخطاء صامتة
+        logger.warning(
+            "_normalize_params: frozenset → ترتيب المعاملات غير مضمون "
+            "عبر Python runs. استخدم tuple/list بدلاً منه."
+        )
+        return tuple(params)
+    if isinstance(params, (list, set)):
         return tuple(params)
     return (params,)
 
@@ -1707,17 +1726,42 @@ class Database(
         "text", "photo", "video", "animation", "document",
         "sticker", "voice", "video_note",
     }
+
+    # ═════════════════════════════════════════════════════════════════
+    # 🆕 v7.7.53: VALID_VIOLATION_TYPES — إضافة أنواع جديدة لدعم
+    # handlers_message.py v7.15.0 (كانت تُستخدم بدون تعريف → TypeError).
+    # ═════════════════════════════════════════════════════════════════
     VALID_VIOLATION_TYPES = {
+        # ─── الأساسية (legacy) ───
         "link", "mention", "flood", "nsfw", "banned_word", "media", "other",
         "forward", "sticker", "gif", "poll", "game", "voice", "video_note",
         "photo", "video", "document", "audio", "animation", "spam",
+
+        # ─── v7.14.0: إعدادات قابلة للتبديل ───
         "delete_links", "mentions", "slow_mode", "delete_videos",
         "delete_audio", "delete_animation", "delete_service",
         "delete_documents", "delete_stickers", "delete_forwarded",
         "delete_polls", "delete_games", "delete_voice", "delete_video_note",
         "delete_photos", "delete_banned_words", "delete_penalty",
+
+        # ─── v7.14.0: عقوبات مركّبة ───
         "antiflood", "night_mode", "warn_penalty", "violation_penalty",
+
+        # ═════════════════════════════════════════════════════════════
+        # 🆕 v7.7.53: أنواع المخالفات الجديدة من handlers_message v7.15.0
+        # ═════════════════════════════════════════════════════════════
+        "forwarded",          # رسالة معاد توجيهها (بديل عن 'forward')
+        "spam_score",         # حذف بسبب spam score
+        "postbot_pattern",    # نمط PostBot مزعج
+        "poll_link",          # استفتاء يحتوي رابط
+        "at_channel",         # @channel mention
+        "tg_scheme",          # روابط tg://
+        "button_link",        # inline button link
+        "email",              # بريد إلكتروني
+        "vcard_url",          # vCard يحتوي URL
+        "venue_url",          # Venue يحتوي URL
     }
+
     VALID_VIOLATION_SETTINGS = {
         "welcome_enabled", "goodbye_enabled",
         "auto_approve_join", "auto_reject_join",
