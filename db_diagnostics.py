@@ -4,27 +4,27 @@
 """
 db_diagnostics.py — PostgreSQL/MySQL/SQLite Database Diagnostics
 ================================================================================
-v6.5.0 — MAINTENANCE + QUICK DIAG + WEEKLY REPORT
+v6.5.1 — FIX-CRITICAL: user_violations column
 
+🔴 FIX-CRITICAL (v6.5.1):
+    تصحيح العمود في user_violations من created_at → last_violation_time
+    - السبب: جدول user_violations لا يحتوي على created_at إطلاقاً
+             (راجع database_tables.py — الأعمدة الفعلية:
+              user_id, chat_id, violation_count, last_violation_time).
+    - الأثر السابق: PSQL OperationalError
+                    "column created_at does not exist"
+                    → يظهر في preview_maintenance + run_maintenance.
+    - الإصلاح في:
+        • preview_maintenance  (delete_plan)
+        • run_maintenance      (delete_plan)
+    - + إضافة IS NOT NULL قبل المقارنة (حماية من NULL في العمود).
+
+v6.5.0 — MAINTENANCE + QUICK DIAG + WEEKLY REPORT
 التحسينات على v6.4.2:
     🆕 diagnose_db_quick      : تقرير صحي مختصر (4 أسطر)
     🆕 preview_maintenance    : معاينة الصيانة (بدون تعديل)
     🆕 run_maintenance        : تنفيذ DELETE + VACUUM بأمان
     🆕 format_maintenance_*   : تنسيق للعرض في تيليجرام
-
-التحسينات الموروثة من v6.4.2:
-    ✅ توحيد مصفوفات القيم المقبولة (ACCEPTED_*_SCALE_FACTORS)
-    ✅ تحسين _split_for_telegram — هامش ديناميكي آمن
-    ✅ عرض n_mod_since_analyze في التفاصيل
-    ✅ _get_pg_settings: تحقق من القيم الفارغة
-    ✅ استخدام _safe_params في كل مكان
-
-التحسينات الموروثة من v6.4.0:
-    🔴 FIX-CRITICAL: تمرير المعاملات كـ tuple دائماً عبر _safe_params
-    🆕 fallback ثانٍ لـ _get_indexes
-    🆕 _get_per_table_autovacuum مع reason واضح
-    🆕 _split_for_telegram آمن لـ HTML
-    🆕 MySQL: dead_tup غير مدعوم → تنبيه واضح
 
 الاستخدام:
     from db_diagnostics import (
@@ -52,7 +52,7 @@ logger = logging.getLogger(__name__)
 # VERSION
 # =============================================================================
 
-VERSION = "6.5.0"
+VERSION = "6.5.1"
 
 
 # =============================================================================
@@ -367,13 +367,6 @@ def _parse_interval_seconds(value: Any) -> Optional[int]:
 # =============================================================================
 
 def _safe_params(*args: Any) -> tuple:
-    """
-    يضمن أن المعاملات دائماً tuple.
-
-    السبب: Database.fetchall/fetchone/fetchval يستخدمون *p
-    داخلياً. تمرير scalar (مثل int) يُسبِّب:
-        TypeError: argument after * must be an iterable
-    """
     if not args:
         return ()
     if len(args) == 1:
@@ -391,7 +384,6 @@ def _safe_params(*args: Any) -> tuple:
 def _build_pg_in_clause(
     items: List[str], start_index: int = 1
 ) -> Tuple[str, List[str]]:
-    """يبني IN ($1, $2, ...) مع placeholders صريحة."""
     if not items:
         return ("NULL", [])
     placeholders = []
@@ -494,7 +486,6 @@ def _parse_reloptions(value: Any) -> Dict[str, str]:
 
 
 def _normalize_factor(value: Any) -> Optional[str]:
-    """يُوحِّد القيم الرقمية: '0.020' → '0.02'، '0' → '0'."""
     if value is None:
         return None
     try:
@@ -786,10 +777,6 @@ async def _get_schema_info() -> Dict[str, Any]:
 # =============================================================================
 
 def _is_tuned_reloptions(reloptions: Dict[str, str]) -> bool:
-    """
-    v6.5.0: يعتبر الجدول مضبوطاً إذا كانت قيم scale_factor
-    ضمن المجموعة المقبولة.
-    """
     vacuum_raw = reloptions.get("autovacuum_vacuum_scale_factor")
     analyze_raw = reloptions.get("autovacuum_analyze_scale_factor")
 
@@ -809,15 +796,6 @@ def _is_tuned_reloptions(reloptions: Dict[str, str]) -> bool:
 
 
 async def _get_per_table_autovacuum() -> Dict[str, Dict[str, Any]]:
-    """
-    v6.5.0: منطق tuned مرن — يقبل 0.02/0.01 و 0.05/0.02 و 0/0.
-
-    reason:
-      - "ok"            : موجود ومُحمَّل
-      - "not_found"     : لم يُرجعه الاستعلام (غير موجود فعلاً؟)
-      - "not_in_schema" : موجود في pg_class لكن خارج current_schemas
-      - "query_failed"  : الاستعلامان فشلا
-    """
     from database import DB, USE_POSTGRES, HEAVY_TABLES_FOR_AUTOVACUUM
 
     result: Dict[str, Dict[str, Any]] = {}
@@ -929,9 +907,6 @@ async def _get_per_table_autovacuum() -> Dict[str, Dict[str, Any]]:
 # =============================================================================
 
 async def _get_autovacuum_blockers() -> List[Dict[str, Any]]:
-    """
-    v6.5.0: جميع الاستدعاءات تستخدم _safe_params لتفادي TypeError.
-    """
     from database import DB, USE_POSTGRES
 
     if not USE_POSTGRES:
@@ -939,7 +914,6 @@ async def _get_autovacuum_blockers() -> List[Dict[str, Any]]:
 
     blockers: List[Dict[str, Any]] = []
 
-    # ── long_transaction ──
     try:
         rows = await DB.fetchall("""
             SELECT pid, state, usename, application_name,
@@ -976,7 +950,6 @@ async def _get_autovacuum_blockers() -> List[Dict[str, Any]]:
     except Exception as exc:
         logger.warning("blockers(long transaction): %s", exc)
 
-    # ── idle_in_transaction ──
     try:
         rows = await DB.fetchall("""
             SELECT pid, usename, application_name,
@@ -1008,7 +981,6 @@ async def _get_autovacuum_blockers() -> List[Dict[str, Any]]:
     except Exception as exc:
         logger.warning("blockers(idle transaction): %s", exc)
 
-    # ── running_vacuum ──
     try:
         rows = await DB.fetchall("""
             SELECT pid, datname,
@@ -2529,7 +2501,7 @@ async def diagnose_db_split(
 
 
 # =============================================================================
-# 🆕 v6.5.0: QUICK DIAGNOSTIC
+# QUICK DIAGNOSTIC
 # =============================================================================
 
 async def diagnose_db_quick() -> str:
@@ -2616,7 +2588,7 @@ async def diagnose_db_quick() -> str:
 
 
 # =============================================================================
-# 🆕 v6.5.0: PREVIEW MAINTENANCE
+# PREVIEW MAINTENANCE
 # =============================================================================
 
 async def preview_maintenance(
@@ -2626,6 +2598,10 @@ async def preview_maintenance(
 ) -> Dict[str, Any]:
     """
     🔍 معاينة عملية الصيانة — بدون أي تعديل.
+
+    ✅ v6.5.1 FIX-CRITICAL:
+        user_violations يستخدم last_violation_time بدل created_at
+        (العمود created_at غير موجود في الجدول).
     """
     from database import (
         DB, USE_POSTGRES, HEAVY_TABLES_FOR_AUTOVACUUM,
@@ -2680,11 +2656,14 @@ async def preview_maintenance(
         result['error'] = f"تعذر جلب قائمة الجداول: {exc}"
         return result
 
-    # بناء خطة الحذف
+    # ✅ v6.5.1: تصحيح عمود user_violations
+    #    جدول user_violations لا يحتوي على created_at
+    #    العمود الصحيح: last_violation_time
+    #    راجع database_tables.py (تعريف الجدول)
     delete_plan = [
         ('admin_logs', 'created_at', admin_logs_days),
         ('penalty_archive', 'created_at', penalty_archive_days),
-        ('user_violations', 'created_at', user_violations_days),
+        ('user_violations', 'last_violation_time', user_violations_days),
     ]
 
     for table, ts_col, days in delete_plan:
@@ -2697,7 +2676,8 @@ async def preview_maintenance(
         try:
             count = await DB.fetchval(
                 f"SELECT COUNT(*) FROM {safe_table} "
-                f"WHERE {safe_col} < "
+                f"WHERE {safe_col} IS NOT NULL "
+                f"  AND {safe_col} < "
                 f"NOW() - INTERVAL '{days} days'",
                 default=0,
             )
@@ -2711,7 +2691,10 @@ async def preview_maintenance(
             'action': 'DELETE',
             'column': ts_col,
             'days': days,
-            'criteria': f"{ts_col} < NOW() - INTERVAL '{days} days'",
+            'criteria': (
+                f"{ts_col} IS NOT NULL "
+                f"AND {ts_col} < NOW() - INTERVAL '{days} days'"
+            ),
             'count': count,
         })
 
@@ -2725,7 +2708,7 @@ async def preview_maintenance(
 
 
 # =============================================================================
-# 🆕 v6.5.0: RUN MAINTENANCE
+# RUN MAINTENANCE
 # =============================================================================
 
 async def run_maintenance(
@@ -2739,6 +2722,9 @@ async def run_maintenance(
 ) -> Dict[str, Any]:
     """
     🧹 تنفيذ الصيانة الكاملة (DELETE + VACUUM) بأمان.
+
+    ✅ v6.5.1 FIX-CRITICAL:
+        user_violations يستخدم last_violation_time بدل created_at.
     """
     from database import (
         DB, USE_POSTGRES, HEAVY_TABLES_FOR_AUTOVACUUM,
@@ -2762,10 +2748,11 @@ async def run_maintenance(
 
     # ═══ 1) DELETE PHASE ═══
     if not skip_delete:
+        # ✅ v6.5.1: تصحيح عمود user_violations
         delete_plan = [
             ('admin_logs', 'created_at', admin_logs_days),
             ('penalty_archive', 'created_at', penalty_archive_days),
-            ('user_violations', 'created_at', user_violations_days),
+            ('user_violations', 'last_violation_time', user_violations_days),
         ]
 
         for table, ts_col, days in delete_plan:
@@ -2780,7 +2767,8 @@ async def run_maintenance(
                 count = _safe_int(await DB.fetchval(
                     f"SELECT COUNT(*) FROM "
                     f"{_quote_pg_identifier(table)} "
-                    f"WHERE {_quote_pg_identifier(ts_col)} < "
+                    f"WHERE {_quote_pg_identifier(ts_col)} IS NOT NULL "
+                    f"  AND {_quote_pg_identifier(ts_col)} < "
                     f"NOW() - INTERVAL '{days} days'",
                     default=0,
                 ))
@@ -2807,7 +2795,8 @@ async def run_maintenance(
                     deleted = await DB._execute_with_conn(
                         conn,
                         f"DELETE FROM {_quote_pg_identifier(table)} "
-                        f"WHERE {_quote_pg_identifier(ts_col)} < "
+                        f"WHERE {_quote_pg_identifier(ts_col)} IS NOT NULL "
+                        f"  AND {_quote_pg_identifier(ts_col)} < "
                         f"NOW() - INTERVAL '{days} days'",
                     )
                 entry['deleted'] = _safe_int(deleted, count)
@@ -2856,7 +2845,6 @@ async def run_maintenance(
 
     result['duration_sec'] = round(_time.monotonic() - t_start, 2)
 
-    # تحديد النجاح
     deletes_ok = all(
         e['error'] is None or e.get('skipped')
         for e in result['deletes']
@@ -2870,7 +2858,7 @@ async def run_maintenance(
 
 
 # =============================================================================
-# 🆕 v6.5.0: MAINTENANCE FORMATTERS
+# MAINTENANCE FORMATTERS
 # =============================================================================
 
 def format_maintenance_preview(preview: Dict[str, Any]) -> str:
