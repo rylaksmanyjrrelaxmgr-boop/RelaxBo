@@ -1,34 +1,39 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-database.py - قاعدة البيانات المتكاملة (v7.7.50 — PARAM-NORMALIZATION)
+database.py - قاعدة البيانات المتكاملة (v7.7.51 — REVIEW-FIXES)
 ================================================================================
+🆕 v7.7.51 (REVIEW-FIXES — DEEP AUDIT):
+  🔴 FIX-CRITICAL:
+    ✅ get_dev_log_channel: استبدال الاستعلام الخام بـ _sql_get_setting_value()
+       السبب: `WHERE key='...'` — كلمة `key` محجوزة في MySQL → syntax error
+       → يُبتلع بصمت → قناة سجل المطور معطّلة على MySQL.
+    ✅ _sql_get_setting_value: إضافة اقتباس PG identifiers ("key"/"value")
+       دفاعاً ضد مستقبل PG وحالات search_path غير القياسية.
+
+  🟡 FIX-MEDIUM:
+    ✅ _execute_with_retry: نقل import AsyncMySQLError إلى مستوى الوحدة
+       (_ASYNC_MYSQL_ERROR) بدل إعادة الاستيراد في كل استدعاء.
+    ✅ executemany: فحص نوع دفاعي على params_list والعنصر الأول
+       (رسائل TypeError واضحة بدل أخطاء غامضة داخل _adapt_params).
+    ✅ _create_secondary_indexes: كشف فهارس PG المعطوبة (indisvalid=false)
+       وحذفها قبل الإنشاء — كان الفهرس المعطوب يبقى للأبد.
+    ✅ add_penalty (SQLite branch): استخدام _execute_with_logging
+       بدل conn.execute المباشر — يُسجّل الاستعلام في slow-query log
+       ويُطبِّق _convert_placeholders + _adapt_params.
+
+  🟢 DOC:
+    ✅ _normalize_params: توثيق سلوك dict-as-scalar.
+
 🆕 v7.7.50 (PARAM-NORMALIZATION — DEFENSE IN DEPTH):
   ✅ FIX-CRITICAL: تطبيع المعاملات في الدوال العامة
        - المشكلة: تمرير scalar (مثل int) إلى fetchall/fetchone/fetchval/
                   execute يُسبِّب TypeError قبل أي شيء:
                   "argument after * must be an iterable"
-       - الأثر: db_diagnostics v6.3.0 كان يُمرِّر LONG_TX_WARN_SECONDS
-                كـ int → long_tx/idle_tx لم تُرصد أبداً (الاستثناء يُبتلع
-                في except Exception → logger.debug)
        - الإصلاح: دالة _normalize_params() تُطبَّق في أول سطر من
                   execute/fetchone/fetchall/fetchval
-       - الأثر: أي نمط استدعاء يعمل: scalar / list / set / tuple / None
-       - ملاحظة: db_diagnostics v6.4.x يُطبِّع من جانبه أيضاً (_safe_params)
-                 — الحماية من الطرفين (defense in depth)
 
-🆕 v7.7.49 (VACUUM-OUTSIDE-TX-FIX — CRITICAL):
-  ✅ FIX-CRITICAL: نقل VACUUM (maintenance_postgres) خارج bootstrap tx
-       - المشكلة: create_tables_postgres (fast-path) كان ينفذ
-                  _run_maintenance_postgres داخل transaction الـ bootstrap
-       - الأعراض: "current transaction is aborted" في كل استعلام لاحق
-       - الإصلاح:
-           1) database_tables.py v7.6.27: حذف _run_maintenance_postgres
-              من fast-path (تم في ملف منفصل)
-           2) database.py v7.7.49: إضافة استدعاء _run_maintenance_postgres
-              في _bootstrap بعد commit، باستخدام self.connection()
-              (autocommit mode — لا tx) → VACUUM يعمل بنجاح
-
+🆕 v7.7.49 (VACUUM-OUTSIDE-TX-FIX — CRITICAL)
 🆕 v7.7.48 (PG-NO-MV-FALLBACK-FIX)
 🆕 v7.7.47 (DEV-LOG-CHANNEL)
 🆕 v7.7.46 (SECONDARY-INDEXES-FIX)
@@ -112,6 +117,23 @@ if DB_TYPE == "sqlite":
 
 USE_POSTGRES = (DB_TYPE == "postgres")
 USE_MYSQL = (DB_TYPE == "mysql")
+
+# =====================================================================
+# 0.0.1) ✅ v7.7.51: AsyncMySQLError على مستوى الوحدة
+# =====================================================================
+# السبب: كان يُعاد استيراده في كل استدعاء لـ _execute_with_retry
+# (لكل execute/fetchone/fetchall/fetchval عندما MySQL). إعادة الربط
+# مكلفة نسبياً وضجيج بصري. الآن يُستورد مرة واحدة.
+
+_ASYNC_MYSQL_ERROR = None
+if USE_MYSQL:
+    try:
+        from asyncmy.errors import MySQLError as _ASYNC_MYSQL_ERROR
+    except ImportError:
+        try:
+            from asyncmy import MySQLError as _ASYNC_MYSQL_ERROR
+        except ImportError:
+            _ASYNC_MYSQL_ERROR = None
 
 logger = logging.getLogger(__name__)
 logger.info(f"📌 قاعدة البيانات: {DB_TYPE.upper()}")
@@ -669,8 +691,17 @@ async def _create_pool_with_retry(
     raise RuntimeError(f"فشل الاتصال بـ {name}")
 
 def _sql_get_setting_value() -> str:
+    """
+    ✅ v7.7.51: إضافة اقتباس PG identifiers دفاعاً ضد:
+      - ترقية PG تجعل `key`/`value` محجوزتين
+      - search_path غير قياسي (نادر لكن ممكن)
+    MySQL: backticks (كان موجوداً).
+    SQLite: بدون اقتباس (مطابق للسلوك الأصلي).
+    """
     if USE_MYSQL:
         return "SELECT `value` FROM settings WHERE `key` = ?"
+    if USE_POSTGRES:
+        return 'SELECT "value" FROM settings WHERE "key" = ?'
     return "SELECT value FROM settings WHERE key = ?"
 
 # =====================================================================
@@ -699,6 +730,11 @@ def _normalize_params(params: Any) -> tuple:
 
     ملاحظة: db_diagnostics v6.4.x يُطبِّع من جانبه أيضاً
     عبر _safe_params — هذه الطبقة الثانية للدفاع.
+
+    ⚠️ v7.7.51: dict يُعامل كـ scalar (param واحد) — وليس كـ
+    مجموعة params. هذا مقصود لأنه يُستخدم أحياناً لتمرير
+    JSON/JSONB إلى PostgreSQL. لتقديم dict-as-multiple-params،
+    استخدم `tuple(d.items())` صراحةً أو مرِّر list من الأزواج.
     """
     if params is None:
         return ()
@@ -706,7 +742,7 @@ def _normalize_params(params: Any) -> tuple:
         return params
     if isinstance(params, (list, set, frozenset)):
         return tuple(params)
-    # scalar (int / str / float / bool / datetime / bytes / ...)
+    # scalar (int / str / float / bool / datetime / bytes / dict / ...)
     return (params,)
 
 # =====================================================================
@@ -2062,10 +2098,16 @@ class Database(
             return 0
 
     # ═══════════════════════════════════════════════════════════════
-    # ✅ v7.7.47: قناة سجل المطور (منفصلة عن العامة)
+    # ✅ v7.7.47 + v7.7.51: قناة سجل المطور (منفصلة عن العامة)
     # ═══════════════════════════════════════════════════════════════
 
     async def get_dev_log_channel(self) -> str:
+        """
+        ✅ v7.7.51: استخدام _sql_get_setting_value() بدل الاستعلام الخام.
+        السبب: `WHERE key='dev_log_channel'` — `key` كلمة محجوزة في
+        MySQL → syntax error → الاستثناء يُبتلع بصمت → قناة سجل
+        المطور معطّلة تماماً على MySQL.
+        """
         try:
             if hasattr(self, 'get_setting'):
                 value = await self.get_setting(
@@ -2075,9 +2117,10 @@ class Database(
             logger.debug(f"get_setting(dev_log_channel): {e}")
 
         try:
+            # ✅ v7.7.51: يستخدم helper الذي يوفّر backticks/اقتباس
             row = await self.fetchone(
-                "SELECT value FROM settings "
-                "WHERE key='dev_log_channel' LIMIT 1"
+                _sql_get_setting_value() + " LIMIT 1",
+                ("dev_log_channel",),
             )
             if row:
                 if hasattr(row, 'get'):
@@ -3275,15 +3318,9 @@ class Database(
     async def _execute_with_retry(
         self, query: str, params, executor, max_retries=3
     ):
-        AsyncMySQLError = None
-        if USE_MYSQL:
-            try:
-                from asyncmy.errors import MySQLError as AsyncMySQLError
-            except ImportError:
-                try:
-                    from asyncmy import MySQLError as AsyncMySQLError
-                except ImportError:
-                    AsyncMySQLError = None
+        # ✅ v7.7.51: استخدام المتغير العام بدلاً من إعادة الاستيراد
+        # في كل استدعاء (كان import داخل try/except في كل مرة).
+        AsyncMySQLError = _ASYNC_MYSQL_ERROR
 
         last_exception = None
         for attempt in range(max_retries):
@@ -3670,8 +3707,27 @@ class Database(
     async def executemany(
         self, query: str, params_list: List[tuple]
     ) -> int:
+        """
+        ✅ v7.7.51: فحص نوع دفاعي.
+        يمنع TypeError غامض داخل _adapt_params عند تمرير
+        scalar tuple بدل list-of-tuples.
+        """
         if not params_list:
             return 0
+        if not isinstance(params_list, (list, tuple)):
+            raise TypeError(
+                f"executemany: params_list must be list/tuple, "
+                f"got {type(params_list).__name__}. "
+                f"Did you mean `execute` for a single param set?"
+            )
+        first = params_list[0]
+        if not isinstance(first, (tuple, list, dict)):
+            raise TypeError(
+                f"executemany: items must be tuple/list/dict, "
+                f"got {type(first).__name__}. "
+                f"Did you mean `execute(q, (p1, p2, ...))` "
+                f"for a single param set?"
+            )
         try:
             async with self.connection() as conn:
                 return await asyncio.wait_for(
@@ -4067,6 +4123,12 @@ class Database(
             return False
 
     async def _create_secondary_indexes(self, indexes):
+        """
+        ✅ v7.7.51: كشف فهارس PG المعطوبة (indisvalid=false / indisready=false)
+        وحذفها قبل إعادة الإنشاء. كان CREATE INDEX CONCURRENTLY الفاشل
+        يُترك كـ "invalid index" بنفس الاسم → كل محاولة لاحقة تفشل
+        بـ "already exists" → تُصنّف skipped → معطوب للأبد.
+        """
         if not indexes:
             return
 
@@ -4094,6 +4156,36 @@ class Database(
                         ):
                             skipped += 1
                             continue
+
+                        # ✅ v7.7.51: كشف فهرس معطوب بنفس الاسم
+                        try:
+                            invalid = await conn.fetchval(
+                                "SELECT NOT (i.indisvalid "
+                                "             AND i.indisready) "
+                                "FROM pg_index i "
+                                "JOIN pg_class c "
+                                "  ON c.oid = i.indexrelid "
+                                "WHERE c.relname = $1 "
+                                "AND i.indrelid = "
+                                "    to_regclass($2)",
+                                idx_name, table,
+                            )
+                            if invalid is True:
+                                logger.warning(
+                                    f"⚠️ حذف فهرس معطوب "
+                                    f"{idx_name} على {table} "
+                                    f"قبل إعادة الإنشاء"
+                                )
+                                await conn.execute(
+                                    f"DROP INDEX CONCURRENTLY "
+                                    f"IF EXISTS {idx_name}"
+                                )
+                        except Exception as _inv_e:
+                            logger.debug(
+                                f"فحص فهرس معطوب "
+                                f"{idx_name}: {_inv_e}"
+                            )
+
                         await conn.execute(create_sql)
                         created += 1
                     except Exception as e:
@@ -6580,6 +6672,13 @@ class Database(
         chat_name: str = "",
         auto_register: bool = True,
     ) -> Optional[int]:
+        """
+        ✅ v7.7.51: فرع SQLite يستخدم _execute_with_logging بدل
+        conn.execute المباشر. كان يتجاوز:
+          - slow-query logging
+          - _convert_placeholders (no-op على SQLite لكن توحيد)
+          - _adapt_params (لا ضرر لكن توحيد)
+        """
         if penalty_type not in self.VALID_PENALTY_TYPES:
             return None
         if duration < 0:
@@ -6660,15 +6759,25 @@ class Database(
                         finally:
                             await cursor.close()
                     else:
-                        cursor = await conn.execute(
+                        # ✅ v7.7.51: عبر _execute_with_logging
+                        # (نحتاج cursor.lastrowid → لذا نمرر lambda
+                        #  يُعيد cursor مباشرة بدلاً من rowcount)
+                        q_ins = _convert_placeholders(
                             "INSERT INTO user_penalties "
                             "(user_id, chat_id, penalty_type, "
                             "duration, start_time, end_time, "
                             "reason, issued_by, status, created_at) "
-                            "VALUES (?,?,?,?,?,?,?,?,'active',?)",
+                            "VALUES (?,?,?,?,?,?,?,?,'active',?)"
+                        )
+                        p_ins = _adapt_params(
                             (user_id, chat_id, penalty_type,
                              duration, start_time, end_time,
                              reason, issued_by, start_time),
+                            q_ins,
+                        )
+                        cursor = await self._execute_with_logging(
+                            q_ins, p_ins, conn,
+                            lambda q2, p2: conn.execute(q2, p2),
                         )
                         try:
                             penalty_id = cursor.lastrowid
@@ -7004,4 +7113,5 @@ __all__ = [
     "_validate_column_def",
     "_ALLOWED_COLUMN_TYPES",
     "_ALLOWED_COL_KEYWORDS",
+    "_ASYNC_MYSQL_ERROR",   # ✅ v7.7.51
 ]
