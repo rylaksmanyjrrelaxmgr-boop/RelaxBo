@@ -2,15 +2,21 @@
 # -*- coding: utf-8 -*-
 
 """
-database_tables.py — إنشاء الجداول والفهارس لكل قواعد البيانات (v7.7.0)
+database_tables.py — إنشاء الجداول والفهارس لكل قواعد البيانات (v7.8.0)
 ================================================================================
+🆕 v7.8.0 (FULL-AUTOVACUUM-COVERAGE):
+  ✅ توسيع SMALL_TABLES_FOR_AGGRESSIVE_AUTOVACUUM من 23 → 33 جدولاً
+  ✅ إضافة: admin_logs, banned_words, penalty_archive, user_points,
+            referral_rewards, hidden_owner_groups, support_tickets,
+            user_reminder_settings, user_channels, bot_addition_log
+  ✅ السبب: تقرير db_diagnostics v6.7.0 كشف 19 جدولاً بـ "default autovacuum"
+  ✅ SCHEMA_VERSION: 24 → 25
+  ✅ EXPECTED_INDEX_COUNT: 77 → 77 (بدون تغيير)
+
 🆕 v7.7.0 (AUTO-BLOCKED-SOURCES):
   ✅ NEW: جدول auto_blocked_sources لحجب المصادر المشبوهة تلقائياً
   ✅ NEW: دوال _ensure_auto_blocked_table_* (PG/MySQL/SQLite)
   ✅ NEW: فهرسان جديدان (hit_count DESC, last_seen DESC)
-  ✅ SCHEMA_VERSION: 23 → 24
-  ✅ EXPECTED_INDEX_COUNT: 75 → 77
-  ✅ MAINTENANCE_TABLES: إضافة auto_blocked_sources
 
 🆕 v7.6.28 (MAINTENANCE-USERS-FIX):
   ✅ FIX-HIGH: إضافة "users" إلى MAINTENANCE_TABLES
@@ -32,8 +38,8 @@ from datetime import datetime, timezone, timedelta
 # 0. ثوابت
 # =====================================================================
 
-# ✅ v7.7.0: 23 → 24
-CURRENT_SCHEMA_VERSION = 24
+# ✅ v7.8.0: 24 → 25
+CURRENT_SCHEMA_VERSION = 25
 
 CLEANUP_ANONYMOUS_BOT_IDS = (1087968824, 136817688)
 
@@ -61,7 +67,12 @@ MAINTENANCE_TABLES = (
     "auto_blocked_sources",  # ✅ v7.7.0
 )
 
+# ✅ v7.8.0: توسيع من 23 → 33 جدولاً
+#    السبب: تقرير db_diagnostics v6.7.0 كشف 19 جدولاً بقيم افتراضية
+#    (autovacuum_vacuum_scale_factor = 0.2)
+#    الجداول المُضافة مدرجة في نهاية المجموعة
 SMALL_TABLES_FOR_AGGRESSIVE_AUTOVACUUM = (
+    # ═══ الأساسية (v7.7.0) ═══
     "auto_replies",
     "auto_reply_settings",
     "anonymous_admins",
@@ -84,7 +95,18 @@ SMALL_TABLES_FOR_AGGRESSIVE_AUTOVACUUM = (
     "user_reminder_settings",
     "support_tickets",
     "bot_addition_log",
-    "auto_blocked_sources",  # ✅ v7.7.0
+    "auto_blocked_sources",
+    # ✅ v7.8.0: 10 جداول جديدة
+    "admin_logs",
+    "banned_words",
+    "penalty_archive",
+    "user_channels",
+    "user_penalties",
+    "user_messages",
+    "scheduled_posts",
+    "sentiment_history",
+    "payment_logs",
+    "referrals",
 )
 
 DEFAULT_SETTINGS = (
@@ -94,7 +116,7 @@ DEFAULT_SETTINGS = (
     ("last_backup", ""),
 )
 
-# ✅ v7.7.0: 75 → 77
+# ✅ v7.8.0: بدون تغيير — 77 فهرس
 EXPECTED_INDEX_COUNT = 77
 
 MYSQL_SKIP_INDEXES = frozenset({
@@ -475,7 +497,7 @@ def _is_advanced_index(cols: str) -> bool:
 
 
 # =====================================================================
-# 🆕 v7.7.0: Auto-blocked sources table
+# v7.7.0: Auto-blocked sources table
 # =====================================================================
 
 async def _ensure_auto_blocked_table_postgres(conn, logger):
@@ -1285,7 +1307,6 @@ async def _migrate_missing_columns_sqlite(conn, logger):
     checked = 0
     added = 0
 
-    # 🆕 v7.7.0: التأكد من وجود الجدول أولاً
     await _ensure_auto_blocked_table_sqlite(conn, logger)
 
     for col_name, col_def in _GROUP_SECURITY_NEW_COLUMNS:
@@ -1360,7 +1381,6 @@ async def _migrate_missing_columns_postgres(conn, logger):
     added = 0
     skipped = 0
 
-    # 🆕 v7.7.0: التأكد من وجود الجدول أولاً
     await _ensure_auto_blocked_table_postgres(conn, logger)
 
     for col_name, col_def in _GROUP_SECURITY_NEW_COLUMNS:
@@ -1466,7 +1486,6 @@ async def _migrate_missing_columns_mysql(conn, logger):
     added = 0
     skipped = 0
 
-    # 🆕 v7.7.0: التأكد من وجود الجدول أولاً
     await _ensure_auto_blocked_table_mysql(conn, logger)
 
     for col_name, col_def in _GROUP_SECURITY_NEW_COLUMNS:
@@ -2139,7 +2158,10 @@ async def _ensure_index_definitions_match_mysql(conn, logger):
                     await cursor.execute(f"SHOW INDEX FROM `{table}`")
                     rows = await cursor.fetchall()
                 finally:
-                    await cursor.close()
+                    try:
+                        await cursor.close()
+                    except Exception:
+                        pass
             except Exception:
                 continue
             by_key = {}
@@ -2422,7 +2444,6 @@ async def _create_indexes_mysql(conn, logger):
 async def create_tables_sqlite(conn, logger, TimeUtils):
     current = await _get_current_schema_version_sqlite(conn)
     if current >= CURRENT_SCHEMA_VERSION:
-        # ✅ v7.7.0: التأكد من الجدول أولاً (قبل migration)
         await _ensure_auto_blocked_table_sqlite(conn, logger)
         await _migrate_missing_columns_sqlite(conn, logger)
         await _verify_critical_indexes_sqlite(conn, logger)
@@ -3037,7 +3058,6 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
         )
     """)
 
-    # 🆕 v7.7.0: auto_blocked_sources
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS auto_blocked_sources (
             source_id INTEGER PRIMARY KEY,
@@ -3052,7 +3072,6 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
         )
     """)
 
-    # ✅ v7.7.0: التأكد من الجدول (idempotent)
     await _ensure_auto_blocked_table_sqlite(conn, logger)
 
     await _migrate_missing_columns_sqlite(conn, logger)
@@ -3068,7 +3087,7 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
             "(version, applied_at, description) "
             "VALUES (?, ?, ?) ON CONFLICT(version) DO NOTHING",
             (CURRENT_SCHEMA_VERSION, _safe_now_iso(TimeUtils),
-             "v7.7.0-auto-blocked-sources"),
+             "v7.8.0-full-autovacuum-coverage"),
         )
         await conn.commit()
     except Exception as e:
@@ -3090,7 +3109,6 @@ async def create_tables_postgres(conn, logger, TimeUtils):
             logger.info(
                 f"⏩ PG fast-path: schema v{current} — بدء الفحوصات"
             )
-        # ✅ v7.7.0: التأكد من الجدول أولاً
         await _ensure_auto_blocked_table_postgres(conn, logger)
         await _migrate_missing_columns_postgres(conn, logger)
         await _verify_critical_indexes_postgres(conn, logger)
@@ -3099,6 +3117,8 @@ async def create_tables_postgres(conn, logger, TimeUtils):
         await _drop_deprecated_indexes_postgres(conn, logger)
         await _cleanup_stale_links_postgres(conn, logger)
         await _cleanup_old_admin_logs_postgres(conn, logger)
+        # ✅ v7.8.0: تطبيق autovacuum tuning على الجداول المُوسَّعة
+        await _tune_autovacuum_postgres(conn, logger)
         await _quick_analyze_postgres(conn, logger)
         if logger:
             logger.info(
@@ -3710,7 +3730,6 @@ async def create_tables_postgres(conn, logger, TimeUtils):
         )
     """)
 
-    # 🆕 v7.7.0: auto_blocked_sources
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS auto_blocked_sources (
             source_id BIGINT PRIMARY KEY,
@@ -3725,7 +3744,6 @@ async def create_tables_postgres(conn, logger, TimeUtils):
         )
     """)
 
-    # ✅ v7.7.0: التأكد من الجدول (idempotent)
     await _ensure_auto_blocked_table_postgres(conn, logger)
 
     await _migrate_missing_columns_postgres(conn, logger)
@@ -3734,6 +3752,8 @@ async def create_tables_postgres(conn, logger, TimeUtils):
     await _create_indexes_postgres(conn, logger)
     await _cleanup_stale_links_postgres(conn, logger)
     await _cleanup_old_admin_logs_postgres(conn, logger)
+    # ✅ v7.8.0: تطبيق autovacuum tuning مباشرة بعد الإنشاء
+    await _tune_autovacuum_postgres(conn, logger)
     await _quick_analyze_postgres(conn, logger)
 
     try:
@@ -3743,7 +3763,7 @@ async def create_tables_postgres(conn, logger, TimeUtils):
             "VALUES ($1, $2, $3) ON CONFLICT (version) DO NOTHING",
             CURRENT_SCHEMA_VERSION,
             _safe_now_dt(TimeUtils),
-            "v7.7.0-auto-blocked-sources",
+            "v7.8.0-full-autovacuum-coverage",
         )
     except Exception as e:
         if logger:
@@ -3760,7 +3780,6 @@ async def create_tables_postgres(conn, logger, TimeUtils):
 async def create_tables_mysql(conn, logger, TimeUtils):
     current = await _get_current_schema_version_mysql(conn)
     if current >= CURRENT_SCHEMA_VERSION:
-        # ✅ v7.7.0: التأكد من الجدول أولاً
         await _ensure_auto_blocked_table_mysql(conn, logger)
         await _migrate_missing_columns_mysql(conn, logger)
         await _verify_critical_indexes_mysql(conn, logger)
@@ -4390,7 +4409,6 @@ async def create_tables_mysql(conn, logger, TimeUtils):
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
         """)
 
-        # 🆕 v7.7.0: auto_blocked_sources
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS auto_blocked_sources (
                 source_id BIGINT PRIMARY KEY,
@@ -4405,7 +4423,6 @@ async def create_tables_mysql(conn, logger, TimeUtils):
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
         """)
 
-        # ✅ v7.7.0: التأكد من الجدول (idempotent)
         await _ensure_auto_blocked_table_mysql(conn, logger)
 
         await _migrate_missing_columns_mysql(conn, logger)
@@ -4424,7 +4441,7 @@ async def create_tables_mysql(conn, logger, TimeUtils):
                 (
                     CURRENT_SCHEMA_VERSION,
                     _safe_now_iso(TimeUtils),
-                    "v7.7.0-auto-blocked-sources",
+                    "v7.8.0-full-autovacuum-coverage",
                 ),
             )
         except Exception as e:
