@@ -2,8 +2,18 @@
 # -*- coding: utf-8 -*-
 
 """
-🌿 Relax Manager – البوت الرئيسي (v5.6.7)
+🌿 Relax Manager – البوت الرئيسي (v5.6.8)
 ================================================================================
+🆕 v5.6.8 (EDITED-DOUBLE-PROCESSING-FIX — إصلاح حرج):
+    🔴 FIX-1: إضافة filters.UpdateType.MESSAGE إلى _group_msg_filter
+              السبب: PTB v20.x MessageHandler يعتمد على
+              update.effective_message الذي يشمل edited_message.
+              بدون هذا الفلتر، handle_group يعالج الرسائل المعدّلة
+              ثم handle_edited يعالجها مرة أخرى → معالجة مزدوجة،
+              حذف مزدوج، وإحصاءات مضاعفة.
+    🟢 FIX-2: ضبط app_shutdown_done=True بعد نجاح app.shutdown()
+    📝 FIX-3: توثيق تداخل handle_group/handle_service (آمن حالياً)
+
 🆕 v5.6.7 (BROADEN-GROUP-FILTER — إصلاح حرج):
     🔴 FIX-1: إزالة فلتر نوع المحتوى من _group_msg_filter
               السبب: رسائل automatic forward من القنوات المرتبطة
@@ -18,7 +28,6 @@
 
 🆕 v5.6.5 (CRITICAL-HANDLER-ORDER-FIX):
     🔴 FIX-1: handle_group/handle_edited/handle_service في group=-1
-    🔴 FIX-2: filters.PAID_MEDIA
     🟠 FIX-3: TypeHandler تشخيصي (DIAG_INCOMING=1)
     🟡 FIX-4: ربط الإصدار بـ handlers_message v7.17.1
 
@@ -1863,7 +1872,7 @@ async def _stop_polling_mode(app: Application) -> None:
 
 
 # ═══════════════════════════════════════════════════════════════════
-# 🆕 v5.6.7: Diagnostic handler
+# Diagnostic handler (v5.6.5)
 # ═══════════════════════════════════════════════════════════════════
 
 async def _diag_incoming(update, context):
@@ -1933,7 +1942,7 @@ async def main():
 
     logger.info("🌿 %s", CONFIG.BOT_NAME)
     logger.info("👨‍💼 المالك: %s", CONFIG.PRIMARY_OWNER_ID)
-    logger.info("📦 main.py: v5.6.7 (BROADEN-GROUP-FILTER)")
+    logger.info("📦 main.py: v5.6.8 (EDITED-DOUBLE-PROCESSING-FIX)")
 
     if not _verify_command_handlers():
         logger.error("❌ فشل فحص دوال الأوامر — الخروج")
@@ -2112,11 +2121,17 @@ async def main():
         )
 
     # ═════════════════════════════════════════════════════════════
-    # 🆕 v5.6.7 FIX: تسجيل معالجات المجموعات في group=-1
-    # بدون فلتر نوع المحتوى — يقبل كل الرسائل
+    # 🆕 v5.6.8 FIX: filters.UpdateType.MESSAGE يمنع معالجة
+    # الرسائل المعدّلة مرتين (handle_group + handle_edited)
     # ═════════════════════════════════════════════════════════════
+    #
+    # في PTB v20.x، MessageHandler يعتمد على effective_message الذي
+    # يشمل edited_message. بدون UpdateType.MESSAGE، الفلتر يُطابق
+    # الرسائل المعدّلة → handle_group يعالجها ثم handle_edited يعالجها.
+    #
     _group_msg_filter = (
         filters.ChatType.GROUPS
+        & filters.UpdateType.MESSAGE      # ← v5.6.8 FIX
         & ~filters.COMMAND
     )
 
@@ -2127,7 +2142,8 @@ async def main():
             group=-1,
         )
         logger.info(
-            "✅ handle_group مُسجَّل في group=-1 (فلتر شامل — كل الأنواع)"
+            "✅ handle_group مُسجَّل في group=-1 "
+            "(فلتر شامل — كل الأنواع، رسائل جديدة فقط)"
         )
     except Exception as _e:
         logger.error("❌ فشل تسجيل handle_group: %s", _e, exc_info=True)
@@ -2144,7 +2160,8 @@ async def main():
                 group=-1,
             )
             logger.info(
-                "✅ handle_edited مُسجَّل في group=-1 (فلتر شامل)"
+                "✅ handle_edited مُسجَّل في group=-1 "
+                "(رسائل معدّلة فقط)"
             )
         except Exception as _e:
             logger.error(
@@ -2624,10 +2641,11 @@ async def main():
         except Exception as _e:
             logger.debug("shutdown_delete_tasks: %s", _e)
 
-        # 5) app shutdown
+        # 5) app shutdown — 🟢 v5.6.8: ضبط العلم بعد النجاح
         if not app_shutdown_done:
             try:
                 await app.shutdown()
+                app_shutdown_done = True   # ← v5.6.8 FIX
                 logger.info("✅ app.shutdown() اكتمل")
             except asyncio.CancelledError:
                 raise
