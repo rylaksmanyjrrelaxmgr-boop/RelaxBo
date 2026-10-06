@@ -1,20 +1,23 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-handlers_message.py - v7.18.0
+handlers_message.py - v7.18.1
 (متوافق مع detectors v3.0.1 UNIFIED — 7 Layers)
 =============================================================================
+🆕 v7.18.1 — حذف إجباري للأزرار بروابط:
+    🔥 NEW: FORCE_DELETE_BUTTON_LINKS (افتراضي = True)
+    🔥 FIX: أولوية حذف الزر برابط قبل PostBot HARD-BLOCK
+    🔥 FIX: زر واحد برابط = حذف فوري (بغض عن DB)
+
 🆕 v7.18.0 — تفعيل الطبقات السبع (Multi-Layer Integration):
     🔥 MAJOR: استدعاء `analyze_message_full(message, bot)` بدل
-              `_compute_spam_score` فقط → تفعيل OCR + Audio +
-              URL Enrichment + Metadata + Obfuscation + Behavioral
+              `_compute_spam_score` فقط
     🔥 FIX-1: الصور/الفويس/الروابط المختصرة تُفحَص الآن تلقائياً
-              (إن كانت طبقاتها مُثبَّتة)
     🔥 FIX-2: Spam score = aggregate من كل الطبقات (بأوزان)
     🟠 FIX-3: PostBot confidence ما زال من Layer 0 (Text) مباشرة
     🟠 FIX-4: Fallback تلقائي لو analyze_message_full فشل
     🟡 FIX-5: لوج موحّد يعرض نتائج كل طبقة
-    🟡 FIX-6: MULTILAYER_ENABLED=1 env flag (افتراضي مفعّل)
+    🟡 FIX-6: MULTILAYER_ENABLED=1 env flag
 
 🆕 v7.17.2:
     🟢 FIX-3: استدعاء واحد لـ`_compute_spam_score` مع
@@ -62,7 +65,6 @@ from cache import settings_cache, posts_cache
 # استيراد محرك الكشف v2.2.0+ / v3.0.1
 # ═════════════════════════════════════════════════════════════════════
 
-# --- Layer 0 API (متوفرة في كل الإصدارات) ---
 try:
     from handlers.handlers_message_detectors import (
         DEBUG_DIAG, DEBUG_SPAM,
@@ -251,7 +253,6 @@ except ImportError:
             BEHAVIORAL_LAYER_ENABLED = _BLE
             _HAS_MULTILAYER = True
         except ImportError:
-            # v2.x — لا يدعم الطبقات، نبقى على Layer 0 فقط
             _HAS_MULTILAYER = False
             analyze_message_full = None
             SpamVerdict = None
@@ -332,10 +333,12 @@ def _as_bool(value, default=False) -> bool:
 _ANTIFLOOD_ENABLED = _env_flag("ANTIFLOOD_ENABLED", True)
 _SLOW_MODE_AUTO = _env_flag("SLOW_MODE_AUTO", True)
 
-# 🆕 v7.18.0: تفعيل الطبقات السبع (افتراضي مفعّل)
 _MULTILAYER_ENABLED = (
     _env_flag("MULTILAYER_ENABLED", True) and _HAS_MULTILAYER
 )
+
+# 🆕 v7.18.1: حذف إجباري لأي رسالة فيها زر برابط
+_FORCE_DELETE_BUTTON_LINKS = _env_flag("FORCE_DELETE_BUTTON_LINKS", True)
 
 _BAN_ADD_RATE_LIMIT = _env_flag("BAN_ADD_RATE_LIMIT", True)
 _BAN_ADD_RATE_MAX = 10
@@ -539,7 +542,7 @@ async def _lazy_init_columns():
         _columns_last_attempt_ts = now
 
         db_type = getattr(DB, "DB_TYPE", "sqlite")
-        logger.info("🔧 v7.18.0: Auto-migration (DB_TYPE=%s)", db_type)
+        logger.info("🔧 v7.18.1: Auto-migration (DB_TYPE=%s)", db_type)
 
         cols = [
             ("delete_protected_any", "INTEGER DEFAULT 0", "TINYINT(1) DEFAULT 0"),
@@ -2359,7 +2362,6 @@ class MessageHandlers:
         limiter_acquired = False
         try:
             limiter, limiter_acquired = await _acquire_group_limiter(chat_id)
-            # v7.17.1 FIX-3: `effective_message` property للقراءة فقط في PTB v20+
             if update.effective_message is None:
                 logger.debug(
                     "handle_edited: effective_message is None — skip"
@@ -2461,7 +2463,6 @@ class MessageHandlers:
         else:
             return
 
-        # v7.17.0: بناء _MessageContext مرة واحدة
         try:
             ctx = _MessageContext(message)
         except Exception as e:
@@ -2495,8 +2496,11 @@ class MessageHandlers:
         _tg_scheme_enabled = _as_bool(
             settings.get('delete_tg_scheme', 1), True,
         )
-        _button_links_enabled = _as_bool(
-            settings.get('delete_button_links', 1), True,
+
+        # 🆕 v7.18.1: الحذف الإجباري للأزرار بروابط (بيتغاضى عن DB)
+        _button_links_enabled = (
+            _FORCE_DELETE_BUTTON_LINKS
+            or _as_bool(settings.get('delete_button_links', 1), True)
         )
         _emails_enabled = _as_bool(settings.get('delete_emails', 0), False)
         _polls_enabled = _as_bool(settings.get('delete_polls', 0), False)
@@ -2546,11 +2550,9 @@ class MessageHandlers:
         except Exception as e:
             logger.debug("slow_mode apply: %s", e)
 
-        # v7.17.0: forward detection
         det = get_forward_detection_reason(message)
         ctx.is_forwarded = _as_bool(det.get('is_forwarded', False), False)
         ctx.is_protected = _as_bool(det.get('is_protected', False), False)
-        # v7.17.1 FIX-2: لا نكتب فوق ctx.has_hint
         forward_hint = _as_bool(det.get('has_hint', False), False)
         ctx.is_auto_fwd = _as_bool(
             det.get('has_automatic_forward', False), False,
@@ -2602,7 +2604,6 @@ class MessageHandlers:
                     logger.debug("multilayer error: %s", e)
                     _verdict = None
 
-            # Fallback: Layer 0 فقط
             if _verdict is None:
                 try:
                     _spam_score, _spam_reasons = _compute_spam_score(ctx)
@@ -2612,7 +2613,6 @@ class MessageHandlers:
 
         _is_spam = _spam_enabled and _spam_score >= SPAM_SCORE_THRESHOLD
 
-        # v7.17.1 FIX-1: PostBot confidence من Layer 0 (دائماً)
         _postbot_hard_conf = 0
         try:
             _postbot_hard_conf = _postbot_pattern_confidence(
@@ -2628,7 +2628,6 @@ class MessageHandlers:
             _postbot_hard_conf >= POSTBOT_AUTO_BLOCK_CONFIDENCE
         )
 
-        # Legacy PostBot match
         _postbot_match = False
         if _postbot_enabled:
             if _postbot_hard_block:
@@ -2643,7 +2642,6 @@ class MessageHandlers:
                 except Exception:
                     _postbot_match = False
 
-        # v7.17.1 FIX-7: POSTBOT-HARD-BLOCK دائماً في اللوج
         if _postbot_hard_block:
             logger.warning(
                 "🤖 POSTBOT-HARD-BLOCK | chat=%s user=%s msg=%s "
@@ -2657,7 +2655,6 @@ class MessageHandlers:
                 _analysis_mode,
             )
 
-        # 🆕 v7.18.0: لوج موحّد للطبقات (يظهر فقط عند وجود نتيجة)
         if _analysis_mode == "multilayer" and _spam_layer_scores:
             logger.info(
                 "🛡️ SHIELD | chat=%s user=%s msg=%s | "
@@ -2740,6 +2737,24 @@ class MessageHandlers:
                 )
                 return
 
+        # ════════════════════════════════════════════════════════════
+        # 🆕 v7.18.1: 0.4) حذف فوري لأي رسالة فيها أزرار بروابط
+        # يعمل قبل PostBot HARD-BLOCK وقبل Spam Score
+        # ════════════════════════════════════════════════════════════
+        if _button_links_enabled and ctx.has_button_link:
+            logger.warning(
+                "🔘 BUTTON-LINK-DELETE | chat=%s user=%s msg=%s | "
+                "buttons=%d | urls=%s",
+                chat_id, user_id, message.message_id,
+                ctx.button_count,
+                ctx.button_link_urls[:3],
+            )
+            await MessageHandlers._delete_and_warn(
+                update, context, chat_id, user_id,
+                "button_link", settings, is_anonymous=is_anonymous,
+            )
+            return
+
         # 0.5) PostBot HARD-BLOCK
         if _postbot_hard_block:
             await MessageHandlers._delete_and_warn(
@@ -2810,7 +2825,7 @@ class MessageHandlers:
             )
             return
 
-        # 4d) Button links
+        # 4d) Button links (احتياطي — لن يصل هنا بسبب 0.4)
         if _button_links_enabled and ctx.has_button_link:
             await MessageHandlers._delete_and_warn(
                 update, context, chat_id, user_id,
@@ -3899,9 +3914,9 @@ __all__ = [
     "_DEFAULT_VIOLATION_MESSAGES",
     "_notify_delete_permission_failure",
     "analyze_sentiment",
-    # v7.18.0 multilayer exports
     "_MULTILAYER_ENABLED",
     "_HAS_MULTILAYER",
     "analyze_message_full",
     "SpamVerdict",
+    "_FORCE_DELETE_BUTTON_LINKS",
 ]
