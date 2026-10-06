@@ -2,29 +2,28 @@
 # -*- coding: utf-8 -*-
 
 """
-🌿 Relax Manager – البوت الرئيسي (v5.6.8)
+🌿 Relax Manager – البوت الرئيسي (v5.6.9)
 ================================================================================
+🆕 v5.6.9 (SECURITY-BRIDGE-INTEGRATION):
+    🟢 NEW-1: فحص handlers_message_detectors عند البدء
+             (يكتشف مشاكل الاستيراد مبكراً)
+    🟢 NEW-2: سجل إقلاع موسّع — حالة 14 طبقة كشف السبام
+    🟢 NEW-3: سجل إقلاع — حالة Security Bridge (utils v7.10.2)
+    🟢 NEW-4: سجل إقلاع — تحذيرات التبعيات (numpy, pytesseract, cv2, ffmpeg)
+    🟢 NEW-5: _shutdown_detector_tasks — إغلاق نظيف لمهام الكشف
+    🟢 NEW-6: تحقق من توافق config.py v6 (SPAM_DETECTION_AVAILABLE)
+    🔵 Preserved: كل منطق v5.6.8 كما هو
+
 🆕 v5.6.8 (EDITED-DOUBLE-PROCESSING-FIX — إصلاح حرج):
-    🔴 FIX-1: إضافة filters.UpdateType.MESSAGE إلى _group_msg_filter
-              السبب: PTB v20.x MessageHandler يعتمد على
-              update.effective_message الذي يشمل edited_message.
-              بدون هذا الفلتر، handle_group يعالج الرسائل المعدّلة
-              ثم handle_edited يعالجها مرة أخرى → معالجة مزدوجة،
-              حذف مزدوج، وإحصاءات مضاعفة.
-    🟢 FIX-2: ضبط app_shutdown_done=True بعد نجاح app.shutdown()
-    📝 FIX-3: توثيق تداخل handle_group/handle_service (آمن حالياً)
+    🔴 FIX-1: filters.UpdateType.MESSAGE في _group_msg_filter
+    🟢 FIX-2: app_shutdown_done=True بعد نجاح app.shutdown()
+    📝 FIX-3: توثيق تداخل handle_group/handle_service
 
 🆕 v5.6.7 (BROADEN-GROUP-FILTER — إصلاح حرج):
     🔴 FIX-1: إزالة فلتر نوع المحتوى من _group_msg_filter
-              السبب: رسائل automatic forward من القنوات المرتبطة
-              (Post Bot) لا تُطابق filters.TEXT/PHOTO/VIDEO في بعض
-              إصدارات PTB → لا تصل لـ handle_group.
-              الحل: قبول كل رسائل المجموعة (بغض النظر عن النوع)
-              ثم اتخاذ القرار داخل _handle_group_impl.
 
 🆕 v5.6.6 (AUTO-BLOCKED-COMMAND):
     🟢 NEW: تسجيل /autoblocked
-    🟢 LINK: متوافق مع handlers_message v7.18.3
 
 🆕 v5.6.5 (CRITICAL-HANDLER-ORDER-FIX):
     🔴 FIX-1: handle_group/handle_edited/handle_service في group=-1
@@ -33,9 +32,6 @@
 
 🆕 v5.6.4 (FIX-CANCELLED-PROPAGATION):
     🔴 FIX-1..3: pool_health_monitor — raise بدل return
-
-🆕 v5.6.3 (EDITED-MESSAGE-HOOK + MAINTENANCE-COMMANDS):
-    🔴 F1..F7
 ================================================================================
 """
 
@@ -132,6 +128,50 @@ except ImportError as _e1:
                 )
 
 # ═════════════════════════════════════════════════════════════════════
+# 🆕 v5.6.9: فحص محرك كشف السبام v4.0.0
+# ═════════════════════════════════════════════════════════════════════
+_SPAM_DETECTOR_AVAILABLE = False
+_SPAM_DETECTOR_IMPORT_ERROR = None
+_SPAM_DETECTOR_VERSION = None
+_SPAM_DETECTOR_LAYERS_COUNT = 0
+
+try:
+    from handlers_message_detectors import (
+        _DETECTORS_VERSION as _SD_VERSION,
+        analyze_message_full as _sd_analyze_full,
+    )
+    _SPAM_DETECTOR_AVAILABLE = True
+    _SPAM_DETECTOR_VERSION = _SD_VERSION
+except ImportError as _sd_e:
+    _SPAM_DETECTOR_AVAILABLE = False
+    _SPAM_DETECTOR_IMPORT_ERROR = str(_sd_e)
+except Exception as _sd_e:
+    _SPAM_DETECTOR_AVAILABLE = False
+    _SPAM_DETECTOR_IMPORT_ERROR = f"unexpected: {_sd_e}"
+
+# ═════════════════════════════════════════════════════════════════════
+# 🆕 v5.6.9: فحص Security Bridge (utils v7.10.2)
+# ═════════════════════════════════════════════════════════════════════
+_SECURITY_BRIDGE_AVAILABLE = False
+try:
+    from utils import (
+        SECURITY_TOGGLE_MAP as _stm,
+        NEW_SECURITY_DEFAULTS as _nsd,
+        get_security_settings as _bridge_get_sec,
+        invalidate_security_settings_cache as _bridge_inv_sec,
+        should_delete_by_security as _bridge_should_del,
+        check_all_security as _bridge_check_all,
+        _SECURITY_BRIDGE_AVAILABLE as _sb_flag,
+    )
+    _SECURITY_BRIDGE_AVAILABLE = bool(_sb_flag)
+except ImportError as _sb_e:
+    _SECURITY_BRIDGE_AVAILABLE = False
+    _SB_IMPORT_ERROR = str(_sb_e)
+except Exception as _sb_e:
+    _SECURITY_BRIDGE_AVAILABLE = False
+    _SB_IMPORT_ERROR = f"unexpected: {_sb_e}"
+
+# ═════════════════════════════════════════════════════════════════════
 # admin_logs cleanup
 # ═════════════════════════════════════════════════════════════════════
 try:
@@ -141,6 +181,7 @@ try:
         _cleanup_old_admin_logs_mysql as _cleanup_admin_logs_mysql,
         ADMIN_LOGS_RETENTION_DAYS,
         ADMIN_LOGS_MAX_ROWS,
+        CURRENT_SCHEMA_VERSION as _DB_SCHEMA_VERSION,
     )
     _ADMIN_LOGS_CLEANUP_AVAILABLE = True
     _ADMIN_LOGS_CLEANUP_IMPORT_ERROR = None
@@ -150,6 +191,7 @@ except ImportError as _e:
     _cleanup_admin_logs_mysql = None
     ADMIN_LOGS_RETENTION_DAYS = 30
     ADMIN_LOGS_MAX_ROWS = 5000
+    _DB_SCHEMA_VERSION = None
     _ADMIN_LOGS_CLEANUP_AVAILABLE = False
     _ADMIN_LOGS_CLEANUP_IMPORT_ERROR = str(_e)
 
@@ -343,6 +385,183 @@ def _spawn_notify_dev_log(context, text: str) -> None:
 
 
 # ═══════════════════════════════════════════════════════════════════
+# 🆕 v5.6.9: تقرير محرك كشف السبام
+# ═══════════════════════════════════════════════════════════════════
+
+def _log_spam_detector_status() -> None:
+    """
+    🆕 v5.6.9: يطبع حالة محرك كشف السبام + Security Bridge + التبعيات.
+    """
+
+    # ── 1. محرك كشف السبام ──
+    if _SPAM_DETECTOR_AVAILABLE:
+        logger.info(
+            "🛡️ Spam Detector: ✅ محمّل (%s)",
+            _SPAM_DETECTOR_VERSION or "unknown version",
+        )
+    else:
+        logger.warning(
+            "⚠️ Spam Detector: ❌ غير محمّل — "
+            "السبب: %s",
+            _SPAM_DETECTOR_IMPORT_ERROR or "unknown",
+        )
+        logger.warning(
+            "   💡 تأكد من وجود handlers_message_detectors.py "
+            "في نفس مجلد main.py"
+        )
+        return
+
+    # ── 2. حالة الطبقات من CONFIG ──
+    try:
+        _summary = CONFIG.DETECTION_SUMMARY  # type: ignore
+        _enabled = [k for k, v in _summary.items() if v]
+        _disabled = [k for k, v in _summary.items() if not v]
+
+        logger.info(
+            "   📊 الطبقات: %d/%d مُفعَّلة",
+            len(_enabled), len(_summary),
+        )
+        if _enabled:
+            logger.info("   ✅ مُفعَّلة: %s", ", ".join(_enabled))
+        if _disabled:
+            logger.info("   ❌ معطّلة: %s", ", ".join(_disabled))
+    except AttributeError:
+        logger.debug(
+            "   ℹ️ CONFIG.DETECTION_SUMMARY غير متاح "
+            "(config.py قديم؟)"
+        )
+
+    # ── 3. تبعيات الطبقات الجديدة ──
+    _deps = {}
+
+    try:
+        import numpy  # noqa: F401
+        _deps["numpy (L13 Stego)"] = True
+    except ImportError:
+        _deps["numpy (L13 Stego)"] = False
+
+    try:
+        import pytesseract  # noqa: F401
+        _deps["pytesseract (L1 OCR)"] = True
+    except ImportError:
+        _deps["pytesseract (L1 OCR)"] = False
+
+    try:
+        import PIL  # noqa: F401
+        _deps["Pillow (L1 OCR)"] = True
+    except ImportError:
+        _deps["Pillow (L1 OCR)"] = False
+
+    try:
+        import pyzbar  # noqa: F401
+        _deps["pyzbar (L1 QR)"] = True
+    except ImportError:
+        _deps["pyzbar (L1 QR)"] = False
+
+    try:
+        import cv2  # noqa: F401
+        _deps["opencv (L7 Video)"] = True
+    except ImportError:
+        _deps["opencv (L7 Video)"] = False
+
+    try:
+        import speech_recognition  # noqa: F401
+        _deps["SpeechRecognition (L2 Audio)"] = True
+    except ImportError:
+        _deps["SpeechRecognition (L2 Audio)"] = False
+
+    try:
+        from pydub import AudioSegment  # noqa: F401
+        _deps["pydub (L2 Audio)"] = True
+    except ImportError:
+        _deps["pydub (L2 Audio)"] = False
+
+    try:
+        import requests  # noqa: F401
+        _deps["requests (L3 URL)"] = True
+    except ImportError:
+        _deps["requests (L3 URL)"] = False
+
+    try:
+        import whois  # noqa: F401
+        _deps["python-whois (L3 URL)"] = True
+    except ImportError:
+        _deps["python-whois (L3 URL)"] = False
+
+    _missing_deps = [name for name, ok in _deps.items() if not ok]
+    _loaded_deps = [name for name, ok in _deps.items() if ok]
+
+    if _loaded_deps:
+        logger.info(
+            "   📦 التبعيات المتوفرة (%d): %s",
+            len(_loaded_deps), ", ".join(_loaded_deps),
+        )
+    if _missing_deps:
+        logger.info(
+            "   ⚠️ التبعيات المفقودة (%d): %s",
+            len(_missing_deps), ", ".join(_missing_deps),
+        )
+        logger.info(
+            "   💡 ثبّت الناقص لتفعيل الطبقات كاملاً: "
+            "pip install numpy pytesseract Pillow pyzbar "
+            "opencv-python-headless SpeechRecognition pydub "
+            "requests python-whois"
+        )
+
+    # ── 4. ffmpeg ──
+    try:
+        import subprocess as _sp
+        _r = _sp.run(
+            ["ffmpeg", "-version"],
+            capture_output=True,
+            timeout=3,
+        )
+        _ffmpeg_ok = (_r.returncode == 0)
+    except Exception:
+        _ffmpeg_ok = False
+
+    if _ffmpeg_ok:
+        logger.info("   🎬 ffmpeg: ✅ متوفر")
+    else:
+        logger.info(
+            "   🎬 ffmpeg: ⚠️ غير متوفر — فيديو كبير لن يُعالَج"
+        )
+
+    # ── 5. Safe Browsing ──
+    try:
+        _sb_key = getattr(CONFIG, "SAFE_BROWSING_API_KEY", "")
+        if _sb_key:
+            logger.info("   🔗 Safe Browsing API: ✅ مُهيَّأ")
+        else:
+            logger.info(
+                "   🔗 Safe Browsing API: ⚠️ غير مُهيَّأ "
+                "(يُوصى به لدقة كشف الروابط)"
+            )
+    except AttributeError:
+        pass
+
+
+def _log_security_bridge_status() -> None:
+    """🆕 v5.6.9: حالة Security Bridge (utils v7.10.2)."""
+    if _SECURITY_BRIDGE_AVAILABLE:
+        try:
+            _buttons = len(_stm) if '_stm' in dir() else 0
+            _defaults = len(_nsd) if '_nsd' in dir() else 0
+            logger.info(
+                "🌉 Security Bridge: ✅ محمّل | "
+                "أزرار=%d | قيم افتراضية=%d",
+                _buttons, _defaults,
+            )
+        except Exception:
+            logger.info("🌉 Security Bridge: ✅ محمّل")
+    else:
+        logger.warning(
+            "⚠️ Security Bridge: غير متاح (utils.py قديم؟) — "
+            "سيُستخدم الوضع الخلفي"
+        )
+
+
+# ═══════════════════════════════════════════════════════════════════
 # Diagnostics — Mixins
 # ═══════════════════════════════════════════════════════════════════
 
@@ -449,6 +668,11 @@ if _ADMIN_LOGS_CLEANUP_AVAILABLE:
         "✅ admin_logs cleanup متاح — احتفاظ=%dd, حد أقصى=%d صف",
         ADMIN_LOGS_RETENTION_DAYS, ADMIN_LOGS_MAX_ROWS,
     )
+    if _DB_SCHEMA_VERSION is not None:
+        logger.info(
+            "✅ database_tables v7.9.0 (schema version=%d)",
+            _DB_SCHEMA_VERSION,
+        )
 else:
     logger.warning(
         "⚠️ دوال تنظيف admin_logs غير متاحة: %s — المهمة معطّلة",
@@ -477,6 +701,10 @@ else:
         "أوامر الصيانة معطّلة",
         _MAINT_CMDS_IMPORT_ERROR or "unknown",
     )
+
+# 🆕 v5.6.9: تقرير محرك السبام + Security Bridge
+_log_spam_detector_status()
+_log_security_bridge_status()
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -556,6 +784,22 @@ GROUP_COMMANDS = [
     ("unban", "🔓 إلغاء حظر"),
     ("pin", "📌 تثبيت رسالة"),
 ]
+
+
+# ═══════════════════════════════════════════════════════════════════
+# 🆕 v5.6.9: إغلاق مهام detector المعلقة
+# ═══════════════════════════════════════════════════════════════════
+
+async def _shutdown_detector_tasks(timeout: float = 3.0) -> None:
+    """
+    🆕 v5.6.9: يُلغي أي مهام معلقة من محرك الكشف.
+    المحرك نفسه لا يُنشئ tasks، لكن هذا placeholder للمستقبل.
+    """
+    try:
+        # مكان مستقبلي لإلغاء مهام الكشف إن أُضيفت
+        logger.debug("_shutdown_detector_tasks: لا مهام معلقة")
+    except Exception as _e:
+        logger.debug("_shutdown_detector_tasks: %s", _e)
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -1942,7 +2186,20 @@ async def main():
 
     logger.info("🌿 %s", CONFIG.BOT_NAME)
     logger.info("👨‍💼 المالك: %s", CONFIG.PRIMARY_OWNER_ID)
-    logger.info("📦 main.py: v5.6.8 (EDITED-DOUBLE-PROCESSING-FIX)")
+    logger.info("📦 main.py: v5.6.9 (SECURITY-BRIDGE-INTEGRATION)")
+
+    # 🆕 v5.6.9: تحقق صريح من تفعيل كشف السبام
+    try:
+        if not CONFIG.SPAM_DETECTION_AVAILABLE:  # type: ignore
+            logger.warning(
+                "⚠️ محرك كشف السبام معطّل — "
+                "TEXT_LAYER_ENABLED=0 في config.py"
+            )
+    except AttributeError:
+        logger.info(
+            "ℹ️ CONFIG.SPAM_DETECTION_AVAILABLE غير متاح "
+            "(config.py v5 أو أقدم)"
+        )
 
     if not _verify_command_handlers():
         logger.error("❌ فشل فحص دوال الأوامر — الخروج")
@@ -2101,7 +2358,7 @@ async def main():
     )
 
     # ═════════════════════════════════════════════════════════════
-    # Diagnostic TypeHandler (group=-100 — أول كل شيء)
+    # Diagnostic TypeHandler (group=-100)
     # ═════════════════════════════════════════════════════════════
     if _DIAG_INCOMING and _HAS_TYPE_HANDLER:
         try:
@@ -2121,14 +2378,9 @@ async def main():
         )
 
     # ═════════════════════════════════════════════════════════════
-    # 🆕 v5.6.8 FIX: filters.UpdateType.MESSAGE يمنع معالجة
+    # v5.6.8 FIX: filters.UpdateType.MESSAGE يمنع معالجة
     # الرسائل المعدّلة مرتين (handle_group + handle_edited)
     # ═════════════════════════════════════════════════════════════
-    #
-    # في PTB v20.x، MessageHandler يعتمد على effective_message الذي
-    # يشمل edited_message. بدون UpdateType.MESSAGE، الفلتر يُطابق
-    # الرسائل المعدّلة → handle_group يعالجها ثم handle_edited يعالجها.
-    #
     _group_msg_filter = (
         filters.ChatType.GROUPS
         & filters.UpdateType.MESSAGE      # ← v5.6.8 FIX
@@ -2242,7 +2494,7 @@ async def main():
     app.add_handler(CommandHandler("db_diag", CommandHandlers.db_diag))
     app.add_handler(CommandHandler("db_vacuum", CommandHandlers.db_vacuum))
 
-    # 🆕 v5.6.6: /autoblocked
+    # v5.6.6: /autoblocked
     try:
         app.add_handler(CommandHandler(
             "autoblocked", _handle_autoblocked_command
@@ -2631,6 +2883,12 @@ async def main():
             except Exception as _e:
                 logger.debug("stop_weekly_diagnostic_task: %s", _e)
 
+        # 3.c) 🆕 v5.6.9: إغلاق مهام detector
+        try:
+            await _shutdown_detector_tasks(timeout=3.0)
+        except Exception as _e:
+            logger.debug("_shutdown_detector_tasks: %s", _e)
+
         # 4) handlers_message: log dispatcher + delayed delete
         try:
             await _shutdown_log_dispatcher(timeout=5.0)
@@ -2641,11 +2899,11 @@ async def main():
         except Exception as _e:
             logger.debug("shutdown_delete_tasks: %s", _e)
 
-        # 5) app shutdown — 🟢 v5.6.8: ضبط العلم بعد النجاح
+        # 5) app shutdown — v5.6.8: ضبط العلم بعد النجاح
         if not app_shutdown_done:
             try:
                 await app.shutdown()
-                app_shutdown_done = True   # ← v5.6.8 FIX
+                app_shutdown_done = True
                 logger.info("✅ app.shutdown() اكتمل")
             except asyncio.CancelledError:
                 raise
