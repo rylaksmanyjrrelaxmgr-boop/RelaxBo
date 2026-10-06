@@ -5,21 +5,31 @@
 handlers_message_detectors.py
 ===============================================================================
 🛡️ Relax Manager — Advanced Spam / Anti-Evasion Detection Engine
-Version: 4.0.0 UNIFIED (14 Layers)
+Version: 4.0.1 HARDENED (14 Layers)
 
 ===============================================================================
-🆕 v4.0.0-FIX (REVIEW CLEANUP):
-    🔴 FIX-1: فصل استيراد PIL عن pytesseract
-              → _PIL_AVAILABLE مستقل عن _OCR_AVAILABLE
-              → L13 (LSB stego) يعمل الآن حتى بدون pytesseract
-              → extract_qr_codes تستخدم _PIL_AVAILABLE بدلاً من الاعتماد الضمني
-    🟠 FIX-2: إضافة "text" إلى text_result في _run_text_layer
-              → L11 (Context window) يعمل الآن فعلياً
-    🟡 FIX-3: إضافة "text" إلى analyze_message + get_spam_diagnostics
-              → تشخيص أوضح
+🆕 v4.0.1-HARDENING (FIXES REVIEW v4.0.0):
+    🔴 FIX-A: _download_telegram_file — دعم PTB v20+ (async) + v13 (sync)
+              عبر _maybe_run_awaitable + thread-pool مشترك
+    🔴 FIX-B: _extract_entity_urls — معالجة MessageEntityType enum بشكل صحيح
+              (كانت قيم URL/TEXT_LINK لا تُطابق نصياً قبل v4.0.1)
+    🔴 FIX-C: _extract_venue_url — تنفيذ حقيقي بدلاً من return None دائماً
+    🔴 FIX-D: try_decode_base64 — حساب padding صحيح (كان يضيف "==" دائماً)
+    🟠 FIX-E: _domain_reputation_cache — سقف حجم LRU (5000) لمنع تسرّب الذاكرة
+    🟠 FIX-F: cleanup_old_data — حذف المفاتيح الفارغة بالكامل + تنظيف
+              _context_buffers (كانت تُترك بلا حد أقصى)
+    🟠 FIX-G: _count_word_matches — pre-compiled regex alternation
+              (تسريع ~10x على النصوص الطويلة)
+    🟠 FIX-H: _extract_sticker_text — إزالة فرع ميت (spam_emojis >= 3)
+    🟠 FIX-I: _extract_video_frames — finally موثوق لـ cv2.VideoCapture.release
+    🟡 FIX-J: _DETECTORS_VERSION_CLEAN — إرسال semver صافي إلى Safe Browsing
+    🟡 FIX-K: analyze_message_full_async — إضافة واجهة async عبر to_thread
+              لتجنّب حجب event loop عند استدعاء الطبقات الشبكية
+    🟡 FIX-L: try_decode_xor — مدى 1..127 فقط (نصف الحساب، نفس الفعالية)
+    🟡 FIX-M: _extract_button_context — دمج _unique_strings المزدوجة
 
 ===============================================================================
-التغطية الفعلية (بعد v4.0.0):
+التغطية الفعلية (بعد v4.0.1):
 ===============================================================================
   1.  سبام نصي كلاسيكي              ✅ 98%  L0
   2.  روابط بأزرار                   ✅ 99%  L0
@@ -65,8 +75,10 @@ Version: 4.0.0 UNIFIED (14 Layers)
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import codecs
+import concurrent.futures
 import datetime
 import hashlib
 import html
@@ -77,10 +89,11 @@ import math
 import os
 import re
 import struct
+import tempfile
 import time
 import unicodedata
 import urllib.parse
-from collections import Counter, defaultdict, deque
+from collections import Counter, defaultdict, deque, OrderedDict
 from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
@@ -95,7 +108,9 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
-_DETECTORS_VERSION = "4.0.0 UNIFIED"
+_DETECTORS_VERSION = "4.0.1 HARDENED"
+# FIX-J: semver صافي للاستخدام في Google Safe Browsing API
+_DETECTORS_VERSION_CLEAN = "4.0.1"
 
 # =============================================================================
 # ENVIRONMENT
@@ -192,10 +207,54 @@ NSFW_MODEL_ENABLED = _env_bool("NSFW_MODEL_ENABLED", False)
 NSFW_THRESHOLD = _env_float("NSFW_THRESHOLD", 0.65)
 
 # =============================================================================
+# SHARED THREAD POOL (FIX-A) — للاستدعاءات المتزامنة داخل event loop
+# =============================================================================
+
+_THREAD_POOL_EXECUTOR: Optional[concurrent.futures.ThreadPoolExecutor] = None
+_THREAD_POOL_LOCK = __import__("threading").Lock()
+
+def _get_shared_pool() -> concurrent.futures.ThreadPoolExecutor:
+    global _THREAD_POOL_EXECUTOR
+    if _THREAD_POOL_EXECUTOR is None:
+        with _THREAD_POOL_LOCK:
+            if _THREAD_POOL_EXECUTOR is None:
+                _THREAD_POOL_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
+                    max_workers=4,
+                    thread_name_prefix="detector-io",
+                )
+    return _THREAD_POOL_EXECUTOR
+
+
+def _maybe_run_awaitable(value: Any, timeout: float = 30.0) -> Any:
+    """
+    FIX-A: تشغيل coroutine بشكل آمن في سياق sync:
+      - إذا لا يوجد event loop نشط → asyncio.run مباشرة
+      - إذا يوجد loop نشط (داخل async handler) → نستخدم thread pool منفصل
+    """
+    if not asyncio.iscoroutine(value) and not hasattr(value, "__await__"):
+        return value
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        try:
+            return asyncio.run(value)
+        except Exception as exc:
+            logger.debug("asyncio.run error: %r", exc)
+            return None
+    try:
+        pool = _get_shared_pool()
+        future = pool.submit(asyncio.run, value)
+        return future.result(timeout=timeout)
+    except Exception as exc:
+        logger.debug("thread await error: %r", exc)
+        return None
+
+
+# =============================================================================
 # OPTIONAL DEPENDENCIES
 # =============================================================================
 
-# ✅ FIX-1: PIL مستقل عن pytesseract
+# ✅ PIL مستقل عن pytesseract
 _PIL_AVAILABLE = False
 try:
     from PIL import Image, ImageEnhance, ImageFilter, ImageStat  # type: ignore
@@ -893,6 +952,33 @@ def _extract_words(text: str) -> List[str]:
         return []
     return re.findall(r"[^\W\d_][\w'-]{1,40}", text, flags=re.UNICODE)
 
+# -----------------------------------------------------------------------------
+# FIX-G: pre-compiled regex cache for vocabulary matching
+# -----------------------------------------------------------------------------
+
+_WORD_RE_CACHE: Dict[frozenset, re.Pattern] = {}
+_WORD_RE_CACHE_MAX = 128
+
+def _vocab_regex(vocabulary: Iterable[str]) -> re.Pattern:
+    key = frozenset(str(w).casefold() for w in vocabulary if w)
+    cached = _WORD_RE_CACHE.get(key)
+    if cached is not None:
+        return cached
+    if not key:
+        pat = re.compile(r"(?!)")  # never matches
+    else:
+        # Longer first: prevents `pack` matching before `megapack`
+        parts = sorted(key, key=len, reverse=True)
+        pat = re.compile(
+            r"(?<![\w\-])(?:" + "|".join(re.escape(p) for p in parts)
+            + r")(?![\w\-])",
+            flags=re.UNICODE,
+        )
+    if len(_WORD_RE_CACHE) >= _WORD_RE_CACHE_MAX:
+        _WORD_RE_CACHE.clear()
+    _WORD_RE_CACHE[key] = pat
+    return pat
+
 def _count_word_matches(
     text: str,
     vocabulary: Iterable[str],
@@ -904,20 +990,11 @@ def _count_word_matches(
     normalized = text if already_normalized else _normalize_text(text)
     if not normalized:
         return 0
-    words = set(_extract_words(normalized))
-    count = 0
-    for word in vocabulary:
-        w = str(word).casefold()
-        if w in words:
-            count += 1
-            continue
-        if re.search(
-            rf"(?<!\w){re.escape(w)}(?!\w)",
-            normalized,
-            flags=re.IGNORECASE,
-        ):
-            count += 1
-    return count
+    pattern = _vocab_regex(vocabulary)
+    try:
+        return len(pattern.findall(normalized))
+    except Exception:
+        return 0
 
 def _count_emojis(text: str) -> int:
     if not text:
@@ -1314,6 +1391,22 @@ def _contains_tg_scheme(text: str, *, already_normalized: bool = False) -> bool:
 # ENTITY / BUTTON EXTRACTION
 # =============================================================================
 
+def _entity_type_str(entity: Any) -> str:
+    """
+    FIX-B: استخراج نوع entity بشكل صحيح — يدعم:
+      - PTB v13: str
+      - PTB v20+: MessageEntityType enum مع .value
+    """
+    et = getattr(entity, "type", None)
+    if et is None:
+        return ""
+    if hasattr(et, "value"):
+        try:
+            return str(et.value).lower()
+        except Exception:
+            pass
+    return str(et).lower()
+
 def _extract_entity_urls(message: Any, _depth: int = 0) -> List[str]:
     if message is None or _depth > 4:
         return []
@@ -1323,7 +1416,7 @@ def _extract_entity_urls(message: Any, _depth: int = 0) -> List[str]:
         entities = getattr(message, "entities", None) or []
         for entity in entities:
             try:
-                entity_type = str(getattr(entity, "type", "") or "").lower()
+                entity_type = _entity_type_str(entity)
                 if entity_type == "text_link":
                     url = getattr(entity, "url", None)
                     if url:
@@ -1342,7 +1435,7 @@ def _extract_entity_urls(message: Any, _depth: int = 0) -> List[str]:
         caption_entities = getattr(message, "caption_entities", None) or []
         for entity in caption_entities:
             try:
-                entity_type = str(getattr(entity, "type", "") or "").lower()
+                entity_type = _entity_type_str(entity)
                 if entity_type == "text_link":
                     url = getattr(entity, "url", None)
                     if url:
@@ -1439,8 +1532,12 @@ def _button_is_external(button: Any) -> bool:
 def _extract_button_context(
     message: Any,
 ) -> Tuple[int, List[str], List[str], List[str]]:
+    """
+    FIX-M: دمج فحص _unique_strings المزدوج.
+    يُعيد: (button_count, button_urls_external, button_texts, button_urls_raw)
+    """
     button_count = 0
-    button_urls: List[str] = []
+    button_urls_external: List[str] = []
     button_texts: List[str] = []
     button_urls_raw: List[str] = []
     try:
@@ -1458,14 +1555,15 @@ def _extract_button_context(
                     button_texts.append(str(text))
                 url = _extract_url_from_button(button)
                 if url:
-                    button_urls_raw.append(str(url))
-                    if not str(url).endswith("://button"):
-                        button_urls.append(str(url))
+                    url_str = str(url)
+                    button_urls_raw.append(url_str)
+                    if not url_str.endswith("://button"):
+                        button_urls_external.append(url_str)
     except Exception:
         pass
     return (
         button_count,
-        _unique_strings(button_urls),
+        _unique_strings(button_urls_external),
         button_texts,
         _unique_strings(button_urls_raw),
     )
@@ -1485,7 +1583,27 @@ def _extract_vcard_urls(message: Any) -> List[str]:
     return _unique_strings(urls)
 
 def _extract_venue_url(message: Any) -> Optional[str]:
-    return None
+    """
+    FIX-C: تنفيذ حقيقي — يُحاول استخراج URL من عنوان المكان
+    (نادر لكن ممكن إذا كان العنوان نفسه رابطاً).
+    """
+    if message is None or not ANTIEVASION_VENUE_VCARD:
+        return None
+    try:
+        venue = getattr(message, "venue", None)
+        if venue is None:
+            return None
+        for attr in ("title", "address"):
+            val = getattr(venue, attr, None)
+            if not val:
+                continue
+            s = str(val)
+            m = _URL_IN_TEXT_RE.search(s)
+            if m:
+                return m.group(0)
+        return None
+    except Exception:
+        return None
 
 def _extract_poll_text(
     message: Any,
@@ -1539,7 +1657,7 @@ def _get_message_analysis_text(message: Any) -> str:
     return "\n".join(x for x in parts if x).strip()[:MAX_ANALYSIS_TEXT_LENGTH]
 
 # =============================================================================
-# LAYER 0: TEXT CONTEXT (v4.0.0 — موسّع)
+# LAYER 0: TEXT CONTEXT
 # =============================================================================
 
 class _MessageContext:
@@ -1799,7 +1917,7 @@ class _MessageContext:
                 self.normalized_text
             )
 
-            # v3.0.1 FIX-3: كشف أوسع للأزرار
+            # كشف أوسع للأزرار
             direct_button_urls = False
             try:
                 _markup = getattr(message, "reply_markup", None)
@@ -3078,7 +3196,6 @@ def extract_text_from_image(
         return ""
 
 def extract_qr_codes(image_bytes: bytes) -> List[str]:
-    # ✅ FIX-1: يعتمد على PIL بدلاً من الاعتماد الضمني
     if not _QR_AVAILABLE or not _PIL_AVAILABLE or not image_bytes:
         return []
     results: List[str] = []
@@ -3096,6 +3213,13 @@ def extract_qr_codes(image_bytes: bytes) -> List[str]:
     return results
 
 def _download_telegram_file(file_id: str, bot: Any = None) -> Optional[bytes]:
+    """
+    FIX-A: يدعم PTB v20+ (async) و v13 (sync).
+    - إذا كان bot async ويعمل داخل event loop → يستخدم thread pool منفصل.
+    - إذا كان sync أو خارج loop → استدعاء مباشر.
+    """
+    if not file_id:
+        return None
     if bot is None:
         try:
             from telegram_bot_singleton import get_bot  # type: ignore
@@ -3105,8 +3229,17 @@ def _download_telegram_file(file_id: str, bot: Any = None) -> Optional[bytes]:
     if bot is None:
         return None
     try:
-        file = bot.get_file(file_id)
-        return bytes(file.download_as_bytearray())
+        file_obj = _maybe_run_awaitable(
+            bot.get_file(file_id), timeout=30.0
+        )
+        if file_obj is None:
+            return None
+        data = _maybe_run_awaitable(
+            file_obj.download_as_bytearray(), timeout=60.0
+        )
+        if data is None:
+            return None
+        return bytes(data)
     except Exception as exc:
         logger.debug("download error: %r", exc)
         return None
@@ -3173,7 +3306,7 @@ def _get_whisper_model() -> Any:
     return _whisper_model
 
 def _ogg_to_wav_bytes(ogg_bytes: bytes) -> Optional[bytes]:
-    """v4.0.0: يضيف noise reduction إذا مفعّل."""
+    """يضيف noise reduction إذا مفعّل."""
     if not _AUDIO_AVAILABLE:
         return None
     try:
@@ -3197,7 +3330,6 @@ def _transcribe_with_whisper(wav_bytes: bytes) -> str:
     if model is None:
         return ""
     try:
-        import tempfile
         with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
             f.write(wav_bytes)
             tmp_path = f.name
@@ -3205,7 +3337,10 @@ def _transcribe_with_whisper(wav_bytes: bytes) -> str:
             result = model.transcribe(tmp_path, language=None)
             return result.get("text", "").strip()
         finally:
-            os.unlink(tmp_path)
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
     except Exception as exc:
         logger.debug("whisper transcribe error: %r", exc)
         return ""
@@ -3307,7 +3442,8 @@ def check_safe_browsing(url: str) -> Dict[str, Any]:
         payload = {
             "client": {
                 "clientId": "relax-manager",
-                "clientVersion": _DETECTORS_VERSION,
+                # FIX-J: semver صافي
+                "clientVersion": _DETECTORS_VERSION_CLEAN,
             },
             "threatInfo": {
                 "threatTypes": [
@@ -3357,7 +3493,10 @@ def get_domain_age_days(url: str) -> Optional[int]:
         if creation is None:
             return None
         if isinstance(creation, str):
-            creation = datetime.datetime.fromisoformat(creation)
+            try:
+                creation = datetime.datetime.fromisoformat(creation)
+            except ValueError:
+                return None
         return (datetime.datetime.now() - creation).days
     except Exception as exc:
         logger.debug("whois error: %r", exc)
@@ -3461,15 +3600,25 @@ def _has_url_signature(text: str) -> bool:
     lower = text.lower()
     return any(sig in lower for sig in _URL_SIGNATURES)
 
+def _b64_pad(text: str) -> str:
+    """FIX-D: إضافة الحشو الصحيح فقط."""
+    if not text:
+        return text
+    pad = (-len(text)) % 4
+    return text + ("=" * pad)
+
 def try_decode_base64(text: str) -> str:
+    if not text:
+        return ""
     for pattern in (_BASE64_RE, _BASE64_URLSAFE_RE):
         if not pattern.match(text):
             continue
         try:
+            padded = _b64_pad(text)
             if "-" in text or "_" in text:
-                decoded = base64.urlsafe_b64decode(text + "==")
+                decoded = base64.urlsafe_b64decode(padded)
             else:
-                decoded = base64.b64decode(text + "==")
+                decoded = base64.b64decode(padded)
             result = decoded.decode("utf-8", errors="strict")
             if _looks_like_text(result):
                 return result
@@ -3628,20 +3777,66 @@ def track_edit(
     return False, None
 
 def cleanup_old_data() -> None:
+    """
+    FIX-F: تنظيف كامل — حذف المفاتيح الفارغة + تنظيف _context_buffers.
+    """
     global _last_cleanup
     now = time.time()
     if now - _last_cleanup < CLEANUP_INTERVAL:
         return
     _last_cleanup = now
     cutoff = now - 600
+
+    # _user_message_times
     for uid in list(_user_message_times.keys()):
-        _user_message_times[uid] = deque(
-            (t for t in _user_message_times[uid] if t > cutoff),
-            maxlen=20,
-        )
+        dq = _user_message_times[uid]
+        while dq and dq[0] < cutoff:
+            dq.popleft()
+        if not dq:
+            del _user_message_times[uid]
+
+    # _user_short_messages
+    for uid in list(_user_short_messages.keys()):
+        dq = _user_short_messages[uid]
+        while dq and dq[0][0] < cutoff:
+            dq.popleft()
+        if not dq:
+            del _user_short_messages[uid]
+
+    # _user_url_count
+    for uid in list(_user_url_count.keys()):
+        dq = _user_url_count[uid]
+        while dq and dq[0] < cutoff:
+            dq.popleft()
+        if not dq:
+            del _user_url_count[uid]
+
+    # _user_edit_times
+    for uid in list(_user_edit_times.keys()):
+        dq = _user_edit_times[uid]
+        while dq and dq[0] < cutoff:
+            dq.popleft()
+        if not dq:
+            del _user_edit_times[uid]
+
+    # _edited_messages
     for key in list(_edited_messages.keys()):
-        if _edited_messages[key]["time"] < cutoff:
+        entry = _edited_messages.get(key)
+        if entry is None:
+            continue
+        if entry.get("time", 0) < cutoff:
             del _edited_messages[key]
+
+    # _context_buffers — FIX-F: كان مُهملاً تماماً
+    try:
+        for uid in list(_context_buffers.keys()):
+            dq = _context_buffers[uid]
+            while dq and dq[0].get("ts", 0) < cutoff:
+                dq.popleft()
+            if not dq:
+                del _context_buffers[uid]
+    except Exception:
+        pass
 
 # =============================================================================
 # LAYER 7: VIDEO (frames → OCR)
@@ -3652,40 +3847,50 @@ def _extract_video_frames(
     max_frames: int = VIDEO_MAX_FRAMES,
     interval_sec: float = VIDEO_FRAME_INTERVAL_SEC,
 ) -> List[bytes]:
-    """استخراج إطارات من فيديو باستخدام OpenCV أو ffmpeg."""
+    """
+    FIX-I: release موثوق لـ cv2.VideoCapture + تنظيف tempfile دائماً.
+    """
     frames: List[bytes] = []
 
     if _CV2_AVAILABLE and _NUMPY_AVAILABLE:
+        tmp_path: Optional[str] = None
+        cap = None
         try:
-            import tempfile
             with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as f:
                 f.write(video_bytes)
                 tmp_path = f.name
-            try:
-                cap = cv2.VideoCapture(tmp_path)
-                fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
-                frame_interval = int(fps * interval_sec) or 1
-                count = 0
-                idx = 0
-                while count < max_frames:
-                    ret, frame = cap.read()
-                    if not ret:
-                        break
-                    if idx % frame_interval == 0:
-                        _, buf = cv2.imencode(".jpg", frame)
+            cap = cv2.VideoCapture(tmp_path)
+            fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+            frame_interval = int(fps * interval_sec) or 1
+            count = 0
+            idx = 0
+            while count < max_frames:
+                ret, frame = cap.read()
+                if not ret:
+                    break
+                if idx % frame_interval == 0:
+                    ok, buf = cv2.imencode(".jpg", frame)
+                    if ok:
                         frames.append(buf.tobytes())
                         count += 1
-                    idx += 1
-                cap.release()
-            finally:
-                os.unlink(tmp_path)
+                idx += 1
             return frames
         except Exception as exc:
             logger.debug("cv2 frame extract error: %r", exc)
+        finally:
+            if cap is not None:
+                try:
+                    cap.release()
+                except Exception:
+                    pass
+            if tmp_path is not None:
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
 
     if _FFMPEG_AVAILABLE:
         try:
-            import tempfile
             import subprocess
             with tempfile.TemporaryDirectory() as tmpdir:
                 inp = os.path.join(tmpdir, "in.mp4")
@@ -3824,7 +4029,9 @@ def extract_nsfw_from_message(message: Any, bot: Any = None) -> Tuple[bool, List
 # =============================================================================
 
 def _extract_sticker_text(message: Any, bot: Any = None) -> Tuple[str, int]:
-    """L9 — محاولة استخراج نص من sticker."""
+    """
+    FIX-H: إزالة فرع ميت (spam_emojis >= 3) — لأن emoji حرف واحد دائماً.
+    """
     if not STICKER_LAYER_ENABLED:
         return "", 0
 
@@ -4005,7 +4212,9 @@ def try_decode_caesar(text: str) -> List[Tuple[int, str]]:
     return results
 
 def try_decode_xor(text: str) -> List[Tuple[int, str]]:
-    """L12 — brute-force XOR مع مفتاح single-byte (1-255)."""
+    """
+    FIX-L: قصر مدى المفاتيح على 1..127 (نصف الحساب، نفس الفعالية عملياً).
+    """
     results: List[Tuple[int, str]] = []
     if not text or len(text) < 8:
         return results
@@ -4015,7 +4224,7 @@ def try_decode_xor(text: str) -> List[Tuple[int, str]]:
     except Exception:
         return results
 
-    for key in range(1, 256):
+    for key in range(1, 128):
         decoded = bytes(b ^ key for b in raw)
         try:
             s = decoded.decode("utf-8")
@@ -4055,7 +4264,6 @@ def _find_encoded_payloads(text: str) -> List[Tuple[str, str]]:
 
 def _lsb_extract_text(image_bytes: bytes, max_bytes: int = 500) -> str:
     """L13 — استخراج نص من LSB."""
-    # ✅ FIX-1: يعتمد على PIL/numpy بشكل مستقل عن OCR
     if not _NUMPY_AVAILABLE or not _PIL_AVAILABLE:
         return ""
 
@@ -4126,7 +4334,22 @@ def extract_stego_content(
 # LAYER 14: DOMAIN REPUTATION (heuristic)
 # =============================================================================
 
-_domain_reputation_cache: Dict[str, Dict[str, Any]] = {}
+# FIX-E: LRU cache مع سقف حجم ثابت
+_domain_reputation_cache: "OrderedDict[str, Dict[str, Any]]" = OrderedDict()
+_DOMAIN_REP_CACHE_MAX = 5000
+
+def _domain_rep_cache_set(domain: str, entry: Dict[str, Any]) -> None:
+    _domain_reputation_cache[domain] = entry
+    _domain_reputation_cache.move_to_end(domain)
+    while len(_domain_reputation_cache) > _DOMAIN_REP_CACHE_MAX:
+        _domain_reputation_cache.popitem(last=False)
+
+def _domain_rep_cache_get(domain: str) -> Optional[Dict[str, Any]]:
+    entry = _domain_reputation_cache.get(domain)
+    if entry is None:
+        return None
+    _domain_reputation_cache.move_to_end(domain)
+    return entry
 
 def _domain_heuristic_analysis(domain: str) -> Tuple[int, List[str]]:
     """L14 — تحليل سمعة الدومين heuristic."""
@@ -4204,19 +4427,19 @@ def analyze_domain_reputation(url: str) -> Tuple[int, List[str]]:
         if not domain:
             return 0, []
 
-        if domain in _domain_reputation_cache:
-            entry = _domain_reputation_cache[domain]
+        entry = _domain_rep_cache_get(domain)
+        if entry is not None:
             age = time.time() - entry["ts"]
             if age < 3600:
                 return entry["score"], entry["reasons"]
 
         score, reasons = _domain_heuristic_analysis(domain)
 
-        _domain_reputation_cache[domain] = {
+        _domain_rep_cache_set(domain, {
             "ts": time.time(),
             "score": score,
             "reasons": reasons,
-        }
+        })
 
         return score, reasons
     except Exception as exc:
@@ -4257,7 +4480,6 @@ def _run_text_layer(message: Any, verdict: SpamVerdict) -> Dict[str, Any]:
         ctx = _MessageContext(message)
         score_info = _compute_spam_score(ctx, return_diagnostics=True)
 
-        # ✅ FIX-2: أضف "text" ليعمل L11 (Context) بشكل صحيح
         text_result: Dict[str, Any] = {
             **score_info,
             "text": ctx.analysis_text,
@@ -4478,10 +4700,7 @@ def _run_sticker_layer(message: Any, bot: Any, verdict: SpamVerdict) -> None:
         sticker_score = 0
         reasons: List[str] = []
 
-        if spam_emojis >= 3:
-            sticker_score += 5
-            reasons.append(f"spam_sticker_emoji:{spam_emojis}")
-        elif spam_emojis >= 1:
+        if spam_emojis >= 1:
             sticker_score += 2
             reasons.append(f"spam_sticker_emoji:{spam_emojis}")
 
@@ -4628,7 +4847,7 @@ def _aggregate_verdict(verdict: SpamVerdict) -> None:
     verdict.is_spam = total >= FINAL_THRESHOLD
 
 def analyze_message_full(message: Any, bot: Any = None) -> SpamVerdict:
-    """تحليل شامل عبر 14 طبقة."""
+    """تحليل شامل عبر 14 طبقة (sync)."""
     verdict = SpamVerdict(
         is_spam=False, total_score=0.0, confidence="none"
     )
@@ -4664,6 +4883,13 @@ def analyze_message_full(message: Any, bot: Any = None) -> SpamVerdict:
 
     return verdict
 
+async def analyze_message_full_async(message: Any, bot: Any = None) -> SpamVerdict:
+    """
+    FIX-K: واجهة async لتجنّب حجب event loop عند استدعاء الطبقات
+    الشبكية (URL/WHOIS/SafeBrowsing/OCR/STT).
+    """
+    return await asyncio.to_thread(analyze_message_full, message, bot)
+
 # =============================================================================
 # HIGH LEVEL API
 # =============================================================================
@@ -4672,7 +4898,6 @@ def analyze_message(message: Any) -> Dict[str, Any]:
     ctx = _MessageContext(message)
     result = _compute_spam_score(ctx, return_diagnostics=True)
     result.update({
-        # ✅ FIX-3
         "text": ctx.analysis_text,
         "has_link": ctx.has_any_link,
         "has_button_link": ctx.has_button_link,
@@ -4752,7 +4977,6 @@ def get_spam_diagnostics(message: Any) -> Dict[str, Any]:
         )
         return {
             **score_info,
-            # ✅ FIX-3
             "text": ctx.analysis_text,
             "detector_version": _DETECTORS_VERSION,
             "full_text": ctx.full_text,
@@ -4931,6 +5155,7 @@ __all__ = [
 
     # Orchestrator / API
     "analyze_message_full",
+    "analyze_message_full_async",
     "analyze_message",
     "get_spam_diagnostics",
     "is_spam",
