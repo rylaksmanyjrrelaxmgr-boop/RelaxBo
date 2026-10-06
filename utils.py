@@ -2,8 +2,18 @@
 # -*- coding: utf-8 -*-
 
 """
-utils.py - الأدوات المساعدة للبوت (v7.10.3 — SECURITY-BRIDGE + PENALTY-RESTORED)
+utils.py - الأدوات المساعدة للبوت (v7.10.4 — SECURITY-TOGGLE-MAP-FIX)
 =================================================================================
+🔴 v7.10.4 (SECURITY-TOGGLE-MAP-FIX):
+    🔴 FIX-CRITICAL: SECURITY_TOGGLE_MAP — حذف بادئة "sec_" من كل المفاتيح
+        السبب: handlers_callback._handle_security يُزيل "sec_" من action
+              قبل الفحص (`action = prefix0[4:]`)، مما يجعل مطابقة
+              المفاتيح ذات البادئة "sec_" تفشل دائماً.
+        الأثر قبل الإصلاح: جميع أزرار الأمان (toggles) في المجموعات
+                          لا تعمل — تُضغط بصمت دون تأثير.
+        الأثر بعد الإصلاح: الأزرار تعمل بشكل صحيح (mutual مع fallback
+                          المحلي في handlers_callback.py).
+
 🆕 v7.10.3 (PENALTY-RESTORED):
     🔴 FIX: إعادة لصق قسم Penalty I18N المفقود:
         • _PENALTY_I18N  — قاموس ترجمات العقوبات (ar/en)
@@ -36,10 +46,6 @@ utils.py - الأدوات المساعدة للبوت (v7.10.3 — SECURITY-BRID
         بدون أي ملف جديد — كل شيء داخل utils.py
 
 🆕 v7.10.2-FIX (REVIEW-CLEANUP):
-    🔴 FIX-1: حذف الأسماء غير المعرّفة من __all__:
-              apply_penalty, _format_duration, _penalty_t, _PENALTY_I18N
-              (كانت تُسبّب AttributeError عند from utils import *)
-              ← أُلغي في v7.10.3: تمّت إعادة تعريفها فعلياً
     🟠 FIX-2: check_all_security يدعم analyze_message_full
               sync و async على السواء (asyncio.iscoroutine)
     🟠 FIX-3: check_bot_permissions — إضافة 'can_pin': False
@@ -2576,8 +2582,7 @@ class PenaltyFactory:
 
 
 # =====================================================================
-# 14b. Penalty I18N + apply_penalty (v7.10.1/v7.10.3)
-#      أُعيد لصقه لإصلاح ImportError في handlers_command/handlers_message
+# 14b. Penalty I18N + apply_penalty (v7.10.1 / v7.10.3)
 # =====================================================================
 
 _PENALTY_I18N: Dict[str, Dict[str, str]] = {
@@ -4055,41 +4060,51 @@ class ErrorHandler:
 
 
 # =====================================================================
-# 21. خريطة أزرار الأمان → حقول DB (v7.10.0)
+# 21. خريطة أزرار الأمان → حقول DB (v7.10.0 / v7.10.4 FIX)
+# =====================================================================
+#
+# ⚠️ v7.10.4 FIX-CRITICAL:
+#   handlers_callback._handle_security يُزيل البادئة "sec_" من action
+#   قبل الفحص: `action = prefix0[4:] if prefix0.startswith("sec_") else prefix0`
+#   لذلك المفاتيح هنا يجب أن تكون بدون "sec_".
+#
+#   قبل v7.10.4: كانت المفاتيح تحمل البادئة "sec_" → لا تطابق أبداً
+#               → جميع أزرار الأمان (toggles) كانت لا تعمل!
+#   بعد v7.10.4: المفاتيح بدون "sec_" → تطابق صحيح مع action.
 # =====================================================================
 
 SECURITY_TOGGLE_MAP: Dict[str, str] = {
-    "sec_links": "delete_links",
-    "sec_mentions": "mentions",
-    "sec_forward": "delete_forwarded",
-    "sec_video": "delete_videos",
-    "sec_audio": "delete_voice",
-    "sec_anim": "delete_animation",
-    "sec_doc": "delete_documents",
-    "sec_sticker": "delete_stickers",
-    "sec_service": "delete_service",
-    "sec_poll": "delete_polls",
-    "sec_game": "delete_games",
-    "sec_voice": "delete_voice_notes",
-    "sec_videonote": "delete_video_note",
-    "sec_nsfw": "nsfw_enabled",
+    "links": "delete_links",
+    "mentions": "mentions",
+    "forward": "delete_forwarded",
+    "video": "delete_videos",
+    "audio": "delete_voice",
+    "anim": "delete_animation",
+    "doc": "delete_documents",
+    "sticker": "delete_stickers",
+    "service": "delete_service",
+    "poll": "delete_polls",
+    "game": "delete_games",
+    "voice": "delete_voice_notes",
+    "videonote": "delete_video_note",
+    "nsfw": "nsfw_enabled",
 
-    "sec_at_channel": "delete_at_channel",
-    "sec_tg_scheme": "delete_tg_scheme",
-    "sec_button_links": "delete_button_links",
-    "sec_emails": "delete_emails",
-    "sec_protected_any": "delete_protected_any",
-    "sec_postbot": "delete_postbot_pattern",
+    "at_channel": "delete_at_channel",
+    "tg_scheme": "delete_tg_scheme",
+    "button_links": "delete_button_links",
+    "emails": "delete_emails",
+    "protected_any": "delete_protected_any",
+    "postbot": "delete_postbot_pattern",
 
-    "sec_flood": "antiflood_enabled",
-    "sec_slow": "slow_mode_enabled",
-    "sec_night": "night_mode_enabled",
-    "sec_welcome": "welcome_enabled",
-    "sec_goodbye": "goodbye_enabled",
-    "sec_approve_join": "auto_approve_join",
-    "sec_reject_join": "auto_reject_join",
-    "sec_banned_words": "delete_banned_words",
-    "sec_warn": "warn_enabled",
+    "flood": "antiflood_enabled",
+    "slow": "slow_mode_enabled",
+    "night": "night_mode_enabled",
+    "welcome": "welcome_enabled",
+    "goodbye": "goodbye_enabled",
+    "approve_join": "auto_approve_join",
+    "reject_join": "auto_reject_join",
+    "banned_words": "delete_banned_words",
+    "warn": "warn_enabled",
 }
 
 NEW_SECURITY_DEFAULTS: Dict[str, int] = {
@@ -4539,7 +4554,7 @@ async def check_all_security(
 
 
 # =====================================================================
-# v7.10.3: تصدير الجسر للاستخدام من handlers
+# v7.10.4: تصدير الجسر للاستخدام من handlers
 # =====================================================================
 
 __all__ = [
@@ -4588,7 +4603,7 @@ _PUBLISH_TIMEOUTS = {
 
 
 # =====================================================================
-# LOAD BEACON — v7.10.3
+# LOAD BEACON — v7.10.4
 # =====================================================================
 # 🟡 FIX-4: لا نستدعي _lazy_import_detectors() بشكل eager —
 #           للحفاظ على ميزة lazy import ومنع circular imports
@@ -4596,10 +4611,11 @@ _PUBLISH_TIMEOUTS = {
 
 try:
     logger.info(
-        "🛡️ utils.py v7.10.3 PENALTY-RESTORED loaded | "
+        "🛡️ utils.py v7.10.4 SECURITY-TOGGLE-MAP-FIX loaded | "
         "Detectors=lazy | Langs=%d | Buttons=✅ | Security-Bridge=✅ | "
-        "Penalty=✅",
+        "Penalty=✅ | ToggleMap=✅(no sec_ prefix, %d keys)",
         len(_AVAILABLE_LANGUAGES),
+        len(SECURITY_TOGGLE_MAP),
     )
 except Exception:
     pass
