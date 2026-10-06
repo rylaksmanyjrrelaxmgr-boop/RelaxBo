@@ -3,7 +3,7 @@
 """
 handlers_callback_base.py — ثوابت ودوال مساعدة لـ handlers_callback
 =====================================================================
-هذا الملف جزء من تقسيم handlers_callback.py (v9.4.32 → v9.7.8)
+هذا الملف جزء من تقسيم handlers_callback.py (v9.4.32 → v9.7.9)
 
 المحتوى:
     • ثوابت رقمية/نصية للاستخدام في كل الوحدات
@@ -22,6 +22,16 @@ handlers_callback_base.py — ثوابت ودوال مساعدة لـ handlers_c
 هذه تبقى في handlers_callback.py (أو تُنقل في ملفات لاحقة).
 
 =====================================================================
+🆕 v9.7.9 (ALL-TYPO-FIX):
+    🔴 FIX-CRITICAL: __all__ — حرف سيريلي "в" في "_CANвCANCEL_EXTRA_KEYS"
+             تم استبداله بـ "_CANCEL_EXTRA_KEYS" الصحيح.
+             الأثر قبل الإصلاح:
+                • `from handlers_callback_base import *` يفشل بـ
+                  AttributeError لأن الاسم غير معرَّف.
+                • `from handlers_callback_base import _CANCEL_EXTRA_KEYS`
+                  يفشل بسبب __all__ يحتوي اسمًا غير موجود.
+             الأثر بعد الإصلاح: الاستيراد يعمل بشكل طبيعي.
+
 🆕 v9.7.8 (SECURITY-PREFIXES-FIX):
     🔴 FIX-1: إضافة _SECURITY_PREFIXES صريحة (22+ زر)
              السبب: dir(CB) قد لا يلتقط كل sec_* إذا لم تكن
@@ -705,7 +715,7 @@ __all__ = [
     "DEFAULT_SUCCESS_RATE", "SEC_AUTH_CACHE_MAX_SIZE",
     "POST_COUNT_CACHE_TTL", "POST_COUNT_CACHE_MAX_SIZE",
     "CONTEST_DURATIONS", "GROUP_NUMBER_EMOJIS",
-    "_ANALYTICS_ALIASES", "_CONTEXT_KEYS_TO_CLEAR", "_CANвCANCEL_EXTRA_KEYS",
+    "_ANALYTICS_ALIASES", "_CONTEXT_KEYS_TO_CLEAR", "_CANCEL_EXTRA_KEYS",
     "_BOLD_MD_PATTERN", "_VALID_URL_PATTERN",
     "_PRIMARY_OWNER_ID", "_KNOWN_CB_PREFIXES",
 
