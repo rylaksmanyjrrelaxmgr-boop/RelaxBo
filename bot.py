@@ -2,8 +2,14 @@
 # -*- coding: utf-8 -*-
 
 """
-🌿 Relax Manager – البوت الرئيسي (v5.6.5)
+🌿 Relax Manager – البوت الرئيسي (v5.6.6)
 ================================================================================
+🆕 v5.6.6 (AUTO-BLOCKED-COMMAND):
+    🟢 NEW: تسجيل /autoblocked — عرض/إدارة القائمة السوداء التلقائية
+    🟢 LINK: متوافق مع handlers_message v7.18.3
+              + database_auto_block v1.0.0
+              + database_tables v7.7.0
+
 🆕 v5.6.5 (CRITICAL-HANDLER-ORDER-FIX):
     🔴 FIX-1: نقل handle_group/handle_edited/handle_service إلى group=-1
               (كانت متأخرة بعد register_nav_fix/register_group_log_handlers
@@ -178,6 +184,7 @@ from handlers.handlers_message import (
     register_shutdown_handlers as _register_message_shutdown,
     shutdown_log_dispatcher as _shutdown_log_dispatcher,
     shutdown_delete_tasks as _shutdown_delete_tasks,
+    handle_autoblocked_command as _handle_autoblocked_command,  # 🆕 v5.6.6
 )
 
 # ═════════════════════════════════════════════════════════════════════
@@ -532,6 +539,7 @@ ADMIN_COMMANDS = [
     ("db_diag_quick", "🔬 تقرير صحي مختصر"),
     ("db_maintenance", "🧹 صيانة قاعدة البيانات"),
     ("db_weekly", "📅 التقرير الأسبوعي"),
+    ("autoblocked", "🚫 المصادر المحجوبة تلقائياً"),  # 🆕 v5.6.6
 ]
 
 GROUP_COMMANDS = [
@@ -2000,7 +2008,7 @@ async def main():
 
     logger.info("🌿 %s", CONFIG.BOT_NAME)
     logger.info("👨‍💼 المالك: %s", CONFIG.PRIMARY_OWNER_ID)
-    logger.info("📦 main.py: v5.6.5 (CRITICAL-HANDLER-ORDER-FIX)")
+    logger.info("📦 main.py: v5.6.6 (AUTO-BLOCKED-COMMAND)")
 
     if not _verify_command_handlers():
         logger.error("❌ فشل فحص دوال الأوامر — الخروج")
@@ -2295,6 +2303,17 @@ async def main():
     app.add_handler(CommandHandler("posts", CommandHandlers.posts))
     app.add_handler(CommandHandler("db_diag", CommandHandlers.db_diag))
     app.add_handler(CommandHandler("db_vacuum", CommandHandlers.db_vacuum))
+
+    # 🆕 v5.6.6: /autoblocked — إدارة القائمة السوداء التلقائية
+    try:
+        app.add_handler(CommandHandler(
+            "autoblocked", _handle_autoblocked_command
+        ))
+        logger.info(
+            "✅ /autoblocked مُسجَّل — إدارة المصادر المحجوبة تلقائياً"
+        )
+    except Exception as _e:
+        logger.warning("⚠️ فشل تسجيل /autoblocked: %s", _e)
 
     if _MAINT_CMDS_AVAILABLE and callable(register_maintenance_commands):
         try:
