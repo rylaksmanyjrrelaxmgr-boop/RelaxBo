@@ -5,29 +5,45 @@
 handlers_message_detectors.py
 ===============================================================================
 🛡️ Relax Manager — Advanced Spam / Anti-Evasion Detection Engine
-Version: 3.0.2 UNIFIED (7 Layers)
+Version: 3.0.3 UNIFIED (7 Layers)
 
 محرك كشف مستقل عن handlers_message.py.
 
 ===============================================================================
+🆕 v3.0.3 (URL-COVERAGE + OBFUSCATION-HARDENING):
+    🔴 FIX-1: _run_url_layer يستقبل الآن:
+              • possible_urls (روابط النص بدون entity)
+              • vcard_urls
+              • poll_urls
+              • venue_url
+              السبب: كانت روابط النص المباشر (example.com بدون http://)
+                     تُتجاهَل تماماً لأن Telegram لا يُنشئ entity لها.
+    🔴 FIX-2: _detect_url_obfuscation يستخدم _MULTILINE_URL_SCHEME_RE
+              (كان مُعرَّفاً لكن غير مستخدم — dead code)
+    🔴 FIX-3: _extract_possible_urls يحترم _MAX_EXTRACTED_URLS=50
+              (حماية ReDoS + منع إغراق URL layer)
+    🟡 FIX-4: _scheme_replacement يدعم httpsx:// و httpx://
+    🟡 FIX-5: _LEET_TARGETS موسّع بكلمات مالية/عملات
+              (free, bonus, winner, crypto, airdrop, ...)
+    🟢 NEW: log إجباري 🛡️ SPAM_DETECTED عند score >= SPAM_HARD_THRESHOLD
+            (visibility بدون الحاجة لـ DEBUG_SPAM=True)
+    🟢 NEW: text_result يحمل الآن venue_url + poll_urls + vcard_urls
+            للاستخدام من _run_url_layer أو أي طبقة لاحقة
+
 🆕 v3.0.2 (PERFORMANCE + COMPATIBILITY):
     🟢 IMP-1: _run_text_layer يبني _MessageContext مرة واحدة
-              (بدل استدعاء analyze_message الذي يعيد البناء)
     🟢 IMP-2: _extract_url_from_button — دعم copy_text كـ str مباشر
-              (توافق مع إصدارات PTB القديمة والحديثة)
     🟢 IMP-3: _extract_venue_url — تعليق توضيحي (stub مقصود)
     🟢 IMP-4: _extract_url_from_button — دعم switch_inline_query_current_chat
     🟢 IMP-5: _extract_url_from_button — دعم callback_game / pay
     🟢 IMP-6: توثيق أوضح لدوال v3.0.1 FIX-1/2/3/4
 
 🆕 v3.0.1 (BUTTON-LINK-DETECTION-FIX):
-    🔴 FIX-1: _extract_url_from_button يدعم الآن:
-              url / web_app / login_url / copy_text /
-              switch_inline_query / callback_data
+    🔴 FIX-1: _extract_url_from_button يدعم url / web_app / login_url /
+              copy_text / switch_inline_query / callback_data
     🔴 FIX-2: _compute_spam_score — لا يُقصّ score إلى 4 عندما
               الروابط موجودة كأزرار (is_button_only_case)
     🔴 FIX-3: _MessageContext._populate — كشف أوسع للأزرار
-              (فحص مباشر لـ reply_markup.inline_keyboard[*].url)
     🟢 FIX-4: Log تشخيصي 🔘 BUTTONS_DETECTED في _populate
 ===============================================================================
     Layer 0: TEXT         — نصوص + روابط + Unicode evasion
@@ -69,7 +85,7 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
-_DETECTORS_VERSION = "3.0.2 UNIFIED"
+_DETECTORS_VERSION = "3.0.3 UNIFIED"
 
 
 # =============================================================================
@@ -204,6 +220,9 @@ MAX_REASON_COUNT = 80
 
 RANDOM_DOMAIN_MIN_LENGTH = 10
 RANDOM_DOMAIN_MAX_VOWEL_RATIO = 0.35
+
+# 🆕 v3.0.3 FIX-3: حد أقصى لعدد الروابط المستخرجة (ReDoS + Flood protection)
+_MAX_EXTRACTED_URLS = 50
 
 # OCR
 OCR_MIN_CONFIDENCE = 40
@@ -347,7 +366,9 @@ _LEET_MAP = str.maketrans({
     "@": "a", "$": "s",
 })
 
+# 🆕 v3.0.3 FIX-5: توسيع _LEET_TARGETS بكلمات مالية/عملات
 _LEET_TARGETS = {
+    # Adult / NSFW
     "spam", "scam", "porn", "porno", "xxx",
     "nude", "nudes", "leak", "leaked", "leaks",
     "viral", "mega", "megapack", "pack", "packs",
@@ -355,6 +376,20 @@ _LEET_TARGETS = {
     "uncensored", "uncut", "download", "click",
     "watch", "open", "join", "subscribe",
     "unlock", "exclusive",
+    # 🆕 v3.0.3: Financial / Crypto / Scam
+    "free", "bonus", "winner", "prize", "gift", "gifts",
+    "cash", "money", "eth", "btc", "usdt", "bnb",
+    "crypto", "airdrop", "airdrops", "invest", "investment",
+    "profit", "profits", "hack", "hacked", "hacker",
+    "claim", "claims", "reward", "rewards",
+    "doubling", "doubler", "mining", "miner", "staking",
+    "presale", "pre-sale", "whitelist", "launchpad",
+    "wallet", "metamask", "trustwallet",
+    "elon", "musk", "tesla", "spacex",
+    "giveaway", "giveaways", "lottery", "jackpot",
+    "casino", "betting", "bet", "poker", "roulette",
+    "trading", "signals", "forex", "pump", "pumping",
+    "100x", "1000x", "10x", "50x", "100x",
 }
 
 
@@ -963,12 +998,21 @@ def _bidi_count(text: str) -> int:
 # =============================================================================
 
 def _scheme_replacement(match: re.Match) -> str:
+    """
+    🆕 v3.0.3 FIX-4: يدعم httpsx:// و httpx:// و ttps://
+    """
     raw = match.group(0)
     compact = re.sub(r"\s+", "", raw).lower()
+    # نفصل الجزء قبل ':' أو '/' للحصول على اسم المخطط
     scheme = re.split(r"[:/\\]", compact, maxsplit=1)[0]
-    if scheme in ("https", "hxxps", "httpsx", "ttps", "htps"):
+
+    # 🆕 v3.0.3: توسيع القائمة لتشمل httpx, httpsx
+    if scheme in (
+        "https", "hxxps", "httpsx", "ttps", "htps",
+        "httpx", "htxps", "hxxpx", "httpsxx",
+    ):
         return "https://"
-    if scheme == "ftp":
+    if scheme in ("ftp", "ftps"):
         return "ftp://"
     return "http://"
 
@@ -998,13 +1042,15 @@ def _merge_split_urls(text: str) -> str:
     if not text:
         return ""
     value = str(text)
+    # 🆕 v3.0.3 FIX-4: توسيع نمط المخطط ليشمل httpsx/httpx و نسخها المتقطعة
     value = re.sub(
-        r"(?i)\b(?:h\s*t\s*t\s*p\s*s?|h\s*x\s*x\s*p\s*s?|f\s*t\s*p)"
-        r"\s*[:]\s*/\s*/",
+        r"(?i)\b(?:h\s*t\s*t\s*p\s*s?\s*x?|h\s*x\s*x\s*p\s*s?|f\s*t\s*p)\s*[:]\s*/\s*/",
         _scheme_replacement,
         value,
     )
     value = re.sub(r"(?i)\bhxxps?\s*:\s*/\s*/", _scheme_replacement, value)
+    value = re.sub(r"(?i)\bhttpsx\s*:\s*/\s*/", _scheme_replacement, value)
+    value = re.sub(r"(?i)\bhttpx\s*:\s*/\s*/", _scheme_replacement, value)
     value = re.sub(
         r"(?i)\bt\s*[\.\[\(\{]?\s*m\s*[\.\]\)\}]?\s*e",
         "t.me",
@@ -1037,6 +1083,9 @@ def _merge_split_urls(text: str) -> str:
 # =============================================================================
 
 def _extract_possible_urls(text: str) -> List[str]:
+    """
+    🆕 v3.0.3 FIX-3: يحترم _MAX_EXTRACTED_URLS لمنع ReDoS + Flood.
+    """
     if not text:
         return []
     merged = _merge_split_urls(str(text))
@@ -1052,7 +1101,8 @@ def _extract_possible_urls(text: str) -> List[str]:
         candidates.extend(_TG_SCHEME_RE.findall(merged))
         candidates.extend(_TG_URL_RE.findall(merged))
         candidates.extend(_TG_INVITE_RE.findall(merged))
-    return _unique_strings(candidates)
+    # 🆕 v3.0.3: قص القائمة إلى الحد الأقصى
+    return _unique_strings(candidates)[:_MAX_EXTRACTED_URLS]
 
 
 # =============================================================================
@@ -1116,6 +1166,9 @@ def _contains_link_enhanced(
         if _SPACED_SCHEME_RE.search(raw):
             return True
         if _COLON_SLASH_SCHEME_RE.search(raw):
+            return True
+        # 🆕 v3.0.3: كشف المخططات متعددة الأسطر
+        if _MULTILINE_URL_SCHEME_RE.search(raw):
             return True
     if ANTIEVASION_EMAIL and _EMAIL_RE.search(normalized):
         return True
@@ -1231,12 +1284,12 @@ def _has_link_entity(message: Any) -> bool:
 
 
 # ═══════════════════════════════════════════════════════════════════
-# 🆕 v3.0.1 FIX-1 + v3.0.2 IMP-2/4/5: زر شامل — يدعم كل الأنواع
+# v3.0.1 FIX-1 + v3.0.2 IMP-2/4/5: زر شامل — يدعم كل الأنواع
 # ═══════════════════════════════════════════════════════════════════
 
 def _extract_url_from_button(button: Any) -> Optional[str]:
     """
-    v3.0.2: يدعم كل أنواع أزرار PTB التي قد تحتوي على رابط:
+    v3.0.3: يدعم كل أنواع أزرار PTB التي قد تحتوي على رابط:
 
       v3.0.1:
         - url           (InlineKeyboardButton الأساسي)
@@ -1249,13 +1302,14 @@ def _extract_url_from_button(button: Any) -> Optional[str]:
       v3.0.2 إضافات:
         - copy_text كـ str مباشرة (توافق PTB قديم)
         - switch_inline_query_current_chat
-        - callback_game / pay (نادر جداً — عادةً ليست روابط لكنها
-          علامة على زر مخصص)
+        - callback_game / pay (نادر جداً)
+
+      v3.0.3: بدون تغيير (v3.0.2 شامل بما يكفي).
     """
     if button is None:
         return None
     try:
-        # 1) url مباشر (الأكثر شيوعاً)
+        # 1) url مباشر
         url = getattr(button, "url", None)
         if url:
             return str(url)
@@ -1276,35 +1330,33 @@ def _extract_url_from_button(button: Any) -> Optional[str]:
                 return str(login_web_url)
             return "login_url://button"
 
-        # 4) copy_text — v3.0.2: يدعم CopyTextButton و str مباشرة
+        # 4) copy_text
         copy_text = getattr(button, "copy_text", None)
         if copy_text is not None:
-            # v20.8+: CopyTextButton.text | إصدارات قديمة: str مباشرة
             text = getattr(copy_text, "text", None)
             if not text and isinstance(copy_text, str):
                 text = copy_text
             if text and _URL_IN_TEXT_RE.search(str(text)):
                 return str(text)
 
-        # 5) switch_inline_query (v3.0.2)
+        # 5) switch_inline_query
         switch_q = getattr(button, "switch_inline_query", None)
         if switch_q and _URL_IN_TEXT_RE.search(str(switch_q)):
             return str(switch_q)
 
-        # 5b) switch_inline_query_current_chat (v3.0.2)
+        # 5b) switch_inline_query_current_chat
         switch_q_cc = getattr(
             button, "switch_inline_query_current_chat", None
         )
         if switch_q_cc and _URL_IN_TEXT_RE.search(str(switch_q_cc)):
             return str(switch_q_cc)
 
-        # 6) callback_data (نادر)
+        # 6) callback_data
         cb = getattr(button, "callback_data", None)
         if cb and isinstance(cb, str) and _URL_IN_TEXT_RE.search(cb):
             return cb
 
-        # 7) v3.0.2: callback_game / pay — علامات أزرار مخصصة
-        # (لا تحتوي رابطاً لكنها تشير لزر تفاعلي مخصص)
+        # 7) callback_game / pay
         if getattr(button, "callback_game", None) is not None:
             return "callback_game://button"
         if getattr(button, "pay", None):
@@ -1381,10 +1433,10 @@ def _extract_vcard_urls(message: Any) -> List[str]:
 
 def _extract_venue_url(message: Any) -> Optional[str]:
     """
-    v3.0.2: stub مقصود — Telegram Bot API لا يُرجع URL من كائن Venue.
-    الكائن يحتوي فقط على: location (lat/long)، title، address،
-    foursquare_id، foursquare_type، google_place_id، google_place_type.
-    لا يوجد حقل 'url'. تُرجع None دائماً للتوافق مع الواجهة العامة.
+    v3.0.3: stub مقصود — Telegram Bot API لا يُرجع URL من كائن Venue.
+    الكائن يحتوي فقط على: location، title، address، foursquare_id،
+    foursquare_type، google_place_id، google_place_type.
+    تُرجع None دائماً للتوافق مع الواجهة العامة.
     """
     return None
 
@@ -1469,6 +1521,8 @@ class _MessageContext:
         "repeated_word_count",
         "forward_hint",
         "random_domains", "has_random_domain",
+        # 🆕 v3.0.3: روابط نصية إضافية
+        "possible_urls",
     )
 
     def __init__(self, message: Any = None, **kwargs: Any) -> None:
@@ -1519,6 +1573,8 @@ class _MessageContext:
         self.forward_hint = False
         self.random_domains = []
         self.has_random_domain = False
+        # 🆕 v3.0.3
+        self.possible_urls = []
 
         for key, value in kwargs.items():
             if key in self.__slots__:
@@ -1580,6 +1636,8 @@ class _MessageContext:
         )
         ctx.random_domains = _extract_random_domains(text)
         ctx.has_random_domain = bool(ctx.random_domains)
+        # 🆕 v3.0.3
+        ctx.possible_urls = _extract_possible_urls(ctx.normalized_url_text)
         ctx.has_any_link = _contains_link_enhanced(
             ctx.analysis_text, include_usernames=False
         )
@@ -1671,9 +1729,12 @@ class _MessageContext:
             )
             self.has_random_domain = bool(self.random_domains)
 
-            # ═══════════════════════════════════════════════════════
-            # 🆕 v3.0.1 FIX-3: كشف أوسع للأزرار
-            # ═══════════════════════════════════════════════════════
+            # 🆕 v3.0.3: استخراج الروابط النصية الممكنة
+            self.possible_urls = _extract_possible_urls(
+                self.normalized_url_text
+            )
+
+            # v3.0.1 FIX-3: كشف أوسع للأزرار
             direct_button_urls = False
             try:
                 _markup = getattr(message, "reply_markup", None)
@@ -1736,7 +1797,7 @@ class _MessageContext:
                 )
             )
 
-            # 🆕 v3.0.1 FIX-4: تشخيص فوري للأزرار
+            # v3.0.1 FIX-4: تشخيص فوري للأزرار
             if DEBUG_DIAG and self.button_count > 0:
                 try:
                     logger.info(
@@ -1898,6 +1959,10 @@ def _detect_url_obfuscation(
     *,
     already_normalized: bool = False,
 ) -> Tuple[bool, List[str]]:
+    """
+    🆕 v3.0.3 FIX-2: يستخدم الآن _MULTILINE_URL_SCHEME_RE
+    (كان مُعرَّفاً لكن غير مستخدم — dead code سابقاً).
+    """
     if not text:
         return False, []
     raw = str(text)
@@ -1909,6 +1974,9 @@ def _detect_url_obfuscation(
         reasons.append("alternate_url_scheme")
     if _COLON_SLASH_SCHEME_RE.search(raw):
         reasons.append("obfuscated_scheme")
+    # 🆕 v3.0.3 FIX-2: استخدام النمط المُهمَل سابقاً
+    if _MULTILINE_URL_SCHEME_RE.search(raw):
+        reasons.append("multiline_scheme")
     if _SPACED_TG_RE.search(normalized):
         reasons.append("obfuscated_telegram_domain")
     if _DOT_DOMAIN_RE.search(normalized):
@@ -2656,16 +2724,7 @@ def _compute_spam_score(
         if only_weak_username:
             score = min(score, 1)
 
-        # ═══════════════════════════════════════════════════════════
-        # 🆕 v3.0.1 FIX-2: لا نُطبّق سقف "الرابط فقط" على الأزرار
-        # ═══════════════════════════════════════════════════════════
-        #
-        # قبل: كان السقف يُطبّق حتى على الرسائل التي تحتوي 3 أزرار
-        #       بروابط → score=4 → لا يُحذف.
-        #
-        # بعد: نستثني الحالة التي تكون الروابط فيها أزراراً
-        #      (is_button_only_case) — الأزرار دليل قوي بحد ذاتها.
-        #
+        # v3.0.1 FIX-2: لا نُطبّق سقف "الرابط فقط" على الأزرار
         is_button_only_case = bool(
             link_score > 0
             and ctx.has_button_link
@@ -2679,7 +2738,7 @@ def _compute_spam_score(
             and evasion_score == 0
             and context_score == 0
             and structure_score == 0
-            and not is_button_only_case  # ← الاستثناء الجديد
+            and not is_button_only_case
         ):
             score = min(score, 4)
             reasons.append("link_only_capped")
@@ -2717,7 +2776,6 @@ def _compute_spam_score(
                     and (cta >= 1 or promo >= 1)
                 )
                 or (
-                    # 🆕 v3.0.1: أزرار كثيرة = evidence كافٍ
                     is_button_only_case
                     and external_buttons >= 3
                 )
@@ -2747,6 +2805,20 @@ def _compute_spam_score(
                     sorted(independent_categories),
                     is_button_only_case,
                     reasons,
+                )
+            except Exception:
+                pass
+
+        # 🆕 v3.0.3 FIX-7: log إجباري لـ spam عالي (بدون الحاجة لـ DEBUG_SPAM)
+        if score >= SPAM_HARD_THRESHOLD:
+            try:
+                logger.info(
+                    "🛡️ SPAM_DETECTED | score=%d conf=%s "
+                    "cats=%s buttons=%d reasons=%s",
+                    score, confidence,
+                    sorted(independent_categories),
+                    ctx.button_count,
+                    reasons[:5],
                 )
             except Exception:
                 pass
@@ -3436,7 +3508,7 @@ def cleanup_old_data() -> None:
 
 
 # =============================================================================
-# ORCHESTRATOR (v3.0.2)
+# ORCHESTRATOR (v3.0.3)
 # =============================================================================
 
 @dataclass
@@ -3463,21 +3535,22 @@ class SpamVerdict:
         }
 
 
-# 🟢 v3.0.2 IMP-1: بناء _MessageContext مرة واحدة فقط
+# 🟢 v3.0.2 IMP-1 + v3.0.3 FIX-1: بناء _MessageContext مرة واحدة
 def _run_text_layer(message: Any, verdict: SpamVerdict) -> Dict[str, Any]:
     """
-    v3.0.2: بدل استدعاء analyze_message (الذي يبني _MessageContext
-    داخلياً)، نبني السياق مباشرة هنا ونعيد dict متوافقاً مع
-    الحقول التي يحتاجها _run_url_layer و _run_behavioral_layer.
+    v3.0.3: يُثري text_result بالحقول التالية:
+        • possible_urls  (روابط النص بدون entity)
+        • vcard_urls
+        • poll_urls
+        • venue_url
+    ليستفيد منها _run_url_layer.
     """
     if not TEXT_LAYER_ENABLED:
         return {}
     try:
-        # بناء السياق مرة واحدة — يُستخدم للتحليل وللحقول الإضافية
         ctx = _MessageContext(message)
         score_info = _compute_spam_score(ctx, return_diagnostics=True)
 
-        # نُثري النتيجة بالحقول التي تحتاجها الطبقات اللاحقة
         text_result: Dict[str, Any] = {
             **score_info,
             "has_link": ctx.has_any_link,
@@ -3485,6 +3558,12 @@ def _run_text_layer(message: Any, verdict: SpamVerdict) -> Dict[str, Any]:
             "button_count": ctx.button_count,
             "button_urls": list(ctx.button_urls),
             "entity_urls": list(ctx.entity_urls),
+            # 🆕 v3.0.3 FIX-1: مصادر روابط إضافية
+            "possible_urls": list(ctx.possible_urls),
+            "vcard_urls": list(ctx.vcard_urls),
+            "poll_urls": list(ctx.poll_urls),
+            "venue_url": ctx.venue_url,
+            # باقي الحقول التشخيصية
             "is_forwarded": ctx.is_forwarded,
             "is_auto_forwarded": ctx.is_auto_fwd,
             "hidden_char_count": ctx.hidden_char_count,
@@ -3545,15 +3624,34 @@ def _run_audio_layer(message: Any, bot: Any, verdict: SpamVerdict) -> None:
 
 
 def _run_url_layer(text_result: Dict[str, Any], verdict: SpamVerdict) -> None:
+    """
+    🆕 v3.0.3 FIX-1: يستقبل الآن كل مصادر الروابط:
+        • entity_urls (text_link entities)
+        • button_urls (أزرار URL/web_app/login_url)
+        • possible_urls (روابط نصية بدون entity)
+        • vcard_urls (contact.website)
+        • poll_urls (روابط في poll)
+        • venue_url (stub حالياً)
+    """
     if not URL_LAYER_ENABLED or not URL_ENRICH_ENABLED:
         return
     try:
-        all_urls = (
+        # 🆕 v3.0.3: دمج كل المصادر
+        venue = text_result.get("venue_url")
+        venue_list = [venue] if venue else []
+
+        all_urls = _unique_strings(
             text_result.get("entity_urls", [])
             + text_result.get("button_urls", [])
+            + text_result.get("possible_urls", [])
+            + text_result.get("vcard_urls", [])
+            + text_result.get("poll_urls", [])
+            + venue_list
         )
+
         if not all_urls:
             return
+
         url_analysis = analyze_urls(all_urls)
         verdict.url_analysis = url_analysis
         url_score = 0
@@ -3707,6 +3805,12 @@ def analyze_message(message: Any) -> Dict[str, Any]:
         "button_count": ctx.button_count,
         "button_urls": list(ctx.button_urls),
         "entity_urls": list(ctx.entity_urls),
+        # 🆕 v3.0.3
+        "possible_urls": list(ctx.possible_urls),
+        "vcard_urls": list(ctx.vcard_urls),
+        "poll_urls": list(ctx.poll_urls),
+        "venue_url": ctx.venue_url,
+        # تشخيصي
         "is_forwarded": ctx.is_forwarded,
         "is_auto_forwarded": ctx.is_auto_fwd,
         "hidden_char_count": ctx.hidden_char_count,
@@ -3793,6 +3897,12 @@ def get_spam_diagnostics(message: Any) -> Dict[str, Any]:
             "links": {
                 "entity": list(ctx.entity_urls),
                 "button": list(ctx.button_link_urls),
+                # 🆕 v3.0.3
+                "possible": list(ctx.possible_urls),
+                "vcard": list(ctx.vcard_urls),
+                "poll": list(ctx.poll_urls),
+                "venue": ctx.venue_url,
+                # تشخيصي
                 "detected": ctx.has_any_link,
                 "count": ctx.url_count,
                 "telegram_count": ctx.telegram_link_count,
@@ -3877,6 +3987,8 @@ __all__ = [
     "SPAM_HARD_THRESHOLD", "SPAM_CRITICAL_THRESHOLD",
     "RANDOM_DOMAIN_MIN_LENGTH", "RANDOM_DOMAIN_MAX_VOWEL_RATIO",
     "FINAL_THRESHOLD", "LAYER_WEIGHTS",
+    # 🆕 v3.0.3
+    "_MAX_EXTRACTED_URLS",
 
     "SpamVerdict",
     "_MessageContext",
@@ -3944,7 +4056,7 @@ try:
         "Text=%s OCR=%s(%s) Audio=%s(%s) URL=%s(%s) "
         "Meta=%s Obf=%s Behav=%s | "
         "SPAM_THRESHOLD=%d HARD=%d CRITICAL=%d | "
-        "TLDs=%d RANDOM_DOMAIN=%s",
+        "TLDs=%d RANDOM_DOMAIN=%s MAX_URLS=%d",
         _DETECTORS_VERSION,
         TEXT_LAYER_ENABLED,
         OCR_LAYER_ENABLED, _OCR_AVAILABLE,
@@ -3958,6 +4070,7 @@ try:
         SPAM_CRITICAL_THRESHOLD,
         len(_COMMON_TLDS),
         ANTIEVASION_RANDOM_DOMAIN,
+        _MAX_EXTRACTED_URLS,
     )
 except Exception:
     pass
