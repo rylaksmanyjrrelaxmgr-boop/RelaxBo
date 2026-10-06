@@ -2,16 +2,32 @@
 # -*- coding: utf-8 -*-
 
 """
-database_tables.py — إنشاء الجداول والفهارس لكل قواعد البيانات (v7.8.0)
+database_tables.py — إنشاء الجداول والفهارس لكل قواعد البيانات (v7.9.0)
 ================================================================================
+🆕 v7.9.0 (SECURITY-V7.10.0-COLUMNS):
+  ✅ CURRENT_SCHEMA_VERSION: 25 → 26
+  ✅ _GROUP_SECURITY_NEW_COLUMNS: +7 أعمدة (أزرار v7.10.0)
+       • delete_at_channel       (📢 منشن قناة)
+       • delete_tg_scheme        (🔗 روابط tg://)
+       • delete_button_links     (🔘 أزرار بروابط)
+       • delete_emails           (📧 البريد الإلكتروني)
+       • delete_protected_any    (🛡️ محمي متعدد)
+       • delete_postbot_pattern  (🤖 نمط PostBot)
+       • delete_protected_forward (دعم forward toggle)
+  ✅ تعريف group_security محدّث في create_tables_sqlite / _postgres / _mysql
+  ✅ فهرس جديد: idx_group_security_postbot (partial index)
+  ✅ EXPECTED_INDEX_COUNT: 77 → 78
+  ✅ السبب: الأزرار الستة الجديدة في handlers_callback v9.7.7
+            + utils.py Security Bridge v7.10.2 تحتاج أعمدة في group_security
+            (الجدول الفعلي — وليس group_settings)
+
 🆕 v7.8.0 (FULL-AUTOVACUUM-COVERAGE):
   ✅ توسيع SMALL_TABLES_FOR_AGGRESSIVE_AUTOVACUUM من 23 → 33 جدولاً
   ✅ إضافة: admin_logs, banned_words, penalty_archive, user_points,
             referral_rewards, hidden_owner_groups, support_tickets,
             user_reminder_settings, user_channels, bot_addition_log
-  ✅ السبب: تقرير db_diagnostics v6.7.0 كشف 19 جدولاً بـ "default autovacuum"
   ✅ SCHEMA_VERSION: 24 → 25
-  ✅ EXPECTED_INDEX_COUNT: 77 → 77 (بدون تغيير)
+  ✅ EXPECTED_INDEX_COUNT: 77 (بدون تغيير)
 
 🆕 v7.7.0 (AUTO-BLOCKED-SOURCES):
   ✅ NEW: جدول auto_blocked_sources لحجب المصادر المشبوهة تلقائياً
@@ -38,8 +54,8 @@ from datetime import datetime, timezone, timedelta
 # 0. ثوابت
 # =====================================================================
 
-# ✅ v7.8.0: 24 → 25
-CURRENT_SCHEMA_VERSION = 25
+# ✅ v7.9.0: 25 → 26 (إضافة 7 أعمدة في group_security)
+CURRENT_SCHEMA_VERSION = 26
 
 CLEANUP_ANONYMOUS_BOT_IDS = (1087968824, 136817688)
 
@@ -68,9 +84,6 @@ MAINTENANCE_TABLES = (
 )
 
 # ✅ v7.8.0: توسيع من 23 → 33 جدولاً
-#    السبب: تقرير db_diagnostics v6.7.0 كشف 19 جدولاً بقيم افتراضية
-#    (autovacuum_vacuum_scale_factor = 0.2)
-#    الجداول المُضافة مدرجة في نهاية المجموعة
 SMALL_TABLES_FOR_AGGRESSIVE_AUTOVACUUM = (
     # ═══ الأساسية (v7.7.0) ═══
     "auto_replies",
@@ -116,8 +129,8 @@ DEFAULT_SETTINGS = (
     ("last_backup", ""),
 )
 
-# ✅ v7.8.0: بدون تغيير — 77 فهرس
-EXPECTED_INDEX_COUNT = 77
+# ✅ v7.9.0: 77 → 78 (فهرس جديد idx_group_security_postbot)
+EXPECTED_INDEX_COUNT = 78
 
 MYSQL_SKIP_INDEXES = frozenset({
     "idx_penalties_active_id",
@@ -293,6 +306,11 @@ COMMON_INDEXES = [
      "auto_blocked_sources(hit_count DESC)"),
     ("auto_blocked_sources", "idx_auto_blocked_last_seen",
      "auto_blocked_sources(last_seen DESC)"),
+
+    # ✅ v7.9.0: فهرس new للـ postbot (يُستخدم في should_delete_by_security)
+    ("group_security", "idx_group_security_postbot",
+     "group_security(delete_postbot_pattern) "
+     "WHERE delete_postbot_pattern = 1"),
 ]
 
 DEPRECATED_INDEXES = [
@@ -385,6 +403,8 @@ CRITICAL_INDEX_NAMES = frozenset({
     "idx_bot_groups_banned_cover",
     "idx_bot_addition_log_chat",
     "idx_user_channels_removed_at",
+    # ✅ v7.9.0
+    "idx_group_security_postbot",
 })
 
 if len(COMMON_INDEXES) != EXPECTED_INDEX_COUNT:
@@ -1063,10 +1083,6 @@ async def _quick_analyze_mysql(conn, logger):
 # =====================================================================
 # VACUUM ANALYZE الدوري
 # =====================================================================
-# ⚠️ v7.6.27 — تحذير حرج:
-#   VACUUM في PostgreSQL **لا يعمل داخل transaction block**.
-#   استدعاؤها من database.py::_bootstrap بعد commit.
-# =====================================================================
 
 async def _run_maintenance_postgres(conn, logger):
     try:
@@ -1286,9 +1302,24 @@ async def _run_maintenance_mysql(conn, logger):
 # Migrations — إضافة أعمدة مفقودة
 # =====================================================================
 
+# ✅ v7.9.0: أُضيفت 7 أعمدة للأزرار الستة الجديدة + forward toggle
 _GROUP_SECURITY_NEW_COLUMNS = [
+    # ─── الموجودة مسبقًا ───
     ("violation_penalty", "TEXT DEFAULT 'none'"),
     ("violation_penalty_duration", "INTEGER DEFAULT 3600"),
+
+    # ═══════════════════════════════════════════════════════════════
+    # 🆕 v7.9.0 (v7.10.0 أزرار): 6 أعمدة الأزرار الستة الجديدة
+    # ═══════════════════════════════════════════════════════════════
+    ("delete_at_channel", "INTEGER DEFAULT 0"),        # 📢 منشن قناة
+    ("delete_tg_scheme", "INTEGER DEFAULT 1"),         # 🔗 روابط tg://
+    ("delete_button_links", "INTEGER DEFAULT 1"),      # 🔘 أزرار بروابط
+    ("delete_emails", "INTEGER DEFAULT 0"),            # 📧 البريد الإلكتروني
+    ("delete_protected_any", "INTEGER DEFAULT 0"),     # 🛡️ محمي متعدد
+    ("delete_postbot_pattern", "INTEGER DEFAULT 0"),   # 🤖 نمط PostBot
+
+    # ─── دعم forward toggle (يُضيفه handlers_callback) ───
+    ("delete_protected_forward", "INTEGER DEFAULT 0"),
 ]
 
 _CONTESTS_NEW_COLUMNS = [
@@ -1488,7 +1519,21 @@ async def _migrate_missing_columns_mysql(conn, logger):
 
     await _ensure_auto_blocked_table_mysql(conn, logger)
 
-    for col_name, col_def in _GROUP_SECURITY_NEW_COLUMNS:
+    # MySQL: قيم افتراضية مختلفة (TINYINT للبوليانات)
+    _mysql_group_security_cols = [
+        ("violation_penalty", "VARCHAR(50) DEFAULT 'none'"),
+        ("violation_penalty_duration", "INT DEFAULT 3600"),
+        # 🆕 v7.9.0
+        ("delete_at_channel", "TINYINT(1) DEFAULT 0"),
+        ("delete_tg_scheme", "TINYINT(1) DEFAULT 1"),
+        ("delete_button_links", "TINYINT(1) DEFAULT 1"),
+        ("delete_emails", "TINYINT(1) DEFAULT 0"),
+        ("delete_protected_any", "TINYINT(1) DEFAULT 0"),
+        ("delete_postbot_pattern", "TINYINT(1) DEFAULT 0"),
+        ("delete_protected_forward", "TINYINT(1) DEFAULT 0"),
+    ]
+
+    for col_name, col_def in _mysql_group_security_cols:
         checked += 1
         try:
             cursor = await conn.cursor()
@@ -2622,6 +2667,7 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
         )
     """)
 
+    # ✅ v7.9.0: جدول group_security مع الأعمدة السبعة الجديدة
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS group_security (
             chat_id INTEGER PRIMARY KEY,
@@ -2680,7 +2726,17 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
             violation_strikes INTEGER DEFAULT 3,
             violation_duration INTEGER DEFAULT 60,
             violation_penalty TEXT DEFAULT 'none',
-            violation_penalty_duration INTEGER DEFAULT 3600
+            violation_penalty_duration INTEGER DEFAULT 3600,
+            -- ═══════════════════════════════════════════════════════
+            -- 🆕 v7.9.0 (v7.10.0 أزرار): 7 أعمدة الأزرار الستة + forward
+            -- ═══════════════════════════════════════════════════════
+            delete_at_channel INTEGER DEFAULT 0,
+            delete_tg_scheme INTEGER DEFAULT 1,
+            delete_button_links INTEGER DEFAULT 1,
+            delete_emails INTEGER DEFAULT 0,
+            delete_protected_any INTEGER DEFAULT 0,
+            delete_postbot_pattern INTEGER DEFAULT 0,
+            delete_protected_forward INTEGER DEFAULT 0
         )
     """)
 
@@ -3087,7 +3143,7 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
             "(version, applied_at, description) "
             "VALUES (?, ?, ?) ON CONFLICT(version) DO NOTHING",
             (CURRENT_SCHEMA_VERSION, _safe_now_iso(TimeUtils),
-             "v7.8.0-full-autovacuum-coverage"),
+             "v7.9.0-security-v7.10.0-columns"),
         )
         await conn.commit()
     except Exception as e:
@@ -3095,7 +3151,10 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
             logger.warning(f"⚠️ schema_version SQLite: {e}")
 
     if logger:
-        logger.info("✅ تم إنشاء جميع جداول SQLite مع الفهارس المحسنة")
+        logger.info(
+            "✅ تم إنشاء جميع جداول SQLite مع الفهارس المحسنة "
+            "(v7.9.0 — 7 أعمدة أزرار جديدة في group_security)"
+        )
 
 
 # =====================================================================
@@ -3290,6 +3349,7 @@ async def create_tables_postgres(conn, logger, TimeUtils):
         )
     """)
 
+    # ✅ v7.9.0: group_security مع الأعمدة السبعة الجديدة
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS group_security (
             chat_id BIGINT PRIMARY KEY,
@@ -3348,7 +3408,17 @@ async def create_tables_postgres(conn, logger, TimeUtils):
             violation_strikes INTEGER DEFAULT 3,
             violation_duration INTEGER DEFAULT 60,
             violation_penalty TEXT DEFAULT 'none',
-            violation_penalty_duration INTEGER DEFAULT 3600
+            violation_penalty_duration INTEGER DEFAULT 3600,
+            -- ═══════════════════════════════════════════════════════
+            -- 🆕 v7.9.0 (v7.10.0 أزرار): 7 أعمدة الأزرار الستة + forward
+            -- ═══════════════════════════════════════════════════════
+            delete_at_channel INTEGER DEFAULT 0,
+            delete_tg_scheme INTEGER DEFAULT 1,
+            delete_button_links INTEGER DEFAULT 1,
+            delete_emails INTEGER DEFAULT 0,
+            delete_protected_any INTEGER DEFAULT 0,
+            delete_postbot_pattern INTEGER DEFAULT 0,
+            delete_protected_forward INTEGER DEFAULT 0
         )
     """)
 
@@ -3763,14 +3833,17 @@ async def create_tables_postgres(conn, logger, TimeUtils):
             "VALUES ($1, $2, $3) ON CONFLICT (version) DO NOTHING",
             CURRENT_SCHEMA_VERSION,
             _safe_now_dt(TimeUtils),
-            "v7.8.0-full-autovacuum-coverage",
+            "v7.9.0-security-v7.10.0-columns",
         )
     except Exception as e:
         if logger:
             logger.warning(f"⚠️ schema_version PG: {e}")
 
     if logger:
-        logger.info("✅ تم إنشاء جميع جداول PostgreSQL مع الفهارس المحسنة")
+        logger.info(
+            "✅ تم إنشاء جميع جداول PostgreSQL مع الفهارس المحسنة "
+            "(v7.9.0 — 7 أعمدة أزرار جديدة في group_security)"
+        )
 
 
 # =====================================================================
@@ -3971,6 +4044,7 @@ async def create_tables_mysql(conn, logger, TimeUtils):
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
         """)
 
+        # ✅ v7.9.0: group_security مع الأعمدة السبعة الجديدة
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS group_security (
                 chat_id BIGINT PRIMARY KEY,
@@ -4031,7 +4105,17 @@ async def create_tables_mysql(conn, logger, TimeUtils):
                 violation_strikes INT DEFAULT 3,
                 violation_duration INT DEFAULT 60,
                 violation_penalty VARCHAR(50) DEFAULT 'none',
-                violation_penalty_duration INT DEFAULT 3600
+                violation_penalty_duration INT DEFAULT 3600,
+                -- ═══════════════════════════════════════════════════════
+                -- 🆕 v7.9.0 (v7.10.0 أزرار): 7 أعمدة الأزرار الستة + forward
+                -- ═══════════════════════════════════════════════════════
+                delete_at_channel TINYINT(1) DEFAULT 0,
+                delete_tg_scheme TINYINT(1) DEFAULT 1,
+                delete_button_links TINYINT(1) DEFAULT 1,
+                delete_emails TINYINT(1) DEFAULT 0,
+                delete_protected_any TINYINT(1) DEFAULT 0,
+                delete_postbot_pattern TINYINT(1) DEFAULT 0,
+                delete_protected_forward TINYINT(1) DEFAULT 0
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
         """)
 
@@ -4441,7 +4525,7 @@ async def create_tables_mysql(conn, logger, TimeUtils):
                 (
                     CURRENT_SCHEMA_VERSION,
                     _safe_now_iso(TimeUtils),
-                    "v7.8.0-full-autovacuum-coverage",
+                    "v7.9.0-security-v7.10.0-columns",
                 ),
             )
         except Exception as e:
@@ -4449,7 +4533,10 @@ async def create_tables_mysql(conn, logger, TimeUtils):
                 logger.warning(f"⚠️ schema_version MySQL: {e}")
 
         if logger:
-            logger.info("✅ تم إنشاء جميع جداول MySQL مع الفهارس المحسنة")
+            logger.info(
+                "✅ تم إنشاء جميع جداول MySQL مع الفهارس المحسنة "
+                "(v7.9.0 — 7 أعمدة أزرار جديدة في group_security)"
+            )
 
     finally:
         try:
