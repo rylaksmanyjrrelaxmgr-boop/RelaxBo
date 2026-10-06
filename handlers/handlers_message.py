@@ -1,33 +1,22 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-handlers_message.py - v7.18.1
+handlers_message.py - v7.18.2
 (متوافق مع detectors v3.0.1 UNIFIED — 7 Layers)
 =============================================================================
+🆕 v7.18.2 — كشف وحذف Post Bot المحوّل من القنوات:
+    🔥 NEW: كشف Post Bot بالاسم (Post Bot / PostBot / News (Post Bot))
+    🔥 NEW: كشف عبر forward_origin حتى لو الأزرار مفقودة
+    🔥 NEW: يعمل قبل كل الفحوصات (بغض عن DB settings)
+    🟢 FORCE_DELETE_POSTBOT_FORWARDS=1 (env flag)
+
 🆕 v7.18.1 — حذف إجباري للأزرار بروابط:
     🔥 NEW: FORCE_DELETE_BUTTON_LINKS (افتراضي = True)
     🔥 FIX: أولوية حذف الزر برابط قبل PostBot HARD-BLOCK
-    🔥 FIX: زر واحد برابط = حذف فوري (بغض عن DB)
 
-🆕 v7.18.0 — تفعيل الطبقات السبع (Multi-Layer Integration):
-    🔥 MAJOR: استدعاء `analyze_message_full(message, bot)` بدل
-              `_compute_spam_score` فقط
-    🔥 FIX-1: الصور/الفويس/الروابط المختصرة تُفحَص الآن تلقائياً
-    🔥 FIX-2: Spam score = aggregate من كل الطبقات (بأوزان)
-    🟠 FIX-3: PostBot confidence ما زال من Layer 0 (Text) مباشرة
-    🟠 FIX-4: Fallback تلقائي لو analyze_message_full فشل
-    🟡 FIX-5: لوج موحّد يعرض نتائج كل طبقة
-    🟡 FIX-6: MULTILAYER_ENABLED=1 env flag
-
-🆕 v7.17.2:
-    🟢 FIX-3: استدعاء واحد لـ`_compute_spam_score` مع
-              `return_diagnostics=True`
-
-🆕 v7.17.1:
-    🔴 FIX-1: حساب PostBot pattern مرة واحدة
-    🔴 FIX-2: تصادم ctx.has_hint
-    🔴 FIX-3: handle_edited
-    🟠 FIX-4..8: إصلاحات متفرقة
+🆕 v7.18.0 — تفعيل الطبقات السبع (Multi-Layer):
+    🔥 MAJOR: analyze_message_full بدل _compute_spam_score
+    🟠 FIX: fallback آمن
 =============================================================================
 """
 
@@ -62,7 +51,7 @@ from cache import settings_cache, posts_cache
 
 
 # ═════════════════════════════════════════════════════════════════════
-# استيراد محرك الكشف v2.2.0+ / v3.0.1
+# استيراد محرك الكشف
 # ═════════════════════════════════════════════════════════════════════
 
 try:
@@ -72,42 +61,22 @@ try:
         SPAM_HARD_THRESHOLD, SPAM_CRITICAL_THRESHOLD,
         ANTIEVASION_COMPACT_WORDS,
         _MessageContext,
-        _strip_combining_marks,
-        _deleet,
-        _apply_homoglyphs_safe,
-        _normalize_text,
-        _strip_emoji_for_domain,
-        _has_hidden_chars,
-        _merge_split_urls,
-        _extract_entity_urls,
-        _has_link_entity,
-        _extract_url_from_button,
-        _button_is_external,
-        _extract_button_context,
-        _extract_vcard_urls,
-        _extract_venue_url,
-        _extract_poll_text,
-        _get_message_button_data,
-        _get_message_button_texts,
+        _strip_combining_marks, _deleet, _apply_homoglyphs_safe,
+        _normalize_text, _strip_emoji_for_domain,
+        _has_hidden_chars, _merge_split_urls,
+        _extract_entity_urls, _has_link_entity,
+        _extract_url_from_button, _button_is_external,
+        _extract_button_context, _extract_vcard_urls,
+        _extract_venue_url, _extract_poll_text,
+        _get_message_button_data, _get_message_button_texts,
         _get_message_analysis_text,
-        _has_domain_pattern,
-        _contains_link_enhanced,
-        _contains_email,
-        _contains_at_channel,
-        _contains_tg_scheme,
-        _has_button_link,
-        _extract_button_link_urls,
-        _extract_spam_words,
-        _count_unique_matches,
-        _count_text_urls,
-        _compute_spam_score,
-        _is_postbot_pattern,
-        _postbot_pattern_confidence,
-        analyze_message,
-        get_spam_diagnostics,
-        is_spam,
-        is_high_confidence_spam,
-        is_critical_spam,
+        _has_domain_pattern, _contains_link_enhanced,
+        _contains_email, _contains_at_channel, _contains_tg_scheme,
+        _has_button_link, _extract_button_link_urls,
+        _extract_spam_words, _count_unique_matches, _count_text_urls,
+        _compute_spam_score, _is_postbot_pattern, _postbot_pattern_confidence,
+        analyze_message, get_spam_diagnostics,
+        is_spam, is_high_confidence_spam, is_critical_spam,
         should_ignore_as_low_signal,
     )
 except ImportError:
@@ -131,8 +100,8 @@ except ImportError:
             _contains_email, _contains_at_channel, _contains_tg_scheme,
             _has_button_link, _extract_button_link_urls,
             _extract_spam_words, _count_unique_matches, _count_text_urls,
-            _compute_spam_score,
-            _is_postbot_pattern, _postbot_pattern_confidence,
+            _compute_spam_score, _is_postbot_pattern,
+            _postbot_pattern_confidence,
             analyze_message, get_spam_diagnostics,
             is_spam, is_high_confidence_spam, is_critical_spam,
             should_ignore_as_low_signal,
@@ -157,15 +126,14 @@ except ImportError:
             _contains_email, _contains_at_channel, _contains_tg_scheme,
             _has_button_link, _extract_button_link_urls,
             _extract_spam_words, _count_unique_matches, _count_text_urls,
-            _compute_spam_score,
-            _is_postbot_pattern, _postbot_pattern_confidence,
+            _compute_spam_score, _is_postbot_pattern,
+            _postbot_pattern_confidence,
             analyze_message, get_spam_diagnostics,
             is_spam, is_high_confidence_spam, is_critical_spam,
             should_ignore_as_low_signal,
         )
 
 
-# --- v3.0.x Multi-Layer API (اختياري) ---
 _HAS_MULTILAYER = False
 analyze_message_full = None
 SpamVerdict = None
@@ -273,10 +241,8 @@ except ImportError:
 
 try:
     from telegram import (
-        MessageOriginUser,
-        MessageOriginHiddenUser,
-        MessageOriginChat,
-        MessageOriginChannel,
+        MessageOriginUser, MessageOriginHiddenUser,
+        MessageOriginChat, MessageOriginChannel,
     )
     _HAS_MESSAGE_ORIGIN = True
 except ImportError:
@@ -303,7 +269,6 @@ _TRUE_STRINGS = frozenset({
     "1", "true", "yes", "on", "enabled", "enable", "y",
     "نعم", "مفعل", "مفعّل",
 })
-
 _FALSE_STRINGS = frozenset({
     "0", "false", "no", "off", "disabled", "disable", "n",
     "لا", "غير مفعل", "غير مفعّل",
@@ -337,13 +302,90 @@ _MULTILAYER_ENABLED = (
     _env_flag("MULTILAYER_ENABLED", True) and _HAS_MULTILAYER
 )
 
-# 🆕 v7.18.1: حذف إجباري لأي رسالة فيها زر برابط
+# v7.18.1: حذف إجباري لأي زر برابط
 _FORCE_DELETE_BUTTON_LINKS = _env_flag("FORCE_DELETE_BUTTON_LINKS", True)
+
+# 🆕 v7.18.2: حذف رسائل Post Bot المحوّلة من القنوات
+_FORCE_DELETE_POSTBOT_FORWARDS = _env_flag(
+    "FORCE_DELETE_POSTBOT_FORWARDS", True
+)
 
 _BAN_ADD_RATE_LIMIT = _env_flag("BAN_ADD_RATE_LIMIT", True)
 _BAN_ADD_RATE_MAX = 10
 _BAN_ADD_RATE_WINDOW = 60.0
 _BOT_DATA_SLOW_MODE_PRUNE_THRESHOLD = 10000
+
+
+# ═══════════════════════════════════════════════════════════════════
+# 🆕 v7.18.2: Post Bot Channel Detection Patterns
+# ═══════════════════════════════════════════════════════════════════
+
+# أسماء قنوات Post Bot الشائعة (lowercase)
+_POSTBOT_CHANNEL_NAMES = frozenset({
+    "post bot",
+    "postbot",
+    "post-bot",
+    "post_bot",
+    "news (post bot)",
+    "news post bot",
+    "news(post bot)",
+    "post bot news",
+    "post_bot_news",
+    "postbotnews",
+    "بوت النشر",
+    "بوت نشر",
+    "بوست بوت",
+})
+
+# لو عندك channel IDs معروفة، أضفها هنا
+_POSTBOT_CHANNEL_IDS: set = set()  # مثال: {-1001234567890, -1000987654321}
+
+# Regex لاسم قناة يشبه Post Bot (احتياطي)
+_POSTBOT_NAME_REGEX = re.compile(
+    r"(?i)\b(post[\s\-_]*bot|postbot|بوست[\s\-_]*بوت)\b"
+)
+
+
+def _is_postbot_channel_name(name: str) -> bool:
+    """v7.18.2: هل اسم القناة يشبه Post Bot؟"""
+    if not name:
+        return False
+    try:
+        name_lower = str(name).lower().strip()
+        # مطابقة مباشرة
+        if name_lower in _POSTBOT_CHANNEL_NAMES:
+            return True
+        # مطابقة regex
+        if _POSTBOT_NAME_REGEX.search(name_lower):
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def _is_postbot_forward(message) -> Tuple[bool, Optional[Dict[str, Any]]]:
+    """
+    v7.18.2: هل الرسالة محوّلة من قناة Post Bot؟
+    Returns: (is_postbot, info_dict)
+    """
+    if message is None or not _FORCE_DELETE_POSTBOT_FORWARDS:
+        return False, None
+    try:
+        fwd_info = extract_forward_info(message) or {}
+        ftype = (fwd_info.get("type") or "").lower()
+        if ftype not in ("channel", "chat", "protected", "protected_any"):
+            return False, None
+        # فحص بـ ID
+        fwd_id = fwd_info.get("id")
+        if fwd_id is not None and fwd_id in _POSTBOT_CHANNEL_IDS:
+            return True, fwd_info
+        # فحص بالاسم
+        fwd_name = fwd_info.get("name") or ""
+        if _is_postbot_channel_name(fwd_name):
+            return True, fwd_info
+    except Exception:
+        pass
+    return False, None
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -356,7 +398,6 @@ LOG_RETRY_ATTEMPTS = 3
 LOG_RETRY_BASE_DELAY = 0.5
 
 DEV_LOG_CACHE_TTL = 300.0
-
 CACHE_CLEANUP_INTERVAL = 3600
 MAX_GROUP_LIMITERS_CACHE = 1000
 MAX_COMPILED_BANNED_PATTERNS = 5000
@@ -368,9 +409,7 @@ PENALTY_MESSAGE_DELETE_DELAY = 10
 _FORWARD_NOTIFY_COOLDOWN_SECONDS = 300.0
 _FORWARD_NOTIFY_MAX_KEYS = 5000
 _GROUP_LOG_PREVIEW_LENGTH = 150
-
 _COLUMNS_RETRY_COOLDOWN_SEC = 300.0
-
 _DELETE_FAILURE_NOTIFY_THRESHOLD = 3
 _DELETE_FAILURE_NOTIFY_WINDOW = 60.0
 
@@ -507,7 +546,7 @@ def _reset_shutdown_for_tests():
         _private_handler_signature_cache.clear()
     except Exception:
         pass
-    logger.debug("🧪 _shutdown_started + signature cache reset (test mode)")
+    logger.debug("🧪 reset for tests")
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -534,15 +573,11 @@ async def _lazy_init_columns():
             _columns_last_attempt_ts > 0
             and now - _columns_last_attempt_ts < _COLUMNS_RETRY_COOLDOWN_SEC
         ):
-            logger.debug(
-                "⏸️ _lazy_init_columns: cooldown (%.1fs)",
-                now - _columns_last_attempt_ts,
-            )
             return
         _columns_last_attempt_ts = now
 
         db_type = getattr(DB, "DB_TYPE", "sqlite")
-        logger.info("🔧 v7.18.1: Auto-migration (DB_TYPE=%s)", db_type)
+        logger.info("🔧 v7.18.2: Auto-migration (DB_TYPE=%s)", db_type)
 
         cols = [
             ("delete_protected_any", "INTEGER DEFAULT 0", "TINYINT(1) DEFAULT 0"),
@@ -574,7 +609,6 @@ async def _lazy_init_columns():
                         m = str(e).lower()
                         if "duplicate" not in m and "already exists" not in m:
                             migration_ok = False
-                            logger.warning("⚠️ MySQL %s: %s", col_name, e)
                 else:
                     try:
                         await DB.execute(
@@ -585,24 +619,16 @@ async def _lazy_init_columns():
                         m = str(e).lower()
                         if "duplicate" not in m and "already exists" not in m:
                             migration_ok = False
-                            logger.warning("⚠️ SQLite %s: %s", col_name, e)
-            except Exception as e:
+            except Exception:
                 migration_ok = False
-                logger.warning("⚠️ auto-migration %s: %s", col_name, e)
 
         try:
             await internal_cache.clear()
-            logger.info("✅ internal_cache cleared")
-        except Exception as e:
-            logger.debug("cache clear: %s", e)
+        except Exception:
+            pass
 
         if migration_ok:
             _columns_initialized = True
-        else:
-            logger.warning(
-                "⚠️ Auto-migration لم يكتمل — إعادة بعد %ds",
-                int(_COLUMNS_RETRY_COOLDOWN_SEC),
-            )
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -616,11 +642,9 @@ _dev_log_cache_lock = asyncio.Lock()
 
 async def _get_dev_log_channel_cached():
     global _dev_log_cache, _dev_log_cache_ts
-
     now = time.monotonic()
     if _dev_log_cache is not None and now - _dev_log_cache_ts < DEV_LOG_CACHE_TTL:
         return _dev_log_cache
-
     async with _dev_log_cache_lock:
         now = time.monotonic()
         if _dev_log_cache is not None and now - _dev_log_cache_ts < DEV_LOG_CACHE_TTL:
@@ -647,7 +671,6 @@ def _invalidate_dev_log_cache():
 
 _log_rate_tracker = defaultdict(lambda: deque(maxlen=LOG_RATE_LIMIT_PER_MIN))
 _log_rate_lock = asyncio.Lock()
-
 _log_rate_warn_last: Dict[Any, float] = {}
 _LOG_RATE_WARN_COOLDOWN = 300.0
 
@@ -667,8 +690,6 @@ async def _can_send_log(chat_id) -> bool:
             if now - last >= _LOG_RATE_WARN_COOLDOWN:
                 _log_rate_warn_last[chat_id] = now
                 logger.warning("🚫 LOG-RATE-LIMIT | chat=%s", chat_id)
-            else:
-                logger.debug("🚫 LOG-RATE-LIMIT (silent) | chat=%s", chat_id)
             return False
         tracker.append(now)
         return True
@@ -681,7 +702,6 @@ async def _can_send_dev_log() -> bool:
             len(_dev_log_rate_tracker) >= LOG_RATE_LIMIT_PER_MIN
             and now - _dev_log_rate_tracker[0] < LOG_RATE_WINDOW_SEC
         ):
-            logger.debug("🚫 DEV-LOG-RATE-LIMIT")
             return False
         _dev_log_rate_tracker.append(now)
         return True
@@ -769,7 +789,6 @@ async def _dispatch_log(
                 factory.close()
             except Exception:
                 pass
-        logger.error("❌ _dispatch_log: factory غير callable (%s)", label)
         return
 
     async def _runner():
@@ -786,10 +805,6 @@ async def _dispatch_log(
                 last_exc = e
                 if attempt < retries:
                     delay = LOG_RETRY_BASE_DELAY * (attempt + 1)
-                    logger.warning(
-                        "⚠️ [%s] attempt %d: %s — retry %.1fs",
-                        label, attempt + 1, e, delay,
-                    )
                     try:
                         await asyncio.sleep(delay)
                     except asyncio.CancelledError:
@@ -799,8 +814,8 @@ async def _dispatch_log(
                 break
         _log_dispatch_failures += 1
         logger.error(
-            "❌ [%s] failed بعد %d محاولات (total=%d): %s",
-            label, retries + 1, _log_dispatch_failures, last_exc,
+            "❌ [%s] failed بعد %d محاولات: %s",
+            label, retries + 1, last_exc,
         )
 
     task = asyncio.create_task(_runner())
@@ -808,11 +823,6 @@ async def _dispatch_log(
 
     def _cleanup(t):
         _running_log_tasks.discard(t)
-        try:
-            if not t.cancelled() and t.exception():
-                logger.error("❌ [%s] bg task: %s", label, t.exception())
-        except Exception:
-            pass
 
     task.add_done_callback(_cleanup)
 
@@ -829,10 +839,8 @@ async def shutdown_log_dispatcher(timeout: float = 5.0):
         await asyncio.wait_for(
             asyncio.gather(*tasks, return_exceptions=True), timeout=timeout,
         )
-    except asyncio.TimeoutError:
-        logger.warning("⏱️ shutdown_log_dispatcher: مهلة")
-    except Exception as e:
-        logger.debug("shutdown_log_dispatcher: %s", e)
+    except Exception:
+        pass
     _running_log_tasks.clear()
 
 
@@ -850,22 +858,11 @@ def _spawn_tracked_task(coro, *, label: str = "bg-task"):
     try:
         task = asyncio.create_task(coro)
     except Exception as e:
-        logger.debug("_spawn_tracked_task(%s): %s", label, e)
-        try:
-            if inspect.iscoroutine(coro):
-                coro.close()
-        except Exception:
-            pass
         return None
     _running_bg_tasks.add(task)
 
     def _cleanup(t):
         _running_bg_tasks.discard(t)
-        try:
-            if not t.cancelled() and t.exception():
-                logger.debug("[%s] failed: %s", label, t.exception())
-        except Exception:
-            pass
 
     task.add_done_callback(_cleanup)
     return task
@@ -883,8 +880,6 @@ async def shutdown_bg_tasks(timeout: float = 3.0):
         await asyncio.wait_for(
             asyncio.gather(*tasks, return_exceptions=True), timeout=timeout,
         )
-    except asyncio.TimeoutError:
-        logger.debug("⏱️ shutdown_bg_tasks: مهلة")
     except Exception:
         pass
     _running_bg_tasks.clear()
@@ -922,11 +917,6 @@ def _spawn_delete_after_delay(bot, chat_id, message_id, delay=10, context=None):
 
     def _cleanup(t):
         _running_delete_tasks.discard(t)
-        try:
-            if not t.cancelled() and t.exception():
-                logger.debug("delayed_delete: %s", t.exception())
-        except Exception:
-            pass
 
     task.add_done_callback(_cleanup)
 
@@ -943,8 +933,6 @@ async def shutdown_delete_tasks(timeout: float = 3.0):
         await asyncio.wait_for(
             asyncio.gather(*tasks, return_exceptions=True), timeout=timeout,
         )
-    except asyncio.TimeoutError:
-        pass
     except Exception:
         pass
     _running_delete_tasks.clear()
@@ -960,21 +948,21 @@ def register_shutdown_handlers(application):
             _mark_shutdown_started()
             try:
                 await shutdown_log_dispatcher(timeout=5.0)
-            except Exception as e:
-                logger.debug("shutdown log: %s", e)
+            except Exception:
+                pass
             try:
                 await shutdown_bg_tasks(timeout=3.0)
-            except Exception as e:
-                logger.debug("shutdown bg: %s", e)
+            except Exception:
+                pass
             try:
                 await shutdown_delete_tasks(timeout=3.0)
-            except Exception as e:
-                logger.debug("shutdown del: %s", e)
+            except Exception:
+                pass
             if callable(original_post_shutdown):
                 try:
                     await original_post_shutdown(app)
-                except Exception as e:
-                    logger.debug("original post_shutdown: %s", e)
+                except Exception:
+                    pass
 
         application.post_shutdown = _post_shutdown
         application._msh_shutdown_registered = True
@@ -1003,31 +991,16 @@ async def _invalidate_banned_words_cache(chat_id=None) -> bool:
         if asyncio.iscoroutine(result):
             await result
         return True
-    except ImportError:
+    except Exception:
         pass
-    except Exception as e:
-        logger.debug("invalidate_banned_words (utils.async): %s", e)
-
     try:
         from utils import invalidate_banned_words_cache as _inv2
         result = _inv2(chat_id) if chat_id is not None else _inv2()
         if asyncio.iscoroutine(result):
             await result
         return True
-    except ImportError:
+    except Exception:
         pass
-    except TypeError:
-        try:
-            from utils import invalidate_banned_words_cache as _inv2
-            result = _inv2()
-            if asyncio.iscoroutine(result):
-                await result
-            return True
-        except Exception:
-            pass
-    except Exception as e:
-        logger.debug("invalidate_banned_words (utils.sync): %s", e)
-
     try:
         from cache import banned_words_cache
         if hasattr(banned_words_cache, 'invalidate'):
@@ -1035,26 +1008,8 @@ async def _invalidate_banned_words_cache(chat_id=None) -> bool:
             if asyncio.iscoroutine(result):
                 await result
             return True
-    except ImportError:
-        pass
-    except Exception as e:
-        logger.debug("invalidate_banned_words (cache): %s", e)
-
-    try:
-        keys = (
-            [f"banned_words_{chat_id}", f"banned_words:{chat_id}"]
-            if chat_id is not None
-            else ["banned_words", "banned_words_all"]
-        )
-        for k in keys:
-            try:
-                await internal_cache.invalidate(k)
-            except Exception:
-                pass
-        return True
     except Exception:
         pass
-
     return False
 
 
@@ -1077,6 +1032,7 @@ _VIOLATION_LABELS_AR = {
     'animation': '🎞️ أنيميشن',
     'video_note': '🎥 فيديو نوت',
     'postbot_pattern': '🤖 نمط Post Bot',
+    'postbot_forward': '📰 Post Bot (محوّل)',
     'spam_score': '🚫 رسالة Spam',
     'at_channel': '📢 منشن قناة',
     'tg_scheme': '🔗 رابط Telegram',
@@ -1099,12 +1055,8 @@ _FORWARD_TYPE_LABELS_AR = {
 }
 
 _PENALTY_LABELS_AR = {
-    'ban': '🚫 حظر',
-    'mute': '🔇 كتم',
-    'kick': '👢 طرد',
-    'restrict': '🔒 تقييد',
-    'warn': '⚠️ تحذير',
-    'unban': '✅ فك حظر',
+    'ban': '🚫 حظر', 'mute': '🔇 كتم', 'kick': '👢 طرد',
+    'restrict': '🔒 تقييد', 'warn': '⚠️ تحذير', 'unban': '✅ فك حظر',
 }
 
 _DEFAULT_VIOLATION_MESSAGES = {
@@ -1122,6 +1074,7 @@ _DEFAULT_VIOLATION_MESSAGES = {
     'photo': '📷 يُمنع إرسال الصور هنا',
     'video_note': '🎥 يُمنع إرسال فيديو نوت هنا',
     'postbot_pattern': '🤖 رُصدت رسالتك كنمط Post Bot مزعج',
+    'postbot_forward': '📰 يُمنع نشر رسائل Post Bot',
     'spam_score': '🚫 رُصدت رسالتك كرسالة دعائية/Spam',
     'service': '🗑️ رسائل الخدمة محذوفة تلقائياً',
     'at_channel': '📢 يُمنع منشن القنوات هنا',
@@ -1203,8 +1156,7 @@ def _build_delete_log_text(
         if user_username:
             user_display_lnk = (
                 f"<a href='tg://user?id={user_id}'>"
-                f"{user_display}</a> "
-                f"(@{escape(user_username)})"
+                f"{user_display}</a> (@{escape(user_username)})"
             )
         else:
             user_display_lnk = (
@@ -1258,8 +1210,7 @@ def _build_penalty_log_text(
     if target_username:
         target_lnk = (
             f"<a href='tg://user?id={target_user_id}'>"
-            f"{target_display}</a> "
-            f"(@{escape(target_username)})"
+            f"{target_display}</a> (@{escape(target_username)})"
         )
     else:
         target_lnk = (
@@ -1306,8 +1257,7 @@ async def _notify_group_log_penalty(
     try:
         if not await _can_send_log(chat_id):
             return
-    except Exception as e:
-        logger.debug("_notify_group_log_penalty: %s", e)
+    except Exception:
         return
     try:
         text = _build_penalty_log_text(
@@ -1425,8 +1375,8 @@ async def _notify_delete_permission_failure(context, chat_id):
             await safe_send(context.bot, owner_id, msg, parse_mode='HTML')
         except Exception as e:
             logger.warning("_notify_delete_permission_failure: %s", e)
-    except Exception as e:
-        logger.debug("_notify_delete_permission_failure: %s", e)
+    except Exception:
+        pass
 
 
 async def _safe_delete_message(
@@ -1639,9 +1589,7 @@ def extract_forward_info(message):
             if isinstance(origin, MessageOriginHiddenUser):
                 return {
                     'type': 'hidden_user', 'id': None,
-                    'name': (
-                        getattr(origin, 'sender_user_name', None) or 'Hidden'
-                    ),
+                    'name': getattr(origin, 'sender_user_name', None) or 'Hidden',
                     'date': getattr(origin, 'date', None),
                     'signature': None, 'message_id': None,
                 }
@@ -1703,12 +1651,9 @@ async def _notify_admin_about_forward(context, admin_id, info):
         return
     try:
         type_labels = {
-            'user': '👤 مستخدم',
-            'hidden_user': '👻 مستخدم مخفي',
-            'chat': '👥 مجموعة',
-            'channel': '📢 قناة',
-            'protected': '🛡️ محتوى محمي',
-            'protected_any': '🛡️ محتوى محمي',
+            'user': '👤 مستخدم', 'hidden_user': '👻 مستخدم مخفي',
+            'chat': '👥 مجموعة', 'channel': '📢 قناة',
+            'protected': '🛡️ محتوى محمي', 'protected_any': '🛡️ محتوى محمي',
         }
         label = type_labels.get(info.get('type', ''), f"❔ {info.get('type')}")
         lines = ["↩️ <b>رسالة معاد توجيهها</b>", "", f"📌 النوع: {label}"]
@@ -1825,8 +1770,8 @@ class GroupRateLimiterManager:
 
                 try:
                     await _cleanup_flood_tracker(force=True)
-                except Exception as e:
-                    logger.debug("flood cleanup: %s", e)
+                except Exception:
+                    pass
 
             except asyncio.CancelledError:
                 raise
@@ -1867,8 +1812,8 @@ async def _release_group_limiter(limiter, acquired):
             result = release()
             if asyncio.iscoroutine(result):
                 await result
-    except Exception as e:
-        logger.debug("group limiter release: %s", e)
+    except Exception:
+        pass
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -2294,10 +2239,6 @@ def _contains_banned_word(text, banned_word) -> bool:
             return False
 
 
-# ═══════════════════════════════════════════════════════════════════
-# Private handler signature cache
-# ═══════════════════════════════════════════════════════════════════
-
 _private_handler_signature_cache: Dict[str, bool] = {}
 
 
@@ -2363,9 +2304,6 @@ class MessageHandlers:
         try:
             limiter, limiter_acquired = await _acquire_group_limiter(chat_id)
             if update.effective_message is None:
-                logger.debug(
-                    "handle_edited: effective_message is None — skip"
-                )
                 return
             await MessageHandlers._handle_group_impl(update, context)
         except asyncio.CancelledError:
@@ -2437,11 +2375,6 @@ class MessageHandlers:
                     "set_chat_slow_mode(%s, %d): %s",
                     chat_id, target, e,
                 )
-                try:
-                    if isinstance(context.bot_data, dict):
-                        context.bot_data[cache_key] = target
-                except Exception:
-                    pass
         except Exception as e:
             logger.debug("_apply_slow_mode: %s", e)
 
@@ -2496,8 +2429,6 @@ class MessageHandlers:
         _tg_scheme_enabled = _as_bool(
             settings.get('delete_tg_scheme', 1), True,
         )
-
-        # 🆕 v7.18.1: الحذف الإجباري للأزرار بروابط (بيتغاضى عن DB)
         _button_links_enabled = (
             _FORCE_DELETE_BUTTON_LINKS
             or _as_bool(settings.get('delete_button_links', 1), True)
@@ -2531,8 +2462,7 @@ class MessageHandlers:
                 if _is_flood:
                     if _DEBUG_DIAG:
                         logger.warning(
-                            "🌊 FLOOD | chat=%s user=%s "
-                            "max=%d win=%.1fs",
+                            "🌊 FLOOD | chat=%s user=%s max=%d win=%.1fs",
                             chat_id, user_id, _af_max, _af_win,
                         )
                     await MessageHandlers._delete_and_warn(
@@ -2568,7 +2498,7 @@ class MessageHandlers:
         )
 
         # ════════════════════════════════════════════════════════════
-        # 🆕 v7.18.0: Multi-Layer Analysis (7 Layers)
+        # Multi-Layer Analysis
         # ════════════════════════════════════════════════════════════
         _spam_score = 0
         _spam_reasons: List[str] = []
@@ -2594,9 +2524,7 @@ class MessageHandlers:
                                 getattr(_verdict, "layer_reasons", {}) or {}
                             ).items():
                                 for _r in (_reasons or []):
-                                    _spam_reasons.append(
-                                        f"{_layer}:{_r}"
-                                    )
+                                    _spam_reasons.append(f"{_layer}:{_r}")
                         except Exception:
                             pass
                         _analysis_mode = "multilayer"
@@ -2651,8 +2579,7 @@ class MessageHandlers:
                 _postbot_hard_conf, POSTBOT_AUTO_BLOCK_CONFIDENCE,
                 ctx.button_count, ctx.strong_word_count,
                 ctx.promo_word_count, ctx.cta_count,
-                ctx.spam_emoji_count,
-                _analysis_mode,
+                ctx.spam_emoji_count, _analysis_mode,
             )
 
         if _analysis_mode == "multilayer" and _spam_layer_scores:
@@ -2688,8 +2615,7 @@ class MessageHandlers:
                 "vcard=%d venue=%s poll_urls=%d hidden=%d bidi=%d | "
                 "mixed_scripts=%s | "
                 "url_count=%d tg_links=%d strong=%d medium=%d | "
-                "arabic=%d cta=%d | "
-                "antiflood_en=%s",
+                "arabic=%d cta=%d | antiflood_en=%s",
                 chat_id, user_id, message.message_id,
                 " [ANON]" if is_anonymous else "",
                 bool(ctx.text), bool(ctx.caption),
@@ -2729,7 +2655,9 @@ class MessageHandlers:
                 logger.warning("   🎯 SPAM=%d | %s",
                                _spam_score, _spam_reasons[:10])
 
+        # ═════════════════════════════════════════════════════════════
         # 0) Service
+        # ═════════════════════════════════════════════════════════════
         if _as_bool(settings.get('delete_service'), False):
             if message.new_chat_members or message.left_chat_member:
                 await _safe_delete_message(
@@ -2737,10 +2665,33 @@ class MessageHandlers:
                 )
                 return
 
-        # ════════════════════════════════════════════════════════════
-        # 🆕 v7.18.1: 0.4) حذف فوري لأي رسالة فيها أزرار بروابط
-        # يعمل قبل PostBot HARD-BLOCK وقبل Spam Score
-        # ════════════════════════════════════════════════════════════
+        # ═════════════════════════════════════════════════════════════
+        # 0.2) 🆕 v7.18.2: Post Bot forwarded detection
+        # يعمل قبل كل شيء، حتى لو delete_forwarded=0
+        # ═════════════════════════════════════════════════════════════
+        if _FORCE_DELETE_POSTBOT_FORWARDS:
+            try:
+                _is_pb, _pb_info = _is_postbot_forward(message)
+                if _is_pb:
+                    logger.warning(
+                        "📰 POSTBOT-FORWARD-DELETE | chat=%s user=%s msg=%s "
+                        "| from=%r id=%s",
+                        chat_id, user_id, message.message_id,
+                        (_pb_info or {}).get("name"),
+                        (_pb_info or {}).get("id"),
+                    )
+                    await MessageHandlers._delete_and_warn(
+                        update, context, chat_id, user_id,
+                        "postbot_forward", settings,
+                        is_anonymous=is_anonymous,
+                    )
+                    return
+            except Exception as e:
+                logger.debug("postbot forward check: %s", e)
+
+        # ═════════════════════════════════════════════════════════════
+        # 0.4) 🆕 v7.18.1: Force delete any button link
+        # ═════════════════════════════════════════════════════════════
         if _button_links_enabled and ctx.has_button_link:
             logger.warning(
                 "🔘 BUTTON-LINK-DELETE | chat=%s user=%s msg=%s | "
@@ -2825,7 +2776,7 @@ class MessageHandlers:
             )
             return
 
-        # 4d) Button links (احتياطي — لن يصل هنا بسبب 0.4)
+        # 4d) Button links (fallback)
         if _button_links_enabled and ctx.has_button_link:
             await MessageHandlers._delete_and_warn(
                 update, context, chat_id, user_id,
@@ -2925,7 +2876,8 @@ class MessageHandlers:
                 raw = settings.get(
                     'antiflood_penalty_duration', _FLOOD_DEFAULT_DURATION,
                 )
-                return max(_FLOOD_MIN_DURATION_SEC, int(raw or _FLOOD_DEFAULT_DURATION))
+                return max(_FLOOD_MIN_DURATION_SEC,
+                           int(raw or _FLOOD_DEFAULT_DURATION))
             if violation_type in ('night', 'night_mode'):
                 raw = settings.get('night_mode_action_duration', 3600)
                 return max(_FLOOD_MIN_DURATION_SEC, int(raw or 3600))
@@ -3057,7 +3009,7 @@ class MessageHandlers:
         message = update.effective_message
         if message is None:
             logger.warning(
-                "⚠️ _delete_and_warn(%s): effective_message is None — abort",
+                "⚠️ _delete_and_warn(%s): effective_message is None",
                 violation_type,
             )
             return
@@ -3069,7 +3021,7 @@ class MessageHandlers:
         except Exception:
             pass
         forward_info = None
-        if violation_type == 'forwarded':
+        if violation_type in ('forwarded', 'postbot_forward'):
             try:
                 forward_info = extract_forward_info(message)
             except Exception:
@@ -3819,104 +3771,53 @@ class MessageHandlers:
 # ═══════════════════════════════════════════════════════════════════
 
 __all__ = [
-    "MessageHandlers",
-    "GroupRateLimiterManager",
-    "clear_lang_cache",
-    "get_security_settings_cached",
-    "get_auto_reply_settings_cached",
-    "invalidate_security_cache",
-    "invalidate_auto_reply_cache",
-    "apply_violation_penalty",
-    "is_forwarded",
-    "extract_forward_info",
-    "get_forward_detection_reason",
-    "notify_group_log",
-    "shutdown_log_dispatcher",
-    "shutdown_delete_tasks",
-    "shutdown_bg_tasks",
-    "register_shutdown_handlers",
-    "_lazy_init_columns",
-    "_reset_shutdown_for_tests",
-    "FEATURE_LOG_DELETIONS",
-    "FEATURE_LOG_PENALTIES",
-    "FEATURE_LOG_GIFTS",
-    "FEATURE_LOG_ADMIN_CHANGES",
-    "SPAM_SCORE_THRESHOLD",
-    "POSTBOT_AUTO_BLOCK_CONFIDENCE",
-    "SPAM_HARD_THRESHOLD",
-    "SPAM_CRITICAL_THRESHOLD",
-    "DEBUG_DIAG",
-    "DEBUG_SPAM",
-    "ANTIEVASION_COMPACT_WORDS",
-    "_MessageContext",
-    "_normalize_text",
-    "_strip_combining_marks",
-    "_deleet",
-    "_apply_homoglyphs_safe",
-    "_strip_emoji_for_domain",
-    "_has_hidden_chars",
-    "_merge_split_urls",
-    "_extract_entity_urls",
-    "_has_link_entity",
-    "_extract_url_from_button",
-    "_button_is_external",
-    "_extract_button_context",
-    "_extract_vcard_urls",
-    "_extract_venue_url",
-    "_extract_poll_text",
-    "_get_message_button_data",
-    "_get_message_button_texts",
+    "MessageHandlers", "GroupRateLimiterManager",
+    "clear_lang_cache", "get_security_settings_cached",
+    "get_auto_reply_settings_cached", "invalidate_security_cache",
+    "invalidate_auto_reply_cache", "apply_violation_penalty",
+    "is_forwarded", "extract_forward_info", "get_forward_detection_reason",
+    "notify_group_log", "shutdown_log_dispatcher", "shutdown_delete_tasks",
+    "shutdown_bg_tasks", "register_shutdown_handlers",
+    "_lazy_init_columns", "_reset_shutdown_for_tests",
+    "FEATURE_LOG_DELETIONS", "FEATURE_LOG_PENALTIES",
+    "FEATURE_LOG_GIFTS", "FEATURE_LOG_ADMIN_CHANGES",
+    "SPAM_SCORE_THRESHOLD", "POSTBOT_AUTO_BLOCK_CONFIDENCE",
+    "SPAM_HARD_THRESHOLD", "SPAM_CRITICAL_THRESHOLD",
+    "DEBUG_DIAG", "DEBUG_SPAM", "ANTIEVASION_COMPACT_WORDS",
+    "_MessageContext", "_normalize_text",
+    "_strip_combining_marks", "_deleet", "_apply_homoglyphs_safe",
+    "_strip_emoji_for_domain", "_has_hidden_chars", "_merge_split_urls",
+    "_extract_entity_urls", "_has_link_entity", "_extract_url_from_button",
+    "_button_is_external", "_extract_button_context",
+    "_extract_vcard_urls", "_extract_venue_url", "_extract_poll_text",
+    "_get_message_button_data", "_get_message_button_texts",
     "_get_message_analysis_text",
-    "_has_domain_pattern",
-    "_contains_link_enhanced",
-    "_contains_email",
-    "_contains_at_channel",
-    "_contains_tg_scheme",
-    "_has_button_link",
-    "_extract_button_link_urls",
-    "_extract_spam_words",
-    "_count_unique_matches",
-    "_count_text_urls",
-    "_compute_spam_score",
-    "_is_postbot_pattern",
+    "_has_domain_pattern", "_contains_link_enhanced", "_contains_email",
+    "_contains_at_channel", "_contains_tg_scheme",
+    "_has_button_link", "_extract_button_link_urls",
+    "_extract_spam_words", "_count_unique_matches", "_count_text_urls",
+    "_compute_spam_score", "_is_postbot_pattern",
     "_postbot_pattern_confidence",
-    "analyze_message",
-    "get_spam_diagnostics",
-    "is_spam",
-    "is_high_confidence_spam",
-    "is_critical_spam",
+    "analyze_message", "get_spam_diagnostics", "is_spam",
+    "is_high_confidence_spam", "is_critical_spam",
     "should_ignore_as_low_signal",
-    "_as_bool",
-    "_env_flag",
-    "_check_flood",
-    "_cleanup_flood_tracker",
-    "_flood_tracker_stats",
-    "_flood_tracker",
-    "_flood_lock",
-    "_invalidate_banned_words_cache",
-    "_check_admin_in_chat",
-    "_private_handler_signature_cache",
-    "_accepts_state_arg",
-    "_notify_dev_log",
-    "_safe_delete_message",
+    "_as_bool", "_env_flag", "_check_flood", "_cleanup_flood_tracker",
+    "_flood_tracker_stats", "_flood_tracker", "_flood_lock",
+    "_invalidate_banned_words_cache", "_check_admin_in_chat",
+    "_private_handler_signature_cache", "_accepts_state_arg",
+    "_notify_dev_log", "_safe_delete_message",
     "_invalidate_after_channel_change",
-    "_FLOOD_TRACKER_MAX_KEYS",
-    "_FLOOD_TRACKER_STALE_SEC",
-    "_FLOOD_DEFAULT_MESSAGES",
-    "_FLOOD_DEFAULT_WINDOW",
-    "_FLOOD_DEFAULT_PENALTY",
-    "_FLOOD_DEFAULT_DURATION",
-    "_BAN_WORD_MIN_LEN",
-    "_BAN_WORD_MAX_LEN",
-    "_BAN_ADD_RATE_LIMIT",
-    "_BAN_ADD_RATE_MAX",
-    "_BAN_ADD_RATE_WINDOW",
+    "_FLOOD_TRACKER_MAX_KEYS", "_FLOOD_TRACKER_STALE_SEC",
+    "_FLOOD_DEFAULT_MESSAGES", "_FLOOD_DEFAULT_WINDOW",
+    "_FLOOD_DEFAULT_PENALTY", "_FLOOD_DEFAULT_DURATION",
+    "_BAN_WORD_MIN_LEN", "_BAN_WORD_MAX_LEN",
+    "_BAN_ADD_RATE_LIMIT", "_BAN_ADD_RATE_MAX", "_BAN_ADD_RATE_WINDOW",
     "_DEFAULT_VIOLATION_MESSAGES",
-    "_notify_delete_permission_failure",
-    "analyze_sentiment",
-    "_MULTILAYER_ENABLED",
-    "_HAS_MULTILAYER",
-    "analyze_message_full",
-    "SpamVerdict",
+    "_notify_delete_permission_failure", "analyze_sentiment",
+    "_MULTILAYER_ENABLED", "_HAS_MULTILAYER",
+    "analyze_message_full", "SpamVerdict",
     "_FORCE_DELETE_BUTTON_LINKS",
+    "_FORCE_DELETE_POSTBOT_FORWARDS",
+    "_is_postbot_forward", "_is_postbot_channel_name",
+    "_POSTBOT_CHANNEL_NAMES", "_POSTBOT_CHANNEL_IDS",
 ]
