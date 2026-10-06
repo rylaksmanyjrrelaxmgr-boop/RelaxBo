@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-database_caches.py - Caches المُستخرجة من database.py (v1.0.0)
+database_caches.py - Caches المُستخرجة من database.py (v1.0.1)
 ================================================================================
 🎯 الهدف:
     فصل تعريفات الـ Caches من database.py لتقليل حجمه،
@@ -9,7 +9,7 @@ database_caches.py - Caches المُستخرجة من database.py (v1.0.0)
 
 📦 المحتوى:
     - InternalQueryCache  : كاش داخلي للاستعلامات (ttl/max_size)
-    - SimpleCache         : كاش async عام مع LRU eviction بسيط
+    - SimpleCache         : كاش async عام مع insertion-order eviction
     - SettingsCache       : SimpleCache بـ ttl أطول (600s افتراضي)
     - internal_cache      : كائن عالمي جاهز من InternalQueryCache
 
@@ -41,6 +41,26 @@ database_caches.py - Caches المُستخرجة من database.py (v1.0.0)
     - هذا الملف لا يستورد أي شيء من database.py أو cache.py
       → لا circular imports إطلاقاً.
     - الاعتماد الوحيد: asyncio, time, logging, typing (stdlib فقط).
+
+================================================================================
+🆕 v1.0.1 (CONSISTENCY-FIXES):
+    🟡 FIX-1: InternalQueryCache — واجهة موحّدة مع SimpleCache:
+        أُضيفت: has(), get_with_ttl(), set_many(), delete_many(),
+                get_keys(), get_all(), get_stats()
+        السبب: كان أي كود يحاول التعامل مع الكاشين بشكل موحّد
+               (مثل cache_cleanup_task الذي يستدعي has/get_keys)
+               يفشل بصمت عند InternalQueryCache.
+    🟡 FIX-2: InternalQueryCache — توحيد الأقفال (lock واحد):
+        قبل: _eviction_lock يُستخدم فقط أثناء eviction + كتابة بلا lock
+        بعد: _lock موحّد لكل get/set/invalidate/clear
+        السبب: الحماية من السباقات مستقبلاً (مثلاً على Python 3.13+
+               free-threaded بدون GIL حيث dict operations ليست atomic).
+    🟡 FIX-3: تصحيح وصف "LRU" → "insertion-order eviction":
+        الكود يُزيل الأقدم إدراجاً (لا يُحدّث ترتيب المفتاح عند get).
+    🟡 FIX-4: InternalQueryCache.get_size() — يُصفّي المنتهية:
+        قبل: يُرجع عدد كل المفاتيح (بما فيها منتهية TTL).
+        بعد: عدد المفاتيح الصالحة فقط (يُطابق SimpleCache.get_stats()['size']).
+    🟡 FIX-5: تحسين التوثيق الداخلي وحذف التعليقات المضلِّلة.
 ================================================================================
 """
 
@@ -63,13 +83,13 @@ class InternalQueryCache:
     الميزات:
       • TTL افتراضي: 30s (يُضبط عند الإنشاء)
       • max_size: 10000 entry (يُضبط عند الإنشاء)
-      • عند الوصول للحد: يُزيل 25% (الأقدم إدراجاً)
-      • eviction lock لتفادي سباق إعادة الإدراج المتزامن
+      • عند الوصول للحد: يُزيل ~25% (الأقدم إدراجاً —
+        insertion-order eviction، ليس LRU حقيقي لأن get لا يُحدّث الترتيب)
+      • asyncio.Lock موحّد لكل العمليات (get/set/invalidate/clear)
 
-    ملاحظات:
-      - لا lock على get/set العاديين (لأن asyncio single-thread).
-      - الـ lock يُستخدم فقط أثناء eviction لتفادي تسابق
-        عدّة coroutines على نفس الـ batch.
+    ⚠️ v1.0.1 FIX-2: القفل موحّد لكل العمليات — لم يعد هناك مسار
+    كتابة بدون lock. هذا مهم على Python 3.13+ free-threaded حيث
+    dict operations ليست atomic.
 
     الاستخدام:
         cache = InternalQueryCache(ttl=30, max_size=10000)
@@ -81,7 +101,8 @@ class InternalQueryCache:
         self._cache: Dict[str, Tuple[Any, float, int]] = {}
         self._ttl = ttl
         self._max_size = max_size
-        self._eviction_lock = asyncio.Lock()
+        # ✅ FIX-2: قفل موحّد (كان _eviction_lock مقتصراً على eviction)
+        self._lock = asyncio.Lock()
 
     async def get(self, key: str):
         """
@@ -89,14 +110,15 @@ class InternalQueryCache:
           • المفتاح غير موجود
           • المفتاح انتهى (TTL) — ويُحذف تلقائياً
         """
-        entry = self._cache.get(key)
-        if entry is not None:
-            data, timestamp, ttl = entry
-            if time.monotonic() - timestamp < ttl:
-                return data
-            # انتهى → احذف فوري
-            self._cache.pop(key, None)
-        return None
+        async with self._lock:
+            entry = self._cache.get(key)
+            if entry is not None:
+                data, timestamp, ttl = entry
+                if time.monotonic() - timestamp < ttl:
+                    return data
+                # انتهى → احذف فوري
+                del self._cache[key]
+            return None
 
     async def set(self, key: str, data, ttl: int = None):
         """
@@ -109,41 +131,136 @@ class InternalQueryCache:
         """
         effective_ttl = ttl if ttl is not None else self._ttl
 
-        # eviction إن امتلأ الكاش
-        if len(self._cache) >= self._max_size and key not in self._cache:
-            async with self._eviction_lock:
-                # إعادة فحص (قد يكون coroutine آخر أزال مفاتيح)
-                if len(self._cache) >= self._max_size:
-                    to_remove = list(self._cache.keys())[
-                        : max(1, self._max_size // 4)
-                    ]
-                    for k in to_remove:
-                        self._cache.pop(k, None)
+        async with self._lock:
+            if (len(self._cache) >= self._max_size
+                    and key not in self._cache):
+                to_remove = list(self._cache.keys())[
+                    : max(1, self._max_size // 4)
+                ]
+                for k in to_remove:
+                    self._cache.pop(k, None)
 
-        self._cache[key] = (data, time.monotonic(), effective_ttl)
+            self._cache[key] = (
+                data, time.monotonic(), effective_ttl
+            )
 
     async def invalidate(self, key: str = None):
         """
         إبطال مفتاح واحد، أو كل المفاتيح إن كان key=None (أو "").
         """
-        if key:
-            self._cache.pop(key, None)
-        else:
-            self._cache.clear()
+        async with self._lock:
+            if key:
+                self._cache.pop(key, None)
+            else:
+                self._cache.clear()
 
     async def clear(self):
         """إبطال كل الكاش — مرادف لـ invalidate(None)."""
-        self._cache.clear()
+        async with self._lock:
+            self._cache.clear()
+
+    # ─────────────────────────────────────────────────────────────
+    # ✅ v1.0.1 FIX-1: توحيد الواجهة مع SimpleCache
+    # ─────────────────────────────────────────────────────────────
+
+    async def has(self, key: str) -> bool:
+        """هل المفتاح موجود وصالح؟ (يحذف المنتهية)."""
+        async with self._lock:
+            entry = self._cache.get(key)
+            if entry is not None:
+                _, ts, ttl = entry
+                if time.monotonic() - ts < ttl:
+                    return True
+                del self._cache[key]
+            return False
+
+    async def get_with_ttl(self, key: str):
+        """
+        يُرجع tuple: (data, ttl_remaining_seconds) أو (None, None).
+        """
+        async with self._lock:
+            entry = self._cache.get(key)
+            if entry is not None:
+                data, ts, ttl = entry
+                remaining = int(ttl - (time.monotonic() - ts))
+                if remaining > 0:
+                    return data, remaining
+                del self._cache[key]
+            return None, None
+
+    async def set_many(
+        self, items: Dict[str, Any], ttl: int = None
+    ):
+        """يُخزّن مجموعة قيم دفعة واحدة (نفس TTL للكل)."""
+        effective = ttl if ttl is not None else self._ttl
+        async with self._lock:
+            now = time.monotonic()
+            for key, data in items.items():
+                if (len(self._cache) >= self._max_size
+                        and key not in self._cache):
+                    to_remove = list(self._cache.keys())[
+                        : max(1, self._max_size // 4)
+                    ]
+                    for k in to_remove:
+                        self._cache.pop(k, None)
+                self._cache[key] = (data, now, effective)
+
+    async def delete_many(self, keys: List[str]) -> int:
+        """يحذف مجموعة مفاتيح. يعدّ المحذوفات فعلياً."""
+        async with self._lock:
+            count = 0
+            for key in keys:
+                if key in self._cache:
+                    del self._cache[key]
+                    count += 1
+            return count
+
+    async def get_keys(self) -> List[str]:
+        """
+        قائمة بكل المفاتيح (بما فيها المنتهية — لا يُصفّي).
+
+        ملاحظة: cache_cleanup_task في cache.py يستخدمها
+        ثم يستدعي has() لكل مفتاح لتصفية المنتهية.
+        """
+        async with self._lock:
+            return list(self._cache.keys())
+
+    async def get_all(self) -> Dict[str, Any]:
+        """قاموس بكل المفاتيح الصالحة (يُصفّي المنتهية)."""
+        async with self._lock:
+            now = time.monotonic()
+            return {
+                k: v[0] for k, v in self._cache.items()
+                if now - v[1] < v[2]
+            }
+
+    async def get_stats(self) -> Dict[str, Any]:
+        """إحصائيات الكاش (الحجم الحالي الصالح + الحد + TTL)."""
+        async with self._lock:
+            now = time.monotonic()
+            valid_count = sum(
+                1 for _, (_, ts, ttl) in self._cache.items()
+                if now - ts < ttl
+            )
+            return {
+                'size': valid_count,
+                'max_size': self._max_size,
+                'ttl': self._ttl,
+            }
 
     async def get_size(self) -> int:
         """
-        عدد المفاتيح الحالية (يشمل المنتهية — لا يُصفّي).
+        ✅ v1.0.1 FIX-4: عدد المفاتيح الصالحة فقط (يُصفّي المنتهية).
 
-        للعدد الصافي بعد التنظيف، استخدم:
-            keys = await cache.get_keys()  # لكن Internal لا يوفرها
-        عملياً: العدد دقيق بما يكفي للمراقبة.
+        قبل v1.0.1: كان يُرجع len(self._cache) شاملاً المنتهية —
+        رقم مضلِّل للمراقبة. الآن يُطابق SimpleCache.get_stats()['size'].
         """
-        return len(self._cache)
+        async with self._lock:
+            now = time.monotonic()
+            return sum(
+                1 for _, (_, ts, ttl) in self._cache.items()
+                if now - ts < ttl
+            )
 
 
 # =====================================================================
@@ -156,7 +273,9 @@ class SimpleCache:
 
     الميزات:
       • TTL per-key (قابل للتجاوز عند set)
-      • max_size مع LRU eviction بسيط (يُزيل 25% عند الوصول للحد)
+      • max_size مع insertion-order eviction بسيط
+        (يُزيل ~25% عند الوصول للحد — الأقدم إدراجاً، ليس LRU حقيقي
+         لأن get لا يُحدّث الترتيب)
       • asyncio.Lock لحماية القاموس من سباقات القراءة/الكتابة
       • دوال مساعدة:
           - has(key) → bool
