@@ -2,56 +2,24 @@
 # -*- coding: utf-8 -*-
 
 """
-database_tables.py — إنشاء الجداول والفهارس لكل قواعد البيانات (v7.6.28)
+database_tables.py — إنشاء الجداول والفهارس لكل قواعد البيانات (v7.7.0)
 ================================================================================
+🆕 v7.7.0 (AUTO-BLOCKED-SOURCES):
+  ✅ NEW: جدول auto_blocked_sources لحجب المصادر المشبوهة تلقائياً
+  ✅ NEW: دوال _ensure_auto_blocked_table_* (PG/MySQL/SQLite)
+  ✅ NEW: فهرسان جديدان (hit_count DESC, last_seen DESC)
+  ✅ SCHEMA_VERSION: 23 → 24
+  ✅ EXPECTED_INDEX_COUNT: 75 → 77
+  ✅ MAINTENANCE_TABLES: إضافة auto_blocked_sources
+
 🆕 v7.6.28 (MAINTENANCE-USERS-FIX):
   ✅ FIX-HIGH: إضافة "users" إلى MAINTENANCE_TABLES
-       - المشكلة: users كان مفقوداً من MAINTENANCE_TABLES
-       - الأثر: VACUUM (ANALYZE, SKIP_LOCKED) الدوري لم يكن يشمل users
-                (autovacuum وحده يعمل — غير كافٍ لجداول كبيرة)
-       - الاكتشاف: db_diagnostics v6.4.0 (_check_maintenance_consistency)
-       - الإصلاح: إضافة "users" في مقدمة القائمة (بعد posts)
 
 🆕 v7.6.27 (VACUUM-OUTSIDE-TX-FIX) — إصلاح حرج:
   ✅ FIX-CRITICAL: إزالة _run_maintenance_postgres من fast-path
-       - المشكلة: VACUUM (ANALYZE, SKIP_LOCKED) كان يُستدعى من داخل
-                  bootstrap transaction block
-       - الأعراض: PostgreSQL يُلغِي الـ transaction كاملاً بـ
-                  "VACUUM cannot run inside a transaction block"
-                  → كل الاستعلامات التالية تفشل بـ:
-                  "current transaction is aborted, commands ignored
-                  until end of transaction block"
-       - التأثير: فشل UNIQUE settings.key، _upsert_setting(tables_hash)،
-                  قراءة bootstrap_hash، وبالتالي فشل التهيئة كاملاً
-       - الإصلاح: VACUUM يجب أن يعمل خارج transaction
-       - الاستدعاء الآن من database.py::_bootstrap بعد commit
-         (استخدام self.connection() — autocommit mode)
-
-🆕 v7.6.26 (AUTOVACUUM-DEDUP + CTE-INDEX):
-  ✅ FIX-1: إزالة الاستدعاء المكرر لـ _tune_autovacuum_postgres
-  ✅ FIX-2: إضافة idx_subs_status_end_active
 
 🚀 v7.6.25 (MIGRATION-ORDER-FIX):
   ✅ FIX-CRITICAL: إعادة ترتيب الـ migrations
-
-🚀 v7.6.24 (SOFT-DELETE-COLUMNS)
-🚀 v7.6.23 (BOT-ADDITION-LOG-FIX)
-🚀 v7.6.22 (CONTEST-QUIZ-COLUMNS)
-🚀 v7.6.21 (FORCE-BOOTSTRAP-RERUN)
-🚀 v7.6.20 (FORCE-DEPRECATED-INDEX-DROP + ADMIN_LOGS-MAX-ROWS)
-🚀 v7.6.19 (AUTOVACUUM-COVERAGE-FIX)
-🚀 v7.6.18 (DIAGNOSIS-FIXES)
-🚀 v7.6.17 (SCHEMA-AWARE-INDEX-CHECK + MIGRATION-FIX)
-🚀 v7.6.16 (REMOVE-REDUNDANT-POSTS-INDEXES)
-🚀 v7.6.15 (SLOW-QUERY-FIX)
-🚀 v7.6.14 (ADVANCED-INDEXES-PER-DB)
-🚀 v7.6.13 (FASTPATH-INDEX-RECOVERY + QUICK-ANALYZE)
-🚀 v7.6.12 (VACUUM + SLOW-QUERY-FIX)
-🚀 v7.6.11 (MISSING-TABLES-MIGRATION)
-🚀 v7.6.10 (AUTO-CLEANUP-STALE-LINKS)
-🚀 v7.6.9  (SLOW-QUERY-INDEX-FIX)
-🚀 v7.6.8  (CURSOR-CLEANUP)
-🚀 v7.6.7  (BANNED-WORDS-INDEX-FIX)
 ================================================================================
 """
 
@@ -64,8 +32,8 @@ from datetime import datetime, timezone, timedelta
 # 0. ثوابت
 # =====================================================================
 
-# ✅ v7.6.24: 22 → 23
-CURRENT_SCHEMA_VERSION = 23
+# ✅ v7.7.0: 23 → 24
+CURRENT_SCHEMA_VERSION = 24
 
 CLEANUP_ANONYMOUS_BOT_IDS = (1087968824, 136817688)
 
@@ -79,13 +47,10 @@ ADMIN_LOGS_MAX_ROWS = 5000
 
 REMOVED_CHANNELS_GRACE_DAYS = 30
 
-# ✅ v7.6.28 FIX-HIGH: إضافة "users" (كان مفقوداً)
-#    users جدول كبير في المشروع (يستقبل تحديثات متكررة:
-#    auto_publish, auto_recycle, active_channel, language, ...)
-#    بدون VACUUM دوري، dead tuples قد تتراكم حتى autovacuum وحده.
+# ✅ v7.7.0: إضافة auto_blocked_sources
 MAINTENANCE_TABLES = (
     "posts",
-    "users",            # ✅ v7.6.28
+    "users",
     "auto_replies",
     "subscriptions",
     "user_channels",
@@ -93,6 +58,7 @@ MAINTENANCE_TABLES = (
     "banned_words",
     "schedule",
     "admin_logs",
+    "auto_blocked_sources",  # ✅ v7.7.0
 )
 
 SMALL_TABLES_FOR_AGGRESSIVE_AUTOVACUUM = (
@@ -118,6 +84,7 @@ SMALL_TABLES_FOR_AGGRESSIVE_AUTOVACUUM = (
     "user_reminder_settings",
     "support_tickets",
     "bot_addition_log",
+    "auto_blocked_sources",  # ✅ v7.7.0
 )
 
 DEFAULT_SETTINGS = (
@@ -127,8 +94,8 @@ DEFAULT_SETTINGS = (
     ("last_backup", ""),
 )
 
-# ✅ v7.6.26: 74 → 75 (إضافة idx_subs_status_end_active)
-EXPECTED_INDEX_COUNT = 75
+# ✅ v7.7.0: 75 → 77
+EXPECTED_INDEX_COUNT = 77
 
 MYSQL_SKIP_INDEXES = frozenset({
     "idx_penalties_active_id",
@@ -217,7 +184,6 @@ COMMON_INDEXES = [
     ("subscriptions", "idx_sub_user", "subscriptions(user_id)"),
     ("subscriptions", "idx_sub_status", "subscriptions(status)"),
     ("subscriptions", "idx_sub_end", "subscriptions(end_date)"),
-    # ✅ v7.6.26: فهرس لتسريع CTE active_subs (status + end_date)
     ("subscriptions", "idx_subs_status_end_active",
      "subscriptions(status, end_date)"),
     ("subscriptions", "idx_subscriptions_user_status",
@@ -299,6 +265,12 @@ COMMON_INDEXES = [
 
     ("user_channels", "idx_user_channels_removed_at",
      "user_channels(removed_at) WHERE removed_at IS NOT NULL"),
+
+    # ✅ v7.7.0: فهارس auto_blocked_sources
+    ("auto_blocked_sources", "idx_auto_blocked_hit_count",
+     "auto_blocked_sources(hit_count DESC)"),
+    ("auto_blocked_sources", "idx_auto_blocked_last_seen",
+     "auto_blocked_sources(last_seen DESC)"),
 ]
 
 DEPRECATED_INDEXES = [
@@ -500,6 +472,87 @@ def _is_advanced_index(cols: str) -> bool:
         return False
     s = cols.upper()
     return " WHERE " in s or " INCLUDE " in s
+
+
+# =====================================================================
+# 🆕 v7.7.0: Auto-blocked sources table
+# =====================================================================
+
+async def _ensure_auto_blocked_table_postgres(conn, logger):
+    """إنشاء جدول auto_blocked_sources إذا لم يكن موجوداً (PostgreSQL)"""
+    try:
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS auto_blocked_sources (
+                source_id BIGINT PRIMARY KEY,
+                source_type VARCHAR(20) DEFAULT 'channel',
+                source_name VARCHAR(255) DEFAULT '',
+                first_seen TIMESTAMP DEFAULT NOW(),
+                last_seen TIMESTAMP DEFAULT NOW(),
+                hit_count INTEGER DEFAULT 1,
+                reason VARCHAR(100) DEFAULT 'auto_detected',
+                auto_added BOOLEAN DEFAULT TRUE,
+                created_at TIMESTAMP DEFAULT NOW()
+            )
+        """)
+        return True
+    except Exception as e:
+        if logger:
+            logger.debug(f"ensure auto_blocked_sources (PG): {e}")
+        return False
+
+
+async def _ensure_auto_blocked_table_sqlite(conn, logger):
+    """إنشاء جدول auto_blocked_sources إذا لم يكن موجوداً (SQLite)"""
+    try:
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS auto_blocked_sources (
+                source_id INTEGER PRIMARY KEY,
+                source_type TEXT DEFAULT 'channel',
+                source_name TEXT DEFAULT '',
+                first_seen TEXT,
+                last_seen TEXT,
+                hit_count INTEGER DEFAULT 1,
+                reason TEXT DEFAULT 'auto_detected',
+                auto_added INTEGER DEFAULT 1,
+                created_at TEXT
+            )
+        """)
+        try:
+            await conn.commit()
+        except Exception:
+            pass
+        return True
+    except Exception as e:
+        if logger:
+            logger.debug(f"ensure auto_blocked_sources (SQLite): {e}")
+        return False
+
+
+async def _ensure_auto_blocked_table_mysql(conn, logger):
+    """إنشاء جدول auto_blocked_sources إذا لم يكن موجوداً (MySQL)"""
+    try:
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS auto_blocked_sources (
+                source_id BIGINT PRIMARY KEY,
+                source_type VARCHAR(20) DEFAULT 'channel',
+                source_name VARCHAR(255) DEFAULT '',
+                first_seen DATETIME DEFAULT CURRENT_TIMESTAMP,
+                last_seen DATETIME DEFAULT CURRENT_TIMESTAMP,
+                hit_count INT DEFAULT 1,
+                reason VARCHAR(100) DEFAULT 'auto_detected',
+                auto_added TINYINT(1) DEFAULT 1,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        """)
+        try:
+            await conn.commit()
+        except Exception:
+            pass
+        return True
+    except Exception as e:
+        if logger:
+            logger.debug(f"ensure auto_blocked_sources (MySQL): {e}")
+        return False
 
 
 # =====================================================================
@@ -716,11 +769,6 @@ async def _cleanup_old_admin_logs_mysql(conn, logger):
 
 # =====================================================================
 # autovacuum
-# =====================================================================
-# ✅ v7.6.26: هذا الـ helper لم يعد يُستدعى تلقائياً من create_tables_postgres
-#            لأن database.py::_tune_heavy_tables_autovacuum يقوم بالمهمة
-#            بإعدادات أقوى (scale_factor=0.0) وبعد create_tables.
-#            أُبقي للاستخدام اليدوي/الاختباري فقط.
 # =====================================================================
 
 async def _tune_autovacuum_postgres(conn, logger):
@@ -994,24 +1042,8 @@ async def _quick_analyze_mysql(conn, logger):
 # VACUUM ANALYZE الدوري
 # =====================================================================
 # ⚠️ v7.6.27 — تحذير حرج:
-# =====================================================================
 #   VACUUM في PostgreSQL **لا يعمل داخل transaction block**.
-#   استدعاء هذه الدالة من داخل `async with self.transaction()`
-#   (كما كان في fast-path قبل v7.6.27) يُلغِي الـ transaction
-#   كاملاً ويُسبِّب:
-#     asyncpg.exceptions.InFailedSQLTransactionError:
-#     current transaction is aborted, commands ignored until end of
-#     transaction block
-#
-#   عندها **كل** استعلام لاحق في نفس الـ transaction يفشل، بما في ذلك:
-#     - UNIQUE settings.key
-#     - _upsert_setting(tables_hash)
-#     - SELECT value FROM settings WHERE key='bootstrap_hash'
-#
-#   ✅ الحل الصحيح: استدعاؤها من database.py::_bootstrap **بعد** commit
-#      عبر `self.connection()` (autocommit mode — بلا tx.start()).
-#
-#   ⚠️ لا تستدعها أبداً من داخل `async with self.transaction()`.
+#   استدعاؤها من database.py::_bootstrap بعد commit.
 # =====================================================================
 
 async def _run_maintenance_postgres(conn, logger):
@@ -1253,6 +1285,9 @@ async def _migrate_missing_columns_sqlite(conn, logger):
     checked = 0
     added = 0
 
+    # 🆕 v7.7.0: التأكد من وجود الجدول أولاً
+    await _ensure_auto_blocked_table_sqlite(conn, logger)
+
     for col_name, col_def in _GROUP_SECURITY_NEW_COLUMNS:
         checked += 1
         try:
@@ -1324,6 +1359,9 @@ async def _migrate_missing_columns_postgres(conn, logger):
     checked = 0
     added = 0
     skipped = 0
+
+    # 🆕 v7.7.0: التأكد من وجود الجدول أولاً
+    await _ensure_auto_blocked_table_postgres(conn, logger)
 
     for col_name, col_def in _GROUP_SECURITY_NEW_COLUMNS:
         try:
@@ -1427,6 +1465,9 @@ async def _migrate_missing_columns_mysql(conn, logger):
     checked = 0
     added = 0
     skipped = 0
+
+    # 🆕 v7.7.0: التأكد من وجود الجدول أولاً
+    await _ensure_auto_blocked_table_mysql(conn, logger)
 
     for col_name, col_def in _GROUP_SECURITY_NEW_COLUMNS:
         checked += 1
@@ -2381,7 +2422,8 @@ async def _create_indexes_mysql(conn, logger):
 async def create_tables_sqlite(conn, logger, TimeUtils):
     current = await _get_current_schema_version_sqlite(conn)
     if current >= CURRENT_SCHEMA_VERSION:
-        # ✅ v7.6.25 FIX: migrations أولاً
+        # ✅ v7.7.0: التأكد من الجدول أولاً (قبل migration)
+        await _ensure_auto_blocked_table_sqlite(conn, logger)
         await _migrate_missing_columns_sqlite(conn, logger)
         await _verify_critical_indexes_sqlite(conn, logger)
         await _ensure_all_indexes_exist_sqlite(conn, logger)
@@ -2995,7 +3037,24 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
         )
     """)
 
-    # ✅ v7.6.25 FIX: migrations أولاً (يضيف removed_at قبل الفهرس)
+    # 🆕 v7.7.0: auto_blocked_sources
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS auto_blocked_sources (
+            source_id INTEGER PRIMARY KEY,
+            source_type TEXT DEFAULT 'channel',
+            source_name TEXT DEFAULT '',
+            first_seen TEXT,
+            last_seen TEXT,
+            hit_count INTEGER DEFAULT 1,
+            reason TEXT DEFAULT 'auto_detected',
+            auto_added INTEGER DEFAULT 1,
+            created_at TEXT
+        )
+    """)
+
+    # ✅ v7.7.0: التأكد من الجدول (idempotent)
+    await _ensure_auto_blocked_table_sqlite(conn, logger)
+
     await _migrate_missing_columns_sqlite(conn, logger)
     await _drop_deprecated_indexes_sqlite(conn, logger)
     await _ensure_index_definitions_match_sqlite(conn, logger)
@@ -3009,7 +3068,7 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
             "(version, applied_at, description) "
             "VALUES (?, ?, ?) ON CONFLICT(version) DO NOTHING",
             (CURRENT_SCHEMA_VERSION, _safe_now_iso(TimeUtils),
-             "v7.6.28-maintenance-users-fix"),
+             "v7.7.0-auto-blocked-sources"),
         )
         await conn.commit()
     except Exception as e:
@@ -3031,7 +3090,8 @@ async def create_tables_postgres(conn, logger, TimeUtils):
             logger.info(
                 f"⏩ PG fast-path: schema v{current} — بدء الفحوصات"
             )
-        # ✅ v7.6.25 FIX: migrations FIRST
+        # ✅ v7.7.0: التأكد من الجدول أولاً
+        await _ensure_auto_blocked_table_postgres(conn, logger)
         await _migrate_missing_columns_postgres(conn, logger)
         await _verify_critical_indexes_postgres(conn, logger)
         await _ensure_all_indexes_exist_postgres(conn, logger)
@@ -3039,19 +3099,7 @@ async def create_tables_postgres(conn, logger, TimeUtils):
         await _drop_deprecated_indexes_postgres(conn, logger)
         await _cleanup_stale_links_postgres(conn, logger)
         await _cleanup_old_admin_logs_postgres(conn, logger)
-        # ✅ v7.6.26 FIX: إزالة _tune_autovacuum_postgres (database.py يتولى)
-        # await _tune_autovacuum_postgres(conn, logger)
         await _quick_analyze_postgres(conn, logger)
-        # ✅ v7.6.27 CRITICAL FIX: VACUUM لا يعمل داخل transaction!
-        #
-        # كان: await _run_maintenance_postgres(conn, logger)
-        #       ↑ يُشغّل VACUUM → PG يُلغِي الـ tx → كل الاستعلامات التالية تفشل
-        #
-        # الآن: VACUUM يُشغَّل من database.py::_bootstrap بعد commit
-        #        عبر self.connection() (autocommit mode).
-        #
-        # ⚠️ لا تُعِد الاستدعاء هنا أبداً — سيُسبِّب فشل التهيئة كاملاً.
-        # await _run_maintenance_postgres(conn, logger)  # ❌ MOVED TO database.py
         if logger:
             logger.info(
                 f"⏩ PG: schema v{current} محدّث — تخطي (fast-path)"
@@ -3662,19 +3710,31 @@ async def create_tables_postgres(conn, logger, TimeUtils):
         )
     """)
 
-    # ✅ v7.6.25 FIX: migrations FIRST (قبل الفهارس)
+    # 🆕 v7.7.0: auto_blocked_sources
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS auto_blocked_sources (
+            source_id BIGINT PRIMARY KEY,
+            source_type VARCHAR(20) DEFAULT 'channel',
+            source_name VARCHAR(255) DEFAULT '',
+            first_seen TIMESTAMP DEFAULT NOW(),
+            last_seen TIMESTAMP DEFAULT NOW(),
+            hit_count INTEGER DEFAULT 1,
+            reason VARCHAR(100) DEFAULT 'auto_detected',
+            auto_added BOOLEAN DEFAULT TRUE,
+            created_at TIMESTAMP DEFAULT NOW()
+        )
+    """)
+
+    # ✅ v7.7.0: التأكد من الجدول (idempotent)
+    await _ensure_auto_blocked_table_postgres(conn, logger)
+
     await _migrate_missing_columns_postgres(conn, logger)
     await _drop_deprecated_indexes_postgres(conn, logger)
     await _ensure_index_definitions_match_postgres(conn, logger)
     await _create_indexes_postgres(conn, logger)
     await _cleanup_stale_links_postgres(conn, logger)
     await _cleanup_old_admin_logs_postgres(conn, logger)
-    # ✅ v7.6.26 FIX: إزالة _tune_autovacuum_postgres (database.py يتولى)
-    # await _tune_autovacuum_postgres(conn, logger)
     await _quick_analyze_postgres(conn, logger)
-    # ✅ v7.6.27 CRITICAL FIX: لا VACUUM داخل transaction!
-    #    (نفس السبب المُوضَّح في fast-path أعلاه)
-    # await _run_maintenance_postgres(conn, logger)  # ❌ MOVED TO database.py
 
     try:
         await conn.execute(
@@ -3683,7 +3743,7 @@ async def create_tables_postgres(conn, logger, TimeUtils):
             "VALUES ($1, $2, $3) ON CONFLICT (version) DO NOTHING",
             CURRENT_SCHEMA_VERSION,
             _safe_now_dt(TimeUtils),
-            "v7.6.28-maintenance-users-fix",
+            "v7.7.0-auto-blocked-sources",
         )
     except Exception as e:
         if logger:
@@ -3700,7 +3760,8 @@ async def create_tables_postgres(conn, logger, TimeUtils):
 async def create_tables_mysql(conn, logger, TimeUtils):
     current = await _get_current_schema_version_mysql(conn)
     if current >= CURRENT_SCHEMA_VERSION:
-        # ✅ v7.6.25 FIX: migrations FIRST
+        # ✅ v7.7.0: التأكد من الجدول أولاً
+        await _ensure_auto_blocked_table_mysql(conn, logger)
         await _migrate_missing_columns_mysql(conn, logger)
         await _verify_critical_indexes_mysql(conn, logger)
         await _ensure_all_indexes_exist_mysql(conn, logger)
@@ -3709,7 +3770,6 @@ async def create_tables_mysql(conn, logger, TimeUtils):
         await _cleanup_stale_links_mysql(conn, logger)
         await _cleanup_old_admin_logs_mysql(conn, logger)
         await _quick_analyze_mysql(conn, logger)
-        # ✅ MySQL: OPTIMIZE/ANALYZE يعملان داخل transaction — لا مشكلة
         await _run_maintenance_mysql(conn, logger)
         if logger:
             logger.info(
@@ -4330,7 +4390,24 @@ async def create_tables_mysql(conn, logger, TimeUtils):
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
         """)
 
-        # ✅ v7.6.25 FIX: migrations FIRST
+        # 🆕 v7.7.0: auto_blocked_sources
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS auto_blocked_sources (
+                source_id BIGINT PRIMARY KEY,
+                source_type VARCHAR(20) DEFAULT 'channel',
+                source_name VARCHAR(255) DEFAULT '',
+                first_seen DATETIME DEFAULT CURRENT_TIMESTAMP,
+                last_seen DATETIME DEFAULT CURRENT_TIMESTAMP,
+                hit_count INT DEFAULT 1,
+                reason VARCHAR(100) DEFAULT 'auto_detected',
+                auto_added TINYINT(1) DEFAULT 1,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        """)
+
+        # ✅ v7.7.0: التأكد من الجدول (idempotent)
+        await _ensure_auto_blocked_table_mysql(conn, logger)
+
         await _migrate_missing_columns_mysql(conn, logger)
         await _drop_deprecated_indexes_mysql(conn, logger)
         await _ensure_index_definitions_match_mysql(conn, logger)
@@ -4347,7 +4424,7 @@ async def create_tables_mysql(conn, logger, TimeUtils):
                 (
                     CURRENT_SCHEMA_VERSION,
                     _safe_now_iso(TimeUtils),
-                    "v7.6.28-maintenance-users-fix",
+                    "v7.7.0-auto-blocked-sources",
                 ),
             )
         except Exception as e:
@@ -4396,4 +4473,7 @@ __all__ = [
     "_run_maintenance_postgres",
     "_run_maintenance_sqlite",
     "_run_maintenance_mysql",
+    "_ensure_auto_blocked_table_postgres",
+    "_ensure_auto_blocked_table_sqlite",
+    "_ensure_auto_blocked_table_mysql",
 ]
