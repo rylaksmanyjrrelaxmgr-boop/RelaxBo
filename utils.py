@@ -2,8 +2,17 @@
 # -*- coding: utf-8 -*-
 
 """
-utils.py - الأدوات المساعدة للبوت (v7.10.2 — SECURITY-BRIDGE)
+utils.py - الأدوات المساعدة للبوت (v7.10.3 — SECURITY-BRIDGE + PENALTY-RESTORED)
 =================================================================================
+🆕 v7.10.3 (PENALTY-RESTORED):
+    🔴 FIX: إعادة لصق قسم Penalty I18N المفقود:
+        • _PENALTY_I18N  — قاموس ترجمات العقوبات (ar/en)
+        • _penalty_t()   — ترجمة موحّدة مع fallback
+        • _format_duration() — تنسيق مدة العقوبة
+        • apply_penalty() — الدالة الموحّدة لتطبيق العقوبات
+        هذه الأسماء كانت مدرجة في __all__ لكن غير معرّفة في الملف
+        → كانت تُسبّب ImportError في handlers_command و handlers_message
+
 🆕 v7.10.2 (SECURITY-BRIDGE-INTEGRATION):
     🟢 NEW: قسم 22 — Security Bridge
         • get_security_settings(chat_id)          — جلب إعدادات الأمان (with cache)
@@ -30,6 +39,7 @@ utils.py - الأدوات المساعدة للبوت (v7.10.2 — SECURITY-BRID
     🔴 FIX-1: حذف الأسماء غير المعرّفة من __all__:
               apply_penalty, _format_duration, _penalty_t, _PENALTY_I18N
               (كانت تُسبّب AttributeError عند from utils import *)
+              ← أُلغي في v7.10.3: تمّت إعادة تعريفها فعلياً
     🟠 FIX-2: check_all_security يدعم analyze_message_full
               sync و async على السواء (asyncio.iscoroutine)
     🟠 FIX-3: check_bot_permissions — إضافة 'can_pin': False
@@ -122,6 +132,7 @@ _HIDDEN_CHARS = (
 
 _HIDDEN_TRANSLATE_TABLE = {ord(c): None for c in _HIDDEN_CHARS}
 
+
 def _normalize_unicode(text: str) -> str:
     """تطبيع NFKC + إزالة المحارف المخفية + التطويل."""
     if not text:
@@ -135,6 +146,7 @@ def _normalize_unicode(text: str) -> str:
         text = text.replace(_ARABIC_TATWEEL, '')
     return text
 
+
 # ═══════════════════════════════════════════════════════════════════
 # قائمة اللغات الثابتة (RR7)
 # ═══════════════════════════════════════════════════════════════════
@@ -146,6 +158,7 @@ _AVAILABLE_LANGUAGES: Dict[str, str] = {
     "fa": "فارسی 🇮🇷", "ur": "اردو 🇵🇰", "nl": "Nederlands 🇳🇱",
     "pl": "Polski 🇵🇱", "hi": "हिन्दी 🇮🇳",
 }
+
 
 # =====================================================================
 # 0. 🧠 SmartCache
@@ -268,9 +281,11 @@ class SmartCache:
         async with self._lock:
             return len(self._cache)
 
+
 _auth_cache_smart = SmartCache(ttl=60, max_size=2000)
 _auth_neg_cache = SmartCache(ttl=15, max_size=1000)
 _security_stats_cache = SmartCache(ttl=60, max_size=500)
+
 
 # =====================================================================
 # 1. TimeUtils
@@ -330,6 +345,7 @@ class TimeUtils:
         except (ValueError, TypeError):
             return None
 
+
 # =====================================================================
 # 2. TextUtils
 # =====================================================================
@@ -375,6 +391,7 @@ class TextUtils:
     @staticmethod
     def truncate(text: str, max_len: int = 200) -> str:
         return text[:max_len] + ("..." if len(text) > max_len else "")
+
 
 # =====================================================================
 # 3. RateLimiter
@@ -422,8 +439,10 @@ class RateLimiter:
             else:
                 await asyncio.sleep(0.01)
 
+
 RATE_LIMITER = RateLimiter(max_concurrent=15, max_per_second=30)
 PUBLISH_RATE_LIMITER = RateLimiter(max_concurrent=5, max_per_second=10)
+
 
 # =====================================================================
 # 4. MetricsCollector
@@ -456,7 +475,9 @@ class MetricsCollector:
     def increment_messages(self):
         self.messages_processed += 1
 
+
 METRICS = MetricsCollector()
+
 
 # =====================================================================
 # 5. AutoReplyCache
@@ -481,7 +502,9 @@ class AutoReplyCache:
     def clear(self):
         self._cache.clear()
 
+
 _auto_reply_cache = AutoReplyCache(maxsize=300, ttl=300)
+
 
 # =====================================================================
 # 5.1 _COMMON_PHRASES
@@ -614,6 +637,7 @@ _COMMON_PHRASES: Dict[str, Dict[str, str]] = {
 }
 
 _ARABIC_TEXT_PATTERN = re.compile(r'[\u0600-\u06FF]')
+
 
 # =====================================================================
 # 6. TranslationManager
@@ -789,8 +813,10 @@ class TranslationManager:
             "default_lang": cls._default_lang,
         }
 
+
 async def get_text(lang: str, key: str, **kwargs) -> str:
     return TranslationManager.get_text(lang, key, **kwargs)
+
 
 # =====================================================================
 # 7. UserState + StateManager
@@ -868,6 +894,7 @@ class UserState(Enum):
     WAIT_UNBAN_USER_ID = auto()
     WAIT_REM_LANG = auto()
 
+
 class StateManager:
     _cache: TTLCache = TTLCache(maxsize=10000, ttl=300)
     _lock = threading.Lock()
@@ -891,6 +918,7 @@ class StateManager:
     def is_expired(cls, user_id: int, timeout: int = None) -> bool:
         with cls._lock:
             return cls._cache.get(user_id) is None
+
 
 # =====================================================================
 # 8. CB
@@ -1068,6 +1096,7 @@ class CB:
     AUTO_REPLY_ADD = "auto_reply_add"
     AUTO_REPLY_DEL = "auto_reply_del"
     AUTO_REPLY_LIST = "auto_reply_list"
+
 
 # =====================================================================
 # 9. KeyboardFactory
@@ -1911,6 +1940,7 @@ class KeyboardFactory:
             f"{T('security_disabled_footer', '🔴 معطّل')}</i>"
         )
 
+
 # =====================================================================
 # 10. كاش الكلمات المحظورة
 # =====================================================================
@@ -1928,6 +1958,7 @@ _global_words_loaded_at: float = 0.0
 _global_words_lock: asyncio.Lock = asyncio.Lock()
 _GLOBAL_WORDS_TTL = 1800
 
+
 def _normalize_word(word: Any) -> Optional[str]:
     if not isinstance(word, str):
         return None
@@ -1942,6 +1973,7 @@ def _normalize_word(word: Any) -> Optional[str]:
         word = word.replace(_ARABIC_TATWEEL, '')
     word = re.sub(r'\s+', ' ', word).strip()
     return word if word else None
+
 
 async def _get_or_create_banned_words_lock(chat_id: int) -> asyncio.Lock:
     async with _banned_words_locks_guard:
@@ -1968,6 +2000,7 @@ async def _get_or_create_banned_words_lock(chat_id: int) -> asyncio.Lock:
         _banned_words_locks[chat_id] = lock
         return lock
 
+
 async def _get_global_words_cached() -> List[str]:
     global _global_words_cache, _global_words_loaded_at
 
@@ -1993,6 +2026,7 @@ async def _get_global_words_cached() -> List[str]:
         except Exception as e:
             logger.error(f"❌ فشل جلب الكلمات العامة: {e}")
             return _global_words_cache or []
+
 
 async def get_banned_words_cached(chat_id: int) -> List[str]:
     if _ENABLE_BANNED_WORDS_CACHE:
@@ -2039,6 +2073,7 @@ async def get_banned_words_cached(chat_id: int) -> List[str]:
             logger.error(f"❌ فشل جلب الكلمات المحظورة: {e}")
             return []
 
+
 def _clear_db_banned_words_cache(chat_id: int = None) -> None:
     try:
         if hasattr(DB, '_banned_words_cache') and DB._banned_words_cache is not None:
@@ -2057,6 +2092,7 @@ def _clear_db_banned_words_cache(chat_id: int = None) -> None:
     except Exception as e:
         logger.debug(f"invalidate DB banned_words cache: {e}")
 
+
 def invalidate_banned_words_cache(chat_id: int = None) -> None:
     global _global_words_cache, _global_words_loaded_at
 
@@ -2070,6 +2106,7 @@ def invalidate_banned_words_cache(chat_id: int = None) -> None:
         _banned_words_cache_time.pop(chat_id, None)
 
     _clear_db_banned_words_cache(chat_id)
+
 
 async def invalidate_banned_words_cache_async(chat_id: int = None) -> None:
     global _global_words_cache, _global_words_loaded_at
@@ -2086,12 +2123,14 @@ async def invalidate_banned_words_cache_async(chat_id: int = None) -> None:
 
     _clear_db_banned_words_cache(chat_id)
 
+
 async def get_min_publish_interval() -> int:
     val = await DB.get_setting('min_publish_interval', str(CONFIG.MIN_PUBLISH_INTERVAL))
     try:
         return max(1, int(val))
     except (ValueError, TypeError):
         return CONFIG.MIN_PUBLISH_INTERVAL
+
 
 # =====================================================================
 # 11. دوال الصلاحيات
@@ -2121,6 +2160,7 @@ async def _do_auth_check(bot, chat_id: int, user_id: int) -> bool:
 
     return False
 
+
 async def is_authorized_in_group(bot, chat_id: int, user_id: int) -> bool:
     try:
         primary_id = int(CONFIG.PRIMARY_OWNER_ID)
@@ -2149,8 +2189,10 @@ async def is_authorized_in_group(bot, chat_id: int, user_id: int) -> bool:
 
     return authorized
 
+
 def invalidate_auth_cache(chat_id: int = None, user_id: int = None) -> None:
     return None
+
 
 async def invalidate_auth_cache_async(
     chat_id: int = None, user_id: int = None
@@ -2165,6 +2207,7 @@ async def invalidate_auth_cache_async(
         else:
             await _auth_cache_smart.clear()
             await _auth_neg_cache.clear()
+
 
 async def check_bot_permissions(bot, chat_id: int) -> dict:
     try:
@@ -2181,6 +2224,7 @@ async def check_bot_permissions(bot, chat_id: int) -> dict:
         return {'can_act': True, 'reason': '', 'can_pin': can_pin}
     except Exception as e:
         return {'can_act': False, 'reason': str(e)[:50], 'can_pin': False}
+
 
 # =====================================================================
 # 12. إرسال آمن
@@ -2246,6 +2290,7 @@ async def _send_media(bot, chat_id, media_type, media_file_id,
     else:
         return await bot.send_message(chat_id, caption or ".", reply_markup=reply_markup,
                                       parse_mode=parse_mode, **kwargs)
+
 
 async def safe_send(bot, chat_id: int, text: str, reply_markup=None,
                     parse_mode: str = None, **kwargs):
@@ -2348,6 +2393,7 @@ async def safe_send(bot, chat_id: int, text: str, reply_markup=None,
 
     return None
 
+
 def get_ram_usage() -> dict:
     if psutil is None:
         return {'total': 0, 'used': 0, 'percent': 0}
@@ -2361,6 +2407,7 @@ def get_ram_usage() -> dict:
     except Exception as e:
         logger.error(f"❌ فشل جلب إحصائيات الرام: {e}")
         return {'total': 0, 'used': 0, 'percent': 0}
+
 
 # =====================================================================
 # 13. دوال حظر/فك حظر المستخدمين
@@ -2400,6 +2447,7 @@ async def ban_user_by_id(user_id: int) -> Tuple[bool, str]:
         logger.error(f"❌ ban_user_by_id({user_id}): {e}", exc_info=True)
         return False, f"❌ فشل الحظر: {str(e)[:100]}"
 
+
 async def unban_user_by_id(user_id: int) -> Tuple[bool, str]:
     try:
         row = await DB.fetchone("SELECT user_id FROM users WHERE user_id=?", (user_id,))
@@ -2416,6 +2464,7 @@ async def unban_user_by_id(user_id: int) -> Tuple[bool, str]:
         logger.error(f"❌ unban_user_by_id({user_id}): {e}", exc_info=True)
         return False, f"❌ فشل فك الحظر: {str(e)[:100]}"
 
+
 # =====================================================================
 # 14. نظام العقوبات
 # =====================================================================
@@ -2424,6 +2473,7 @@ class PenaltyStrategy(ABC):
     @abstractmethod
     async def apply(self, bot, chat_id: int, user_id: int, **kwargs) -> Tuple[bool, str]:
         pass
+
 
 class BanPenalty(PenaltyStrategy):
     async def apply(self, bot, chat_id: int, user_id: int, **kwargs) -> Tuple[bool, str]:
@@ -2436,6 +2486,7 @@ class BanPenalty(PenaltyStrategy):
             return True, "✅ تم الحظر"
         except Exception as e:
             return False, str(e)[:100]
+
 
 class MutePenalty(PenaltyStrategy):
     async def apply(self, bot, chat_id: int, user_id: int, **kwargs) -> Tuple[bool, str]:
@@ -2456,6 +2507,7 @@ class MutePenalty(PenaltyStrategy):
         except Exception as e:
             return False, str(e)[:100]
 
+
 class KickPenalty(PenaltyStrategy):
     async def apply(self, bot, chat_id: int, user_id: int, **kwargs) -> Tuple[bool, str]:
         if user_id == bot.id:
@@ -2467,6 +2519,7 @@ class KickPenalty(PenaltyStrategy):
         except Exception as e:
             return False, str(e)[:100]
 
+
 class WarnPenalty(PenaltyStrategy):
     async def apply(self, bot, chat_id: int, user_id: int, **kwargs) -> Tuple[bool, str]:
         if user_id == bot.id:
@@ -2476,6 +2529,7 @@ class WarnPenalty(PenaltyStrategy):
             return True, f"⚠️ تحذير {w}"
         except Exception as e:
             return False, str(e)[:100]
+
 
 class RestrictPenalty(PenaltyStrategy):
     async def apply(self, bot, chat_id: int, user_id: int, **kwargs) -> Tuple[bool, str]:
@@ -2496,6 +2550,7 @@ class RestrictPenalty(PenaltyStrategy):
         except Exception as e:
             return False, str(e)[:100]
 
+
 class UnbanPenalty(PenaltyStrategy):
     async def apply(self, bot, chat_id: int, user_id: int, **kwargs) -> Tuple[bool, str]:
         try:
@@ -2503,6 +2558,7 @@ class UnbanPenalty(PenaltyStrategy):
             return True, "✅ تم إلغاء الحظر"
         except Exception as e:
             return False, str(e)[:100]
+
 
 class PenaltyFactory:
     _strategies: Dict[str, PenaltyStrategy] = {
@@ -2518,6 +2574,204 @@ class PenaltyFactory:
     def get_strategy(cls, penalty_type: str) -> Optional[PenaltyStrategy]:
         return cls._strategies.get(penalty_type)
 
+
+# =====================================================================
+# 14b. Penalty I18N + apply_penalty (v7.10.1/v7.10.3)
+#      أُعيد لصقه لإصلاح ImportError في handlers_command/handlers_message
+# =====================================================================
+
+_PENALTY_I18N: Dict[str, Dict[str, str]] = {
+    "ar": {
+        "ban": "🚫 حظر", "mute": "🔇 كتم", "kick": "👢 طرد",
+        "restrict": "🔒 تقييد", "warn": "⚠️ تحذير", "unban": "🔓 فك حظر",
+        "none": "بدون", "permanent": "دائم",
+        "duration_seconds": "{n} ثانية",
+        "duration_minutes": "{n} دقيقة",
+        "duration_hours": "{n} ساعة",
+        "duration_days": "{n} يوم",
+        "success_ban": "✅ تم حظر المستخدم {name}",
+        "success_mute": "✅ تم كتم المستخدم {name}",
+        "success_kick": "✅ تم طرد المستخدم {name}",
+        "success_restrict": "✅ تم تقييد المستخدم {name}",
+        "success_warn": "⚠️ تم تحذير المستخدم {name}",
+        "success_unban": "✅ تم فك الحظر عن المستخدم {name}",
+        "fail_ban": "❌ فشل الحظر",
+        "fail_mute": "❌ فشل الكتم",
+        "fail_kick": "❌ فشل الطرد",
+        "fail_restrict": "❌ فشل التقييد",
+        "fail_warn": "❌ فشل التحذير",
+        "fail_unban": "❌ فشل فك الحظر",
+        "cannot_penalize_bot": "❌ لا يمكن معاقبة البوت نفسه",
+        "cannot_penalize_admin": "❌ لا يمكن معاقبة مشرف",
+        "unknown_penalty": "❌ نوع عقوبة غير معروف: {ptype}",
+        "reason_label": "📋 السبب",
+        "duration_label": "⏱️ المدة",
+        "moderator_label": "👮 المشرف",
+        "target_label": "👤 المستهدف",
+        "group_label": "💬 المجموعة",
+    },
+    "en": {
+        "ban": "🚫 Ban", "mute": "🔇 Mute", "kick": "👢 Kick",
+        "restrict": "🔒 Restrict", "warn": "⚠️ Warn", "unban": "🔓 Unban",
+        "none": "None", "permanent": "Permanent",
+        "duration_seconds": "{n}s",
+        "duration_minutes": "{n}m",
+        "duration_hours": "{n}h",
+        "duration_days": "{n}d",
+        "success_ban": "✅ User {name} banned",
+        "success_mute": "✅ User {name} muted",
+        "success_kick": "✅ User {name} kicked",
+        "success_restrict": "✅ User {name} restricted",
+        "success_warn": "⚠️ User {name} warned",
+        "success_unban": "✅ User {name} unbanned",
+        "fail_ban": "❌ Ban failed",
+        "fail_mute": "❌ Mute failed",
+        "fail_kick": "❌ Kick failed",
+        "fail_restrict": "❌ Restrict failed",
+        "fail_warn": "❌ Warn failed",
+        "fail_unban": "❌ Unban failed",
+        "cannot_penalize_bot": "❌ Cannot penalize the bot",
+        "cannot_penalize_admin": "❌ Cannot penalize an admin",
+        "unknown_penalty": "❌ Unknown penalty: {ptype}",
+        "reason_label": "📋 Reason",
+        "duration_label": "⏱️ Duration",
+        "moderator_label": "👮 Moderator",
+        "target_label": "👤 Target",
+        "group_label": "💬 Group",
+    },
+}
+
+
+def _penalty_t(lang: str, key: str, **kwargs) -> str:
+    """ترجمة رسائل العقوبات — fallback: lang → ar → en → key."""
+    try:
+        pack = _PENALTY_I18N.get(lang) or _PENALTY_I18N.get("ar") or {}
+        template = pack.get(key)
+        if template is None:
+            template = (_PENALTY_I18N.get("en") or {}).get(key, key)
+        if kwargs:
+            try:
+                return template.format(**kwargs)
+            except (KeyError, IndexError):
+                return template
+        return template
+    except Exception:
+        return key
+
+
+def _format_duration(seconds, lang: str = "ar") -> str:
+    """تنسيق مدة العقوبة (v7.10.1)."""
+    try:
+        seconds = int(seconds or 0)
+    except (TypeError, ValueError):
+        seconds = 0
+    if seconds <= 0:
+        return _penalty_t(lang, "permanent")
+    if seconds < 60:
+        return _penalty_t(lang, "duration_seconds", n=seconds)
+    if seconds < 3600:
+        return _penalty_t(lang, "duration_minutes", n=seconds // 60)
+    if seconds < 86400:
+        return _penalty_t(lang, "duration_hours", n=seconds // 3600)
+    return _penalty_t(lang, "duration_days", n=seconds // 86400)
+
+
+async def apply_penalty(
+    bot,
+    chat_id: int,
+    user_id: int,
+    penalty_type: str,
+    duration: int = 0,
+    reason: str = "",
+    *,
+    moderator: Optional[int] = None,
+    username: str = "",
+    first_name: str = "",
+    chat_name: str = "",
+    lang: str = "ar",
+) -> Tuple[bool, str]:
+    """
+    تطبيق العقوبة الموحّد (v7.10.1 / v7.10.3).
+
+    Returns:
+        (success: bool, message: str)
+    """
+    try:
+        if penalty_type not in (
+            "ban", "mute", "kick", "restrict", "warn", "unban",
+        ):
+            return False, _penalty_t(
+                lang, "unknown_penalty", ptype=penalty_type,
+            )
+
+        try:
+            bot_id = getattr(bot, "id", None)
+            if bot_id is not None and int(user_id) == int(bot_id):
+                return False, _penalty_t(lang, "cannot_penalize_bot")
+        except Exception:
+            pass
+
+        strategy = PenaltyFactory.get_strategy(penalty_type)
+        if strategy is None:
+            return False, _penalty_t(
+                lang, "unknown_penalty", ptype=penalty_type,
+            )
+
+        try:
+            ok, result_msg = await strategy.apply(
+                bot, chat_id, user_id, duration=duration,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.warning(
+                "apply_penalty strategy error | type=%s chat=%s user=%s: %s",
+                penalty_type, chat_id, user_id, e,
+            )
+            ok = False
+            result_msg = str(e)[:100]
+
+        try:
+            if hasattr(DB, "add_admin_log"):
+                await DB.add_admin_log(
+                    chat_id=chat_id,
+                    admin_id=moderator or (getattr(bot, "id", 0) or 0),
+                    action=f"penalty_{penalty_type}",
+                    target_id=user_id,
+                    reason=(reason or "")[:200],
+                )
+        except TypeError:
+            try:
+                await DB.add_admin_log(
+                    chat_id,
+                    moderator or (getattr(bot, "id", 0) or 0),
+                    f"penalty_{penalty_type}",
+                    user_id,
+                )
+            except Exception as e2:
+                logger.debug("apply_penalty admin_log (legacy): %s", e2)
+        except Exception as e:
+            logger.debug("apply_penalty admin_log: %s", e)
+
+        name = first_name or username or str(user_id)
+        if ok:
+            msg = _penalty_t(lang, f"success_{penalty_type}", name=name)
+        else:
+            msg = _penalty_t(lang, f"fail_{penalty_type}")
+            if result_msg:
+                msg = f"{msg} — {result_msg[:80]}"
+        return ok, msg
+
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:
+        logger.error(
+            "apply_penalty unexpected | type=%s chat=%s user=%s: %s",
+            penalty_type, chat_id, user_id, e, exc_info=True,
+        )
+        return False, f"❌ خطأ غير متوقع: {str(e)[:80]}"
+
+
 # =====================================================================
 # 15. الردود التلقائية
 # =====================================================================
@@ -2528,6 +2782,7 @@ _USAGE_FLUSH_INTERVAL = 60
 _usage_lock = asyncio.Lock()
 _flush_in_progress = False
 
+
 async def _increment_usage_async(chat_id: int, keyword: str):
     async with _usage_lock:
         key = (chat_id, keyword.lower())
@@ -2535,6 +2790,7 @@ async def _increment_usage_async(chat_id: int, keyword: str):
         should_flush = len(_usage_updates) >= _USAGE_FLUSH_LIMIT
     if should_flush:
         await _flush_usage_updates()
+
 
 async def _flush_usage_updates():
     global _flush_in_progress
@@ -2566,6 +2822,7 @@ async def _flush_usage_updates():
         async with _usage_lock:
             _flush_in_progress = False
 
+
 async def export_auto_replies(chat_id: int, file_path: str = None) -> int:
     rows = await DB.fetchall(
         "SELECT keyword, reply FROM auto_replies WHERE chat_id=? AND is_active=1",
@@ -2583,6 +2840,7 @@ async def export_auto_replies(chat_id: int, file_path: str = None) -> int:
 
     await asyncio.to_thread(_write)
     return len(data)
+
 
 async def import_auto_replies(chat_id: int,
                               file_path_or_data: Union[str, List[Dict]],
@@ -2625,6 +2883,7 @@ async def import_auto_replies(chat_id: int,
         logger.error(f"❌ Import error: {e}")
         return 0
 
+
 async def fetch_json_from_url(url: str) -> Optional[Union[list, dict]]:
     try:
         parsed = urlparse(url)
@@ -2657,6 +2916,7 @@ async def fetch_json_from_url(url: str) -> Optional[Union[list, dict]]:
         logger.error(f"❌ Fetch JSON error: {e}")
         return None
 
+
 # =====================================================================
 # 16. الردود من ملف
 # =====================================================================
@@ -2678,6 +2938,7 @@ def load_replies_from_file() -> dict:
         logger.error(f"❌ خطأ في تحميل replies.py: {e}")
         return {}
 
+
 _REPLIES_FROM_FILE = load_replies_from_file()
 
 if _REPLIES_FROM_FILE:
@@ -2685,7 +2946,9 @@ if _REPLIES_FROM_FILE:
 else:
     logger.info("ℹ️ لا توجد ردود محملة من ملف replies.py")
 
+
 _COMPILED_REPLIES_LIST: List[Tuple[str, re.Pattern]] = []
+
 
 def _build_compiled_replies_pattern() -> None:
     global _COMPILED_REPLIES_LIST
@@ -2704,7 +2967,9 @@ def _build_compiled_replies_pattern() -> None:
         result.append((k, compiled))
     _COMPILED_REPLIES_LIST = result
 
+
 _build_compiled_replies_pattern()
+
 
 def get_reply_from_file(keyword: str) -> Optional[str]:
     if not _REPLIES_FROM_FILE or not keyword:
@@ -2731,6 +2996,7 @@ def get_reply_from_file(keyword: str) -> Optional[str]:
                 return random.choice(replies)
     return None
 
+
 def reload_replies_from_file() -> dict:
     global _REPLIES_FROM_FILE
     _REPLIES_FROM_FILE = load_replies_from_file()
@@ -2738,6 +3004,7 @@ def reload_replies_from_file() -> dict:
     if _REPLIES_FROM_FILE:
         logger.info(f"✅ تم إعادة تحميل ملف الردود: {len(_REPLIES_FROM_FILE)} رد")
     return _REPLIES_FROM_FILE
+
 
 # =====================================================================
 # 17. المهام الخلفية
@@ -3612,6 +3879,7 @@ class BackgroundTasks:
             except Exception as e:
                 logger.error(f"❌ فشل تنظيف قاعدة البيانات: {e}")
 
+
 # =====================================================================
 # 18. Warmup
 # =====================================================================
@@ -3666,11 +3934,13 @@ async def warmup_all() -> Dict[str, Any]:
     )
     return result
 
+
 # =====================================================================
 # 19. خادم الويب
 # =====================================================================
 
 _telegram_app = None
+
 
 async def setup_webhook(app, port: int):
     global _telegram_app
@@ -3696,6 +3966,7 @@ async def setup_webhook(app, port: int):
 
     logger.info(f"✅ Webhook on port {port}")
     return runner
+
 
 async def webhook_handler(request):
     expected_secret = getattr(CONFIG, 'WEBHOOK_SECRET', None)
@@ -3729,6 +4000,7 @@ async def webhook_handler(request):
     except Exception as e:
         logger.error(f"❌ Webhook error: {e}")
         return web.Response(status=200, text="OK")
+
 
 # =====================================================================
 # 20. معالج الأخطاء
@@ -3781,6 +4053,7 @@ class ErrorHandler:
             except Exception:
                 pass
 
+
 # =====================================================================
 # 21. خريطة أزرار الأمان → حقول DB (v7.10.0)
 # =====================================================================
@@ -3828,6 +4101,7 @@ NEW_SECURITY_DEFAULTS: Dict[str, int] = {
     "delete_postbot_pattern": 0,
 }
 
+
 # =====================================================================
 # 22. Security Bridge (v7.10.2) — ربط أزرار الأمان بمحرك الكشف
 # ═════════════════════════════════════════════════════════════════════
@@ -3846,6 +4120,7 @@ NEW_SECURITY_DEFAULTS: Dict[str, int] = {
 # Lazy imports من handlers_message_detectors
 _detector_imports: Optional[Dict[str, Any]] = None
 _detector_import_lock = threading.Lock()
+
 
 def _lazy_import_detectors() -> Dict[str, Any]:
     """
@@ -3896,12 +4171,14 @@ def _lazy_import_detectors() -> Dict[str, Any]:
 
     return _detector_imports
 
+
 # =====================================================================
 # كاش إعدادات الأمان (per-chat، TTL=60s)
 # =====================================================================
 
 _security_settings_cache: Dict[int, Tuple[float, Dict[str, int]]] = {}
 _SEC_SETTINGS_TTL = 60
+
 
 async def get_security_settings(chat_id: int) -> Dict[str, int]:
     """
@@ -3970,6 +4247,7 @@ async def get_security_settings(chat_id: int) -> Dict[str, int]:
     _security_settings_cache[chat_id] = (now, settings)
     return settings
 
+
 def invalidate_security_settings_cache(chat_id: Optional[int] = None) -> None:
     """
     يُستدعى من handlers_callbacks.py عند toggle أي زر أمان.
@@ -3979,6 +4257,7 @@ def invalidate_security_settings_cache(chat_id: Optional[int] = None) -> None:
         _security_settings_cache.clear()
     else:
         _security_settings_cache.pop(chat_id, None)
+
 
 # =====================================================================
 # الفحص الرئيسي — أزرار الأمان المخصصة
@@ -4154,6 +4433,7 @@ async def should_delete_by_security(
         logger.error(f"should_delete_by_security: {e}", exc_info=True)
         return False, None
 
+
 # =====================================================================
 # الفحص الشامل — أزرار الأمان + محرك السبام الكامل
 # =====================================================================
@@ -4257,8 +4537,9 @@ async def check_all_security(
 
     return result
 
+
 # =====================================================================
-# v7.10.2: تصدير الجسر للاستخدام من handlers
+# v7.10.3: تصدير الجسر للاستخدام من handlers
 # =====================================================================
 
 __all__ = [
@@ -4275,8 +4556,8 @@ __all__ = [
     'ban_user_by_id', 'unban_user_by_id',
     'PenaltyStrategy', 'BanPenalty', 'MutePenalty', 'KickPenalty',
     'WarnPenalty', 'RestrictPenalty', 'UnbanPenalty', 'PenaltyFactory',
-    # 🔴 FIX-1: حُذفت الأسماء غير المعرّفة:
-    #   apply_penalty, _format_duration, _penalty_t, _PENALTY_I18N
+    # ✅ v7.10.3: أُعيدت هذه الأسماء مع تعريفاتها الفعلية
+    'apply_penalty', '_format_duration', '_penalty_t', '_PENALTY_I18N',
     'export_auto_replies', 'import_auto_replies', 'fetch_json_from_url',
     'load_replies_from_file', 'get_reply_from_file', 'reload_replies_from_file',
     'BackgroundTasks', 'setup_webhook', 'webhook_handler', 'ErrorHandler',
@@ -4305,8 +4586,9 @@ _PUBLISH_TIMEOUTS = {
     "pool_timeout": 15.0,
 }
 
+
 # =====================================================================
-# LOAD BEACON — v7.10.2
+# LOAD BEACON — v7.10.3
 # =====================================================================
 # 🟡 FIX-4: لا نستدعي _lazy_import_detectors() بشكل eager —
 #           للحفاظ على ميزة lazy import ومنع circular imports
@@ -4314,8 +4596,9 @@ _PUBLISH_TIMEOUTS = {
 
 try:
     logger.info(
-        "🛡️ utils.py v7.10.2 SECURITY-BRIDGE loaded | "
-        "Detectors=lazy | Langs=%d | Buttons=✅ | Security-Bridge=✅",
+        "🛡️ utils.py v7.10.3 PENALTY-RESTORED loaded | "
+        "Detectors=lazy | Langs=%d | Buttons=✅ | Security-Bridge=✅ | "
+        "Penalty=✅",
         len(_AVAILABLE_LANGUAGES),
     )
 except Exception:
