@@ -1,65 +1,70 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-database.py - قاعدة البيانات المتكاملة (v7.7.53 — NEW-SECURITY-TYPES)
+database.py - قاعدة البيانات المتكاملة (v7.7.54 — HARDENED-AUDIT)
 ================================================================================
+🆕 v7.7.54 (HARDENED-AUDIT — إصلاح أخطاء الفحص الشامل):
+  🔴 FIX-1 CRITICAL: _get_pg_query_no_mv_fallback جديد — يُستخدم عند
+      غياب MV بدل الـ fallback الذي كان يشير إلى mv_active_user_limits
+      غائبة → "relation does not exist" مخفي.
+  🔴 FIX-2 CRITICAL: _import_auto_replies hash يشمل الآن media_id و
+      buttons → التغييرات في auto_replies.py لم تعد صامتة.
+  🔴 FIX-3 CRITICAL: safety guard قبل حذف جماعي في banned_words و
+      auto_replies — يمنع فقدان بيانات عند ملف فارغ/تالف.
+  🟠 FIX-4 HIGH: mark_users_as_blocked — جمع select+update داخل معاملة
+      واحدة لمنع race على MySQL.
+  🟠 FIX-5 HIGH: mark_published_batch — التحقق من اقتران
+      (channel_db_id, post_id) قبل UPDATE.
+  🟠 FIX-6 HIGH: _import_banned_words + _import_auto_replies —
+      دعم transaction موحّد لكل DBs (وليس فقط PG).
+  🟠 FIX-7 HIGH: تحذير عند عدم توفر _ASYNC_MYSQL_ERROR → retry معطّل.
+  🟡 FIX-8 MEDIUM: _normalize_params — dedup تحذير frozenset (warn-once).
+  🟡 FIX-9 MEDIUM: _ensure_group_exists — تحديث chat_name عند اختلافه.
+  🟡 FIX-10 MEDIUM: type hints str = None → Optional[str] في 3 دوال.
+  🟡 FIX-11 MEDIUM: expire_penalties — إزالة تكرار query زائد.
+  🟡 FIX-12 MEDIUM: _maybe_refresh_mv — cooldown أقصر عند الفشل.
+  🟢 FIX-13 LOW: _execute_with_logging — redaction regex أقوى
+      (يغطي 5 أرقام + نصوص طويلة).
+  🟢 FIX-14 LOW: get_db_size_kb — cache لمدة 60 ثانية.
+  🟢 FIX-15 LOW: _import_banned_words — fallback owner_id=0 بدل early
+      return المانع لـ hash.
+  🟢 FIX-16 LOW: register_user — COALESCE بدل CASE WHEN لتجنّب
+      مشاكل type hints في MySQL.
+  🟢 FIX-17 LOW: _tune_heavy_tables_autovacuum — استعلام جماعي واحد
+      لفحص وجود الجداول (N+1 → 1).
+  🟢 FIX-18 LOW: register_user — cache invalidation بعد النجاح فقط
+      عند force=True لتجنب إبطال زائد.
+
 🆕 v7.7.53 (NEW-SECURITY-TYPES — دعم الأزرار الجديدة):
   ✅ NC1: VALID_VIOLATION_TYPES — إضافة 10 أنواع جديدة:
       forwarded, spam_score, postbot_pattern, poll_link,
       at_channel, tg_scheme, button_link, email, vcard_url, venue_url
-      (كانت تُستخدم في handlers_message.py v7.15.0 بدون تعريف → TypeError).
-
   ✅ NC2: _normalize_params — تحذير من frozenset + توثيق أفضل.
 
-🆕 v7.7.52 (REVIEW-FIXES-2 — DEEP AUDIT):
-  🔴 FIX-CRITICAL:
-    ✅ mark_published_and_advance: إزالة subquery خام
-       `WHERE key = 'min_publish_interval'` (كلمة `key` محجوزة في MySQL)
-       → فصل الاستعلام + استخدام _sql_get_setting_value().
-       الأثر السابق: الاستثناء يُبتلع بصمت → ROLLBACK كامل للمعاملة →
-       UPDATE posts SET published=1 يُلغى → المنشور يُعاد نشره كل دورة.
-
-  🟡 FIX-MEDIUM:
-    ✅ _sql_get_setting_value: إضافة LIMIT 1 (دفاع في العمق).
-    ✅ _executemany_with_conn (PG fallback): regex أدق.
-
-🆕 v7.7.51 (REVIEW-FIXES):
-  🔴 FIX-CRITICAL:
-    ✅ get_dev_log_channel: استبدال الاستعلام الخام بـ _sql_get_setting_value()
-    ✅ _sql_get_setting_value: اقتباس PG identifiers
-
-  🟡 FIX-MEDIUM:
-    ✅ _execute_with_retry: نقل import AsyncMySQLError إلى _ASYNC_MYSQL_ERROR
-    ✅ executemany: فحص نوع دفاعي
-    ✅ _create_secondary_indexes: كشف فهارس PG المعطوبة
-    ✅ add_penalty (SQLite branch): _execute_with_logging
-
-🆕 v7.7.50 (PARAM-NORMALIZATION)
-🆕 v7.7.49 (VACUUM-OUTSIDE-TX-FIX — CRITICAL)
-🆕 v7.7.48 (PG-NO-MV-FALLBACK-FIX)
-🆕 v7.7.47 (DEV-LOG-CHANNEL)
-🆕 v7.7.46 (SECONDARY-INDEXES-FIX)
-🆕 v7.7.45 (MIGRATIONS-EXTRACT)
-🆕 v7.7.44 (CACHES-EXTRACT)
-🆕 v7.7.43 (REFACTOR-MIXIN)
+🆕 v7.7.52 (REVIEW-FIXES-2):
+  🔴 mark_published_and_advance: إزالة subquery خام WHERE key='...'.
+  🟡 _sql_get_setting_value: LIMIT 1.
+  🟡 _executemany_with_conn (PG fallback): regex أدق.
 ================================================================================
 """
 
 # =====================================================================
 # 🧭 CHECKLIST — قبل أي patch في هذه الوحدة
 # =====================================================================
-# [1] التناظر: هل توجد دالة/نمط مماثل يستحق نفس الإصلاح؟
-# [2] التغطية عبر DBs: SQLite / MySQL / PostgreSQL — بما فيها MV/CTE.
-# [3] hash/cache: _upsert_setting خارج كل if — وإلا حلقات لا نهائية.
-# [4] Escape chars في SQL: استخدم '!' — موحّد عبر MySQL/PG/SQLite.
-# [5] القيود في ALTER TABLE: على MySQL، MODIFY COLUMN يستبدل التعريف.
-# [6] Magic numbers: كل رقم سحري → constant مُسمّى أعلى الملف.
-# [7] LIKE audit: grep -rn "LIKE" database_*.py | grep -v "ESCAPE '!'"
-# [8] CancelledError: catch BaseException عند الإلغاء — ليس Exception.
-# [9] Iteration safety: `for x in dict.keys()/items()` + `pop/del`
-#     داخل الحلقة = RuntimeError. استخدم `list(...)` snapshot.
+# [1]  التناظر: هل توجد دالة/نمط مماثل يستحق نفس الإصلاح؟
+# [2]  التغطية عبر DBs: SQLite / MySQL / PostgreSQL — بما فيها MV/CTE.
+# [3]  hash/cache: _upsert_setting خارج كل if — وإلا حلقات لا نهائية.
+# [4]  Escape chars في SQL: استخدم '!' — موحّد عبر MySQL/PG/SQLite.
+# [5]  القيود في ALTER TABLE: على MySQL، MODIFY COLUMN يستبدل التعريف.
+# [6]  Magic numbers: كل رقم سحري → constant مُسمّى أعلى الملف.
+# [7]  LIKE audit: grep -rn "LIKE" database_*.py | grep -v "ESCAPE '!'"
+# [8]  CancelledError: catch BaseException عند الإلغاء — ليس Exception.
+# [9]  Iteration safety: `for x in dict.keys()/items()` + `pop/del`
+#      داخل الحلقة = RuntimeError. استخدم `list(...)` snapshot.
 # [10] Reserved SQL words: `key`, `value`, `order`, `group`, `user`
-#     تُحاط بـ backticks/اقتباس دائماً عبر _sql_get_setting_value().
+#      تُحاط بـ backticks/اقتباس دائماً عبر _sql_get_setting_value().
+# [11] v7.7.54: كل delete-massive يحتاج threshold safety (see FIX-3).
+# [12] v7.7.54: hash-based imports يجب أن تشمل كل الحقول المؤثرة (FIX-2).
 # =====================================================================
 
 import os
@@ -117,7 +122,7 @@ USE_POSTGRES = (DB_TYPE == "postgres")
 USE_MYSQL = (DB_TYPE == "mysql")
 
 # =====================================================================
-# 0.0.1) ✅ v7.7.51: AsyncMySQLError على مستوى الوحدة
+# 0.0.1) ✅ v7.7.51 + v7.7.54 FIX-7: AsyncMySQLError + تحذير
 # =====================================================================
 
 _ASYNC_MYSQL_ERROR = None
@@ -132,6 +137,14 @@ if USE_MYSQL:
 
 logger = logging.getLogger(__name__)
 logger.info(f"📌 قاعدة البيانات: {DB_TYPE.upper()}")
+
+# ✅ v7.7.54 FIX-7: تحذير مبكر إن كان retry على MySQL معطّلاً
+if USE_MYSQL and _ASYNC_MYSQL_ERROR is None:
+    logger.warning(
+        "⚠️ v7.7.54 FIX-7: asyncmy.errors.MySQLError غير متاح — "
+        "retry على MySQL معطّل (Deadlock/Lock-wait لن يُعاد). "
+        "تحقق من تثبيت asyncmy بشكل صحيح."
+    )
 
 # =====================================================================
 # 0.0) مسارات stdlib و asyncio
@@ -516,6 +529,17 @@ UTC = timezone.utc
 
 GLOBAL_CHAT_ID = -1
 
+# ✅ v7.7.54 FIX-3: عتبات أمان الحذف الجماعي
+IMPORT_MASS_DELETE_MIN_ABSOLUTE = int(
+    os.getenv("IMPORT_MASS_DELETE_MIN_ABSOLUTE", "20")
+)
+IMPORT_MASS_DELETE_MAX_RATIO = float(
+    os.getenv("IMPORT_MASS_DELETE_MAX_RATIO", "0.5")
+)
+
+# ✅ v7.7.54 FIX-14: cache لـ get_db_size_kb
+DB_SIZE_CACHE_TTL = float(os.getenv("DB_SIZE_CACHE_TTL", "60"))
+
 if REFACTOR_MIXIN_AVAILABLE and _R_DEFAULT_PUBLISH_INTERVAL_MINUTES is not None:
     DEFAULT_PUBLISH_INTERVAL_MINUTES = _R_DEFAULT_PUBLISH_INTERVAL_MINUTES
     PUBLISH_POLLING_COMPENSATION_SECONDS = _R_PUBLISH_POLLING_COMPENSATION_SECONDS
@@ -686,11 +710,7 @@ async def _create_pool_with_retry(
 def _sql_get_setting_value() -> str:
     """
     ✅ v7.7.52: إضافة LIMIT 1 (دفاع في العمق).
-    ✅ v7.7.51: إضافة اقتباس PG identifiers دفاعاً ضد:
-      - ترقية PG تجعل `key`/`value` محجوزتين
-      - search_path غير قياسي (نادر لكن ممكن)
-    MySQL: backticks (كان موجوداً).
-    SQLite: بدون اقتباس (مطابق للسلوك الأصلي).
+    ✅ v7.7.51: إضافة اقتباس PG identifiers.
     """
     if USE_MYSQL:
         return "SELECT `value` FROM settings WHERE `key` = ? LIMIT 1"
@@ -700,44 +720,49 @@ def _sql_get_setting_value() -> str:
 
 # =====================================================================
 # 🆕 v7.7.50: PARAMETER NORMALIZATION
+# ✅ v7.7.54 FIX-8: dedup تحذير frozenset
 # =====================================================================
+
+_FROZENSET_WARN_SITES: Set[str] = set()
+_FROZENSET_WARN_LOCK = __import__("threading").Lock()
 
 def _normalize_params(params: Any) -> tuple:
     """
     🆕 v7.7.50: يُطبِّع المعاملات إلى tuple دائماً.
 
-    يقبل:
-        None              → ()
-        ()                → ()
-        scalar (int/str)  → (scalar,)
-        list              → tuple(items)
-        set               → tuple(items)
-        frozenset         → tuple(items) + تحذير (ترتيب غير مضمون)
-        tuple             → كما هو
-
-    ⚠️ v7.7.51: dict يُعامل كـ scalar (param واحد).
-
-    ⚠️ v7.7.53: frozenset يُنتج تحذيراً — الترتيب غير مضمون
-        عبر Python runs المختلفة. استخدم tuple/list.
-
-    أمثلة:
-        execute("SELECT $1::jsonb", {"a": 1})   # dict كـ param واحد
-        execute("SELECT ?, ?", [1, 2])          # list → (1, 2)
-        execute("UPDATE t SET x=? WHERE y=?", 5)  # scalar → (5,)
+    ⚠️ v7.7.53: frozenset يُنتج تحذيراً — الترتيب غير مضمون.
+    ✅ v7.7.54 FIX-8: التحذير يُسجَّل مرة واحدة لكل call-site.
     """
     if params is None:
         return ()
     if isinstance(params, tuple):
         return params
     if isinstance(params, frozenset):
-        # ⚠️ v7.7.53: frozenset غير مرتب — خطر أخطاء صامتة
-        logger.warning(
-            "_normalize_params: frozenset → ترتيب المعاملات غير مضمون "
-            "عبر Python runs. استخدم tuple/list بدلاً منه."
-        )
+        # ✅ FIX-8: warn-once per call-site
+        try:
+            frame = inspect.currentframe()
+            caller = frame.f_back if frame else None
+            site = "unknown"
+            if caller is not None:
+                site = f"{caller.f_code.co_filename}:{caller.f_lineno}"
+            with _FROZENSET_WARN_LOCK:
+                should_warn = site not in _FROZENSET_WARN_SITES
+                if should_warn:
+                    _FROZENSET_WARN_SITES.add(site)
+            if should_warn:
+                logger.warning(
+                    "_normalize_params: frozenset → ترتيب المعاملات غير "
+                    "مضمون عبر Python runs. استخدم tuple/list. "
+                    f"(site={site})"
+                )
+        except Exception:
+            pass
         return tuple(params)
     if isinstance(params, (list, set)):
         return tuple(params)
+    if isinstance(params, dict):
+        # ✅ FIX-15: توضيح أن dict يُعامَل كـ param واحد
+        return (params,)
     return (params,)
 
 # =====================================================================
@@ -1727,10 +1752,6 @@ class Database(
         "sticker", "voice", "video_note",
     }
 
-    # ═════════════════════════════════════════════════════════════════
-    # 🆕 v7.7.53: VALID_VIOLATION_TYPES — إضافة أنواع جديدة لدعم
-    # handlers_message.py v7.15.0 (كانت تُستخدم بدون تعريف → TypeError).
-    # ═════════════════════════════════════════════════════════════════
     VALID_VIOLATION_TYPES = {
         # ─── الأساسية (legacy) ───
         "link", "mention", "flood", "nsfw", "banned_word", "media", "other",
@@ -1747,9 +1768,7 @@ class Database(
         # ─── v7.14.0: عقوبات مركّبة ───
         "antiflood", "night_mode", "warn_penalty", "violation_penalty",
 
-        # ═════════════════════════════════════════════════════════════
-        # 🆕 v7.7.53: أنواع المخالفات الجديدة من handlers_message v7.15.0
-        # ═════════════════════════════════════════════════════════════
+        # ─── v7.7.53: أنواع المخالفات الجديدة ───
         "forwarded",          # رسالة معاد توجيهها (بديل عن 'forward')
         "spam_score",         # حذف بسبب spam score
         "postbot_pattern",    # نمط PostBot مزعج
@@ -2044,8 +2063,12 @@ class Database(
             self._mv_available = False
 
             self._group_security_columns_cache: Optional[set] = None
-            # ✅ v7.4.11: قفل لكاش أعمدة group_security
             self._gsc_columns_lock = asyncio.Lock()
+
+            # ✅ v7.7.54 FIX-14: cache لـ db_size_kb
+            self._db_size_kb_cache: Optional[float] = None
+            self._db_size_kb_cache_ts: float = 0.0
+            self._db_size_kb_lock = asyncio.Lock()
 
             self._singleton_init_done = True
         except Exception:
@@ -2119,10 +2142,6 @@ class Database(
             logger.warning(f"⚠️ clear_slow_queries_log: {e}")
             return 0
 
-    # ═══════════════════════════════════════════════════════════════
-    # ✅ v7.7.47 + v7.7.51: قناة سجل المطور
-    # ═══════════════════════════════════════════════════════════════
-
     async def get_dev_log_channel(self) -> str:
         """
         ✅ v7.7.51: استخدام _sql_get_setting_value() بدل الاستعلام الخام.
@@ -2171,41 +2190,57 @@ class Database(
             return False
 
     async def get_db_size_kb(self) -> float:
-        try:
-            if USE_POSTGRES:
-                size_bytes = await self.fetchval(
-                    "SELECT pg_database_size(current_database())",
-                    default=0,
-                )
-                if size_bytes:
-                    return round(float(size_bytes) / 1024.0, 2)
-                return 0.0
-            elif USE_MYSQL:
-                size_bytes = await self.fetchval(
-                    "SELECT SUM(data_length + index_length) "
-                    "FROM information_schema.tables "
-                    "WHERE table_schema = DATABASE()",
-                    default=0,
-                )
-                if size_bytes:
-                    return round(float(size_bytes) / 1024.0, 2)
-                return 0.0
-            else:
-                page_count = await self.fetchval(
-                    "PRAGMA page_count", default=0
-                )
-                page_size = await self.fetchval(
-                    "PRAGMA page_size", default=0
-                )
-                if page_count and page_size:
-                    return round(
-                        (int(page_count) * int(page_size)) / 1024.0,
-                        2,
+        """
+        ✅ v7.7.54 FIX-14: cache لمدة DB_SIZE_CACHE_TTL (افتراضي 60s).
+        """
+        now = time.monotonic()
+        if (self._db_size_kb_cache is not None
+                and now - self._db_size_kb_cache_ts < DB_SIZE_CACHE_TTL):
+            return self._db_size_kb_cache
+
+        async with self._db_size_kb_lock:
+            now = time.monotonic()
+            if (self._db_size_kb_cache is not None
+                    and now - self._db_size_kb_cache_ts < DB_SIZE_CACHE_TTL):
+                return self._db_size_kb_cache
+
+            value = 0.0
+            try:
+                if USE_POSTGRES:
+                    size_bytes = await self.fetchval(
+                        "SELECT pg_database_size(current_database())",
+                        default=0,
                     )
+                    if size_bytes:
+                        value = round(float(size_bytes) / 1024.0, 2)
+                elif USE_MYSQL:
+                    size_bytes = await self.fetchval(
+                        "SELECT SUM(data_length + index_length) "
+                        "FROM information_schema.tables "
+                        "WHERE table_schema = DATABASE()",
+                        default=0,
+                    )
+                    if size_bytes:
+                        value = round(float(size_bytes) / 1024.0, 2)
+                else:
+                    page_count = await self.fetchval(
+                        "PRAGMA page_count", default=0
+                    )
+                    page_size = await self.fetchval(
+                        "PRAGMA page_size", default=0
+                    )
+                    if page_count and page_size:
+                        value = round(
+                            (int(page_count) * int(page_size)) / 1024.0,
+                            2,
+                        )
+            except Exception as e:
+                logger.warning(f"⚠️ get_db_size_kb: {e}")
                 return 0.0
-        except Exception as e:
-            logger.warning(f"⚠️ get_db_size_kb: {e}")
-            return 0.0
+
+            self._db_size_kb_cache = value
+            self._db_size_kb_cache_ts = now
+            return value
 
     async def get_pool_stats(self) -> Dict[str, Any]:
         if not (USE_POSTGRES or USE_MYSQL):
@@ -2301,6 +2336,9 @@ class Database(
                 )
 
     async def _tune_heavy_tables_autovacuum(self, conn) -> int:
+        """
+        ✅ v7.7.54 FIX-17: استعلام جماعي واحد لفحص الجداول الموجودة.
+        """
         if not USE_POSTGRES:
             return 0
         if self._autovacuum_tuned:
@@ -2309,17 +2347,25 @@ class Database(
         tuned = 0
         failed = 0
         try:
-            for table in HEAVY_TABLES_FOR_AUTOVACUUM:
-                try:
-                    exists = await conn.fetchval(
-                        "SELECT 1 FROM information_schema.tables "
-                        "WHERE table_name = $1 "
-                        "AND table_schema = current_schema()",
-                        table,
-                    )
-                    if not exists:
-                        continue
+            all_tables = list(HEAVY_TABLES_FOR_AUTOVACUUM) + list(
+                SMALL_TABLES_FOR_AUTOVACUUM
+            )
+            if not all_tables:
+                return 0
 
+            # ✅ FIX-17: query واحد بدل N+1
+            existing_rows = await conn.fetch(
+                "SELECT table_name FROM information_schema.tables "
+                "WHERE table_schema = current_schema() "
+                "  AND table_name = ANY($1::text[])",
+                all_tables,
+            )
+            existing_tables = {r["table_name"] for r in existing_rows}
+
+            for table in HEAVY_TABLES_FOR_AUTOVACUUM:
+                if table not in existing_tables:
+                    continue
+                try:
                     await conn.execute(
                         f"ALTER TABLE {table} SET ("
                         f"autovacuum_vacuum_scale_factor = 0.02, "
@@ -2336,16 +2382,9 @@ class Database(
                     )
 
             for table in SMALL_TABLES_FOR_AUTOVACUUM:
+                if table not in existing_tables:
+                    continue
                 try:
-                    exists = await conn.fetchval(
-                        "SELECT 1 FROM information_schema.tables "
-                        "WHERE table_name = $1 "
-                        "AND table_schema = current_schema()",
-                        table,
-                    )
-                    if not exists:
-                        continue
-
                     await conn.execute(
                         f"ALTER TABLE {table} SET ("
                         f"autovacuum_vacuum_scale_factor = 0.0, "
@@ -2365,7 +2404,7 @@ class Database(
 
             if tuned:
                 logger.info(
-                    f"✅ v7.7.39: ضُبِط autovacuum على {tuned} جدول "
+                    f"✅ v7.7.54: ضُبِط autovacuum على {tuned} جدول "
                     f"({len(HEAVY_TABLES_FOR_AUTOVACUUM)} heavy + "
                     f"{len(SMALL_TABLES_FOR_AUTOVACUUM)} small) — "
                     f"{failed} فشل"
@@ -2374,7 +2413,7 @@ class Database(
                 self._autovacuum_tuned = True
             else:
                 logger.warning(
-                    f"⚠️ v7.7.42: autovacuum — {failed} جدول فشل، "
+                    f"⚠️ v7.7.54: autovacuum — {failed} جدول فشل، "
                     f"ستُعاد المحاولة في الإقلاع التالي"
                 )
         except Exception as e:
@@ -2507,6 +2546,10 @@ class Database(
             return False
 
     async def _maybe_refresh_mv(self) -> bool:
+        """
+        ✅ v7.7.54 FIX-12: cooldown أقصر عند الفشل (10% من المدة)
+        بدل انتظار المدة الكاملة (ساعة افتراضية).
+        """
         if not USE_POSTGRES or not self._mv_available:
             return False
         now_mono = time.monotonic()
@@ -2520,6 +2563,7 @@ class Database(
                     < self._mv_refresh_cooldown):
                 return False
 
+            success = False
             try:
                 async with self.connection() as conn:
                     try:
@@ -2533,12 +2577,23 @@ class Database(
                             "mv_active_user_limits"
                         )
                 logger.debug("🔄 mv_active_user_limits محدّث")
+                success = True
                 return True
             except Exception as e:
                 logger.warning(f"⚠️ MV refresh: {e}")
                 return False
             finally:
-                self._mv_last_refresh_mono = time.monotonic()
+                if success:
+                    self._mv_last_refresh_mono = time.monotonic()
+                else:
+                    # ✅ FIX-12: cooldown قصير عند الفشل
+                    short_cooldown = max(
+                        60.0, self._mv_refresh_cooldown * 0.1
+                    )
+                    self._mv_last_refresh_mono = (
+                        time.monotonic() - self._mv_refresh_cooldown
+                        + short_cooldown
+                    )
 
     def _spawn_bg_task(self, coro) -> Optional[asyncio.Task]:
         try:
@@ -3241,6 +3296,17 @@ class Database(
             else:
                 await self._return_connection(conn)
 
+    def _redact_slow_query(self, query: str, max_len: int = 500) -> str:
+        """
+        ✅ v7.7.54 FIX-13: redaction أقوى.
+        - يحجب الأرقام من 5 خانات فما فوق
+        - يحجب النصوص الطويلة (>20 حرف)
+        """
+        safe = query[:max_len]
+        safe = re.sub(r"\b\d{5,}\b", "[REDACTED]", safe)
+        safe = re.sub(r"'[^']{20,}'", "'[LONG_STR]'", safe)
+        return safe
+
     async def _execute_with_logging(
         self, query: str, params: tuple, conn, executor,
         skip_explain: bool = False,
@@ -3250,9 +3316,8 @@ class Database(
             result = await executor(query, params)
             elapsed = time.monotonic() - start
             if elapsed > self._slow_query_log_threshold:
-                safe_query = re.sub(
-                    r"\b\d{6,}\b", "[REDACTED]", query[:500]
-                )
+                # ✅ FIX-13: redaction أقوى
+                safe_query = self._redact_slow_query(query)
                 logger.warning(f"🐌 بطيء ({elapsed:.2f}s): {safe_query}")
 
                 try:
@@ -3281,7 +3346,8 @@ class Database(
             return result
         except Exception as e:
             elapsed = time.monotonic() - start
-            safe_query = re.sub(r"\b\d{6,}\b", "[REDACTED]", query[:500])
+            # ✅ FIX-13: redaction أقوى
+            safe_query = self._redact_slow_query(query)
             logger.error(
                 f"❌ فشل ({elapsed:.2f}s): {safe_query} | {e}"
             )
@@ -3482,7 +3548,7 @@ class Database(
                     raise
                 logger.warning(f"⚠️ executemany فشل: {e}")
                 total = 0
-                # ✅ v7.7.52: regex أدق — يمنع التقاط أرقام من VALUES(...)
+                # ✅ v7.7.52: regex أدق
                 rowcount_re = re.compile(
                     r"\b(INSERT|UPDATE|DELETE)\s+\d+\s+(\d+)\s*$",
                     re.IGNORECASE,
@@ -3720,9 +3786,6 @@ class Database(
     async def executemany(
         self, query: str, params_list: List[tuple]
     ) -> int:
-        """
-        ✅ v7.7.51: فحص نوع دفاعي.
-        """
         if not params_list:
             return 0
         if not isinstance(params_list, (list, tuple)):
@@ -4134,9 +4197,6 @@ class Database(
             return False
 
     async def _create_secondary_indexes(self, indexes):
-        """
-        ✅ v7.7.51: كشف فهارس PG المعطوبة (indisvalid=false).
-        """
         if not indexes:
             return
 
@@ -4244,12 +4304,34 @@ class Database(
         added_by: Optional[int] = None,
         auto_register: bool = True,
     ) -> bool:
+        """
+        ✅ v7.7.54 FIX-9: تحديث chat_name عند اختلافه.
+        """
         try:
-            exists = await self.fetchval(
-                "SELECT 1 FROM bot_groups WHERE chat_id = ?",
+            row = await self.fetchone(
+                "SELECT chat_name FROM bot_groups WHERE chat_id = ?",
                 (chat_id,),
             )
-            if exists:
+            if row:
+                # ✅ FIX-9: تحديث الاسم إذا تغيّر
+                cur_name = (row.get("chat_name") or "").strip()
+                new_name = (chat_name or "").strip()
+                if new_name and new_name != cur_name:
+                    try:
+                        await self.execute(
+                            "UPDATE bot_groups SET chat_name = ? "
+                            "WHERE chat_id = ?",
+                            (new_name, chat_id),
+                        )
+                        if CACHE_AVAILABLE:
+                            try:
+                                await groups_cache.invalidate(chat_id)
+                            except Exception:
+                                pass
+                    except Exception as ue:
+                        logger.debug(
+                            f"_ensure_group_exists update name: {ue}"
+                        )
                 return True
             if not auto_register:
                 logger.warning(
@@ -4451,7 +4533,32 @@ class Database(
                 except Exception:
                     pass
 
+    def _safety_check_mass_delete(
+        self, kind: str, existing_count: int, to_delete_count: int
+    ) -> Tuple[bool, str]:
+        """
+        ✅ v7.7.54 FIX-3: فحص أمان قبل حذف جماعي.
+        يعيد (allowed, reason).
+        """
+        if to_delete_count <= 0:
+            return True, "no_deletions"
+        if to_delete_count < IMPORT_MASS_DELETE_MIN_ABSOLUTE:
+            return True, "below_absolute_min"
+
+        if existing_count > 0:
+            ratio = to_delete_count / existing_count
+            if ratio > IMPORT_MASS_DELETE_MAX_RATIO:
+                return False, (
+                    f"ratio_too_high:{to_delete_count}/{existing_count}"
+                    f"={ratio:.2%} > {IMPORT_MASS_DELETE_MAX_RATIO:.0%}"
+                )
+        return True, "ok"
+
     async def _import_banned_words(self, conn):
+        """
+        ✅ v7.7.54 FIX-3: safety guard قبل الحذف الجماعي.
+        ✅ v7.7.54 FIX-15: fallback owner_id=0 بدل early return.
+        """
         try:
             import banned_words
             BANNED_WORDS = getattr(banned_words, "BANNED_WORDS", [])
@@ -4469,7 +4576,11 @@ class Database(
                 logger.info("ℹ️ لا كلمات صالحة بعد التوحيد")
                 return
 
-            words_snapshot = "\n".join(sorted(normalized_words))
+            # ✅ FIX-2-style: JSON serialize أوضح
+            words_snapshot = json.dumps(
+                sorted(normalized_words),
+                ensure_ascii=False,
+            )
             current_hash = hashlib.sha256(
                 words_snapshot.encode("utf-8")
             ).hexdigest()
@@ -4495,17 +4606,22 @@ class Database(
             to_delete = existing_global - normalized_words
             to_insert = normalized_words - existing_global
 
+            # ✅ FIX-3: safety check
+            allowed, reason = self._safety_check_mass_delete(
+                "banned_words", len(existing_global), len(to_delete)
+            )
+            if not allowed:
+                logger.error(
+                    f"❌ banned_words: رفض الحذف الجماعي — {reason}. "
+                    f"الحذف المحتمل: {len(to_delete)}/"
+                    f"{len(existing_global)}. تخطي المزامنة لحماية البيانات."
+                )
+                return
+
+            # ✅ FIX-15: fallback owner_id بدل early return
             owner_id = getattr(CONFIG, "PRIMARY_OWNER_ID", None)
             if not owner_id:
-                exists = await self._fetchval_with_conn(
-                    conn,
-                    "SELECT 1 FROM users WHERE user_id = ?",
-                    1,
-                )
-                if not exists:
-                    logger.warning("⚠️ owner_id=1 غير موجود")
-                    return
-                owner_id = 1
+                owner_id = 0
 
             ts = TimeUtils.utc_now()
             had_failures = False
@@ -4600,6 +4716,10 @@ class Database(
             logger.error(f"❌ banned_words: {e}", exc_info=True)
 
     async def _import_auto_replies(self, conn):
+        """
+        ✅ v7.7.54 FIX-2: hash يشمل media_id و buttons.
+        ✅ v7.7.54 FIX-3: safety guard قبل الحذف الجماعي.
+        """
         try:
             from auto_replies import AUTO_REPLIES
             if not AUTO_REPLIES:
@@ -4676,11 +4796,19 @@ class Database(
                 logger.info("ℹ️ لا ردود صالحة بعد التطبيع")
                 return
 
+            # ✅ FIX-2: تضمين media_id و buttons في الـ hash
             snapshot_items = sorted(
                 (
                     k[0], k[1],
                     str(v.get("reply", "")),
                     str(v.get("reply_type", "text")),
+                    str(v.get("media_id") or ""),
+                    json.dumps(
+                        v.get("buttons"),
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        default=str,
+                    ) if v.get("buttons") else "",
                 )
                 for k, v in normalized.items()
             )
@@ -4721,6 +4849,18 @@ class Database(
 
             to_delete = existing_global - set(normalized.keys())
             to_upsert = set(normalized.keys())
+
+            # ✅ FIX-3: safety check
+            allowed, reason = self._safety_check_mass_delete(
+                "auto_replies", len(existing_global), len(to_delete)
+            )
+            if not allowed:
+                logger.error(
+                    f"❌ auto_replies: رفض الحذف الجماعي — {reason}. "
+                    f"الحذف المحتمل: {len(to_delete)}/"
+                    f"{len(existing_global)}. تخطي المزامنة لحماية البيانات."
+                )
+                return
 
             had_failures = False
 
@@ -4824,9 +4964,6 @@ class Database(
             logger.error(f"❌ auto_replies: {e}", exc_info=True)
 
     def _get_secondary_indexes(self) -> List[Tuple[str, str, str]]:
-        """
-        ✅ v7.7.48: إزالة فهرسين deprecated.
-        """
         return [
             (
                 "user_penalties",
@@ -5160,15 +5297,9 @@ class Database(
 
                 self._in_bootstrap_tx = True
                 try:
-                    if USE_POSTGRES:
-                        async with self.transaction() as conn:
-                            await self._do_bootstrap_inner(conn)
-                    elif USE_MYSQL:
-                        async with self.connection() as conn:
-                            await self._do_bootstrap_inner(conn)
-                    else:
-                        async with self.connection() as conn:
-                            await self._do_bootstrap_inner(conn)
+                    # ✅ v7.7.54 FIX-6: transaction موحّد لكل DBs
+                    async with self.transaction() as conn:
+                        await self._do_bootstrap_inner(conn)
                 finally:
                     self._in_bootstrap_tx = False
 
@@ -5621,6 +5752,9 @@ class Database(
         first_name: str = "",
         force: bool = False,
     ) -> bool:
+        """
+        ✅ v7.7.54 FIX-16: COALESCE بدل CASE WHEN (type hints).
+        """
         try:
             async with await self._get_user_lock(user_id):
                 if not force:
@@ -5647,16 +5781,16 @@ class Database(
                            first_name != cur_first:
                             need_update = True
                         if need_update:
+                            # ✅ FIX-16: COALESCE مع None normalization
+                            uname_param = username if username else None
+                            fname_param = first_name if first_name else None
                             await self.execute(
                                 "UPDATE users SET "
-                                "username = CASE WHEN ? != '' "
-                                "THEN ? ELSE username END, "
-                                "first_name = CASE WHEN ? != '' "
-                                "THEN ? ELSE first_name END, "
+                                "username = COALESCE(?, username), "
+                                "first_name = COALESCE(?, first_name), "
                                 "updated_at = ? "
                                 "WHERE user_id = ?",
-                                username, username,
-                                first_name, first_name,
+                                uname_param, fname_param,
                                 TimeUtils.utc_now(), user_id,
                             )
                         return True
@@ -5990,6 +6124,10 @@ class Database(
     async def mark_users_as_blocked(
         self, user_ids: List[int]
     ) -> int:
+        """
+        ✅ v7.7.54 FIX-4: كل الدفعات داخل معاملة واحدة لضمان
+        snapshot consistency على MySQL (SELECT + UPDATE لا يتفرّقان).
+        """
         if not user_ids:
             return 0
         try:
@@ -6000,16 +6138,14 @@ class Database(
                     batch = user_ids[i: i + BATCH]
                     placeholders = ",".join(["?"] * len(batch))
                     if USE_MYSQL:
-                        try:
-                            existing_count = await self._fetchval_with_conn(
-                                conn,
-                                f"SELECT COUNT(*) FROM users "
-                                f"WHERE user_id IN ({placeholders})",
-                                *batch,
-                                default=0,
-                            ) or 0
-                        except Exception:
-                            existing_count = len(batch)
+                        # ✅ FIX-4: داخل نفس المعاملة → snapshot موحد
+                        existing_count = await self._fetchval_with_conn(
+                            conn,
+                            f"SELECT COUNT(*) FROM users "
+                            f"WHERE user_id IN ({placeholders})",
+                            *batch,
+                            default=0,
+                        ) or 0
                         await self._execute_with_conn(
                             conn,
                             f"UPDATE users SET banned = 1 "
@@ -6265,11 +6401,6 @@ class Database(
     async def mark_published_and_advance(
         self, channel_db_id: int, post_id: int
     ) -> bool:
-        """
-        ✅ v7.7.52 FIX-CRITICAL: إزالة subquery خام `WHERE key = '...'`
-        الذي كان يُسبِّب syntax error على MySQL → يُبتلع → ROLLBACK كامل
-        للمعاملة → المنشور لا يُعلَّم → يُعاد نشره كل دورة.
-        """
         if post_id is None or channel_db_id is None:
             return False
 
@@ -6300,7 +6431,6 @@ class Database(
                     channel_db_id, now,
                 )
 
-                # ✅ v7.7.52: فصل الاستعلام — لا subquery خام
                 row = await self._fetchone_with_conn(
                     conn,
                     "SELECT schedule_type, interval_minutes, "
@@ -6354,9 +6484,52 @@ class Database(
             )
             return False
 
+    async def _verify_pairs_belong(
+        self, conn, updates: List[Tuple[int, int]]
+    ) -> List[Tuple[int, int]]:
+        """
+        ✅ v7.7.54 FIX-5: التحقق من أن كل post_id ينتمي فعلاً
+        إلى channel_db_id المُعلن.
+        """
+        if not updates:
+            return []
+        valid: List[Tuple[int, int]] = []
+        try:
+            # بنية: [(ch_id, post_id)] → grouped by channel
+            by_channel: Dict[int, List[int]] = defaultdict(list)
+            for ch_id, post_id in updates:
+                by_channel[ch_id].append(post_id)
+
+            for ch_id, post_ids in by_channel.items():
+                placeholders = ",".join(["?"] * len(post_ids))
+                rows = await self._fetchall_with_conn(
+                    conn,
+                    f"SELECT id FROM posts "
+                    f"WHERE channel_db_id = ? "
+                    f"  AND id IN ({placeholders})",
+                    ch_id, *post_ids,
+                )
+                found_ids = {int(r["id"]) for r in (rows or []) if r.get("id")}
+                for pid in post_ids:
+                    if pid in found_ids:
+                        valid.append((ch_id, pid))
+                    else:
+                        logger.warning(
+                            f"⚠️ mark_published_batch: "
+                            f"post_id={pid} لا ينتمي لـ channel={ch_id} "
+                            f"— تم التخطي"
+                        )
+        except Exception as e:
+            logger.error(f"_verify_pairs_belong: {e}")
+            return updates  # fallback: لا تُحرِم العملية الأصلية
+        return valid
+
     async def mark_published_batch(
         self, updates: List[Tuple[int, int]]
     ) -> bool:
+        """
+        ✅ v7.7.54 FIX-5: التحقق من اقتران (channel_db_id, post_id).
+        """
         if not updates:
             return True
 
@@ -6376,11 +6549,22 @@ class Database(
             return True
 
         now = TimeUtils.utc_now()
-        ch_ids = [ch_id for ch_id, _ in valid_updates]
-        post_ids = [post_id for _, post_id in valid_updates]
 
         try:
             async with self.transaction() as conn:
+                # ✅ FIX-5: التحقق من الاقتران
+                valid_updates = await self._verify_pairs_belong(
+                    conn, valid_updates
+                )
+                if not valid_updates:
+                    logger.warning(
+                        "⚠️ mark_published_batch: كل الأزواج مرفوضة"
+                    )
+                    return False
+
+                ch_ids = [ch_id for ch_id, _ in valid_updates]
+                post_ids = [post_id for _, post_id in valid_updates]
+
                 post_placeholders = ",".join(["?"] * len(post_ids))
                 updated = await self._execute_with_conn(
                     conn,
@@ -6497,6 +6681,9 @@ class Database(
     async def get_channels_to_publish(
         self, limit: int = 20
     ) -> List[Dict]:
+        """
+        ✅ v7.7.54 FIX-1: الاستخدام الصحيح للـ fallback بدون MV.
+        """
         now = TimeUtils.utc_now()
         owner_id = getattr(CONFIG, "PRIMARY_OWNER_ID", 0) or 0
 
@@ -6519,22 +6706,24 @@ class Database(
                     query, (owner_id, now, limit)
                 )
 
+            # ✅ FIX-1: عند عدم توفر MV — استخدام نسخة بلا MV حصراً
             if _R_CHANNELS_TO_PUBLISH_SQL_PG_NO_MV is not None:
                 logger.debug(
-                    "ℹ️ PG: MV غير جاهز — استخدام PG_NO_MV fallback"
+                    "ℹ️ PG: MV غير جاهز — استخدام PG_NO_MV fallback "
+                    "(من mixin)"
                 )
                 return await self.fetchall(
                     _R_CHANNELS_TO_PUBLISH_SQL_PG_NO_MV,
                     (now, owner_id, now, limit),
                 )
 
-            logger.warning(
-                "⚠️ PG: PG_NO_MV غير متاح — استخدام "
-                "_get_pg_query_fallback (يفترض MV موجود)"
+            # ✅ FIX-1: fallback خاص بلا MV
+            logger.debug(
+                "ℹ️ PG: MV غير جاهز — استخدام _get_pg_query_no_mv_fallback"
             )
             return await self.fetchall(
-                _get_pg_query_fallback(),
-                (owner_id, now, limit),
+                _get_pg_query_no_mv_fallback(),
+                (now, owner_id, now, limit),
             )
 
         elif USE_MYSQL:
@@ -6558,36 +6747,36 @@ class Database(
             )
 
     async def expire_penalties(self) -> int:
+        """
+        ✅ v7.7.54 FIX-11: إزالة تكرار query زائد.
+        """
         total_expired = 0
         BATCH = EXPIRED_PENALTIES_BATCH
         try:
             while True:
                 batch_expired = 0
                 got_rows = 0
-                has_more = False
                 async with self.transaction() as conn:
                     if USE_POSTGRES:
                         batch_expired, got_rows = (
                             await self._expire_penalties_pg(conn, BATCH)
                         )
-                        has_more = got_rows > 0
                     elif USE_MYSQL:
                         batch_expired, got_rows = (
                             await self._expire_penalties_mysql(
                                 conn, BATCH
                             )
                         )
-                        has_more = got_rows > 0
                     else:
                         batch_expired, got_rows = (
                             await self._expire_penalties_sqlite(
                                 conn, BATCH
                             )
                         )
-                        has_more = got_rows > 0
 
                 total_expired += batch_expired
-                if not has_more or got_rows < BATCH:
+                # ✅ FIX-11: loop ينتهي عندما لا يوجد المزيد
+                if got_rows < BATCH:
                     break
                 await asyncio.sleep(0)
 
@@ -6632,8 +6821,11 @@ class Database(
 
     async def get_user_penalty_count(
         self, user_id: int, chat_id: int,
-        penalty_type: str = None,
+        penalty_type: Optional[str] = None,
     ) -> int:
+        """
+        ✅ v7.7.54 FIX-10: type hint صحيح Optional[str].
+        """
         query = (
             "SELECT COUNT(*) FROM user_penalties "
             "WHERE user_id = ? AND chat_id = ? "
@@ -6667,9 +6859,6 @@ class Database(
         chat_name: str = "",
         auto_register: bool = True,
     ) -> Optional[int]:
-        """
-        ✅ v7.7.51: فرع SQLite يستخدم _execute_with_logging.
-        """
         if penalty_type not in self.VALID_PENALTY_TYPES:
             return None
         if duration < 0:
@@ -6816,8 +7005,11 @@ class Database(
 
     async def remove_penalties_for_user(
         self, user_id: int, chat_id: int,
-        penalty_type: str = None,
+        penalty_type: Optional[str] = None,
     ) -> int:
+        """
+        ✅ v7.7.54 FIX-10: type hint صحيح Optional[str].
+        """
         try:
             async with self.transaction() as conn:
                 query = (
@@ -6840,9 +7032,13 @@ class Database(
             return 0
 
     async def get_active_penalties(
-        self, user_id: int, chat_id: int = None,
+        self, user_id: int,
+        chat_id: Optional[int] = None,
         limit: int = MAX_ACTIVE_PENALTIES_FETCH,
     ) -> List[Dict]:
+        """
+        ✅ v7.7.54 FIX-10: type hint صحيح Optional[int].
+        """
         query = (
             "SELECT * FROM user_penalties "
             "WHERE user_id = ? AND status = 'active'"
@@ -6861,6 +7057,10 @@ class Database(
 # =====================================================================
 
 def _get_pg_query_fallback() -> str:
+    """
+    ✅ v7.7.54 FIX-1: هذا الـ fallback مخصص لحالة
+    self._mv_available=True حيث mv_active_user_limits موجودة.
+    """
     return f"""
         SELECT uc.id, uc.channel_id, uc.user_id,
                u.auto_publish, u.auto_recycle,
@@ -6915,6 +7115,78 @@ def _get_pg_query_fallback() -> str:
             sch.next_publish_date, uc.created_at
         ) ASC
         LIMIT $3
+    """
+
+def _get_pg_query_no_mv_fallback() -> str:
+    """
+    ✅ v7.7.54 FIX-1: نسخة مستقلة تماماً عن mv_active_user_limits.
+    تستخدم subscriptions + plans مباشرة عبر LATERAL.
+    يُستخدَم عندما self._mv_available=False.
+
+    Params order: (now, owner_id, now, limit)
+    """
+    return f"""
+        SELECT uc.id, uc.channel_id, uc.user_id,
+               u.auto_publish, u.auto_recycle,
+               COALESCE(pc.published_count, 0)
+                   AS published_count
+        FROM user_channels uc
+        JOIN users u ON uc.user_id = u.user_id
+        LEFT JOIN schedule sch
+            ON uc.id = sch.channel_db_id
+        LEFT JOIN LATERAL (
+            SELECT MAX(p.max_channels) AS max_channels,
+                   MAX(p.max_posts) AS max_posts
+            FROM subscriptions s
+            JOIN plans p ON s.plan_id = p.id
+            WHERE s.user_id = uc.user_id
+              AND s.status = 'active'
+              AND s.end_date > $1
+              AND p.is_active = 1
+        ) a ON TRUE
+        LEFT JOIN LATERAL (
+            SELECT
+                COUNT(*) FILTER (
+                    WHERE p.published = 0
+                      AND (p.fail_count IS NULL
+                           OR p.fail_count < {MAX_POST_FAIL_COUNT})
+                ) AS publishable_unpublished_count,
+                COUNT(*) FILTER (
+                    WHERE p.published = 1
+                ) AS published_count
+            FROM posts p
+            WHERE p.channel_db_id = uc.id
+        ) pc ON TRUE
+        LEFT JOIN LATERAL (
+            SELECT COUNT(*) AS channel_count
+            FROM user_channels uc2
+            WHERE uc2.user_id = uc.user_id
+              AND uc2.banned = 0
+        ) cc ON TRUE
+        WHERE uc.banned = 0 AND u.banned = 0
+          AND u.auto_publish = 1
+          AND (a.max_channels IS NOT NULL OR uc.user_id = $2)
+          AND (sch.next_publish_date IS NULL
+               OR sch.next_publish_date <= $3)
+          AND (COALESCE(
+                   pc.publishable_unpublished_count, 0
+               ) > 0
+               OR (u.auto_recycle = 1
+                   AND COALESCE(
+                       pc.published_count, 0
+                   ) > 0))
+          AND (a.max_channels IS NULL
+               OR COALESCE(
+                   cc.channel_count, 0
+               ) <= a.max_channels)
+          AND (a.max_posts IS NULL
+               OR COALESCE(
+                   pc.publishable_unpublished_count, 0
+               ) <= a.max_posts)
+        ORDER BY COALESCE(
+            sch.next_publish_date, uc.created_at
+        ) ASC
+        LIMIT $4
     """
 
 def _get_mysql_query_fallback() -> str:
@@ -7076,6 +7348,8 @@ __all__ = [
     "MAX_POST_FAIL_COUNT", "PENALTY_ARCHIVE_RETENTION_DAYS",
     "SUB_CACHE_TTL", "EXPIRED_PENALTIES_BATCH",
     "HEAVY_TABLES_FOR_AUTOVACUUM", "SMALL_TABLES_FOR_AUTOVACUUM",
+    "IMPORT_MASS_DELETE_MIN_ABSOLUTE", "IMPORT_MASS_DELETE_MAX_RATIO",
+    "DB_SIZE_CACHE_TTL",
     "internal_cache", "InternalQueryCache", "SimpleCache",
     "SettingsCache",
     "user_cache", "banned_words_cache", "settings_cache",
@@ -7093,6 +7367,8 @@ __all__ = [
     "_convert_placeholders", "_convert_insert_or_ignore",
     "_convert_insert_or_replace", "_convert_upsert",
     "_adapt_params", "_table_exists",
+    "_get_pg_query_fallback", "_get_pg_query_no_mv_fallback",
+    "_get_mysql_query_fallback", "_get_sqlite_query_fallback",
     "REFACTOR_MIXIN_AVAILABLE",
     "CACHES_MODULE_AVAILABLE",
     "MIGRATIONS_MIXIN_AVAILABLE",
@@ -7102,4 +7378,5 @@ __all__ = [
     "_ALLOWED_COLUMN_TYPES",
     "_ALLOWED_COL_KEYWORDS",
     "_ASYNC_MYSQL_ERROR",
+    "_FROZENSET_WARN_SITES",
 ]
