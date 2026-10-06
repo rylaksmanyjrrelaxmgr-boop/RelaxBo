@@ -1,22 +1,37 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-handlers_message.py - v7.18.2
+handlers_message.py - v7.18.4
 (متوافق مع detectors v3.0.1 UNIFIED — 7 Layers)
 =============================================================================
-🆕 v7.18.2 — كشف وحذف Post Bot المحوّل من القنوات:
-    🔥 NEW: كشف Post Bot بالاسم (Post Bot / PostBot / News (Post Bot))
-    🔥 NEW: كشف عبر forward_origin حتى لو الأزرار مفقودة
-    🔥 NEW: يعمل قبل كل الفحوصات (بغض عن DB settings)
-    🟢 FORCE_DELETE_POSTBOT_FORWARDS=1 (env flag)
+🆕 v7.18.4 — إصلاحات شاملة:
+    🔧 FIX: إزالة كود ميت (dead code) في فحص button_links المكرر
+    🔧 FIX: نقل _private_handler_signature_cache قبل استخدامه
+    🔧 FIX: تناسق تسمية المعرّف في _build_delete_log_text
+    🔧 FIX: تبسيط regex _POSTBOT_NAME_REGEX (إزالة تكرار postbot)
+    🔧 FIX: نوع _flood_tracker → DefaultDict
+    🔧 FIX: استخدام _e_ab في log الـ import
+    🔧 FIX: تحسين منطق migration_ok مع log للأخطاء
+    🔧 FIX: cooldown لتنظيف bot_data في _apply_slow_mode
+    🔧 FIX: حماية escape(translated) من None
+    🔧 FIX: إزالة f-strings غير ضرورية
+    📝 تحسين: صياغة عربية أدق في الرسائل
 
-🆕 v7.18.1 — حذف إجباري للأزرار بروابط:
-    🔥 NEW: FORCE_DELETE_BUTTON_LINKS (افتراضي = True)
-    🔥 FIX: أولوية حذف الزر برابط قبل PostBot HARD-BLOCK
+🆕 v7.18.3 — Auto-Block Sources + Post Bot Detection:
+    🔥 NEW: تكامل كامل مع database_auto_block
+    🔥 NEW: get_forward_info() — دالة موحّدة
+    🔥 FIX: _is_postbot_forward يقبل user/hidden_user
+    🔥 FIX: قائمة أسماء موسّعة ("news", ...)
+    🔥 FIX: قائمة IDs معروفة (_POSTBOT_CHANNEL_IDS)
+    🔥 NEW: /autoblocked command
+    🟢 NEW: لوج 🔍 FWD-CHECK
 
-🆕 v7.18.0 — تفعيل الطبقات السبع (Multi-Layer):
-    🔥 MAJOR: analyze_message_full بدل _compute_spam_score
-    🟠 FIX: fallback آمن
+🆕 v7.18.2b — Post Bot من قنوات خاصة
+🆕 v7.18.2 — Post Bot detection بالاسم
+🆕 v7.18.1 — FORCE_DELETE_BUTTON_LINKS
+🆕 v7.18.0 — Multi-Layer (7 layers)
+🆕 v7.17.2 — return_diagnostics
+🆕 v7.17.1 — 8 FIX
 =============================================================================
 """
 
@@ -29,7 +44,9 @@ import inspect
 import ipaddress
 from html import escape
 from functools import partial
-from typing import Optional, Dict, Any, List, Tuple, Callable, Awaitable
+from typing import (
+    Optional, Dict, Any, List, Tuple, Callable, Awaitable, DefaultDict,
+)
 from datetime import datetime
 from urllib.parse import urlparse
 from collections import defaultdict, deque, OrderedDict
@@ -50,8 +67,11 @@ from utils import (
 from cache import settings_cache, posts_cache
 
 
+logger = logging.getLogger(__name__)
+
+
 # ═════════════════════════════════════════════════════════════════════
-# استيراد محرك الكشف
+# استيراد محرك الكشف v2.2.0+ / v3.0.1
 # ═════════════════════════════════════════════════════════════════════
 
 try:
@@ -138,7 +158,7 @@ _HAS_MULTILAYER = False
 analyze_message_full = None
 SpamVerdict = None
 FINAL_THRESHOLD = 5
-LAYER_WEIGHTS = {}
+LAYER_WEIGHTS: Dict[str, float] = {}
 
 try:
     from handlers.handlers_message_detectors import (
@@ -233,6 +253,36 @@ except ImportError:
             BEHAVIORAL_LAYER_ENABLED = False
 
 
+# 🆕 v7.18.3: Auto-block database integration
+try:
+    from database_auto_block import (
+        ensure_table as _ensure_autoblock_table,
+        is_blocked as _is_source_blocked,
+        add_source as _add_blocked_source,
+        list_blocked as _list_blocked_sources,
+        remove_source as _remove_blocked_source,
+    )
+    _HAS_AUTO_BLOCK = True
+except ImportError as _e_ab:
+    _HAS_AUTO_BLOCK = False
+    logger.debug("database_auto_block import failed: %s", _e_ab)
+
+    async def _ensure_autoblock_table() -> bool:
+        return False
+
+    async def _is_source_blocked(source_id) -> bool:
+        return False
+
+    async def _add_blocked_source(*args, **kwargs) -> bool:
+        return False
+
+    async def _list_blocked_sources(limit: int = 100):
+        return []
+
+    async def _remove_blocked_source(source_id: int) -> bool:
+        return False
+
+
 try:
     from replies import analyze_sentiment  # noqa: F401
 except ImportError:
@@ -249,9 +299,6 @@ except ImportError:
     MessageOriginUser = MessageOriginHiddenUser = None
     MessageOriginChat = MessageOriginChannel = None
     _HAS_MESSAGE_ORIGIN = False
-
-
-logger = logging.getLogger(__name__)
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -302,10 +349,7 @@ _MULTILAYER_ENABLED = (
     _env_flag("MULTILAYER_ENABLED", True) and _HAS_MULTILAYER
 )
 
-# v7.18.1: حذف إجباري لأي زر برابط
 _FORCE_DELETE_BUTTON_LINKS = _env_flag("FORCE_DELETE_BUTTON_LINKS", True)
-
-# 🆕 v7.18.2: حذف رسائل Post Bot المحوّلة من القنوات
 _FORCE_DELETE_POSTBOT_FORWARDS = _env_flag(
     "FORCE_DELETE_POSTBOT_FORWARDS", True
 )
@@ -314,78 +358,71 @@ _BAN_ADD_RATE_LIMIT = _env_flag("BAN_ADD_RATE_LIMIT", True)
 _BAN_ADD_RATE_MAX = 10
 _BAN_ADD_RATE_WINDOW = 60.0
 _BOT_DATA_SLOW_MODE_PRUNE_THRESHOLD = 10000
+_BOT_DATA_SLOW_MODE_PRUNE_COOLDOWN = 300.0
 
 
 # ═══════════════════════════════════════════════════════════════════
-# 🆕 v7.18.2: Post Bot Channel Detection Patterns
+# 🆕 v7.18.3: Post Bot Detection
 # ═══════════════════════════════════════════════════════════════════
 
-# أسماء قنوات Post Bot الشائعة (lowercase)
 _POSTBOT_CHANNEL_NAMES = frozenset({
-    "post bot",
-    "postbot",
-    "post-bot",
-    "post_bot",
-    "news (post bot)",
+    # القنوات المعروفة
+    "news",
     "news post bot",
-    "news(post bot)",
-    "post bot news",
-    "post_bot_news",
-    "postbotnews",
-    "بوت النشر",
-    "بوت نشر",
-    "بوست بوت",
+    "news (post bot)",
+    # English
+    "post bot", "postbot", "post-bot", "post_bot",
+    "news postbot", "news post-bot", "news post_bot",
+    "post bot news", "postbotnews", "postbot news",
+    "post news", "news bot", "newsbot",
+    # Arabic
+    "بوت النشر", "بوت نشر", "بوست بوت", "بوستبوت",
+    "نشر بوت", "أخبار بوت", "بوت الأخبار",
+    "قناة النشر", "قناة نشر",
 })
 
-# لو عندك channel IDs معروفة، أضفها هنا
-_POSTBOT_CHANNEL_IDS: set = set()  # مثال: {-1001234567890, -1000987654321}
+# 🆕 v7.18.3: قائمة channel IDs معروفة
+_POSTBOT_CHANNEL_IDS: set = {
+    3826578265,
+    -3826578265,
+    -1003826578265,
+}
 
-# Regex لاسم قناة يشبه Post Bot (احتياطي)
+# 🔧 v7.18.4: إزالة تكرار "postbot" لأنه مُغطّى بـ post[\s\-_]*bot
 _POSTBOT_NAME_REGEX = re.compile(
-    r"(?i)\b(post[\s\-_]*bot|postbot|بوست[\s\-_]*بوت)\b"
+    r"(?i)(?:"
+    r"post[\s\-_]*bot"
+    r"|news[\s\-_]*post"
+    r"|post[\s\-_]*news"
+    r"|newsbot"
+    r"|بوست[\s\-_]*بوت"
+    r"|بوت[\s\-_]*(?:نشر|بوست|أخبار)"
+    r"|نشر[\s\-_]*بوت"
+    r"|أخبار[\s\-_]*بوت"
+    r")"
 )
 
 
 def _is_postbot_channel_name(name: str) -> bool:
-    """v7.18.2: هل اسم القناة يشبه Post Bot؟"""
+    """v7.18.3: كشف مرن — user + channel + Arabic."""
     if not name:
         return False
     try:
         name_lower = str(name).lower().strip()
-        # مطابقة مباشرة
-        if name_lower in _POSTBOT_CHANNEL_NAMES:
-            return True
-        # مطابقة regex
+        for candidate in _POSTBOT_CHANNEL_NAMES:
+            if candidate in name_lower:
+                return True
         if _POSTBOT_NAME_REGEX.search(name_lower):
+            return True
+        has_post = "post" in name_lower or "بوست" in name_lower
+        has_bot = "bot" in name_lower or "بوت" in name_lower
+        if has_post and has_bot:
+            return True
+        if "news" in name_lower and ("post" in name_lower or "bot" in name_lower):
             return True
     except Exception:
         pass
     return False
-
-
-def _is_postbot_forward(message) -> Tuple[bool, Optional[Dict[str, Any]]]:
-    """
-    v7.18.2: هل الرسالة محوّلة من قناة Post Bot؟
-    Returns: (is_postbot, info_dict)
-    """
-    if message is None or not _FORCE_DELETE_POSTBOT_FORWARDS:
-        return False, None
-    try:
-        fwd_info = extract_forward_info(message) or {}
-        ftype = (fwd_info.get("type") or "").lower()
-        if ftype not in ("channel", "chat", "protected", "protected_any"):
-            return False, None
-        # فحص بـ ID
-        fwd_id = fwd_info.get("id")
-        if fwd_id is not None and fwd_id in _POSTBOT_CHANNEL_IDS:
-            return True, fwd_info
-        # فحص بالاسم
-        fwd_name = fwd_info.get("name") or ""
-        if _is_postbot_channel_name(fwd_name):
-            return True, fwd_info
-    except Exception:
-        pass
-    return False, None
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -437,10 +474,18 @@ _DEBUG_SPAM = DEBUG_SPAM
 
 
 # ═══════════════════════════════════════════════════════════════════
+# 🔧 v7.18.4: private-handler signature cache (نُقل للأعلى)
+# ═══════════════════════════════════════════════════════════════════
+
+_private_handler_signature_cache: Dict[str, bool] = {}
+
+
+# ═══════════════════════════════════════════════════════════════════
 # Flood Tracker
 # ═══════════════════════════════════════════════════════════════════
 
-_flood_tracker: Dict[Tuple[int, int], deque] = defaultdict(
+# 🔧 v7.18.4: نوع أدق — DefaultDict
+_flood_tracker: DefaultDict[Tuple[int, int], deque] = defaultdict(
     lambda: deque(maxlen=_FLOOD_MAX_MESSAGES_LIMIT + 5)
 )
 _flood_lock = asyncio.Lock()
@@ -506,9 +551,6 @@ async def _cleanup_flood_tracker(force: bool = False) -> int:
                     if k in _flood_tracker:
                         _flood_tracker.pop(k, None)
                         removed += 1
-    if removed > 0:
-        logger.debug("🧹 flood_tracker cleanup: أُزيل %d (المتبقي %d)",
-                     removed, len(_flood_tracker))
     return removed
 
 
@@ -546,7 +588,6 @@ def _reset_shutdown_for_tests():
         _private_handler_signature_cache.clear()
     except Exception:
         pass
-    logger.debug("🧪 reset for tests")
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -577,7 +618,7 @@ async def _lazy_init_columns():
         _columns_last_attempt_ts = now
 
         db_type = getattr(DB, "DB_TYPE", "sqlite")
-        logger.info("🔧 v7.18.2: Auto-migration (DB_TYPE=%s)", db_type)
+        logger.info("🔧 v7.18.4: Auto-migration (DB_TYPE=%s)", db_type)
 
         cols = [
             ("delete_protected_any", "INTEGER DEFAULT 0", "TINYINT(1) DEFAULT 0"),
@@ -590,7 +631,9 @@ async def _lazy_init_columns():
             ("delete_polls", "INTEGER DEFAULT 0", "TINYINT(1) DEFAULT 0"),
         ]
 
+        # 🔧 v7.18.4: تتبّع الأخطاء الحقيقية بشكل منفصل
         migration_ok = True
+        unexpected_failures: List[str] = []
 
         for col_name, sqlite_def, mysql_def in cols:
             try:
@@ -609,6 +652,7 @@ async def _lazy_init_columns():
                         m = str(e).lower()
                         if "duplicate" not in m and "already exists" not in m:
                             migration_ok = False
+                            unexpected_failures.append(f"{col_name}: {e}")
                 else:
                     try:
                         await DB.execute(
@@ -619,16 +663,32 @@ async def _lazy_init_columns():
                         m = str(e).lower()
                         if "duplicate" not in m and "already exists" not in m:
                             migration_ok = False
-            except Exception:
+                            unexpected_failures.append(f"{col_name}: {e}")
+            except Exception as e:
                 migration_ok = False
+                unexpected_failures.append(f"{col_name}: {e}")
+
+        # 🆕 v7.18.3: إنشاء جدول auto_blocked_sources
+        if _HAS_AUTO_BLOCK:
+            try:
+                await _ensure_autoblock_table()
+            except Exception as e:
+                logger.debug("auto_block table init: %s", e)
 
         try:
             await internal_cache.clear()
+            logger.info("✅ internal_cache cleared")
         except Exception:
             pass
 
         if migration_ok:
             _columns_initialized = True
+        elif unexpected_failures:
+            logger.warning(
+                "⚠️ migration_ok=False — فشل %d عمود: %s",
+                len(unexpected_failures),
+                "; ".join(unexpected_failures[:3]),
+            )
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -689,7 +749,6 @@ async def _can_send_log(chat_id) -> bool:
             last = _log_rate_warn_last.get(chat_id, 0.0)
             if now - last >= _LOG_RATE_WARN_COOLDOWN:
                 _log_rate_warn_last[chat_id] = now
-                logger.warning("🚫 LOG-RATE-LIMIT | chat=%s", chat_id)
             return False
         tracker.append(now)
         return True
@@ -857,7 +916,7 @@ def _spawn_tracked_task(coro, *, label: str = "bg-task"):
         return None
     try:
         task = asyncio.create_task(coro)
-    except Exception as e:
+    except Exception:
         return None
     _running_bg_tasks.add(task)
 
@@ -1018,7 +1077,7 @@ async def _invalidate_banned_words_cache(chat_id=None) -> bool:
 # ═══════════════════════════════════════════════════════════════════
 
 _VIOLATION_LABELS_AR = {
-    'forwarded': '↩️ رسالة معاد توجيهها',
+    'forwarded': '↩️ رسالة مُعاد توجيهها',
     'link': '🔗 رابط',
     'mention': '📢 منشن',
     'banned_word': '🚫 كلمة محظورة',
@@ -1081,7 +1140,7 @@ _DEFAULT_VIOLATION_MESSAGES = {
     'tg_scheme': '🔗 يُمنع إرسال روابط Telegram هنا',
     'button_link': '🔘 يُمنع إرسال أزرار بروابط',
     'vcard_url': '📇 يُمنع إرسال بطاقات اتصال تحوي روابط',
-    'venue_url': '📍 يُمنع إرسال مواقع',
+    'venue_url': '📍 يُمنع إرسال المواقع الجغرافية',
     'email': '📧 يُمنع إرسال البريد الإلكتروني هنا',
     'poll_link': '📊 يُمنع إرسال استفتاءات بروابط',
     'antiflood': '🌊 يُمنع إرسال رسائل بسرعة (فيضان)',
@@ -1168,10 +1227,12 @@ def _build_delete_log_text(
         f"📌 النوع: {label}",
         f"👤 المستخدم: {user_display_lnk}",
     ]
-    if not is_anonymous:
-        lines.append(f"🆔 المعرّف: <code>{user_id}</code>")
-    else:
+    # 🔧 v7.18.4: تناسق تسمية المعرّف
+    if is_anonymous:
+        lines.append(f"🆔 مصدر الإرسال: <code>{user_id}</code>")
         lines.append(f"🆔 المجموعة: <code>{chat_id}</code>")
+    else:
+        lines.append(f"🆔 المعرّف: <code>{user_id}</code>")
     if message_preview:
         preview = message_preview.strip().replace("\n", " ")
         if len(preview) > _GROUP_LOG_PREVIEW_LENGTH:
@@ -1217,8 +1278,9 @@ def _build_penalty_log_text(
             f"<a href='tg://user?id={target_user_id}'>{target_display}</a>"
         )
     source_label = "🤖 تلقائي" if source == "auto" else "👮 يدوي"
+    # 🔧 v7.18.4: إزالة f-string غير ضرورية
     lines = [
-        f"{ptype_label}",
+        ptype_label,
         "━━━━━━━━━━━━━━━━━━━━",
         f"🎯 العقوبة: <b>{ptype_label}</b>",
         f"⏱️ المدة: {_format_duration(duration_seconds)}",
@@ -1360,12 +1422,12 @@ async def _notify_delete_permission_failure(context, chat_id):
         if not owner_id:
             return
         msg = (
-            "⚠️ <b>تحذير حرج — الحماية معطّلة!</b>\n"
+            "⚠️ <b>تحذير — تعذّر حذف الرسائل!</b>\n"
             "━━━━━━━━━━━━━━━━━━━━\n"
             f"البوت لا يستطيع حذف الرسائل في المجموعة "
             f"<code>{chat_id}</code>.\n\n"
-            "🔴 <b>جميع إعدادات الحماية معطّلة فعلياً</b> — "
-            "أي رسالة مخالفة لن تُحذف!\n\n"
+            "🔴 <b>عقوبات الحماية لن تُطبَّق فعلياً</b> — "
+            "لأن الرسالة المخالفة تبقى قائمة.\n\n"
             "✅ <b>الحل:</b>\n"
             "1. ارفع البوت لمشرف في المجموعة\n"
             "2. امنحه صلاحية <code>can_delete_messages</code>\n"
@@ -1646,6 +1708,152 @@ def extract_forward_info(message):
     return None
 
 
+# ═══════════════════════════════════════════════════════════════════
+# 🆕 v7.18.3: get_forward_info + _is_postbot_forward
+# ═══════════════════════════════════════════════════════════════════
+
+def get_forward_info(message) -> Dict[str, Any]:
+    """v7.18.3: استخراج موحّد لمعلومات الرسالة المحوّلة."""
+    result: Dict[str, Any] = {
+        "is_forwarded": False,
+        "origin_type": None,
+        "original_chat_id": None,
+        "original_message_id": None,
+        "original_user_id": None,
+        "original_username": None,
+        "original_name": None,
+        "origin_date": None,
+        "sender_chat_id": None,
+        "sender_chat_title": None,
+        "is_automatic_forward": False,
+    }
+
+    if message is None:
+        return result
+
+    try:
+        sender_chat = getattr(message, "sender_chat", None)
+        if sender_chat is not None:
+            result["sender_chat_id"] = getattr(sender_chat, "id", None)
+            result["sender_chat_title"] = (
+                getattr(sender_chat, "title", None)
+                or getattr(sender_chat, "username", None)
+            )
+
+        result["is_automatic_forward"] = bool(
+            getattr(message, "is_automatic_forward", False)
+        )
+
+        origin = getattr(message, "forward_origin", None)
+        if origin is None:
+            legacy = _extract_legacy_forward_info(message)
+            if legacy:
+                result["is_forwarded"] = True
+                result["origin_type"] = legacy.get("type")
+                result["original_user_id"] = legacy.get("id")
+                result["original_name"] = legacy.get("name")
+                result["origin_date"] = legacy.get("date")
+            return result
+
+        result["is_forwarded"] = True
+        result["origin_date"] = getattr(origin, "date", None)
+
+        if isinstance(origin, MessageOriginChannel):
+            result["origin_type"] = "channel"
+            result["original_chat_id"] = getattr(origin.chat, "id", None)
+            result["original_message_id"] = getattr(origin, "message_id", None)
+            result["original_username"] = getattr(origin.chat, "username", None)
+            result["original_name"] = getattr(origin.chat, "title", None)
+        elif isinstance(origin, MessageOriginUser):
+            result["origin_type"] = "user"
+            user = origin.sender_user
+            result["original_user_id"] = getattr(user, "id", None)
+            result["original_username"] = getattr(user, "username", None)
+            result["original_name"] = (
+                getattr(user, "full_name", None)
+                or getattr(user, "first_name", None)
+            )
+        elif isinstance(origin, MessageOriginChat):
+            result["origin_type"] = "chat"
+            chat = origin.sender_chat
+            result["original_chat_id"] = getattr(chat, "id", None)
+            result["original_name"] = (
+                getattr(chat, "title", None)
+                or getattr(chat, "username", None)
+            )
+        elif isinstance(origin, MessageOriginHiddenUser):
+            result["origin_type"] = "hidden_user"
+            result["original_name"] = getattr(origin, "sender_user_name", None)
+        else:
+            result["origin_type"] = type(origin).__name__
+    except Exception as e:
+        logger.debug("get_forward_info error: %s", e)
+
+    return result
+
+
+def _is_postbot_forward(message) -> Tuple[bool, Optional[Dict[str, Any]]]:
+    """v7.18.3: كشف Post Bot (يشمل القنوات الخاصة)."""
+    if message is None or not _FORCE_DELETE_POSTBOT_FORWARDS:
+        return False, None
+    try:
+        info = get_forward_info(message)
+
+        if not info.get("is_forwarded") and not info.get("sender_chat_id"):
+            return False, None
+
+        # sender_chat
+        sender_id = info.get("sender_chat_id")
+        if sender_id is not None and sender_id in _POSTBOT_CHANNEL_IDS:
+            return True, {
+                "type": "channel", "id": sender_id,
+                "name": info.get("sender_chat_title"),
+            }
+        sender_title = info.get("sender_chat_title") or ""
+        if _is_postbot_channel_name(sender_title):
+            return True, {
+                "type": "channel", "id": sender_id,
+                "name": sender_title,
+            }
+
+        # forward_origin
+        ftype = (info.get("origin_type") or "").lower()
+        if ftype not in (
+            "channel", "chat", "user", "hidden_user",
+            "protected", "protected_any",
+        ):
+            return False, None
+
+        for id_key in ("original_chat_id", "original_user_id"):
+            oid = info.get(id_key)
+            if oid is None:
+                continue
+            if oid in _POSTBOT_CHANNEL_IDS:
+                return True, {
+                    "type": ftype, "id": oid,
+                    "name": info.get("original_name"),
+                    "message_id": info.get("original_message_id"),
+                }
+            if -oid in _POSTBOT_CHANNEL_IDS:
+                return True, {
+                    "type": ftype, "id": -oid,
+                    "name": info.get("original_name"),
+                    "message_id": info.get("original_message_id"),
+                }
+
+        name = info.get("original_name") or ""
+        if _is_postbot_channel_name(name):
+            return True, {
+                "type": ftype,
+                "id": info.get("original_chat_id") or info.get("original_user_id"),
+                "name": name,
+                "message_id": info.get("original_message_id"),
+            }
+    except Exception as e:
+        logger.debug("_is_postbot_forward error: %s", e)
+    return False, None
+
+
 async def _notify_admin_about_forward(context, admin_id, info):
     if not info or not admin_id:
         return
@@ -1656,7 +1864,7 @@ async def _notify_admin_about_forward(context, admin_id, info):
             'protected': '🛡️ محتوى محمي', 'protected_any': '🛡️ محتوى محمي',
         }
         label = type_labels.get(info.get('type', ''), f"❔ {info.get('type')}")
-        lines = ["↩️ <b>رسالة معاد توجيهها</b>", "", f"📌 النوع: {label}"]
+        lines = ["↩️ <b>رسالة مُعاد توجيهها</b>", "", f"📌 النوع: {label}"]
         if info.get('id'):
             lines.append(f"🆔 المصدر: <code>{info['id']}</code>")
         if info.get('name'):
@@ -1764,15 +1972,12 @@ class GroupRateLimiterManager:
                     for cid in to_remove:
                         cls._limiters.pop(cid, None)
                         cls._last_access.pop(cid, None)
-
                 await _cleanup_log_rate_tracker()
                 await _cleanup_delete_failure_counter()
-
                 try:
                     await _cleanup_flood_tracker(force=True)
                 except Exception:
                     pass
-
             except asyncio.CancelledError:
                 raise
             except Exception as e:
@@ -1947,6 +2152,9 @@ async def _detect_and_translate(update, context, chat_id, user_id, text):
 async def _send_translation_reply(
     bot, chat_id, original_message_id, translated, lang, context=None,
 ):
+    # 🔧 v7.18.4: حماية من translated=None
+    if not translated:
+        return
     try:
         label = (
             TranslationManager.get_text(lang, "translation_label")
@@ -1955,9 +2163,10 @@ async def _send_translation_reply(
     except Exception:
         label = "🌐 <b>Translation:</b>"
     try:
+        translated_safe = escape(str(translated))
         kwargs = {
             "chat_id": chat_id,
-            "text": f"{label}\n{escape(translated)}",
+            "text": f"{label}\n{translated_safe}",
             "parse_mode": "HTML",
         }
         if original_message_id:
@@ -2239,9 +2448,6 @@ def _contains_banned_word(text, banned_word) -> bool:
             return False
 
 
-_private_handler_signature_cache: Dict[str, bool] = {}
-
-
 def _accepts_state_arg(handler, handler_name: str) -> bool:
     cached = _private_handler_signature_cache.get(handler_name)
     if cached is not None:
@@ -2324,9 +2530,14 @@ class MessageHandlers:
             except (TypeError, ValueError):
                 slow_secs = 0
 
-            try:
-                bd = context.bot_data
-                if isinstance(bd, dict) and len(bd) > _BOT_DATA_SLOW_MODE_PRUNE_THRESHOLD:
+            bd = context.bot_data
+            # 🔧 v7.18.4: cooldown لتنظيف bot_data
+            if isinstance(bd, dict) and len(bd) > _BOT_DATA_SLOW_MODE_PRUNE_THRESHOLD:
+                now_ts = time.monotonic()
+                last_prune = bd.get("_slow_prune_last_ts", 0.0)
+                if not isinstance(last_prune, (int, float)):
+                    last_prune = 0.0
+                if now_ts - last_prune >= _BOT_DATA_SLOW_MODE_PRUNE_COOLDOWN:
                     prefix = "_slow_applied_"
                     stale = [
                         k for k in list(bd.keys())
@@ -2334,13 +2545,11 @@ class MessageHandlers:
                     ]
                     for k in stale[:max(1, len(stale) // 2)]:
                         bd.pop(k, None)
-            except Exception:
-                pass
+                    bd["_slow_prune_last_ts"] = now_ts
 
             cache_key = f"_slow_applied_{chat_id}"
 
             try:
-                bd = context.bot_data
                 if isinstance(bd, dict):
                     last_applied = bd.get(cache_key, -1)
                 else:
@@ -2497,9 +2706,7 @@ class MessageHandlers:
             and not is_protected_forward
         )
 
-        # ════════════════════════════════════════════════════════════
         # Multi-Layer Analysis
-        # ════════════════════════════════════════════════════════════
         _spam_score = 0
         _spam_reasons: List[str] = []
         _spam_layer_scores: Dict[str, float] = {}
@@ -2666,19 +2873,68 @@ class MessageHandlers:
                 return
 
         # ═════════════════════════════════════════════════════════════
-        # 0.2) 🆕 v7.18.2: Post Bot forwarded detection
-        # يعمل قبل كل شيء، حتى لو delete_forwarded=0
+        # 🆕 v7.18.3: 0.1) Auto-blocked source detection
+        # ═════════════════════════════════════════════════════════════
+        if _HAS_AUTO_BLOCK:
+            try:
+                _fwd_ab = get_forward_info(message)
+                _source_id = (
+                    _fwd_ab.get("original_chat_id")
+                    or _fwd_ab.get("original_user_id")
+                    or _fwd_ab.get("sender_chat_id")
+                )
+                if _source_id is not None:
+                    if await _is_source_blocked(_source_id):
+                        logger.warning(
+                            "🚫 AUTO-BLOCKED-SOURCE | chat=%s msg=%s | "
+                            "source_id=%s name=%r",
+                            chat_id, message.message_id,
+                            _source_id, _fwd_ab.get("original_name"),
+                        )
+                        await MessageHandlers._delete_and_warn(
+                            update, context, chat_id, user_id,
+                            "postbot_forward", settings,
+                            is_anonymous=is_anonymous,
+                        )
+                        return
+            except Exception as e:
+                logger.debug("auto-block check: %s", e)
+
+        # ═════════════════════════════════════════════════════════════
+        # 🆕 v7.18.3: 0.2) Post Bot forwarded detection
         # ═════════════════════════════════════════════════════════════
         if _FORCE_DELETE_POSTBOT_FORWARDS:
             try:
+                _fwd = get_forward_info(message)
+
+                if _fwd.get("is_forwarded") or _fwd.get("sender_chat_id"):
+                    logger.info(
+                        "🔍 FWD-CHECK | chat=%s msg=%s | "
+                        "type=%s name=%r | "
+                        "orig_chat_id=%s orig_msg_id=%s orig_user_id=%s | "
+                        "sender_chat_id=%s sender_title=%r | "
+                        "auto_fwd=%s",
+                        chat_id, message.message_id,
+                        _fwd.get("origin_type"),
+                        _fwd.get("original_name"),
+                        _fwd.get("original_chat_id"),
+                        _fwd.get("original_message_id"),
+                        _fwd.get("original_user_id"),
+                        _fwd.get("sender_chat_id"),
+                        _fwd.get("sender_chat_title"),
+                        _fwd.get("is_automatic_forward"),
+                    )
+
                 _is_pb, _pb_info = _is_postbot_forward(message)
                 if _is_pb:
                     logger.warning(
                         "📰 POSTBOT-FORWARD-DELETE | chat=%s user=%s msg=%s "
-                        "| from=%r id=%s",
+                        "| from=%r id=%s type=%s orig_msg_id=%s",
                         chat_id, user_id, message.message_id,
                         (_pb_info or {}).get("name"),
                         (_pb_info or {}).get("id"),
+                        (_pb_info or {}).get("type"),
+                        (_pb_info or {}).get("message_id"),
                     )
                     await MessageHandlers._delete_and_warn(
                         update, context, chat_id, user_id,
@@ -2690,7 +2946,8 @@ class MessageHandlers:
                 logger.debug("postbot forward check: %s", e)
 
         # ═════════════════════════════════════════════════════════════
-        # 0.4) 🆕 v7.18.1: Force delete any button link
+        # 0.4) Force delete any button link
+        # 🔧 v7.18.4: حذف القسم المكرر 4d (كود ميت)
         # ═════════════════════════════════════════════════════════════
         if _button_links_enabled and ctx.has_button_link:
             logger.warning(
@@ -2776,13 +3033,8 @@ class MessageHandlers:
             )
             return
 
-        # 4d) Button links (fallback)
-        if _button_links_enabled and ctx.has_button_link:
-            await MessageHandlers._delete_and_warn(
-                update, context, chat_id, user_id,
-                "button_link", settings, is_anonymous=is_anonymous,
-            )
-            return
+        # 🔧 v7.18.4: تمت إزالة قسم 4d المكرر
+        # (كان لا يُنفَّذ أبداً لأن 0.4 يحذف ويُرجع)
 
         # 4e) Emails
         if _emails_enabled and _contains_email(ctx.normalized_text):
@@ -3050,6 +3302,31 @@ class MessageHandlers:
             except Exception:
                 pass
             return
+
+        # 🆕 v7.18.3: إضافة المصدر للقائمة السوداء تلقائياً
+        if _HAS_AUTO_BLOCK and violation_type in (
+            'postbot_forward', 'forwarded', 'spam_score',
+        ):
+            try:
+                _fwd = get_forward_info(message)
+                _source_id = (
+                    _fwd.get("original_chat_id")
+                    or _fwd.get("original_user_id")
+                    or _fwd.get("sender_chat_id")
+                )
+                if _source_id is not None:
+                    await _add_blocked_source(
+                        source_id=_source_id,
+                        source_type=_fwd.get("origin_type") or "channel",
+                        source_name=_fwd.get("original_name") or "",
+                        reason=f"auto:{violation_type}",
+                    )
+                    logger.info(
+                        "📝 AUTO-ADDED-TO-BLACKLIST | source_id=%s name=%r",
+                        _source_id, _fwd.get("original_name"),
+                    )
+            except Exception as e:
+                logger.debug("auto-add blacklist: %s", e)
 
         if FEATURE_LOG_DELETIONS:
             try:
@@ -3767,6 +4044,90 @@ class MessageHandlers:
 
 
 # ═══════════════════════════════════════════════════════════════════
+# 🆕 v7.18.3: /autoblocked command
+# ═══════════════════════════════════════════════════════════════════
+
+async def handle_autoblocked_command(update, context):
+    """🆕 v7.18.3: عرض / إدارة القائمة السوداء التلقائية"""
+    if not update.effective_user or not update.effective_message:
+        return
+    user_id = update.effective_user.id
+    owner_id = int(getattr(CONFIG, 'PRIMARY_OWNER_ID', 0) or 0)
+    if user_id != owner_id:
+        return
+
+    if not _HAS_AUTO_BLOCK:
+        await safe_send(
+            context.bot, update.effective_chat.id,
+            "❌ نظام auto-block غير مفعّل",
+        )
+        return
+
+    args = list(context.args or [])
+    chat_id = update.effective_chat.id
+
+    if args and args[0].lower() in ("remove", "del", "delete") and len(args) > 1:
+        try:
+            src_id = int(args[1])
+            ok = await _remove_blocked_source(src_id)
+            if ok:
+                await safe_send(
+                    context.bot, chat_id,
+                    f"✅ أُزيل المصدر: <code>{src_id}</code>",
+                    parse_mode='HTML',
+                )
+            else:
+                await safe_send(
+                    context.bot, chat_id,
+                    f"⚠️ لم يُوجَد: <code>{src_id}</code>",
+                    parse_mode='HTML',
+                )
+        except (ValueError, TypeError):
+            await safe_send(
+                context.bot, chat_id,
+                "❌ استخدام: <code>/autoblocked remove ID</code>",
+                parse_mode='HTML',
+            )
+        return
+
+    sources = await _list_blocked_sources(limit=50)
+    if not sources:
+        await safe_send(
+            context.bot, chat_id,
+            "✨ القائمة السوداء التلقائية فارغة",
+        )
+        return
+
+    lines = [
+        "🚫 <b>المصادر المحجوبة تلقائياً</b>",
+        "━━━━━━━━━━━━━━━━━━━━",
+    ]
+    for s in sources:
+        try:
+            sid = s.get('source_id')
+            name = str(s.get('source_name') or '')[:30]
+            hits = s.get('hit_count', 0)
+            stype = s.get('source_type', '?')
+            reason = str(s.get('reason', ''))[:20]
+            lines.append(
+                f"• <code>{sid}</code> "
+                f"<b>{escape(name)}</b> "
+                f"({hits}×, {stype}, {reason})"
+            )
+        except Exception:
+            continue
+    lines.append("")
+    lines.append(
+        "🗑️ للحذف: <code>/autoblocked remove ID</code>"
+    )
+    await safe_send(
+        context.bot, chat_id,
+        "\n".join(lines),
+        parse_mode='HTML',
+    )
+
+
+# ═══════════════════════════════════════════════════════════════════
 # Public API
 # ═══════════════════════════════════════════════════════════════════
 
@@ -3776,6 +4137,7 @@ __all__ = [
     "get_auto_reply_settings_cached", "invalidate_security_cache",
     "invalidate_auto_reply_cache", "apply_violation_penalty",
     "is_forwarded", "extract_forward_info", "get_forward_detection_reason",
+    "get_forward_info",
     "notify_group_log", "shutdown_log_dispatcher", "shutdown_delete_tasks",
     "shutdown_bg_tasks", "register_shutdown_handlers",
     "_lazy_init_columns", "_reset_shutdown_for_tests",
@@ -3820,4 +4182,7 @@ __all__ = [
     "_FORCE_DELETE_POSTBOT_FORWARDS",
     "_is_postbot_forward", "_is_postbot_channel_name",
     "_POSTBOT_CHANNEL_NAMES", "_POSTBOT_CHANNEL_IDS",
+    "_POSTBOT_NAME_REGEX",
+    "_HAS_AUTO_BLOCK",
+    "handle_autoblocked_command",
 ]
