@@ -5,11 +5,21 @@
 handlers_message_detectors.py
 ===============================================================================
 🛡️ Relax Manager — Advanced Spam / Anti-Evasion Detection Engine
-Version: 3.0.1 UNIFIED (7 Layers)
+Version: 3.0.2 UNIFIED (7 Layers)
 
 محرك كشف مستقل عن handlers_message.py.
 
 ===============================================================================
+🆕 v3.0.2 (PERFORMANCE + COMPATIBILITY):
+    🟢 IMP-1: _run_text_layer يبني _MessageContext مرة واحدة
+              (بدل استدعاء analyze_message الذي يعيد البناء)
+    🟢 IMP-2: _extract_url_from_button — دعم copy_text كـ str مباشر
+              (توافق مع إصدارات PTB القديمة والحديثة)
+    🟢 IMP-3: _extract_venue_url — تعليق توضيحي (stub مقصود)
+    🟢 IMP-4: _extract_url_from_button — دعم switch_inline_query_current_chat
+    🟢 IMP-5: _extract_url_from_button — دعم callback_game / pay
+    🟢 IMP-6: توثيق أوضح لدوال v3.0.1 FIX-1/2/3/4
+
 🆕 v3.0.1 (BUTTON-LINK-DETECTION-FIX):
     🔴 FIX-1: _extract_url_from_button يدعم الآن:
               url / web_app / login_url / copy_text /
@@ -59,7 +69,7 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
-_DETECTORS_VERSION = "3.0.1 UNIFIED"
+_DETECTORS_VERSION = "3.0.2 UNIFIED"
 
 
 # =============================================================================
@@ -1221,18 +1231,26 @@ def _has_link_entity(message: Any) -> bool:
 
 
 # ═══════════════════════════════════════════════════════════════════
-# 🆕 v3.0.1 FIX-1: زر شامل — يدعم كل الأنواع
+# 🆕 v3.0.1 FIX-1 + v3.0.2 IMP-2/4/5: زر شامل — يدعم كل الأنواع
 # ═══════════════════════════════════════════════════════════════════
 
 def _extract_url_from_button(button: Any) -> Optional[str]:
     """
-    v3.0.1: يدعم كل أنواع أزرار PTB التي قد تحتوي على رابط:
-      - url           (InlineKeyboardButton الأساسي)
-      - web_app       (WebAppInfo.url)
-      - login_url     (LoginUrl.url)
-      - copy_text     (v20.8+ — الزر ينسخ نصاً)
-      - switch_inline_query
-      - callback_data (نادراً ما يخفي رابطاً)
+    v3.0.2: يدعم كل أنواع أزرار PTB التي قد تحتوي على رابط:
+
+      v3.0.1:
+        - url           (InlineKeyboardButton الأساسي)
+        - web_app       (WebAppInfo.url)
+        - login_url     (LoginUrl.url)
+        - copy_text     (v20.8+ — الزر ينسخ نصاً)
+        - switch_inline_query
+        - callback_data (نادراً ما يخفي رابطاً)
+
+      v3.0.2 إضافات:
+        - copy_text كـ str مباشرة (توافق PTB قديم)
+        - switch_inline_query_current_chat
+        - callback_game / pay (نادر جداً — عادةً ليست روابط لكنها
+          علامة على زر مخصص)
     """
     if button is None:
         return None
@@ -1258,22 +1276,39 @@ def _extract_url_from_button(button: Any) -> Optional[str]:
                 return str(login_web_url)
             return "login_url://button"
 
-        # 4) copy_text (v20.8+)
+        # 4) copy_text — v3.0.2: يدعم CopyTextButton و str مباشرة
         copy_text = getattr(button, "copy_text", None)
         if copy_text is not None:
+            # v20.8+: CopyTextButton.text | إصدارات قديمة: str مباشرة
             text = getattr(copy_text, "text", None)
+            if not text and isinstance(copy_text, str):
+                text = copy_text
             if text and _URL_IN_TEXT_RE.search(str(text)):
                 return str(text)
 
-        # 5) switch_inline_query
+        # 5) switch_inline_query (v3.0.2)
         switch_q = getattr(button, "switch_inline_query", None)
         if switch_q and _URL_IN_TEXT_RE.search(str(switch_q)):
             return str(switch_q)
+
+        # 5b) switch_inline_query_current_chat (v3.0.2)
+        switch_q_cc = getattr(
+            button, "switch_inline_query_current_chat", None
+        )
+        if switch_q_cc and _URL_IN_TEXT_RE.search(str(switch_q_cc)):
+            return str(switch_q_cc)
 
         # 6) callback_data (نادر)
         cb = getattr(button, "callback_data", None)
         if cb and isinstance(cb, str) and _URL_IN_TEXT_RE.search(cb):
             return cb
+
+        # 7) v3.0.2: callback_game / pay — علامات أزرار مخصصة
+        # (لا تحتوي رابطاً لكنها تشير لزر تفاعلي مخصص)
+        if getattr(button, "callback_game", None) is not None:
+            return "callback_game://button"
+        if getattr(button, "pay", None):
+            return "pay://button"
 
     except Exception:
         pass
@@ -1345,6 +1380,12 @@ def _extract_vcard_urls(message: Any) -> List[str]:
 
 
 def _extract_venue_url(message: Any) -> Optional[str]:
+    """
+    v3.0.2: stub مقصود — Telegram Bot API لا يُرجع URL من كائن Venue.
+    الكائن يحتوي فقط على: location (lat/long)، title، address،
+    foursquare_id، foursquare_type، google_place_id، google_place_type.
+    لا يوجد حقل 'url'. تُرجع None دائماً للتوافق مع الواجهة العامة.
+    """
     return None
 
 
@@ -3395,7 +3436,7 @@ def cleanup_old_data() -> None:
 
 
 # =============================================================================
-# ORCHESTRATOR (v3.0.1)
+# ORCHESTRATOR (v3.0.2)
 # =============================================================================
 
 @dataclass
@@ -3422,13 +3463,48 @@ class SpamVerdict:
         }
 
 
+# 🟢 v3.0.2 IMP-1: بناء _MessageContext مرة واحدة فقط
 def _run_text_layer(message: Any, verdict: SpamVerdict) -> Dict[str, Any]:
+    """
+    v3.0.2: بدل استدعاء analyze_message (الذي يبني _MessageContext
+    داخلياً)، نبني السياق مباشرة هنا ونعيد dict متوافقاً مع
+    الحقول التي يحتاجها _run_url_layer و _run_behavioral_layer.
+    """
     if not TEXT_LAYER_ENABLED:
         return {}
     try:
-        text_result = analyze_message(message)
-        verdict.layer_scores["text"] = text_result.get("score", 0)
-        verdict.layer_reasons["text"] = text_result.get("reasons", [])
+        # بناء السياق مرة واحدة — يُستخدم للتحليل وللحقول الإضافية
+        ctx = _MessageContext(message)
+        score_info = _compute_spam_score(ctx, return_diagnostics=True)
+
+        # نُثري النتيجة بالحقول التي تحتاجها الطبقات اللاحقة
+        text_result: Dict[str, Any] = {
+            **score_info,
+            "has_link": ctx.has_any_link,
+            "has_button_link": ctx.has_button_link,
+            "button_count": ctx.button_count,
+            "button_urls": list(ctx.button_urls),
+            "entity_urls": list(ctx.entity_urls),
+            "is_forwarded": ctx.is_forwarded,
+            "is_auto_forwarded": ctx.is_auto_fwd,
+            "hidden_char_count": ctx.hidden_char_count,
+            "bidi_count": ctx.bidi_count,
+            "mixed_scripts": ctx.mixed_scripts,
+            "script_counts": dict(ctx.script_counts),
+            "url_count": ctx.url_count,
+            "telegram_link_count": ctx.telegram_link_count,
+            "spam_emoji_count": ctx.spam_emoji_count,
+            "strong_word_count": ctx.strong_word_count,
+            "medium_word_count": ctx.medium_word_count,
+            "promo_word_count": ctx.promo_word_count,
+            "arabic_spam_count": ctx.arabic_spam_count,
+            "cta_count": ctx.cta_count,
+            "random_domains": list(ctx.random_domains),
+            "has_random_domain": ctx.has_random_domain,
+        }
+
+        verdict.layer_scores["text"] = score_info.get("score", 0)
+        verdict.layer_reasons["text"] = score_info.get("reasons", [])
         return text_result
     except Exception as exc:
         logger.debug("L0 error: %r", exc)
