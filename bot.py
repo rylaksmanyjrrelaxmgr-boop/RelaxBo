@@ -2,39 +2,31 @@
 # -*- coding: utf-8 -*-
 
 """
-🌿 Relax Manager – البوت الرئيسي (v5.6.6)
+🌿 Relax Manager – البوت الرئيسي (v5.6.7)
 ================================================================================
+🆕 v5.6.7 (BROADEN-GROUP-FILTER — إصلاح حرج):
+    🔴 FIX-1: إزالة فلتر نوع المحتوى من _group_msg_filter
+              السبب: رسائل automatic forward من القنوات المرتبطة
+              (Post Bot) لا تُطابق filters.TEXT/PHOTO/VIDEO في بعض
+              إصدارات PTB → لا تصل لـ handle_group.
+              الحل: قبول كل رسائل المجموعة (بغض النظر عن النوع)
+              ثم اتخاذ القرار داخل _handle_group_impl.
+
 🆕 v5.6.6 (AUTO-BLOCKED-COMMAND):
-    🟢 NEW: تسجيل /autoblocked — عرض/إدارة القائمة السوداء التلقائية
+    🟢 NEW: تسجيل /autoblocked
     🟢 LINK: متوافق مع handlers_message v7.18.3
-              + database_auto_block v1.0.0
-              + database_tables v7.7.0
 
 🆕 v5.6.5 (CRITICAL-HANDLER-ORDER-FIX):
-    🔴 FIX-1: نقل handle_group/handle_edited/handle_service إلى group=-1
-              (كانت متأخرة بعد register_nav_fix/register_group_log_handlers
-               فتُبتلع الرسائل قبل وصولها إليها)
-    🔴 FIX-2: إضافة filters.PAID_MEDIA للفلتر عند توفره (PTB v20.7+)
-    🟠 FIX-3: TypeHandler تشخيصي (DIAG_INCOMING=1) — يطبع كل رسالة
-              واردة للمجموعة قبل أي handler
+    🔴 FIX-1: handle_group/handle_edited/handle_service في group=-1
+    🔴 FIX-2: filters.PAID_MEDIA
+    🟠 FIX-3: TypeHandler تشخيصي (DIAG_INCOMING=1)
     🟡 FIX-4: ربط الإصدار بـ handlers_message v7.17.1
 
 🆕 v5.6.4 (FIX-CANCELLED-PROPAGATION):
-    🔴 FIX-1: pool_health_monitor — مسار "قبل البدء"
-              `return` → `raise` عند CancelledError
-    🔴 FIX-2: pool_health_monitor — فرع SQLite (DB غير Postgres)
-              `return` → `raise` عند CancelledError
-    🔴 FIX-3: pool_health_monitor — حلقة النوم الرئيسية (300s)
-              `return` → `raise` عند CancelledError
+    🔴 FIX-1..3: pool_health_monitor — raise بدل return
 
 🆕 v5.6.3 (EDITED-MESSAGE-HOOK + MAINTENANCE-COMMANDS):
-    🔴 F1: تسجيل MessageHandlers.handle_edited (Fix #A4)
-    🔴 F2: تسجيل أوامر db_maintenance_commands
-    🔴 F3: _start/_stop_polling_mode — post_init/post_stop hooks
-    🟠 F4: timeout عند إلغاء المهام الخلفية (10s)
-    🟠 F5: استبدال datetime.utcnow() بـ TimeUtils.utc_now()
-    🟡 F6: إضافة الأوامر الجديدة إلى ADMIN_COMMANDS
-    🟡 F7: فحص handle_edited في CommandHandlers._verify
+    🔴 F1..F7
 ================================================================================
 """
 
@@ -184,7 +176,7 @@ from handlers.handlers_message import (
     register_shutdown_handlers as _register_message_shutdown,
     shutdown_log_dispatcher as _shutdown_log_dispatcher,
     shutdown_delete_tasks as _shutdown_delete_tasks,
-    handle_autoblocked_command as _handle_autoblocked_command,  # 🆕 v5.6.6
+    handle_autoblocked_command as _handle_autoblocked_command,
 )
 
 # ═════════════════════════════════════════════════════════════════════
@@ -308,7 +300,6 @@ _PM_LOCK_WAIT_WARN = 1
 _PM_WAITING_WARN = 3
 _PM_ALERT_COOLDOWN_SEC = 600.0
 
-# 🆕 v5.6.5: تشخيص الرسائل الواردة
 _DIAG_INCOMING = os.getenv("DIAG_INCOMING", "0").strip().lower() in (
     "1", "true", "yes", "on", "enabled",
 )
@@ -539,7 +530,7 @@ ADMIN_COMMANDS = [
     ("db_diag_quick", "🔬 تقرير صحي مختصر"),
     ("db_maintenance", "🧹 صيانة قاعدة البيانات"),
     ("db_weekly", "📅 التقرير الأسبوعي"),
-    ("autoblocked", "🚫 المصادر المحجوبة تلقائياً"),  # 🆕 v5.6.6
+    ("autoblocked", "🚫 المصادر المحجوبة تلقائياً"),
 ]
 
 GROUP_COMMANDS = [
@@ -1346,13 +1337,7 @@ async def _dump_idle_tx_details() -> None:
 
 
 async def pool_health_monitor() -> None:
-    """
-    يراقب Pool + الاتصالات كل 5 دقائق.
-
-    ✅ v5.6.4: جميع مسارات CancelledError تستخدم `raise` بدل `return`
-       — يُمرِّر الإلغاء بشكل صحيح إلى `run_task_with_retry`
-       (يمنع تحذير "عادت بدون استثناء — إعادة بعد 5s").
-    """
+    """يراقب Pool + الاتصالات كل 5 دقائق."""
     _task_start_mono = time.monotonic()
     _idle_tx_streak = 0
     _last_details_dump_mono = 0.0
@@ -1361,7 +1346,6 @@ async def pool_health_monitor() -> None:
         await asyncio.sleep(120)
     except asyncio.CancelledError:
         logger.info("🛑 pool_health_monitor أُلغيت (قبل البدء)")
-        # ✅ v5.6.4 FIX-1: raise بدل return
         raise
 
     while True:
@@ -1372,7 +1356,6 @@ async def pool_health_monitor() -> None:
                     await asyncio.sleep(1800)
                 except asyncio.CancelledError:
                     logger.info("🛑 pool_health_monitor أُلغيت")
-                    # ✅ v5.6.4 FIX-2: raise بدل return
                     raise
                 continue
 
@@ -1526,7 +1509,6 @@ async def pool_health_monitor() -> None:
             await asyncio.sleep(300)
         except asyncio.CancelledError:
             logger.info("🛑 pool_health_monitor أُلغيت")
-            # ✅ v5.6.4 FIX-3: raise بدل return
             raise
 
 
@@ -1693,12 +1675,7 @@ async def _watch_runner(
 # ═══════════════════════════════════════════════════════════════════
 
 async def run_task_with_retry(task_func, *args, task_name=""):
-    """
-    يعيد تشغيل المهمة عند الانهيار مع backoff تصاعدي.
-    - عند خروج مفاجئ (بدون استثناء) → تأخير وقائي 5s.
-    - عند استثناء → backoff من 5s إلى 60s.
-    - عند CancelledError → raise (إغلاق نظيف).
-    """
+    """يعيد تشغيل المهمة عند الانهيار مع backoff تصاعدي."""
     consecutive_failures = 0
     while True:
         try:
@@ -1805,11 +1782,6 @@ async def contest_cleanup(app: Application):
 # ═══════════════════════════════════════════════════════════════════
 
 async def _run_post_init_hooks(app: Application) -> None:
-    """
-    تنفيذ post_init hooks بشكل صحيح — يدعم:
-      - callable مفرد (PTB v20+)
-      - list/tuple من callables (توافق أوسع)
-    """
     _post_init = getattr(app, "post_init", None)
     if _post_init is None:
         return
@@ -1829,11 +1801,6 @@ async def _run_post_init_hooks(app: Application) -> None:
 
 
 async def _run_post_stop_hooks(app: Application) -> None:
-    """
-    تنفيذ post_stop hooks بشكل صحيح — يدعم:
-      - callable مفرد
-      - list/tuple من callables
-    """
     _post_stop = getattr(app, "post_stop", None)
     if _post_stop is None:
         return
@@ -1857,12 +1824,6 @@ async def _run_post_stop_hooks(app: Application) -> None:
 # ═══════════════════════════════════════════════════════════════════
 
 async def _start_polling_mode(app: Application) -> None:
-    """
-    F1-fix: يُحاكي app.start() بدقة مع تمرير allowed_updates/
-    drop_pending_updates — بدون استدعاء app.start().
-
-    v5.6.3: يستخدم _run_post_init_hooks بدل iteration مباشر.
-    """
     if app.updater is None:
         raise RuntimeError(
             "Polling mode يتطلب updater — تأكد أن Application.builder() "
@@ -1887,12 +1848,6 @@ async def _start_polling_mode(app: Application) -> None:
 
 
 async def _stop_polling_mode(app: Application) -> None:
-    """
-    F1-fix: يُحاكي app.stop() بدقة:
-      1. تنفيذ post_stop hooks (عبر helper)
-      2. await app.updater.stop()
-      3. app._running = False
-    """
     if not getattr(app, "_running", False):
         return
 
@@ -1908,41 +1863,11 @@ async def _stop_polling_mode(app: Application) -> None:
 
 
 # ═══════════════════════════════════════════════════════════════════
-# 🆕 v5.6.5: Group message filters + diagnostic handler
+# 🆕 v5.6.7: Diagnostic handler
 # ═══════════════════════════════════════════════════════════════════
 
-def _build_group_content_filter():
-    """
-    بناء فلتر محتوى الرسائل للمجموعات بشكل شامل.
-
-    يشمل:
-      - TEXT, PHOTO, VIDEO, Document.ALL, AUDIO, VOICE, ANIMATION,
-        Sticker.ALL, VIDEO_NOTE
-      - PAID_MEDIA إن كان PTB v20.7+
-    """
-    content = (
-        filters.TEXT
-        | filters.PHOTO
-        | filters.VIDEO
-        | filters.Document.ALL
-        | filters.AUDIO
-        | filters.VOICE
-        | filters.ANIMATION
-        | filters.Sticker.ALL
-        | filters.VIDEO_NOTE
-    )
-
-    # 🆕 v5.6.5 FIX-2: PAID_MEDIA (PTB v20.7+)
-    try:
-        content = content | filters.PAID_MEDIA
-    except AttributeError:
-        pass
-
-    return content
-
-
 async def _diag_incoming(update, context):
-    """🆕 v5.6.5: TypeHandler تشخيصي — يُطبع كل رسالة واردة للمجموعة."""
+    """v5.6.5: TypeHandler تشخيصي — يُطبع كل رسالة واردة للمجموعة."""
     try:
         msg = update.effective_message
         chat = update.effective_chat
@@ -2008,7 +1933,7 @@ async def main():
 
     logger.info("🌿 %s", CONFIG.BOT_NAME)
     logger.info("👨‍💼 المالك: %s", CONFIG.PRIMARY_OWNER_ID)
-    logger.info("📦 main.py: v5.6.6 (AUTO-BLOCKED-COMMAND)")
+    logger.info("📦 main.py: v5.6.7 (BROADEN-GROUP-FILTER)")
 
     if not _verify_command_handlers():
         logger.error("❌ فشل فحص دوال الأوامر — الخروج")
@@ -2167,7 +2092,7 @@ async def main():
     )
 
     # ═════════════════════════════════════════════════════════════
-    # 🆕 v5.6.5: DIAGNOSTIC TypeHandler (group=-100 — أول كل شيء)
+    # Diagnostic TypeHandler (group=-100 — أول كل شيء)
     # ═════════════════════════════════════════════════════════════
     if _DIAG_INCOMING and _HAS_TYPE_HANDLER:
         try:
@@ -2187,14 +2112,11 @@ async def main():
         )
 
     # ═════════════════════════════════════════════════════════════
-    # 🆕 v5.6.5 FIX-1: تسجيل معالجات المجموعات في group=-1
-    # تُشغَّل قبل كل handlers group=0 — تمنع "ابتلاع" الرسائل
+    # 🆕 v5.6.7 FIX: تسجيل معالجات المجموعات في group=-1
+    # بدون فلتر نوع المحتوى — يقبل كل الرسائل
     # ═════════════════════════════════════════════════════════════
-    _group_content_filter = _build_group_content_filter()
-
     _group_msg_filter = (
-        _group_content_filter
-        & filters.ChatType.GROUPS
+        filters.ChatType.GROUPS
         & ~filters.COMMAND
     )
 
@@ -2205,7 +2127,7 @@ async def main():
             group=-1,
         )
         logger.info(
-            "✅ handle_group مُسجَّل في group=-1 (أولوية عالية)"
+            "✅ handle_group مُسجَّل في group=-1 (فلتر شامل — كل الأنواع)"
         )
     except Exception as _e:
         logger.error("❌ فشل تسجيل handle_group: %s", _e, exc_info=True)
@@ -2215,15 +2137,14 @@ async def main():
         try:
             app.add_handler(
                 MessageHandler(
-                    _group_content_filter
-                    & filters.ChatType.GROUPS
+                    filters.ChatType.GROUPS
                     & filters.UpdateType.EDITED_MESSAGE,
                     MessageHandlers.handle_edited,
                 ),
                 group=-1,
             )
             logger.info(
-                "✅ handle_edited مُسجَّل في group=-1 (Fix #A4)"
+                "✅ handle_edited مُسجَّل في group=-1 (فلتر شامل)"
             )
         except Exception as _e:
             logger.error(
@@ -2304,7 +2225,7 @@ async def main():
     app.add_handler(CommandHandler("db_diag", CommandHandlers.db_diag))
     app.add_handler(CommandHandler("db_vacuum", CommandHandlers.db_vacuum))
 
-    # 🆕 v5.6.6: /autoblocked — إدارة القائمة السوداء التلقائية
+    # 🆕 v5.6.6: /autoblocked
     try:
         app.add_handler(CommandHandler(
             "autoblocked", _handle_autoblocked_command
@@ -2393,9 +2314,6 @@ async def main():
         filters.ChatType.PRIVATE & ~filters.COMMAND,
         MessageHandlers.handle_private
     ))
-
-    # ⚠️ handle_group/handle_edited/handle_service مُسجّلة الآن في group=-1
-    # لا نُعيد تسجيلها هنا.
 
     app.add_handler(ChatJoinRequestHandler(MessageHandlers.handle_join_request))
     app.add_error_handler(ErrorHandler.handle_error)
