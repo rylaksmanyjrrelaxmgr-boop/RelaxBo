@@ -1,9 +1,14 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-handlers_message.py - v7.18.4
+handlers_message.py - v7.18.5
 (متوافق مع detectors v3.0.1 UNIFIED — 7 Layers)
 =============================================================================
+🆕 v7.18.5 — حماية المستخدمين من الحجب التلقائي:
+    🛡️ NEW: عدم إضافة users/hidden_users للقائمة السوداء
+    🛡️ NEW: فحص positive-ID كحماية إضافية (قنوات/مجموعات فقط)
+    📝 NEW: لوج SKIP-BLACKLIST-USER و SKIP-BLACKLIST-POSITIVE-ID
+
 🆕 v7.18.4 — إصلاحات شاملة:
     🔧 FIX: إزالة كود ميت (dead code) في فحص button_links المكرر
     🔧 FIX: نقل _private_handler_signature_cache قبل استخدامه
@@ -618,7 +623,7 @@ async def _lazy_init_columns():
         _columns_last_attempt_ts = now
 
         db_type = getattr(DB, "DB_TYPE", "sqlite")
-        logger.info("🔧 v7.18.4: Auto-migration (DB_TYPE=%s)", db_type)
+        logger.info("🔧 v7.18.5: Auto-migration (DB_TYPE=%s)", db_type)
 
         cols = [
             ("delete_protected_any", "INTEGER DEFAULT 0", "TINYINT(1) DEFAULT 0"),
@@ -3303,28 +3308,48 @@ class MessageHandlers:
                 pass
             return
 
-        # 🆕 v7.18.3: إضافة المصدر للقائمة السوداء تلقائياً
+        # 🆕 v7.18.5: إضافة المصدر للقائمة السوداء — فقط القنوات/المجموعات
         if _HAS_AUTO_BLOCK and violation_type in (
             'postbot_forward', 'forwarded', 'spam_score',
         ):
             try:
                 _fwd = get_forward_info(message)
-                _source_id = (
-                    _fwd.get("original_chat_id")
-                    or _fwd.get("original_user_id")
-                    or _fwd.get("sender_chat_id")
-                )
-                if _source_id is not None:
-                    await _add_blocked_source(
-                        source_id=_source_id,
-                        source_type=_fwd.get("origin_type") or "channel",
-                        source_name=_fwd.get("original_name") or "",
-                        reason=f"auto:{violation_type}",
+                _origin_type = (_fwd.get("origin_type") or "").lower()
+
+                # 🆕 v7.18.5: لا نضيف users للقائمة السوداء
+                # (channel/chat فقط) — لحماية المستخدمين العاديين
+                if _origin_type in ("user", "hidden_user"):
+                    logger.debug(
+                        "SKIP-BLACKLIST-USER | type=%s name=%r",
+                        _origin_type, _fwd.get("original_name"),
                     )
-                    logger.info(
-                        "📝 AUTO-ADDED-TO-BLACKLIST | source_id=%s name=%r",
-                        _source_id, _fwd.get("original_name"),
+                else:
+                    _source_id = (
+                        _fwd.get("original_chat_id")
+                        or _fwd.get("sender_chat_id")
+                        or _fwd.get("original_user_id")
                     )
+                    # 🆕 v7.18.5: حماية إضافية — تجاهل ID موجب
+                    # (معرّفات القنوات/المجموعات سالبة دائماً في Telegram)
+                    if _source_id is not None and int(_source_id) > 0:
+                        logger.debug(
+                            "SKIP-BLACKLIST-POSITIVE-ID | id=%s type=%s",
+                            _source_id, _origin_type,
+                        )
+                    elif _source_id is not None:
+                        await _add_blocked_source(
+                            source_id=_source_id,
+                            source_type=_origin_type or "channel",
+                            source_name=_fwd.get("original_name") or "",
+                            reason=f"auto:{violation_type}",
+                        )
+                        logger.info(
+                            "📝 AUTO-ADDED-TO-BLACKLIST | "
+                            "source_id=%s name=%r type=%s",
+                            _source_id,
+                            _fwd.get("original_name"),
+                            _origin_type,
+                        )
             except Exception as e:
                 logger.debug("auto-add blacklist: %s", e)
 
