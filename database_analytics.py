@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-database_analytics.py - دوال التحليلات المتقدمة (v1.0.3)
+database_analytics.py - دوال التحليلات المتقدمة (v1.0.4)
 ================================================================================
 AnalyticsMixin:
   - get_user_growth               : نمو المستخدمين آخر N يوم
   - get_top_channels              : أفضل N قناة (نجاح + إنجاز)
-  - get_channel_success_rate      : 🆕 v1.0.3: نسبة نجاح القنوات (alias + فلترة)
+  - get_channel_success_rate      : نسبة نجاح القنوات (alias + فلترة)
   - get_publish_stats             : متوسط + نسبة النجاح + نسبة الإنجاز
   - get_subscription_rate         : اشتراكات شهرية
   - get_slow_queries              : أبطأ الاستعلامات (الأبطأ أولاً)
-  - get_slowest_queries           : 🆕 v1.0.3: alias موثّق للأبطأ أولاً
+  - get_slowest_queries           : alias موثّق للأبطأ أولاً
   - get_pool_live                 : حالة Pool مباشرة
   🆕 Diagnostics:
   - get_db_diagnostics            : 🔬 تقرير تشخيص DB شامل
@@ -20,6 +20,16 @@ AnalyticsMixin:
   - get_autovacuum_settings       : إعدادات Autovacuum
   - get_maintenance_recommendations : توصيات SQL عملية
 ================================================================================
+🆕 v1.0.4 (POST-AUDIT FIXES):
+  🔴 FIX-1: get_user_growth — دعم PostgreSQL.
+      قبل: كان يستخدم DATE(created_at) وهي غير موجودة في PG
+            → الاستعلام يفشل على PG ويرجع قائمة فارغة بصمت.
+      بعد: فرع DB-specific (PG: created_at::date،
+            MySQL/SQLite: DATE(created_at)).
+  🟡 FIX-2: get_channel_success_rate — تنفيذ "الفلترة" المُعلَنة في
+      الـ changelog v1.0.3. أُضيف معامل اختياري filter_min_attempts
+      (افتراضي 0 = بدون فلترة، backward-compatible).
+
 🆕 v1.0.3 — إصلاحات ما بعد المراجعة النهائية:
   ✅ get_channel_success_rate: مُضافة فعلياً (كانت في docstring فقط)
   ✅ get_slowest_queries: alias موثّق — يتفادى التعارض مع database.py
@@ -224,18 +234,35 @@ class AnalyticsMixin:
     # =================================================================
 
     async def get_user_growth(self, days: int = 30) -> List[Dict[str, Any]]:
-        """📈 نمو المستخدمين آخر N يوم."""
+        """
+        📈 نمو المستخدمين آخر N يوم.
+
+        ✅ v1.0.4 FIX-1: دعم PostgreSQL.
+        - PG         : created_at::date
+        - MySQL/SQLite: DATE(created_at)
+        """
         try:
             days = max(1, min(int(days), 365))
             since = self.TimeUtils.utc_now() - timedelta(days=days)
 
-            query = """
-                SELECT DATE(created_at) AS day, COUNT(*) AS cnt
-                FROM users
-                WHERE created_at >= ?
-                GROUP BY DATE(created_at)
-                ORDER BY day ASC
-            """
+            # ✅ FIX-1: DB-specific date function
+            if getattr(self, "USE_POSTGRES", False):
+                query = """
+                    SELECT created_at::date AS day, COUNT(*) AS cnt
+                    FROM users
+                    WHERE created_at >= $1
+                    GROUP BY created_at::date
+                    ORDER BY day ASC
+                """
+            else:
+                # MySQL + SQLite كلاهما يدعم DATE(created_at)
+                query = """
+                    SELECT DATE(created_at) AS day, COUNT(*) AS cnt
+                    FROM users
+                    WHERE created_at >= ?
+                    GROUP BY DATE(created_at)
+                    ORDER BY day ASC
+                """
             rows = await self.fetchall(query, (since,))
 
             result = []
@@ -307,19 +334,37 @@ class AnalyticsMixin:
             return []
 
     # =================================================================
-    # 2.b) 🆕 v1.0.3: نسبة نجاح القنوات (alias موثّق)
+    # 2.b) نسبة نجاح القنوات (alias + فلترة اختيارية)
     # =================================================================
 
     async def get_channel_success_rate(
-        self, limit: int = 20
+        self,
+        limit: int = 20,
+        filter_min_attempts: int = 0,
     ) -> List[Dict[str, Any]]:
         """
         🎯 نسبة نجاح كل قناة — alias واضح لـ get_top_channels.
 
         يُستخدم في handlers_callback.py → analytics → channels_rate
         حيث يُرتَّب تصاعدياً بـ success_rate (الأقل نجاحاً أولاً).
+
+        ✅ v1.0.4 FIX-2: تنفيذ "الفلترة" المُعلَنة في changelog v1.0.3.
+
+        Args:
+            limit: عدد القنوات الأقصى (1..50).
+            filter_min_attempts: إن > 0، يستبعد القنوات التي
+                عدد محاولاتها (attempted) أقل من هذا الحد.
+                مفيد لتفادي ضجيج قنوات جديدة (1 محاولة = 100% أو 0%).
+                افتراضي 0 = بدون فلترة (backward-compatible).
         """
-        return await self.get_top_channels(limit)
+        channels = await self.get_top_channels(limit)
+        if filter_min_attempts > 0:
+            min_att = max(0, int(filter_min_attempts))
+            channels = [
+                c for c in channels
+                if c.get('attempted', 0) >= min_att
+            ]
+        return channels
 
     # =================================================================
     # 3) متوسط النشر + نسبة النجاح العامة
@@ -532,7 +577,7 @@ class AnalyticsMixin:
             return []
 
     # =================================================================
-    # 🆕 v1.0.2: 8) Dead Tuples لكل جدول
+    # 8) Dead Tuples لكل جدول
     # =================================================================
 
     async def get_dead_tuples(self, limit: int = 20) -> List[Dict[str, Any]]:
@@ -600,7 +645,7 @@ class AnalyticsMixin:
             return []
 
     # =================================================================
-    # 🆕 v1.0.2: 9) أحجام الجداول
+    # 9) أحجام الجداول
     # =================================================================
 
     async def get_table_sizes(self, limit: int = 20) -> List[Dict[str, Any]]:
@@ -653,7 +698,7 @@ class AnalyticsMixin:
             return []
 
     # =================================================================
-    # 🆕 v1.0.2: 10) معلومات الفهارس
+    # 10) معلومات الفهارس
     # =================================================================
 
     async def get_indexes_info(
@@ -728,7 +773,7 @@ class AnalyticsMixin:
             return {}
 
     # =================================================================
-    # 🆕 v1.0.2: 11) إعدادات Autovacuum
+    # 11) إعدادات Autovacuum
     # =================================================================
 
     async def get_autovacuum_settings(self) -> Dict[str, Any]:
@@ -773,7 +818,7 @@ class AnalyticsMixin:
             return {}
 
     # =================================================================
-    # 🆕 v1.0.2/1.0.3: 12) توصيات الصيانة
+    # 12) توصيات الصيانة
     # =================================================================
 
     async def get_maintenance_recommendations(
@@ -913,7 +958,7 @@ class AnalyticsMixin:
         return recs
 
     # =================================================================
-    # 🆕 v1.0.2/1.0.3: 13) تقرير التشخيص الشامل
+    # 13) تقرير التشخيص الشامل
     # =================================================================
 
     async def get_db_diagnostics(self, top_n: int = 10) -> Dict[str, Any]:
