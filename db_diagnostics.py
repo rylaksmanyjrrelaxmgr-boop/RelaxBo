@@ -4,7 +4,17 @@
 """
 db_diagnostics.py — PostgreSQL/MySQL/SQLite Database Diagnostics
 ================================================================================
-v6.5.1 — FIX-CRITICAL: user_violations column
+v6.6.0 — AUTO-CLEANUP + FIX-CRITICAL: user_violations column
+
+🆕 v6.6.0 (AUTO-CLEANUP):
+    • auto_cleanup_check_and_run() — فحص الحجم + تشغيل صيانة تلقائية
+    • _auto_cleanup_loop()          — مهمة دورية (كل 6 ساعات افتراضياً)
+    • start_auto_cleanup()          — بدء المهمة عند إقلاع البوت
+    • stop_auto_cleanup()           — إيقاف نظيف عند shutdown
+    • get_auto_cleanup_status()     — حالة النظام للعرض
+    • _get_table_size_mb()          — حساب حجم جدول بالميغابايت
+    • متغيرات ENV جديدة (DB_AUTO_CLEANUP_*)
+    • _check_admin_logs_size()      — يعرض حالة auto-cleanup
 
 🔴 FIX-CRITICAL (v6.5.1):
     تصحيح العمود في user_violations من created_at → last_violation_time
@@ -32,13 +42,18 @@ v6.5.0 — MAINTENANCE + QUICK DIAG + WEEKLY REPORT
         preview_maintenance, run_maintenance,
         format_maintenance_preview, format_maintenance_result,
         vacuum_analyze_tables,
+        # 🆕 v6.6.0:
+        start_auto_cleanup, stop_auto_cleanup,
+        auto_cleanup_check_and_run, get_auto_cleanup_status,
     )
 ================================================================================
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import os
 import re
 import time as _time
 from dataclasses import dataclass, field
@@ -52,7 +67,7 @@ logger = logging.getLogger(__name__)
 # VERSION
 # =============================================================================
 
-VERSION = "6.5.1"
+VERSION = "6.6.0"
 
 
 # =============================================================================
@@ -125,6 +140,73 @@ MAINTENANCE_MAX_DELETE_PER_TABLE = 100_000
 MAINTENANCE_DEFAULT_ADMIN_LOGS_DAYS = 30
 MAINTENANCE_DEFAULT_PENALTY_ARCHIVE_DAYS = 90
 MAINTENANCE_DEFAULT_USER_VIOLATIONS_DAYS = 90
+
+
+# =============================================================================
+# ENV HELPERS (v6.6.0)
+# =============================================================================
+
+_TRUE_STRS = frozenset({"1", "true", "yes", "y", "on", "enabled", "enable"})
+_FALSE_STRS = frozenset({"0", "false", "no", "n", "off", "disabled", "disable"})
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    """يقرأ متغير بيئي كـ boolean."""
+    val = os.getenv(name)
+    if val is None:
+        return default
+    v = val.strip().lower()
+    if v in _TRUE_STRS:
+        return True
+    if v in _FALSE_STRS:
+        return False
+    return default
+
+
+def _env_int(name: str, default: int) -> int:
+    """يقرأ متغير بيئي كـ int."""
+    try:
+        return int(os.getenv(name, str(default)))
+    except (TypeError, ValueError):
+        return default
+
+
+# =============================================================================
+# 🆕 v6.6.0: AUTO-CLEANUP CONFIGURATION
+# =============================================================================
+
+AUTO_CLEANUP_ENABLED = _env_bool(
+    "DB_AUTO_CLEANUP_ENABLED", True
+)
+AUTO_CLEANUP_MAX_SIZE_MB = _env_int(
+    "DB_AUTO_CLEANUP_MAX_SIZE_MB", 20
+)
+AUTO_CLEANUP_INTERVAL_HOURS = _env_int(
+    "DB_AUTO_CLEANUP_INTERVAL_HOURS", 6
+)
+AUTO_CLEANUP_INITIAL_DELAY_SEC = _env_int(
+    "DB_AUTO_CLEANUP_INITIAL_DELAY_SEC", 60
+)
+AUTO_CLEANUP_MAX_DELETE_PER_TABLE = _env_int(
+    "DB_AUTO_CLEANUP_MAX_DELETE_PER_TABLE", 50_000
+)
+AUTO_CLEANUP_ADMIN_LOGS_DAYS = _env_int(
+    "DB_AUTO_CLEANUP_ADMIN_LOGS_DAYS", 30
+)
+AUTO_CLEANUP_PENALTY_ARCHIVE_DAYS = _env_int(
+    "DB_AUTO_CLEANUP_PENALTY_ARCHIVE_DAYS", 90
+)
+AUTO_CLEANUP_USER_VIOLATIONS_DAYS = _env_int(
+    "DB_AUTO_CLEANUP_USER_VIOLATIONS_DAYS", 90
+)
+AUTO_CLEANUP_VACUUM = _env_bool(
+    "DB_AUTO_CLEANUP_VACUUM", True
+)
+
+# الجداول المراقَبة — يُشغَّل التنظيف عندما يتجاوز أحدها الحد
+AUTO_CLEANUP_WATCH_TABLES: Tuple[str, ...] = (
+    "admin_logs",
+)
 
 
 # =============================================================================
@@ -707,6 +789,70 @@ async def _get_table_sizes() -> List[Dict[str, Any]]:
     except Exception as exc:
         logger.warning("_get_table_sizes sqlite: %s", exc)
         return []
+
+
+# =============================================================================
+# 🆕 v6.6.0: SIZE HELPERS
+# =============================================================================
+
+async def _get_table_size_mb(table_name: str) -> float:
+    """
+    🆕 v6.6.0: يرجع حجم جدول + فهارسه بالميغابايت.
+
+    يدعم PostgreSQL و MySQL. SQLite يرجع 0.0 (لا توجد طريقة موحّدة).
+    """
+    if not table_name:
+        return 0.0
+
+    from database import DB
+
+    if _is_postgres():
+        try:
+            row = await DB.fetchone(
+                """
+                SELECT pg_total_relation_size($1::regclass) AS total_bytes
+                """,
+                _safe_params(table_name),
+            )
+            if not row:
+                return 0.0
+            total = row.get("total_bytes") if isinstance(row, dict) else None
+            if total is None:
+                return 0.0
+            return round(int(total) / (1024.0 * 1024.0), 2)
+        except Exception as exc:
+            logger.debug("_get_table_size_mb(%s): %s", table_name, exc)
+            return 0.0
+
+    if _is_mysql():
+        try:
+            val = await DB.fetchval(
+                """
+                SELECT (
+                    COALESCE(DATA_LENGTH, 0)
+                    + COALESCE(INDEX_LENGTH, 0)
+                )
+                FROM information_schema.TABLES
+                WHERE TABLE_SCHEMA = DATABASE()
+                  AND TABLE_NAME = %s
+                """,
+                _safe_params(table_name),
+                default=0,
+            )
+            return round(_safe_int(val) / (1024.0 * 1024.0), 2)
+        except Exception as exc:
+            logger.debug("_get_table_size_mb(%s): %s", table_name, exc)
+            return 0.0
+
+    return 0.0
+
+
+async def _get_all_watched_table_sizes() -> Dict[str, float]:
+    """يقرأ أحجام كل الجداول المراقَبة بالميغابايت."""
+    sizes: Dict[str, float] = {}
+    for table in AUTO_CLEANUP_WATCH_TABLES:
+        sizes[table] = await _get_table_size_mb(table)
+    return sizes
 
 
 # =============================================================================
@@ -1363,6 +1509,9 @@ def _check_maintenance_consistency() -> Optional[str]:
 
 
 async def _check_admin_logs_size() -> Optional[str]:
+    """
+    🔍 يفحص حجم admin_logs — مُحدَّث v6.6.0 ليعرض حالة auto-cleanup.
+    """
     from database import DB
 
     try:
@@ -1374,10 +1523,42 @@ async def _check_admin_logs_size() -> Optional[str]:
         logger.debug("_check_admin_logs_size: %s", exc)
         return None
 
+    # 🆕 v6.6.0: قراءة الحجم بالميغابايت + حالة auto-cleanup
+    try:
+        size_mb = await _get_table_size_mb("admin_logs")
+    except Exception:
+        size_mb = 0.0
+
+    ac_status_line = ""
+    if AUTO_CLEANUP_ENABLED:
+        ac_status_line = (
+            f"\n🤖 <b>Auto-cleanup:</b> مُفعَّل "
+            f"(كل {AUTO_CLEANUP_INTERVAL_HOURS}h، "
+            f"عند ≥ {AUTO_CLEANUP_MAX_SIZE_MB}MB)"
+        )
+    else:
+        ac_status_line = "\n🤖 <b>Auto-cleanup:</b> معطَّل"
+
+    size_line = (
+        f"\n💾 <b>الحجم الحالي:</b> {size_mb:.2f} MB"
+        if size_mb > 0 else ""
+    )
+
+    # فحص الحجم أولاً (أهم من عدد الصفوف)
+    if AUTO_CLEANUP_MAX_SIZE_MB > 0 and size_mb >= AUTO_CLEANUP_MAX_SIZE_MB:
+        return (
+            f"🔴 <b>admin_logs تجاوز الحد المسموح:</b> "
+            f"{size_mb:.2f} MB ≥ {AUTO_CLEANUP_MAX_SIZE_MB} MB\n"
+            f"📊 عدد الصفوف: {row_count:,}"
+            f"{ac_status_line}\n"
+            f"💡 سيُنظَّف تلقائياً في الدورة القادمة."
+        )
+
     if row_count >= ADMIN_LOGS_CRIT_ROWS:
         return (
             f"🔴 <b>admin_logs كبير جداً:</b> "
-            f"{row_count:,} صف\n"
+            f"{row_count:,} صف"
+            f"{size_line}{ac_status_line}\n"
             f"💡 نظّف القديم الآن: "
             f"<code>DELETE FROM admin_logs "
             f"WHERE created_at < NOW() - INTERVAL '30 days';</code>"
@@ -1386,7 +1567,8 @@ async def _check_admin_logs_size() -> Optional[str]:
     if row_count >= ADMIN_LOGS_WARN_ROWS:
         return (
             f"🟡 <b>admin_logs يحتاج تقليماً:</b> "
-            f"{row_count:,} صف\n"
+            f"{row_count:,} صف"
+            f"{size_line}{ac_status_line}\n"
             f"💡 نظّف القديم: "
             f"<code>DELETE FROM admin_logs "
             f"WHERE created_at < NOW() - INTERVAL '60 days';</code>"
@@ -2469,6 +2651,38 @@ async def _build_diagnose_lines() -> List[str]:
             "VACUUM يعيد بناء قاعدة البيانات."
         )
 
+    # 🆕 v6.6.0: عرض حالة auto-cleanup
+    if AUTO_CLEANUP_ENABLED and USE_POSTGRES:
+        lines.append("")
+        lines.append("<b>8. Auto-Cleanup</b>")
+        lines.append("")
+        watched = AUTO_CLEANUP_WATCH_TABLES
+        for table in watched:
+            try:
+                size_mb = await _get_table_size_mb(table)
+            except Exception:
+                size_mb = 0.0
+            if size_mb >= AUTO_CLEANUP_MAX_SIZE_MB:
+                icon = "🔴"
+                status = "يتجاوز الحد — سيُنظَّف"
+            elif size_mb > 0:
+                icon = "🟢"
+                status = "ضمن الحد"
+            else:
+                icon = "❔"
+                status = "غير موجود أو غير مدعوم"
+            lines.append(
+                f"  {icon} <code>{_escape_html(table)}</code> — "
+                f"<b>{size_mb:.2f}MB</b> "
+                f"(الحد: {AUTO_CLEANUP_MAX_SIZE_MB}MB) — "
+                f"{status}"
+            )
+        lines.append(
+            f"  ⚙️ يُشغَّل كل <b>{AUTO_CLEANUP_INTERVAL_HOURS}h</b> | "
+            f"VACUUM: "
+            f"{'ON 🟢' if AUTO_CLEANUP_VACUUM else 'OFF ⚪'}"
+        )
+
     lines.append("")
     lines.append("━━━━━━━━━━━━━━━━━━━━━━")
     lines.append("✅ <b>اكتمل التشخيص</b>")
@@ -3129,6 +3343,295 @@ async def vacuum_analyze_tables() -> str:
 
 
 # =============================================================================
+# 🆕 v6.6.0: AUTO-CLEANUP ENGINE
+# =============================================================================
+
+_auto_cleanup_task: Optional[asyncio.Task] = None
+_auto_cleanup_shutdown: bool = False
+_auto_cleanup_last_run: float = 0.0
+_auto_cleanup_last_result: Dict[str, Any] = {}
+
+
+async def auto_cleanup_check_and_run() -> Dict[str, Any]:
+    """
+    🆕 v6.6.0: الفحص الرئيسي — يقارن أحجام الجداول المراقَبة
+    بالعتبة، ويشغّل run_maintenance() عند التجاوز.
+
+    Returns:
+        dict يحتوي على:
+            - ran: bool — هل نُفِّذ التنظيف؟
+            - reason: str — السبب
+            - sizes: dict — أحجام الجداول قبل الفحص
+            - triggers: list — الجداول التي تجاوزت الحد
+            - maintenance_result: dict | None — نتيجة run_maintenance
+    """
+    global _auto_cleanup_last_run, _auto_cleanup_last_result
+
+    _auto_cleanup_last_run = _time.time()
+
+    report: Dict[str, Any] = {
+        "ran": False,
+        "reason": "",
+        "sizes": {},
+        "triggers": [],
+        "maintenance_result": None,
+    }
+
+    if not AUTO_CLEANUP_ENABLED:
+        report["reason"] = "disabled"
+        _auto_cleanup_last_result = report
+        return report
+
+    if not _is_postgres():
+        report["reason"] = "not_postgres"
+        _auto_cleanup_last_result = report
+        return report
+
+    # ── قراءة أحجام الجداول المراقَبة ──
+    try:
+        sizes = await _get_all_watched_table_sizes()
+    except Exception as exc:
+        logger.error(
+            "❌ auto_cleanup: فشل قراءة الأحجام: %s", exc,
+            exc_info=True,
+        )
+        report["reason"] = f"size_read_failed:{exc}"
+        _auto_cleanup_last_result = report
+        return report
+
+    report["sizes"] = sizes
+
+    # ── تحديد الجداول المتجاوزة ──
+    triggers: List[Dict[str, Any]] = []
+    if AUTO_CLEANUP_MAX_SIZE_MB > 0:
+        for table, size_mb in sizes.items():
+            if size_mb >= AUTO_CLEANUP_MAX_SIZE_MB:
+                triggers.append({
+                    "table": table,
+                    "size_mb": size_mb,
+                    "threshold_mb": AUTO_CLEANUP_MAX_SIZE_MB,
+                })
+
+    report["triggers"] = triggers
+
+    if not triggers:
+        report["reason"] = "no_action"
+        _auto_cleanup_last_result = report
+        logger.debug(
+            "🧹 auto_cleanup: no action needed | sizes=%s",
+            {k: f"{v:.2f}MB" for k, v in sizes.items()},
+        )
+        return report
+
+    # ── تشغيل الصيانة ──
+    report["ran"] = True
+    report["reason"] = (
+        "size_threshold:" + ",".join(
+            f"{t['table']}={t['size_mb']:.2f}MB" for t in triggers
+        )
+    )
+
+    logger.warning(
+        "🧹 auto_cleanup TRIGGERED | %s",
+        report["reason"],
+    )
+
+    try:
+        maintenance = await run_maintenance(
+            admin_logs_days=AUTO_CLEANUP_ADMIN_LOGS_DAYS,
+            penalty_archive_days=AUTO_CLEANUP_PENALTY_ARCHIVE_DAYS,
+            user_violations_days=AUTO_CLEANUP_USER_VIOLATIONS_DAYS,
+            max_delete_per_table=AUTO_CLEANUP_MAX_DELETE_PER_TABLE,
+            skip_vacuum=not AUTO_CLEANUP_VACUUM,
+        )
+        report["maintenance_result"] = maintenance
+
+        total_deleted = sum(
+            int(e.get("deleted", 0) or 0)
+            for e in (maintenance.get("deletes") or [])
+        )
+
+        logger.info(
+            "✅ auto_cleanup DONE | deleted=%d rows | "
+            "duration=%.2fs | success=%s",
+            total_deleted,
+            maintenance.get("duration_sec", 0.0),
+            maintenance.get("success", False),
+        )
+
+        # ── قراءة الأحجام بعد التنظيف ──
+        try:
+            new_sizes = await _get_all_watched_table_sizes()
+            report["sizes_after"] = new_sizes
+            for table in sizes:
+                before = sizes.get(table, 0.0)
+                after = new_sizes.get(table, 0.0)
+                if before > 0 or after > 0:
+                    logger.info(
+                        "🧹 %s: %.2fMB → %.2fMB",
+                        table, before, after,
+                    )
+        except Exception as exc:
+            logger.debug("post-cleanup size read failed: %s", exc)
+
+    except Exception as exc:
+        logger.error(
+            "❌ auto_cleanup run_maintenance failed: %s", exc,
+            exc_info=True,
+        )
+        report["reason"] += f"|error:{exc}"
+
+    _auto_cleanup_last_result = report
+    return report
+
+
+async def _auto_cleanup_loop() -> None:
+    """🆕 v6.6.0: الحلقة الدورية للتنظيف التلقائي."""
+    interval_sec = max(600, AUTO_CLEANUP_INTERVAL_HOURS * 3600)
+    initial_delay = max(0, AUTO_CLEANUP_INITIAL_DELAY_SEC)
+
+    logger.info(
+        "🧹 auto-cleanup loop started | every=%dh | "
+        "max_size=%dMB | admin_days=%d | "
+        "max_delete=%d | vacuum=%s",
+        AUTO_CLEANUP_INTERVAL_HOURS,
+        AUTO_CLEANUP_MAX_SIZE_MB,
+        AUTO_CLEANUP_ADMIN_LOGS_DAYS,
+        AUTO_CLEANUP_MAX_DELETE_PER_TABLE,
+        AUTO_CLEANUP_VACUUM,
+    )
+
+    # تأخير أولي
+    if initial_delay > 0:
+        try:
+            await asyncio.sleep(initial_delay)
+        except asyncio.CancelledError:
+            return
+
+    while not _auto_cleanup_shutdown:
+        try:
+            await auto_cleanup_check_and_run()
+        except asyncio.CancelledError:
+            break
+        except Exception as exc:
+            logger.error(
+                "❌ auto-cleanup loop error: %s", exc, exc_info=True,
+            )
+
+        try:
+            await asyncio.sleep(interval_sec)
+        except asyncio.CancelledError:
+            break
+
+
+def start_auto_cleanup() -> bool:
+    """
+    🆕 v6.6.0: يبدأ المهمة الدورية للتنظيف.
+
+    آمن للاستدعاء المتكرّر.
+
+    Returns:
+        True إذا نجح البدء أو كانت المهمة تعمل مسبقاً.
+        False إذا كان النظام معطّلاً أو غير مدعوم.
+    """
+    global _auto_cleanup_task, _auto_cleanup_shutdown
+
+    if not AUTO_CLEANUP_ENABLED:
+        logger.info(
+            "ℹ️ auto-cleanup معطّل (DB_AUTO_CLEANUP_ENABLED=false)"
+        )
+        return False
+
+    if not _is_postgres():
+        logger.info(
+            "ℹ️ auto-cleanup مُتخطّى (لا يعمل إلا على PostgreSQL)"
+        )
+        return False
+
+    if (
+        _auto_cleanup_task is not None
+        and not _auto_cleanup_task.done()
+    ):
+        logger.debug("auto-cleanup task already running")
+        return True
+
+    _auto_cleanup_shutdown = False
+    try:
+        loop = asyncio.get_event_loop()
+        _auto_cleanup_task = loop.create_task(
+            _auto_cleanup_loop(),
+            name="db_auto_cleanup",
+        )
+        logger.info(
+            "✅ auto-cleanup task scheduled (v%s)", VERSION,
+        )
+        return True
+    except Exception as exc:
+        logger.error(
+            "❌ فشل بدء auto-cleanup: %s", exc, exc_info=True,
+        )
+        return False
+
+
+async def stop_auto_cleanup(timeout: float = 5.0) -> None:
+    """
+    🆕 v6.6.0: إيقاف نظيف للمهمة الدورية.
+    """
+    global _auto_cleanup_task, _auto_cleanup_shutdown
+
+    _auto_cleanup_shutdown = True
+
+    task = _auto_cleanup_task
+    _auto_cleanup_task = None
+
+    if task is None or task.done():
+        return
+
+    task.cancel()
+    try:
+        await asyncio.wait_for(
+            asyncio.shield(task), timeout=timeout,
+        )
+    except (asyncio.CancelledError, asyncio.TimeoutError):
+        pass
+    except Exception as exc:
+        logger.debug("stop_auto_cleanup: %s", exc)
+
+    logger.info("🛑 auto-cleanup task stopped")
+
+
+async def get_auto_cleanup_status() -> Dict[str, Any]:
+    """
+    🆕 v6.6.0: معلومات حالة النظام للعرض أو للاختبارات.
+    """
+    sizes: Dict[str, float] = {}
+    try:
+        sizes = await _get_all_watched_table_sizes()
+    except Exception:
+        pass
+
+    return {
+        "enabled": AUTO_CLEANUP_ENABLED,
+        "running": (
+            _auto_cleanup_task is not None
+            and not _auto_cleanup_task.done()
+        ),
+        "max_size_mb": AUTO_CLEANUP_MAX_SIZE_MB,
+        "interval_hours": AUTO_CLEANUP_INTERVAL_HOURS,
+        "initial_delay_sec": AUTO_CLEANUP_INITIAL_DELAY_SEC,
+        "max_delete_per_table": AUTO_CLEANUP_MAX_DELETE_PER_TABLE,
+        "admin_logs_days": AUTO_CLEANUP_ADMIN_LOGS_DAYS,
+        "penalty_archive_days": AUTO_CLEANUP_PENALTY_ARCHIVE_DAYS,
+        "user_violations_days": AUTO_CLEANUP_USER_VIOLATIONS_DAYS,
+        "vacuum": AUTO_CLEANUP_VACUUM,
+        "watched_tables": list(AUTO_CLEANUP_WATCH_TABLES),
+        "current_sizes_mb": sizes,
+        "last_run_ts": _auto_cleanup_last_run,
+        "last_result": dict(_auto_cleanup_last_result),
+    }
+
+
+# =============================================================================
 # PUBLIC API
 # =============================================================================
 
@@ -3145,6 +3648,25 @@ __all__ = [
     "format_maintenance_result",
     # Vacuum
     "vacuum_analyze_tables",
+    # 🆕 v6.6.0: Auto-cleanup
+    "start_auto_cleanup",
+    "stop_auto_cleanup",
+    "auto_cleanup_check_and_run",
+    "get_auto_cleanup_status",
+    # 🆕 v6.6.0: Auto-cleanup constants
+    "AUTO_CLEANUP_ENABLED",
+    "AUTO_CLEANUP_MAX_SIZE_MB",
+    "AUTO_CLEANUP_INTERVAL_HOURS",
+    "AUTO_CLEANUP_INITIAL_DELAY_SEC",
+    "AUTO_CLEANUP_MAX_DELETE_PER_TABLE",
+    "AUTO_CLEANUP_ADMIN_LOGS_DAYS",
+    "AUTO_CLEANUP_PENALTY_ARCHIVE_DAYS",
+    "AUTO_CLEANUP_USER_VIOLATIONS_DAYS",
+    "AUTO_CLEANUP_VACUUM",
+    "AUTO_CLEANUP_WATCH_TABLES",
+    # 🆕 v6.6.0: Size helpers
+    "_get_table_size_mb",
+    "_get_all_watched_table_sizes",
     # Dataclasses
     "RootCause",
     "CauseItem",
