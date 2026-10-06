@@ -1,40 +1,43 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-handlers_callback.py - معالج الأزرار (v9.7.6)
+handlers_callback.py - معالج الأزرار (v9.7.7)
 =====================================================================
+🆕 v9.7.7 (SECURITY-BRIDGE-INTEGRATION):
+    ✅ SB1: استيراد SECURITY_TOGGLE_MAP + NEW_SECURITY_DEFAULTS
+            + get_security_settings + invalidate_security_settings_cache
+            من utils.py v7.10.2 (Security Bridge)
+    ✅ SB2: _invalidate_security_settings_cache — تستدعي الآن:
+              • cache.settings_cache.invalidate_security (المحلي)
+              • utils.invalidate_security_settings_cache (Bridge)
+            لضمان تناسق كلا الكاشين
+    ✅ SB3: _handle_security يستخدم SECURITY_TOGGLE_MAP بدل
+            toggle_map المحلي — مصدر واحد للحقيقة
+    ✅ SB4: fallback آمن إذا كانت utils إصدار قديم (بدون Bridge)
+    ✅ SB5: _show_antiflood_messages_buttons / _seconds_buttons
+            تستخدم Bridge.get_security_settings عند توفره
+    ✅ SB6: تحقق صريح من القيم ضمن الحدود قبل الحفظ
+    ✅ الحفاظ الكامل على سلوك v9.7.6
+
 🆕 v9.7.6 (ANTIFLOOD-BUTTONS):
     ✅ NF1: sec_set_antiflood_messages → أزرار بدل إدخال نصي
-        [3, 5, 7] [10, 15, 20] [30]
     ✅ NF2: sec_set_antiflood_seconds → أزرار بدل إدخال نصي
-        [3s, 5s, 10s] [15s, 30s, 60s] [120s]
     ✅ NF3: set_antiflood_messages:{chat_id}:{value} — يحفظ مباشرة
     ✅ NF4: set_antiflood_seconds:{chat_id}:{value} — يحفظ مباشرة
     ✅ NF5: الأزرار تُظهر ✅ على القيمة الحالية
-    ✅ الحفاظ على WAIT_ANTIFLOOD_* كـ fallback (backward compat)
+    ✅ NF6: الحفاظ على WAIT_ANTIFLOOD_* كـ fallback
 
 🆕 v9.7.5 (NEW SECURITY BUTTONS):
     ✅ NC1: toggle_map — 6 أزرار أمان جديدة
     ✅ NC2: activate_all/deactivate_all تشمل الأعمدة الجديدة
-    ✅ NC3: _KNOWN_CB_PREFIXES لم تتغيّر — الأزرار تحت sec_*
-    ✅ الحفاظ الكامل على سلوك v9.7.4
+    ✅ NC3: _KNOWN_CB_PREFIXES لم تتغيّر
 
 🆕 v9.7.4 (SECOND REVIEW FIXES):
-    🔴 C1: admin_toggle_gr — فشل DB يمنع leave_chat
-    🔴 C2: admin_restore_file — فشل صريح عند غياب دالة إعادة اتصال
-    🔴 C3: _load_stats_and_edit — token بدل expected_msg_id
-    🔴 C4: _publish_single — release_half_open على early returns
-    🔴 C5: admin_toggle_ch — CASE WHEN COALESCE بدل 1 - banned
-    🟠 M1: حذف imports غير مستخدمة
-    🟡 N2: _safe_answer — show_alert يعمل حتى مع text فارغ
-    🟡 N5: _handle_parameterized — startswith+slicing
+    🔴 C1-C5 + 🟠 M1 + 🟡 N2, N5
 
 🆕 v9.7.3 (REVIEW FIXES):
-    🔴 FIX-ADV-1: _handle_advanced_actions — startswith+slicing
-    🟠 FIX-GR-1:  admin_toggle_gr — DB أولاً
-    🟠 FIX-UPD-1: admin_send_update — فحص قناة التحديثات
-    🟠 FIX-ACT-1: sec_activate_all_confirm — لا fallback غير ذرّي
-    🟡 FIX-ANS-1: _safe_answer — logger.debug
+    🔴 FIX-ADV-1, FIX-GR-1, FIX-UPD-1, FIX-ACT-1
+    🟡 FIX-ANS-1
 =====================================================================
 """
 import asyncio, importlib, logging, json, time, shutil, os, re
@@ -61,14 +64,90 @@ except ImportError:
         if inverse: return "🟢" if v <= low else ("🟡" if v <= high else "🔴")
         return "🟢" if v >= high else ("🟡" if v >= low else "🔴")
 
+# ═══════════════════════════════════════════════════════════════════
+# 🆕 v9.7.7: استيرادات Security Bridge من utils.py v7.10.2
+# ═══════════════════════════════════════════════════════════════════
 try:
-    from utils import (safe_send, is_authorized_in_group, get_text,
-                       StateManager, UserState, KeyboardFactory, CB,
-                       get_ram_usage, SmartCache, TranslationManager)
+    from utils import (
+        safe_send, is_authorized_in_group, get_text,
+        StateManager, UserState, KeyboardFactory, CB,
+        get_ram_usage, SmartCache, TranslationManager,
+        # 🆕 v7.10.2 Security Bridge:
+        SECURITY_TOGGLE_MAP,
+        NEW_SECURITY_DEFAULTS,
+        get_security_settings as bridge_get_security_settings,
+        invalidate_security_settings_cache as bridge_invalidate_sec_cache,
+    )
+    _SECURITY_BRIDGE_AVAILABLE = True
 except ImportError:
-    from .utils import (safe_send, is_authorized_in_group, get_text,
-                        StateManager, UserState, KeyboardFactory, CB,
-                        get_ram_usage, SmartCache, TranslationManager)
+    try:
+        from .utils import (
+            safe_send, is_authorized_in_group, get_text,
+            StateManager, UserState, KeyboardFactory, CB,
+            get_ram_usage, SmartCache, TranslationManager,
+            SECURITY_TOGGLE_MAP,
+            NEW_SECURITY_DEFAULTS,
+            get_security_settings as bridge_get_security_settings,
+            invalidate_security_settings_cache as bridge_invalidate_sec_cache,
+        )
+        _SECURITY_BRIDGE_AVAILABLE = True
+    except ImportError:
+        # fallback: utils إصدار قديم بدون Bridge
+        from utils import (
+            safe_send, is_authorized_in_group, get_text,
+            StateManager, UserState, KeyboardFactory, CB,
+            get_ram_usage, SmartCache, TranslationManager,
+        )
+        _SECURITY_BRIDGE_AVAILABLE = False
+
+        # ═══════════════════════════════════════════════════
+        # fallback: إذا كانت utils قديمة — عرّف القيم محلياً
+        # ═══════════════════════════════════════════════════
+        SECURITY_TOGGLE_MAP: Dict[str, str] = {
+            "links": "delete_links",
+            "mentions": "mentions",
+            "forward": "delete_forwarded",
+            "video": "delete_videos",
+            "audio": "delete_voice",
+            "anim": "delete_animation",
+            "doc": "delete_documents",
+            "sticker": "delete_stickers",
+            "service": "delete_service",
+            "poll": "delete_polls",
+            "game": "delete_games",
+            "voice": "delete_voice_notes",
+            "videonote": "delete_video_note",
+            "nsfw": "nsfw_enabled",
+            "at_channel": "delete_at_channel",
+            "tg_scheme": "delete_tg_scheme",
+            "button_links": "delete_button_links",
+            "emails": "delete_emails",
+            "protected_any": "delete_protected_any",
+            "postbot": "delete_postbot_pattern",
+            "flood": "antiflood_enabled",
+            "slow": "slow_mode_enabled",
+            "night": "night_mode_enabled",
+            "welcome": "welcome_enabled",
+            "goodbye": "goodbye_enabled",
+            "approve_join": "auto_approve_join",
+            "reject_join": "auto_reject_join",
+            "banned_words": "delete_banned_words",
+            "warn": "warn_enabled",
+        }
+        NEW_SECURITY_DEFAULTS: Dict[str, int] = {
+            "delete_at_channel": 0,
+            "delete_tg_scheme": 1,
+            "delete_button_links": 1,
+            "delete_emails": 0,
+            "delete_protected_any": 0,
+            "delete_postbot_pattern": 0,
+        }
+
+        async def bridge_get_security_settings(chat_id):  # type: ignore
+            return {}
+
+        def bridge_invalidate_sec_cache(chat_id=None):  # type: ignore
+            return None
 
 try:
     from utils import PUBLISH_RATE_LIMITER
@@ -145,13 +224,11 @@ except ImportError:
         _coerce_float, _safe_str, _md_to_html, _log_channel_cache_key,
         _is_valid_url, _mask_id, _make_user_cache_keys)
 
-
 # ═══════════════ v9.7.6: Antiflood Button Options ═══════════════
 _ANTIFLOOD_MESSAGES_OPTIONS: List[int] = [3, 5, 7, 10, 15, 20, 30]
 _ANTIFLOOD_SECONDS_OPTIONS: List[int] = [3, 5, 10, 15, 30, 60, 120]
 _ANTIFLOOD_MESSAGES_MAX = 100
 _ANTIFLOOD_SECONDS_MAX = 3600
-
 
 # ═══════════════ حالة مشتركة ═══════════════
 ACTIVE_TASKS: Set[asyncio.Task] = set()
@@ -178,7 +255,6 @@ _MEMBERSHIP_OUT_STATUSES = frozenset(('left', 'kicked'))
 _MEMBERSHIP_IN_STATUSES = frozenset(('member', 'administrator'))
 _membership_recent_reports: Dict[int, float] = {}
 _membership_table_created = False
-
 
 async def _membership_ensure_table() -> None:
     global _membership_table_created
@@ -215,7 +291,6 @@ async def _membership_ensure_table() -> None:
     except Exception as e:
         logger.debug(f"_membership_ensure_table: {type(e).__name__}: {e}")
 
-
 def _membership_should_send(chat_id):
     if chat_id is None: return False
     now = time.monotonic()
@@ -223,7 +298,6 @@ def _membership_should_send(chat_id):
     if now - last < _MEMBERSHIP_DEBOUNCE_SECONDS: return False
     _membership_recent_reports[chat_id] = now
     return True
-
 
 def _membership_prune_reports():
     try:
@@ -233,11 +307,9 @@ def _membership_prune_reports():
                 _membership_recent_reports.pop(k, None)
     except Exception: pass
 
-
 def _membership_safe_html(v, default=""):
     try: return default if v is None else _html.escape(str(v))
     except Exception: return default
-
 
 def _membership_build_user_link(uid, uname=None):
     try:
@@ -246,7 +318,6 @@ def _membership_build_user_link(uid, uname=None):
             if c: return f"https://t.me/{c}"
         return f"tg://user?id={uid}"
     except Exception: return f"tg://user?id={uid}"
-
 
 async def _membership_get_log_channel():
     try:
@@ -270,7 +341,6 @@ async def _membership_get_log_channel():
     except Exception: pass
     return None
 
-
 async def _membership_save_to_db(chat_id, chat_title, chat_type,
                                   chat_username, added_by_id, added_by_name,
                                   added_by_username, bot_status):
@@ -286,7 +356,6 @@ async def _membership_save_to_db(chat_id, chat_title, chat_type,
              bot_status or '', TimeUtils.sql_iso()))
         return True
     except Exception: return False
-
 
 def _membership_build_report_text(chat, user, new_status):
     is_ch = (chat.type == "channel")
@@ -317,7 +386,6 @@ def _membership_build_report_text(chat, user, new_status):
              f"🕐 <b>الوقت:</b> {_membership_safe_html(TimeUtils.mecca_iso())}")
     return text
 
-
 def _membership_build_keyboard(chat, user):
     rows = []
     uname = getattr(chat, 'username', None)
@@ -334,7 +402,6 @@ def _membership_build_keyboard(chat, user):
     try: return InlineKeyboardMarkup(rows)
     except Exception: return None
 
-
 async def _membership_try_get_photo(bot, chat, chat_type):
     try:
         photo = getattr(chat, 'photo', None)
@@ -350,7 +417,6 @@ async def _membership_try_get_photo(bot, chat, chat_type):
             except Exception: pass
     except Exception: pass
     return None
-
 
 async def handle_my_chat_member(update, context):
     result = update.my_chat_member
@@ -400,7 +466,6 @@ async def handle_my_chat_member(update, context):
                 parse_mode='HTML', disable_web_page_preview=True)
         except Exception: pass
 
-
 def register_membership_handlers(application):
     try:
         application.add_handler(ChatMemberHandler(
@@ -408,7 +473,6 @@ def register_membership_handlers(application):
         logger.info("✅ ChatMemberHandler مُسجَّل")
     except Exception as e:
         logger.error(f"❌ فشل تسجيل ChatMemberHandler: {e}", exc_info=True)
-
 
 # ═══════════════ CircuitBreaker ═══════════════
 class CircuitBreaker:
@@ -456,10 +520,8 @@ class CircuitBreaker:
         self._half_open_in_flight = False
         self.last_activity = time.monotonic()
 
-
 _publish_circuits: Dict[int, CircuitBreaker] = {}
 _CIRCUIT_STALE_AGE = 3600.0
-
 
 def _get_publish_circuit(ch_db_id):
     cb = _publish_circuits.get(ch_db_id)
@@ -467,7 +529,6 @@ def _get_publish_circuit(ch_db_id):
         cb = CircuitBreaker(threshold=5, recovery=300.0)
         _publish_circuits[ch_db_id] = cb
     return cb
-
 
 def _prune_publish_circuits():
     try:
@@ -481,7 +542,6 @@ def _prune_publish_circuits():
                 _publish_circuits.pop(ch_id, None)
     except Exception: pass
 
-
 # ═══════════════ Metrics ═══════════════
 _metrics = {
     'started_at': time.monotonic(), 'callbacks_total': 0,
@@ -493,11 +553,9 @@ _metrics = {
     'publishes_rate_limited': 0, 'circuit_opened': 0, 'circuit_blocked': 0}
 _TOP_CALLBACKS_MAX = 100
 
-
 def _metrics_inc(key, delta=1):
     try: _metrics[key] = _metrics.get(key, 0) + delta
     except Exception: pass
-
 
 def _metrics_top_cb(base_data):
     try:
@@ -508,7 +566,6 @@ def _metrics_top_cb(base_data):
             for k in keys[:len(keys) // 2]: top.pop(k, None)
     except Exception: pass
 
-
 def _metrics_latency(elapsed):
     try:
         b = _metrics['callbacks_latency']
@@ -517,7 +574,6 @@ def _metrics_latency(elapsed):
         else: b['>1s'] += 1
     except Exception: pass
 
-
 def _metrics_snapshot():
     try:
         snap = dict(_metrics)
@@ -525,7 +581,6 @@ def _metrics_snapshot():
         snap['callbacks_latency'] = dict(_metrics.get('callbacks_latency', {}))
         return snap
     except Exception: return {}
-
 
 def _metrics_reset():
     try:
@@ -540,7 +595,6 @@ def _metrics_reset():
         _metrics['started_at'] = time.monotonic()
     except Exception: pass
 
-
 # ═══════════════ Helpers ═══════════════
 def _match_cb(data, *candidates):
     if not data: return False
@@ -548,7 +602,6 @@ def _match_cb(data, *candidates):
         if c is None or c == "": continue
         if data == c: return True
     return False
-
 
 def _clear_lang_cache_local(context):
     mod = sys.modules.get('handlers_message')
@@ -573,7 +626,6 @@ def _clear_lang_cache_local(context):
                 context.user_data.pop(_k, None)
     except Exception: pass
 
-
 def _apply_auto_reply_status_icons(kb, enabled, admins_only,
                                     enabled_label, admins_label):
     try:
@@ -595,7 +647,6 @@ def _apply_auto_reply_status_icons(kb, enabled, admins_only,
         return InlineKeyboardMarkup(new_rows)
     except Exception: return kb
 
-
 def _patch_auto_reply_back(kb, chat_id):
     try:
         new_rows = []
@@ -610,7 +661,6 @@ def _patch_auto_reply_back(kb, chat_id):
             new_rows.append(nr)
         return InlineKeyboardMarkup(new_rows)
     except Exception: return kb
-
 
 async def _render_auto_reply_menu(query, context, chat_id, lang):
     try:
@@ -637,7 +687,6 @@ async def _render_auto_reply_menu(query, context, chat_id, lang):
         try: await safe_edit(query, await _trans('error_occurred', lang, "❌"),
             bot=context.bot)
         except Exception: pass
-
 
 async def _notify_channel_owner_kicked(context, ch_db_id):
     notify_key = f"_kicked_notify_{ch_db_id}"
@@ -668,7 +717,6 @@ async def _notify_channel_owner_kicked(context, ch_db_id):
         except Exception: pass
     except Exception: pass
 
-
 def _prune_kicked_notify_state(context, now):
     if context is None: return 0
     bd = getattr(context, 'bot_data', None)
@@ -682,20 +730,17 @@ def _prune_kicked_notify_state(context, now):
             except Exception: pass
     except Exception: pass
 
-
 async def _invalidate_log_channel_menu_cache(chat_id):
     try: await internal_cache.invalidate(_log_channel_cache_key(chat_id))
     except Exception: pass
     try: await internal_cache.invalidate(f"group_log_{chat_id}")
     except Exception: pass
 
-
 def _set_sec_chat(context, chat_id):
     try:
         context.user_data['sec_chat'] = chat_id
         context.user_data['security_chat_id'] = chat_id
     except Exception: pass
-
 
 async def _get_log_channel_menu_data(chat_id):
     cache_key = _log_channel_cache_key(chat_id)
@@ -725,7 +770,6 @@ async def _get_log_channel_menu_data(chat_id):
     await internal_cache.set(cache_key, data, ttl=LOG_CHANNEL_MENU_CACHE_TTL)
     return data
 
-
 async def _safe_answer(query, text=None, show_alert=False):
     if not query: return False
     try:
@@ -734,7 +778,6 @@ async def _safe_answer(query, text=None, show_alert=False):
     except Exception as e:
         logger.debug(f"_safe_answer failed: {type(e).__name__}: {e}")
         return False
-
 
 async def safe_edit(query, text, reply_markup=None, parse_mode=None,
                     bot=None, clear_markup=False):
@@ -785,7 +828,6 @@ async def safe_edit(query, text, reply_markup=None, parse_mode=None,
         return False
     except Exception: return False
 
-
 async def safe_delete_message(qm):
     try:
         if hasattr(qm, 'message') and qm.message:
@@ -793,11 +835,9 @@ async def safe_delete_message(qm):
         elif qm: await qm.delete()
     except Exception: pass
 
-
 async def _is_channel_owner(user_id, channel_db_id):
     try: return await DB.is_channel_owner(user_id, channel_db_id)
     except Exception: return False
-
 
 async def _is_group_owner(user_id, chat_id):
     try:
@@ -811,17 +851,14 @@ async def _is_group_owner(user_id, chat_id):
         return False
     except Exception: return False
 
-
 def _clear_context_keys(context, extra_keys=None):
     for k in _CONTEXT_KEYS_TO_CLEAR: context.user_data.pop(k, None)
     if extra_keys:
         for k in extra_keys: context.user_data.pop(k, None)
 
-
 def _ensure_bot_start_time(context):
     if 'start_time' not in context.bot_data:
         context.bot_data['start_time'] = time.monotonic()
-
 
 async def _resolve_sec_chat_id(context, data):
     for part in data.split(":")[1:]:
@@ -833,7 +870,6 @@ async def _resolve_sec_chat_id(context, data):
         try: return int(stored)
         except (TypeError, ValueError): return None
     return None
-
 
 def _prune_sec_auth_cache(now):
     removed = 0
@@ -860,7 +896,6 @@ def _prune_sec_auth_cache(now):
     try: _prune_publish_circuits()
     except Exception: pass
     return removed
-
 
 async def _check_sec_auth(context, user_id, chat_id):
     if chat_id is None: return False
@@ -910,7 +945,6 @@ async def _check_sec_auth(context, user_id, chat_id):
         _sec_auth_neg_cache.pop(key, None)
         return result
 
-
 def _invalidate_sec_auth_cache(chat_id=None):
     if chat_id is None:
         _sec_auth_cache.clear(); _sec_auth_neg_cache.clear()
@@ -929,11 +963,9 @@ def _invalidate_sec_auth_cache(chat_id=None):
                 if lock is not None and not lock.locked():
                     _sec_auth_locks.pop(k, None)
 
-
 async def _invalidate_post_count_cache(channel_db_id):
     try: await _post_count_cache.delete(f"post_count_{channel_db_id}")
     except Exception: pass
-
 
 async def _invalidate_after_channel_change(user_id, channel_db_id=None,
                                             invalidate_posts=True):
@@ -947,7 +979,6 @@ async def _invalidate_after_channel_change(user_id, channel_db_id=None,
         try: await posts_cache.invalidate(channel_db_id)
         except Exception: pass
         await _invalidate_post_count_cache(channel_db_id)
-
 
 def _format_channel_rate_line(ch):
     published = _coerce_int(ch.get('published'), 0)
@@ -967,7 +998,6 @@ def _format_channel_rate_line(ch):
         line += f"   📈 {published}/{total}  ⏳ {pending}  ({completion_rate}%)\n"
     line += "\n"
     return line
-
 
 # ═════════════════════════════════════════════════════════════════════
 # CallbackHandlers
@@ -1526,7 +1556,7 @@ class CallbackHandlers:
         except Exception: pass
 
     # ═════════════════════════════════════════════════════════════
-    # v9.7.6: Antiflood button-based UI
+    # v9.7.6: Antiflood button-based UI (مع تحسينات v9.7.7)
     # ═════════════════════════════════════════════════════════════
 
     @staticmethod
@@ -1534,15 +1564,14 @@ class CallbackHandlers:
         update, context, query, chat_id, lang
     ):
         """
-        v9.7.6 NF1: أزرار لاختيار عدد الرسائل المسموحة.
+        v9.7.6 NF1 + v9.7.7 SB5:
+        أزرار لاختيار عدد الرسائل المسموحة — تستخدم Bridge إن متوفر.
         """
         try:
             settings = await CallbackHandlers._get_security_settings_cached(
                 chat_id
             )
-            current = _coerce_int(
-                settings.get('antiflood_messages'), 5
-            )
+            current = _coerce_int(settings.get('antiflood_messages'), 5)
             title = await _trans('antiflood_messages_title', lang,
                 "🔢 <b>عدد الرسائل المسموحة</b>")
             current_label = _fmt(await _trans(
@@ -1552,8 +1581,8 @@ class CallbackHandlers:
             choose = await _trans('antiflood_messages_choose', lang,
                 "اختر الحد الأقصى للرسائل خلال النافذة الزمنية:")
 
-            text = f"{title}\n━━━━━━━━━━━━━━━━━━━━━━\n\n" \
-                   f"{current_label}\n\n{choose}"
+            text = (f"{title}\n━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                    f"{current_label}\n\n{choose}")
 
             kb = []
             row = []
@@ -1590,15 +1619,14 @@ class CallbackHandlers:
         update, context, query, chat_id, lang
     ):
         """
-        v9.7.6 NF2: أزرار لاختيار النافذة الزمنية.
+        v9.7.6 NF2 + v9.7.7 SB5:
+        أزرار لاختيار النافذة الزمنية — تستخدم Bridge إن متوفر.
         """
         try:
             settings = await CallbackHandlers._get_security_settings_cached(
                 chat_id
             )
-            current = _coerce_int(
-                settings.get('antiflood_seconds'), 10
-            )
+            current = _coerce_int(settings.get('antiflood_seconds'), 10)
             title = await _trans('antiflood_seconds_title', lang,
                 "⏱️ <b>النافذة الزمنية (ثواني)</b>")
             current_label = _fmt(await _trans(
@@ -1608,14 +1636,13 @@ class CallbackHandlers:
             choose = await _trans('antiflood_seconds_choose', lang,
                 "اختر النافذة الزمنية لعدّ الرسائل:")
 
-            text = f"{title}\n━━━━━━━━━━━━━━━━━━━━━━\n\n" \
-                   f"{current_label}\n\n{choose}"
+            text = (f"{title}\n━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                    f"{current_label}\n\n{choose}")
 
             kb = []
             row = []
             for n in _ANTIFLOOD_SECONDS_OPTIONS:
                 icon = "✅" if n == current else "▫️"
-                # عرض بصيغة مقروءة: 60s → 1m، 120s → 2m
                 if n < 60:
                     label = f"{icon} {n}s"
                 elif n % 60 == 0:
@@ -1648,266 +1675,91 @@ class CallbackHandlers:
                 await _trans('error_occurred', lang, "❌"),
                 bot=context.bot)
 
-    @staticmethod
-    async def _show_metrics_dashboard(query, context, user_id, lang):
-        try:
-            snap = _metrics_snapshot()
-            uptime = max(0.0, time.monotonic() - snap.get(
-                'started_at', time.monotonic()))
-            hours = int(uptime // 3600); minutes = int((uptime % 3600) // 60)
-            seconds = int(uptime % 60)
-            cb_total = int(snap.get('callbacks_total', 0))
-            cb_failed = int(snap.get('callbacks_failed', 0))
-            cb_rl = int(snap.get('callbacks_rate_limited', 0))
-            cb_success_rate = (((cb_total - cb_failed) / cb_total * 100)
-                               if cb_total > 0 else 100.0)
-            lat = snap.get('callbacks_latency', {}) or {}
-            fast = int(lat.get('<100ms', 0))
-            mid = int(lat.get('100ms-1s', 0))
-            slow = int(lat.get('>1s', 0))
-            lat_total = max(1, fast + mid + slow)
-            auth_hits = int(snap.get('auth_cache_hits', 0))
-            auth_miss = int(snap.get('auth_cache_misses', 0))
-            auth_neg = int(snap.get('auth_neg_cache_hits', 0))
-            auth_fail = int(snap.get('auth_api_failures', 0))
-            auth_total = max(1, auth_hits + auth_miss)
-            pub_ok = int(snap.get('publishes_success', 0))
-            pub_fail = int(snap.get('publishes_failed', 0))
-            pub_forb = int(snap.get('publishes_forbidden', 0))
-            pub_rl = int(snap.get('publishes_rate_limited', 0))
-            pub_total = max(1, pub_ok + pub_fail)
-            circ_open = int(snap.get('circuit_opened', 0))
-            circ_block = int(snap.get('circuit_blocked', 0))
-            circuits_count = len(_publish_circuits)
-            now_open = sum(1 for cb in _publish_circuits.values()
-                           if cb.state == "open")
-            now_half = sum(1 for cb in _publish_circuits.values()
-                           if cb.state == "half_open")
-            top = snap.get('top_callbacks', {}) or {}
-            top_sorted = sorted(top.items(), key=lambda x: x[1],
-                                reverse=True)[:5]
-            top_lines = [f"   • <code>{_html.escape(n[:25])}</code> → {c}"
-                         for n, c in top_sorted]
-            top_block = ("\n".join(top_lines) if top_lines
-                         else await _trans('metrics_top_callbacks_empty',
-                                            lang, "   <i>—</i>"))
-            text = (await _trans('metrics_live_title', lang,
-                                 "📊 <b>Live Metrics</b>")
-                    + "\n━━━━━━━━━━━━━━━━━━━━━━\n\n"
-                    + _fmt(await _trans('metrics_uptime', lang,
-                        "⏱️ <b>Uptime:</b> {hours}h {minutes}m {seconds}s"),
-                        hours=hours, minutes=minutes, seconds=seconds) + "\n\n"
-                    + await _trans('metrics_callbacks_section', lang,
-                                    "📞 <b>Callbacks</b>") + "\n"
-                    + _fmt(await _trans('metrics_callbacks_total', lang,
-                        "   📈 Total: <b>{count}</b>"), count=cb_total) + "\n"
-                    + _fmt(await _trans('metrics_callbacks_success_rate', lang,
-                        "   ✅ Success rate: <b>{rate}%</b>"),
-                        rate=f"{cb_success_rate:.1f}") + "\n"
-                    + _fmt(await _trans('metrics_callbacks_failed', lang,
-                        "   ❌ Failed: {count}"), count=cb_failed) + "\n"
-                    + _fmt(await _trans('metrics_callbacks_rate_limited', lang,
-                        "   ⚠️ Rate-limited: {count}"), count=cb_rl) + "\n\n"
-                    + await _trans('metrics_latency_section', lang,
-                                    "⚡ <b>Latency</b>") + "\n"
-                    + _fmt(await _trans('metrics_latency_fast', lang,
-                        "   🟢 <100ms: {count} ({percent}%)"), count=fast,
-                        percent=f"{fast/lat_total*100:.0f}") + "\n"
-                    + _fmt(await _trans('metrics_latency_mid', lang,
-                        "   🟡 100ms-1s: {count} ({percent}%)"), count=mid,
-                        percent=f"{mid/lat_total*100:.0f}") + "\n"
-                    + _fmt(await _trans('metrics_latency_slow', lang,
-                        "   🔴 >1s: {count} ({percent}%)"), count=slow,
-                        percent=f"{slow/lat_total*100:.0f}") + "\n\n"
-                    + await _trans('metrics_auth_section', lang,
-                                    "🔐 <b>Auth Cache</b>") + "\n"
-                    + _fmt(await _trans('metrics_auth_hits', lang,
-                        "   ✅ Hits: {count} ({percent}%)"), count=auth_hits,
-                        percent=f"{auth_hits/auth_total*100:.0f}") + "\n"
-                    + _fmt(await _trans('metrics_auth_misses', lang,
-                        "   ❌ Misses: {count}"), count=auth_miss) + "\n"
-                    + _fmt(await _trans('metrics_auth_neg_hits', lang,
-                        "   🛡️ Neg hits: {count}"), count=auth_neg) + "\n"
-                    + _fmt(await _trans('metrics_auth_api_failures', lang,
-                        "   ⚠️ API failures: {count}"), count=auth_fail)
-                    + "\n\n"
-                    + await _trans('metrics_publishes_section', lang,
-                                    "📤 <b>Publishes</b>") + "\n"
-                    + _fmt(await _trans('metrics_publishes_success', lang,
-                        "   ✅ Success: {count} ({percent}%)"), count=pub_ok,
-                        percent=f"{pub_ok/pub_total*100:.0f}") + "\n"
-                    + _fmt(await _trans('metrics_publishes_failed', lang,
-                        "   ❌ Failed: {count}"), count=pub_fail) + "\n"
-                    + _fmt(await _trans('metrics_publishes_forbidden', lang,
-                        "   🚫 Forbidden: {count}"), count=pub_forb) + "\n"
-                    + _fmt(await _trans('metrics_publishes_rate_limited', lang,
-                        "   ⏱️ Rate-limited: {count}"), count=pub_rl)
-                    + "\n\n"
-                    + await _trans('metrics_circuits_section', lang,
-                                    "🔌 <b>Circuit Breakers</b>") + "\n"
-                    + _fmt(await _trans('metrics_circuits_active', lang,
-                        "   📡 Active: {count}"), count=circuits_count) + "\n"
-                    + _fmt(await _trans('metrics_circuits_opened_now', lang,
-                        "   🔴 Opened now: <b>{count}</b>"), count=now_open)
-                    + "\n"
-                    + _fmt(await _trans('metrics_circuits_half_open_now', lang,
-                        "   🟡 Half-open now: {count}"), count=now_half) + "\n"
-                    + _fmt(await _trans('metrics_circuits_opened_total', lang,
-                        "   🟠 Opened (total): {count}"), count=circ_open)
-                    + "\n"
-                    + _fmt(await _trans('metrics_circuits_blocked', lang,
-                        "   🚫 Blocked: {count}"), count=circ_block) + "\n\n"
-                    + await _trans('metrics_top_callbacks_section', lang,
-                                    "🏆 <b>Top Callbacks</b>") + "\n"
-                    + top_block)
-            kb = InlineKeyboardMarkup([
-                [InlineKeyboardButton(await _trans('metrics_refresh_btn',
-                    lang, "🔄 تحديث"), callback_data="admin_metrics_live")],
-                [InlineKeyboardButton(await _trans('metrics_reset_btn',
-                    lang, "♻️ إعادة تعيين"),
-                    callback_data="admin_metrics_reset")],
-                [InlineKeyboardButton(KeyboardFactory.get_text("back", lang),
-                    callback_data=CB.ADMIN)]])
-            await safe_edit(query, text, reply_markup=kb,
-                parse_mode='HTML', bot=context.bot)
-        except Exception as e:
-            logger.error(f"_show_metrics_dashboard: {e}", exc_info=True)
-            await safe_edit(query,
-                await _trans('error_occurred', lang, "❌"),
-                bot=context.bot)
-
-    @staticmethod
-    async def _show_updates_channel(query, context, user_id, lang):
-        title = await _trans('updates_channel_title', lang, "📢 Updates Channel")
-        try: ch = await DB.get_updates_channel()
-        except Exception: ch = None
-        back_text = KeyboardFactory.get_text("back", lang)
-        if not ch:
-            text = (f"{title}\n━━━━━━━━━━━━━━━━━━━━━━\n\n"
-                    + await _trans('no_update_channel', lang,
-                                    "📭 No update channel set"))
-            kb = InlineKeyboardMarkup([[InlineKeyboardButton(
-                back_text, callback_data=CB.BACK)]])
-            await safe_edit(query, text, reply_markup=kb,
-                parse_mode='HTML', bot=context.bot); return
-        ch_str = str(ch).strip(); url = None; display = ch_str
-        try:
-            if ch_str.startswith('@'):
-                uname = ch_str[1:]
-                if re.match(r'^[A-Za-z0-9_]{4,32}$', uname):
-                    url = f"https://t.me/{uname}"; display = ch_str
-            elif ch_str.lstrip('-').isdigit():
-                cid = int(ch_str)
-                try:
-                    chat = await context.bot.get_chat(cid)
-                    if getattr(chat, 'username', None):
-                        url = f"https://t.me/{chat.username}"
-                        display = f"@{chat.username}"
-                    elif getattr(chat, 'invite_link', None):
-                        url = chat.invite_link
-                        display = chat.title or ch_str
-                    else:
-                        try:
-                            url = await context.bot.export_chat_invite_link(cid)
-                            display = chat.title or ch_str
-                        except Exception: url = None
-                except Exception: url = None
-            elif ch_str.startswith(('https://', 'http://')):
-                url = ch_str; display = ch_str
-            elif ch_str.startswith(('t.me/', 'telegram.me/')):
-                url = f"https://{ch_str}"; display = url
-            else:
-                if re.match(r'^[A-Za-z0-9_]{4,32}$', ch_str):
-                    url = f"https://t.me/{ch_str}"; display = f"@{ch_str}"
-        except Exception: pass
-        url_is_valid = _is_valid_url(url)
-        text = (f"{title}\n━━━━━━━━━━━━━━━━━━━━━━\n\n"
-                f"📌 <b>{_html.escape(display)}</b>")
-        rows = []
-        if url_is_valid:
-            rows.append([InlineKeyboardButton(await _trans('open_channel_btn',
-                lang, "📢 Open Channel"), url=url)])
-        else:
-            text += ("\n\n⚠️ " + await _trans('channel_link_unavailable',
-                        lang, "Cannot generate link for this channel"))
-        rows.append([InlineKeyboardButton(back_text, callback_data=CB.BACK)])
-        await safe_edit(query, text, reply_markup=InlineKeyboardMarkup(rows),
-            parse_mode='HTML', bot=context.bot)
-
-    @staticmethod
-    async def _show_admin_update_channel_menu(query, context, user_id, lang):
-        if not CONFIG.is_developer(user_id):
-            await safe_edit(query,
-                await _trans('unauthorized', lang, "❌ غير مصرح"),
-                bot=context.bot); return
-        title = await _trans('updates_channel_title', lang, "📢 قناة التحديثات")
-        try: ch = await DB.get_updates_channel()
-        except Exception: ch = None
-        back_text = KeyboardFactory.get_text("back", lang)
-        change_text = await _trans('change_update_ch_btn', lang, "🔄 تغيير القناة")
-        remove_text = await _trans('remove_update_ch_btn', lang, "🗑️ حذف القناة")
-        send_text = await _trans('admin_send_update', lang, "📤 إرسال تحديث")
-        if ch:
-            ch_str = str(ch).strip(); display = ch_str
-            try:
-                if ch_str.startswith('@'): display = ch_str
-                elif ch_str.lstrip('-').isdigit():
-                    cid = int(ch_str)
-                    try:
-                        chat = await context.bot.get_chat(cid)
-                        if getattr(chat, 'username', None):
-                            display = f"@{chat.username}"
-                        elif getattr(chat, 'title', None):
-                            display = chat.title
-                    except Exception: pass
-            except Exception: pass
-            text = (f"{title}\n━━━━━━━━━━━━━━━━━━━━━━\n\n"
-                    f"✅ <b>القناة الحالية:</b>\n"
-                    f"🔗 {_html.escape(str(display))}\n"
-                    f"🆔 <code>{_html.escape(ch_str)}</code>")
-            kb = InlineKeyboardMarkup([
-                [InlineKeyboardButton(change_text,
-                    callback_data="admin_change_update_ch")],
-                [InlineKeyboardButton(remove_text,
-                    callback_data="admin_remove_update_ch")],
-                [InlineKeyboardButton(send_text,
-                    callback_data="admin_send_update")],
-                [InlineKeyboardButton(back_text, callback_data=CB.ADMIN)]])
-        else:
-            text = (f"{title}\n━━━━━━━━━━━━━━━━━━━━━━\n\n"
-                    + await _trans('no_update_channel', lang,
-                                    "📭 لم يتم تعيين قناة تحديثات"))
-            set_text = await _trans('set_update_ch_btn', lang, "🔗 تعيين قناة")
-            kb = InlineKeyboardMarkup([
-                [InlineKeyboardButton(set_text,
-                    callback_data="admin_change_update_ch")],
-                [InlineKeyboardButton(back_text, callback_data=CB.ADMIN)]])
-        await safe_edit(query, text, reply_markup=kb,
-            parse_mode='HTML', bot=context.bot)
-
-    @staticmethod
-    async def _get_security_settings_cached(chat_id):
-        try: cached = await settings_cache.get_security(chat_id)
-        except Exception: cached = None
-        if cached is not None:
-            if isinstance(cached, dict): return cached
-            as_dict = _row_to_dict(cached)
-            if as_dict is not None: return as_dict
-        try:
-            settings = await DB.get_security_settings(chat_id) or {}
-            if not isinstance(settings, dict):
-                settings = _row_to_dict(settings) or {}
-        except Exception: settings = {}
-        try: await settings_cache.set_security(chat_id, settings)
-        except Exception: pass
-        return settings
-
+    # ─────────────────────────────────────────────────────────────
+    # v9.7.7 SB2: invalidation موحّد للكاش (المحلي + Bridge)
+    # ─────────────────────────────────────────────────────────────
     @staticmethod
     async def _invalidate_security_settings_cache(chat_id):
-        try: await settings_cache.invalidate_security(chat_id)
-        except Exception: pass
-        try: await _security_stats_cache_local.delete(f"sec_stats_{chat_id}")
-        except Exception: pass
+        """
+        v9.7.7 SB2:
+        إبطال كلا الكاشين لضمان التناسق:
+          1. cache.settings_cache (المحلي)
+          2. _security_stats_cache_local (الإحصائيات)
+          3. utils.invalidate_security_settings_cache (Bridge v7.10.2)
+        """
+        # 1) الكاش المحلي للـ settings
+        try:
+            await settings_cache.invalidate_security(chat_id)
+        except Exception:
+            pass
+
+        # 2) كاش الإحصائيات
+        try:
+            await _security_stats_cache_local.delete(f"sec_stats_{chat_id}")
+        except Exception:
+            pass
+
+        # 3) 🆕 v9.7.7: كاش Bridge من utils.py v7.10.2
+        if _SECURITY_BRIDGE_AVAILABLE:
+            try:
+                bridge_invalidate_sec_cache(chat_id)
+            except Exception as e:
+                logger.debug(
+                    f"bridge_invalidate_sec_cache({chat_id}) failed: {e}"
+                )
+
+    # ─────────────────────────────────────────────────────────────
+    # v9.7.7 SB5: استخدام Bridge.get_security_settings إن متوفر
+    # ─────────────────────────────────────────────────────────────
+    @staticmethod
+    async def _get_security_settings_cached(chat_id):
+        """
+        v9.7.7 SB5:
+        يجرب الجلب بالترتيب:
+          1. cache.settings_cache (الأسرع)
+          2. utils.bridge_get_security_settings (v7.10.2)
+          3. DB.get_security_settings (fallback)
+        """
+        # 1) محاولة الكاش المحلي
+        try:
+            cached = await settings_cache.get_security(chat_id)
+        except Exception:
+            cached = None
+        if cached is not None:
+            if isinstance(cached, dict):
+                return cached
+            as_dict = _row_to_dict(cached)
+            if as_dict is not None:
+                return as_dict
+
+        # 2) 🆕 v9.7.7: Bridge من utils (له كاش داخلي TTL=60s)
+        settings: Dict = {}
+        if _SECURITY_BRIDGE_AVAILABLE:
+            try:
+                bridge_settings = await bridge_get_security_settings(chat_id)
+                if isinstance(bridge_settings, dict) and bridge_settings:
+                    settings = bridge_settings
+            except Exception as e:
+                logger.debug(
+                    f"bridge_get_security_settings({chat_id}) failed: {e}"
+                )
+
+        # 3) fallback: DB مباشرة
+        if not settings:
+            try:
+                raw = await DB.get_security_settings(chat_id) or {}
+                if not isinstance(raw, dict):
+                    raw = _row_to_dict(raw) or {}
+                settings = raw
+            except Exception:
+                settings = {}
+
+        # احفظ في الكاش المحلي
+        try:
+            await settings_cache.set_security(chat_id, settings)
+        except Exception:
+            pass
+        return settings
 
     @staticmethod
     async def _load_stats_and_edit(query, context, chat_id, lang, settings,
@@ -1921,18 +1773,24 @@ class CallbackHandlers:
                     return
             cache_key = f"sec_stats_{chat_id}"
             cached_stats = await _security_stats_cache_local.get(cache_key)
-            if cached_stats is not None: stats = cached_stats
+            if cached_stats is not None:
+                stats = cached_stats
             else:
                 stats = await KeyboardFactory._get_security_stats(chat_id) or {}
-                await _security_stats_cache_local.set(cache_key, stats,
-                                                       ttl=SEC_STATS_CACHE_TTL)
+                await _security_stats_cache_local.set(
+                    cache_key, stats, ttl=SEC_STATS_CACHE_TTL
+                )
             if expected_token is not None:
                 if context.user_data.get('_sec_view_token') != expected_token:
                     return
-            try: text = KeyboardFactory._format_security_text(
-                    settings, stats, lang=lang)
-            except TypeError: text = KeyboardFactory._format_security_text(
-                    settings, stats)
+            try:
+                text = KeyboardFactory._format_security_text(
+                    settings, stats, lang=lang
+                )
+            except TypeError:
+                text = KeyboardFactory._format_security_text(
+                    settings, stats
+                )
             kb = KeyboardFactory.build("security", chat_id=chat_id, lang=lang)
             await safe_edit(query, text, reply_markup=kb,
                 parse_mode='HTML', bot=context.bot)
@@ -1948,24 +1806,34 @@ class CallbackHandlers:
                     chat_id)
             settings = await CallbackHandlers._get_security_settings_cached(
                 chat_id)
-            try: text_no_stats = KeyboardFactory._format_security_text(
-                    settings, {}, lang=lang)
-            except TypeError: text_no_stats = \
-                    KeyboardFactory._format_security_text(settings, {})
+            try:
+                text_no_stats = KeyboardFactory._format_security_text(
+                    settings, {}, lang=lang
+                )
+            except TypeError:
+                text_no_stats = KeyboardFactory._format_security_text(
+                    settings, {}
+                )
             kb = KeyboardFactory.build("security", chat_id=chat_id, lang=lang)
             await safe_edit(query, text_no_stats, reply_markup=kb,
                 parse_mode='HTML', bot=context.bot)
             token = time.monotonic()
             try:
                 context.user_data['_sec_view_token'] = token
-            except Exception: pass
+            except Exception:
+                pass
             task = asyncio.create_task(
                 CallbackHandlers._load_stats_and_edit(
                     query, context, chat_id, lang, settings,
-                    expected_token=token))
-            ACTIVE_TASKS.add(task); task.add_done_callback(ACTIVE_TASKS.discard)
+                    expected_token=token
+                )
+            )
+            ACTIVE_TASKS.add(task)
+            task.add_done_callback(ACTIVE_TASKS.discard)
         except Exception as e:
-            logger.error(f"_render_security_two_phase: {e}", exc_info=True)
+            logger.error(
+                f"_render_security_two_phase: {e}", exc_info=True
+            )
 
     @staticmethod
     async def _show_main_menu_inline(query, context, user_id):
@@ -2437,7 +2305,6 @@ class CallbackHandlers:
                     await safe_edit(query,
                         await _trans('no_permission', lang, "❌"),
                         bot=context.bot); return True
-                # ✅ v9.7.6: أزرار بدل إدخال نصي
                 StateManager.clear(user_id)
                 await CallbackHandlers._show_antiflood_messages_buttons(
                     update, context, query, chat_id, lang
@@ -2455,7 +2322,6 @@ class CallbackHandlers:
                     await safe_edit(query,
                         await _trans('no_permission', lang, "❌"),
                         bot=context.bot); return True
-                # ✅ v9.7.6: أزرار بدل إدخال نصي
                 StateManager.clear(user_id)
                 await CallbackHandlers._show_antiflood_seconds_buttons(
                     update, context, query, chat_id, lang
@@ -3169,7 +3035,9 @@ class CallbackHandlers:
             try: cached = await settings_cache.get_security(chat_id)
             except Exception: cached = None
             if cached is None:
-                settings = await DB.get_security_settings(chat_id) or {}
+                settings = await CallbackHandlers._get_security_settings_cached(
+                    chat_id
+                )
                 if not isinstance(settings, dict):
                     settings = _row_to_dict(settings) or {}
                 try: await settings_cache.set_security(chat_id, settings)
@@ -3523,6 +3391,9 @@ class CallbackHandlers:
         await safe_edit(query, display_text,
             reply_markup=InlineKeyboardMarkup(kb), bot=context.bot)
 
+    # ═════════════════════════════════════════════════════════════
+    # 🆕 v9.7.7 SB3: _handle_security يستخدم SECURITY_TOGGLE_MAP
+    # ═════════════════════════════════════════════════════════════
     @staticmethod
     async def _handle_security(update, context, query, user_id, lang=None):
         if not lang: lang = await DB.get_user_language(user_id) or 'ar'
@@ -3670,26 +3541,13 @@ class CallbackHandlers:
                 ACTIVE_TASKS.add(task)
                 task.add_done_callback(ACTIVE_TASKS.discard)
                 return
-            toggle_map = {
-                "links": "delete_links", "mentions": "delete_mentions",
-                "slow": "slow_mode", "video": "delete_videos",
-                "audio": "delete_audio", "anim": "delete_animation",
-                "service": "delete_service", "doc": "delete_documents",
-                "sticker": "delete_stickers", "forward": "delete_forwarded",
-                "poll": "delete_polls", "game": "delete_games",
-                "voice": "delete_voice", "videonote": "delete_video_note",
-                "welcome": "welcome_enabled", "goodbye": "goodbye_enabled",
-                "flood": "antiflood_enabled", "night": "night_mode_enabled",
-                "approve_join": "auto_approve_join",
-                "reject_join": "auto_reject_join", "nsfw": "nsfw_enabled",
-                "at_channel": "delete_at_channel",
-                "tg_scheme": "delete_tg_scheme",
-                "button_links": "delete_button_links",
-                "emails": "delete_emails",
-                "protected_any": "delete_protected_any",
-                "postbot": "delete_postbot_pattern"}
-            if action in toggle_map:
-                col = toggle_map[action]
+
+            # ═════════════════════════════════════════════════════
+            # 🆕 v9.7.7 SB3: استخدام SECURITY_TOGGLE_MAP من utils
+            # بدل toggle_map المحلي — مصدر واحد للحقيقة
+            # ═════════════════════════════════════════════════════
+            if action in SECURITY_TOGGLE_MAP:
+                col = SECURITY_TOGGLE_MAP[action]
                 settings = (await CallbackHandlers.
                             _get_security_settings_cached(chat_id))
                 new_val = 1 - _coerce_int(settings.get(col, 0))
@@ -3721,6 +3579,7 @@ class CallbackHandlers:
                     _invalidate_security_settings_cache(chat_id)
                 await CallbackHandlers._refresh_security_view(
                     query, context, chat_id, lang); return
+
             if action == "warn":
                 kb = InlineKeyboardMarkup([
                     [InlineKeyboardButton(await _trans('warn_toggle_btn',
@@ -4756,6 +4615,10 @@ class CallbackHandlers:
                 except Exception: pass
                 try: await settings_cache.invalidate_auto_reply()
                 except Exception: pass
+                # 🆕 v9.7.7: إبطال Bridge أيضاً
+                if _SECURITY_BRIDGE_AVAILABLE:
+                    try: bridge_invalidate_sec_cache(None)
+                    except Exception: pass
                 await safe_edit(query,
                     await _trans('cache_refreshed_admin', lang, "🔄"),
                     bot=context.bot); return
@@ -6044,7 +5907,6 @@ class CallbackHandlers:
                 await safe_send(context.bot, user_id, msg)
             except Exception: pass
 
-
 # ═════════════════════════════════════════════════════════════════════
 # __all__
 # ═════════════════════════════════════════════════════════════════════
@@ -6079,4 +5941,23 @@ __all__ = [
     # v9.7.6
     "_ANTIFLOOD_MESSAGES_OPTIONS", "_ANTIFLOOD_SECONDS_OPTIONS",
     "_ANTIFLOOD_MESSAGES_MAX", "_ANTIFLOOD_SECONDS_MAX",
+    # 🆕 v9.7.7 — Security Bridge
+    "_SECURITY_BRIDGE_AVAILABLE",
+    "SECURITY_TOGGLE_MAP", "NEW_SECURITY_DEFAULTS",
+    "bridge_get_security_settings", "bridge_invalidate_sec_cache",
 ]
+
+# ═════════════════════════════════════════════════════════════════════
+# LOAD BEACON — v9.7.7
+# ═════════════════════════════════════════════════════════════════════
+try:
+    _bridge_icon = "✅" if _SECURITY_BRIDGE_AVAILABLE else "⚠️"
+    logger.info(
+        "🛡️ handlers_callback.py v9.7.7 SECURITY-BRIDGE loaded | "
+        "Bridge=%s | Antiflood-Msgs=%d | Antiflood-Secs=%d",
+        _bridge_icon,
+        len(_ANTIFLOOD_MESSAGES_OPTIONS),
+        len(_ANTIFLOOD_SECONDS_OPTIONS),
+    )
+except Exception:
+    pass
