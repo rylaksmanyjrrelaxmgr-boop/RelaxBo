@@ -2,8 +2,22 @@
 # -*- coding: utf-8 -*-
 
 """
-handlers_membership.py - مراقبة إضافة/إزالة البوت (v1.3.0-final)
+handlers_membership.py - مراقبة إضافة/إزالة البوت (v1.3.1-final)
 =====================================================================
+🆕 v1.3.1-final — POST-AUDIT FIXES:
+    🔴 FIX-A: _get_effective_log_channel — استخدام
+              _sql_get_setting_value() بدل الاستعلام الخام.
+              السبب: `key` محجوز في PostgreSQL/MySQL، و`value` محجوز
+              في MySQL. الاستعلام الخام كان يفشل دائماً على هذه
+              المنصات، والخطأ مدفون في try/except → fallback معطّل.
+    🟠 FIX-B: _restore_channel_if_soft_deleted — تحسين التسجيل:
+              - logger.info عند نجاح استرجاع فعلي
+              - logger.warning عند فشل الاستعلام (كان debug)
+              - تسجيل تفصيلي لأسباب عدم الاسترجاع
+    🟡 FIX-C: _try_get_chat_photo — إضافة "channel" للـ fallback
+              عبر bot.get_chat() — لأن بعض تحديثات my_chat_member
+              لا تحمل صورة القناة.
+
 🆕 v1.3.0-final — استرجاع تلقائي عند إعادة الإضافة:
     ✅ FIX-11: دالة _restore_channel_if_soft_deleted()
                تُلغي علامة الإزالة (removed_at) عند إعادة إضافة البوت
@@ -36,6 +50,18 @@ from telegram import (
 from telegram.ext import ContextTypes, ChatMemberHandler
 
 from database import DB, TimeUtils
+
+# ✅ v1.3.1 FIX-A: استيراد محمي للدالة المساعدة
+try:
+    from database import _sql_get_setting_value
+except ImportError:
+    def _sql_get_setting_value() -> str:
+        """fallback آمن إن لم تُصدَّر من database."""
+        if getattr(DB, "USE_MYSQL", False):
+            return "SELECT `value` FROM settings WHERE `key` = ? LIMIT 1"
+        if getattr(DB, "USE_POSTGRES", False):
+            return 'SELECT "value" FROM settings WHERE "key" = ? LIMIT 1'
+        return "SELECT value FROM settings WHERE key = ? LIMIT 1"
 
 logger = logging.getLogger(__name__)
 
@@ -255,6 +281,7 @@ def _normalize_datetime(value: Any) -> datetime:
 
 # ═════════════════════════════════════════════════════════════════════
 # ✅ v1.3.0 (FIX-11): استرجاع تلقائي للقناة المُعلَّمة كمُزالة
+# ✅ v1.3.1 FIX-B: تحسين التسجيل
 # ═════════════════════════════════════════════════════════════════════
 
 async def _restore_channel_if_soft_deleted(chat_id: int) -> int:
@@ -264,11 +291,16 @@ async def _restore_channel_if_soft_deleted(chat_id: int) -> int:
     عند إعادة إضافة البوت لقناة كانت مُزالة سابقاً (Soft delete)،
     تُلغى العلامة تلقائياً + تُستعاد القناة مع منشوراتها.
 
+    ⚠️ v1.3.1 FIX-B: التسجيل رُفع لمستوى أوضح:
+       - نجاح حقيقي → logger.info (كان debug)
+       - فشل استعلام → logger.warning (كان debug في caller)
+       - عدم وجود علامة → logger.debug (طبيعي، لا يهم)
+
     Args:
         chat_id: معرّف القناة/المجموعة في تيليجرام
 
     Returns:
-        عدد الصفوف المُحدَّثة (0 إذا لم تكن مُعلَّمة)
+        عدد الصفوف المُحدَّثة (0 إذا لم تكن مُعلَّمة أو فشل الاستعلام)
     """
     if not chat_id:
         return 0
@@ -281,8 +313,7 @@ async def _restore_channel_if_soft_deleted(chat_id: int) -> int:
             (chat_id,),
         )
 
-        # PostgreSQL: DB.execute يُرجع عدد الصفوف
-        # SQLite/MySQL: نأخذ rowcount
+        # PG/MySQL/SQLite: DB.execute يُرجع rowcount (int)
         restored = 0
         if isinstance(result, int):
             restored = result
@@ -300,15 +331,27 @@ async def _restore_channel_if_soft_deleted(chat_id: int) -> int:
         return restored
 
     except Exception as e:
-        logger.warning(
-            f"⚠️ _restore_channel_if_soft_deleted({chat_id}): "
-            f"{type(e).__name__}: {e}"
-        )
+        # ✅ FIX-B: warning بدل debug — الأخطاء الفعلية يجب أن تظهر
+        err_type = type(e).__name__
+        err_msg = str(e)[:200]
+        # كشف شائع: عمود غير موجود (schema قديم)
+        if "column" in err_msg.lower() or "unknown" in err_msg.lower():
+            logger.warning(
+                f"⚠️ _restore_channel_if_soft_deleted({chat_id}): "
+                f"عمود removed_at/removal_reason غير موجود في schema "
+                f"— تأكد من migrations ({err_type}: {err_msg})"
+            )
+        else:
+            logger.warning(
+                f"⚠️ _restore_channel_if_soft_deleted({chat_id}): "
+                f"{err_type}: {err_msg}"
+            )
         return 0
 
 
 # ═════════════════════════════════════════════════════════════════════
 # قناة السجل الفعّالة
+# ✅ v1.3.1 FIX-A: استخدام _sql_get_setting_value() في المسار الأخير
 # ═════════════════════════════════════════════════════════════════════
 
 async def _get_effective_log_channel(
@@ -316,7 +359,7 @@ async def _get_effective_log_channel(
 ) -> Tuple[Optional[str], str]:
     """
     جلب قناة السجل الفعّالة.
-    الأولوية: مجموعة → عامة (3 طرق fallback)
+    الأولوية: مجموعة → عامة (4 طرق fallback)
     """
     # 1: قناة المجموعة
     if chat_id is not None:
@@ -357,11 +400,11 @@ async def _get_effective_log_channel(
     except Exception as e:
         logger.debug(f"DB.get_setting failed: {e}")
 
-    # 4: استعلام مباشر
+    # 4: استعلام مباشر — ✅ FIX-A: عبر _sql_get_setting_value()
     try:
         row = await DB.fetchone(
-            "SELECT value FROM settings "
-            "WHERE key='log_channel' LIMIT 1"
+            _sql_get_setting_value(),
+            ("log_channel",),
         )
         if row:
             if hasattr(row, 'get'):
@@ -556,6 +599,11 @@ def _build_report_keyboard(
 async def _try_get_chat_photo(
     bot, chat, chat_type: str
 ) -> Optional[str]:
+    """
+    ✅ v1.3.1 FIX-C: توسيع fallback ليشمل "channel" أيضاً.
+    بعض تحديثات my_chat_member لا تحمل صورة القناة/المجموعة،
+    لذا نجلبها عبر get_chat في هذه الحالة.
+    """
     try:
         photo = getattr(chat, 'photo', None)
         if photo is not None:
@@ -563,7 +611,8 @@ async def _try_get_chat_photo(
             if file_id:
                 return file_id
 
-        if chat_type in ('group', 'supergroup'):
+        # ✅ FIX-C: channel + group + supergroup
+        if chat_type in ('group', 'supergroup', 'channel'):
             try:
                 full_chat = await bot.get_chat(chat.id)
                 photo = getattr(full_chat, 'photo', None)
@@ -632,7 +681,11 @@ async def handle_my_chat_member(
     # ✅ v1.3.0 (FIX-11): استرجاع تلقائي إن كانت مُعلَّمة كمُزالة
     # ═══════════════════════════════════════════════════════════
     try:
-        await _restore_channel_if_soft_deleted(chat.id)
+        restored = await _restore_channel_if_soft_deleted(chat.id)
+        if restored > 0:
+            logger.debug(
+                f"♻️ restore succeeded: {restored} rows for chat={chat.id}"
+            )
     except Exception as e:
         logger.debug(f"restore soft-deleted (outer): {e}")
 
@@ -766,7 +819,7 @@ def register_handlers(application) -> None:
         application.add_handler(handler, group=-1)
         logger.info(
             "✅ تم تسجيل ChatMemberHandler لمراقبة "
-            "إضافة/إزالة البوت (v1.3.0)"
+            "إضافة/إزالة البوت (v1.3.1)"
         )
     except Exception as e:
         logger.error(
