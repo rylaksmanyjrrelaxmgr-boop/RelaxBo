@@ -1,8 +1,19 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-handlers_callback.py - معالج الأزرار (v9.7.7)
+handlers_callback.py - معالج الأزرار (v9.7.8)
 =====================================================================
+🆕 v9.7.8 (SECURITY-TABLE-MISMATCH-FIX):
+    🔴 TMF1: _get_security_settings_cached — إزالة تفضيل Bridge.
+             السبب: Bridge.get_security_settings (utils v7.10.2) يقرأ من
+             group_settings بينما DB.update_security_settings يكتب في
+             group_security → الأزرار "تعمل" (تُحدّث DB) لكن العرض
+             لا يرى التغيير لأن Bridge يُرجع القيم القديمة.
+             → قراءة مباشرة من DB دائماً (مصدر واحد للحقيقة).
+    🔴 TMF2: _handle_security — نقل فحص action == "warn" قبل
+             SECURITY_TOGGLE_MAP حتى يظهر القائمة الفرعية
+             (toggle + count + penalty + duration) بدل toggle مباشر.
+
 🆕 v9.7.7 (SECURITY-BRIDGE-INTEGRATION):
     ✅ SB1: استيراد SECURITY_TOGGLE_MAP + NEW_SECURITY_DEFAULTS
             + get_security_settings + invalidate_security_settings_cache
@@ -1709,18 +1720,24 @@ class CallbackHandlers:
                 )
 
     # ─────────────────────────────────────────────────────────────
-    # v9.7.7 SB5: استخدام Bridge.get_security_settings إن متوفر
+    # v9.7.8 TMF1: قراءة مباشرة من DB — إزالة تفضيل Bridge
     # ─────────────────────────────────────────────────────────────
     @staticmethod
     async def _get_security_settings_cached(chat_id):
         """
-        v9.7.7 SB5:
-        يجرب الجلب بالترتيب:
+        v9.7.8 TMF1:
+        قراءة مباشرة من DB — تجنّب تعارض الجداول.
+
+        السبب:
+          Bridge.get_security_settings (v7.10.2) يقرأ من group_settings
+          لكن DB.update_security_settings يكتب في group_security
+          → الأزرار كانت "تعمل" (تُحدّث DB) لكن العرض لا يرى التغيير.
+
+        الترتيب الجديد:
           1. cache.settings_cache (الأسرع)
-          2. utils.bridge_get_security_settings (v7.10.2)
-          3. DB.get_security_settings (fallback)
+          2. DB.get_security_settings (المصدر الوحيد للحقيقة)
         """
-        # 1) محاولة الكاش المحلي
+        # 1) الكاش المحلي
         try:
             cached = await settings_cache.get_security(chat_id)
         except Exception:
@@ -1732,29 +1749,18 @@ class CallbackHandlers:
             if as_dict is not None:
                 return as_dict
 
-        # 2) 🆕 v9.7.7: Bridge من utils (له كاش داخلي TTL=60s)
+        # 2) 🆕 v9.7.8: قراءة مباشرة من DB
         settings: Dict = {}
-        if _SECURITY_BRIDGE_AVAILABLE:
-            try:
-                bridge_settings = await bridge_get_security_settings(chat_id)
-                if isinstance(bridge_settings, dict) and bridge_settings:
-                    settings = bridge_settings
-            except Exception as e:
-                logger.debug(
-                    f"bridge_get_security_settings({chat_id}) failed: {e}"
-                )
+        try:
+            raw = await DB.get_security_settings(chat_id) or {}
+            if not isinstance(raw, dict):
+                raw = _row_to_dict(raw) or {}
+            settings = raw
+        except Exception as e:
+            logger.debug(f"DB.get_security_settings({chat_id}): {e}")
+            settings = {}
 
-        # 3) fallback: DB مباشرة
-        if not settings:
-            try:
-                raw = await DB.get_security_settings(chat_id) or {}
-                if not isinstance(raw, dict):
-                    raw = _row_to_dict(raw) or {}
-                settings = raw
-            except Exception:
-                settings = {}
-
-        # احفظ في الكاش المحلي
+        # 3) حفظ في الكاش المحلي
         try:
             await settings_cache.set_security(chat_id, settings)
         except Exception:
@@ -3392,7 +3398,7 @@ class CallbackHandlers:
             reply_markup=InlineKeyboardMarkup(kb), bot=context.bot)
 
     # ═════════════════════════════════════════════════════════════
-    # 🆕 v9.7.7 SB3: _handle_security يستخدم SECURITY_TOGGLE_MAP
+    # v9.7.8 TMF2: نقل فحص warn قبل SECURITY_TOGGLE_MAP
     # ═════════════════════════════════════════════════════════════
     @staticmethod
     async def _handle_security(update, context, query, user_id, lang=None):
@@ -3543,8 +3549,32 @@ class CallbackHandlers:
                 return
 
             # ═════════════════════════════════════════════════════
+            # 🆕 v9.7.8 TMF2: فحص warn يجب أن يسبق SECURITY_TOGGLE_MAP
+            # لأن "warn" موجودة في الـmap كـtoggle، لكن المستخدم يتوقع
+            # قائمة فرعية (toggle + count + penalty + duration).
+            # ═════════════════════════════════════════════════════
+            if action == "warn":
+                kb = InlineKeyboardMarkup([
+                    [InlineKeyboardButton(await _trans('warn_toggle_btn',
+                        lang, "✅"), callback_data=f"sec_warn_toggle:{chat_id}")],
+                    [InlineKeyboardButton(await _trans('warn_count_btn',
+                        lang, "🔢"), callback_data=f"sec_warn_count:{chat_id}")],
+                    [InlineKeyboardButton(await _trans('warn_penalty_btn',
+                        lang, "⚖️"), callback_data=f"sec_warn_penalty:{chat_id}")],
+                    [InlineKeyboardButton(await _trans(
+                        'warn_penalty_duration_btn', lang, "⏱️"),
+                        callback_data=f"sec_warn_penalty_duration:{chat_id}")],
+                    [InlineKeyboardButton(
+                        KeyboardFactory.get_text("back", lang),
+                        callback_data=f"{CB.GRP_SET}:{chat_id}")]])
+                await safe_edit(query,
+                    await _trans('warnings_management', lang, "⚠️"),
+                    reply_markup=kb, bot=context.bot); return
+
+            # ═════════════════════════════════════════════════════
             # 🆕 v9.7.7 SB3: استخدام SECURITY_TOGGLE_MAP من utils
             # بدل toggle_map المحلي — مصدر واحد للحقيقة
+            # (بعد فحص warn أعلاه)
             # ═════════════════════════════════════════════════════
             if action in SECURITY_TOGGLE_MAP:
                 col = SECURITY_TOGGLE_MAP[action]
@@ -3580,23 +3610,6 @@ class CallbackHandlers:
                 await CallbackHandlers._refresh_security_view(
                     query, context, chat_id, lang); return
 
-            if action == "warn":
-                kb = InlineKeyboardMarkup([
-                    [InlineKeyboardButton(await _trans('warn_toggle_btn',
-                        lang, "✅"), callback_data=f"sec_warn_toggle:{chat_id}")],
-                    [InlineKeyboardButton(await _trans('warn_count_btn',
-                        lang, "🔢"), callback_data=f"sec_warn_count:{chat_id}")],
-                    [InlineKeyboardButton(await _trans('warn_penalty_btn',
-                        lang, "⚖️"), callback_data=f"sec_warn_penalty:{chat_id}")],
-                    [InlineKeyboardButton(await _trans(
-                        'warn_penalty_duration_btn', lang, "⏱️"),
-                        callback_data=f"sec_warn_penalty_duration:{chat_id}")],
-                    [InlineKeyboardButton(
-                        KeyboardFactory.get_text("back", lang),
-                        callback_data=f"{CB.GRP_SET}:{chat_id}")]])
-                await safe_edit(query,
-                    await _trans('warnings_management', lang, "⚠️"),
-                    reply_markup=kb, bot=context.bot); return
             if action == "penalty":
                 await CallbackHandlers._show_penalty_types(
                     update, context, query, chat_id, lang); return
@@ -5941,19 +5954,19 @@ __all__ = [
     # v9.7.6
     "_ANTIFLOOD_MESSAGES_OPTIONS", "_ANTIFLOOD_SECONDS_OPTIONS",
     "_ANTIFLOOD_MESSAGES_MAX", "_ANTIFLOOD_SECONDS_MAX",
-    # 🆕 v9.7.7 — Security Bridge
+    # v9.7.7 — Security Bridge
     "_SECURITY_BRIDGE_AVAILABLE",
     "SECURITY_TOGGLE_MAP", "NEW_SECURITY_DEFAULTS",
     "bridge_get_security_settings", "bridge_invalidate_sec_cache",
 ]
 
 # ═════════════════════════════════════════════════════════════════════
-# LOAD BEACON — v9.7.7
+# LOAD BEACON — v9.7.8
 # ═════════════════════════════════════════════════════════════════════
 try:
     _bridge_icon = "✅" if _SECURITY_BRIDGE_AVAILABLE else "⚠️"
     logger.info(
-        "🛡️ handlers_callback.py v9.7.7 SECURITY-BRIDGE loaded | "
+        "🛡️ handlers_callback.py v9.7.8 SECURITY-TABLE-FIX loaded | "
         "Bridge=%s | Antiflood-Msgs=%d | Antiflood-Secs=%d",
         _bridge_icon,
         len(_ANTIFLOOD_MESSAGES_OPTIONS),
