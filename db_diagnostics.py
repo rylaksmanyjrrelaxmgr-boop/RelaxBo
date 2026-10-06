@@ -4,9 +4,23 @@
 """
 db_diagnostics.py — PostgreSQL/MySQL/SQLite Database Diagnostics
 ================================================================================
-v6.6.0 — AUTO-CLEANUP + FIX-CRITICAL: user_violations column
+v6.7.0 — FULL-COVERAGE DIAGNOSTICS + FIX: hardcoded 12-table limit
 
-🆕 v6.6.0 (AUTO-CLEANUP):
+🆕 v6.7.0 (FULL-COVERAGE):
+    • FIX-HIGH: إزالة الحد الثابت (12 جدولاً) في قسم Dead Tuples
+                → أصبح قابلاً للضبط عبر DB_DIAG_MAX_DEAD_TABLES
+    • NEW: قسم "1b. جداول نظيفة (dead=0)" — يظهر الجداول السليمة
+    • NEW: قسم "2b. تغطية autovacuum لكل الجداول" — بدلاً من HEAVY فقط
+    • NEW: قسم "5b. صحة الفهارس العامة" — كشف جداول بدون PK/فهارس
+    • NEW: توسيع AUTO_CLEANUP_WATCH_TABLES ليشمل جداول سريعة النمو
+    • NEW: دوال _get_all_tables_autovacuum_status(),
+           _get_all_tables_index_health(),
+           _count_all_user_tables()
+    • ENV جديدة: DB_DIAG_MAX_DEAD_TABLES, DB_DIAG_MAX_CLEAN_TABLES,
+                 DB_DIAG_MAX_SIZES, DB_DIAG_SHOW_ALL_TABLES,
+                 DB_DIAG_SHOW_INDEX_HEALTH
+
+✅ v6.6.0 (AUTO-CLEANUP):
     • auto_cleanup_check_and_run() — فحص الحجم + تشغيل صيانة تلقائية
     • _auto_cleanup_loop()          — مهمة دورية (كل 6 ساعات افتراضياً)
     • start_auto_cleanup()          — بدء المهمة عند إقلاع البوت
@@ -19,22 +33,8 @@ v6.6.0 — AUTO-CLEANUP + FIX-CRITICAL: user_violations column
 🔴 FIX-CRITICAL (v6.5.1):
     تصحيح العمود في user_violations من created_at → last_violation_time
     - السبب: جدول user_violations لا يحتوي على created_at إطلاقاً
-             (راجع database_tables.py — الأعمدة الفعلية:
-              user_id, chat_id, violation_count, last_violation_time).
-    - الأثر السابق: PSQL OperationalError
-                    "column created_at does not exist"
-                    → يظهر في preview_maintenance + run_maintenance.
-    - الإصلاح في:
-        • preview_maintenance  (delete_plan)
-        • run_maintenance      (delete_plan)
-    - + إضافة IS NOT NULL قبل المقارنة (حماية من NULL في العمود).
-
-v6.5.0 — MAINTENANCE + QUICK DIAG + WEEKLY REPORT
-التحسينات على v6.4.2:
-    🆕 diagnose_db_quick      : تقرير صحي مختصر (4 أسطر)
-    🆕 preview_maintenance    : معاينة الصيانة (بدون تعديل)
-    🆕 run_maintenance        : تنفيذ DELETE + VACUUM بأمان
-    🆕 format_maintenance_*   : تنسيق للعرض في تيليجرام
+    - الإصلاح في preview_maintenance + run_maintenance
+    - + إضافة IS NOT NULL قبل المقارنة
 
 الاستخدام:
     from db_diagnostics import (
@@ -42,7 +42,6 @@ v6.5.0 — MAINTENANCE + QUICK DIAG + WEEKLY REPORT
         preview_maintenance, run_maintenance,
         format_maintenance_preview, format_maintenance_result,
         vacuum_analyze_tables,
-        # 🆕 v6.6.0:
         start_auto_cleanup, stop_auto_cleanup,
         auto_cleanup_check_and_run, get_auto_cleanup_status,
     )
@@ -67,7 +66,7 @@ logger = logging.getLogger(__name__)
 # VERSION
 # =============================================================================
 
-VERSION = "6.6.0"
+VERSION = "6.7.0"
 
 
 # =============================================================================
@@ -106,22 +105,20 @@ ANALYZE_MOD_CRIT_PCT = 20.0
 # ═════════════════════════════════════════════════════════════════════
 
 ACCEPTED_VACUUM_SCALE_FACTORS: Set[str] = {
-    "0.02",   # database.py (v7.7.x — heavy tables)
-    "0.05",   # database_tables.py (manual helper)
-    "0",      # aggressive
+    "0.02",
+    "0.05",
+    "0",
 }
 
 ACCEPTED_ANALYZE_SCALE_FACTORS: Set[str] = {
-    "0.01",   # database.py (v7.7.x — heavy tables)
-    "0.02",   # database_tables.py (manual helper)
-    "0",      # aggressive
+    "0.01",
+    "0.02",
+    "0",
 }
 
-# للعرض فقط
 EXPECTED_VACUUM_SCALE_FACTOR = "0.02"
 EXPECTED_ANALYZE_SCALE_FACTOR = "0.01"
 
-# للتوافق الخلفي
 EXPECTED_VACUUM_SCALE_FACTORS = ACCEPTED_VACUUM_SCALE_FACTORS
 EXPECTED_ANALYZE_SCALE_FACTORS = ACCEPTED_ANALYZE_SCALE_FACTORS
 
@@ -135,7 +132,6 @@ TELEGRAM_MESSAGE_LIMIT = 4096
 
 REQUIRED_HEAVY_TABLE_USERS = "users"
 
-# 🆕 v6.5.0
 MAINTENANCE_MAX_DELETE_PER_TABLE = 100_000
 MAINTENANCE_DEFAULT_ADMIN_LOGS_DAYS = 30
 MAINTENANCE_DEFAULT_PENALTY_ARCHIVE_DAYS = 90
@@ -143,7 +139,7 @@ MAINTENANCE_DEFAULT_USER_VIOLATIONS_DAYS = 90
 
 
 # =============================================================================
-# ENV HELPERS (v6.6.0)
+# ENV HELPERS
 # =============================================================================
 
 _TRUE_STRS = frozenset({"1", "true", "yes", "y", "on", "enabled", "enable"})
@@ -172,7 +168,7 @@ def _env_int(name: str, default: int) -> int:
 
 
 # =============================================================================
-# 🆕 v6.6.0: AUTO-CLEANUP CONFIGURATION
+# AUTO-CLEANUP CONFIGURATION (v6.6.0)
 # =============================================================================
 
 AUTO_CLEANUP_ENABLED = _env_bool(
@@ -203,9 +199,37 @@ AUTO_CLEANUP_VACUUM = _env_bool(
     "DB_AUTO_CLEANUP_VACUUM", True
 )
 
-# الجداول المراقَبة — يُشغَّل التنظيف عندما يتجاوز أحدها الحد
+# ✅ v6.7.0: توسيع ليشمل جداول سريعة النمو
 AUTO_CLEANUP_WATCH_TABLES: Tuple[str, ...] = (
     "admin_logs",
+    "payment_logs",
+    "sentiment_history",
+    "user_messages",
+    "bot_addition_log",
+    "penalty_archive",
+    "user_violations",
+)
+
+
+# =============================================================================
+# 🆕 v6.7.0: DIAGNOSTIC DISPLAY CONFIGURATION
+# =============================================================================
+
+# ✅ FIX-HIGH v6.7.0: لم تعد القيم ثابتة داخل الكود
+DB_DIAG_MAX_DEAD_TABLES = _env_int(
+    "DB_DIAG_MAX_DEAD_TABLES", 30
+)
+DB_DIAG_MAX_CLEAN_TABLES = _env_int(
+    "DB_DIAG_MAX_CLEAN_TABLES", 15
+)
+DB_DIAG_MAX_SIZES = _env_int(
+    "DB_DIAG_MAX_SIZES", 15
+)
+DB_DIAG_SHOW_ALL_TABLES = _env_bool(
+    "DB_DIAG_SHOW_ALL_TABLES", True
+)
+DB_DIAG_SHOW_INDEX_HEALTH = _env_bool(
+    "DB_DIAG_SHOW_INDEX_HEALTH", True
 )
 
 
@@ -605,7 +629,7 @@ async def _get_dead_tuples_postgres() -> List[Dict[str, Any]]:
             FROM pg_stat_user_tables
             WHERE n_live_tup > 0 OR n_dead_tup > 0
             ORDER BY n_dead_tup DESC, n_live_tup DESC
-            LIMIT 50
+            LIMIT 100
         """)
         return rows or []
     except Exception as exc:
@@ -625,7 +649,7 @@ async def _get_dead_tuples_mysql() -> List[Dict[str, Any]]:
             FROM information_schema.TABLES
             WHERE TABLE_SCHEMA = DATABASE()
             ORDER BY DATA_FREE DESC, TABLE_ROWS DESC
-            LIMIT 50
+            LIMIT 100
         """)
         result = []
         for row in rows or []:
@@ -726,7 +750,7 @@ async def _get_table_sizes() -> List[Dict[str, Any]]:
                        pg_indexes_size(relid) AS index_bytes
                 FROM pg_stat_user_tables
                 ORDER BY pg_total_relation_size(relid) DESC
-                LIMIT 20
+                LIMIT 30
             """) or []
         except Exception as exc:
             logger.warning("_get_table_sizes postgres: %s", exc)
@@ -746,7 +770,7 @@ async def _get_table_sizes() -> List[Dict[str, Any]]:
                     COALESCE(DATA_LENGTH, 0)
                     + COALESCE(INDEX_LENGTH, 0)
                 ) DESC
-                LIMIT 20
+                LIMIT 30
             """) or []
         except Exception as exc:
             logger.warning("_get_table_sizes mysql: %s", exc)
@@ -785,21 +809,20 @@ async def _get_table_sizes() -> List[Dict[str, Any]]:
             key=lambda item: _safe_int(item.get("total_bytes")),
             reverse=True,
         )
-        return result[:20]
+        return result[:30]
     except Exception as exc:
         logger.warning("_get_table_sizes sqlite: %s", exc)
         return []
 
 
 # =============================================================================
-# 🆕 v6.6.0: SIZE HELPERS
+# SIZE HELPERS (v6.6.0)
 # =============================================================================
 
 async def _get_table_size_mb(table_name: str) -> float:
     """
-    🆕 v6.6.0: يرجع حجم جدول + فهارسه بالميغابايت.
-
-    يدعم PostgreSQL و MySQL. SQLite يرجع 0.0 (لا توجد طريقة موحّدة).
+    يرجع حجم جدول + فهارسه بالميغابايت.
+    يدعم PostgreSQL و MySQL. SQLite يرجع 0.0.
     """
     if not table_name:
         return 0.0
@@ -1046,6 +1069,145 @@ async def _get_per_table_autovacuum() -> Dict[str, Dict[str, Any]]:
             logger.debug("missing-tables probe: %s", exc)
 
     return result
+
+
+# =============================================================================
+# 🆕 v6.7.0: ALL TABLES AUTOVACUUM STATUS
+# =============================================================================
+
+async def _get_all_tables_autovacuum_status() -> List[Dict[str, Any]]:
+    """
+    🆕 v6.7.0: فحص حالة autovacuum لكل الجداول (بدلاً من HEAVY فقط).
+
+    Returns:
+        قائمة dicts: {table_name, reloptions, is_tuned, live_tup, dead_tup}
+        مرتبة حسب dead_tup DESC.
+    """
+    from database import DB, USE_POSTGRES
+
+    if not USE_POSTGRES:
+        return []
+
+    try:
+        rows = await DB.fetchall("""
+            SELECT c.relname AS table_name,
+                   c.reloptions,
+                   n.nspname AS schema_name,
+                   COALESCE(s.n_live_tup, 0) AS live_tup,
+                   COALESCE(s.n_dead_tup, 0) AS dead_tup
+            FROM pg_class c
+            JOIN pg_namespace n ON n.oid = c.relnamespace
+            LEFT JOIN pg_stat_user_tables s ON s.relid = c.oid
+            WHERE c.relkind IN ('r', 'p')
+              AND n.nspname = ANY(current_schemas(false))
+            ORDER BY COALESCE(s.n_dead_tup, 0) DESC,
+                     COALESCE(s.n_live_tup, 0) DESC
+        """)
+        result = []
+        for row in rows or []:
+            name = row.get("table_name")
+            if not name:
+                continue
+            options = _parse_reloptions(row.get("reloptions"))
+            result.append({
+                "table_name": name,
+                "reloptions": options,
+                "is_tuned": _is_tuned_reloptions(options),
+                "live_tup": _safe_int(row.get("live_tup")),
+                "dead_tup": _safe_int(row.get("dead_tup")),
+                "schema": row.get("schema_name"),
+            })
+        return result
+    except Exception as exc:
+        logger.warning("_get_all_tables_autovacuum_status: %s", exc)
+        return []
+
+
+# =============================================================================
+# 🆕 v6.7.0: ALL TABLES INDEX HEALTH
+# =============================================================================
+
+async def _get_all_tables_index_health() -> List[Dict[str, Any]]:
+    """
+    🆕 v6.7.0: كشف الجداول التي تفتقد PK أو بدون أي فهرس.
+
+    Returns:
+        قائمة dicts: {table_name, index_count, has_pk, live_tup}
+    """
+    from database import DB, USE_POSTGRES
+
+    if not USE_POSTGRES:
+        return []
+
+    try:
+        rows = await DB.fetchall("""
+            SELECT c.relname AS table_name,
+                   COUNT(i.indexrelid)::int AS index_count,
+                   COALESCE(bool_or(i.indisprimary), false) AS has_pk,
+                   COALESCE(s.n_live_tup, 0)::int AS live_tup
+            FROM pg_class c
+            JOIN pg_namespace n ON n.oid = c.relnamespace
+            LEFT JOIN pg_index i ON i.indrelid = c.oid
+            LEFT JOIN pg_stat_user_tables s ON s.relid = c.oid
+            WHERE c.relkind = 'r'
+              AND n.nspname = ANY(current_schemas(false))
+            GROUP BY c.relname, s.n_live_tup
+            HAVING COUNT(i.indexrelid) = 0
+                OR NOT bool_or(i.indisprimary)
+            ORDER BY COALESCE(s.n_live_tup, 0) DESC
+        """)
+        return [
+            {
+                "table_name": r.get("table_name"),
+                "index_count": _safe_int(r.get("index_count")),
+                "has_pk": bool(r.get("has_pk")),
+                "live_tup": _safe_int(r.get("live_tup")),
+            }
+            for r in (rows or [])
+        ]
+    except Exception as exc:
+        logger.warning("_get_all_tables_index_health: %s", exc)
+        return []
+
+
+# =============================================================================
+# 🆕 v6.7.0: COUNT USER TABLES
+# =============================================================================
+
+async def _count_all_user_tables() -> int:
+    """🆕 v6.7.0: عدد جداول المستخدم الإجمالي."""
+    from database import DB
+
+    if _is_postgres():
+        try:
+            return _safe_int(await DB.fetchval("""
+                SELECT COUNT(*)::int
+                FROM pg_class c
+                JOIN pg_namespace n ON n.oid = c.relnamespace
+                WHERE c.relkind = 'r'
+                  AND n.nspname = ANY(current_schemas(false))
+            """, default=0))
+        except Exception:
+            return 0
+
+    if _is_mysql():
+        try:
+            return _safe_int(await DB.fetchval("""
+                SELECT COUNT(*)::int
+                FROM information_schema.TABLES
+                WHERE TABLE_SCHEMA = DATABASE()
+                  AND TABLE_TYPE = 'BASE TABLE'
+            """, default=0))
+        except Exception:
+            return 0
+
+    try:
+        return _safe_int(await DB.fetchval("""
+            SELECT COUNT(*) FROM sqlite_master
+            WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
+        """, default=0))
+    except Exception:
+        return 0
 
 
 # =============================================================================
@@ -1510,7 +1672,7 @@ def _check_maintenance_consistency() -> Optional[str]:
 
 async def _check_admin_logs_size() -> Optional[str]:
     """
-    🔍 يفحص حجم admin_logs — مُحدَّث v6.6.0 ليعرض حالة auto-cleanup.
+    🔍 يفحص حجم admin_logs — مُحدَّث ليعرض حالة auto-cleanup.
     """
     from database import DB
 
@@ -1523,7 +1685,6 @@ async def _check_admin_logs_size() -> Optional[str]:
         logger.debug("_check_admin_logs_size: %s", exc)
         return None
 
-    # 🆕 v6.6.0: قراءة الحجم بالميغابايت + حالة auto-cleanup
     try:
         size_mb = await _get_table_size_mb("admin_logs")
     except Exception:
@@ -1544,7 +1705,6 @@ async def _check_admin_logs_size() -> Optional[str]:
         if size_mb > 0 else ""
     )
 
-    # فحص الحجم أولاً (أهم من عدد الصفوف)
     if AUTO_CLEANUP_MAX_SIZE_MB > 0 and size_mb >= AUTO_CLEANUP_MAX_SIZE_MB:
         return (
             f"🔴 <b>admin_logs تجاوز الحد المسموح:</b> "
@@ -2349,6 +2509,29 @@ async def _build_diagnose_lines() -> List[str]:
     sizes = await _get_table_sizes()
     indexes = await _get_indexes(list(_CRITICAL_INDEXES.keys()))
 
+    # 🆕 v6.7.0: قراءات إضافية
+    total_tables_count = 0
+    all_tables_av: List[Dict[str, Any]] = []
+    index_health: List[Dict[str, Any]] = []
+
+    if USE_POSTGRES:
+        try:
+            total_tables_count = await _count_all_user_tables()
+        except Exception as exc:
+            logger.debug("_count_all_user_tables: %s", exc)
+
+        if DB_DIAG_SHOW_ALL_TABLES:
+            try:
+                all_tables_av = await _get_all_tables_autovacuum_status()
+            except Exception as exc:
+                logger.debug("_get_all_tables_autovacuum_status: %s", exc)
+
+        if DB_DIAG_SHOW_INDEX_HEALTH:
+            try:
+                index_health = await _get_all_tables_index_health()
+            except Exception as exc:
+                logger.debug("_get_all_tables_index_health: %s", exc)
+
     if USE_POSTGRES:
         health = _calculate_pg_health(dead_rows, blockers, pg_settings)
         lines.append("")
@@ -2371,6 +2554,23 @@ async def _build_diagnose_lines() -> List[str]:
             f"  📊 جداول مهمة: "
             f"<b>{health['significant_tables']}</b>"
         )
+        # 🆕 v6.7.0: عدد الجداول الإجمالي
+        if total_tables_count > 0:
+            lines.append(
+                f"  🗂️ إجمالي الجداول: <b>{total_tables_count}</b>"
+            )
+        # 🆕 v6.7.0: تحذير جداول بدون PK
+        if index_health:
+            no_pk = sum(1 for r in index_health if not r.get("has_pk"))
+            no_idx = sum(
+                1 for r in index_health
+                if _safe_int(r.get("index_count")) == 0
+            )
+            if no_pk or no_idx:
+                lines.append(
+                    f"  🔑 جداول بلا PK: <b>{no_pk}</b> | "
+                    f"بلا فهارس: <b>{no_idx}</b>"
+                )
         av_state = (
             "🟢 ON"
             if _autovacuum_enabled(pg_settings)
@@ -2462,12 +2662,20 @@ async def _build_diagnose_lines() -> List[str]:
         lines.append("")
         lines.append("<b>1. Dead Tuples + نشاط التنظيف</b>")
         lines.append("")
+
+        # ═══════════════════════════════════════════════════════
+        # ✅ FIX-HIGH v6.7.0: لم يعد الحد ثابتاً على 12
+        # ═══════════════════════════════════════════════════════
         shown = 0
+        clean_tables: List[Dict[str, Any]] = []
         for row in dead_rows:
             name = row.get("table_name") or "?"
             live = _safe_int(row.get("live_tup"))
             dead = _safe_int(row.get("dead_tup"))
             if live == 0 and dead == 0:
+                continue
+            if dead == 0 and live > 0:
+                clean_tables.append(row)
                 continue
             pct = _dead_pct(dead, live)
             emoji = _dead_emoji(dead, live)
@@ -2484,14 +2692,48 @@ async def _build_diagnose_lines() -> List[str]:
                 f"🔄 mod={mod_since:,}"
             )
             shown += 1
-            if shown >= 12:
+            if shown >= DB_DIAG_MAX_DEAD_TABLES:
+                remaining = sum(
+                    1 for r in dead_rows
+                    if _safe_int(r.get("dead_tup")) > 0
+                ) - shown
+                if remaining > 0:
+                    lines.append(
+                        f"<i>… و{remaining} جدول آخر فيه dead tuples "
+                        f"(ارفع DB_DIAG_MAX_DEAD_TABLES لعرضها)</i>"
+                    )
                 break
-        if shown == 0:
-            lines.append("✅ لا توجد بيانات.")
 
+        if shown == 0:
+            lines.append("✅ لا توجد بيانات dead tuples.")
+
+        # 🆕 v6.7.0: قسم الجداول النظيفة
+        if clean_tables and DB_DIAG_MAX_CLEAN_TABLES > 0:
+            lines.append("")
+            lines.append("<b>1b. جداول نظيفة (dead=0)</b>")
+            lines.append("")
+            clean_shown = 0
+            for row in clean_tables[:DB_DIAG_MAX_CLEAN_TABLES]:
+                name = row.get("table_name") or "?"
+                live = _safe_int(row.get("live_tup"))
+                last_an = _fmt_dt(row.get("last_autoanalyze"))
+                lines.append(
+                    f"✅ <code>{_escape_html(name):<18}</code> "
+                    f"live={live:>7,} | 📊 AN: <code>{last_an}</code>"
+                )
+                clean_shown += 1
+            remaining_clean = len(clean_tables) - clean_shown
+            if remaining_clean > 0:
+                lines.append(
+                    f"<i>… و{remaining_clean} جدول نظيف آخر</i>"
+                )
+
+    # ═══════════════════════════════════════════════════════
+    # Autovacuum per HEAVY table (كما كان)
+    # ═══════════════════════════════════════════════════════
     if USE_POSTGRES and per_table:
         lines.append("")
-        lines.append("<b>2. Autovacuum لكل جدول حرج</b>")
+        lines.append("<b>2. Autovacuum للجداول الحرجة (HEAVY)</b>")
         lines.append("")
         for table in HEAVY_TABLES_FOR_AUTOVACUUM:
             info = per_table.get(table, {})
@@ -2536,6 +2778,41 @@ async def _build_diagnose_lines() -> List[str]:
                     f"القيم الافتراضية"
                 )
 
+    # ═══════════════════════════════════════════════════════
+    # 🆕 v6.7.0: تغطية autovacuum لكل الجداول
+    # ═══════════════════════════════════════════════════════
+    if USE_POSTGRES and all_tables_av:
+        heavy_set = set(HEAVY_TABLES_FOR_AUTOVACUUM or [])
+        not_tuned = [
+            r for r in all_tables_av
+            if not r.get("is_tuned")
+            and r.get("table_name") not in heavy_set
+        ]
+        if not_tuned:
+            lines.append("")
+            lines.append(
+                f"<b>2b. جداول ليست مضبوطة autovacuum "
+                f"({len(not_tuned)} من {len(all_tables_av)})</b>"
+            )
+            lines.append("")
+            shown_2b = 0
+            for row in not_tuned[:10]:
+                name = row.get("table_name")
+                live = _safe_int(row.get("live_tup"))
+                dead = _safe_int(row.get("dead_tup"))
+                lines.append(
+                    f"⚙️ <code>{_escape_html(name):<22}</code> "
+                    f"live={live:>6,} dead={dead:>6,}"
+                )
+                shown_2b += 1
+            remaining = len(not_tuned) - shown_2b
+            if remaining > 0:
+                lines.append(
+                    f"<i>… و{remaining} جدول آخر (توسيع "
+                    f"SMALL_TABLES_FOR_AGGRESSIVE_AUTOVACUUM "
+                    f"في database_tables.py يحلّها)</i>"
+                )
+
     if USE_POSTGRES and blockers:
         lines.append("")
         lines.append("<b>3. نشاط PostgreSQL / Blockers</b>")
@@ -2571,9 +2848,11 @@ async def _build_diagnose_lines() -> List[str]:
 
     if sizes:
         lines.append("")
-        lines.append("<b>4. أحجام الجداول — Top 10</b>")
+        lines.append(
+            f"<b>4. أحجام الجداول — Top {DB_DIAG_MAX_SIZES}</b>"
+        )
         lines.append("")
-        for row in sizes[:10]:
+        for row in sizes[:DB_DIAG_MAX_SIZES]:
             name = row.get("table_name") or "?"
             total = _safe_int(row.get("total_bytes"))
             lines.append(
@@ -2582,7 +2861,7 @@ async def _build_diagnose_lines() -> List[str]:
             )
 
     lines.append("")
-    lines.append("<b>5. الفهارس الحرجة</b>")
+    lines.append("<b>5. الفهارس الحرجة (يدوياً)</b>")
     for table, expected_indexes in _CRITICAL_INDEXES.items():
         actual = set(indexes.get(table, []))
         missing = [
@@ -2601,6 +2880,40 @@ async def _build_diagnose_lines() -> List[str]:
         else:
             lines.append(
                 f"✅ <b>{_escape_html(table)}</b> ({len(actual)})"
+            )
+
+    # ═══════════════════════════════════════════════════════
+    # 🆕 v6.7.0: صحة الفهارس العامة
+    # ═══════════════════════════════════════════════════════
+    if USE_POSTGRES and index_health and DB_DIAG_SHOW_INDEX_HEALTH:
+        lines.append("")
+        lines.append(
+            f"<b>5b. صحة الفهارس العامة "
+            f"({len(index_health)} جدولاً)</b>"
+        )
+        lines.append("")
+        for row in index_health[:15]:
+            name = row.get("table_name")
+            cnt = _safe_int(row.get("index_count"))
+            pk = row.get("has_pk")
+            live = _safe_int(row.get("live_tup"))
+            if cnt == 0:
+                icon = "🔴"
+                note = "بلا أي فهرس!"
+            elif not pk:
+                icon = "🟡"
+                note = f"{cnt} فهرس، بلا PK"
+            else:
+                icon = "✅"
+                note = f"{cnt} فهرس"
+            lines.append(
+                f"{icon} <code>{_escape_html(name):<22}</code> "
+                f"live={live:>6,} — {note}"
+            )
+        remaining = len(index_health) - 15
+        if remaining > 0:
+            lines.append(
+                f"<i>… و{remaining} جدول آخر يحتاج فحص</i>"
             )
 
     if USE_POSTGRES and pg_settings:
@@ -2651,7 +2964,7 @@ async def _build_diagnose_lines() -> List[str]:
             "VACUUM يعيد بناء قاعدة البيانات."
         )
 
-    # 🆕 v6.6.0: عرض حالة auto-cleanup
+    # Auto-cleanup section
     if AUTO_CLEANUP_ENABLED and USE_POSTGRES:
         lines.append("")
         lines.append("<b>8. Auto-Cleanup</b>")
@@ -2815,7 +3128,6 @@ async def preview_maintenance(
 
     ✅ v6.5.1 FIX-CRITICAL:
         user_violations يستخدم last_violation_time بدل created_at
-        (العمود created_at غير موجود في الجدول).
     """
     from database import (
         DB, USE_POSTGRES, HEAVY_TABLES_FOR_AUTOVACUUM,
@@ -2838,7 +3150,6 @@ async def preview_maintenance(
 
     result['available'] = True
 
-    # فحص VACUUM جارٍ
     try:
         blockers = await _get_autovacuum_blockers()
         running = [
@@ -2853,7 +3164,6 @@ async def preview_maintenance(
     except Exception as exc:
         logger.debug(f"preview_maintenance(blockers): {exc}")
 
-    # فحص الجداول المطلوبة
     tables_exist: Set[str] = set()
     try:
         rows = await DB.fetchall("""
@@ -2870,10 +3180,6 @@ async def preview_maintenance(
         result['error'] = f"تعذر جلب قائمة الجداول: {exc}"
         return result
 
-    # ✅ v6.5.1: تصحيح عمود user_violations
-    #    جدول user_violations لا يحتوي على created_at
-    #    العمود الصحيح: last_violation_time
-    #    راجع database_tables.py (تعريف الجدول)
     delete_plan = [
         ('admin_logs', 'created_at', admin_logs_days),
         ('penalty_archive', 'created_at', penalty_archive_days),
@@ -2912,7 +3218,6 @@ async def preview_maintenance(
             'count': count,
         })
 
-    # VACUUM plan
     result['vacuum_tables'] = [
         t for t in (HEAVY_TABLES_FOR_AUTOVACUUM or [])
         if t and t in tables_exist
@@ -2960,9 +3265,7 @@ async def run_maintenance(
         )
         return result
 
-    # ═══ 1) DELETE PHASE ═══
     if not skip_delete:
-        # ✅ v6.5.1: تصحيح عمود user_violations
         delete_plan = [
             ('admin_logs', 'created_at', admin_logs_days),
             ('penalty_archive', 'created_at', penalty_archive_days),
@@ -3020,7 +3323,6 @@ async def run_maintenance(
 
             result['deletes'].append(entry)
 
-    # ═══ 2) VACUUM PHASE ═══
     if not skip_vacuum:
         running_tables: Set[str] = set()
         try:
@@ -3343,7 +3645,7 @@ async def vacuum_analyze_tables() -> str:
 
 
 # =============================================================================
-# 🆕 v6.6.0: AUTO-CLEANUP ENGINE
+# AUTO-CLEANUP ENGINE (v6.6.0)
 # =============================================================================
 
 _auto_cleanup_task: Optional[asyncio.Task] = None
@@ -3354,16 +3656,8 @@ _auto_cleanup_last_result: Dict[str, Any] = {}
 
 async def auto_cleanup_check_and_run() -> Dict[str, Any]:
     """
-    🆕 v6.6.0: الفحص الرئيسي — يقارن أحجام الجداول المراقَبة
+    الفحص الرئيسي — يقارن أحجام الجداول المراقَبة
     بالعتبة، ويشغّل run_maintenance() عند التجاوز.
-
-    Returns:
-        dict يحتوي على:
-            - ran: bool — هل نُفِّذ التنظيف؟
-            - reason: str — السبب
-            - sizes: dict — أحجام الجداول قبل الفحص
-            - triggers: list — الجداول التي تجاوزت الحد
-            - maintenance_result: dict | None — نتيجة run_maintenance
     """
     global _auto_cleanup_last_run, _auto_cleanup_last_result
 
@@ -3387,7 +3681,6 @@ async def auto_cleanup_check_and_run() -> Dict[str, Any]:
         _auto_cleanup_last_result = report
         return report
 
-    # ── قراءة أحجام الجداول المراقَبة ──
     try:
         sizes = await _get_all_watched_table_sizes()
     except Exception as exc:
@@ -3401,7 +3694,6 @@ async def auto_cleanup_check_and_run() -> Dict[str, Any]:
 
     report["sizes"] = sizes
 
-    # ── تحديد الجداول المتجاوزة ──
     triggers: List[Dict[str, Any]] = []
     if AUTO_CLEANUP_MAX_SIZE_MB > 0:
         for table, size_mb in sizes.items():
@@ -3423,7 +3715,6 @@ async def auto_cleanup_check_and_run() -> Dict[str, Any]:
         )
         return report
 
-    # ── تشغيل الصيانة ──
     report["ran"] = True
     report["reason"] = (
         "size_threshold:" + ",".join(
@@ -3459,7 +3750,6 @@ async def auto_cleanup_check_and_run() -> Dict[str, Any]:
             maintenance.get("success", False),
         )
 
-        # ── قراءة الأحجام بعد التنظيف ──
         try:
             new_sizes = await _get_all_watched_table_sizes()
             report["sizes_after"] = new_sizes
@@ -3486,7 +3776,7 @@ async def auto_cleanup_check_and_run() -> Dict[str, Any]:
 
 
 async def _auto_cleanup_loop() -> None:
-    """🆕 v6.6.0: الحلقة الدورية للتنظيف التلقائي."""
+    """الحلقة الدورية للتنظيف التلقائي."""
     interval_sec = max(600, AUTO_CLEANUP_INTERVAL_HOURS * 3600)
     initial_delay = max(0, AUTO_CLEANUP_INITIAL_DELAY_SEC)
 
@@ -3501,7 +3791,6 @@ async def _auto_cleanup_loop() -> None:
         AUTO_CLEANUP_VACUUM,
     )
 
-    # تأخير أولي
     if initial_delay > 0:
         try:
             await asyncio.sleep(initial_delay)
@@ -3526,13 +3815,9 @@ async def _auto_cleanup_loop() -> None:
 
 def start_auto_cleanup() -> bool:
     """
-    🆕 v6.6.0: يبدأ المهمة الدورية للتنظيف.
+    يبدأ المهمة الدورية للتنظيف.
 
     آمن للاستدعاء المتكرّر.
-
-    Returns:
-        True إذا نجح البدء أو كانت المهمة تعمل مسبقاً.
-        False إذا كان النظام معطّلاً أو غير مدعوم.
     """
     global _auto_cleanup_task, _auto_cleanup_shutdown
 
@@ -3574,9 +3859,7 @@ def start_auto_cleanup() -> bool:
 
 
 async def stop_auto_cleanup(timeout: float = 5.0) -> None:
-    """
-    🆕 v6.6.0: إيقاف نظيف للمهمة الدورية.
-    """
+    """إيقاف نظيف للمهمة الدورية."""
     global _auto_cleanup_task, _auto_cleanup_shutdown
 
     _auto_cleanup_shutdown = True
@@ -3601,9 +3884,7 @@ async def stop_auto_cleanup(timeout: float = 5.0) -> None:
 
 
 async def get_auto_cleanup_status() -> Dict[str, Any]:
-    """
-    🆕 v6.6.0: معلومات حالة النظام للعرض أو للاختبارات.
-    """
+    """معلومات حالة النظام للعرض أو للاختبارات."""
     sizes: Dict[str, float] = {}
     try:
         sizes = await _get_all_watched_table_sizes()
@@ -3648,12 +3929,12 @@ __all__ = [
     "format_maintenance_result",
     # Vacuum
     "vacuum_analyze_tables",
-    # 🆕 v6.6.0: Auto-cleanup
+    # Auto-cleanup (v6.6.0)
     "start_auto_cleanup",
     "stop_auto_cleanup",
     "auto_cleanup_check_and_run",
     "get_auto_cleanup_status",
-    # 🆕 v6.6.0: Auto-cleanup constants
+    # Auto-cleanup constants
     "AUTO_CLEANUP_ENABLED",
     "AUTO_CLEANUP_MAX_SIZE_MB",
     "AUTO_CLEANUP_INTERVAL_HOURS",
@@ -3664,9 +3945,19 @@ __all__ = [
     "AUTO_CLEANUP_USER_VIOLATIONS_DAYS",
     "AUTO_CLEANUP_VACUUM",
     "AUTO_CLEANUP_WATCH_TABLES",
-    # 🆕 v6.6.0: Size helpers
+    # 🆕 v6.7.0: Diagnostic display config
+    "DB_DIAG_MAX_DEAD_TABLES",
+    "DB_DIAG_MAX_CLEAN_TABLES",
+    "DB_DIAG_MAX_SIZES",
+    "DB_DIAG_SHOW_ALL_TABLES",
+    "DB_DIAG_SHOW_INDEX_HEALTH",
+    # Size helpers
     "_get_table_size_mb",
     "_get_all_watched_table_sizes",
+    # 🆕 v6.7.0: Coverage helpers
+    "_get_all_tables_autovacuum_status",
+    "_get_all_tables_index_health",
+    "_count_all_user_tables",
     # Dataclasses
     "RootCause",
     "CauseItem",
