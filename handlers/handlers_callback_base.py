@@ -3,7 +3,7 @@
 """
 handlers_callback_base.py — ثوابت ودوال مساعدة لـ handlers_callback
 =====================================================================
-هذا الملف جزء من تقسيم handlers_callback.py (v9.4.32 → v9.5.x)
+هذا الملف جزء من تقسيم handlers_callback.py (v9.4.32 → v9.7.8)
 
 المحتوى:
     • ثوابت رقمية/نصية للاستخدام في كل الوحدات
@@ -20,6 +20,25 @@ handlers_callback_base.py — ثوابت ودوال مساعدة لـ handlers_c
     - _sec_auth_cache / _post_count_cache / _security_stats_cache_local
     - context / update / query
 هذه تبقى في handlers_callback.py (أو تُنقل في ملفات لاحقة).
+
+=====================================================================
+🆕 v9.7.8 (SECURITY-PREFIXES-FIX):
+    🔴 FIX-1: إضافة _SECURITY_PREFIXES صريحة (22+ زر)
+             السبب: dir(CB) قد لا يلتقط كل sec_* إذا لم تكن
+             معرّفة في utils.CB.
+    🔴 FIX-2: إضافة _SECURITY_SUB_PREFIXES (set_, sec_set_, sec_penalty_)
+             السبب: الأزرار الفرعية تحتاج prefix لتوجيهها.
+    🔴 FIX-3: إضافة _ACTION_PREFIXES (ban_, act_, pen_)
+             السبب: أزرار الإجراءات تحتاج توجيه.
+    🟠 FIX-4: إضافة _CONFIRM_SUFFIXES لتوجيه التأكيدات.
+    🟠 FIX-5: إضافة _MENU_PREFIXES (auto_reply_, sched_, analytics_).
+    🟢 NEW:   _ALL_KNOWN_PREFIXES = union of everything
+    🟢 NEW:   دالة _is_known_prefix(data) للفحص السريع
+
+🆕 v9.5.x:
+    • تقسيم handlers_callback.py إلى وحدات
+    • دوال مساعدة نقية
+=====================================================================
 """
 
 import logging
@@ -154,10 +173,216 @@ GROUP_NUMBER_EMOJIS = [
 
 
 # =====================================================================
-# _KNOWN_CB_PREFIXES — توليد ديناميكي من CB.* + إضافات صريحة
+# 🆕 v9.7.8: قوائم prefixes صريحة
+# =====================================================================
+
+# ─── 1. أزرار الأمان الرئيسية ───
+_SECURITY_PREFIXES: Set[str] = {
+    # 🆕 v7.10.0 — الأزرار الستة الجديدة
+    "sec_at_channel",
+    "sec_tg_scheme",
+    "sec_button_links",
+    "sec_emails",
+    "sec_protected_any",
+    "sec_postbot",
+
+    # الأزرار الأساسية
+    "sec_links",
+    "sec_mentions",
+    "sec_forward",
+    "sec_video",
+    "sec_audio",
+    "sec_anim",
+    "sec_doc",
+    "sec_sticker",
+    "sec_service",
+    "sec_poll",
+    "sec_game",
+    "sec_voice",
+    "sec_videonote",
+    "sec_nsfw",
+    "sec_flood",
+    "sec_slow",
+    "sec_night",
+    "sec_welcome",
+    "sec_goodbye",
+    "sec_approve_join",
+    "sec_reject_join",
+    "sec_banned_words",
+    "sec_warn",
+
+    # أزرار المجموعة
+    "sec_welcome_text",
+    "sec_goodbye_text",
+    "sec_slow_mode_seconds",
+    "sec_maxlen",
+    "sec_penalty",
+    "sec_del_pen",
+    "sec_adv_act",
+    "sec_act_log",
+    "sec_auto_reply_menu",
+    "sec_antiflood_settings",
+    "sec_night_settings",
+    "sec_violation_penalties",
+    "sec_violation_settings",
+    "sec_penalty_durations",
+    "sec_warn_count",
+    "sec_warn_penalty",
+    "sec_warn_penalty_duration",
+    "sec_warn_toggle",
+
+    # أوامر التفعيل/التعطيل
+    "sec_activate_all",
+    "sec_deactivate_all",
+    "sec_enable_all",
+    "sec_disable_all",
+    "sec_activate_all_confirm",
+    "sec_deactivate_all_confirm",
+
+    # إغلاق ورجوع
+    "sec_close",
+    "sec_back",
+}
+
+
+# ─── 2. الأزرار الفرعية (set_*, sec_set_*, sec_penalty_*) ───
+_SECURITY_SUB_PREFIXES: Set[str] = {
+    "set_warn_count",
+    "set_duration",
+    "set_warn_penalty",
+    "set_antiflood_messages",
+    "set_antiflood_seconds",
+    "sec_set_mute_duration",
+    "sec_set_ban_duration",
+    "sec_set_restrict_duration",
+    "sec_set_del_penalty",
+    "sec_set_del_penalty_duration",
+    "sec_set_violation_strikes",
+    "sec_set_violation_duration",
+    "sec_set_violation_penalty",
+    "sec_set_antiflood_messages",
+    "sec_set_antiflood_seconds",
+    "sec_set_antiflood_penalty",
+    "sec_set_night_start",
+    "sec_set_night_end",
+    "sec_set_night_action",
+    "sec_antiflood_penalty",
+    "sec_antiflood_duration",
+    "sec_night_action",
+    "sec_night_duration",
+    "sec_penalty_ban",
+    "sec_penalty_mute",
+    "sec_penalty_kick",
+    "sec_penalty_restrict",
+    "sec_penalty_none",
+    "sec_violation_penalty",
+    "sec_toggle_banned_words",
+}
+
+
+# ─── 3. أزرار الإجراءات (ban_*, act_*, pen_*) ───
+_ACTION_PREFIXES: Set[str] = {
+    "ban_add",
+    "ban_list",
+    "ban_rem",
+    "act_ban",
+    "act_mute",
+    "act_warn",
+    "act_kick",
+    "act_restrict",
+    "act_unban",
+    "act_pin",
+    "act_log",
+    "pen_ban",
+    "pen_mute",
+    "pen_kick",
+    "pen_warn",
+    "pen_restrict",
+}
+
+
+# ─── 4. القوائم الفرعية ───
+_MENU_PREFIXES: Set[str] = {
+    # auto_reply
+    "auto_reply_menu",
+    "auto_reply_toggle",
+    "auto_reply_admins",
+    "auto_reply_add",
+    "auto_reply_del",
+    "auto_reply_list",
+    "auto_reply_stats",
+    "auto_reply_reset",
+    "auto_reply_reset_confirm",
+    "auto_reply_manage",
+
+    # schedule
+    "sched_open",
+    "sched_min",
+    "sched_hour",
+    "sched_day",
+    "sched_time",
+
+    # log channel
+    "log_channel_menu",
+    "log_channel_set",
+    "log_channel_test",
+    "log_channel_remove",
+    "log_channel_btn",
+    "log_channel_change",
+
+    # analytics
+    "analytics_user_growth",
+    "analytics_top_channels",
+    "analytics_publish_stats",
+    "analytics_channels_rate",
+    "analytics_subscriptions",
+    "analytics_pool",
+    "analytics_slow",
+    "analytics_export",
+}
+
+
+# ─── 5. أزرار التأكيد ───
+_CONFIRM_SUFFIXES: Set[str] = {
+    "ch_del_confirm",
+    "post_del_confirm",
+    "grp_del_confirm",
+    "delete_post_confirm",
+    "post_clear_confirm",
+}
+
+
+# ─── 6. أزرار المسابقات ───
+_CONTEST_PREFIXES: Set[str] = {
+    "contest_duration",
+    "contest_type_raffle",
+    "contest_type_quiz",
+    "contest_join",
+    "contest_winners",
+    "declare_winner_sel",
+    "admin_declare_winner_sel",
+    "admin_delete_contest",
+}
+
+
+# ─── 7. أزرار الإدارة ───
+_ADMIN_PREFIXES: Set[str] = {
+    "admin_toggle_ch",
+    "admin_toggle_gr",
+    "admin_restore_file",
+    "admin_delete_contest",
+    "adm_ch_page",
+    "adm_gr_page",
+}
+
+
+# =====================================================================
+# 🆕 v9.7.8: _KNOWN_CB_PREFIXES — توليد ديناميكي + صريح
 # =====================================================================
 
 _KNOWN_CB_PREFIXES: Set[str] = set()
+
+# ─── 1. من CB.* (تلقائي) ───
 try:
     for _attr_name in dir(CB):
         if _attr_name.startswith('_'):
@@ -171,6 +396,8 @@ try:
 except Exception as _e_cb:
     logger.warning(f"⚠️ _KNOWN_CB_PREFIXES build from CB.* failed: {_e_cb}")
 
+
+# ─── 2. إضافات صريحة (v9.5.x القديمة) ───
 _KNOWN_CB_PREFIXES.update({
     "finish_posts",
     "gift_plans",
@@ -179,6 +406,116 @@ _KNOWN_CB_PREFIXES.update({
     "admin_analytics",
     "refresh_btn",
 })
+
+
+# ─── 3. 🆕 v9.7.8: أزرار الأمان ───
+_KNOWN_CB_PREFIXES.update(_SECURITY_PREFIXES)
+_KNOWN_CB_PREFIXES.update(_SECURITY_SUB_PREFIXES)
+
+
+# ─── 4. 🆕 v9.7.8: أزرار الإجراءات ───
+_KNOWN_CB_PREFIXES.update(_ACTION_PREFIXES)
+
+
+# ─── 5. 🆕 v9.7.8: القوائم الفرعية ───
+_KNOWN_CB_PREFIXES.update(_MENU_PREFIXES)
+
+
+# ─── 6. 🆕 v9.7.8: أزرار التأكيد ───
+_KNOWN_CB_PREFIXES.update(_CONFIRM_SUFFIXES)
+
+
+# ─── 7. 🆕 v9.7.8: المسابقات ───
+_KNOWN_CB_PREFIXES.update(_CONTEST_PREFIXES)
+
+
+# ─── 8. 🆕 v9.7.8: الإدارة ───
+_KNOWN_CB_PREFIXES.update(_ADMIN_PREFIXES)
+
+
+# ─── 9. 🆕 v9.7.8: أزرار عامة إضافية ───
+_KNOWN_CB_PREFIXES.update({
+    # Buy subscription
+    "buy_sub",
+    "buy_gift",
+
+    # Channel/Group management
+    "ch_page",
+    "post_page",
+    "grp_del",
+    "grp_set",
+
+    # Gift
+    "gift",
+
+    # Referral
+    "ref_claim",
+    "ref_list",
+
+    # Support
+    "support_ticket",
+
+    # Panel
+    "panel_lock",
+    "panel_unlock",
+    "panel_close",
+})
+
+
+# ─── Union موحّد للسريع ───
+_ALL_KNOWN_PREFIXES: Set[str] = set(_KNOWN_CB_PREFIXES)
+
+
+# =====================================================================
+# 🆕 v9.7.8: دالة الفحص السريع
+# =====================================================================
+
+def _is_known_prefix(data: str) -> bool:
+    """
+    فحص سريع: هل data يبدأ بـ prefix معروف؟
+
+    الاستخدام:
+        if _is_known_prefix(data):
+            # طابق base_data = parts[0]
+        else:
+            # استخدم data كاملاً
+    """
+    if not data:
+        return False
+
+    # فحص مباشر
+    if data in _ALL_KNOWN_PREFIXES:
+        return True
+
+    # فحص إذا كان هناك ':' → اختبر الجزء قبلها
+    if ':' in data:
+        prefix = data.split(':', 1)[0]
+        return prefix in _ALL_KNOWN_PREFIXES
+
+    return False
+
+
+def _get_base_prefix(data: str) -> str:
+    """
+    استخراج الـ base prefix من data.
+
+    مثلاً:
+        "sec_forward:-100123"  → "sec_forward"
+        "sec_close"            → "sec_close"
+        "unknown_xyz:99"       → "unknown_xyz:99" (كاملاً)
+    """
+    if not data:
+        return data
+
+    if data in _ALL_KNOWN_PREFIXES:
+        return data
+
+    if ':' in data:
+        prefix = data.split(':', 1)[0]
+        if prefix in _ALL_KNOWN_PREFIXES:
+            return prefix
+
+    return data
 
 
 # =====================================================================
@@ -315,6 +652,47 @@ def _make_user_cache_keys(
     return keys
 
 
+# =====================================================================
+# 🆕 v9.7.8: diagnostics
+# =====================================================================
+
+def _log_prefixes_status() -> None:
+    """يُسجّل عدد الـ prefixes المعروفة عند الإقلاع."""
+    logger.info(
+        "📋 _KNOWN_CB_PREFIXES: %d إجمالي | "
+        "security=%d sub=%d action=%d menu=%d confirm=%d "
+        "contest=%d admin=%d",
+        len(_KNOWN_CB_PREFIXES),
+        len(_SECURITY_PREFIXES),
+        len(_SECURITY_SUB_PREFIXES),
+        len(_ACTION_PREFIXES),
+        len(_MENU_PREFIXES),
+        len(_CONFIRM_SUFFIXES),
+        len(_CONTEST_PREFIXES),
+        len(_ADMIN_PREFIXES),
+    )
+    # تحقق من وجود الأزرار الحرجة
+    critical = [
+        "sec_forward", "sec_links", "sec_mentions",
+        "sec_at_channel", "sec_tg_scheme", "sec_button_links",
+        "sec_emails", "sec_protected_any", "sec_postbot",
+    ]
+    missing = [p for p in critical if p not in _KNOWN_CB_PREFIXES]
+    if missing:
+        logger.warning(
+            "⚠️ _KNOWN_CB_PREFIXES: مفقود حرج: %s", missing
+        )
+    else:
+        logger.debug("✅ كل prefixes الحرجة موجودة")
+
+
+# استدعاء التشخيص عند الاستيراد (log level INFO)
+try:
+    _log_prefixes_status()
+except Exception as _e:
+    logger.debug(f"_log_prefixes_status: {_e}")
+
+
 __all__ = [
     # ثوابت
     "MAX_CAPTION_LENGTH", "MAX_MESSAGE_LENGTH", "MAX_BACKUPS",
@@ -327,13 +705,28 @@ __all__ = [
     "DEFAULT_SUCCESS_RATE", "SEC_AUTH_CACHE_MAX_SIZE",
     "POST_COUNT_CACHE_TTL", "POST_COUNT_CACHE_MAX_SIZE",
     "CONTEST_DURATIONS", "GROUP_NUMBER_EMOJIS",
-    "_ANALYTICS_ALIASES", "_CONTEXT_KEYS_TO_CLEAR", "_CANCEL_EXTRA_KEYS",
+    "_ANALYTICS_ALIASES", "_CONTEXT_KEYS_TO_CLEAR", "_CANвCANCEL_EXTRA_KEYS",
     "_BOLD_MD_PATTERN", "_VALID_URL_PATTERN",
     "_PRIMARY_OWNER_ID", "_KNOWN_CB_PREFIXES",
+
+    # 🆕 v9.7.8 — قوائم prefixes
+    "_SECURITY_PREFIXES",
+    "_SECURITY_SUB_PREFIXES",
+    "_ACTION_PREFIXES",
+    "_MENU_PREFIXES",
+    "_CONFIRM_SUFFIXES",
+    "_CONTEST_PREFIXES",
+    "_ADMIN_PREFIXES",
+    "_ALL_KNOWN_PREFIXES",
 
     # دوال
     "_trans", "_fmt", "_group_number", "_is_primary_owner",
     "_row_to_dict", "_coerce_int", "_coerce_float", "_safe_str",
     "_md_to_html", "_log_channel_cache_key", "_is_valid_url",
     "_mask_id", "_make_user_cache_keys",
+
+    # 🆕 v9.7.8 — دوال الفحص
+    "_is_known_prefix",
+    "_get_base_prefix",
+    "_log_prefixes_status",
 ]
