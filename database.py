@@ -1,8 +1,21 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-database.py - قاعدة البيانات المتكاملة (v7.7.54 — HARDENED-AUDIT)
+database.py - قاعدة البيانات المتكاملة (v7.7.55 — HARDENED-AUDIT-FIXED)
 ================================================================================
+🆕 v7.7.55 (POST-AUDIT FIXES — تصحيحات مراجعة v7.7.54):
+  🔴 PA-1 HIGH: _normalize_params — dict يرفع TypeError صريح بدل
+      تمريره كـ param واحد (كان asyncpg يرفضه برسالة غامضة).
+  🔴 PA-2 HIGH: _verify_pairs_belong — عند فشل الاستعلام نرفض
+      الأزواج (return []) بدل تمريرها بلا تحقق (كانت ثغرة FIX-5).
+  🟠 PA-3 MEDIUM: register_user — نقل invalidate cache خارج
+      finally لتجنّب إبطال الكاش عند early-return بدون تعديل.
+  🟠 PA-4 MEDIUM: _import_auto_replies — إزالة existing_all (متغيّر
+      ميت) — التنبيه FIX-2 كان يشير لمتغيّر غير مُستخدَم.
+  🟡 PA-5 LOW: توثيق FIX-6 — إضافة تحذير صريح أن CREATE/ALTER على
+      MySQL يُسبّب implicit commit وبالتالي "transaction" في
+      bootstrap غير حقيقي على MySQL.
+
 🆕 v7.7.54 (HARDENED-AUDIT — إصلاح أخطاء الفحص الشامل):
   🔴 FIX-1 CRITICAL: _get_pg_query_no_mv_fallback جديد — يُستخدم عند
       غياب MV بدل الـ fallback الذي كان يشير إلى mv_active_user_limits
@@ -17,6 +30,9 @@ database.py - قاعدة البيانات المتكاملة (v7.7.54 — HARDEN
       (channel_db_id, post_id) قبل UPDATE.
   🟠 FIX-6 HIGH: _import_banned_words + _import_auto_replies —
       دعم transaction موحّد لكل DBs (وليس فقط PG).
+      ⚠️ PA-5: على MySQL، CREATE/ALTER يُسبّب implicit commit، لذا
+      "المعاملة" فعلياً غير مضمونة على MySQL — لكن لا نستطيع تجاهل
+      هذا القيد (MySQL DDL غير transactional بطبيعته).
   🟠 FIX-7 HIGH: تحذير عند عدم توفر _ASYNC_MYSQL_ERROR → retry معطّل.
   🟡 FIX-8 MEDIUM: _normalize_params — dedup تحذير frozenset (warn-once).
   🟡 FIX-9 MEDIUM: _ensure_group_exists — تحديث chat_name عند اختلافه.
@@ -65,6 +81,8 @@ database.py - قاعدة البيانات المتكاملة (v7.7.54 — HARDEN
 #      تُحاط بـ backticks/اقتباس دائماً عبر _sql_get_setting_value().
 # [11] v7.7.54: كل delete-massive يحتاج threshold safety (see FIX-3).
 # [12] v7.7.54: hash-based imports يجب أن تشمل كل الحقول المؤثرة (FIX-2).
+# [13] v7.7.55: كل transaction يحتوي DDL (CREATE/ALTER) على MySQL
+#      = implicit commit → "transaction" غير حقيقي. راجع PA-5.
 # =====================================================================
 
 import os
@@ -721,6 +739,7 @@ def _sql_get_setting_value() -> str:
 # =====================================================================
 # 🆕 v7.7.50: PARAMETER NORMALIZATION
 # ✅ v7.7.54 FIX-8: dedup تحذير frozenset
+# ✅ v7.7.55 PA-1: dict يرفع TypeError صريح
 # =====================================================================
 
 _FROZENSET_WARN_SITES: Set[str] = set()
@@ -732,6 +751,8 @@ def _normalize_params(params: Any) -> tuple:
 
     ⚠️ v7.7.53: frozenset يُنتج تحذيراً — الترتيب غير مضمون.
     ✅ v7.7.54 FIX-8: التحذير يُسجَّل مرة واحدة لكل call-site.
+    ✅ v7.7.55 PA-1: dict يرفع TypeError بدل تمريره كـ param واحد
+       (كان asyncpg يرفضه برسالة غامضة لاحقاً).
     """
     if params is None:
         return ()
@@ -761,8 +782,13 @@ def _normalize_params(params: Any) -> tuple:
     if isinstance(params, (list, set)):
         return tuple(params)
     if isinstance(params, dict):
-        # ✅ FIX-15: توضيح أن dict يُعامَل كـ param واحد
-        return (params,)
+        # ✅ PA-1: ارفض dict بصراحة — الطلب كان يمرّره كـ param واحد
+        # وهذا يُنتج خطأ غامضاً في asyncpg/asyncmy.
+        raise TypeError(
+            "_normalize_params: dict غير مدعوم كحاوية معاملات. "
+            "مرّر tuple/list من القيم بترتيب صريح، أو استخدم "
+            "json.dumps(...) لقيمة JSON واحدة."
+        )
     return (params,)
 
 # =====================================================================
@@ -4719,6 +4745,7 @@ class Database(
         """
         ✅ v7.7.54 FIX-2: hash يشمل media_id و buttons.
         ✅ v7.7.54 FIX-3: safety guard قبل الحذف الجماعي.
+        ✅ v7.7.55 PA-4: إزالة existing_all (متغيّر ميت).
         """
         try:
             from auto_replies import AUTO_REPLIES
@@ -4832,7 +4859,7 @@ class Database(
                 conn,
                 "SELECT chat_id, keyword FROM auto_replies",
             )
-            existing_all: Set[Tuple[int, str]] = set()
+            # ✅ PA-4: حذف existing_all — كان متغيّراً ميتاً
             existing_global: Set[Tuple[int, str]] = set()
             for r in (existing_rows or []):
                 cid = r.get("chat_id")
@@ -4842,10 +4869,8 @@ class Database(
                         cid_int = int(cid)
                     except (TypeError, ValueError):
                         continue
-                    key = (cid_int, kw)
-                    existing_all.add(key)
                     if cid_int == GLOBAL_CHAT_ID:
-                        existing_global.add(key)
+                        existing_global.add((cid_int, kw))
 
             to_delete = existing_global - set(normalized.keys())
             to_upsert = set(normalized.keys())
@@ -5195,6 +5220,12 @@ class Database(
         await self._invalidate_user_cache_keys(user_id)
 
     async def _do_bootstrap_inner(self, conn) -> bool:
+        """
+        ⚠️ PA-5 (v7.7.55): على MySQL، CREATE/ALTER TABLE يُسبّب implicit
+        commit — أي أن "المعاملة" المُحيطة بهذه الدالة (عبر
+        self.transaction()) غير حقيقية على MySQL. القيد مقصود،
+        لأن MySQL لا يدعم DDL معاملاتي. باقي DBs (PG/SQLite) آمنة.
+        """
         tables_hash = self._compute_tables_hash()
         legacy_tables_hash = self._compute_legacy_tables_hash()
         stored_tables_hash = await self._fetchval_with_conn(
@@ -5298,6 +5329,9 @@ class Database(
                 self._in_bootstrap_tx = True
                 try:
                     # ✅ v7.7.54 FIX-6: transaction موحّد لكل DBs
+                    # ⚠️ PA-5: على MySQL، DDL يُسبّب implicit commit —
+                    # المعاملة الفعلية غير مضمونة لكن لا ضرر (كل
+                    # عملية idempotent عبر hash guards).
                     async with self.transaction() as conn:
                         await self._do_bootstrap_inner(conn)
                 finally:
@@ -5322,7 +5356,7 @@ class Database(
                         from database_tables import (
                             _run_maintenance_postgres,
                         )
-                        async with self.connection() as _vac_conn:
+                        async with self._connection() as _vac_conn:
                             await _run_maintenance_postgres(
                                 _vac_conn, logger
                             )
@@ -5754,7 +5788,10 @@ class Database(
     ) -> bool:
         """
         ✅ v7.7.54 FIX-16: COALESCE بدل CASE WHEN (type hints).
+        ✅ v7.7.55 PA-3: invalidate cache فقط عند نجاح فعلي أو عند
+           force=True — لم يعد يُنفَّذ في finally دائماً.
         """
+        invalidate_needed = False
         try:
             async with await self._get_user_lock(user_id):
                 if not force:
@@ -5793,6 +5830,15 @@ class Database(
                                 uname_param, fname_param,
                                 TimeUtils.utc_now(), user_id,
                             )
+                            invalidate_needed = True
+                        # ✅ PA-3: invalidate فقط إذا تغيّر شيء فعلاً
+                        if invalidate_needed:
+                            try:
+                                await self._invalidate_user_cache_keys(
+                                    user_id
+                                )
+                            except Exception:
+                                pass
                         return True
 
                 referral_code = secrets.token_urlsafe(9)
@@ -5918,15 +5964,15 @@ class Database(
                             "VALUES (?, 0, 0, 0, NULL)",
                             user_id,
                         )
-            return True
-        except Exception as e:
-            logger.error(f"❌ register_user: {e}", exc_info=True)
-            return False
-        finally:
+            # ✅ PA-3: نجح المسار — إبطال الكاش مرة واحدة
             try:
                 await self._invalidate_user_cache_keys(user_id)
             except Exception:
                 pass
+            return True
+        except Exception as e:
+            logger.error(f"❌ register_user: {e}", exc_info=True)
+            return False
 
     async def get_user_language(self, user_id: int) -> str:
         try:
@@ -6490,6 +6536,8 @@ class Database(
         """
         ✅ v7.7.54 FIX-5: التحقق من أن كل post_id ينتمي فعلاً
         إلى channel_db_id المُعلن.
+        ✅ v7.7.55 PA-2: عند فشل الاستعلام نرفض جميع الأزواج
+        (return []) بدلاً من تمريرها بلا تحقق — كان ثغرة أمنية.
         """
         if not updates:
             return []
@@ -6520,8 +6568,12 @@ class Database(
                             f"— تم التخطي"
                         )
         except Exception as e:
-            logger.error(f"_verify_pairs_belong: {e}")
-            return updates  # fallback: لا تُحرِم العملية الأصلية
+            # ✅ PA-2: رفض كل الأزواج — لا نمرّر ما لم نتحقق منه
+            logger.error(
+                f"❌ _verify_pairs_belong: {e} — "
+                f"رفض جميع الأزواج ({len(updates)}) لضمان سلامة البيانات"
+            )
+            return []
         return valid
 
     async def mark_published_batch(
