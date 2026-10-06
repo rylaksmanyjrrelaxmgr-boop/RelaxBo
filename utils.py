@@ -2,8 +2,17 @@
 # -*- coding: utf-8 -*-
 
 """
-utils.py - الأدوات المساعدة للبوت (v7.10.4 — SECURITY-TOGGLE-MAP-FIX)
+utils.py - الأدوات المساعدة للبوت (v7.10.5 — SECURITY-CACHE-ISOLATION-FIX)
 =================================================================================
+🟢 v7.10.5 (SECURITY-CACHE-ISOLATION-FIX):
+    🟡 FIX-PA-1: get_security_settings يُرجع نسخة (dict) بدل المرجع
+        المشترك من _security_settings_cache. السبب: كان المتصل يستطيع
+        تعديل dict رجعه من الكاش فيلوّث الإعدادات لمدة TTL كامل (60s)
+        ويؤثر على جميع مستدعي الدالة بنفس chat_id.
+        الأثر قبل الإصلاح: تعديل عرضي في أي handler يستدعي
+                          get_security_settings كان يُفسد الكاش.
+        الأثر بعد الإصلاح: كل متصل يحصل على نسخة مستقلة.
+
 🔴 v7.10.4 (SECURITY-TOGGLE-MAP-FIX):
     🔴 FIX-CRITICAL: SECURITY_TOGGLE_MAP — حذف بادئة "sec_" من كل المفاتيح
         السبب: handlers_callback._handle_security يُزيل "sec_" من action
@@ -4199,6 +4208,8 @@ async def get_security_settings(chat_id: int) -> Dict[str, int]:
     """
     جلب إعدادات الأمان لمجموعة من DB.
 
+    ✅ v7.10.5 FIX-PA-1: يُرجع نسخة (dict) بدل المرجع المشترك من الكاش.
+
     Returns:
         dict: {delete_links: 0/1, delete_emails: 0/1, ...}
     """
@@ -4206,7 +4217,8 @@ async def get_security_settings(chat_id: int) -> Dict[str, int]:
 
     cached = _security_settings_cache.get(chat_id)
     if cached is not None and now - cached[0] < _SEC_SETTINGS_TTL:
-        return cached[1]
+        # ✅ PA-1: نسخة — لا تُسمح للمتصل بتلويث الكاش
+        return dict(cached[1])
 
     # Defaults
     settings: Dict[str, int] = dict(NEW_SECURITY_DEFAULTS)
@@ -4260,7 +4272,8 @@ async def get_security_settings(chat_id: int) -> Dict[str, int]:
         logger.debug(f"get_security_settings({chat_id}): {e}")
 
     _security_settings_cache[chat_id] = (now, settings)
-    return settings
+    # ✅ PA-1: نسخة — لا تُسمح للمتصل بتلويث الكاش
+    return dict(settings)
 
 
 def invalidate_security_settings_cache(chat_id: Optional[int] = None) -> None:
@@ -4603,7 +4616,7 @@ _PUBLISH_TIMEOUTS = {
 
 
 # =====================================================================
-# LOAD BEACON — v7.10.4
+# LOAD BEACON — v7.10.5
 # =====================================================================
 # 🟡 FIX-4: لا نستدعي _lazy_import_detectors() بشكل eager —
 #           للحفاظ على ميزة lazy import ومنع circular imports
@@ -4611,9 +4624,10 @@ _PUBLISH_TIMEOUTS = {
 
 try:
     logger.info(
-        "🛡️ utils.py v7.10.4 SECURITY-TOGGLE-MAP-FIX loaded | "
+        "🛡️ utils.py v7.10.5 SECURITY-CACHE-ISOLATION-FIX loaded | "
         "Detectors=lazy | Langs=%d | Buttons=✅ | Security-Bridge=✅ | "
-        "Penalty=✅ | ToggleMap=✅(no sec_ prefix, %d keys)",
+        "Penalty=✅ | ToggleMap=✅(no sec_ prefix, %d keys) | "
+        "Cache-Iso=✅",
         len(_AVAILABLE_LANGUAGES),
         len(SECURITY_TOGGLE_MAP),
     )
