@@ -2,46 +2,37 @@
 # -*- coding: utf-8 -*-
 
 """
-config.py - إعدادات البوت الأساسية (v5 — Production Fixes)
+config.py - إعدادات البوت الأساسية (v6 — Spam Detection Integration)
 ================================================================================
+🆕 v6 (SPAM-DETECTION-V4-INTEGRATION):
+    ✅ قسم 13 جديد: Spam Detection Engine (v4.0.0 — 14 طبقة)
+        • تفعيل/تعطيل كل طبقة عبر .env
+        • إعدادات الطبقات المتقدمة (Video, NSFW, Cipher, Stego, ...)
+        • Safe Browsing API key
+        • OCR Languages, Audio Whisper, URL enrichment
+        • DEBUG_DIAG, DEBUG_SPAM
+    ✅ تكامل كامل مع:
+        • handlers_message_detectors.py v4.0.0
+        • utils.py v7.10.2 (Security Bridge)
+        • database_tables.py v7.9.0 (7 أعمدة جديدة)
+    ✅ validate() — تحققات إضافية لطبقات الكشف
+    ✅ get_detector_env() — helper لتصدير إعدادات الكشف إلى os.environ
+    ✅ Properties جديدة: SPAM_DETECTION_AVAILABLE, DETECTION_SUMMARY
+    ✅ سجل الإقلاع يُظهر حالة الطبقات
+
 🆕 v5 (REVIEW R4 FIXES):
-    🔴 Critical:
-        ✅ C1  WEBHOOK_SECRET — مُضاف (مطلوب لـ utils.webhook_handler C2)
-                + فحص في validate() يُحذّر عند production
-
-    🟠 Medium:
-        ✅ M1  DEVELOPER_IDS — إزالة shadowing لـ id() builtin
-        ✅ M2  DEFAULT_LANG — alias موحّد مع DEFAULT_LANGUAGE
-        ✅ M3  ENVIRONMENT — تطبيع .strip().lower() + فحص القيم المعروفة
-        ✅ M4  get_log_level() — numeric level helper
-        ✅ M5  validate() — فحص MAX_GLOBAL_BANNED_WORDS > 0
-        ✅ M6  WEB_PORT — fallback من WEB_PORT ثم PORT
-
-    🟡 Minor:
-        ✅ m1  safe_str: خيار single-line يُزيل \n\r\t
-        ✅ m6  SUB_CACHE_TTL نُقل إلى قسم الكاش
-        ✅ m8  DEVELOPER_IDS كـ tuple (frozen=True)
-        ✅ m9  AUTO_BACKUP_SLEEP موثّق ويُمرَّر لـ utils (لا hardcode)
-        ✅ m10 ANONYMOUS_ADMIN_ID — تحقق إجباري > 0
-        ✅ m11 TOKEN_FILE → TWO_FA_TOKEN_FILE (اسم أوضح) + alias خلفي
-        ✅ m12 BANNED_WORDS_FILE — مسار مطلق موحّد
-        ✅ m13 DB_POOL_MIN_SIZE > DB_POOL_SIZE check موثّق
-        ✅ m14 MAX_BACKUPS — حد أعلى 100
+    🔴 C1  WEBHOOK_SECRET — مُضاف (مطلوب لـ utils.webhook_handler C2)
+    🟠 M1-M6 + 🟡 m1-m14
 
 🆕 v4 (إصلاح MAX_GLOBAL_BANNED_WORDS):
-    ✅ القيمة الافتراضية للحد الأقصى للكلمات المحظورة العالمية:
-       من 100 → 10000
-    ✅ يحل مشكلة "وصلنا للحد الأقصى (1897/100)"
+    ✅ القيمة الافتراضية: 100 → 10000
 
-🆕 v3 (إعادة تنظيم شاملة — بدون تغيير سلوكي):
-    ✅ إعادة تنظيم الإعدادات في 12 قسم منطقي
-    ✅ إضافة المتغيرات المفقودة التي يقرأها database.py مباشرة
-    ✅ ترتيب التحققات في validate() حسب الأهمية المنطقية
+🆕 v3 (إعادة تنظيم شاملة):
+    ✅ 12 قسم منطقي
     ✅ 100% توافق خلفي مع v2
 
 🆕 v2 (2026-09-24):
-    ✅ safe_float() — حماية من القيم غير الصالحة
-    ✅ تحقق من WEB_PASSWORD عند ENVIRONMENT=production
+    ✅ safe_float() + تحقق WEB_PASSWORD
 ================================================================================
 """
 
@@ -51,7 +42,7 @@ import logging
 import threading
 from pathlib import Path
 from dataclasses import dataclass, field
-from typing import List, Tuple
+from typing import List, Tuple, Dict, Any
 from dotenv import load_dotenv
 
 # ═══════════════════════════════════════════════════════════════════
@@ -94,9 +85,7 @@ def safe_bool(value: str, default: bool = False) -> bool:
 def safe_str(value: str, default: str = "", *, single_line: bool = False) -> str:
     """
     إرجاع قيمة نصية نظيفة.
-
-    ✅ m1: عند single_line=True يتم طي كل المسافات (بما فيها \n\r\t)
-    إلى مسافة واحدة. مفيد للـsecrets و tokens.
+    عند single_line=True يتم طي كل المسافات إلى مسافة واحدة.
     """
     if value is None:
         return default
@@ -107,9 +96,7 @@ def safe_str(value: str, default: str = "", *, single_line: bool = False) -> str
 
 
 def safe_abs_path(value: str, default: str) -> str:
-    """
-    ✅ m12: توحيد المسارات — يحوّل المسار النسبي إلى مطلق بناءً على BASE_DIR.
-    """
+    """توحيد المسارات — يحوّل المسار النسبي إلى مطلق."""
     raw = (value or "").strip()
     if not raw:
         raw = default
@@ -120,10 +107,7 @@ def safe_abs_path(value: str, default: str) -> str:
 
 
 def _parse_developer_ids() -> Tuple[int, ...]:
-    """
-    ✅ M1: إزالة shadowing لـ`id()` builtin.
-    ✅ m8: يُعيد tuple (متوافق مع frozen=True).
-    """
+    """إزالة shadowing لـ`id()` builtin + إرجاع tuple."""
     raw = os.getenv("DEVELOPER_IDS", "") or ""
     result: List[int] = []
     for token in raw.split(","):
@@ -143,7 +127,7 @@ def _parse_developer_ids() -> Tuple[int, ...]:
 @dataclass(frozen=True)
 class AppConfig:
     """
-    إعدادات البوت — مقسّمة إلى 12 قسم منطقي:
+    إعدادات البوت — مقسّمة إلى 13 قسم منطقي:
 
       1.  الهوية والملاك        (من أنا؟ من يملكني؟)
       2.  البيئة والتشخيص       (production/development)
@@ -157,6 +141,7 @@ class AppConfig:
       10. المصادقة الثنائية     (2FA)
       11. NSFW / Sightengine    (فلترة المحتوى)
       12. المسارات والملفات     (مكان التخزين)
+      13. 🆕 Spam Detection Engine (v4.0.0 — 14 طبقة)
     """
 
     # ═══════════════════════════════════════════════════════════════
@@ -170,7 +155,6 @@ class AppConfig:
     ).lstrip('@')
 
     PRIMARY_OWNER_ID: int = safe_int(os.getenv("MAIN_ADMIN_ID", "0"))
-    # ✅ M1 + m8: tuple بدل list + lambda نظيفة بدون shadowing
     DEVELOPER_IDS: Tuple[int, ...] = field(default_factory=_parse_developer_ids)
     ANONYMOUS_ADMIN_ID: int = safe_int(
         os.getenv("ANONYMOUS_ADMIN_ID", "1087968824")
@@ -180,7 +164,6 @@ class AppConfig:
     # 2. البيئة والتشخيص
     # ═══════════════════════════════════════════════════════════════
 
-    # ✅ M3: تطبيع القيمة (lower + strip) لتفادي "Production" != "production"
     ENVIRONMENT: str = safe_str(
         os.getenv("ENVIRONMENT", "production")
     ).lower() or "production"
@@ -194,28 +177,20 @@ class AppConfig:
         os.getenv("DEFAULT_LANGUAGE", "ar")
     ).lower() or "ar"
 
-    # ✅ M2: alias موحّد — بعض الوحدات (utils.py) تقرأ DEFAULT_LANG
-    # (لا يمكن أن يكون حقل dataclass property بسبب frozen=True، لذا
-    #  نُعرّفه كـ@property على مستوى الفئة — انظر أدناه)
-    # DEFAULT_LANG → @property
-
     # ═══════════════════════════════════════════════════════════════
     # 3. قاعدة البيانات
     # ═══════════════════════════════════════════════════════════════
 
-    # الاتصال
     DATABASE_URL: str = safe_str(
         os.getenv("DATABASE_URL", ""), single_line=True
     )
     DB_TIMEOUT: int = safe_int(os.getenv("DB_TIMEOUT", "30"))
 
-    # Pool (يُقرأ في database.py)
     DB_POOL_SIZE: int = safe_int(os.getenv("DB_POOL_SIZE", "20"))
     DB_POOL_MIN_SIZE: int = safe_int(os.getenv("DB_POOL_MIN_SIZE", "2"))
     SQLITE_POOL_SIZE: int = safe_int(os.getenv("SQLITE_POOL_SIZE", "10"))
     MAX_CONNECTIONS: int = safe_int(os.getenv("MAX_CONNECTIONS", "20"))
 
-    # الأداء والصيانة
     MV_REFRESH_COOLDOWN: int = safe_int(os.getenv("MV_REFRESH_COOLDOWN", "3600"))
     VACUUM_TIMEOUT: int = safe_int(os.getenv("VACUUM_TIMEOUT", "300"))
     SLOW_QUERY_LOG_THRESHOLD: float = safe_float(
@@ -232,7 +207,6 @@ class AppConfig:
         os.getenv("EXPIRED_PENALTIES_BATCH", "500")
     )
 
-    # التشفير
     DB_ENCRYPTION: bool = safe_bool(os.getenv("DB_ENCRYPTION", "false"))
     DB_ENCRYPTION_PASSWORD: str = safe_str(
         os.getenv("DB_ENCRYPTION_PASSWORD", ""), single_line=True
@@ -256,12 +230,10 @@ class AppConfig:
     )
     PUBLISH_RETRY_DELAY: int = safe_int(os.getenv("PUBLISH_RETRY_DELAY", "5"))
 
-    # ✅ v7.9.17: حد التزامن لاستعلامات النشر (منع TooManyConnections)
     PUBLISH_DB_CONCURRENCY: int = safe_int(
         os.getenv("PUBLISH_DB_CONCURRENCY", "4")
     )
 
-    # حدود المحتوى
     MAX_UNPUBLISHED_POSTS: int = safe_int(
         os.getenv("MAX_UNPUBLISHED_POSTS", "1000")
     )
@@ -279,11 +251,9 @@ class AppConfig:
     AUTO_BACKUP_ENABLED: bool = safe_bool(
         os.getenv("AUTO_BACKUP_ENABLED", "true")
     )
-    # ✅ m9: القيمة الافتراضية 86400 (يوم) — utils._do_backup يستخدمها
     AUTO_BACKUP_SLEEP: int = safe_int(os.getenv("AUTO_BACKUP_SLEEP", "86400"))
     MAX_BACKUPS: int = safe_int(os.getenv("MAX_BACKUPS", "20"))
 
-    # Google Drive (اختياري)
     GOOGLE_CREDENTIALS_FILE: str = safe_str(
         os.getenv("GOOGLE_CREDENTIALS_FILE", "credentials.json")
     )
@@ -307,11 +277,8 @@ class AppConfig:
     ENABLE_BANNED_WORDS_CACHE: bool = safe_bool(
         os.getenv("ENABLE_BANNED_WORDS_CACHE", "true")
     )
-
-    # ✅ m6: SUB_CACHE_TTL انتقل إلى هنا (منطقياً كاش، لا نشر)
     SUB_CACHE_TTL: int = safe_int(os.getenv("SUB_CACHE_TTL", "300"))
 
-    # حدود الأقفال (تُقرأ في database.py)
     MAX_USER_LOCKS: int = safe_int(os.getenv("MAX_USER_LOCKS", "10000"))
     MAX_GROUP_LOCKS: int = safe_int(os.getenv("MAX_GROUP_LOCKS", "5000"))
     MAX_CHANNEL_LOCKS: int = safe_int(os.getenv("MAX_CHANNEL_LOCKS", "5000"))
@@ -322,8 +289,6 @@ class AppConfig:
     # ═══════════════════════════════════════════════════════════════
 
     WEB_HOST: str = safe_str(os.getenv("WEB_HOST", "0.0.0.0"))
-
-    # ✅ M6: fallback من WEB_PORT ثم PORT (لسهولة الضبط)
     WEB_PORT: int = safe_int(
         os.getenv("WEB_PORT") or os.getenv("PORT", "10000")
     )
@@ -360,9 +325,6 @@ class AppConfig:
     WEB_RATE_LIMIT: int = safe_int(os.getenv("WEB_RATE_LIMIT", "100"))
     WEB_RATE_WINDOW: int = safe_int(os.getenv("WEB_RATE_WINDOW", "60"))
 
-    # ✅ C1: WEBHOOK_SECRET — مطلوب لـ utils.webhook_handler (C2 fix)
-    # إذا كان فارغاً، تُعطَّل حماية X-Telegram-Bot-Api-Secret-Token تلقائياً
-    # (متوافق خلفياً مع السلوك السابق) لكن يُحذَّر في production.
     WEBHOOK_SECRET: str = safe_str(
         os.getenv("WEBHOOK_SECRET", ""), single_line=True
     )
@@ -371,7 +333,6 @@ class AppConfig:
     # 9. الميزات الاختيارية
     # ═══════════════════════════════════════════════════════════════
 
-    # العملة والاشتراكات
     XTR_CURRENCY: str = safe_str(os.getenv("XTR_CURRENCY", "XTR"))
     GIFT_PLANS_ENABLED: bool = safe_bool(
         os.getenv("GIFT_PLANS_ENABLED", "true")
@@ -380,16 +341,12 @@ class AppConfig:
         os.getenv("PENALTY_SYSTEM_ENABLED", "true")
     )
 
-    # الإحالات
     MAX_DAILY_REFERRALS: int = safe_int(os.getenv("MAX_DAILY_REFERRALS", "5"))
 
-    # ✅ v4: رُفع الافتراضي من 100 → 10000
-    # السبب: بعض deployments تحتوي على 1897+ كلمة محظورة عالمية
     MAX_GLOBAL_BANNED_WORDS: int = safe_int(
         os.getenv("MAX_GLOBAL_BANNED_WORDS", "10000")
     )
 
-    # Redis + QStash
     REDIS_AVAILABLE: bool = safe_bool(os.getenv("REDIS_AVAILABLE", "false"))
     REDIS_URL: str = safe_str(os.getenv("REDIS_URL", ""), single_line=True)
     QSTASH_TOKEN: str = safe_str(
@@ -406,8 +363,6 @@ class AppConfig:
         os.getenv("ADMIN_2FA_SECRET", ""), single_line=True
     )
 
-    # ✅ m11: اسم أوضح — يمنع اللبس مع BOT_TOKEN
-    # يُحتفظ بـ TOKEN_FILE كـ alias خلفي عبر @property
     TWO_FA_TOKEN_FILE: str = safe_str(
         os.getenv("TWO_FA_TOKEN_FILE")
         or os.getenv("TOKEN_FILE", "token.json")
@@ -437,7 +392,6 @@ class AppConfig:
     # 12. المسارات والملفات والأمان الإضافي
     # ═══════════════════════════════════════════════════════════════
 
-    # ✅ m12: مسار مطلق موحّد
     BANNED_WORDS_FILE: str = safe_abs_path(
         os.getenv("BANNED_WORDS_FILE", ""), "./banned_words.txt"
     )
@@ -455,28 +409,158 @@ class AppConfig:
     ).upper()
 
     # ═══════════════════════════════════════════════════════════════
+    # 🆕 13. Spam Detection Engine (v4.0.0 — 14 طبقة)
+    # ═══════════════════════════════════════════════════════════════
+
+    # ─── تفعيل الطبقات (افتراضي: الكل مُفعَّل) ───
+    TEXT_LAYER_ENABLED: bool = safe_bool(
+        os.getenv("TEXT_LAYER_ENABLED", "true")
+    )
+    OCR_LAYER_ENABLED: bool = safe_bool(
+        os.getenv("OCR_LAYER_ENABLED", "true")
+    )
+    AUDIO_LAYER_ENABLED: bool = safe_bool(
+        os.getenv("AUDIO_LAYER_ENABLED", "true")
+    )
+    URL_LAYER_ENABLED: bool = safe_bool(
+        os.getenv("URL_LAYER_ENABLED", "true")
+    )
+    METADATA_LAYER_ENABLED: bool = safe_bool(
+        os.getenv("METADATA_LAYER_ENABLED", "true")
+    )
+    OBFUSCATION_LAYER_ENABLED: bool = safe_bool(
+        os.getenv("OBFUSCATION_LAYER_ENABLED", "true")
+    )
+    BEHAVIORAL_LAYER_ENABLED: bool = safe_bool(
+        os.getenv("BEHAVIORAL_LAYER_ENABLED", "true")
+    )
+
+    # 🆕 v4.0.0 — 7 طبقات إضافية
+    VIDEO_LAYER_ENABLED: bool = safe_bool(
+        os.getenv("VIDEO_LAYER_ENABLED", "true")
+    )
+    NSFW_LAYER_ENABLED: bool = safe_bool(
+        os.getenv("NSFW_LAYER_ENABLED", "true")
+    )
+    STICKER_LAYER_ENABLED: bool = safe_bool(
+        os.getenv("STICKER_LAYER_ENABLED", "true")
+    )
+    REACTIONS_LAYER_ENABLED: bool = safe_bool(
+        os.getenv("REACTIONS_LAYER_ENABLED", "true")
+    )
+    CONTEXT_LAYER_ENABLED: bool = safe_bool(
+        os.getenv("CONTEXT_LAYER_ENABLED", "true")
+    )
+    CIPHER_LAYER_ENABLED: bool = safe_bool(
+        os.getenv("CIPHER_LAYER_ENABLED", "true")
+    )
+    STEGO_LAYER_ENABLED: bool = safe_bool(
+        os.getenv("STEGO_LAYER_ENABLED", "true")
+    )
+    DOMAIN_REP_LAYER_ENABLED: bool = safe_bool(
+        os.getenv("DOMAIN_REP_LAYER_ENABLED", "true")
+    )
+
+    # ─── إعدادات الطبقات المتقدمة ───
+
+    # L7: Video
+    VIDEO_MAX_FRAMES: int = safe_int(os.getenv("VIDEO_MAX_FRAMES", "8"))
+    VIDEO_FRAME_INTERVAL_SEC: float = safe_float(
+        os.getenv("VIDEO_FRAME_INTERVAL_SEC", "2.0")
+    )
+
+    # L8: NSFW Model
+    NSFW_MODEL_ENABLED: bool = safe_bool(
+        os.getenv("NSFW_MODEL_ENABLED", "false")
+    )
+    # NSFW_THRESHOLD أعلاه (قسم 11) — يُستخدم لكلا النظامين
+
+    # L2: Audio
+    AUDIO_USE_WHISPER: bool = safe_bool(
+        os.getenv("AUDIO_USE_WHISPER", "false")
+    )
+    AUDIO_NOISE_REDUCE: bool = safe_bool(
+        os.getenv("AUDIO_NOISE_REDUCE", "true")
+    )
+
+    # L3: URL Enrichment
+    URL_ENRICH_ENABLED: bool = safe_bool(
+        os.getenv("URL_ENRICH_ENABLED", "true")
+    )
+    URL_EXPAND_TIMEOUT: int = safe_int(os.getenv("URL_EXPAND_TIMEOUT", "5"))
+    URL_EXPAND_MAX_HOPS: int = safe_int(os.getenv("URL_EXPAND_MAX_HOPS", "5"))
+    URL_ENRICH_MAX_URLS: int = safe_int(os.getenv("URL_ENRICH_MAX_URLS", "5"))
+    WHOIS_ENABLED: bool = safe_bool(os.getenv("WHOIS_ENABLED", "true"))
+    WHOIS_NEW_DOMAIN_DAYS: int = safe_int(
+        os.getenv("WHOIS_NEW_DOMAIN_DAYS", "30")
+    )
+    SAFE_BROWSING_API_KEY: str = safe_str(
+        os.getenv("SAFE_BROWSING_API_KEY", ""), single_line=True
+    )
+
+    # L1: OCR Languages
+    OCR_LANGUAGES: str = safe_str(
+        os.getenv("OCR_LANGUAGES", "ara+eng+fas+rus"), single_line=True
+    )
+
+    # ─── التشخيص ───
+    DEBUG_DIAG: bool = safe_bool(os.getenv("DEBUG_DIAG", "false"))
+    DEBUG_SPAM: bool = safe_bool(os.getenv("DEBUG_SPAM", "false"))
+
+    # ═══════════════════════════════════════════════════════════════
     # Properties (aliases خلفية)
     # ═══════════════════════════════════════════════════════════════
 
     @property
     def DEFAULT_LANG(self) -> str:
-        """✅ M2: alias لـ DEFAULT_LANGUAGE — متوافق مع utils.py."""
+        """alias لـ DEFAULT_LANGUAGE — متوافق مع utils.py."""
         return self.DEFAULT_LANGUAGE
 
     @property
     def TOKEN_FILE(self) -> str:
-        """✅ m11: alias خلفي لـ TWO_FA_TOKEN_FILE."""
+        """alias خلفي لـ TWO_FA_TOKEN_FILE."""
         return self.TWO_FA_TOKEN_FILE
+
+    @property
+    def SPAM_DETECTION_AVAILABLE(self) -> bool:
+        """هل محرك كشف السبام متاح؟"""
+        return self.TEXT_LAYER_ENABLED
+
+    @property
+    def DETECTION_SUMMARY(self) -> Dict[str, bool]:
+        """
+        🆕 v6: ملخّص حالة كل طبقات الكشف.
+        مفيد لـ /health endpoint أو logging.
+        """
+        return {
+            "text":        self.TEXT_LAYER_ENABLED,
+            "ocr":         self.OCR_LAYER_ENABLED,
+            "audio":       self.AUDIO_LAYER_ENABLED,
+            "url":         self.URL_LAYER_ENABLED,
+            "metadata":    self.METADATA_LAYER_ENABLED,
+            "obfuscation": self.OBFUSCATION_LAYER_ENABLED,
+            "behavioral":  self.BEHAVIORAL_LAYER_ENABLED,
+            "video":       self.VIDEO_LAYER_ENABLED,
+            "nsfw":        self.NSFW_LAYER_ENABLED and self.NSFW_MODEL_ENABLED,
+            "sticker":     self.STICKER_LAYER_ENABLED,
+            "reactions":   self.REACTIONS_LAYER_ENABLED,
+            "context":     self.CONTEXT_LAYER_ENABLED,
+            "cipher":      self.CIPHER_LAYER_ENABLED,
+            "stego":       self.STEGO_LAYER_ENABLED,
+            "domain_rep":  self.DOMAIN_REP_LAYER_ENABLED,
+        }
+
+    @property
+    def DETECTION_ENABLED_COUNT(self) -> int:
+        """عدد الطبقات المُفعَّلة حالياً (0-15)."""
+        return sum(1 for v in self.DETECTION_SUMMARY.values() if v)
 
     # ═══════════════════════════════════════════════════════════════
     # دوال مساعدة
     # ═══════════════════════════════════════════════════════════════
 
     def get_log_level(self) -> int:
-        """
-        ✅ M4: يُرجع numeric logging level من النص.
-        يُستخدم في bot.py / setup_logging() بدل LOG_LEVEL مباشرة.
-        """
+        """يُرجع numeric logging level من النص."""
         mapping = {
             "DEBUG": logging.DEBUG,
             "INFO": logging.INFO,
@@ -496,22 +580,80 @@ class AppConfig:
         """هل المستخدم هو المالك؟"""
         return user_id == self.PRIMARY_OWNER_ID
 
+    def get_detector_env(self) -> Dict[str, str]:
+        """
+        🆕 v6: يُصدّر إعدادات كاشف السبام كـ dict
+        متوافق مع os.environ — مفيد عند استيراد
+        handlers_message_detectors قبل config.
+
+        الاستخدام:
+            for k, v in CONFIG.get_detector_env().items():
+                os.environ.setdefault(k, v)
+        """
+        def _b(x: bool) -> str:
+            return "1" if x else "0"
+
+        return {
+            # Layer toggles
+            "TEXT_LAYER_ENABLED": _b(self.TEXT_LAYER_ENABLED),
+            "OCR_LAYER_ENABLED": _b(self.OCR_LAYER_ENABLED),
+            "AUDIO_LAYER_ENABLED": _b(self.AUDIO_LAYER_ENABLED),
+            "URL_LAYER_ENABLED": _b(self.URL_LAYER_ENABLED),
+            "METADATA_LAYER_ENABLED": _b(self.METADATA_LAYER_ENABLED),
+            "OBFUSCATION_LAYER_ENABLED": _b(self.OBFUSCATION_LAYER_ENABLED),
+            "BEHAVIORAL_LAYER_ENABLED": _b(self.BEHAVIORAL_LAYER_ENABLED),
+            "VIDEO_LAYER_ENABLED": _b(self.VIDEO_LAYER_ENABLED),
+            "NSFW_LAYER_ENABLED": _b(self.NSFW_LAYER_ENABLED),
+            "STICKER_LAYER_ENABLED": _b(self.STICKER_LAYER_ENABLED),
+            "REACTIONS_LAYER_ENABLED": _b(self.REACTIONS_LAYER_ENABLED),
+            "CONTEXT_LAYER_ENABLED": _b(self.CONTEXT_LAYER_ENABLED),
+            "CIPHER_LAYER_ENABLED": _b(self.CIPHER_LAYER_ENABLED),
+            "STEGO_LAYER_ENABLED": _b(self.STEGO_LAYER_ENABLED),
+            "DOMAIN_REP_LAYER_ENABLED": _b(self.DOMAIN_REP_LAYER_ENABLED),
+
+            # Settings
+            "VIDEO_MAX_FRAMES": str(self.VIDEO_MAX_FRAMES),
+            "VIDEO_FRAME_INTERVAL_SEC": str(self.VIDEO_FRAME_INTERVAL_SEC),
+            "NSFW_MODEL_ENABLED": _b(self.NSFW_MODEL_ENABLED),
+            "NSFW_THRESHOLD": str(self.NSFW_THRESHOLD),
+            "AUDIO_USE_WHISPER": _b(self.AUDIO_USE_WHISPER),
+            "AUDIO_NOISE_REDUCE": _b(self.AUDIO_NOISE_REDUCE),
+            "URL_ENRICH_ENABLED": _b(self.URL_ENRICH_ENABLED),
+            "URL_EXPAND_TIMEOUT": str(self.URL_EXPAND_TIMEOUT),
+            "URL_EXPAND_MAX_HOPS": str(self.URL_EXPAND_MAX_HOPS),
+            "URL_ENRICH_MAX_URLS": str(self.URL_ENRICH_MAX_URLS),
+            "WHOIS_ENABLED": _b(self.WHOIS_ENABLED),
+            "WHOIS_NEW_DOMAIN_DAYS": str(self.WHOIS_NEW_DOMAIN_DAYS),
+            "SAFE_BROWSING_API_KEY": self.SAFE_BROWSING_API_KEY,
+            "OCR_LANGUAGES": self.OCR_LANGUAGES,
+            "DEBUG_DIAG": _b(self.DEBUG_DIAG),
+            "DEBUG_SPAM": _b(self.DEBUG_SPAM),
+        }
+
+    def apply_detector_env(self, *, override: bool = False) -> int:
+        """
+        🆕 v6: يضبط متغيرات كاشف السبام في os.environ.
+        Returns: عدد المتغيرات المضبوطة.
+
+        يُستدعى في bot.py مبكراً قبل import handlers_message_detectors
+        لضمان أن CONFIG هو مصدر الحقيقة الوحيد.
+        """
+        env = self.get_detector_env()
+        applied = 0
+        for k, v in env.items():
+            if override or k not in os.environ:
+                os.environ[k] = v
+                applied += 1
+        return applied
+
     # ═══════════════════════════════════════════════════════════════
     # التحقق من الإعدادات
     # ═══════════════════════════════════════════════════════════════
 
     def validate(self) -> None:
-        """
-        التحقق من القيم المطلوبة — مرتّب حسب الأهمية المنطقية:
-          1. الإعدادات الحرجة (البوت لا يعمل بدونها)
-          2. إعدادات النشر (جوهر عمل البوت)
-          3. إعدادات الشبكة والموارد
-          4. إعدادات الميزات الاختيارية
-
-        يرفع ValueError عند وجود أخطاء حرجة.
-        التحذيرات تُطبع في logger.warning ولا توقف البوت.
-        """
+        """التحقق من القيم المطلوبة — 5 مستويات."""
         errors: List[str] = []
+        warnings: List[str] = []
 
         # ─── 1. الإعدادات الحرجة ───────────────────────────────
 
@@ -525,19 +667,17 @@ class AppConfig:
         elif self.PRIMARY_OWNER_ID < 0:
             errors.append("MAIN_ADMIN_ID يجب أن يكون رقماً موجباً")
 
-        # ✅ m10: ANONYMOUS_ADMIN_ID يجب أن يكون موجباً
         if self.ANONYMOUS_ADMIN_ID <= 0:
             errors.append(
                 f"ANONYMOUS_ADMIN_ID يجب أن يكون رقماً موجباً: "
                 f"{self.ANONYMOUS_ADMIN_ID}"
             )
 
-        # ✅ M3: فحص القيم المعروفة لـ ENVIRONMENT
         if self.ENVIRONMENT not in (
             "production", "development", "staging", "test"
         ):
-            logger.warning(
-                f"⚠️ ENVIRONMENT غير معروف: {self.ENVIRONMENT!r} — "
+            warnings.append(
+                f"ENVIRONMENT غير معروف: {self.ENVIRONMENT!r} — "
                 f"سيُعامَل كـ production."
             )
 
@@ -561,7 +701,6 @@ class AppConfig:
         if self.WEB_PORT < 1 or self.WEB_PORT > 65535:
             errors.append(f"WEB_PORT غير صالح: {self.WEB_PORT}")
 
-        # ✅ m14: حد أعلى لـ MAX_BACKUPS
         if self.MAX_BACKUPS < 1:
             errors.append("MAX_BACKUPS يجب أن يكون أكبر من 0")
         elif self.MAX_BACKUPS > 100:
@@ -576,7 +715,6 @@ class AppConfig:
         if self.DB_POOL_MIN_SIZE < 1:
             errors.append("DB_POOL_MIN_SIZE يجب أن يكون أكبر من 0")
 
-        # ✅ m13: min يجب أن يكون < size (لا يساوي) لضمان مرونة pool
         if self.DB_POOL_MIN_SIZE >= self.DB_POOL_SIZE:
             errors.append(
                 f"DB_POOL_MIN_SIZE ({self.DB_POOL_MIN_SIZE}) "
@@ -590,7 +728,6 @@ class AppConfig:
                 f"{self.PUBLISH_DB_CONCURRENCY}"
             )
 
-        # ✅ M5: فحص MAX_GLOBAL_BANNED_WORDS
         if self.MAX_GLOBAL_BANNED_WORDS < 1:
             errors.append(
                 f"MAX_GLOBAL_BANNED_WORDS يجب أن يكون أكبر من 0: "
@@ -612,29 +749,114 @@ class AppConfig:
         if self.REDIS_AVAILABLE and not self.REDIS_URL:
             errors.append("REDIS_URL مطلوب عند تفعيل REDIS_AVAILABLE")
 
-        # ─── 5. تحذيرات (ليست أخطاء) ───────────────────────────
+        # ─── 5. 🆕 v6: طبقات كشف السبام ──────────────────────
+
+        # NSFW_LAYER_ENABLED بدون NSFW_MODEL_ENABLED = تحذير (لن يعمل)
+        if self.NSFW_LAYER_ENABLED and not self.NSFW_MODEL_ENABLED:
+            warnings.append(
+                "NSFW_LAYER_ENABLED=1 لكن NSFW_MODEL_ENABLED=0 — "
+                "طبقة NSFW لن تعمل. "
+                "إما فعّل NSFW_MODEL_ENABLED (يتطلب transformers+torch) "
+                "أو عطّل NSFW_LAYER_ENABLED."
+            )
+
+        # URL_LAYER_ENABLED بدون Safe Browsing = تحذير
+        if self.URL_LAYER_ENABLED and not self.SAFE_BROWSING_API_KEY:
+            warnings.append(
+                "URL_LAYER_ENABLED=1 لكن SAFE_BROWSING_API_KEY فارغ — "
+                "دقة كشف الروابط ستكون أقل (بدون Google Safe Browsing)."
+            )
+
+        # OCR_LAYER_ENABLED بدون tesseract = تحذير
+        if self.OCR_LAYER_ENABLED:
+            try:
+                import pytesseract  # noqa: F401
+            except ImportError:
+                warnings.append(
+                    "OCR_LAYER_ENABLED=1 لكن pytesseract غير مثبت — "
+                    "OCR معطّل فعلياً. "
+                    "ثبّت: pip install pytesseract Pillow"
+                )
+
+        # VIDEO_LAYER_ENABLED بدون opencv/ffmpeg = تحذير
+        if self.VIDEO_LAYER_ENABLED:
+            _has_cv2 = False
+            _has_ffmpeg = False
+            try:
+                import cv2  # noqa: F401
+                _has_cv2 = True
+            except ImportError:
+                pass
+            try:
+                import subprocess
+                r = subprocess.run(
+                    ["ffmpeg", "-version"],
+                    capture_output=True,
+                    timeout=3,
+                )
+                _has_ffmpeg = (r.returncode == 0)
+            except Exception:
+                pass
+            if not (_has_cv2 or _has_ffmpeg):
+                warnings.append(
+                    "VIDEO_LAYER_ENABLED=1 لكن opencv و ffmpeg غير متوفرين — "
+                    "طبقة الفيديو معطّلة فعلياً."
+                )
+
+        # AUDIO_LAYER_ENABLED بدون pydub = تحذير
+        if self.AUDIO_LAYER_ENABLED:
+            try:
+                import speech_recognition  # noqa: F401
+                from pydub import AudioSegment  # noqa: F401
+            except ImportError:
+                warnings.append(
+                    "AUDIO_LAYER_ENABLED=1 لكن SpeechRecognition/pydub "
+                    "غير مثبتين — طبقة الصوت معطّلة فعلياً."
+                )
+
+        # STEGO_LAYER_ENABLED بدون numpy = تحذير
+        if self.STEGO_LAYER_ENABLED:
+            try:
+                import numpy  # noqa: F401
+            except ImportError:
+                warnings.append(
+                    "STEGO_LAYER_ENABLED=1 لكن numpy غير مثبت — "
+                    "طبقة Steganography معطّلة فعلياً. "
+                    "ثبّت: pip install numpy"
+                )
+
+        # إذا كل طبقات الكشف معطّلة = تحذير
+        if not self.SPAM_DETECTION_AVAILABLE:
+            warnings.append(
+                "TEXT_LAYER_ENABLED=0 — محرك كشف السبام معطّل بالكامل! "
+                "لن يكتشف البوت أي سبام."
+            )
+
+        # ─── 6. تحذيرات الإنتاج ────────────────────────────────
 
         if self.ENVIRONMENT == "production" and not self.WEB_PASSWORD:
-            logger.warning(
-                "⚠️ WEB_PASSWORD فارغ في بيئة الإنتاج — "
-                "لوحة الويب غير محمية! اضبط WEB_PASSWORD في env."
+            warnings.append(
+                "WEB_PASSWORD فارغ في بيئة الإنتاج — "
+                "لوحة الويب غير محمية!"
             )
 
         if self.ENVIRONMENT == "production" and not self.WEB_SECRET_KEY:
-            logger.warning(
-                "⚠️ WEB_SECRET_KEY فارغ في بيئة الإنتاج — "
+            warnings.append(
+                "WEB_SECRET_KEY فارغ في بيئة الإنتاج — "
                 "جلسات الويب غير آمنة."
             )
 
-        # ✅ C1: تحذير عند production بدون WEBHOOK_SECRET
         if self.ENVIRONMENT == "production" and not self.WEBHOOK_SECRET:
-            logger.warning(
-                "⚠️ WEBHOOK_SECRET فارغ في بيئة الإنتاج — "
-                "حماية webhook (X-Telegram-Bot-Api-Secret-Token) "
-                "معطّلة. اضبط المتغير + استخدمه في set_webhook()."
+            warnings.append(
+                "WEBHOOK_SECRET فارغ في بيئة الإنتاج — "
+                "حماية webhook معطّلة."
             )
 
         # ─── النتيجة النهائية ──────────────────────────────────
+
+        if warnings:
+            for w in warnings:
+                logger.warning(f"⚠️ {w}")
 
         if errors:
             error_msg = "\n".join(f"  • {e}" for e in errors)
@@ -648,13 +870,6 @@ class AppConfig:
 class PathManager:
     """
     إنشاء وإدارة مسارات المشروع (Singleton).
-
-    المسارات:
-      BASE    → مجلد المشروع
-      DATA    → قاعدة البيانات
-      BACKUPS → النسخ الاحتياطية
-      LOGS    → ملفات السجل
-      TEMP    → ملفات مؤقتة
     """
 
     _instance = None
@@ -675,20 +890,17 @@ class PathManager:
         self.DB = self.DATA / "bot_data.db"
         self.LOG_FILE = self.LOGS / "bot.log"
 
-        # TEMP: استخدم CONFIG.TEMP_PATH إن وُجد وإلا fallback
         try:
             self.TEMP = Path(CONFIG.TEMP_PATH)
         except Exception:
             self.TEMP = self.BASE / "temp"
 
-        # إنشاء المجلدات اللازمة
         for d in (self.DATA, self.BACKUPS, self.LOGS, self.TEMP):
             try:
                 d.mkdir(parents=True, exist_ok=True)
             except Exception as e:
                 logger.warning(f"⚠️ تعذّر إنشاء {d}: {e}")
 
-        # إنشاء ملف السجل إن لم يكن موجوداً
         try:
             if not self.LOG_FILE.exists():
                 self.LOG_FILE.touch(exist_ok=True)
@@ -703,14 +915,27 @@ class PathManager:
 CONFIG = AppConfig()
 PATHS = PathManager()
 
-# التحقق من الإعدادات — إيقاف البوت فوراً عند وجود أخطاء
+# 🆕 v6: تصدير إعدادات كاشف السبام إلى os.environ (بدون override)
+try:
+    _applied = CONFIG.apply_detector_env(override=False)
+    if _applied > 0:
+        logger.debug(
+            f"🛡️ تم تصدير {_applied} متغير كشف سبام إلى os.environ"
+        )
+except Exception as e:
+    logger.debug(f"apply_detector_env: {e}")
+
+# التحقق من الإعدادات
 try:
     CONFIG.validate()
 except ValueError as e:
     logger.error(f"❌ {e}")
     raise SystemExit(1)
 
-# سجل الإقلاع
+# ═══════════════════════════════════════════════════════════════════
+# سجل الإقلاع — v6
+# ═══════════════════════════════════════════════════════════════════
+
 logger.info(
     f"✅ تم تحميل الإعدادات: {CONFIG.BOT_NAME} (@{CONFIG.BOT_USERNAME})"
 )
@@ -718,7 +943,7 @@ logger.info(f"📁 قاعدة البيانات: {PATHS.DB}")
 logger.info(
     f"🔐 المصادقة الثنائية: {'مفعلة' if CONFIG.ENABLE_2FA else 'معطلة'}"
 )
-logger.info(f"📊 NSFW: {'مفعل' if CONFIG.NSFW_ENABLED else 'معطل'}")
+logger.info(f"📊 NSFW (Sightengine): {'مفعل' if CONFIG.NSFW_ENABLED else 'معطل'}")
 logger.info(
     f"🗄️ Redis: {'متاح' if CONFIG.REDIS_AVAILABLE else 'غير متاح'}"
 )
@@ -731,3 +956,22 @@ logger.info(
     f"🔒 Webhook secret: "
     f"{'مُهيَّأ' if CONFIG.WEBHOOK_SECRET else 'غير مُهيَّأ (اختياري)'}"
 )
+
+# 🆕 v6: تقرير طبقات كشف السبام
+_summary = CONFIG.DETECTION_SUMMARY
+_enabled_layers = [k for k, v in _summary.items() if v]
+_disabled_layers = [k for k, v in _summary.items() if not v]
+
+logger.info(
+    f"🛡️ Spam Detection Engine v4.0.0 | "
+    f"مُفعَّلة: {len(_enabled_layers)}/15 طبقة"
+)
+if _enabled_layers:
+    logger.info(f"   ✅ مُفعَّلة: {', '.join(_enabled_layers)}")
+if _disabled_layers:
+    logger.info(f"   ❌ معطّلة: {', '.join(_disabled_layers)}")
+
+if CONFIG.SAFE_BROWSING_API_KEY:
+    logger.info("   🔗 Safe Browsing API: مُهيَّأ ✅")
+else:
+    logger.info("   🔗 Safe Browsing API: غير مُهيَّأ ⚠️ (يُوصى به)")
