@@ -1,8 +1,27 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-handlers_callback.py - معالج الأزرار (v9.7.8)
+handlers_callback.py - معالج الأزرار (v9.7.9)
 =====================================================================
+🆕 v9.7.9 (CLEANUP-AND-HARDENING):
+    🟡 CLEANUP-1: _get_security_settings_cached — إذا كانت القيمة المخزّنة
+                  في الكاش فاسدة (لا يمكن تحويلها إلى dict)، يُبطَل الكاش
+                  ويُعاد القراءة من DB مباشرة (بدل إرجاع {} صامت).
+    🟡 ORDER-1:  إعادة ترتيب فحصي startswith:
+                  sec_set_del_penalty_duration:  قبل  sec_set_del_penalty:
+                  (دفاعي — رغم عدم وجود تضارب حالياً).
+    🟡 ORDER-2:  نفس المعالجة لـ sec_warn_penalty_duration: قبل
+                  sec_warn_penalty: (كان بالفعل مرتّباً — موثّق الآن).
+    🟡 DEAD-1:   إزالة المفتاح الميت 'delete_penalty' من _back_map في
+                  _show_penalty_type_selection (لا يُستدعى أبداً).
+    🟡 DOC-1:    توثيق 5 معالجات "يتيمة" في _handle_security بأنّ الأزرار
+                  تأتي من utils.KeyboardFactory (وليست كود ميت).
+    🟡 LOG-1:    إضافة logger.debug عند الوصول إلى فرع not_available
+                  لتسهيل تتبع الأزرار غير المعروفة أثناء التطوير.
+    🟡 IMPORT-1: توثيق أن bridge_get_security_settings مستورد كـ re-export
+                  فقط (لا يُستخدم داخلياً بعد v9.7.8 TMF1).
+    ✅ الحفاظ الكامل على سلوك v9.7.8
+
 🆕 v9.7.8 (SECURITY-TABLE-MISMATCH-FIX):
     🔴 TMF1: _get_security_settings_cached — إزالة تفضيل Bridge.
              السبب: Bridge.get_security_settings (utils v7.10.2) يقرأ من
@@ -77,6 +96,9 @@ except ImportError:
 
 # ═══════════════════════════════════════════════════════════════════
 # 🆕 v9.7.7: استيرادات Security Bridge من utils.py v7.10.2
+# 🆕 v9.7.9 IMPORT-1: bridge_get_security_settings مستورد كـ re-export
+#                     فقط — لا يُستخدم داخلياً بعد TMF1 (v9.7.8).
+#                     التصدير عبر __all__ للحفاظ على التوافق العكسي.
 # ═══════════════════════════════════════════════════════════════════
 try:
     from utils import (
@@ -1529,6 +1551,14 @@ class CallbackHandlers:
             if data in ("panel_lock", "panel_unlock", "panel_close"):
                 await CallbackHandlers._handle_panel(
                     update, context, query, user_id, data, lang); return
+            # 🆕 v9.7.9 LOG-1: تتبّع الأزرار غير المعروفة
+            try:
+                logger.debug(
+                    f"⚠️ unhandled callback | user={user_id} "
+                    f"base={base_data!r} data={data!r}"
+                )
+            except Exception:
+                pass
             await safe_edit(query,
                 await _trans('not_available', lang, "⚠️"),
                 bot=context.bot)
@@ -1721,6 +1751,7 @@ class CallbackHandlers:
 
     # ─────────────────────────────────────────────────────────────
     # v9.7.8 TMF1: قراءة مباشرة من DB — إزالة تفضيل Bridge
+    # v9.7.9 CLEANUP-1: تنظيف الكاش الفاسد
     # ─────────────────────────────────────────────────────────────
     @staticmethod
     async def _get_security_settings_cached(chat_id):
@@ -1733,9 +1764,14 @@ class CallbackHandlers:
           لكن DB.update_security_settings يكتب في group_security
           → الأزرار كانت "تعمل" (تُحدّث DB) لكن العرض لا يرى التغيير.
 
-        الترتيب الجديد:
+        الترتيب:
           1. cache.settings_cache (الأسرع)
           2. DB.get_security_settings (المصدر الوحيد للحقيقة)
+          3. تخزين في الكاش
+
+        v9.7.9 CLEANUP-1:
+          إذا كانت القيمة المخزّنة فاسدة (لا يمكن تحويلها dict)،
+          يُبطَل الكاش ويُعاد القراءة من DB (بدل إرجاع {} صامت).
         """
         # 1) الكاش المحلي
         try:
@@ -1748,6 +1784,15 @@ class CallbackHandlers:
             as_dict = _row_to_dict(cached)
             if as_dict is not None:
                 return as_dict
+            # 🆕 v9.7.9 CLEANUP-1: cached فاسد → نظّفه
+            try:
+                await settings_cache.invalidate_security(chat_id)
+            except Exception:
+                pass
+            logger.debug(
+                f"_get_security_settings_cached: cached value corrupted "
+                f"for chat={chat_id} → invalidated"
+            )
 
         # 2) 🆕 v9.7.8: قراءة مباشرة من DB
         settings: Dict = {}
@@ -2141,6 +2186,24 @@ class CallbackHandlers:
                     chat_id)
                 await CallbackHandlers._refresh_security_view(
                     query, context, chat_id, lang); return True
+
+            # ═════════════════════════════════════════════════════
+            # 🆕 v9.7.9 ORDER-1: الأطول أولاً (دفاعي)
+            # sec_set_del_penalty_duration: قبل sec_set_del_penalty:
+            # ═════════════════════════════════════════════════════
+            if data.startswith("sec_set_del_penalty_duration:"):
+                parts = data.split(":")
+                if len(parts) != 2:
+                    await safe_edit(query, await _trans('invalid_data', lang,
+                        "❌"), bot=context.bot); return True
+                chat_id = _coerce_int(parts[1])
+                if not await _check_sec_auth(context, user_id, chat_id):
+                    await safe_edit(query,
+                        await _trans('no_permission', lang, "❌"),
+                        bot=context.bot); return True
+                await CallbackHandlers._show_penalty_durations(
+                    update, context, query, chat_id, lang, 'delete_penalty')
+                return True
             if data.startswith("sec_set_del_penalty:"):
                 parts = data.split(":")
                 if len(parts) != 3:
@@ -2166,19 +2229,7 @@ class CallbackHandlers:
                     chat_id)
                 await CallbackHandlers._refresh_security_view(
                     query, context, chat_id, lang); return True
-            if data.startswith("sec_set_del_penalty_duration:"):
-                parts = data.split(":")
-                if len(parts) != 2:
-                    await safe_edit(query, await _trans('invalid_data', lang,
-                        "❌"), bot=context.bot); return True
-                chat_id = _coerce_int(parts[1])
-                if not await _check_sec_auth(context, user_id, chat_id):
-                    await safe_edit(query,
-                        await _trans('no_permission', lang, "❌"),
-                        bot=context.bot); return True
-                await CallbackHandlers._show_penalty_durations(
-                    update, context, query, chat_id, lang, 'delete_penalty')
-                return True
+
             if data.startswith("sec_penalty_durations:"):
                 parts = data.split(":")
                 if len(parts) != 2:
@@ -2210,6 +2261,10 @@ class CallbackHandlers:
                     await CallbackHandlers._show_penalty_durations(
                         update, context, query, chat_id, lang, action_type)
                     return True
+            # ═════════════════════════════════════════════════════
+            # 🆕 v9.7.9 ORDER-2: الأطول أولاً (موثّق — كان مرتّباً)
+            # sec_warn_penalty_duration: قبل sec_warn_penalty:
+            # ═════════════════════════════════════════════════════
             if data.startswith("sec_warn_penalty_duration:"):
                 parts = data.split(":")
                 if len(parts) != 2:
@@ -3399,6 +3454,7 @@ class CallbackHandlers:
 
     # ═════════════════════════════════════════════════════════════
     # v9.7.8 TMF2: نقل فحص warn قبل SECURITY_TOGGLE_MAP
+    # v9.7.9 DOC-1: توثيق المعالجات "اليتيمة" (تأتي من KeyboardFactory)
     # ═════════════════════════════════════════════════════════════
     @staticmethod
     async def _handle_security(update, context, query, user_id, lang=None):
@@ -3424,15 +3480,19 @@ class CallbackHandlers:
             await safe_edit(query, await _trans('no_permission', lang, "❌"),
                 bot=context.bot); return
         try:
+            # 🆕 v9.7.9 DOC-1: زر sec_auto_reply_menu:{cid}
+            #     يأتي من utils.KeyboardFactory.build("security")
             if action == "auto_reply_menu":
                 await _render_auto_reply_menu(query, context, chat_id, lang)
                 return
+            # 🆕 v9.7.9 DOC-1: زر sec_maxlen:{cid} من KeyboardFactory
             if action == "maxlen":
                 StateManager.set(user_id, UserState.WAIT_MAX_LEN)
                 _set_sec_chat(context, chat_id)
                 await safe_edit(query,
                     await _trans('send_max_length', lang, "📏"),
                     bot=context.bot); return
+            # 🆕 v9.7.9 DOC-1: زر sec_act_log:{cid} من KeyboardFactory
             if action == "act_log":
                 await CallbackHandlers._show_admin_logs(
                     update, context, query, chat_id, lang); return
@@ -3657,6 +3717,7 @@ class CallbackHandlers:
             if action == "night_settings":
                 await CallbackHandlers._show_night_settings(
                     update, context, query, chat_id, lang); return
+            # 🆕 v9.7.9 DOC-1: زر sec_adv_act:{cid} من KeyboardFactory
             if action == "adv_act":
                 await CallbackHandlers._show_advanced_actions(
                     update, context, query, chat_id, lang); return
@@ -3678,12 +3739,15 @@ class CallbackHandlers:
                 await safe_edit(query,
                     await _trans('send_goodbye_text', lang, "📝"),
                     bot=context.bot); return
+            # 🆕 v9.7.9 DOC-1: يلتقط sec_set_antiflood_messages:{cid} (بدون value)
+            # من KeyboardFactory → يحوّل إلى أزرار v9.7.6 NF1
             if action == "set_antiflood_messages":
                 StateManager.set(user_id, UserState.WAIT_ANTIFLOOD_MESSAGES)
                 _set_sec_chat(context, chat_id)
                 await safe_edit(query,
                     await _trans('send_antiflood_messages', lang, "📊"),
                     bot=context.bot); return
+            # 🆕 v9.7.9 DOC-1: يلتقط sec_set_antiflood_seconds:{cid} (بدون value)
             if action == "set_antiflood_seconds":
                 StateManager.set(user_id, UserState.WAIT_ANTIFLOOD_SECONDS)
                 _set_sec_chat(context, chat_id)
@@ -3717,6 +3781,14 @@ class CallbackHandlers:
                 await CallbackHandlers._show_penalty_type_selection(
                     update, context, query, chat_id, lang,
                     'violation_penalty'); return
+            # 🆕 v9.7.9 LOG-1: تتبّع الأزرار الأمنية غير المعروفة
+            try:
+                logger.debug(
+                    f"⚠️ unhandled security action | user={user_id} "
+                    f"chat={chat_id} action={action!r} data={data!r}"
+                )
+            except Exception:
+                pass
             await safe_edit(query,
                 await _trans('not_available', lang, "⚠️"),
                 bot=context.bot)
@@ -3927,6 +3999,11 @@ class CallbackHandlers:
             await _trans('manage_banned_words', lang, "🚫"),
             reply_markup=kb, bot=context.bot)
 
+    # ═════════════════════════════════════════════════════════════
+    # 🆕 v9.7.9 DEAD-1: حذف 'delete_penalty' من _back_map
+    # السبب: هذا المفتاح لا يُستدعى أبداً — زر الحذف يستخدم
+    #        `sec_set_del_penalty:` مباشرة في `_handle_security`.
+    # ═════════════════════════════════════════════════════════════
     @staticmethod
     async def _show_penalty_type_selection(update, context, query, chat_id,
                                             lang, setting_key):
@@ -3943,8 +4020,7 @@ class CallbackHandlers:
         _back_map = {
             'antiflood_penalty': f"sec_antiflood_settings:{chat_id}",
             'night_action': f"sec_night_settings:{chat_id}",
-            'violation_penalty': f"sec_violation_settings:{chat_id}",
-            'delete_penalty': f"sec_del_pen:{chat_id}"}
+            'violation_penalty': f"sec_violation_settings:{chat_id}"}
         back_cb = _back_map.get(setting_key, f"{CB.GRP_SET}:{chat_id}")
         kb.append([InlineKeyboardButton(
             KeyboardFactory.get_text("back", lang), callback_data=back_cb)])
@@ -4871,6 +4947,14 @@ class CallbackHandlers:
                         await _trans('contest_deleted_failed', lang, "❌"),
                         bot=context.bot)
                 return
+            # 🆕 v9.7.9 LOG-1: تتبّع الأزرار الإدارية غير المعروفة
+            try:
+                logger.debug(
+                    f"⚠️ unhandled admin callback | user={user_id} "
+                    f"data={data!r}"
+                )
+            except Exception:
+                pass
             await safe_edit(query,
                 await _trans('not_available', lang, "⚠️"),
                 bot=context.bot)
@@ -5295,6 +5379,14 @@ class CallbackHandlers:
                             back_btn, callback_data="admin_analytics")]]),
                         bot=context.bot)
                 return
+            # 🆕 v9.7.9 LOG-1: تتبّع تقارير التحليلات غير المعروفة
+            try:
+                logger.debug(
+                    f"⚠️ unknown analytics report | user={user_id} "
+                    f"action={action!r} data={data!r}"
+                )
+            except Exception:
+                pass
             await safe_edit(query,
                 await _trans('unknown_report', lang, "⚠️"),
                 bot=context.bot)
@@ -5954,19 +6046,21 @@ __all__ = [
     # v9.7.6
     "_ANTIFLOOD_MESSAGES_OPTIONS", "_ANTIFLOOD_SECONDS_OPTIONS",
     "_ANTIFLOOD_MESSAGES_MAX", "_ANTIFLOOD_SECONDS_MAX",
-    # v9.7.7 — Security Bridge
+    # v9.7.7 — Security Bridge (re-export للتوفيق العكسي)
+    # 🆕 v9.7.9 IMPORT-1: bridge_get_security_settings مُصدَّر لكن
+    #                     غير مُستخدَم داخلياً (TMF1)
     "_SECURITY_BRIDGE_AVAILABLE",
     "SECURITY_TOGGLE_MAP", "NEW_SECURITY_DEFAULTS",
     "bridge_get_security_settings", "bridge_invalidate_sec_cache",
 ]
 
 # ═════════════════════════════════════════════════════════════════════
-# LOAD BEACON — v9.7.8
+# LOAD BEACON — v9.7.9
 # ═════════════════════════════════════════════════════════════════════
 try:
     _bridge_icon = "✅" if _SECURITY_BRIDGE_AVAILABLE else "⚠️"
     logger.info(
-        "🛡️ handlers_callback.py v9.7.8 SECURITY-TABLE-FIX loaded | "
+        "🛡️ handlers_callback.py v9.7.9 CLEANUP-AND-HARDENING loaded | "
         "Bridge=%s | Antiflood-Msgs=%d | Antiflood-Secs=%d",
         _bridge_icon,
         len(_ANTIFLOOD_MESSAGES_OPTIONS),
