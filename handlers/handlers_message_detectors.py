@@ -5,26 +5,36 @@
 handlers_message_detectors.py
 ===============================================================================
 🛡️ Relax Manager — Advanced Spam / Anti-Evasion Detection Engine
-Version: 4.0.4 (CORRECTED — NSFW + PERF + SAFETY)
+Version: 4.0.5 (SHUTDOWN-INTEGRATION)
+
+🆕 v4.0.5:
+    ✅ FIX-R: _shutdown_shared_pool() — للاستدعاء من main.py عند الإغلاق
+             يمنع تعليق التطبيق بسبب thread pool غير مُغلق
 
 🆕 v4.0.4-FIX:
-    ✅ FIX-A: NSFW chicken-and-egg — النموذج المحلي يُحمّل الآن فعلياً
+    ✅ FIX-A: NSFW chicken-and-egg — النموذج المحلي يُحمّل فعلياً
     ✅ FIX-B: توحيد NSFW_THRESHOLD بين المزوّدين
     ✅ FIX-C: _extract_spam_words يستخدم _vocab_regex (تسريع ~40x)
-    ✅ FIX-D: cleanup_old_data خارج BEHAVIORAL_LAYER (منع leak)
-    ✅ FIX-E: قفل _WORD_RE_CACHE + _last_cleanup (thread-safety)
-    ✅ FIX-F: expand_url يفحص scheme (منع SSRF)
-    ✅ FIX-G: _deleet مطابقة دقيقة (منع FPs)
+    ✅ FIX-D: cleanup_old_data خارج BEHAVIORAL_LAYER
+    ✅ FIX-E: قفل _WORD_RE_CACHE + _last_cleanup
+    ✅ FIX-F: expand_url يفحص scheme (SSRF protection)
+    ✅ FIX-G: _deleet مطابقة دقيقة (FPs أقل)
     ✅ FIX-H: ReDoS hardening على _MULTILINE_DOMAIN_RE
     ✅ FIX-I: asyncio.gather للطبقات المستقلة + Semaphore(6)
     ✅ FIX-J: lru_cache على _normalize_text
-    ✅ FIX-K: _download_telegram_file يرفض العمل بدون running loop
+    ✅ FIX-K: _download_telegram_file يرفض running loop
     ✅ FIX-L: mime + size check في _check_nsfw_via_sightengine
     ✅ FIX-M: thread pool بحجم 8
     ✅ FIX-N: إزالة has_hint dead code
     ✅ FIX-O: _extract_random_domains_from_merged
-    ✅ FIX-P: is_shortener يكشف subdomain tricks
-    ✅ FIX-Q: _run_text_layer يُرجع dataclass بقيم افتراضية
+    ✅ FIX-P: is_shortener subdomain-aware
+    ✅ FIX-Q: _run_text_layer fail-safe
+
+🆕 v4.0.3-FIX:
+    ✅ دعم Sightengine API لكشف NSFW (fallback للنموذج المحلي)
+
+🆕 v4.0.2-ASYNC-NATIVE:
+    🔴 FIX-N, FIX-O, FIX-P, FIX-Q, FIX-R, FIX-S, FIX-T, FIX-U, FIX-V
 ===============================================================================
 """
 
@@ -66,8 +76,8 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
-_DETECTORS_VERSION = "4.0.4 CORRECTED"
-_DETECTORS_VERSION_CLEAN = "4.0.4"
+_DETECTORS_VERSION = "4.0.5 SHUTDOWN-INTEGRATION"
+_DETECTORS_VERSION_CLEAN = "4.0.5"
 
 
 def _version_semver(version: str) -> str:
@@ -167,10 +177,9 @@ VIDEO_MAX_FRAMES = _env_int("VIDEO_MAX_FRAMES", 8)
 VIDEO_FRAME_INTERVAL_SEC = _env_float("VIDEO_FRAME_INTERVAL_SEC", 2.0)
 
 NSFW_MODEL_ENABLED = _env_bool("NSFW_MODEL_ENABLED", False)
-NSFW_THRESHOLD = _env_float("NSFW_THRESHOLD", 0.65)  # ✅ FIX-B: موحّد
+NSFW_THRESHOLD = _env_float("NSFW_THRESHOLD", 0.65)
 NSFW_SIGHTENGINE_MAX_BYTES = _env_int("NSFW_SIGHTENGINE_MAX_BYTES", 10 * 1024 * 1024)
 
-# ✅ FIX-J: مفاتيح lru_cache
 NORMALIZE_CACHE_MAX = _env_int("NORMALIZE_CACHE_MAX", 512)
 
 
@@ -181,7 +190,6 @@ NORMALIZE_CACHE_MAX = _env_int("NORMALIZE_CACHE_MAX", 512)
 _THREAD_POOL_EXECUTOR: Optional[concurrent.futures.ThreadPoolExecutor] = None
 _THREAD_POOL_LOCK = threading.Lock()
 
-# ✅ FIX-M: pool بحجم 8 (كان 4 — يسبب bottleneck مع gather)
 _POOL_MAX_WORKERS = _env_int("DETECTOR_POOL_WORKERS", 8)
 
 
@@ -195,6 +203,33 @@ def _get_shared_pool() -> concurrent.futures.ThreadPoolExecutor:
                     thread_name_prefix="detector-io",
                 )
     return _THREAD_POOL_EXECUTOR
+
+
+# ✅ FIX-R: دالة إغلاق pool الـdetectors للتكامل مع main.py
+def _shutdown_shared_pool() -> None:
+    """
+    ✅ FIX-R: إغلاق thread pool الخاص بالـdetectors.
+
+    يُستدعى عند إنهاء التطبيق (main.py FIX-1).
+    - wait=False: لا ننتظر المهام الجارية
+    - cancel_futures=True: نُلغي المهام المنتظرة (Python 3.9+)
+    - idempotent: آمن للاستدعاء عدة مرات
+    """
+    global _THREAD_POOL_EXECUTOR
+    with _THREAD_POOL_LOCK:
+        if _THREAD_POOL_EXECUTOR is None:
+            return
+        pool = _THREAD_POOL_EXECUTOR
+        _THREAD_POOL_EXECUTOR = None
+    try:
+        try:
+            pool.shutdown(wait=False, cancel_futures=True)
+        except TypeError:
+            # Python < 3.9 — لا يدعم cancel_futures
+            pool.shutdown(wait=False)
+        logger.info("✅ detectors thread pool: shutdown complete")
+    except Exception as _e:
+        logger.debug("_shutdown_shared_pool: %s", _e)
 
 
 def _run_coro_in_new_loop(coro: Any) -> Any:
@@ -211,23 +246,17 @@ def _run_coro_in_new_loop(coro: Any) -> Any:
 
 def _maybe_run_awaitable(value: Any, timeout: float = 30.0) -> Any:
     """
-    ✅ FIX-K: يرفض التشغيل في thread pool عندما تكون هناك حلقة جارية
-    لتجنّب مشاكل PTB's bot loop affinity. القاعدة:
-      - لا awaitable → رجوع مباشر
-      - هناك running loop → خطأ واضح (يجب استخدام النسخة async)
-      - لا يوجد running loop → asyncio.run مباشرة (main thread)
+    ✅ FIX-K: يرفض التشغيل داخل running loop — يستخدم النسخة async.
     """
     if not asyncio.iscoroutine(value) and not hasattr(value, "__await__"):
         return value
 
     try:
         asyncio.get_running_loop()
-        # داخل حلقة جارية — لا نحاول تشغيل coroutine متزامن
         logger.warning(
             "_maybe_run_awaitable: running loop detected — "
             "استخدم النسخة async بدلاً من sync"
         )
-        # حاول إغلاق coroutine لتجنب warning
         if asyncio.iscoroutine(value):
             try:
                 value.close()
@@ -601,7 +630,7 @@ _SPACED_DOMAIN_RE = re.compile(
     rf"(?:{_TLD_PATTERN})(?!\w)"
 )
 
-# ✅ FIX-H: ReDoS hardening — حدود على \s* و \r\n+ المتداخلة
+# ✅ FIX-H: ReDoS hardening على _MULTILINE_DOMAIN_RE
 _MULTILINE_DOMAIN_RE = re.compile(
     rf"(?is)\b[a-z0-9_-]{{2,50}}"
     rf"[ \t]{{0,8}}[\r\n]{{1,4}}[ \t]{{0,8}}"
@@ -876,7 +905,7 @@ def _is_random_domain(domain: str) -> bool:
         parts = domain.split(".")
         if len(parts) < 2:
             return False
-        # ✅ FIX: قبول TLDs جديدة أيضاً (وليس فقط القائمة الثابتة)
+        # قبول TLDs جديدة أيضاً
         tld = parts[-1]
         if not re.match(r"^[a-z]{2,24}$", tld):
             return False
@@ -1142,7 +1171,7 @@ def _remove_hidden_chars(text: str) -> str:
     return "".join(ch for ch in text if ch not in _HIDDEN_CHARS)
 
 
-# ✅ FIX-G: مطابقة دقيقة لـdeleet
+# ✅ FIX-G: مطابقة دقيقة لـdeleet (لا startswith/endswith)
 def _deleet(text: str) -> str:
     if not text or not ANTIEVASION_LEETSPEAK:
         return text or ""
@@ -1157,9 +1186,8 @@ def _deleet(text: str) -> str:
         if letters < 2:
             return token
         candidate = token.translate(_LEET_MAP).casefold()
-        # مطابقة تامة بعد إزالة الفواصل
         compact_candidate = re.sub(r"[^a-z]+", "", candidate)
-        # ✅ FIX-G: مطابقة تامة فقط (لا startswith/endswith)
+        # مطابقة تامة فقط (لا startswith/endswith)
         if compact_candidate in _LEET_TARGETS:
             return candidate
         return token
@@ -1179,9 +1207,9 @@ def _normalize_unicode_dots(text: str) -> str:
     return text.translate(_UNICODE_DOT_TABLE)
 
 
+# ✅ FIX-J: lru_cache على normalize
 @functools.lru_cache(maxsize=NORMALIZE_CACHE_MAX)
 def _normalize_text_cached(text: str) -> str:
-    """✅ FIX-J: النسخة المُخزَّنة — استخدمها عبر _normalize_text."""
     value = html.unescape(str(text))
     value = unicodedata.normalize("NFKC", value).casefold()
     if ANTIEVASION_COMBINING or ANTIEVASION_EXTENDED_COMBINING:
@@ -1201,15 +1229,19 @@ def _normalize_text_cached(text: str) -> str:
 def _normalize_text(text: str) -> str:
     if not text:
         return ""
-    # استخدم lru_cache فقط للنصوص ضمن حد معقول
     if len(text) <= MAX_ANALYSIS_TEXT_LENGTH:
         try:
             return _normalize_text_cached(text)
         except Exception:
             pass
-    return _normalize_text_cached.__wrapped__(text) if hasattr(
-        _normalize_text_cached, "__wrapped__"
-    ) else _normalize_text_cached(text)
+    # نص طويل — تجاوز الـcache
+    try:
+        unwrapped = getattr(_normalize_text_cached, "__wrapped__", None)
+        if callable(unwrapped):
+            return unwrapped(text)
+    except Exception:
+        pass
+    return _normalize_text_cached(text)
 
 
 def _strip_emoji_for_domain(text: str) -> str:
@@ -1874,7 +1906,7 @@ class _MessageContext:
         ctx.repeated_word_count = len(
             _REPEATED_WORD_RE.findall(ctx.normalized_text)
         )
-        # ✅ FIX-O: استخدام النسخة من merged
+        # ✅ FIX-O: من merged مباشرة
         ctx.random_domains = _extract_random_domains_from_merged(
             ctx.normalized_url_text
         )
@@ -2034,7 +2066,7 @@ class _MessageContext:
             self.is_protected = bool(
                 getattr(message, "has_protected_content", False)
             )
-            # ✅ FIX-N: إزالة has_hint (كود ميت)
+            # ✅ FIX-N: إزالة has_hint dead code
             self.forward_hint = bool(
                 getattr(message, "has_protected_content", False)
                 and (
@@ -3630,7 +3662,7 @@ def extract_audio_content(message: Any, bot: Any = None) -> str:
 # LAYER 3: URL ENRICHMENT
 # =============================================================================
 
-# ✅ FIX-F: قائمة schemes المسموحة
+# ✅ FIX-F: schemes مسموحة
 _ALLOWED_URL_SCHEMES = frozenset({"http", "https"})
 
 
@@ -3644,7 +3676,7 @@ def expand_url(url: str, *, max_hops: int = URL_EXPAND_MAX_HOPS) -> str:
             if current in visited:
                 break
             visited.add(current)
-            # ✅ FIX-F: فحص scheme (منع SSRF / file:// / javascript:)
+            # ✅ FIX-F: فحص scheme (منع SSRF)
             parsed = urlparse(current)
             if parsed.scheme.lower() not in _ALLOWED_URL_SCHEMES:
                 logger.debug("expand_url: rejected scheme %r", parsed.scheme)
@@ -3658,11 +3690,15 @@ def expand_url(url: str, *, max_hops: int = URL_EXPAND_MAX_HOPS) -> str:
                 location = response.headers.get("Location")
                 if not location:
                     break
-                # ✅ FIX-F: فحص scheme على location أيضاً
                 loc_parsed = urlparse(location)
-                if loc_parsed.scheme.lower() not in _ALLOWED_URL_SCHEMES and loc_parsed.scheme:
-                    logger.debug("expand_url: rejected redirect scheme %r",
-                                 loc_parsed.scheme)
+                if (
+                    loc_parsed.scheme
+                    and loc_parsed.scheme.lower() not in _ALLOWED_URL_SCHEMES
+                ):
+                    logger.debug(
+                        "expand_url: rejected redirect scheme %r",
+                        loc_parsed.scheme,
+                    )
                     break
                 current = location
             else:
@@ -3672,15 +3708,14 @@ def expand_url(url: str, *, max_hops: int = URL_EXPAND_MAX_HOPS) -> str:
     return current
 
 
+# ✅ FIX-P: كشف subdomain tricks
 def is_shortener(url: str) -> bool:
-    """✅ FIX-P: يكشف subdomain tricks مثل bit.ly.evil.com"""
     try:
         parsed = urlparse(url)
         domain = parsed.netloc.lower()
         domain = re.sub(r"^www\.", "", domain).split(":")[0]
         if domain in _SHORTENER_DOMAINS:
             return True
-        # ✅ FIX-P: فحص subdomain — bit.ly.evil.com يحتوي bit.ly كـsubdomain
         for shortener in _SHORTENER_DOMAINS:
             if domain.endswith("." + shortener):
                 return True
@@ -4087,10 +4122,8 @@ def track_edit(
     return False, None
 
 
+# ✅ FIX-D + FIX-E: cleanup آمن + thread-safe
 def cleanup_old_data(force: bool = False) -> None:
-    """
-    ✅ FIX-D + FIX-E: تعمل بشكل مستقل عن BEHAVIORAL_LAYER + قفل آمن.
-    """
     global _last_cleanup
     now = time.time()
     with _last_cleanup_lock:
@@ -4137,7 +4170,6 @@ def cleanup_old_data(force: bool = False) -> None:
             _edited_messages.pop(key, None)
 
     try:
-        # _context_buffers معرّف لاحقاً — استخدام globals() آمن
         buffers = globals().get("_context_buffers")
         if buffers is not None:
             for uid in list(buffers.keys()):
@@ -4173,7 +4205,7 @@ def _extract_video_frames(
             frame_interval = int(fps * interval_sec) or 1
             count = 0
             idx = 0
-            # ✅ FIX: حد أعلى صارم لتفادي infinite loop
+            # حد أعلى صارم لتفادي infinite loop
             max_iterations = 100_000
             iterations = 0
             while count < max_frames and iterations < max_iterations:
@@ -4318,7 +4350,7 @@ def extract_video_content(
 
 
 # =============================================================================
-# NSFW Detection — 3 Providers (✅ FIX-A, B, L)
+# NSFW Detection — 3 Providers
 # =============================================================================
 
 def _detect_image_mime(image_bytes: bytes) -> str:
@@ -4363,7 +4395,6 @@ def _check_nsfw_via_sightengine(
 
     try:
         url = "https://api.sightengine.com/1.0/check.json"
-        # ✅ FIX-L: mime ديناميكي
         mime = _detect_image_mime(image_bytes)
         ext = mime.split("/")[-1]
         files = {
@@ -4416,7 +4447,7 @@ def _analyze_nsfw_image(image_bytes: bytes) -> Tuple[bool, float, List[str]]:
     if not image_bytes:
         return False, 0.0, []
 
-    # ─── 1) النموذج المحلي (✅ FIX-A: لا يتطلب _NSFW_MODEL_AVAILABLE مسبقاً)
+    # ─── 1) النموذج المحلي (لا يتطلب _NSFW_MODEL_AVAILABLE مسبقاً)
     if NSFW_MODEL_ENABLED and _PIL_AVAILABLE:
         classifier = _load_nsfw_classifier()
         if classifier is not None:
@@ -4538,7 +4569,6 @@ def extract_nsfw_from_message(
 def _extract_sticker_text_sync(
     message: Any, bot: Any = None
 ) -> Tuple[str, int]:
-    """Sync helper مشترك."""
     if not STICKER_LAYER_ENABLED:
         return "", 0
     try:
@@ -4633,7 +4663,6 @@ def analyze_reactions(message: Any) -> Tuple[int, List[str]]:
                     if isinstance(emoji_obj, str):
                         emoji = emoji_obj
                     else:
-                        # ✅ FIX: استخدام .emoji فقط إذا كانت السمة string
                         _e = getattr(emoji_obj, "emoji", None)
                         if isinstance(_e, str):
                             emoji = _e
@@ -4658,7 +4687,7 @@ def analyze_reactions(message: Any) -> Tuple[int, List[str]]:
             score += 2
             reasons.append(f"spam_reactions:{spam_emoji_total}")
 
-        # ✅ ملاحظة: إشارة إضافية للنص + reactions (لا تُلغي الشرط الأصلي)
+        # إشارة إضافية للنص + reactions
         if has_text and spam_emoji_total >= 8:
             score += 2
             reasons.append(f"text_with_spam_reactions:{spam_emoji_total}")
@@ -5066,7 +5095,7 @@ class SpamVerdict:
         }
 
 
-# ✅ FIX-Q: default text_result كامل بدل {}
+# ✅ FIX-Q: default text_result كامل
 def _empty_text_result() -> Dict[str, Any]:
     return {
         "score": 0, "reasons": [], "confidence": "none",
@@ -5183,7 +5212,6 @@ def _run_behavioral_layer(
     if not BEHAVIORAL_LAYER_ENABLED:
         return
     try:
-        # ✅ FIX: استخدام user_id من text_result إذا متوفر (تجنّب إعادة الاستخراج)
         user_id = int(text_result.get("user_id", 0) or 0)
         if not user_id:
             user = getattr(message, "from_user", None)
@@ -5467,7 +5495,7 @@ async def _run_stego_layer_async(
         logger.debug("L13 error: %r", exc)
 
 
-# ─── Sync Layers (تُستخدم من analyze_message_full sync) ──────────────────────
+# ─── Sync Layers ─────────────────────────────────────────────────────────────
 
 def _run_ocr_layer(message: Any, bot: Any, verdict: SpamVerdict) -> None:
     if not OCR_LAYER_ENABLED or not _OCR_AVAILABLE:
@@ -5644,7 +5672,7 @@ def _aggregate_verdict(verdict: SpamVerdict) -> None:
     verdict.is_spam = total >= FINAL_THRESHOLD
 
 
-# ✅ FIX-D: cleanup_old_data يُستدعى هنا بشكل موثوق
+# ✅ FIX-D: cleanup مُوثّق
 def _post_analysis_cleanup() -> None:
     try:
         cleanup_old_data()
@@ -5692,13 +5720,10 @@ def analyze_message_full(message: Any, bot: Any = None) -> SpamVerdict:
     return verdict
 
 
+# ✅ FIX-I: asyncio.gather للطبقات المستقلة
 async def analyze_message_full_async(
     message: Any, bot: Any = None
 ) -> SpamVerdict:
-    """
-    ✅ FIX-I: الطبقات المستقلة تُشغَّل بالتوازي عبر asyncio.gather،
-    مع Semaphore(6) للتحكم في التزامن (لا نستنزف pool الـ 8).
-    """
     verdict = SpamVerdict(
         is_spam=False, total_score=0.0, confidence="none"
     )
@@ -5728,7 +5753,7 @@ async def analyze_message_full_async(
         return_exceptions=True,
     )
 
-    # الطبقات المتزامنة السريعة (يجب أن تُنفَّذ بعد اكتمال الـasync)
+    # الطبقات المتزامنة السريعة
     _run_metadata_layer(message, verdict)
     _run_obfuscation_layer(message, verdict)
     _run_behavioral_layer(message, text_result, verdict)
@@ -6037,6 +6062,10 @@ __all__ = [
     "_download_telegram_file_async",
     "_maybe_run_awaitable",
     "_run_coro_in_new_loop",
+
+    # ✅ FIX-R: shutdown helper for main.py
+    "_shutdown_shared_pool",
+    "_get_shared_pool",
 ]
 
 
