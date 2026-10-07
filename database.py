@@ -1,71 +1,37 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-database.py - قاعدة البيانات المتكاملة (v7.7.56 — HARDENED-PA6-PA7)
+database.py - قاعدة البيانات المتكاملة (v7.7.57 — BANNED-WORDS-FIX)
 ================================================================================
+🆕 v7.7.57 (BANNED-WORDS-USER-PRESERVE-FIX):
+  🔴 BW-FIX-1 CRITICAL: _import_banned_words — فصل كلمات الملف عن
+      كلمات المستخدم عبر علامة added_by=0 (من الملف) vs added_by=user_id
+      (من البوت). قبل الإصلاح: كل كلمة يضيفها المستخدم عبر البوت
+      (chat_id=-1) كانت تُحذف عند أي إعادة تشغيل لأنها ليست في
+      banned_words.py → to_delete = existing_global - normalized_words
+      كان يشملها.
+  🔴 BW-FIX-2 CRITICAL: نفس الإصلاح لـ _import_auto_replies (بنفس
+      المنطق — auto_replies من auto_replies.py فقط للـ added_by=0).
+  🟡 BW-FIX-3: توثيق سيناريو المشكلة في الـdocstring.
+  🟡 BW-FIX-4: احتفاظ دالة _safety_check_mass_delete على نفس السلوك.
+  🟢 BW-FIX-5: تحسين رسائل الـlog لتوضيح المصدر.
+
 🆕 v7.7.56 (POST-AUDIT FIXES — تصحيحات PA-6 و PA-7 + فحص شامل):
   🔴 PA-6 HIGH: expire_penalties — إضافة `or batch_expired == 0`
-      لمنع الحلقة اللانهائية عندما يُعيد الاستعلام دفعة كاملة
-      بلا أي تحديث فعلي (فشل UPDATE صامت).
   🔴 PA-7 HIGH: _executemany_with_conn (PG) — فحص is_in_transaction
-      قبل محاولة fallback فردي. PG يُلغي الـ transaction عند فشل DML،
-      لذا fallback عديم الجدوى ويبتلع الأخطاء → رفع الاستثناء بدل
-      ابتلاعه داخل transaction.
-  🔴 H-3 HIGH: _return_connection — استدعاء _destroy_connection عند
-      فشل pool.release لمنع تسريب الـ connections.
-  🔴 H-4 HIGH: _verify_pairs_belong — int() آمن لكل صف بدل انهيار
-      جماعي عند وجود id غير رقمي واحد.
-  🔴 H-5 HIGH: `#` يُعامَل كتعليق في MySQL فقط — كان يُسبّب قصّ
-      خاطئ لاستعلامات PostgreSQL (JSONB operators مثل #> و #>>)
-      و SQLite.
-  🟠 M-1 MEDIUM: _normalize_params — تحذير لـ set أيضاً (تناظر
-      مع frozenset) لأن الترتيب غير مضمون.
-  🟠 M-2 MEDIUM: _execute_with_retry — انتظار إضافي عندما تكون
-      _recovering_pool نشطة، لمنع إعادة المحاولة على pool ميت.
-  🟠 M-4 MEDIUM: _maybe_refresh_mv — صيغة حساب cooldown أوضح.
-  🟠 M-7 MEDIUM: _convert_placeholders (MySQL) — معالجة `#` كتعليق
-      لمنع تحويل `?` داخل تعليق إلى `%s`.
-  🟡 NEW: _pg_in_transaction() — مساعد آمن موحّد لحالة PG.
-  🟡 L-3 LOW: _redact_slow_query — إضافة نمط بريد إلكتروني/معرّف.
+  🔴 H-3 HIGH: _return_connection — destroy عند فشل release
+  🔴 H-4 HIGH: _verify_pairs_belong — int() آمن لكل صف
+  🔴 H-5 HIGH: `#` يُعامَل كتعليق في MySQL فقط
+  🟠 M-1 MEDIUM: _normalize_params — تحذير لـ set
+  🟠 M-2 MEDIUM: _execute_with_retry — انتظار عند recovery
+  🟠 M-4 MEDIUM: _maybe_refresh_mv — صيغة cooldown أوضح
+  🟠 M-7 MEDIUM: _convert_placeholders (MySQL) — `#` تعليق
+  🟡 NEW: _pg_in_transaction() — مساعد آمن
+  🟡 L-3 LOW: _redact_slow_query — نمط بريد إلكتروني
 
-🆕 v7.7.55 (POST-AUDIT FIXES — تصحيحات مراجعة v7.7.54):
-  🔴 PA-1 HIGH: _normalize_params — dict يرفع TypeError صريح بدل
-      تمريره كـ param واحد (كان asyncpg يرفضه برسالة غامضة).
-  🔴 PA-2 HIGH: _verify_pairs_belong — عند فشل الاستعلام نرفض
-      الأزواج (return []) بدل تمريرها بلا تحقق (كانت ثغرة FIX-5).
-  🟠 PA-3 MEDIUM: register_user — نقل invalidate cache خارج
-      finally لتجنّب إبطال الكاش عند early-return بدون تعديل.
-  🟠 PA-4 MEDIUM: _import_auto_replies — إزالة existing_all (متغيّر
-      ميت) — التنبيه FIX-2 كان يشير لمتغيّر غير مُستخدَم.
-  🟡 PA-5 LOW: توثيق FIX-6 — إضافة تحذير صريح أن CREATE/ALTER على
-      MySQL يُسبّب implicit commit وبالتالي "transaction" في
-      bootstrap غير حقيقي على MySQL.
-
-🆕 v7.7.54 (HARDENED-AUDIT — إصلاح أخطاء الفحص الشامل):
-  🔴 FIX-1 CRITICAL: _get_pg_query_no_mv_fallback جديد.
-  🔴 FIX-2 CRITICAL: _import_auto_replies hash يشمل media_id/buttons.
-  🔴 FIX-3 CRITICAL: safety guard قبل حذف جماعي في banned_words و
-      auto_replies.
-  🟠 FIX-4 HIGH: mark_users_as_blocked — معاملة واحدة لـ select+update.
-  🟠 FIX-5 HIGH: mark_published_batch — التحقق من (channel_db_id, post_id).
-  🟠 FIX-6 HIGH: _import_banned_words + _import_auto_replies —
-      دعم transaction موحّد لكل DBs. ⚠️ PA-5 على MySQL DDL غير transactional.
-  🟠 FIX-7 HIGH: تحذير عند عدم توفر _ASYNC_MYSQL_ERROR.
-  🟡 FIX-8 MEDIUM: _normalize_params — dedup تحذير frozenset.
-  🟡 FIX-9 MEDIUM: _ensure_group_exists — تحديث chat_name عند اختلافه.
-  🟡 FIX-10 MEDIUM: type hints Optional[str] في 3 دوال.
-  🟡 FIX-11 MEDIUM: expire_penalties — إزالة query زائد.
-  🟡 FIX-12 MEDIUM: _maybe_refresh_mv — cooldown أقصر عند الفشل.
-  🟢 FIX-13 LOW: _execute_with_logging — redaction أقوى.
-  🟢 FIX-14 LOW: get_db_size_kb — cache 60 ثانية.
-  🟢 FIX-15 LOW: _import_banned_words — fallback owner_id=0.
-  🟢 FIX-16 LOW: register_user — COALESCE بدل CASE WHEN.
-  🟢 FIX-17 LOW: _tune_heavy_tables_autovacuum — استعلام جماعي واحد.
-  🟢 FIX-18 LOW: register_user — cache invalidation بعد النجاح فقط.
-
-🆕 v7.7.53 (NEW-SECURITY-TYPES — دعم الأزرار الجديدة):
-  ✅ NC1: VALID_VIOLATION_TYPES — إضافة 10 أنواع جديدة.
-  ✅ NC2: _normalize_params — تحذير من frozenset.
+🆕 v7.7.55 (POST-AUDIT FIXES): PA-1..PA-5
+🆕 v7.7.54 (HARDENED-AUDIT): FIX-1..FIX-18
+🆕 v7.7.53 (NEW-SECURITY-TYPES): NC1, NC2
 ================================================================================
 """
 
@@ -93,6 +59,9 @@ database.py - قاعدة البيانات المتكاملة (v7.7.56 — HARDEN
 # [15] v7.7.56: PG: فشل DML داخل transaction = ABORTED. لا fallback
 #      فردي بدون SAVEPOINT — راجع PA-7.
 # [16] v7.7.56: `#` تعليق MySQL فقط — ليس PG/SQLite. راجع H-5.
+# [17] v7.7.57: أي import من ملف (banned_words.py / auto_replies.py)
+#      يجب أن يُميّز صفوفه بـ added_by=0 — وإلا حذف بيانات المستخدم.
+#      راجع BW-FIX-1 و BW-FIX-2.
 # =====================================================================
 
 import os
@@ -572,6 +541,10 @@ IMPORT_MASS_DELETE_MAX_RATIO = float(
 
 # ✅ v7.7.54 FIX-14: cache لـ get_db_size_kb
 DB_SIZE_CACHE_TTL = float(os.getenv("DB_SIZE_CACHE_TTL", "60"))
+
+# ✅ v7.7.57 BW-FIX-1: علامة `added_by` لصفوف مستوردة من ملف
+# (banned_words.py / auto_replies.py)
+IMPORT_MARKER_ADDED_BY = 0
 
 if REFACTOR_MIXIN_AVAILABLE and _R_DEFAULT_PUBLISH_INTERVAL_MINUTES is not None:
     DEFAULT_PUBLISH_INTERVAL_MINUTES = _R_DEFAULT_PUBLISH_INTERVAL_MINUTES
@@ -1823,32 +1796,18 @@ class Database(
     }
 
     VALID_VIOLATION_TYPES = {
-        # ─── الأساسية (legacy) ───
         "link", "mention", "flood", "nsfw", "banned_word", "media", "other",
         "forward", "sticker", "gif", "poll", "game", "voice", "video_note",
         "photo", "video", "document", "audio", "animation", "spam",
-
-        # ─── v7.14.0: إعدادات قابلة للتبديل ───
         "delete_links", "mentions", "slow_mode", "delete_videos",
         "delete_audio", "delete_animation", "delete_service",
         "delete_documents", "delete_stickers", "delete_forwarded",
         "delete_polls", "delete_games", "delete_voice", "delete_video_note",
         "delete_photos", "delete_banned_words", "delete_penalty",
-
-        # ─── v7.14.0: عقوبات مركّبة ───
         "antiflood", "night_mode", "warn_penalty", "violation_penalty",
-
-        # ─── v7.7.53: أنواع المخالفات الجديدة ───
-        "forwarded",
-        "spam_score",
-        "postbot_pattern",
-        "poll_link",
-        "at_channel",
-        "tg_scheme",
-        "button_link",
-        "email",
-        "vcard_url",
-        "venue_url",
+        "forwarded", "spam_score", "postbot_pattern", "poll_link",
+        "at_channel", "tg_scheme", "button_link", "email",
+        "vcard_url", "venue_url",
     }
 
     VALID_VIOLATION_SETTINGS = {
@@ -2641,10 +2600,6 @@ class Database(
                 if success:
                     self._mv_last_refresh_mono = time.monotonic()
                 else:
-                    # ✅ FIX-12 + M-4 (v7.7.56): cooldown قصير عند الفشل
-                    # الصيغة: نُرجِع last_refresh إلى الماضي بمقدار
-                    # (cooldown - short_cooldown) بحيث يكون الفارق الفعلي
-                    # = short_cooldown عند الفحص التالي.
                     short_cooldown = max(
                         60.0, self._mv_refresh_cooldown * 0.1
                     )
@@ -3603,9 +3558,6 @@ class Database(
         ✅ v7.7.56 PA-7: عند فشل executemany على PostgreSQL داخل
         transaction، الـ transaction تصبح ABORTED — كل استعلام لاحق
         (بما فيه SELECT) سيرفع "current transaction is aborted".
-        الحل: فحص is_in_transaction قبل محاولة fallback فردي. إن كنا
-        داخل معاملة، نرفع الخطأ بدل ابتلاعه (يمنع hash-update كاذب
-        + rollback غامض لاحق).
         """
         if not params_list:
             return 0
@@ -3650,7 +3602,6 @@ class Database(
                     f"fallback فردي: {e}"
                 )
                 total = 0
-                # ✅ v7.7.52: regex أدق
                 rowcount_re = re.compile(
                     r"\b(INSERT|UPDATE|DELETE)\s+\d+\s+(\d+)\s*$",
                     re.IGNORECASE,
@@ -3665,7 +3616,6 @@ class Database(
                         m = rowcount_re.search(result or "")
                         total += int(m.group(2)) if m else 1
                     except Exception as fe:
-                        # ✅ PA-7: لا نبتلع بلا أثر
                         logger.debug(
                             f"PG fallback فردي فشل: {fe}"
                         )
@@ -4652,7 +4602,32 @@ class Database(
                 )
         return True, "ok"
 
+    # ═══════════════════════════════════════════════════════════════
+    # 🆕 v7.7.57 BW-FIX-1: _import_banned_words مع حماية كلمات البوت
+    # ═══════════════════════════════════════════════════════════════
     async def _import_banned_words(self, conn):
+        """
+        🆕 v7.7.57 BW-FIX-1 CRITICAL:
+        فصل كلمات الملف (banned_words.py) عن كلمات البوت (التي أضافها
+        المستخدم/المطور عبر handlers_message.handle_add_banned_word).
+
+        قبل الإصلاح:
+            to_delete = existing_global - normalized_words
+            → كل كلمة أضافها المستخدم عبر البوت (chat_id=-1) كانت
+              تُحذف في كل إعادة تشغيل لأنها ليست في banned_words.py.
+
+        بعد الإصلاح:
+            - علامة added_by=0 للصفوف المُستوردة من الملف.
+            - to_delete = file_words_before - normalized_words
+              (فقط الكلمات من الملف التي أُزيلت من المصدر).
+            - كلمات البوت (added_by=user_id) محصّنة ضد الحذف.
+
+        سيناريو الفشل السابق:
+            1. المستخدم: /autoblock → يضيف "spam" → DB: added_by=8763481548
+            2. Render redeploy → _import_banned_words
+            3. to_delete يشمل "spam" → DELETE → كلمة المستخدم تُمسح
+            4. المستخدم: حذف "spam" → "غير موجودة" ← BUG!
+        """
         try:
             import banned_words
             BANNED_WORDS = getattr(banned_words, "BANNED_WORDS", [])
@@ -4671,8 +4646,7 @@ class Database(
                 return
 
             words_snapshot = json.dumps(
-                sorted(normalized_words),
-                ensure_ascii=False,
+                sorted(normalized_words), ensure_ascii=False,
             )
             current_hash = hashlib.sha256(
                 words_snapshot.encode("utf-8")
@@ -4682,37 +4656,55 @@ class Database(
                 conn, _sql_get_setting_value(), "banned_words_hash"
             )
             if stored_hash == current_hash:
-                logger.info("ℹ️ الكلمات المحظورة لم تتغيّر")
+                logger.info(
+                    "ℹ️ banned_words.py لم يتغيّر — تخطي المزامنة "
+                    "(كلمات البوت محفوظة)"
+                )
                 return
 
+            # ✅ BW-FIX-1: جلب فقط صفوف الملف (added_by=0)
             existing_rows = await self._fetchall_with_conn(
                 conn,
-                "SELECT word FROM banned_words WHERE chat_id = ?",
-                GLOBAL_CHAT_ID,
+                "SELECT word FROM banned_words "
+                "WHERE chat_id = ? AND added_by = ?",
+                GLOBAL_CHAT_ID, IMPORT_MARKER_ADDED_BY,
             )
-            existing_global: Set[str] = {
+            existing_file_words: Set[str] = {
                 (row.get("word") or "").strip().lower()
                 for row in (existing_rows or [])
                 if row.get("word")
             }
 
-            to_delete = existing_global - normalized_words
-            to_insert = normalized_words - existing_global
+            # ✅ BW-FIX-1: to_delete = كلمات الملف المُزالة من المصدر فقط
+            to_delete = existing_file_words - normalized_words
+
+            # ✅ BW-FIX-1: to_insert = كلمات جديدة في الملف
+            to_insert = normalized_words - existing_file_words
+
+            # طباعة تشخيصية
+            if to_delete:
+                logger.info(
+                    f"🔍 BW-FIX-1: كلمات الملف المُزالة من المصدر: "
+                    f"{len(to_delete)} (لن تُحذف كلمات البوت)"
+                )
+            if to_insert:
+                logger.info(
+                    f"🔍 BW-FIX-1: كلمات جديدة في الملف: "
+                    f"{len(to_insert)}"
+                )
 
             allowed, reason = self._safety_check_mass_delete(
-                "banned_words", len(existing_global), len(to_delete)
+                "banned_words",
+                len(existing_file_words),
+                len(to_delete),
             )
             if not allowed:
                 logger.error(
                     f"❌ banned_words: رفض الحذف الجماعي — {reason}. "
                     f"الحذف المحتمل: {len(to_delete)}/"
-                    f"{len(existing_global)}. تخطي المزامنة لحماية البيانات."
+                    f"{len(existing_file_words)}. تخطي المزامنة لحماية البيانات."
                 )
                 return
-
-            owner_id = getattr(CONFIG, "PRIMARY_OWNER_ID", None)
-            if not owner_id:
-                owner_id = 0
 
             ts = TimeUtils.utc_now()
             had_failures = False
@@ -4725,12 +4717,13 @@ class Database(
                     batch = delete_list[i: i + batch_size]
                     placeholders = ",".join(["?"] * len(batch))
                     try:
+                        # ✅ BW-FIX-1: قيد إضافي added_by=0
                         rc = await self._execute_with_conn(
                             conn,
                             f"DELETE FROM banned_words "
-                            f"WHERE chat_id = ? "
+                            f"WHERE chat_id = ? AND added_by = ? "
                             f"AND word IN ({placeholders})",
-                            GLOBAL_CHAT_ID, *batch,
+                            GLOBAL_CHAT_ID, IMPORT_MARKER_ADDED_BY, *batch,
                         )
                         deleted_count += (
                             rc if isinstance(rc, int) and rc >= 0
@@ -4749,10 +4742,12 @@ class Database(
                 for i in range(0, len(insert_list), batch_size):
                     batch_words = insert_list[i: i + batch_size]
                     batch_params = [
-                        (w, GLOBAL_CHAT_ID, owner_id, ts)
+                        (w, GLOBAL_CHAT_ID,
+                         IMPORT_MARKER_ADDED_BY, ts)
                         for w in batch_words
                     ]
                     try:
+                        # ✅ BW-FIX-1: added_by=0 للكلمات من الملف
                         rc = await self._executemany_with_conn(
                             conn,
                             """INSERT OR IGNORE INTO banned_words
@@ -4783,11 +4778,14 @@ class Database(
 
             if deleted_count or inserted_count:
                 logger.info(
-                    f"🔄 banned_words sync: "
-                    f"🗑️ -{deleted_count} | ➕ +{inserted_count}"
+                    f"🔄 banned_words sync (BW-FIX-1): "
+                    f"🗑️ -{deleted_count} (من الملف) | "
+                    f"➕ +{inserted_count} (من الملف)"
                 )
             else:
-                logger.info("ℹ️ banned_words: لا تغيير فعلي في DB")
+                logger.info(
+                    "ℹ️ banned_words: لا تغيير فعلي في DB"
+                )
 
             if CACHE_AVAILABLE:
                 try:
@@ -4795,8 +4793,10 @@ class Database(
                 except Exception:
                     pass
             try:
-                import utils  # noqa: F401
-                inv = getattr(utils, "invalidate_banned_words_cache_async", None)
+                import utils
+                inv = getattr(
+                    utils, "invalidate_banned_words_cache_async", None
+                )
                 if inv is not None:
                     await inv()
             except Exception as e:
@@ -4806,7 +4806,17 @@ class Database(
         except Exception as e:
             logger.error(f"❌ banned_words: {e}", exc_info=True)
 
+    # ═══════════════════════════════════════════════════════════════
+    # 🆕 v7.7.57 BW-FIX-2: _import_auto_replies مع حماية ردود البوت
+    # ═══════════════════════════════════════════════════════════════
     async def _import_auto_replies(self, conn):
+        """
+        🆕 v7.7.57 BW-FIX-2 CRITICAL:
+        نفس منطق BW-FIX-1 لكن لـ auto_replies.
+
+        علامة: added_by=0 للردود المُستوردة من auto_replies.py.
+        الردود المُضافة عبر البوت (added_by=user_id) محصّنة.
+        """
         try:
             from auto_replies import AUTO_REPLIES
             if not AUTO_REPLIES:
@@ -4911,14 +4921,20 @@ class Database(
                 conn, _sql_get_setting_value(), "auto_replies_hash"
             )
             if stored_hash == current_hash:
-                logger.info("ℹ️ الردود التلقائية لم تتغيّر")
+                logger.info(
+                    "ℹ️ auto_replies.py لم يتغيّر — تخطي "
+                    "(ردود البوت محفوظة)"
+                )
                 return
 
+            # ✅ BW-FIX-2: جلب فقط صفوف الملف (added_by=0)
             existing_rows = await self._fetchall_with_conn(
                 conn,
-                "SELECT chat_id, keyword FROM auto_replies",
+                "SELECT chat_id, keyword FROM auto_replies "
+                "WHERE added_by = ?",
+                IMPORT_MARKER_ADDED_BY,
             )
-            existing_global: Set[Tuple[int, str]] = set()
+            existing_file_keys: Set[Tuple[int, str]] = set()
             for r in (existing_rows or []):
                 cid = r.get("chat_id")
                 kw = (r.get("keyword") or "").lower()
@@ -4928,19 +4944,22 @@ class Database(
                     except (TypeError, ValueError):
                         continue
                     if cid_int == GLOBAL_CHAT_ID:
-                        existing_global.add((cid_int, kw))
+                        existing_file_keys.add((cid_int, kw))
 
-            to_delete = existing_global - set(normalized.keys())
+            # ✅ BW-FIX-2: to_delete = ردود الملف المُزالة من المصدر فقط
+            to_delete = existing_file_keys - set(normalized.keys())
             to_upsert = set(normalized.keys())
 
             allowed, reason = self._safety_check_mass_delete(
-                "auto_replies", len(existing_global), len(to_delete)
+                "auto_replies",
+                len(existing_file_keys),
+                len(to_delete),
             )
             if not allowed:
                 logger.error(
                     f"❌ auto_replies: رفض الحذف الجماعي — {reason}. "
                     f"الحذف المحتمل: {len(to_delete)}/"
-                    f"{len(existing_global)}. تخطي المزامنة لحماية البيانات."
+                    f"{len(existing_file_keys)}. تخطي المزامنة."
                 )
                 return
 
@@ -4950,11 +4969,14 @@ class Database(
             if to_delete:
                 for chat_id, keyword in to_delete:
                     try:
+                        # ✅ BW-FIX-2: قيد إضافي added_by=0
                         rc = await self._execute_with_conn(
                             conn,
                             "DELETE FROM auto_replies "
-                            "WHERE chat_id = ? AND keyword = ?",
+                            "WHERE chat_id = ? AND keyword = ? "
+                            "AND added_by = ?",
                             chat_id, keyword,
+                            IMPORT_MARKER_ADDED_BY,
                         )
                         deleted_count += (
                             rc if isinstance(rc, int) and rc >= 0 else 1
@@ -4980,6 +5002,7 @@ class Database(
                             data.get("media_id"),
                             data.get("buttons"),
                             TimeUtils.utc_now(), 1,
+                            IMPORT_MARKER_ADDED_BY,  # ✅ added_by=0
                         ))
                     try:
                         rc = await self._executemany_with_conn(
@@ -4987,15 +5010,17 @@ class Database(
                             """INSERT INTO auto_replies
                                (chat_id, keyword, reply, reply_type,
                                 reply_media_id, reply_buttons,
-                                created_at, is_active, usage_count)
-                               VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0)
+                                created_at, is_active, added_by,
+                                usage_count)
+                               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
                                ON CONFLICT (chat_id, keyword)
                                DO UPDATE SET
                                    reply = EXCLUDED.reply,
                                    reply_type = EXCLUDED.reply_type,
                                    reply_media_id = EXCLUDED.reply_media_id,
                                    reply_buttons = EXCLUDED.reply_buttons,
-                                   is_active = 1""",
+                                   is_active = 1
+                               WHERE auto_replies.added_by = 0""",
                             batch_params,
                         )
                         upserted_count += (
@@ -5010,8 +5035,7 @@ class Database(
 
             if had_failures:
                 logger.error(
-                    "❌ auto_replies: فشل جزئي — لن يُحدَّث hash "
-                    "(ستُعاد المزامنة في التشغيل التالي)"
+                    "❌ auto_replies: فشل جزئي — لن يُحدَّث hash"
                 )
                 return
 
@@ -5021,12 +5045,9 @@ class Database(
 
             if deleted_count or upserted_count:
                 logger.info(
-                    f"🔄 auto_replies sync: "
-                    f"🗑️ -{deleted_count} | ⬆️ ~{upserted_count}"
-                )
-            else:
-                logger.info(
-                    "ℹ️ auto_replies: لا تغيير فعلي في DB"
+                    f"🔄 auto_replies sync (BW-FIX-2): "
+                    f"🗑️ -{deleted_count} (من الملف) | "
+                    f"⬆️ ~{upserted_count} (من الملف)"
                 )
 
             if CACHE_AVAILABLE:
@@ -5280,8 +5301,7 @@ class Database(
         """
         ⚠️ PA-5 (v7.7.55): على MySQL، CREATE/ALTER TABLE يُسبّب implicit
         commit — أي أن "المعاملة" المُحيطة بهذه الدالة (عبر
-        self.transaction()) غير حقيقية على MySQL. القيد مقصود،
-        لأن MySQL لا يدعم DDL معاملاتي. باقي DBs (PG/SQLite) آمنة.
+        self.transaction()) غير حقيقية على MySQL.
         """
         tables_hash = self._compute_tables_hash()
         legacy_tables_hash = self._compute_legacy_tables_hash()
@@ -5301,8 +5321,7 @@ class Database(
             )
             if not ok:
                 logger.error(
-                    "❌ فشل حفظ tables_hash الجديد — سيُعاد "
-                    "في التشغيل التالي"
+                    "❌ فشل حفظ tables_hash الجديد"
                 )
             stored_tables_hash = tables_hash
 
@@ -5314,7 +5333,7 @@ class Database(
             )
             if not ok:
                 logger.error(
-                    "❌ فشل حفظ tables_hash — قد يُعاد create_tables"
+                    "❌ فشل حفظ tables_hash"
                 )
             logger.info(
                 f"✅ create_tables في "
@@ -5342,7 +5361,7 @@ class Database(
             )
             if not ok:
                 logger.error(
-                    "❌ فشل حفظ bootstrap_hash — قد يُعاد migrate"
+                    "❌ فشل حفظ bootstrap_hash"
                 )
             logger.info(f"✅ ترحيل في {elapsed:.2f}s")
 
@@ -5385,10 +5404,6 @@ class Database(
 
                 self._in_bootstrap_tx = True
                 try:
-                    # ✅ v7.7.54 FIX-6: transaction موحّد لكل DBs
-                    # ⚠️ PA-5: على MySQL، DDL يُسبّب implicit commit —
-                    # المعاملة الفعلية غير مضمونة لكن لا ضرر (كل
-                    # عملية idempotent عبر hash guards).
                     async with self.transaction() as conn:
                         await self._do_bootstrap_inner(conn)
                 finally:
@@ -6580,10 +6595,8 @@ class Database(
         """
         ✅ v7.7.54 FIX-5: التحقق من أن كل post_id ينتمي فعلاً إلى
         channel_db_id المُعلن.
-        ✅ v7.7.55 PA-2: عند فشل الاستعلام نرفض جميع الأزواج
-        (return []) بدلاً من تمريرها بلا تحقق.
-        ✅ v7.7.56 H-4: تحويل int آمن لكل صف بدل انهيار جماعي عند
-        وجود id غير رقمي واحد.
+        ✅ v7.7.55 PA-2: عند فشل الاستعلام نرفض جميع الأزواج.
+        ✅ v7.7.56 H-4: تحويل int آمن لكل صف.
         """
         if not updates:
             return []
@@ -6602,7 +6615,6 @@ class Database(
                     f"  AND id IN ({placeholders})",
                     ch_id, *post_ids,
                 )
-                # ✅ H-4: تحويل int آمن لكل صف
                 found_ids: Set[int] = set()
                 for r in (rows or []):
                     rid = r.get("id")
@@ -6848,10 +6860,7 @@ class Database(
     async def expire_penalties(self) -> int:
         """
         ✅ v7.7.54 FIX-11: إزالة تكرار query زائد.
-        ✅ v7.7.56 PA-6: إضافة `or batch_expired == 0` لمنع حلقة
-        لا نهائية إذا أعاد الاستعلام دفعة كاملة (got_rows == BATCH)
-        لكن لم يُحدَّث أي صف (batch_expired == 0). هذا يحدث عند
-        فشل UPDATE صامت أو عدم تطابق WHERE مع صفوف ACTIVE.
+        ✅ v7.7.56 PA-6: `or batch_expired == 0` لمنع حلقة لا نهائية.
         """
         total_expired = 0
         BATCH = EXPIRED_PENALTIES_BATCH
@@ -6859,7 +6868,6 @@ class Database(
         try:
             while True:
                 iterations += 1
-                # ✅ PA-6: سقف دفاعي
                 if iterations > EXPIRE_PENALTIES_MAX_ITER:
                     logger.error(
                         f"❌ expire_penalties: بلغ سقف التكرارات "
@@ -6889,8 +6897,6 @@ class Database(
                         )
 
                 total_expired += batch_expired
-                # ✅ FIX-11 + PA-6 (v7.7.56): الخروج عند عدم وجود
-                # المزيد من الصفوف أو عند عدم تحقيق تقدّم فعلي.
                 if got_rows < BATCH or batch_expired == 0:
                     if (got_rows >= BATCH
                             and batch_expired == 0
@@ -7228,13 +7234,6 @@ def _get_pg_query_fallback() -> str:
     """
 
 def _get_pg_query_no_mv_fallback() -> str:
-    """
-    ✅ v7.7.54 FIX-1: نسخة مستقلة تماماً عن mv_active_user_limits.
-    تستخدم subscriptions + plans مباشرة عبر LATERAL.
-    يُستخدَم عندما self._mv_available=False.
-
-    Params order: (now, owner_id, now, limit)
-    """
     return f"""
         SELECT uc.id, uc.channel_id, uc.user_id,
                u.auto_publish, u.auto_recycle,
@@ -7461,6 +7460,7 @@ __all__ = [
     "HEAVY_TABLES_FOR_AUTOVACUUM", "SMALL_TABLES_FOR_AUTOVACUUM",
     "IMPORT_MASS_DELETE_MIN_ABSOLUTE", "IMPORT_MASS_DELETE_MAX_RATIO",
     "DB_SIZE_CACHE_TTL",
+    "IMPORT_MARKER_ADDED_BY",
     "internal_cache", "InternalQueryCache", "SimpleCache",
     "SettingsCache",
     "user_cache", "banned_words_cache", "settings_cache",
