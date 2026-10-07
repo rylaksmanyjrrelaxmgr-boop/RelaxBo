@@ -1,17 +1,27 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-handlers_callback.py - معالج الأزرار (v9.7.10)
+handlers_callback.py - معالج الأزرار (v9.7.11)
 =====================================================================
+🆕 v9.7.11 (PERF-INTEGRATION — تكامل مع handlers_message v7.18.8):
+    🟠 PERF-CB-1: إضافة helper _invalidate_message_caches
+                  (يُبطل caches handlers_message المحلية بعد تعديل الإعدادات)
+                  • _invalidate_group_log_cache       (PERF-1)
+                  • _invalidate_sec_settings_local    (PERF-2)
+                  • _invalidate_admin_check_cache     (PERF-7)
+    🟠 PERF-CB-2: ربط الإبطال مع _invalidate_security_settings_cache
+                  → أي تعديل أمان يُبطل 5 طبقات cache بدل 2
+    🟠 PERF-CB-3: ربط الإبطال مع _invalidate_log_channel_menu_cache
+                  → تغيير قناة السجل يُبطل cache handlers_message PERF-1
+    🟡 PERF-CB-4: log تشخيصي عند فشل استدعاء invalidation
+    🟢 PERF-CB-5: توثيق واضح في docstrings لكل مسار إبطال
+    ✅ الحفاظ الكامل على سلوك v9.7.10
+
 🆕 v9.7.10 (MISSING-METHODS-FIX):
     🔴 MISSING-1: إضافة 3 دوال كانت تُستدعى بدون تعريف:
         • _show_updates_channel           (زر updates_channel_btn)
         • _show_metrics_dashboard         (admin_metrics_live/reset)
         • _show_admin_update_channel_menu (admin_update_ch_btn)
-        كانت تُسبّب AttributeError صامتاً يُلتقط في try/except
-        → الأزرار "لا تعمل" بدون رسالة خطأ.
-        الأثر قبل الإصلاح: 3 أزرار ميتة (منذ v9.7.3).
-        الأثر بعد الإصلاح: الأزرار تعمل بشكل صحيح.
     ✅ الحفاظ الكامل على سلوك v9.7.9
 
 🆕 v9.7.9 (CLEANUP-AND-HARDENING):
@@ -239,6 +249,117 @@ _MEMBERSHIP_IN_STATUSES = frozenset(('member', 'administrator'))
 _membership_recent_reports: Dict[int, float] = {}
 _membership_table_created = False
 
+
+# ═══════════════════════════════════════════════════════════════════
+# 🆕 v9.7.11 PERF-CB-1: Message-handlers cache invalidation bridge
+# ═══════════════════════════════════════════════════════════════════
+
+_message_handlers_module = None
+_message_handlers_import_attempted = False
+
+
+def _get_message_handlers_module():
+    """
+    🆕 v9.7.11: تحميل handlers_message مرة واحدة (lazy).
+    يُعيد الوحدة أو None إذا فشل الاستيراد.
+    """
+    global _message_handlers_module, _message_handlers_import_attempted
+    if _message_handlers_module is not None:
+        return _message_handlers_module
+    if _message_handlers_import_attempted:
+        return None
+    _message_handlers_import_attempted = True
+    try:
+        _message_handlers_module = importlib.import_module(
+            "handlers_message"
+        )
+    except ImportError:
+        try:
+            _message_handlers_module = importlib.import_module(
+                ".handlers_message", package=__package__
+            )
+        except (ImportError, TypeError, ValueError):
+            _message_handlers_module = None
+    return _message_handlers_module
+
+
+async def _invalidate_message_caches(
+    chat_id=None, user_id=None, reason="",
+):
+    """
+    🆕 v9.7.11 PERF-CB-1: إبطال caches handlers_message المحلية.
+
+    يُبطل:
+        • _invalidate_group_log_cache(chat_id)      (PERF-1 — 60s TTL)
+        • _invalidate_sec_settings_local(chat_id)   (PERF-2 — 5s TTL)
+        • _invalidate_admin_check_cache(chat_id)    (PERF-7 — 30s TTL)
+
+    يُنادى من:
+        • _invalidate_security_settings_cache
+        • _invalidate_log_channel_menu_cache
+        • أي مسار يُعدّل إعدادات أمان المجموعة
+
+    ⚠️ لا يفشل إذا لم تكن الوحدة متاحة — يُسجّل debug فقط.
+    """
+    mod = _get_message_handlers_module()
+    if mod is None:
+        if reason:
+            logger.debug(
+                "🧹 PERF-CB: handlers_message غير متاح — تخطي invalidation "
+                "(%s)",
+                reason,
+            )
+        return
+
+    # 🟠 PERF-2: cache إعدادات الأمان المحلية
+    try:
+        inv_sec = getattr(mod, "_invalidate_sec_settings_local", None)
+        if callable(inv_sec):
+            inv_sec(chat_id)
+    except Exception as e:
+        logger.debug(
+            "🧹 PERF-CB: _invalidate_sec_settings_local(%s) failed: %s",
+            chat_id, e,
+        )
+
+    # 🟠 PERF-1: cache قناة السجل
+    try:
+        inv_log = getattr(mod, "_invalidate_group_log_cache", None)
+        if callable(inv_log):
+            inv_log(chat_id)
+    except Exception as e:
+        logger.debug(
+            "🧹 PERF-CB: _invalidate_group_log_cache(%s) failed: %s",
+            chat_id, e,
+        )
+
+    # 🟡 PERF-7: cache فحص الأدمن
+    try:
+        inv_admin = getattr(mod, "_invalidate_admin_check_cache", None)
+        if callable(inv_admin):
+            # إذا كنا نعرف user_id → إبطال محدد، وإلا → كل المجموعة
+            if user_id is not None:
+                inv_admin(chat_id, user_id)
+            else:
+                inv_admin(chat_id)
+    except Exception as e:
+        logger.debug(
+            "🧹 PERF-CB: _invalidate_admin_check_cache(%s, %s) failed: %s",
+            chat_id, user_id, e,
+        )
+
+    if reason:
+        logger.debug(
+            "🧹 PERF-CB: أُبطلت caches handlers_message | chat=%s "
+            "user=%s | %s",
+            chat_id, user_id, reason,
+        )
+
+
+# ═══════════════════════════════════════════════════════════════════
+# Membership handlers
+# ═══════════════════════════════════════════════════════════════════
+
 async def _membership_ensure_table() -> None:
     global _membership_table_created
     if _membership_table_created: return
@@ -421,6 +542,9 @@ async def handle_my_chat_member(update, context):
             getattr(user, 'full_name', None) or '',
             getattr(user, 'username', None), new_status)
     except Exception: pass
+
+    # 🆕 v9.7.11 PERF-CB: عند إضافة البوت لمجموعة جديدة —
+    # لا حاجة لإبطال caches handlers_message لأنها لم تُنشأ بعد
     log_channel = await _membership_get_log_channel()
     if not log_channel: return
     try: text = _membership_build_report_text(chat, user, new_status)
@@ -710,11 +834,35 @@ def _prune_kicked_notify_state(context, now):
             except Exception: pass
     except Exception: pass
 
+
+# ═══════════════════════════════════════════════════════════════════
+# 🆕 v9.7.11 PERF-CB-2: Log-channel cache invalidation (مع ربط)
+# ═══════════════════════════════════════════════════════════════════
+
 async def _invalidate_log_channel_menu_cache(chat_id):
-    try: await internal_cache.invalidate(_log_channel_cache_key(chat_id))
-    except Exception: pass
-    try: await internal_cache.invalidate(f"group_log_{chat_id}")
-    except Exception: pass
+    """
+    🆕 v9.7.11 PERF-CB-3: إبطال 3 طبقات:
+        1) internal_cache (handlers_callback)
+        2) group_log_{chat_id} (misc)
+        3) handlers_message._invalidate_group_log_cache (PERF-1)
+    """
+    try:
+        await internal_cache.invalidate(_log_channel_cache_key(chat_id))
+    except Exception:
+        pass
+    try:
+        await internal_cache.invalidate(f"group_log_{chat_id}")
+    except Exception:
+        pass
+    # 🆕 v9.7.11 PERF-CB-3: ربط مع handlers_message
+    try:
+        await _invalidate_message_caches(
+            chat_id=chat_id, reason="log_channel_change"
+        )
+    except Exception as e:
+        logger.debug(
+            "🧹 PERF-CB: _invalidate_message_caches (log) failed: %s", e
+        )
 
 def _set_sec_chat(context, chat_id):
     try:
@@ -1647,8 +1795,21 @@ class CallbackHandlers:
                 await _trans('error_occurred', lang, "❌"),
                 bot=context.bot)
 
+    # ═════════════════════════════════════════════════════════════════
+    # 🆕 v9.7.11 PERF-CB-2: ربط 5 طبقات cache
+    # ═════════════════════════════════════════════════════════════════
     @staticmethod
     async def _invalidate_security_settings_cache(chat_id):
+        """
+        🆕 v9.7.11 PERF-CB-2: إبطال 5 طبقات cache لأي تعديل أمان:
+
+        الطبقات:
+            1) settings_cache (cache.py — DB-level cache)
+            2) _security_stats_cache_local (handlers_callback — stats)
+            3) bridge_invalidate_sec_cache (utils bridge)
+            4) _invalidate_sec_settings_local (handlers_message PERF-2)
+            5) _invalidate_admin_check_cache  (handlers_message PERF-7)
+        """
         try:
             await settings_cache.invalidate_security(chat_id)
         except Exception:
@@ -1664,6 +1825,16 @@ class CallbackHandlers:
                 logger.debug(
                     f"bridge_invalidate_sec_cache({chat_id}) failed: {e}"
                 )
+        # 🆕 v9.7.11 PERF-CB-2: ربط مع handlers_message
+        try:
+            await _invalidate_message_caches(
+                chat_id=chat_id, reason="security_settings_change"
+            )
+        except Exception as e:
+            logger.debug(
+                "🧹 PERF-CB: _invalidate_message_caches (security) "
+                "failed: %s", e,
+            )
 
     @staticmethod
     async def _get_security_settings_cached(chat_id):
@@ -3739,6 +3910,7 @@ class CallbackHandlers:
                             share_info = f"\n\n⚠️ {len(others)}"
                     except Exception: pass
                 ok = await DB.remove_group_log_channel(chat_id)
+                # 🆕 v9.7.11 PERF-CB-3: إبطال 3 طبقات
                 await _invalidate_log_channel_menu_cache(chat_id)
                 if not ok:
                     await safe_edit(query,
@@ -4552,6 +4724,15 @@ class CallbackHandlers:
                 if _SECURITY_BRIDGE_AVAILABLE:
                     try: bridge_invalidate_sec_cache(None)
                     except Exception: pass
+                # 🆕 v9.7.11: إبطال كل caches handlers_message
+                try:
+                    await _invalidate_message_caches(
+                        chat_id=None, reason="admin_refresh_cache"
+                    )
+                except Exception as e:
+                    logger.debug(
+                        "🧹 PERF-CB: admin refresh invalidation failed: %s", e
+                    )
                 await safe_edit(query,
                     await _trans('cache_refreshed_admin', lang, "🔄"),
                     bot=context.bot); return
@@ -5318,8 +5499,7 @@ class CallbackHandlers:
             stored = context.user_data.get('auto_chat')
             if stored is not None:
                 try: chat_id = int(stored)
-                except (TypeError, ValueError): chat_id = None
-        if chat_id is None:
+                except (TypeError, ValueError): chat_id = None        if chat_id is None:
             await safe_edit(query,
                 await _trans('group_not_specified', lang, "❌"),
                 bot=context.bot); return
@@ -6087,13 +6267,20 @@ __all__ = [
     "_SECURITY_BRIDGE_AVAILABLE",
     "SECURITY_TOGGLE_MAP", "NEW_SECURITY_DEFAULTS",
     "bridge_get_security_settings", "bridge_invalidate_sec_cache",
+
+    # 🆕 v9.7.11 — PERF integration
+    "_invalidate_message_caches",
+    "_get_message_handlers_module",
+    "_message_handlers_module",
+    "_message_handlers_import_attempted",
 ]
 
 try:
     _bridge_icon = "✅" if _SECURITY_BRIDGE_AVAILABLE else "⚠️"
     logger.info(
-        "🛡️ handlers_callback.py v9.7.10 MISSING-METHODS-FIX loaded | "
-        "Bridge=%s | Antiflood-Msgs=%d | Antiflood-Secs=%d",
+        "🛡️ handlers_callback.py v9.7.11 PERF-INTEGRATION loaded | "
+        "Bridge=%s | Antiflood-Msgs=%d | Antiflood-Secs=%d | "
+        "Message-Cache-Invalidation=ON",
         _bridge_icon,
         len(_ANTIFLOOD_MESSAGES_OPTIONS),
         len(_ANTIFLOOD_SECONDS_OPTIONS),
