@@ -1,7 +1,11 @@
 # handlers/handlers_group_log.py
-"""
-handlers_group_log.py — MessageHandler لاستقبال معرّف قناة السجل (v1.6.3)
+r"""
+handlers_group_log.py — MessageHandler لاستقبال معرّف قناة السجل (v1.6.4)
 =====================================================================
+🆕 v1.6.4 (SYNTAX-WARNING-FIX):
+    ✅ إضافة r prefix لـdocstring الرئيسي
+       (يحتوي \+ في وصف F4 → كان يسبب SyntaxWarning في Python 3.12)
+
 🆕 v1.6.3 (SECURITY + UX FIXES):
     🔴 F1  رفض الرسائل المُعاد توجيهها من مستخدم صراحةً
            (كان نصها يُفسَّر كمدخل → يمكن تعيين قناة خاطئة بخطأ)
@@ -871,6 +875,6 @@ __all__ = [
     "_invalidate_log_channel_menu_cache",
     "_safe_html",
     "_passes_initial_validation",
-    "_safe_pop_user_data",       # 🆕 v1.6.3
-    "_looks_like_url",            # 🆕 v1.6.3
+    "_safe_pop_user_data",
+    "_looks_like_url",
 ]
