@@ -4,46 +4,45 @@
 """
 db_diagnostics.py — PostgreSQL/MySQL/SQLite Database Diagnostics
 ================================================================================
-v6.8.0 — VACUUM-COVERAGE-FIX + FULL-COVERAGE + AUTO-CLEANUP
+v6.9.0 — FULL-TABLES-VACUUM + AUTO-DISCOVERY
+
+🆕 v6.9.0 (FULL-TABLES-VACUUM):
+    🔴 FIX: DB_VACUUM_MODE="all" — وضع جديد يكتشف كل الجداول تلقائياً
+    🔴 FIX: الافتراضي الآن "all" بدلاً من "maintenance"
+             → VACUUM يعمل على **كل** جداول المستخدم
+    🟢 NEW: _discover_all_tables_postgres() — من pg_class/pg_namespace
+    🟢 NEW: _discover_all_tables_mysql() — من information_schema
+    🟢 NEW: _discover_all_tables_sqlite() — من sqlite_master
+    🟢 NEW: تخطي جداول النظام تلقائياً (pg_*, sqlite_*, etc)
+    🟢 NEW: DB_VACUUM_EXCLUDE_TABLES env — استثناء جداول محددة
+    🟢 NEW: VACUUM (ANALYZE) بدلاً من VACUUM فقط (تحديث الإحصائيات)
+    🟢 NEW: عرض عدد الجداول المكتشفة قبل البدء
 
 🆕 v6.8.0 (VACUUM-COVERAGE-FIX):
     🔴 FIX-HIGH: vacuum_analyze_tables() و run_maintenance() كانا يعملان
                  على HEAVY_TABLES_FOR_AUTOVACUUM فقط (4 جداول)
                  → الآن يعملان على MAINTENANCE_TABLES (10 جداول)
-                 → admin_logs أصبح مُضمَّناً لأول مرة!
     🟢 NEW: _get_vacuum_target_tables() — دمج ذكي مع إزالة التكرار
-    🟢 NEW: DB_VACUUM_MODE env — التحكم بمصدر القائمة:
-              "maintenance" (افتراضي) | "heavy" | "both"
-    🟢 NEW: عرض عدد الجداول المستهدفة قبل التنفيذ
+    🟢 NEW: DB_VACUUM_MODE env — التحكم بمصدر القائمة
 
 🆕 v6.7.0 (FULL-COVERAGE):
     • FIX-HIGH: إزالة الحد الثابت (12 جدولاً) في قسم Dead Tuples
-                → أصبح قابلاً للضبط عبر DB_DIAG_MAX_DEAD_TABLES
-    • NEW: قسم "1b. جداول نظيفة (dead=0)" — يظهر الجداول السليمة
-    • NEW: قسم "2b. تغطية autovacuum لكل الجداول" — بدلاً من HEAVY فقط
-    • NEW: قسم "5b. صحة الفهارس العامة" — كشف جداول بدون PK/فهارس
-    • NEW: توسيع AUTO_CLEANUP_WATCH_TABLES ليشمل جداول سريعة النمو
-    • NEW: دوال _get_all_tables_autovacuum_status(),
-           _get_all_tables_index_health(),
-           _count_all_user_tables()
-    • ENV جديدة: DB_DIAG_MAX_DEAD_TABLES, DB_DIAG_MAX_CLEAN_TABLES,
-                 DB_DIAG_MAX_SIZES, DB_DIAG_SHOW_ALL_TABLES,
-                 DB_DIAG_SHOW_INDEX_HEALTH
+    • NEW: قسم "1b. جداول نظيفة (dead=0)"
+    • NEW: قسم "2b. تغطية autovacuum لكل الجداول"
+    • NEW: قسم "5b. صحة الفهارس العامة"
+    • NEW: توسيع AUTO_CLEANUP_WATCH_TABLES
 
 ✅ v6.6.0 (AUTO-CLEANUP):
     • auto_cleanup_check_and_run() — فحص الحجم + تشغيل صيانة تلقائية
-    • _auto_cleanup_loop()          — مهمة دورية (كل 6 ساعات افتراضياً)
-    • start_auto_cleanup()          — بدء المهمة عند إقلاع البوت
-    • stop_auto_cleanup()           — إيقاف نظيف عند shutdown
-    • get_auto_cleanup_status()     — حالة النظام للعرض
-    • _get_table_size_mb()          — حساب حجم جدول بالميغابايت
-    • متغيرات ENV جديدة (DB_AUTO_CLEANUP_*)
-    • _check_admin_logs_size()      — يعرض حالة auto-cleanup
+    • _auto_cleanup_loop()          — مهمة دورية
+    • start_auto_cleanup()          — بدء المهمة
+    • stop_auto_cleanup()           — إيقاف نظيف
+    • get_auto_cleanup_status()     — حالة النظام
+    • _get_table_size_mb()          — حجم جدول بالميغابايت
+    • _check_admin_logs_size()      — حالة auto-cleanup
 
 🔴 FIX-CRITICAL (v6.5.1):
     تصحيح العمود في user_violations من created_at → last_violation_time
-    - الإصلاح في preview_maintenance + run_maintenance
-    - + إضافة IS NOT NULL قبل المقارنة
 
 الاستخدام:
     from db_diagnostics import (
@@ -75,7 +74,7 @@ logger = logging.getLogger(__name__)
 # VERSION
 # =============================================================================
 
-VERSION = "6.8.0"
+VERSION = "6.9.0"
 
 
 # =============================================================================
@@ -177,8 +176,16 @@ def _env_str(name: str, default: str) -> str:
     return val.strip()
 
 
+def _env_list(name: str, default: Tuple[str, ...] = ()) -> Tuple[str, ...]:
+    val = os.getenv(name)
+    if val is None:
+        return default
+    items = [item.strip() for item in val.split(",") if item.strip()]
+    return tuple(items) if items else default
+
+
 # =============================================================================
-# AUTO-CLEANUP CONFIGURATION (v6.6.0)
+# AUTO-CLEANUP CONFIGURATION
 # =============================================================================
 
 AUTO_CLEANUP_ENABLED = _env_bool("DB_AUTO_CLEANUP_ENABLED", True)
@@ -197,7 +204,6 @@ AUTO_CLEANUP_USER_VIOLATIONS_DAYS = _env_int(
 )
 AUTO_CLEANUP_VACUUM = _env_bool("DB_AUTO_CLEANUP_VACUUM", True)
 
-# ✅ v6.7.0: توسيع ليشمل جداول سريعة النمو
 AUTO_CLEANUP_WATCH_TABLES: Tuple[str, ...] = (
     "admin_logs",
     "payment_logs",
@@ -210,7 +216,7 @@ AUTO_CLEANUP_WATCH_TABLES: Tuple[str, ...] = (
 
 
 # =============================================================================
-# DIAGNOSTIC DISPLAY CONFIGURATION (v6.7.0)
+# DIAGNOSTIC DISPLAY CONFIGURATION
 # =============================================================================
 
 DB_DIAG_MAX_DEAD_TABLES = _env_int("DB_DIAG_MAX_DEAD_TABLES", 30)
@@ -221,21 +227,36 @@ DB_DIAG_SHOW_INDEX_HEALTH = _env_bool("DB_DIAG_SHOW_INDEX_HEALTH", True)
 
 
 # =============================================================================
-# 🆕 v6.8.0: VACUUM TARGET CONFIGURATION
+# 🆕 v6.9.0: VACUUM TARGET CONFIGURATION
 # =============================================================================
-
-# "maintenance" (افتراضي — MAINTENANCE_TABLES — 10 جداول)
+# "all"         (افتراضي جديد — كل جداول المستخدم المكتشفة تلقائياً)
+# "maintenance" (MAINTENANCE_TABLES — 10 جداول)
 # "heavy"       (السلوك القديم — HEAVY_TABLES_FOR_AUTOVACUUM — 4 جداول)
-# "both"        (الاتحاد)
-DB_VACUUM_MODE = _env_str("DB_VACUUM_MODE", "maintenance").lower()
+# "both"        (اتحاد maintenance + heavy)
+DB_VACUUM_MODE = _env_str("DB_VACUUM_MODE", "all").lower()
 
-_VALID_VACUUM_MODES = frozenset({"maintenance", "heavy", "both"})
+_VALID_VACUUM_MODES = frozenset({"all", "maintenance", "heavy", "both"})
 if DB_VACUUM_MODE not in _VALID_VACUUM_MODES:
     logger.warning(
-        "⚠️ DB_VACUUM_MODE='%s' غير معروف — استخدام 'maintenance'",
+        "⚠️ DB_VACUUM_MODE='%s' غير معروف — استخدام 'all'",
         DB_VACUUM_MODE,
     )
-    DB_VACUUM_MODE = "maintenance"
+    DB_VACUUM_MODE = "all"
+
+# 🆕 v6.9.0: استثناء جداول محددة من VACUUM (مفصولة بفواصل)
+DB_VACUUM_EXCLUDE_TABLES: Tuple[str, ...] = _env_list(
+    "DB_VACUUM_EXCLUDE_TABLES", ()
+)
+
+# 🆕 v6.9.0: جداول النظام التي يجب استثناؤها دائماً
+_ALWAYS_EXCLUDE_TABLES: frozenset = frozenset({
+    "spatial_ref_sys",         # PostGIS
+    "geography_columns",
+    "geometry_columns",
+    "raster_columns",
+    "raster_overviews",
+    "pg_stat_statements",      # PG extension
+})
 
 
 # =============================================================================
@@ -609,20 +630,162 @@ def _normalize_factor(value: Any) -> Optional[str]:
 
 
 # =============================================================================
-# 🆕 v6.8.0: VACUUM TARGET TABLES
+# 🆕 v6.9.0: TABLE DISCOVERY (Full coverage)
 # =============================================================================
 
-def _get_vacuum_target_tables() -> List[str]:
-    """
-    🆕 v6.8.0: قائمة الجداول المستهدفة لـ VACUUM.
+def _is_excluded_table(name: str) -> bool:
+    """فحص: هل الجدول مستثنى من VACUUM؟"""
+    if not name or not isinstance(name, str):
+        return True
 
-    تُحدَّد عبر DB_VACUUM_MODE:
-        - "maintenance" (افتراضي): MAINTENANCE_TABLES (يشمل admin_logs)
-        - "heavy": HEAVY_TABLES_FOR_AUTOVACUUM (السلوك القديم)
-        - "both": الاتحاد مع إزالة التكرار
+    name_lower = name.lower().strip()
+
+    # جداول النظام دائماً مستثناة
+    if name_lower in _ALWAYS_EXCLUDE_TABLES:
+        return True
+
+    # pg_* / sqlite_* / information_schema
+    if name_lower.startswith("pg_"):
+        return True
+    if name_lower.startswith("sqlite_"):
+        return True
+    if name_lower.startswith("information_schema"):
+        return True
+    if name_lower.startswith("mysql_"):
+        return True
+    if name_lower.startswith("performance_schema"):
+        return True
+    if name_lower.startswith("sys_"):
+        return True
+
+    # استثناءات المستخدم
+    if DB_VACUUM_EXCLUDE_TABLES:
+        for exclude in DB_VACUUM_EXCLUDE_TABLES:
+            if name_lower == exclude.lower().strip():
+                return True
+
+    return False
+
+
+async def _discover_all_tables_postgres() -> List[str]:
+    """🆕 v6.9.0: اكتشاف كل جداول المستخدم في PostgreSQL."""
+    from database import DB
+
+    try:
+        rows = await DB.fetchall("""
+            SELECT c.relname AS table_name
+            FROM pg_class c
+            JOIN pg_namespace n ON n.oid = c.relnamespace
+            WHERE c.relkind = 'r'
+              AND n.nspname = ANY(current_schemas(false))
+              AND n.nspname NOT IN (
+                  'pg_catalog', 'information_schema'
+              )
+            ORDER BY c.relname
+        """)
+        result: List[str] = []
+        seen: Set[str] = set()
+        for r in (rows or []):
+            name = r.get("table_name")
+            if not name:
+                continue
+            if name in seen:
+                continue
+            if _is_excluded_table(name):
+                continue
+            seen.add(name)
+            result.append(name)
+        return result
+    except Exception as exc:
+        logger.warning("_discover_all_tables_postgres: %s", exc)
+        return []
+
+
+async def _discover_all_tables_mysql() -> List[str]:
+    """🆕 v6.9.0: اكتشاف كل جداول المستخدم في MySQL."""
+    from database import DB
+
+    try:
+        rows = await DB.fetchall("""
+            SELECT TABLE_NAME AS table_name
+            FROM information_schema.TABLES
+            WHERE TABLE_SCHEMA = DATABASE()
+              AND TABLE_TYPE = 'BASE TABLE'
+            ORDER BY TABLE_NAME
+        """)
+        result: List[str] = []
+        seen: Set[str] = set()
+        for r in (rows or []):
+            name = r.get("table_name")
+            if not name:
+                continue
+            if name in seen:
+                continue
+            if _is_excluded_table(name):
+                continue
+            seen.add(name)
+            result.append(name)
+        return result
+    except Exception as exc:
+        logger.warning("_discover_all_tables_mysql: %s", exc)
+        return []
+
+
+async def _discover_all_tables_sqlite() -> List[str]:
+    """🆕 v6.9.0: اكتشاف كل جداول المستخدم في SQLite."""
+    from database import DB
+
+    try:
+        rows = await DB.fetchall("""
+            SELECT name AS table_name
+            FROM sqlite_master
+            WHERE type = 'table'
+              AND name NOT LIKE 'sqlite_%'
+            ORDER BY name
+        """)
+        result: List[str] = []
+        seen: Set[str] = set()
+        for r in (rows or []):
+            name = r.get("table_name")
+            if not name:
+                continue
+            if name in seen:
+                continue
+            if _is_excluded_table(name):
+                continue
+            seen.add(name)
+            result.append(name)
+        return result
+    except Exception as exc:
+        logger.warning("_discover_all_tables_sqlite: %s", exc)
+        return []
+
+
+async def _discover_all_tables() -> List[str]:
+    """🆕 v6.9.0: اكتشاف كل الجداول حسب نوع DB."""
+    if _is_postgres():
+        return await _discover_all_tables_postgres()
+    if _is_mysql():
+        return await _discover_all_tables_mysql()
+    return await _discover_all_tables_sqlite()
+
+
+# =============================================================================
+# 🆕 v6.9.0: VACUUM TARGET TABLES (UPGRADED)
+# =============================================================================
+
+async def _get_vacuum_target_tables_async() -> List[str]:
+    """
+    🆕 v6.9.0: قائمة الجداول المستهدفة لـ VACUUM (async).
+
+    يدعم 4 أوضاع:
+        - "all" (افتراضي): كل جداول المستخدم (اكتشاف تلقائي)
+        - "maintenance": MAINTENANCE_TABLES (10 جداول)
+        - "heavy": HEAVY_TABLES_FOR_AUTOVACUUM (4 جداول)
+        - "both": اتحاد maintenance + heavy
 
     Returns:
-        قائمة أسماء جداول بدون تكرار، محافظة على الترتيب.
+        قائمة أسماء جداول بدون تكرار، مع احترام الاستثناءات.
     """
     result: List[str] = []
     seen: Set[str] = set()
@@ -635,8 +798,72 @@ def _get_vacuum_target_tables() -> List[str]:
                 continue
             if t in seen:
                 continue
+            if _is_excluded_table(t):
+                continue
             seen.add(t)
             result.append(t)
+
+    # "all": اكتشاف تلقائي
+    if DB_VACUUM_MODE == "all":
+        discovered = await _discover_all_tables()
+        _add_all(discovered)
+        return result
+
+    # "maintenance"
+    if DB_VACUUM_MODE in ("maintenance", "both"):
+        try:
+            from database_tables import MAINTENANCE_TABLES
+            _add_all(MAINTENANCE_TABLES)
+        except Exception as exc:
+            logger.debug("_get_vacuum_target_tables (maint): %s", exc)
+
+    # "heavy"
+    if DB_VACUUM_MODE in ("heavy", "both"):
+        try:
+            from database import HEAVY_TABLES_FOR_AUTOVACUUM
+            _add_all(HEAVY_TABLES_FOR_AUTOVACUUM)
+        except Exception as exc:
+            logger.debug("_get_vacuum_target_tables (heavy): %s", exc)
+
+    return result
+
+
+def _get_vacuum_target_tables() -> List[str]:
+    """
+    ⚠️ نسخة متزامنة (legacy) — تستخدم فقط في preview_maintenance.
+    للحصول على القائمة الكاملة، استخدم
+    `_get_vacuum_target_tables_async()`.
+    """
+    result: List[str] = []
+    seen: Set[str] = set()
+
+    def _add_all(tables) -> None:
+        for t in (tables or ()):
+            if not t:
+                continue
+            if not isinstance(t, str):
+                continue
+            if t in seen:
+                continue
+            if _is_excluded_table(t):
+                continue
+            seen.add(t)
+            result.append(t)
+
+    # "all" (sync) — استخدم MAINTENANCE + HEAVY كتقدير
+    # (لا يمكن discovery تلقائي بدون await)
+    if DB_VACUUM_MODE == "all":
+        try:
+            from database_tables import MAINTENANCE_TABLES
+            _add_all(MAINTENANCE_TABLES)
+        except Exception:
+            pass
+        try:
+            from database import HEAVY_TABLES_FOR_AUTOVACUUM
+            _add_all(HEAVY_TABLES_FOR_AUTOVACUUM)
+        except Exception:
+            pass
+        return result
 
     if DB_VACUUM_MODE in ("maintenance", "both"):
         try:
@@ -868,7 +1095,7 @@ async def _get_table_sizes() -> List[Dict[str, Any]]:
 
 
 # =============================================================================
-# SIZE HELPERS (v6.6.0)
+# SIZE HELPERS
 # =============================================================================
 
 async def _get_table_size_mb(table_name: str) -> float:
@@ -1119,11 +1346,11 @@ async def _get_per_table_autovacuum() -> Dict[str, Dict[str, Any]]:
 
 
 # =============================================================================
-# 🆕 v6.7.0: ALL TABLES AUTOVACUUM STATUS
+# ALL TABLES AUTOVACUUM STATUS
 # =============================================================================
 
 async def _get_all_tables_autovacuum_status() -> List[Dict[str, Any]]:
-    """🆕 v6.7.0: فحص حالة autovacuum لكل الجداول."""
+    """فحص حالة autovacuum لكل الجداول."""
     from database import DB, USE_POSTGRES
 
     if not USE_POSTGRES:
@@ -1165,11 +1392,11 @@ async def _get_all_tables_autovacuum_status() -> List[Dict[str, Any]]:
 
 
 # =============================================================================
-# 🆕 v6.7.0: ALL TABLES INDEX HEALTH
+# ALL TABLES INDEX HEALTH
 # =============================================================================
 
 async def _get_all_tables_index_health() -> List[Dict[str, Any]]:
-    """🆕 v6.7.0: كشف الجداول التي تفتقد PK أو بدون أي فهرس."""
+    """كشف الجداول التي تفتقد PK أو بدون أي فهرس."""
     from database import DB, USE_POSTGRES
 
     if not USE_POSTGRES:
@@ -1207,11 +1434,11 @@ async def _get_all_tables_index_health() -> List[Dict[str, Any]]:
 
 
 # =============================================================================
-# 🆕 v6.7.0: COUNT USER TABLES
+# COUNT USER TABLES
 # =============================================================================
 
 async def _count_all_user_tables() -> int:
-    """🆕 v6.7.0: عدد جداول المستخدم الإجمالي."""
+    """عدد جداول المستخدم الإجمالي."""
     from database import DB
 
     if _is_postgres():
@@ -1707,7 +1934,7 @@ def _check_maintenance_consistency() -> Optional[str]:
 
 
 async def _check_admin_logs_size() -> Optional[str]:
-    """🔍 يفحص حجم admin_logs — يعرض حالة auto-cleanup."""
+    """يفحص حجم admin_logs — يعرض حالة auto-cleanup."""
     from database import DB
 
     try:
@@ -2829,9 +3056,7 @@ async def _build_diagnose_lines() -> List[str]:
             remaining = len(not_tuned) - shown_2b
             if remaining > 0:
                 lines.append(
-                    f"<i>… و{remaining} جدول آخر (توسيع "
-                    f"SMALL_TABLES_FOR_AGGRESSIVE_AUTOVACUUM "
-                    f"في database_tables.py يحلّها)</i>"
+                    f"<i>… و{remaining} جدول آخر</i>"
                 )
 
     if USE_POSTGRES and blockers:
@@ -3010,7 +3235,8 @@ async def _build_diagnose_lines() -> List[str]:
         lines.append(
             f"  ⚙️ يُشغَّل كل <b>{AUTO_CLEANUP_INTERVAL_HOURS}h</b> | "
             f"VACUUM: "
-            f"{'ON 🟢' if AUTO_CLEANUP_VACUUM else 'OFF ⚪'}"
+            f"{'ON 🟢' if AUTO_CLEANUP_VACUUM else 'OFF ⚪'} | "
+            f"Mode: <b>{DB_VACUUM_MODE}</b>"
         )
 
     lines.append("")
@@ -3187,7 +3413,7 @@ async def preview_maintenance(
                 tables_exist.add(name)
     except Exception as exc:
         logger.warning(f"preview_maintenance(tables): {exc}")
-        result['error'] = f"تعذر جلب قائمة الجداول: {exc}"
+        result['error'] = f"تعذّر جلب قائمة الجداول: {exc}"
         return result
 
     delete_plan = [
@@ -3228,9 +3454,10 @@ async def preview_maintenance(
             'count': count,
         })
 
-    # 🆕 v6.8.0: استخدام _get_vacuum_target_tables بدلاً من HEAVY فقط
+    # 🆕 v6.9.0: استخدام النسخة async (تدعم "all")
+    vacuum_targets = await _get_vacuum_target_tables_async()
     result['vacuum_tables'] = [
-        t for t in _get_vacuum_target_tables()
+        t for t in vacuum_targets
         if t and t in tables_exist
     ]
 
@@ -3255,6 +3482,7 @@ async def run_maintenance(
 
     ✅ v6.5.1: user_violations يستخدم last_violation_time.
     ✅ v6.8.0: VACUUM يشمل MAINTENANCE_TABLES بدلاً من HEAVY فقط.
+    ✅ v6.9.0: VACUUM يعمل على كل جداول المستخدم (DB_VACUUM_MODE="all").
     """
     from database import (
         DB, USE_POSTGRES,
@@ -3346,8 +3574,10 @@ async def run_maintenance(
         except Exception:
             pass
 
-        # 🆕 v6.8.0: استخدام _get_vacuum_target_tables بدلاً من HEAVY فقط
-        for table in _get_vacuum_target_tables():
+        # 🆕 v6.9.0: استخدام النسخة async — تدعم "all"
+        vacuum_targets = await _get_vacuum_target_tables_async()
+
+        for table in vacuum_targets:
             if not table:
                 continue
 
@@ -3555,25 +3785,29 @@ def format_maintenance_result(result: Dict[str, Any]) -> str:
 
 
 # =============================================================================
-# VACUUM / OPTIMIZE (v6.8.0 — FIXED COVERAGE)
+# VACUUM / OPTIMIZE (v6.9.0 — FULL TABLES)
 # =============================================================================
 
 async def vacuum_analyze_tables() -> str:
     """
-    🧹 تنظيف قاعدة البيانات.
+    🧹 تنظيف قاعدة البيانات — **كل الجداول**.
 
-    🆕 v6.8.0: يعمل الآن على MAINTENANCE_TABLES (10 جداول)
-    بدلاً من HEAVY_TABLES_FOR_AUTOVACUUM (4 جداول).
+    🆕 v6.9.0: يعمل على **كل** جداول المستخدم في الوضع الافتراضي
+    (DB_VACUUM_MODE="all"). يمكن ضبطه على 4 أوضاع:
+        - "all" (افتراضي): كل جداول المستخدم
+        - "maintenance": MAINTENANCE_TABLES (10 جداول)
+        - "heavy": HEAVY_TABLES_FOR_AUTOVACUUM (4 جداول)
+        - "both": اتحاد maintenance + heavy
     """
     from database import DB, USE_POSTGRES, USE_MYSQL
 
     lines: List[str] = []
-    lines.append("🧹 <b>تنظيف قاعدة البيانات</b>")
+    lines.append(f"🧹 <b>تنظيف قاعدة البيانات v{VERSION}</b>")
     lines.append("━━━━━━━━━━━━━━━━━━━━━━")
     lines.append("")
 
     if USE_POSTGRES:
-        lines.append("🗄️ PostgreSQL — VACUUM")
+        lines.append("🗄️ PostgreSQL — VACUUM (ANALYZE)")
     elif USE_MYSQL:
         lines.append("🗄️ MySQL — OPTIMIZE/maintenance")
     else:
@@ -3605,8 +3839,8 @@ async def vacuum_analyze_tables() -> str:
             lines.append("💡 لن نوقف العملية الجارية.")
             lines.append("")
 
-    # 🆕 v6.8.0: استخدام القائمة المُدمَجة
-    tables = _get_vacuum_target_tables()
+    # 🆕 v6.9.0: استخدام القائمة الكاملة (تدعم "all")
+    tables = await _get_vacuum_target_tables_async()
     if not tables:
         lines.append(
             "ℹ️ لا توجد جداول مستهدفة "
@@ -3615,8 +3849,14 @@ async def vacuum_analyze_tables() -> str:
         return "\n".join(lines)
 
     lines.append(
-        f"🎯 <b>الجداول المستهدفة:</b> <b>{len(tables)}</b>"
+        f"🎯 <b>الوضع:</b> <code>{_escape_html(DB_VACUUM_MODE)}</code> | "
+        f"<b>الجداول المستهدفة:</b> <b>{len(tables)}</b>"
     )
+    if DB_VACUUM_EXCLUDE_TABLES:
+        lines.append(
+            f"⚪ <b>مستثنى:</b> "
+            f"<code>{_escape_html(', '.join(DB_VACUUM_EXCLUDE_TABLES))}</code>"
+        )
     lines.append("")
 
     results: List[Tuple[str, bool, str]] = []
@@ -3670,7 +3910,7 @@ async def vacuum_analyze_tables() -> str:
 
 
 # =============================================================================
-# AUTO-CLEANUP ENGINE (v6.6.0)
+# AUTO-CLEANUP ENGINE
 # =============================================================================
 
 _auto_cleanup_task: Optional[asyncio.Task] = None
@@ -3925,6 +4165,7 @@ async def get_auto_cleanup_status() -> Dict[str, Any]:
         "user_violations_days": AUTO_CLEANUP_USER_VIOLATIONS_DAYS,
         "vacuum": AUTO_CLEANUP_VACUUM,
         "vacuum_mode": DB_VACUUM_MODE,
+        "vacuum_exclude": list(DB_VACUUM_EXCLUDE_TABLES),
         "vacuum_target_tables": _get_vacuum_target_tables(),
         "watched_tables": list(AUTO_CLEANUP_WATCH_TABLES),
         "current_sizes_mb": sizes,
@@ -3950,7 +4191,7 @@ __all__ = [
     "format_maintenance_result",
     # Vacuum
     "vacuum_analyze_tables",
-    # Auto-cleanup (v6.6.0)
+    # Auto-cleanup
     "start_auto_cleanup",
     "stop_auto_cleanup",
     "auto_cleanup_check_and_run",
@@ -3966,23 +4207,31 @@ __all__ = [
     "AUTO_CLEANUP_USER_VIOLATIONS_DAYS",
     "AUTO_CLEANUP_VACUUM",
     "AUTO_CLEANUP_WATCH_TABLES",
-    # Diagnostic display config (v6.7.0)
+    # Diagnostic display config
     "DB_DIAG_MAX_DEAD_TABLES",
     "DB_DIAG_MAX_CLEAN_TABLES",
     "DB_DIAG_MAX_SIZES",
     "DB_DIAG_SHOW_ALL_TABLES",
     "DB_DIAG_SHOW_INDEX_HEALTH",
-    # 🆕 v6.8.0: Vacuum mode
+    # 🆕 v6.9.0: Vacuum mode + exclude
     "DB_VACUUM_MODE",
+    "DB_VACUUM_EXCLUDE_TABLES",
     # Size helpers
     "_get_table_size_mb",
     "_get_all_watched_table_sizes",
-    # Coverage helpers (v6.7.0)
+    # Coverage helpers
     "_get_all_tables_autovacuum_status",
     "_get_all_tables_index_health",
     "_count_all_user_tables",
-    # 🆕 v6.8.0: Vacuum target
+    # 🆕 v6.9.0: Table discovery
+    "_discover_all_tables",
+    "_discover_all_tables_postgres",
+    "_discover_all_tables_mysql",
+    "_discover_all_tables_sqlite",
+    "_is_excluded_table",
+    # 🆕 v6.9.0: Vacuum target (async)
     "_get_vacuum_target_tables",
+    "_get_vacuum_target_tables_async",
     # Dataclasses
     "RootCause",
     "CauseItem",
@@ -4012,6 +4261,7 @@ __all__ = [
     "_env_bool",
     "_env_int",
     "_env_str",
+    "_env_list",
     # Constants
     "REPORT_MAX_CHARS",
     "TELEGRAM_MESSAGE_LIMIT",
@@ -4031,4 +4281,5 @@ __all__ = [
     "MAINTENANCE_DEFAULT_ADMIN_LOGS_DAYS",
     "MAINTENANCE_DEFAULT_PENALTY_ARCHIVE_DAYS",
     "MAINTENANCE_DEFAULT_USER_VIOLATIONS_DAYS",
+    "_ALWAYS_EXCLUDE_TABLES",
 ]
