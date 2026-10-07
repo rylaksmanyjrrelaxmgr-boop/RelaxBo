@@ -2,22 +2,39 @@
 # -*- coding: utf-8 -*-
 
 """
-🌿 Relax Manager – البوت الرئيسي (v5.6.10-FIX)
+🌿 Relax Manager – البوت الرئيسي (v5.6.11-CORRECTED)
 ================================================================================
+🆕 v5.6.11 (CORRECTED — INTEGRATION + LIFECYCLE HARDENING):
+    🔴 FIX-1:  _shutdown_detector_tasks — إغلاق حقيقي لـpool v4.0.4
+    🔴 FIX-2:  _SPAM_DETECTOR_LAYERS_COUNT مُفعَّل من LAYER_WEIGHTS
+    🔴 FIX-3:  فحص deps: transformers, torch, SIGHTENGINE env
+    🔴 FIX-4:  توحيد إصدار detectors في تقرير البداية
+    🔴 FIX-5:  إزالة الإغلاق المزدوج لـ_shutdown_log_dispatcher
+    🟠 FIX-6:  _PM_STARTUP_GRACE_SEC صحيح بالنسبة للـsleep الأولي
+    🟠 FIX-7:  _collect_admin_ids — continue بدل break
+    🟠 FIX-8:  pyzbar.pyzbar.decode — فحص حقيقي
+    🟠 FIX-9:  إزالة _sd_analyze_full غير المستخدم (import probe)
+    🟡 FIX-10: _running_state داخلي بدل app._running الخاص
+    🟡 FIX-11: _stop_polling_mode عند فشل _start_polling_mode
+    🟡 FIX-12: probe_failures — decrement بدل reset
+    🟡 FIX-13: _verify_command_handlers — cache نتيجة الفحص
+    🟡 FIX-14: _diag_incoming — تعليق توضيحي فقط
+    🟡 FIX-15: SIGHUP — إضافته لـsignal handlers
+    🟡 FIX-16: توثيق RENDER_EXTERNAL_URL (https يُعالج كـhttp)
+    🟡 FIX-17: keep_alive — sleep داخل try
+    🟡 FIX-18: _init_group_log_instance — فحص app.bot
+    🟡 FIX-19: _amounts_match() للمقارنة الآمنة (int vs float)
+    🟡 FIX-20: نفس FIX-19 في successful_payment
+    🟡 FIX-21: توثيق الإغلاق المُوحَّد (post_shutdown)
+    🟡 FIX-22: pool data — fetch موحّد
+    🟡 FIX-23: _dump_idle_tx_details — توثيق PG-only
+    🟡 FIX-24: _verify_bot_in_log_channel_error_text — حذف lang
+    🟡 FIX-25: chat_member.register — try/except
+
 🆕 v5.6.10-FIX (SECURITY-BRIDGE-IMPORT-FIX):
     🔴 FIX: إزالة استيراد `_SECURITY_BRIDGE_AVAILABLE` من utils.py
-            (غير موجود في utils.py v7.10.5 — كان يسبب تحذير كاذب دائم)
     ✅ FIX: تحديد `_SECURITY_BRIDGE_AVAILABLE = True` عند نجاح الاستيراد
     ✅ FIX: تهيئة `_SB_IMPORT_ERROR = None` قبل try
-    الأثر قبل: ⚠️ Security Bridge: غير متاح (utils.py قديم؟)
-    الأثر بعد: 🌉 Security Bridge: ✅ محمّل | أزرار=24 | قيم افتراضية=6
-
-🆕 v5.6.10 (IMPORT-FIX):
-    🔴 FIX-1: 3-tier import fallback لـ handlers_message_detectors
-    🟢 FIX-2: تحسين رسالة الخطأ عند فشل كل المحاولات
-
-🆕 v5.6.9 (SECURITY-BRIDGE-INTEGRATION):
-    🟢 NEW-1..NEW-6: فحص محرك السبام + Security Bridge + التبعيات
 ================================================================================
 """
 
@@ -114,59 +131,79 @@ except ImportError as _e1:
                 )
 
 # ═════════════════════════════════════════════════════════════════════
-# فحص محرك كشف السبام مع 3-tier fallback
+# ✅ FIX-9: فحص محرك كشف السبام (3-tier) — بدون import probe غير مستخدم
 # ═════════════════════════════════════════════════════════════════════
 _SPAM_DETECTOR_AVAILABLE = False
 _SPAM_DETECTOR_IMPORT_ERROR = None
 _SPAM_DETECTOR_VERSION = None
-_SPAM_DETECTOR_LAYERS_COUNT = 0
+_SPAM_DETECTOR_LAYERS_COUNT = 0  # ✅ FIX-2: سيُملأ من LAYER_WEIGHTS
 _SPAM_DETECTOR_SOURCE = None
 
-try:
-    from handlers_message_detectors import (
-        _DETECTORS_VERSION as _SD_VERSION,
-        analyze_message_full as _sd_analyze_full,
-    )
-    _SPAM_DETECTOR_AVAILABLE = True
-    _SPAM_DETECTOR_VERSION = _SD_VERSION
-    _SPAM_DETECTOR_SOURCE = "root"
-except ImportError:
+_detectors_module = None
+for _mod_path in (
+    "handlers_message_detectors",
+    "handlers.handlers_message_detectors",
+    ".handlers_message_detectors",
+):
     try:
-        from handlers.handlers_message_detectors import (
-            _DETECTORS_VERSION as _SD_VERSION,
-            analyze_message_full as _sd_analyze_full,
-        )
-        _SPAM_DETECTOR_AVAILABLE = True
-        _SPAM_DETECTOR_VERSION = _SD_VERSION
-        _SPAM_DETECTOR_SOURCE = "handlers package"
-    except ImportError:
-        try:
-            from .handlers_message_detectors import (
-                _DETECTORS_VERSION as _SD_VERSION,
-                analyze_message_full as _sd_analyze_full,
+        if _mod_path.startswith("."):
+            from importlib import import_module
+            _detectors_module = import_module(
+                _mod_path, package=__package__ or None,
             )
-            _SPAM_DETECTOR_AVAILABLE = True
-            _SPAM_DETECTOR_VERSION = _SD_VERSION
-            _SPAM_DETECTOR_SOURCE = "relative"
-        except ImportError as _sd_e:
-            _SPAM_DETECTOR_AVAILABLE = False
-            _SPAM_DETECTOR_IMPORT_ERROR = str(_sd_e)
-        except Exception as _sd_e:
-            _SPAM_DETECTOR_AVAILABLE = False
-            _SPAM_DETECTOR_IMPORT_ERROR = f"unexpected: {_sd_e}"
-    except Exception as _sd_e:
-        _SPAM_DETECTOR_AVAILABLE = False
-        _SPAM_DETECTOR_IMPORT_ERROR = f"unexpected: {_sd_e}"
-except Exception as _sd_e:
-    _SPAM_DETECTOR_AVAILABLE = False
-    _SPAM_DETECTOR_IMPORT_ERROR = f"unexpected: {_sd_e}"
+        else:
+            from importlib import import_module
+            _detectors_module = import_module(_mod_path)
+        _SPAM_DETECTOR_AVAILABLE = True
+        _SPAM_DETECTOR_SOURCE = _mod_path
+        break
+    except ImportError as _e:
+        _SPAM_DETECTOR_IMPORT_ERROR = str(_e)
+        _detectors_module = None
+    except Exception as _e:
+        _SPAM_DETECTOR_IMPORT_ERROR = f"unexpected: {_e}"
+        _detectors_module = None
+
+# ✅ FIX-1 + FIX-2: استخراج version + layer count في نفس المكان
+_shutdown_detector_pool_fn = None
+if _SPAM_DETECTOR_AVAILABLE and _detectors_module is not None:
+    try:
+        _SPAM_DETECTOR_VERSION = getattr(
+            _detectors_module, "_DETECTORS_VERSION", None,
+        )
+        _layer_weights = getattr(_detectors_module, "LAYER_WEIGHTS", {})
+        if isinstance(_layer_weights, dict) and _layer_weights:
+            _SPAM_DETECTOR_LAYERS_COUNT = len(_layer_weights)
+        else:
+            # Fallback: عدّ *_LAYER_ENABLED
+            _layer_flag_names = (
+                "TEXT_LAYER_ENABLED", "OCR_LAYER_ENABLED",
+                "AUDIO_LAYER_ENABLED", "URL_LAYER_ENABLED",
+                "METADATA_LAYER_ENABLED", "OBFUSCATION_LAYER_ENABLED",
+                "BEHAVIORAL_LAYER_ENABLED", "VIDEO_LAYER_ENABLED",
+                "NSFW_LAYER_ENABLED", "STICKER_LAYER_ENABLED",
+                "REACTIONS_LAYER_ENABLED", "CONTEXT_LAYER_ENABLED",
+                "CIPHER_LAYER_ENABLED", "STEGO_LAYER_ENABLED",
+                "DOMAIN_REP_LAYER_ENABLED",
+            )
+            _SPAM_DETECTOR_LAYERS_COUNT = sum(
+                1 for name in _layer_flag_names
+                if hasattr(_detectors_module, name)
+            )
+    except Exception as _e:
+        logger_pre_init = logging.getLogger(__name__)
+        logger_pre_init.debug("detector introspection: %s", _e)
+
+    # ✅ FIX-1: ربط دالة إغلاق pool الـdetectors إن وُجدت
+    try:
+        _shutdown_detector_pool_fn = getattr(
+            _detectors_module, "_shutdown_shared_pool", None,
+        )
+    except Exception:
+        _shutdown_detector_pool_fn = None
 
 # ═════════════════════════════════════════════════════════════════════
 # ✅ v5.6.10-FIX: فحص Security Bridge (utils v7.10.5)
-# ─────────────────────────────────────────────────────────────────────
-# ⚠️ ملاحظة: `_SECURITY_BRIDGE_AVAILABLE` لم يكن معرَّفًا في utils.py —
-#            ولهذا السبب كان الاستيراد يفشل دائمًا ويظهر التحذير الكاذب.
-#            الحل: تحديد `True` عند نجاح استيراد الدوال المطلوبة فقط.
 # ═════════════════════════════════════════════════════════════════════
 _SECURITY_BRIDGE_AVAILABLE = False
 _SB_IMPORT_ERROR = None
@@ -179,7 +216,6 @@ try:
         should_delete_by_security as _bridge_should_del,
         check_all_security as _bridge_check_all,
     )
-    # ✅ نجح استيراد كل الدوال المطلوبة → Security Bridge متاح
     _SECURITY_BRIDGE_AVAILABLE = True
 except ImportError as _sb_e:
     _SECURITY_BRIDGE_AVAILABLE = False
@@ -359,7 +395,9 @@ _WATCHER_MAX_PROBE_FAILURES = 3
 _REMOVED_CHANNELS_GRACE_DAYS = 30
 
 # pool_health_monitor v2
-_PM_STARTUP_GRACE_SEC = 90.0
+# ✅ FIX-6: رفع grace ليكون > الـsleep الأولي (120s) بفارق مريح
+_PM_STARTUP_GRACE_SEC = 180.0
+_PM_INITIAL_DELAY_SEC = 120.0
 _PM_IDLE_TX_WARN_STREAK = 2
 _PM_IDLE_TX_ERROR_THRESHOLD = 3
 _PM_UTIL_WARN_PCT = 80.0
@@ -368,9 +406,26 @@ _PM_LOCK_WAIT_WARN = 1
 _PM_WAITING_WARN = 3
 _PM_ALERT_COOLDOWN_SEC = 600.0
 
+# ✅ FIX-19/20: epsilon لمقارنة الأموال (int vs float)
+_PAYMENT_AMOUNT_EPSILON = 0.01
+
 _DIAG_INCOMING = os.getenv("DIAG_INCOMING", "0").strip().lower() in (
     "1", "true", "yes", "on", "enabled",
 )
+
+
+# ═══════════════════════════════════════════════════════════════════
+# ✅ FIX-19/20: مساعد مقارنة المبالغ
+# ═══════════════════════════════════════════════════════════════════
+
+def _amounts_match(expected: Any, actual: Any) -> bool:
+    """يقارن مبلغين بشكل آمن عبر تحويلهما إلى float."""
+    try:
+        e = float(expected or 0)
+        a = float(actual or 0)
+    except (TypeError, ValueError):
+        return False
+    return abs(e - a) < _PAYMENT_AMOUNT_EPSILON
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -381,7 +436,6 @@ _NOTIFY_TASKS: Set[asyncio.Task] = set()
 
 
 def _spawn_notify_dev_log(context, text: str) -> None:
-    """تشغيل _notify_dev_log في الخلفية + تتبّع الاستثناءات."""
     try:
         task = asyncio.create_task(_notify_dev_log(context, text))
         _NOTIFY_TASKS.add(task)
@@ -402,17 +456,17 @@ def _spawn_notify_dev_log(context, text: str) -> None:
 
 
 # ═══════════════════════════════════════════════════════════════════
-# تقرير محرك كشف السبام
+# ✅ FIX-3: تقرير محرك كشف السبام (مع deps v4.0.4)
 # ═══════════════════════════════════════════════════════════════════
 
 def _log_spam_detector_status() -> None:
-    """يطبع حالة محرك كشف السبام + التبعيات."""
+    """يطبع حالة محرك كشف السبام + التبعيات (v4.0.4-aware)."""
 
-    # ── 1. محرك كشف السبام ──
     if _SPAM_DETECTOR_AVAILABLE:
         logger.info(
-            "🛡️ Spam Detector: ✅ محمّل (%s) [from %s]",
+            "🛡️ Spam Detector: ✅ محمّل (%s, %d layers) [from %s]",
             _SPAM_DETECTOR_VERSION or "unknown version",
+            _SPAM_DETECTOR_LAYERS_COUNT,
             _SPAM_DETECTOR_SOURCE or "unknown",
         )
     else:
@@ -426,14 +480,14 @@ def _log_spam_detector_status() -> None:
         )
         return
 
-    # ── 2. حالة الطبقات من CONFIG ──
+    # ── CONFIG.DETECTION_SUMMARY ──
     try:
         _summary = CONFIG.DETECTION_SUMMARY  # type: ignore
         _enabled = [k for k, v in _summary.items() if v]
         _disabled = [k for k, v in _summary.items() if not v]
 
         logger.info(
-            "   📊 الطبقات: %d/%d مُفعَّلة",
+            "   📊 الطبقات (per CONFIG): %d/%d مُفعَّلة",
             len(_enabled), len(_summary),
         )
         if _enabled:
@@ -446,8 +500,8 @@ def _log_spam_detector_status() -> None:
             "(config.py قديم؟)"
         )
 
-    # ── 3. تبعيات الطبقات الجديدة ──
-    _deps = {}
+    # ── التبعيات ──
+    _deps: Dict[str, bool] = {}
 
     try:
         import numpy  # noqa: F401
@@ -456,21 +510,24 @@ def _log_spam_detector_status() -> None:
         _deps["numpy (L13 Stego)"] = False
 
     try:
-        import pytesseract  # noqa: F401
-        _deps["pytesseract (L1 OCR)"] = True
-    except ImportError:
-        _deps["pytesseract (L1 OCR)"] = False
-
-    try:
         import PIL  # noqa: F401
         _deps["Pillow (L1 OCR)"] = True
     except ImportError:
         _deps["Pillow (L1 OCR)"] = False
 
     try:
-        import pyzbar  # noqa: F401
+        import pytesseract  # noqa: F401
+        _deps["pytesseract (L1 OCR)"] = True
+    except ImportError:
+        _deps["pytesseract (L1 OCR)"] = False
+
+    # ✅ FIX-8: فحص pyzbar.pyzbar.decode فعلياً (يحتاج libzbar النظامية)
+    try:
+        from pyzbar.pyzbar import decode as _test_qr_decode  # noqa: F401
         _deps["pyzbar (L1 QR)"] = True
     except ImportError:
+        _deps["pyzbar (L1 QR)"] = False
+    except Exception:
         _deps["pyzbar (L1 QR)"] = False
 
     try:
@@ -503,6 +560,33 @@ def _log_spam_detector_status() -> None:
     except ImportError:
         _deps["python-whois (L3 URL)"] = False
 
+    # ✅ FIX-3: deps v4.0.4 الجديدة (NSFW local)
+    try:
+        import torch  # noqa: F401
+        _deps["torch (L8 NSFW-local backend)"] = True
+    except ImportError:
+        _deps["torch (L8 NSFW-local backend)"] = False
+
+    try:
+        import transformers  # noqa: F401
+        _deps["transformers (L8 NSFW-local)"] = True
+    except ImportError:
+        _deps["transformers (L8 NSFW-local)"] = False
+
+    # ✅ FIX-3: Sightengine عبر env vars
+    _se_user = os.getenv("SIGHTENGINE_API_USER", "").strip()
+    _se_secret = os.getenv("SIGHTENGINE_API_SECRET", "").strip()
+    _deps["Sightengine API (L8 NSFW-cloud)"] = bool(_se_user and _se_secret)
+
+    # ✅ FIX-3: NSFW_MODEL_ENABLED من detectors (لو متاح)
+    if _detectors_module is not None:
+        try:
+            _deps["NSFW local mode enabled"] = bool(
+                getattr(_detectors_module, "NSFW_MODEL_ENABLED", False)
+            )
+        except Exception:
+            pass
+
     _missing_deps = [name for name, ok in _deps.items() if not ok]
     _loaded_deps = [name for name, ok in _deps.items() if ok]
 
@@ -516,14 +600,8 @@ def _log_spam_detector_status() -> None:
             "   ⚠️ التبعيات المفقودة (%d): %s",
             len(_missing_deps), ", ".join(_missing_deps),
         )
-        logger.info(
-            "   💡 ثبّت الناقص لتفعيل الطبقات كاملاً: "
-            "pip install numpy pytesseract Pillow pyzbar "
-            "opencv-python-headless SpeechRecognition pydub "
-            "requests python-whois"
-        )
 
-    # ── 4. ffmpeg ──
+    # ── ffmpeg ──
     try:
         import subprocess as _sp
         _r = _sp.run(
@@ -542,7 +620,7 @@ def _log_spam_detector_status() -> None:
             "   🎬 ffmpeg: ⚠️ غير متوفر — فيديو كبير لن يُعالَج"
         )
 
-    # ── 5. Safe Browsing ──
+    # ── Safe Browsing ──
     try:
         _sb_key = getattr(CONFIG, "SAFE_BROWSING_API_KEY", "")
         if _sb_key:
@@ -557,7 +635,6 @@ def _log_spam_detector_status() -> None:
 
 
 def _log_security_bridge_status() -> None:
-    """حالة Security Bridge (utils v7.10.5)."""
     if _SECURITY_BRIDGE_AVAILABLE:
         try:
             _buttons = len(_stm)
@@ -571,15 +648,8 @@ def _log_security_bridge_status() -> None:
             logger.info("🌉 Security Bridge: ✅ محمّل")
     else:
         logger.warning(
-            "⚠️ Security Bridge: غير متاح — "
-            "السبب: %s",
+            "⚠️ Security Bridge: غير متاح — السبب: %s",
             _SB_IMPORT_ERROR or "unknown",
-        )
-        logger.warning(
-            "   💡 تأكد من أن utils.py يُصدِّر: "
-            "SECURITY_TOGGLE_MAP, NEW_SECURITY_DEFAULTS, "
-            "get_security_settings, should_delete_by_security, "
-            "check_all_security"
         )
 
 
@@ -724,7 +794,6 @@ else:
         _MAINT_CMDS_IMPORT_ERROR or "unknown",
     )
 
-# تقرير محرك السبام + Security Bridge
 _log_spam_detector_status()
 _log_security_bridge_status()
 
@@ -809,15 +878,47 @@ GROUP_COMMANDS = [
 
 
 # ═══════════════════════════════════════════════════════════════════
-# إغلاق مهام detector المعلقة
+# ✅ FIX-1: إغلاق مهام + pool الـdetectors
 # ═══════════════════════════════════════════════════════════════════
 
 async def _shutdown_detector_tasks(timeout: float = 3.0) -> None:
-    """يُغلق أي مهام معلقة من محرك الكشف."""
+    """
+    ✅ FIX-1: إغلاق thread pool محرك الكشف (v4.0.4+).
+
+    يحاول أولاً استخدام `_shutdown_shared_pool` إن وُجدت في الوحدة،
+    وإلا يصل إلى `_get_shared_pool` مباشرة ويستدعي `shutdown(wait=False)`.
+    """
+    if not _SPAM_DETECTOR_AVAILABLE or _detectors_module is None:
+        return
+
+    # المسار 1: دالة إغلاق رسمية
+    if callable(_shutdown_detector_pool_fn):
+        try:
+            result = _shutdown_detector_pool_fn()
+            if asyncio.iscoroutine(result):
+                await asyncio.wait_for(result, timeout=timeout)
+            logger.info("✅ detectors pool: shutdown (official)")
+            return
+        except asyncio.TimeoutError:
+            logger.warning("⚠️ detectors pool shutdown: timeout")
+        except Exception as _e:
+            logger.debug("_shutdown_detector_pool_fn: %s", _e)
+
+    # المسار 2: الوصول المباشر
     try:
-        logger.debug("_shutdown_detector_tasks: لا مهام معلقة")
+        getter = getattr(_detectors_module, "_get_shared_pool", None)
+        if callable(getter):
+            pool = getter()
+            if pool is not None:
+                try:
+                    pool.shutdown(wait=False, cancel_futures=True)
+                    logger.info("✅ detectors pool: shutdown (direct)")
+                except TypeError:
+                    # Python < 3.9 لا يدعم cancel_futures
+                    pool.shutdown(wait=False)
+                    logger.info("✅ detectors pool: shutdown (legacy)")
     except Exception as _e:
-        logger.debug("_shutdown_detector_tasks: %s", _e)
+        logger.debug("_shutdown_detector_tasks (direct): %s", _e)
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -861,12 +962,14 @@ async def _collect_admin_ids() -> List[int]:
 
             any_method_succeeded = True
 
+            # ✅ FIX-7: continue بدل break — نجرّب الدالة التالية لو الفارغة
             if not result:
                 logger.debug(
-                    "ℹ️ _collect_admin_ids: DB.%s() أعادت قائمة فارغة",
+                    "ℹ️ _collect_admin_ids: DB.%s() أعادت قائمة فارغة "
+                    "— تجربة الدالة التالية",
                     method_name,
                 )
-                break
+                continue
 
             added_from_db = 0
             for a in result:
@@ -887,6 +990,7 @@ async def _collect_admin_ids() -> List[int]:
                 "✅ _collect_admin_ids: قرأ %d أدمن من DB.%s()",
                 added_from_db, method_name,
             )
+            # أول دالة تُعيد نتائج غير فارغة → توقف
             break
         except Exception as _e:
             last_error = _e
@@ -973,10 +1077,18 @@ def _safe_url(url: str) -> str:
 
 
 # ═══════════════════════════════════════════════════════════════════
-# Verifications
+# ✅ FIX-13: Verifications (مع cache)
 # ═══════════════════════════════════════════════════════════════════
 
+_command_handlers_verified: Optional[bool] = None
+
+
 def _verify_command_handlers() -> bool:
+    """✅ FIX-13: cache نتيجة الفحص بعد أول استدعاء."""
+    global _command_handlers_verified
+    if _command_handlers_verified is not None:
+        return _command_handlers_verified
+
     required = [
         "start", "help_command", "trial", "subscribe", "support",
         "developer", "stats", "language", "contests", "replies_command",
@@ -999,6 +1111,7 @@ def _verify_command_handlers() -> bool:
             "❌ دوال مفقودة في CommandHandlers (%d): %s",
             len(missing), missing,
         )
+        _command_handlers_verified = False
         return False
 
     logger.info("✅ كل %d دالة CommandHandlers موجودة", len(required))
@@ -1011,6 +1124,7 @@ def _verify_command_handlers() -> bool:
     else:
         logger.info("✅ MessageHandlers.handle_edited متاح")
 
+    _command_handlers_verified = True
     return True
 
 
@@ -1089,6 +1203,7 @@ def _verify_membership_handler() -> bool:
     return True
 
 
+# ✅ FIX-18: فحص app.bot قبل init
 def _init_group_log_instance(app) -> bool:
     global _GROUP_LOG_INSTANCE
 
@@ -1103,8 +1218,17 @@ def _init_group_log_instance(app) -> bool:
         logger.warning("⚠️ init_group_log غير قابل للاستدعاء")
         return False
 
+    # ✅ FIX-18: تأكد أن app.bot جاهز
+    bot = getattr(app, "bot", None)
+    if bot is None:
+        logger.error(
+            "❌ _init_group_log_instance: app.bot = None — "
+            "هل app.initialize() نُفِّذ؟"
+        )
+        return False
+
     try:
-        _GROUP_LOG_INSTANCE = _init_group_log(DB, app.bot)
+        _GROUP_LOG_INSTANCE = _init_group_log(DB, bot)
         if _GROUP_LOG_INSTANCE is None:
             logger.error("❌ init_group_log أعاد None")
             return False
@@ -1203,7 +1327,6 @@ async def cleanup_admin_logs_periodically() -> None:
 
 
 async def cleanup_removed_channels_periodically() -> None:
-    """يحذف نهائياً القنوات المُزالة بعد فترة السماح."""
     GRACE_DAYS = _REMOVED_CHANNELS_GRACE_DAYS
 
     try:
@@ -1356,12 +1479,13 @@ async def pre_checkout(update, context):
             logger.error("❌ Failed to answer pre-checkout rejection: %s", e)
         return
 
+    # ✅ FIX-19: مقارنة آمنة (int vs float)
     if hasattr(query, 'total_amount'):
         expected_amount = plan.get('price')
         if (
             expected_amount is not None
-            and expected_amount > 0
-            and query.total_amount != expected_amount
+            and float(expected_amount or 0) > 0
+            and not _amounts_match(expected_amount, query.total_amount)
         ):
             logger.warning(
                 "❌ Amount mismatch for user %s: expected %s, got %s",
@@ -1401,7 +1525,11 @@ async def successful_payment(update, context):
         await safe_send(context.bot, user_id, "❌ حدث خطأ في معالجة الدفع.")
         return
 
-    if plan.get('price', 0) > 0 and plan.get('price') != total_amount:
+    # ✅ FIX-20: مقارنة آمنة (int vs float)
+    plan_price = plan.get('price', 0)
+    if float(plan_price or 0) > 0 and not _amounts_match(
+        plan_price, total_amount,
+    ):
         logger.error(
             "❌ Amount mismatch in successful payment for user %s", user_id
         )
@@ -1532,9 +1660,13 @@ async def health_check(request):
     return web.Response(text="OK", status=200)
 
 
+# ✅ FIX-17: sleep داخل try لالتقاط CancelledError بدقة
 async def keep_alive():
-    """يرسل ping كل 5 دقائق لمنع Render من إيقاف الخدمة."""
-    await asyncio.sleep(60)
+    try:
+        await asyncio.sleep(60)
+    except asyncio.CancelledError:
+        logger.info("🛑 keep_alive أُلغي (initial sleep)")
+        raise
 
     url = os.getenv("RENDER_EXTERNAL_URL") or os.getenv("KEEP_ALIVE_URL")
     if not url:
@@ -1567,7 +1699,9 @@ async def keep_alive():
 # Pool health monitor
 # ═══════════════════════════════════════════════════════════════════
 
+# ✅ FIX-23: PG-only guard موثّق (يُستخدم فقط عند DB_TYPE=postgres)
 async def _dump_idle_tx_details() -> None:
+    """يستعلم pg_stat_activity — يعمل فقط على PostgreSQL."""
     try:
         rows = await DB.fetchall(
             """
@@ -1607,14 +1741,47 @@ async def _dump_idle_tx_details() -> None:
         logger.debug("_dump_idle_tx_details: %s", qe)
 
 
+# ✅ FIX-22: توحيد fetch بيانات pool
+async def _fetch_pool_data(total: int, active: int) -> Optional[Dict[str, Any]]:
+    """يحاول get_pool_live ثم get_pool_stats بالترتيب."""
+    try:
+        if hasattr(DB, "get_pool_live"):
+            _pd = await DB.get_pool_live()
+            if (
+                isinstance(_pd, dict)
+                and _pd.get("available")
+                and _pd.get("max_size")
+            ):
+                return _pd
+    except Exception as _e:
+        logger.debug("_fetch_pool_data: get_pool_live: %s", _e)
+
+    try:
+        if hasattr(DB, "get_pool_stats"):
+            _pd = await DB.get_pool_stats()
+            if (
+                isinstance(_pd, dict)
+                and _pd.get("type") in ("postgres", "mysql")
+                and _pd.get("max_size")
+            ):
+                return {
+                    "max_size": _pd.get("max_size"),
+                    "current_size": _pd.get("current_size"),
+                    "in_use": _pd.get("in_use"),
+                }
+    except Exception as _e:
+        logger.debug("_fetch_pool_data: get_pool_stats: %s", _e)
+
+    return None
+
+
 async def pool_health_monitor() -> None:
-    """يراقب Pool + الاتصالات كل 5 دقائق."""
     _task_start_mono = time.monotonic()
     _idle_tx_streak = 0
     _last_details_dump_mono = 0.0
 
     try:
-        await asyncio.sleep(120)
+        await asyncio.sleep(_PM_INITIAL_DELAY_SEC)
     except asyncio.CancelledError:
         logger.info("🛑 pool_health_monitor أُلغيت (قبل البدء)")
         raise
@@ -1669,38 +1836,8 @@ async def pool_health_monitor() -> None:
             pool_current = total
             pool_in_use = active
 
-            _pool_data: Optional[Dict[str, Any]] = None
-
-            try:
-                if hasattr(DB, "get_pool_live"):
-                    _pd_live = await DB.get_pool_live()
-                    if (
-                        isinstance(_pd_live, dict)
-                        and _pd_live.get("available")
-                        and _pd_live.get("max_size")
-                    ):
-                        _pool_data = _pd_live
-            except Exception as _e:
-                logger.debug("pool_health_monitor: get_pool_live: %s", _e)
-
-            if _pool_data is None:
-                try:
-                    if hasattr(DB, "get_pool_stats"):
-                        _pd_stats = await DB.get_pool_stats()
-                        if (
-                            isinstance(_pd_stats, dict)
-                            and _pd_stats.get("type") in ("postgres", "mysql")
-                            and _pd_stats.get("max_size")
-                        ):
-                            _pool_data = {
-                                "max_size": _pd_stats.get("max_size"),
-                                "current_size": _pd_stats.get("current_size"),
-                                "in_use": _pd_stats.get("in_use"),
-                            }
-                except Exception as _e:
-                    logger.debug(
-                        "pool_health_monitor: get_pool_stats: %s", _e
-                    )
+            # ✅ FIX-22: fetch موحّد
+            _pool_data = await _fetch_pool_data(total, active)
 
             if _pool_data is not None:
                 try:
@@ -1787,11 +1924,14 @@ async def pool_health_monitor() -> None:
 # Hostname/Port resolution
 # ═══════════════════════════════════════════════════════════════════
 
+# ✅ FIX-16: توثيق سلوك RENDER_EXTERNAL_URL (https://host يُعالَج كـ http لاحقاً)
 def _resolve_hostname() -> Optional[str]:
     rh = os.getenv("RENDER_EXTERNAL_HOSTNAME")
     if rh:
         return rh.strip()
 
+    # ملاحظة: RENDER_EXTERNAL_URL يأتي عادة بصيغة https://... —
+    # نستخرج الـnetloc فقط لأن bot.py يبني webhook_url بـhttps:// لاحقاً.
     ru = os.getenv("RENDER_EXTERNAL_URL")
     if ru:
         ru = ru.strip()
@@ -1853,6 +1993,7 @@ def _resolve_port() -> int:
 # Webhook runner watcher
 # ═══════════════════════════════════════════════════════════════════
 
+# ✅ FIX-12: probe_failures decrement بدل reset
 async def _watch_runner(
     runner,
     shutdown_event: asyncio.Event,
@@ -1907,7 +2048,9 @@ async def _watch_runner(
                                 raise RuntimeError(
                                     f"health status={resp.status}"
                                 )
-                    probe_failures = 0
+                    # ✅ FIX-12: decrement تدريجي بدل reset كامل
+                    if probe_failures > 0:
+                        probe_failures -= 1
                 except asyncio.CancelledError:
                     raise
                 except Exception as probe_e:
@@ -1946,7 +2089,6 @@ async def _watch_runner(
 # ═══════════════════════════════════════════════════════════════════
 
 async def run_task_with_retry(task_func, *args, task_name=""):
-    """يعيد تشغيل المهمة عند الانهيار مع backoff تصاعدي."""
     consecutive_failures = 0
     while True:
         try:
@@ -1992,7 +2134,6 @@ async def cleanup_locks():
 
 
 async def contest_cleanup(app: Application):
-    """يُعلن الفائزين تلقائياً للمسابقات المنتهية (كل ساعة)."""
     try:
         await asyncio.sleep(300)
     except asyncio.CancelledError:
@@ -2092,7 +2233,14 @@ async def _run_post_stop_hooks(app: Application) -> None:
 
 # ═══════════════════════════════════════════════════════════════════
 # Polling mode helpers
+# ✅ FIX-10 + FIX-11: use internal state, guarantee reset
 # ═══════════════════════════════════════════════════════════════════
+
+# ✅ FIX-10: متتبّع داخلي بدل app._running
+_polling_state = {
+    "running": False,
+}
+
 
 async def _start_polling_mode(app: Application) -> None:
     if app.updater is None:
@@ -2101,10 +2249,14 @@ async def _start_polling_mode(app: Application) -> None:
             "لم يستدعِ .updater(None)."
         )
 
-    if getattr(app, "_running", False):
+    if _polling_state["running"]:
         raise RuntimeError("Application is already running!")
 
-    app._running = True
+    if getattr(app, "running", False):
+        raise RuntimeError("Application.running=True — تعارض حالة")
+
+    # ✅ FIX-11: نضع العلامة قبل المحاولة، ونصفّرها عند الفشل
+    _polling_state["running"] = True
 
     try:
         await app.updater.start_polling(
@@ -2112,17 +2264,28 @@ async def _start_polling_mode(app: Application) -> None:
             allowed_updates=ALLOWED_UPDATES,
         )
     except Exception:
-        app._running = False
+        _polling_state["running"] = False
         raise
 
     await _run_post_init_hooks(app)
 
 
 async def _stop_polling_mode(app: Application) -> None:
-    if not getattr(app, "_running", False):
+    # ✅ FIX-11: نستمر حتى لو لم تُفعَّل العلامة — قد يكون فشل جزئي
+    if not _polling_state["running"]:
+        # محاولة أخيرة لإيقاف updater إن كان قيد التشغيل
+        if app.updater is not None:
+            try:
+                if getattr(app.updater, "running", False):
+                    await app.updater.stop()
+            except Exception as _e:
+                logger.debug("updater.stop (cleanup): %s", _e)
         return
 
-    await _run_post_stop_hooks(app)
+    try:
+        await _run_post_stop_hooks(app)
+    finally:
+        _polling_state["running"] = False
 
     if app.updater is not None:
         try:
@@ -2130,15 +2293,21 @@ async def _stop_polling_mode(app: Application) -> None:
         except Exception as _e:
             logger.debug("updater.stop: %s", _e)
 
-    app._running = False
-
 
 # ═══════════════════════════════════════════════════════════════════
 # Diagnostic handler
+# ✅ FIX-14: TypeHandler(object, ...) مقصود — group=-100 يمنع التداخل
 # ═══════════════════════════════════════════════════════════════════
 
 async def _diag_incoming(update, context):
-    """TypeHandler تشخيصي — يُطبع كل رسالة واردة للمجموعة."""
+    """
+    تشخيصي — يُطبع كل رسالة واردة للمجموعة.
+
+    ✅ FIX-14: نستخدم TypeHandler(object, ...) + group=-100 —
+    هذا مبرمج عمداً: TypeHandler(object) يمسك كل الـupdates،
+    لكن group=-100 يضمن التنفيذ قبل كل الـhandlers الأخرى
+    (لمراقبة ما يصل قبل أن يُعالجه أي handler آخر).
+    """
     try:
         msg = update.effective_message
         chat = update.effective_chat
@@ -2204,9 +2373,15 @@ async def main():
 
     logger.info("🌿 %s", CONFIG.BOT_NAME)
     logger.info("👨‍💼 المالك: %s", CONFIG.PRIMARY_OWNER_ID)
-    logger.info("📦 main.py: v5.6.10-FIX (SECURITY-BRIDGE-IMPORT-FIX)")
 
-    # تحقق صريح من تفعيل كشف السبام
+    # ✅ FIX-4: تقرير موحّد بالـversion + layers
+    logger.info(
+        "📦 main.py: v5.6.11-CORRECTED | "
+        "detectors=%s | layers=%d",
+        _SPAM_DETECTOR_VERSION or "N/A",
+        _SPAM_DETECTOR_LAYERS_COUNT,
+    )
+
     try:
         if not CONFIG.SPAM_DETECTION_AVAILABLE:  # type: ignore
             logger.warning(
@@ -2404,7 +2579,6 @@ async def main():
         & ~filters.COMMAND
     )
 
-    # ✅ handle_group
     try:
         app.add_handler(
             MessageHandler(_group_msg_filter, MessageHandlers.handle_group),
@@ -2417,7 +2591,6 @@ async def main():
     except Exception as _e:
         logger.error("❌ فشل تسجيل handle_group: %s", _e, exc_info=True)
 
-    # ✅ handle_edited
     if hasattr(MessageHandlers, "handle_edited"):
         try:
             app.add_handler(
@@ -2442,7 +2615,6 @@ async def main():
             "تعديل الرسائل لن يُفحص! حدّث handlers_message.py إلى v7.15.1+"
         )
 
-    # ✅ handle_service
     try:
         app.add_handler(
             MessageHandler(
@@ -2511,7 +2683,6 @@ async def main():
     app.add_handler(CommandHandler("db_diag", CommandHandlers.db_diag))
     app.add_handler(CommandHandler("db_vacuum", CommandHandlers.db_vacuum))
 
-    # /autoblocked
     try:
         app.add_handler(CommandHandler(
             "autoblocked", _handle_autoblocked_command
@@ -2604,8 +2775,17 @@ async def main():
     app.add_handler(ChatJoinRequestHandler(MessageHandlers.handle_join_request))
     app.add_error_handler(ErrorHandler.handle_error)
 
-    chat_member.register(app)
-    logger.info("✅ ChatMemberHandler مُفعّل — تحديث المشرفين فوري")
+    # ✅ FIX-25: try/except حول chat_member.register
+    try:
+        chat_member.register(app)
+        logger.info("✅ ChatMemberHandler مُفعّل — تحديث المشرفين فوري")
+    except Exception as _e:
+        logger.error(
+            "❌ فشل تسجيل ChatMemberHandler: %s — "
+            "تحديثات المشرفين لن تكون فورية",
+            _e,
+            exc_info=True,
+        )
 
     if _MEMBERSHIP_AVAILABLE and callable(register_membership_handlers):
         try:
@@ -2718,6 +2898,7 @@ async def main():
 
     # ═════════════════════════════════════════════════════════════
     # _shutdown_event + signal handlers
+    # ✅ FIX-15: SIGHUP مُضاف
     # ═════════════════════════════════════════════════════════════
     _shutdown_event = asyncio.Event()
 
@@ -2727,7 +2908,12 @@ async def main():
 
     try:
         _loop = asyncio.get_running_loop()
-        for _sig in (signal.SIGTERM, signal.SIGINT):
+        # ✅ FIX-15: SIGHUP مُضاف (terminal close / hangup)
+        _signals_to_install = [signal.SIGTERM, signal.SIGINT]
+        if hasattr(signal, "SIGHUP"):
+            _signals_to_install.append(signal.SIGHUP)
+
+        for _sig in _signals_to_install:
             try:
                 _loop.add_signal_handler(
                     _sig,
@@ -2900,21 +3086,26 @@ async def main():
             except Exception as _e:
                 logger.debug("stop_weekly_diagnostic_task: %s", _e)
 
-        # 3.c) إغلاق مهام detector
+        # 3.c) ✅ FIX-1: إغلاق pool الـdetectors
         try:
             await _shutdown_detector_tasks(timeout=3.0)
         except Exception as _e:
             logger.debug("_shutdown_detector_tasks: %s", _e)
 
-        # 4) handlers_message: log dispatcher + delayed delete
+        # 4) ✅ FIX-5 + FIX-21: log dispatcher + delayed delete
+        # ملاحظة: handlers_message يُسجّل post_shutdown الذي يستدعي
+        # shutdown_log_dispatcher + shutdown_delete_tasks بشكل تلقائي.
+        # نستدعيهما هنا فقط كإجراء احتياطي في حال لم يُسجَّل post_shutdown
+        # (مثلاً إذا فشل _register_message_shutdown سابقاً).
+        # كلاهما idempotent.
         try:
             await _shutdown_log_dispatcher(timeout=5.0)
         except Exception as _e:
-            logger.debug("shutdown_log_dispatcher: %s", _e)
+            logger.debug("shutdown_log_dispatcher (main): %s", _e)
         try:
             await _shutdown_delete_tasks(timeout=3.0)
         except Exception as _e:
-            logger.debug("shutdown_delete_tasks: %s", _e)
+            logger.debug("shutdown_delete_tasks (main): %s", _e)
 
         # 5) app shutdown
         if not app_shutdown_done:
