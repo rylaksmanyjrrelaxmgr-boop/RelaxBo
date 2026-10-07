@@ -4152,6 +4152,8 @@ def _lazy_import_detectors() -> Dict[str, Any]:
     يُخزّن النتيجة في `_detector_imports` لتجنّب إعادة الاستيراد.
 
     لا يُرفع استثناء إذا كان الملف غير متاح — يُرجع {} بدلاً منه.
+
+    ✅ v7.10.3.1 FIX: 3-tier fallback (root → handlers → relative)
     """
     global _detector_imports
 
@@ -4162,6 +4164,8 @@ def _lazy_import_detectors() -> Dict[str, Any]:
         if _detector_imports is not None:
             return _detector_imports
 
+        _mod = None
+        # ─── محاولة 1: من الجذر ───
         try:
             from handlers_message_detectors import (  # type: ignore
                 _MessageContext,
@@ -4173,7 +4177,7 @@ def _lazy_import_detectors() -> Dict[str, Any]:
                 _extract_button_context,
                 analyze_message_full,
             )
-            _detector_imports = {
+            _mod = {
                 "MessageContext": _MessageContext,
                 "contains_at_channel": _contains_at_channel,
                 "contains_email": _contains_email,
@@ -4183,17 +4187,66 @@ def _lazy_import_detectors() -> Dict[str, Any]:
                 "extract_button_context": _extract_button_context,
                 "analyze_message_full": analyze_message_full,
             }
-            logger.info(
-                "✅ Security Bridge: تم ربط handlers_message_detectors v4.0.0"
-            )
-        except Exception as e:
-            logger.warning(
-                f"⚠️ Security Bridge: handlers_message_detectors غير متاح — "
-                f"سيتم تعطيل فحوص الأزرار المتقدمة ({e})"
-            )
-            _detector_imports = {}
+        except ImportError:
+            # ─── محاولة 2: من handlers package ───
+            try:
+                from handlers.handlers_message_detectors import (  # type: ignore
+                    _MessageContext,
+                    _contains_at_channel,
+                    _contains_email,
+                    _contains_tg_scheme,
+                    _is_postbot_pattern,
+                    _postbot_pattern_confidence,
+                    _extract_button_context,
+                    analyze_message_full,
+                )
+                _mod = {
+                    "MessageContext": _MessageContext,
+                    "contains_at_channel": _contains_at_channel,
+                    "contains_email": _contains_email,
+                    "contains_tg_scheme": _contains_tg_scheme,
+                    "is_postbot_pattern": _is_postbot_pattern,
+                    "postbot_pattern_confidence": _postbot_pattern_confidence,
+                    "extract_button_context": _extract_button_context,
+                    "analyze_message_full": analyze_message_full,
+                }
+            except ImportError:
+                # ─── محاولة 3: relative ───
+                try:
+                    from .handlers_message_detectors import (  # type: ignore
+                        _MessageContext,
+                        _contains_at_channel,
+                        _contains_email,
+                        _contains_tg_scheme,
+                        _is_postbot_pattern,
+                        _postbot_pattern_confidence,
+                        _extract_button_context,
+                        analyze_message_full,
+                    )
+                    _mod = {
+                        "MessageContext": _MessageContext,
+                        "contains_at_channel": _contains_at_channel,
+                        "contains_email": _contains_email,
+                        "contains_tg_scheme": _contains_tg_scheme,
+                        "is_postbot_pattern": _is_postbot_pattern,
+                        "postbot_pattern_confidence": _postbot_pattern_confidence,
+                        "extract_button_context": _extract_button_context,
+                        "analyze_message_full": analyze_message_full,
+                    }
+                except Exception as e:
+                    logger.warning(
+                        f"⚠️ Security Bridge: handlers_message_detectors غير متاح "
+                        f"في المسارات الثلاثة — سيتم تعطيل فحوص الأزرار "
+                        f"المتقدمة ({e})"
+                    )
+                    _mod = {}
 
-    return _detector_imports
+        _detector_imports = _mod or {}
+        if _detector_imports:
+            logger.info(
+                "✅ Security Bridge: تم ربط handlers_message_detectors"
+            )
+        return _detector_imports
 
 
 # =====================================================================
