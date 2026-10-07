@@ -2,11 +2,22 @@
 # -*- coding: utf-8 -*-
 
 """
-🌿 Relax Manager – البوت الرئيسي (v5.6.9)
+🌿 Relax Manager – البوت الرئيسي (v5.6.10)
 ================================================================================
+🆕 v5.6.10 (IMPORT-FIX):
+    🔴 FIX-1: 3-tier import fallback لـ handlers_message_detectors
+              (كان يفشل بصمت لأن Python يبحث في الجذر فقط)
+              • محاولة 1: from handlers_message_detectors
+              • محاولة 2: from handlers.handlers_message_detectors
+              • محاولة 3: from .handlers_message_detectors
+              الأثر قبل: ⚠️ Spam Detector: ❌ غير محمّل — No module named
+              الأثر بعد: ✅ Spam Detector: ✅ محمّل (4.0.1 HARDENED)
+    🟢 FIX-2: تحسين رسالة الخطأ عند فشل كل المحاولات
+              (تُظهر الخطأ الحقيقي من المحاولة الأخيرة فقط)
+    ✅ Preserved: كل منطق v5.6.9 كما هو
+
 🆕 v5.6.9 (SECURITY-BRIDGE-INTEGRATION):
     🟢 NEW-1: فحص handlers_message_detectors عند البدء
-             (يكتشف مشاكل الاستيراد مبكراً)
     🟢 NEW-2: سجل إقلاع موسّع — حالة 14 طبقة كشف السبام
     🟢 NEW-3: سجل إقلاع — حالة Security Bridge (utils v7.10.2)
     🟢 NEW-4: سجل إقلاع — تحذيرات التبعيات (numpy, pytesseract, cv2, ffmpeg)
@@ -128,23 +139,53 @@ except ImportError as _e1:
                 )
 
 # ═════════════════════════════════════════════════════════════════════
-# 🆕 v5.6.9: فحص محرك كشف السبام v4.0.0
+# 🆕 v5.6.9 / 🔴 v5.6.10 FIX-1: فحص محرك كشف السبام مع 3-tier fallback
 # ═════════════════════════════════════════════════════════════════════
 _SPAM_DETECTOR_AVAILABLE = False
 _SPAM_DETECTOR_IMPORT_ERROR = None
 _SPAM_DETECTOR_VERSION = None
 _SPAM_DETECTOR_LAYERS_COUNT = 0
+_SPAM_DETECTOR_SOURCE = None  # 🆕 v5.6.10: أي مسار نجح
 
+# 🔴 v5.6.10 FIX-1: 3-tier import fallback
 try:
+    # ─── محاولة 1: من الجذر (كما كان) ───
     from handlers_message_detectors import (
         _DETECTORS_VERSION as _SD_VERSION,
         analyze_message_full as _sd_analyze_full,
     )
     _SPAM_DETECTOR_AVAILABLE = True
     _SPAM_DETECTOR_VERSION = _SD_VERSION
-except ImportError as _sd_e:
-    _SPAM_DETECTOR_AVAILABLE = False
-    _SPAM_DETECTOR_IMPORT_ERROR = str(_sd_e)
+    _SPAM_DETECTOR_SOURCE = "root"
+except ImportError:
+    try:
+        # ─── محاولة 2: من داخل حزمة handlers ───
+        from handlers.handlers_message_detectors import (
+            _DETECTORS_VERSION as _SD_VERSION,
+            analyze_message_full as _sd_analyze_full,
+        )
+        _SPAM_DETECTOR_AVAILABLE = True
+        _SPAM_DETECTOR_VERSION = _SD_VERSION
+        _SPAM_DETECTOR_SOURCE = "handlers package"
+    except ImportError:
+        try:
+            # ─── محاولة 3: النسبي (لو main.py داخل حزمة) ───
+            from .handlers_message_detectors import (
+                _DETECTORS_VERSION as _SD_VERSION,
+                analyze_message_full as _sd_analyze_full,
+            )
+            _SPAM_DETECTOR_AVAILABLE = True
+            _SPAM_DETECTOR_VERSION = _SD_VERSION
+            _SPAM_DETECTOR_SOURCE = "relative"
+        except ImportError as _sd_e:
+            _SPAM_DETECTOR_AVAILABLE = False
+            _SPAM_DETECTOR_IMPORT_ERROR = str(_sd_e)
+        except Exception as _sd_e:
+            _SPAM_DETECTOR_AVAILABLE = False
+            _SPAM_DETECTOR_IMPORT_ERROR = f"unexpected: {_sd_e}"
+    except Exception as _sd_e:
+        _SPAM_DETECTOR_AVAILABLE = False
+        _SPAM_DETECTOR_IMPORT_ERROR = f"unexpected: {_sd_e}"
 except Exception as _sd_e:
     _SPAM_DETECTOR_AVAILABLE = False
     _SPAM_DETECTOR_IMPORT_ERROR = f"unexpected: {_sd_e}"
@@ -385,29 +426,30 @@ def _spawn_notify_dev_log(context, text: str) -> None:
 
 
 # ═══════════════════════════════════════════════════════════════════
-# 🆕 v5.6.9: تقرير محرك كشف السبام
+# 🆕 v5.6.9 / 🟢 v5.6.10 FIX-2: تقرير محرك كشف السبام
 # ═══════════════════════════════════════════════════════════════════
 
 def _log_spam_detector_status() -> None:
     """
     🆕 v5.6.9: يطبع حالة محرك كشف السبام + Security Bridge + التبعيات.
+    🟢 v5.6.10 FIX-2: يُظهر مصدر الاستيراد الناجح + الخطأ الحقيقي عند الفشل.
     """
 
     # ── 1. محرك كشف السبام ──
     if _SPAM_DETECTOR_AVAILABLE:
         logger.info(
-            "🛡️ Spam Detector: ✅ محمّل (%s)",
+            "🛡️ Spam Detector: ✅ محمّل (%s) [from %s]",
             _SPAM_DETECTOR_VERSION or "unknown version",
+            _SPAM_DETECTOR_SOURCE or "unknown",
         )
     else:
         logger.warning(
-            "⚠️ Spam Detector: ❌ غير محمّل — "
-            "السبب: %s",
+            "⚠️ Spam Detector: ❌ غير محمّل — السبب: %s",
             _SPAM_DETECTOR_IMPORT_ERROR or "unknown",
         )
         logger.warning(
-            "   💡 تأكد من وجود handlers_message_detectors.py "
-            "في نفس مجلد main.py"
+            "   💡 تأكد من وجود handlers_message_detectors.py في: "
+            "الجذر، أو handlers/، أو نفس مجلد main.py"
         )
         return
 
@@ -2186,7 +2228,7 @@ async def main():
 
     logger.info("🌿 %s", CONFIG.BOT_NAME)
     logger.info("👨‍💼 المالك: %s", CONFIG.PRIMARY_OWNER_ID)
-    logger.info("📦 main.py: v5.6.9 (SECURITY-BRIDGE-INTEGRATION)")
+    logger.info("📦 main.py: v5.6.10 (IMPORT-FIX)")
 
     # 🆕 v5.6.9: تحقق صريح من تفعيل كشف السبام
     try:
