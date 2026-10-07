@@ -5,31 +5,30 @@
 handlers_message_detectors.py
 ===============================================================================
 🛡️ Relax Manager — Advanced Spam / Anti-Evasion Detection Engine
-Version: 4.0.7 (FULL-AUDIT-V3)
+Version: 4.0.8 (CRITICAL-FIXES)
+
+🆕 v4.0.8 — إصلاحات v4.0.7:
+    🔴 FIX-A: _run_in_pool يقبل **kwargs (كان crash في audio layer)
+    🟠 FIX-B: install_default_executor — إصلاح API deprecated
+    🟠 FIX-C: NSFW lazy load — تقليل احتجاز pool workers
+    🟠 FIX-D: _URL_SIGNATURES — TLD-aware regex (FPs أقل بكثير)
+    🟠 FIX-E: _EMOJI_STRIP_RE — ZWJ sequences + modifiers
+    🟡 FIX-G: _analyze_message_full_async — تعليق دقيق + ترتيب أمثل
+    🟡 FIX-I: type annotations لـ_se_last_failure_ts
+    🟡 FIX-J: Lock بدل RLock لـ_BEHAVIOR_LOCK
+    🟡 FIX-K: _context_buffers معرّف قبل cleanup_old_data
+    🟡 FIX-N: shutdown_default_executor() helper
+    🟡 FIX-O: _domain_rep_cache_get يعيد نسخة
+    🟡 FIX-R: _run_in_pool timeout اختياري
 
 🆕 v4.0.7:
-    ✅ FIX-AA: حذف الاستيرادات الميتة (struct, itertools, hashlib)
-    ✅ FIX-BB: حذف _run_coro_in_new_loop و _maybe_run_awaitable (كود ميت)
-    ✅ FIX-CC: ربط Shared Pool فعلياً — install_default_executor() + _run_in_pool()
-    ✅ FIX-DD: _BEHAVIOR_LOCK لحماية القواميس المشتركة (Race P0)
-    ✅ FIX-EE: requests timeouts على شكل tuple (connect, read)
-    ✅ FIX-FF: \u2028 و \u2029 في _WS_TRANSLATE_TABLE
-    ✅ FIX-GG: _tld_aware_dot_repl — إزالة .lower() الميت
-    ✅ FIX-HH: _download_telegram_file_async — إزالة التكرار الداخلي
-    ✅ FIX-II: تنظيف __all__ (إزالة الميت، إضافة الجديد)
+    ✅ FIX-AA..II (FULL-AUDIT-V3)
 
-🆕 v4.0.6:
-    ✅ FIX-S: _normalize_text — فصل _do_normalize عن lru_cache
-    ✅ FIX-T: _download_telegram_file — حلقة واحدة موحّدة (PTB v20+ safe)
-    ✅ FIX-U: _run_url_layer_async — fallback sync عند ASYNC_NETWORK=0
-    ✅ FIX-V: Sightengine circuit breaker (5 failures / 60s)
-    ✅ FIX-W: _maybe_run_awaitable — deprecated
-    ✅ FIX-X: _POOL_MAX_WORKERS مضاف إلى __all__
+🆕 v4.0.5/4.0.6:
+    ✅ FIX-R,S,T,U,V,W,X (SHUTDOWN + ASYNC hardening)
 
-🆕 v4.0.5:
-    ✅ FIX-R: _shutdown_shared_pool() — للاستدعاء من main.py
-
-🆕 v4.0.4-FIX: A, B, C, D, E, F, G, H, I, J, K, L, M, N, O, P, Q
+🆕 v4.0.4:
+    ✅ FIX-A..Q
 ===============================================================================
 """
 
@@ -70,8 +69,8 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
-_DETECTORS_VERSION = "4.0.7 FULL-AUDIT-V3"
-_DETECTORS_VERSION_CLEAN = "4.0.7"
+_DETECTORS_VERSION = "4.0.8 CRITICAL-FIXES"
+_DETECTORS_VERSION_CLEAN = "4.0.8"
 
 
 def _version_semver(version: str) -> str:
@@ -181,6 +180,9 @@ NORMALIZE_CACHE_MAX = _env_int("NORMALIZE_CACHE_MAX", 512)
 SE_CIRCUIT_FAILURE_THRESHOLD = _env_int("SE_CIRCUIT_FAILURE_THRESHOLD", 5)
 SE_CIRCUIT_OPEN_SEC = _env_float("SE_CIRCUIT_OPEN_SEC", 60.0)
 
+# ✅ FIX-R v4.0.8: timeout افتراضي لمهام pool
+POOL_TASK_TIMEOUT = _env_float("POOL_TASK_TIMEOUT", 60.0)
+
 
 # =============================================================================
 # SHARED THREAD POOL
@@ -192,7 +194,6 @@ _POOL_MAX_WORKERS = _env_int("DETECTOR_POOL_WORKERS", 8)
 
 
 def _get_shared_pool() -> concurrent.futures.ThreadPoolExecutor:
-    """✅ FIX-CC: pool مشترك فعّال — يُستخدم عبر _run_in_pool()."""
     global _THREAD_POOL_EXECUTOR
     if _THREAD_POOL_EXECUTOR is None:
         with _THREAD_POOL_LOCK:
@@ -209,10 +210,7 @@ def _get_shared_pool() -> concurrent.futures.ThreadPoolExecutor:
 
 
 def _shutdown_shared_pool() -> None:
-    """
-    ✅ FIX-R + FIX-CC: إغلاق thread pool الخاص بالـdetectors.
-    يُستدعى من main.py عند الإغلاق. idempotent.
-    """
+    """إغلاق thread pool. idempotent — آمن للاستدعاء المتكرر."""
     global _THREAD_POOL_EXECUTOR
     with _THREAD_POOL_LOCK:
         if _THREAD_POOL_EXECUTOR is None:
@@ -229,34 +227,73 @@ def _shutdown_shared_pool() -> None:
         logger.debug("_shutdown_shared_pool: %s", _e)
 
 
-async def _run_in_pool(fn: Callable[..., Any], *args: Any) -> Any:
+# ✅ FIX-A v4.0.8: _run_in_pool يقبل **kwargs + timeout اختياري
+async def _run_in_pool(
+    fn: Callable[..., Any],
+    *args: Any,
+    timeout: Optional[float] = None,
+    **kwargs: Any,
+) -> Any:
     """
-    ✅ FIX-CC: تشغيل دالة sync في الـshared pool.
+    ✅ v4.0.8 FIX-A: يدعم keyword arguments عبر functools.partial.
+    ✅ v4.0.8 FIX-R: timeout اختياري (افتراضي POOL_TASK_TIMEOUT).
 
-    يُفضَّل على asyncio.to_thread لأن:
-    - يستخدم pool مُتحكَّم فيه (workers محدود)
-    - يُغلق بوضوح عند الإغلاق
+    Examples:
+        await _run_in_pool(func, arg1, arg2)
+        await _run_in_pool(func, arg1, key=value)
+        await _run_in_pool(func, arg1, timeout=5.0)
     """
+    if kwargs:
+        fn = functools.partial(fn, **kwargs)
+
     loop = asyncio.get_running_loop()
     pool = _get_shared_pool()
-    return await loop.run_in_executor(pool, fn, *args)
+
+    if timeout is None:
+        timeout = POOL_TASK_TIMEOUT
+
+    fut = loop.run_in_executor(pool, fn, *args)
+    if timeout and timeout > 0:
+        try:
+            return await asyncio.wait_for(fut, timeout=timeout)
+        except asyncio.TimeoutError:
+            logger.warning(
+                "_run_in_pool: timeout after %.1fs — fn=%s",
+                timeout, getattr(fn, "__name__", repr(fn)),
+            )
+            raise
+    return await fut
 
 
-def install_default_executor() -> None:
+# ✅ FIX-B v4.0.8: install_default_executor مع API حديث
+def install_default_executor(loop: Optional[asyncio.AbstractEventLoop] = None) -> None:
     """
-    ✅ FIX-CC: ربط الـshared pool كـdefault executor لحلقة asyncio الحالية.
+    ✅ v4.0.8 FIX-B: إصلاح asyncio.get_event_loop() deprecated.
 
-    يُستدعى من main.py بعد إنشاء الحلقة، قبل تشغيل الـbot.
-    يجعل كل asyncio.to_thread تلقائياً يستخدم هذا pool.
-
-    مثال:
+    الاستخدام الموصى به:
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
-        install_default_executor()
+        install_default_executor(loop)   # ← مرّر loop صراحة
         loop.run_until_complete(main())
+
+    أو داخل coroutine:
+        install_default_executor()  # يكتشف running loop تلقائياً
     """
     try:
-        loop = asyncio.get_event_loop()
+        if loop is None:
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                try:
+                    policy = asyncio.get_event_loop_policy()
+                    loop = policy.get_event_loop()
+                except Exception as exc:
+                    logger.warning(
+                        "install_default_executor: no loop available — %r",
+                        exc,
+                    )
+                    return
+
         pool = _get_shared_pool()
         loop.set_default_executor(pool)
         logger.info(
@@ -266,6 +303,52 @@ def install_default_executor() -> None:
         )
     except Exception as exc:
         logger.warning("install_default_executor: %r", exc)
+
+
+# ✅ FIX-N v4.0.8: shutdown_default_executor helper
+async def shutdown_default_executor(
+    loop: Optional[asyncio.AbstractEventLoop] = None,
+    timeout: float = 3.0,
+) -> None:
+    """
+    ✅ v4.0.8 FIX-N: يُغلق default executor الخاص بالحلقة ثم pool الداخلي.
+
+    يُستدعى من main.py قبل إغلاق الحلقة.
+    idempotent — آمن للاستدعاء المتكرر.
+    """
+    try:
+        if loop is None:
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                loop = None
+
+        if loop is not None and not loop.is_closed():
+            try:
+                shutdown_method = getattr(
+                    loop, "shutdown_default_executor", None,
+                )
+                if callable(shutdown_method):
+                    try:
+                        await asyncio.wait_for(
+                            shutdown_method(), timeout=timeout,
+                        )
+                    except (asyncio.TimeoutError, TypeError, AttributeError):
+                        # Python < 3.9 أو لا يدعم timeout arg
+                        try:
+                            await shutdown_method()
+                        except Exception:
+                            pass
+                elif hasattr(loop, "run_in_executor"):
+                    # fallback: انتظر انتهاء المهام الجارية
+                    pass
+            except Exception as _e:
+                logger.debug("shutdown_default_executor (loop): %s", _e)
+
+        # أغلق pool الداخلي أيضاً
+        _shutdown_shared_pool()
+    except Exception as exc:
+        logger.debug("shutdown_default_executor: %r", exc)
 
 
 # =============================================================================
@@ -353,17 +436,35 @@ except Exception:
 
 _nsfw_classifier = None
 _nsfw_load_lock = threading.Lock()
+# ✅ FIX-C v4.0.8: flag لمنع محاولات متكررة (كاش فشل)
+_nsfw_load_attempted = False
 
 
 def _load_nsfw_classifier() -> Any:
-    global _nsfw_classifier, _NSFW_MODEL_AVAILABLE
+    """
+    ✅ v4.0.8 FIX-C: تحميل كسول محسّن.
+
+    - لا يحجز pool slot إن كانت محاولة سابقة فشلت (كاش فشل).
+    - التحميل يحدث مرة واحدة فقط في عمر التطبيق.
+    - يُوصى بـpreload عبر warmup_all() لتجنب احتجاز slot في أول رسالة.
+    """
+    global _nsfw_classifier, _NSFW_MODEL_AVAILABLE, _nsfw_load_attempted
+
     if _nsfw_classifier is not None:
         return _nsfw_classifier
     if not NSFW_MODEL_ENABLED:
         return None
+    # ✅ FIX-C: لو حاولنا وفشلنا سابقاً → لا نُعيد المحاولة (توفير slots)
+    if _nsfw_load_attempted and _nsfw_classifier is None:
+        return None
+
     with _nsfw_load_lock:
         if _nsfw_classifier is not None:
             return _nsfw_classifier
+        if _nsfw_load_attempted and _nsfw_classifier is None:
+            return None
+
+        _nsfw_load_attempted = True
         try:
             from transformers import pipeline  # type: ignore
             _nsfw_classifier = pipeline(
@@ -564,7 +665,6 @@ _LEET_TARGETS = frozenset({
 # TRANSLATION TABLES
 # =============================================================================
 
-# ✅ FIX-FF: إضافة \u2028 (LINE SEP) + \u2029 (PARA SEP)
 _WS_TRANSLATE_TABLE = str.maketrans({
     **{chr(c): " " for c in range(0x2000, 0x200B)},
     "\u00a0": " ",
@@ -580,7 +680,21 @@ _UNICODE_DOT_TABLE = str.maketrans({
     "\u3002": ".", "\uFE52": ".", "\uFF0E": ".", "\uFF61": ".",
 })
 
-_EMOJI_STRIP_RE = re.compile(r"[\U0001F000-\U0001FAFF\u2600-\u27BF]")
+
+# ✅ FIX-E v4.0.8: emoji strip يغطي ZWJ + modifiers + keycaps + flags
+_EMOJI_STRIP_RE = re.compile(
+    r"(?:"
+    # ZWJ sequences (families, professions...)
+    r"(?:[\U0001F000-\U0001FAFF\u2600-\u27BF\u2B00-\u2BFF]"
+    r"[\U0001F3FB-\U0001F3FF]?"           # skin tone modifier
+    r"(?:\u200d[\U0001F000-\U0001FAFF]"
+    r"[\U0001F3FB-\U0001F3FF]?)*)"
+    # Regional indicators (flags) — two consecutive
+    r"|[\U0001F1E6-\U0001F1FF]{2}"
+    # Keycap sequences (1️⃣ 2️⃣ ...)
+    r"|[0-9#*]\uFE0F?\u20E3"
+    r")"
+)
 
 
 # =============================================================================
@@ -614,7 +728,6 @@ _SPACED_SCHEME_RE = re.compile(r"(?i)\bh\s*t\s*t\s*p\s*s?\s*[:./\\]")
 _COLON_SLASH_SCHEME_RE = re.compile(
     r"(?i)\b(?:https?|hxxps?|ftp)\s*[\[\(\{]?\s*:\s*[\]\)\}]?\s*/\s*/"
 )
-# ✅ FIX-DD: تحسين pattern لمنع backtracking (كان \s* مفتوح)
 _SPACED_TG_RE = re.compile(
     r"(?i)\bt[ \t]{0,3}[\.\[\(\{]{0,1}[ \t]{0,3}m[ \t]{0,3}"
     r"[\.\]\)\}]{0,1}[ \t]{0,3}e\b"
@@ -681,9 +794,15 @@ _MULTILINE_URL_SCHEME_RE = re.compile(
 _BASE64_RE = re.compile(r"^[A-Za-z0-9+/]{16,}={0,2}$")
 _BASE64_URLSAFE_RE = re.compile(r"^[A-Za-z0-9_-]{16,}={0,2}$")
 
-_URL_SIGNATURES = (
-    "http://", "https://", "www.", "t.me/", "telegram.me/",
-    ".com", ".net", ".org", ".io", ".xyz", ".digital",
+# ✅ FIX-D v4.0.8: TLD-aware regex بدل substring matching
+_URL_SIGNATURE_RE = re.compile(
+    r"(?i)(?:"
+    r"https?://"
+    r"|www\."
+    r"|t\.me/"
+    r"|telegram\.me/"
+    r"|\.(?:com|net|org|io|xyz|digital)(?![\w])"
+    r")"
 )
 
 _URL_IN_TEXT_RE = re.compile(
@@ -1283,7 +1402,6 @@ def _scheme_replacement(match: re.Match) -> str:
     return "http://"
 
 
-# ✅ FIX-GG: إزالة .lower() الميت — الـpattern [a-z] أصلاً lowercase
 def _tld_aware_dot_repl(match: re.Match) -> str:
     left, right = match.group(1), match.group(2)
     if right in _COMMON_TLDS:
@@ -2642,7 +2760,6 @@ def _compute_spam_score(
         context_score = 0
         independent_categories = set()
 
-        # ---- LINK ----
         link_detected = _contains_link_enhanced(
             normalized, include_usernames=False, already_normalized=True
         )
@@ -2728,7 +2845,6 @@ def _compute_spam_score(
         if link_score > 0 or ctx.has_link_entity or ctx.has_button_link:
             independent_categories.add("link")
 
-        # ---- BUTTON / CTA ----
         if ctx.button_count >= 4:
             cta_score = _cap_score(cta_score, 2, _SCORE_CAP_CTA)
             reasons.append(f"many_buttons:{ctx.button_count}")
@@ -2751,7 +2867,6 @@ def _compute_spam_score(
             cta_score = _cap_score(cta_score, 1, _SCORE_CAP_CTA)
             reasons.append("button_cta")
 
-        # ---- VOCABULARY ----
         strong = ctx.strong_word_count
         medium = ctx.medium_word_count
         promo = ctx.promo_word_count
@@ -2812,7 +2927,6 @@ def _compute_spam_score(
         if cta_score > 0:
             independent_categories.add("cta")
 
-        # ---- PACK / NUMBER ----
         has_number_pack = bool(_NUMBER_PROMO_RE.search(merged_text))
         has_pack = bool(_PACK_RE.search(merged_text))
         if has_number_pack:
@@ -2822,7 +2936,6 @@ def _compute_spam_score(
             context_score = _cap_score(context_score, 1, _SCORE_CAP_CONTEXT)
             reasons.append("pack_pattern")
 
-        # ---- PROMO CONTEXT ----
         context_hits = _count_unique_matches(
             merged_text, _PROMO_CONTEXT_PATTERNS
         )
@@ -2838,7 +2951,6 @@ def _compute_spam_score(
         if context_score > 0:
             independent_categories.add("context")
 
-        # ---- POSTBOT ----
         postbot_confidence = _postbot_pattern_confidence(
             normalized,
             button_count=ctx.button_count,
@@ -2856,7 +2968,6 @@ def _compute_spam_score(
             context_score = _cap_score(context_score, 1, _SCORE_CAP_CONTEXT)
             reasons.append(f"postbot:{postbot_confidence}")
 
-        # ---- EMOJI ----
         spam_emojis = ctx.spam_emoji_count
         if spam_emojis >= 6:
             cta_score = _cap_score(cta_score, 2, _SCORE_CAP_CTA)
@@ -2865,7 +2976,6 @@ def _compute_spam_score(
             cta_score = _cap_score(cta_score, 1, _SCORE_CAP_CTA)
             reasons.append(f"spam_emojis:{spam_emojis}")
 
-        # ---- SPLIT WORDS ----
         split_words = _detect_split_spam_words(
             normalized, already_normalized=True
         )
@@ -2879,7 +2989,6 @@ def _compute_spam_score(
                 "split_spam_words:" + ",".join(split_words[:5])
             )
 
-        # ---- URL EVASION ----
         if url_obfuscated:
             evasion_score = _cap_score(
                 evasion_score,
@@ -2888,7 +2997,6 @@ def _compute_spam_score(
             )
             reasons.extend("url_evasion:" + x for x in url_reasons)
 
-        # ---- UNICODE EVASION ----
         unicode_score, unicode_reasons = _detect_unicode_evasion(
             text, script_counts=ctx.script_counts
         )
@@ -2905,7 +3013,6 @@ def _compute_spam_score(
             )
             reasons.append("suspicious_mixed_scripts")
 
-        # ---- STRUCTURAL EVASION ----
         structural_score, structural_reasons = _detect_structural_evasion(
             text, already_normalized=True
         )
@@ -2917,7 +3024,6 @@ def _compute_spam_score(
                 "structural_evasion:" + x for x in structural_reasons
             )
 
-        # ---- DENSITY ----
         density_score, density_reasons = _text_density_signals(text)
         if density_score:
             structure_score = _cap_score(
@@ -2925,7 +3031,6 @@ def _compute_spam_score(
             )
             reasons.extend("density:" + x for x in density_reasons)
 
-        # ---- CONTACT ----
         contact_score, contact_reasons = _detect_phone_or_contact_evasion(
             normalized, already_normalized=True
         )
@@ -2935,7 +3040,6 @@ def _compute_spam_score(
             )
             reasons.extend("contact:" + x for x in contact_reasons)
 
-        # ---- REPETITION ----
         if ctx.suspicious_separator_count >= 2:
             structure_score = _cap_score(
                 structure_score, 1, _SCORE_CAP_STRUCTURE
@@ -2952,7 +3056,6 @@ def _compute_spam_score(
             )
             reasons.append("repeated_words")
 
-        # ---- MEDIA + PROMOTION ----
         has_media = _message_has_media(context_or_message)
         if has_media and (ctx.button_count >= 2 or cta >= 2):
             context_score = _cap_score(
@@ -2960,7 +3063,6 @@ def _compute_spam_score(
             )
             reasons.append("media_plus_promotion")
 
-        # ---- POLL / VCARD ----
         if ANTIEVASION_POLL and ctx.poll_urls:
             link_score = _cap_score(link_score, 2, _SCORE_CAP_LINK)
             reasons.append("poll_with_url")
@@ -2972,7 +3074,6 @@ def _compute_spam_score(
                 link_score = _cap_score(link_score, 1, _SCORE_CAP_LINK)
                 reasons.append("venue_url")
 
-        # ---- FORWARDED ----
         preliminary_score = (
             link_score + content_score + cta_score
             + evasion_score + structure_score + context_score
@@ -2983,7 +3084,6 @@ def _compute_spam_score(
             )
             reasons.append("forwarded_spam_context")
 
-        # ---- HIGH-CONFIDENCE MARKETING ----
         if (
             (promo >= 2 or strong >= 2)
             and cta >= 1
@@ -2994,7 +3094,6 @@ def _compute_spam_score(
             )
             reasons.append("high_confidence_marketing_spam")
 
-        # ---- PACK + NUMBER + EXTERNAL ----
         if (
             has_pack and has_number_pack
             and (ctx.button_link_urls or link_detected)
@@ -3004,7 +3103,6 @@ def _compute_spam_score(
             )
             reasons.append("pack_number_external_cta")
 
-        # ---- CATEGORY STACK ----
         category_hits = _count_word_matches(
             normalized,
             {
@@ -3021,14 +3119,12 @@ def _compute_spam_score(
             )
             reasons.append("multiple_spam_categories")
 
-        # ---- OBFUSCATION + PROMOTION ----
         if url_obfuscated and (strong >= 1 or promo >= 1 or cta >= 1):
             evasion_score = _cap_score(
                 evasion_score, 2, _SCORE_CAP_EVASION
             )
             reasons.append("obfuscated_promotion")
 
-        # ---- HIDDEN + LINK/SPAM ----
         if ctx.has_hidden_chars and (
             link_detected or strong >= 1 or promo >= 1
         ):
@@ -3037,7 +3133,6 @@ def _compute_spam_score(
             )
             reasons.append("hidden_evasion_with_spam")
 
-        # ---- USERNAME + PROMOTION ----
         if (
             _contains_at_channel(normalized, already_normalized=True)
             and (cta >= 1 or promo >= 1 or strong >= 1)
@@ -3045,7 +3140,6 @@ def _compute_spam_score(
             cta_score = _cap_score(cta_score, 1, _SCORE_CAP_CTA)
             reasons.append("telegram_username_with_promotion")
 
-        # ---- RANDOM DOMAIN + PROMOTION ----
         if (
             ANTIEVASION_RANDOM_DOMAIN and ctx.has_random_domain
             and (cta >= 1 or promo >= 1 or strong >= 1)
@@ -3055,7 +3149,6 @@ def _compute_spam_score(
             )
             reasons.append("random_domain_with_promotion")
 
-        # ---- AI-Generated Text ----
         if ctx.ai_generated_score >= 3 and (
             cta >= 1 or promo >= 1 or link_detected
         ):
@@ -3066,7 +3159,6 @@ def _compute_spam_score(
                 f"ai_generated_pattern:{ctx.ai_generated_score}"
             )
 
-        # ---- Financial Scam Combo ----
         if (
             financial >= 2
             and (link_detected or ctx.button_link_urls)
@@ -3077,7 +3169,6 @@ def _compute_spam_score(
             )
             reasons.append("financial_scam_combo")
 
-        # ---- INDEPENDENT CATEGORIES ----
         if evasion_score > 0:
             independent_categories.add("evasion")
         if structure_score > 0:
@@ -3085,13 +3176,11 @@ def _compute_spam_score(
         if postbot_confidence >= 4 and context_score > 0:
             independent_categories.add("postbot")
 
-        # ---- RAW SCORE ----
         score = (
             link_score + content_score + cta_score
             + evasion_score + structure_score + context_score
         )
 
-        # ---- BONUS ----
         independent_signals = len(independent_categories)
         if independent_signals >= 4 and (
             link_score > 0 or content_score > 0
@@ -3102,7 +3191,6 @@ def _compute_spam_score(
             score += 1
             reasons.append("independent_evidence")
 
-        # ---- GATES ----
         only_weak_username = (
             _contains_at_channel(normalized, already_normalized=True)
             and not link_detected
@@ -3133,7 +3221,6 @@ def _compute_spam_score(
             score = min(score, 4)
             reasons.append("link_only_capped")
 
-        # ---- CLAMP ----
         score = max(0, min(MAX_SPAM_SCORE, int(score)))
         reasons = _unique_strings(reasons)[:MAX_REASON_COUNT]
 
@@ -3150,7 +3237,6 @@ def _compute_spam_score(
         else:
             confidence = "none"
 
-        # ---- HARD / CRITICAL ----
         hard = bool(
             score >= SPAM_HARD_THRESHOLD
             and (
@@ -3322,11 +3408,10 @@ def extract_qr_codes(image_bytes: bytes) -> List[str]:
     return results
 
 
-# ✅ FIX-HH: دالة داخلية موحّدة للتنزيل (تُستخدم من sync و async)
 async def _do_download_telegram_file(
     file_id: str, bot: Any
 ) -> Optional[bytes]:
-    """التنفيذ الفعلي للتنزيل — يُستدعى من كل من sync و async."""
+    """التنفيذ الفعلي للتنزيل — يُستدعى من sync و async."""
     try:
         file_obj = await asyncio.wait_for(
             bot.get_file(file_id), timeout=30.0
@@ -3364,9 +3449,6 @@ async def _download_telegram_file_async(
 
 
 def _download_telegram_file(file_id: str, bot: Any = None) -> Optional[bytes]:
-    """
-    ✅ FIX-T + FIX-HH: حلقة واحدة موحّدة + إعادة استخدام _do_download.
-    """
     if not file_id:
         return None
     if bot is None:
@@ -3611,6 +3693,7 @@ async def extract_audio_content_async(
             )
             if not audio_bytes:
                 continue
+            # ✅ FIX-A v4.0.8: kwargs مدعومة الآن في _run_in_pool
             text = await _run_in_pool(
                 transcribe_audio,
                 audio_bytes,
@@ -3654,8 +3737,6 @@ def extract_audio_content(message: Any, bot: Any = None) -> str:
 
 _ALLOWED_URL_SCHEMES = frozenset({"http", "https"})
 
-
-# ✅ FIX-EE: tuple timeout (connect, read)
 _REQ_TIMEOUT_TUPLE = (URL_EXPAND_CONNECT_TIMEOUT, URL_EXPAND_READ_TIMEOUT)
 
 
@@ -3917,9 +3998,11 @@ def _looks_like_text(text: str) -> bool:
     return (printable / len(text)) >= 0.85
 
 
+# ✅ FIX-D v4.0.8: TLD-aware URL signature
 def _has_url_signature(text: str) -> bool:
-    lower = text.lower()
-    return any(sig in lower for sig in _URL_SIGNATURES)
+    if not text:
+        return False
+    return bool(_URL_SIGNATURE_RE.search(text))
 
 
 def _b64_pad(text: str) -> str:
@@ -4027,10 +4110,10 @@ def has_any_obfuscation(text: str) -> bool:
 
 # =============================================================================
 # LAYER 6: BEHAVIORAL
+# ✅ FIX-J v4.0.8: Lock بدل RLock (لا يوجد re-entrancy)
 # =============================================================================
 
-# ✅ FIX-DD: قفل عام لحماية القواميس المشتركة
-_BEHAVIOR_LOCK = threading.RLock()
+_BEHAVIOR_LOCK = threading.Lock()
 
 _user_message_times: Dict[int, deque] = defaultdict(lambda: deque(maxlen=20))
 _user_short_messages: Dict[int, deque] = defaultdict(lambda: deque(maxlen=20))
@@ -4039,13 +4122,15 @@ _user_edit_times: Dict[int, deque] = defaultdict(lambda: deque(maxlen=20))
 
 _edited_messages: Dict[Tuple[int, int], Dict[str, Any]] = {}
 
+# ✅ FIX-K v4.0.8: _context_buffers قبل cleanup_old_data
+_context_buffers: Dict[int, deque] = defaultdict(lambda: deque(maxlen=10))
+
 _last_cleanup = 0.0
 _last_cleanup_lock = threading.Lock()
 CLEANUP_INTERVAL = 300
 
 
 def record_message(user_id: int, text: str, has_url: bool = False) -> None:
-    """✅ FIX-DD: محمي بقفل — آمن من التزامن."""
     now = time.time()
     with _BEHAVIOR_LOCK:
         _user_message_times[user_id].append(now)
@@ -4132,7 +4217,6 @@ def cleanup_old_data(force: bool = False) -> None:
     cutoff = now - 600
     context_cutoff = now - (_CONTEXT_WINDOW_SEC * 2)
 
-    # ✅ FIX-DD: كل عملية حذف تحت القفل
     with _BEHAVIOR_LOCK:
         for uid in list(_user_message_times.keys()):
             dq = _user_message_times[uid]
@@ -4169,14 +4253,13 @@ def cleanup_old_data(force: bool = False) -> None:
             if entry.get("time", 0) < cutoff:
                 _edited_messages.pop(key, None)
 
-        buffers = globals().get("_context_buffers")
-        if buffers is not None:
-            for uid in list(buffers.keys()):
-                dq = buffers[uid]
-                while dq and dq[0].get("ts", 0) < context_cutoff:
-                    dq.popleft()
-                if not dq:
-                    buffers.pop(uid, None)
+        # ✅ FIX-K v4.0.8: direct reference (no globals lookup)
+        for uid in list(_context_buffers.keys()):
+            dq = _context_buffers[uid]
+            while dq and dq[0].get("ts", 0) < context_cutoff:
+                dq.popleft()
+            if not dq:
+                _context_buffers.pop(uid, None)
 
 
 # =============================================================================
@@ -4363,8 +4446,9 @@ def _detect_image_mime(image_bytes: bytes) -> str:
     return "image/jpeg"
 
 
-_se_failure_count = 0
-_se_last_failure_ts = 0.0
+# ✅ FIX-I v4.0.8: type annotations
+_se_failure_count: int = 0
+_se_last_failure_ts: float = 0.0
 _se_circuit_lock = threading.Lock()
 
 
@@ -4435,7 +4519,6 @@ def _check_nsfw_via_sightengine(
             "api_secret": se_secret,
         }
 
-        # ✅ FIX-EE: tuple timeout
         resp = _requests.post(
             url, data=data, files=files,
             timeout=(5.0, 15.0),
@@ -4735,11 +4818,7 @@ def analyze_reactions(message: Any) -> Tuple[int, List[str]]:
 # LAYER 11: CONTEXT (cross-message)
 # =============================================================================
 
-_context_buffers: Dict[int, deque] = defaultdict(lambda: deque(maxlen=10))
-
-
 def record_context_message(user_id: int, text: str, has_url: bool) -> None:
-    """✅ FIX-DD: محمي بقفل — آمن من التزامن."""
     with _BEHAVIOR_LOCK:
         _context_buffers[user_id].append(
             {"text": text, "has_url": has_url, "ts": time.time()}
@@ -5001,13 +5080,15 @@ def _domain_rep_cache_set(domain: str, entry: Dict[str, Any]) -> None:
             _domain_reputation_cache.popitem(last=False)
 
 
+# ✅ FIX-O v4.0.8: إعادة نسخة بدل المرجع (منع التعديل الخارجي)
 def _domain_rep_cache_get(domain: str) -> Optional[Dict[str, Any]]:
     with _DOMAIN_REP_LOCK:
         entry = _domain_reputation_cache.get(domain)
         if entry is None:
             return None
         _domain_reputation_cache.move_to_end(domain)
-        return entry
+        # نسخة سطحية — يمنع تعديل المرجع الأصلي خارج القفل
+        return dict(entry)
 
 
 def _domain_heuristic_analysis(domain: str) -> Tuple[int, List[str]]:
@@ -5762,21 +5843,27 @@ async def analyze_message_full_async(
     message: Any, bot: Any = None
 ) -> SpamVerdict:
     """
-    ✅ FIX-DD: الترتيب مُهيكَل لتقليل مخاطر التزامن.
+    ✅ v4.0.8 FIX-G: تعليق دقيق حول الترتيب.
 
-    - الطبقات المتزامنة السريعة (behavioral/context) تُنفَّذ أولاً
-      قبل asyncio.gather لتقليل نافذة الـinterleaving.
-    - كل عمليات القواميس المشتركة محمية بـ_BEHAVIOR_LOCK.
+    الترتيب:
+      1) text layer (sync سريعة) — تُنتج text_result المطلوب للطبقات التالية.
+      2) sync سريعة (behavioral, context, reactions, ...) — تسجّل سلوك
+         المستخدم بأسرع وقت قبل أي I/O. هذه الطبقات محمية بـ_BEHAVIOR_LOCK
+         ولا تتعارض مع async layers.
+      3) async I/O layers — بالتوازي عبر asyncio.gather مع Semaphore(6).
+
+    ملاحظة: الطبقات الـsync لا تلمس أي ملف/شبكة، لذا تنفيذها قبل الـgather
+    لا يُبطئ أي شيء جوهري ويضمن تسجيل user behavior قبل أي محاولة تحميل ملف
+    قد تفشل وتُغير مسار التحليل.
     """
     verdict = SpamVerdict(
         is_spam=False, total_score=0.0, confidence="none"
     )
 
-    # 1) الطبقة النصية أولاً (تُنتج text_result)
+    # 1) Text layer أولاً
     text_result = _run_text_layer(message, verdict)
 
-    # 2) الطبقات المتزامنة السريعة — قبل الـgather
-    #    لتسجيل سلوك المستخدم بأسرع وقت (وقبل أي await)
+    # 2) Sync layers — قبل الـgather لتسجيل behavior فوراً
     _run_metadata_layer(message, verdict)
     _run_obfuscation_layer(message, verdict)
     _run_behavioral_layer(message, text_result, verdict)
@@ -5785,7 +5872,7 @@ async def analyze_message_full_async(
     _run_cipher_layer(message, verdict)
     _run_domain_rep_layer(text_result, verdict)
 
-    # 3) الطبقات المستقلة I/O — بالتوازي
+    # 3) Async I/O layers — بالتوازي
     sem = asyncio.Semaphore(6)
 
     async def _guarded(coro_fn, *args):
@@ -5991,7 +6078,7 @@ def get_spam_diagnostics(message: Any) -> Dict[str, Any]:
 
 
 # =============================================================================
-# __all__  (✅ FIX-II: تنظيف — إزالة الميت، إضافة الجديد)
+# __all__
 # =============================================================================
 
 __all__ = [
@@ -6010,7 +6097,8 @@ __all__ = [
     "NSFW_SIGHTENGINE_MAX_BYTES", "NORMALIZE_CACHE_MAX",
     "SE_CIRCUIT_FAILURE_THRESHOLD", "SE_CIRCUIT_OPEN_SEC",
     "URL_EXPAND_CONNECT_TIMEOUT", "URL_EXPAND_READ_TIMEOUT",
-    "_POOL_MAX_WORKERS",
+    "URL_EXPAND_TIMEOUT", "URL_EXPAND_MAX_HOPS", "URL_ENRICH_MAX_URLS",
+    "_POOL_MAX_WORKERS", "POOL_TASK_TIMEOUT",
 
     # Anti-evasion toggles
     "ANTIEVASION_ENTITY_LINK", "ANTIEVASION_BUTTON_LINK",
@@ -6108,9 +6196,10 @@ __all__ = [
     "_version_semver",
     "_download_telegram_file", "_download_telegram_file_async",
 
-    # ✅ FIX-CC: pool APIs
+    # Pool APIs (✅ v4.0.8)
     "_get_shared_pool", "_shutdown_shared_pool",
     "_run_in_pool", "install_default_executor",
+    "shutdown_default_executor",
 ]
 
 
@@ -6132,7 +6221,7 @@ try:
         "Stego=%s(numpy=%s,pil=%s) DomainRep=%s | "
         "SPAM_THRESHOLD=%d HARD=%d CRITICAL=%d | "
         "TLDs=%d RANDOM_DOMAIN=%s ASYNC_NET=%s POOL=%d "
-        "SE_CIRCUIT=%d/%ds",
+        "SE_CIRCUIT=%d/%ds TIMEOUT=%.1fs",
         _DETECTORS_VERSION,
         TEXT_LAYER_ENABLED,
         OCR_LAYER_ENABLED, _PIL_AVAILABLE,
@@ -6158,6 +6247,7 @@ try:
         _POOL_MAX_WORKERS,
         SE_CIRCUIT_FAILURE_THRESHOLD,
         int(SE_CIRCUIT_OPEN_SEC),
+        POOL_TASK_TIMEOUT,
     )
 except Exception:
     pass
