@@ -2,7 +2,40 @@
 # -*- coding: utf-8 -*-
 
 """
-🌿 Relax Manager – البوت الرئيسي (v5.6.12-DETECTORS-4.0.8-BRIDGE)
+🌿 Relax Manager – البوت الرئيسي (bot.py v5.6.12-DETECTORS-4.0.8-BRIDGE)
+================================================================================
+📌 نقطة الدخول الرسمية للتطبيق (entrypoint).
+
+================================================================================
+🔗 خريطة التكامل بين الملفات الرئيسية:
+
+    config.py v7 (المصدر الوحيد للحقيقة)
+         │
+         │  CONFIG.apply_detector_env()   ← يُستدعى تلقائياً عند import
+         │  CONFIG.get_detector_env()      ← helper للاستخدام اليدوي
+         ▼
+    handlers_message_detectors.py v4.0.8 (FULL-AUDIT-V3 — 15 طبقة)
+         │
+         │  install_default_executor(loop)      ← يُستدعى قبل main()
+         │  analyze_message_full_async()        ← الطبقة المفضّلة
+         │  _run_in_pool()                      ← pool مشترك لـsync
+         │  shutdown_default_executor(loop)     ← يُستدعى عند الإغلاق
+         ▼
+    handlers_message.py v7.18.9 (POOL-BRIDGE)
+         │
+         │  register_shutdown_handlers(app)     ← يشمل post_shutdown
+         │  _run_sync_in_pool()                 ← يمرّر إلى _run_in_pool
+         │  MessageHandlers.handle_group()      ← نقطة الفحص الرئيسية
+         ▼
+    bot.py v5.6.12 (هذا الملف — entrypoint)
+         │
+         │  asyncio.new_event_loop()
+         │  install_default_executor(loop)      ← ربط pool
+         │  loop.run_until_complete(main())
+         │  shutdown_default_executor(loop)     ← تنظيف الحلقة
+         ▼
+    ✅ إغلاق نظيف بلا تسريب ThreadPool
+
 ================================================================================
 🆕 v5.6.12 (DETECTORS-4.0.8-BRIDGE):
     🟢 PATCH-1: استيراد install_default_executor + shutdown_default_executor
@@ -26,8 +59,92 @@
     🔴 FIX: إزالة استيراد `_SECURITY_BRIDGE_AVAILABLE` من utils.py
     ✅ FIX: تحديد `_SECURITY_BRIDGE_AVAILABLE = True` عند نجاح الاستيراد
     ✅ FIX: تهيئة `_SB_IMPORT_ERROR = None` قبل try
+
+================================================================================
+📦 قائمة الملفات والمتطلبات:
+
+    الملفات الرئيسية:
+      • bot.py                             (هذا الملف — entrypoint)
+      • config.py                          (v7 — يقرأ .env ويُصدّر CONFIG)
+      • handlers_message_detectors.py      (v4.0.8 — 15 طبقة كشف)
+      • handlers_message.py                (v7.18.9 — معالجة الرسائل)
+      • handlers/                          (حزمة الـhandlers)
+      • database.py / database_*.py        (طبقة قاعدة البيانات)
+      • utils.py                           (v7.10.5+ — أدوات مساعدة)
+
+    متطلبات التشغيل الأساسية:
+      • Python 3.9+ (يدعم cancel_futures في ThreadPoolExecutor)
+      • python-telegram-bot v20+
+      • aiohttp, python-dotenv
+      • config.py v7 (يحتاج لتشغيل apply_detector_env)
+
+    متطلبات اختيارية (لتفعيل الطبقات):
+      • numpy, Pillow, pytesseract       → OCR (L1)
+      • pyzbar                            → QR (L1)
+      • SpeechRecognition, pydub          → Audio (L2)
+      • requests, python-whois            → URL (L3)
+      • opencv-python, ffmpeg             → Video (L7)
+      • transformers, torch               → NSFW local (L8)
+
+    فحص التبعيات:
+        python bot.py 2>&1 | grep "Spam Detector"
+        python bot.py 2>&1 | grep "التبعيات"
+
+================================================================================
+🚀 التشغيل:
+
+    # 1. تثبيت المتطلبات
+    pip install -r requirements.txt
+
+    # 2. نسخ ملف البيئة وتعديله
+    cp .env.example .env
+    # عدّل .env: BOT_TOKEN, MAIN_ADMIN_ID, ...
+
+    # 3. تشغيل البوت
+    python bot.py
+
+    # 4. متابعة السجلات
+    tail -f logs/bot.log
+
+================================================================================
+⚠️ ملاحظات المطوّر:
+
+    1) ترتيب الاستيراد إلزامي:
+       config.py → (apply_detector_env) → detectors → handlers_message → bot.py
+
+       لا تستورد detectors قبل config، وإلا ستفقد القيم المُصدَّرة من .env.
+
+    2) عند الاستيراد الناجح، ستظهر سجلات:
+       ✅ تم تحميل الإعدادات: ...
+       🛡️ Spam Detection Engine v4.0.8 | مُفعَّلة: N/15 طبقة
+       🛡️ Spam Detector: ✅ محمّل (4.0.8 ..., 15 layers, helpers=install,shutdown)
+       ✅ detectors pool: installed as default executor
+       📦 bot.py: v5.6.12 | detectors=4.0.8 | layers=15 | helpers=install,shutdown
+
+    3) الإغلاق النظيف:
+       - Ctrl+C أو SIGTERM يُشغّل الإغلاق اللطيف
+       - يُغلق: group_log → background tasks → detectors pool → log dispatcher
+       - event loop يُغلق بعد إلغاء كل المهام المعلّقة
+       - إن رأيت تعليقاً عند الإغلاق > 15 ثانية → راجع pool_health_monitor
+
+    4) الفحص التشخيصي (اختياري):
+       DIAG_INCOMING=1 python bot.py
+       # يطبع كل رسالة واردة للمجموعة (group=-100)
+
+    5) الإصدارات الحالية:
+       config.py                    = v7 (DETECTORS-v4.0.8-INTEGRATION)
+       handlers_message_detectors.py = v4.0.8 (FULL-AUDIT-V3 — 15 layers)
+       handlers_message.py          = v7.18.9 (POOL-BRIDGE)
+       bot.py                       = v5.6.12 (DETECTORS-4.0.8-BRIDGE)
+       utils.py                     = v7.10.5+ (Security Bridge)
+       database_tables.py           = v7.9.0 (schema version)
+
 ================================================================================
 """
+
+# ═══════════════════════════════════════════════════════════════════
+# ⚠️ بداية الكود الفعلي — لا تعدّل الأسطر أعلاه إلا لتحديث التوثيق
+# ═══════════════════════════════════════════════════════════════════
 
 import asyncio
 import os
@@ -122,7 +239,7 @@ except ImportError as _e1:
                 )
 
 # ═════════════════════════════════════════════════════════════════════
-# ✅ FIX-9 (v5.6.11): فحص محرك كشف السبام — بدون import probe
+# ✅ FIX-9 (v5.6.11): فحص محرك كشف السبام
 # ✅ v5.6.12 PATCH-1: إضافة ربط helpers v4.0.8
 # ═════════════════════════════════════════════════════════════════════
 _SPAM_DETECTOR_AVAILABLE = False
@@ -496,7 +613,7 @@ def _log_spam_detector_status() -> None:
         )
         logger.warning(
             "   💡 تأكد من وجود handlers_message_detectors.py في: "
-            "الجذر، أو handlers/، أو نفس مجلد main.py"
+            "الجذر، أو handlers/، أو نفس مجلد bot.py"
         )
         return
 
@@ -2401,7 +2518,7 @@ async def main():
 
     # ✅ FIX-4 + PATCH-4: تقرير موحّد
     logger.info(
-        "📦 main.py: v5.6.12 | "
+        "📦 bot.py: v5.6.12 | "
         "detectors=%s | layers=%d | helpers=%s",
         _SPAM_DETECTOR_VERSION or "N/A",
         _SPAM_DETECTOR_LAYERS_COUNT,
@@ -3130,11 +3247,11 @@ async def main():
         try:
             await _shutdown_log_dispatcher(timeout=5.0)
         except Exception as _e:
-            logger.debug("shutdown_log_dispatcher (main): %s", _e)
+            logger.debug("shutdown_log_dispatcher (bot): %s", _e)
         try:
             await _shutdown_delete_tasks(timeout=3.0)
         except Exception as _e:
-            logger.debug("shutdown_delete_tasks (main): %s", _e)
+            logger.debug("shutdown_delete_tasks (bot): %s", _e)
 
         # 5) app shutdown
         if not app_shutdown_done:
