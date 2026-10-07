@@ -2,8 +2,13 @@
 # -*- coding: utf-8 -*-
 
 """
-handlers/handlers_nav_fix.py - v3.2 (delegating dispatcher, hardened)
+handlers/handlers_nav_fix.py - v3.2.1 (delegating dispatcher, hardened)
 =====================================================================
+🎯 v3.2.1 (توثيق):
+    📝 إضافة توضيح في docstring log_and_delegate حول التفاعل
+       مع handlers_channels_list.py وبقية CallbackQueryHandlers
+       في group > -99.
+
 🎯 v3.2:
     🔴 FIX-A: حلّ صحيح لـ CallbackHandlers.handle — يدعم
               staticmethod / classmethod / instance method.
@@ -240,13 +245,40 @@ async def log_and_delegate(
         2. تفويض صريح إلى CallbackHandlers.handle()
         3. منع باقي المعالجات من التشغيل (ApplicationHandlerStop)
 
-    ⚠️ ملاحظة معمارية:
-        لأن هذا المُوزّع يُسجَّل في group=-99 (أول مجموعة)، فهو يعمل
-        قبل أي CallbackQueryHandler آخر. وبعد رفعه ApplicationHandlerStop،
-        لا تُنفَّذ أي معالجة أخرى للأزرار.
+    ⚠️ ملاحظة معمارية مهمة (v3.2.1):
+        ─────────────────────────────────────────────────────────
+        هذا المُوزّع مُسجَّل في group=-99 (أول مجموعة).
+        بعد تنفيذه، يرفع ApplicationHandlerStop فيتوقف PTB عن
+        استدعاء أي CallbackQueryHandler آخر في group ≥ -99.
 
-        إذن: أيّ CallbackQueryHandler آخر في `main.py` لا يُنفَّذ
-        (مثل channels_list إن لم يعتمد على group أصغر من -99).
+        الأثر العملي:
+            • أي CallbackQueryHandler في bot.py يُسجَّل بدون group
+              صريح (أي group=0) → **لن يُنفَّذ**.
+            • أي CallbackQueryHandler في handlers_channels_list.py
+              (مثل ch_list, ch_info:, ch_select:, ch_schedule:, ...)
+              → **لن يُنفَّذ أيضاً**.
+            • كل الأزرار تُفوَّض إلى CallbackHandlers.handle() الذي
+              يجب أن يعرف هذه الـ prefixes.
+
+        ✅ هذا مقصود (delegation mode):
+            CallbackHandlers.handle() هو الـ single source of truth
+            لتوجيه الأزرار. أي prefix غير معروف سيتجاهله، وأي handler
+            آخر كان سيعالجه يصبح غير فعّال.
+
+        ⚠️ إذا أردت تشغيل handlers معينة قبل NAV_FIX:
+            سجّلها في group=-100 (أصغر من -99)، مثال:
+
+                application.add_handler(
+                    CallbackQueryHandler(ch_list_handler),
+                    group=-100,  # ← يسبق NAV_FIX
+                )
+
+        📌 تشخيص سريع:
+            لو ضغطة زر لا تفعل شيئاً، فالمشكلة في:
+              (أ) CallbackHandlers.handle() لا يعرف الـ prefix
+              (ب) أو handler آخر في group=-100 يعترض قبل NAV_FIX
+            وليس في NAV_FIX نفسه.
+        ─────────────────────────────────────────────────────────
     """
     query = update.callback_query
     if not query:
@@ -325,7 +357,7 @@ def register_nav_fix(application) -> bool:
         )
         logger.info(
             "✅ NAV_FIX: مُوزّع الأزرار مُسجّل "
-            "(v3.2 — delegation mode + stop-safe + handler-resolve)"
+            "(v3.2.1 — delegation mode + stop-safe + handler-resolve)"
         )
         return True
     except Exception as e:
