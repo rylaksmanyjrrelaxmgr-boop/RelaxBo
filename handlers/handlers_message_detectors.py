@@ -5,15 +5,20 @@
 handlers_message_detectors.py
 ===============================================================================
 🛡️ Relax Manager — Advanced Spam / Anti-Evasion Detection Engine
-Version: 4.0.8 (CRITICAL-FIXES)
+Version: 4.0.8.1 (DOCS-FIX)
+
+🆕 v4.0.8.1 — إصلاح توثيقي:
+    🟡 FIX-DOC-1: Load Beacon — "14 Layers" → "15 Layers"
+                  (كان يخبر 14 بينما LAYER_WEIGHTS يحتوي 15 مفتاحاً:
+                   7 أساسية + 8 متقدمة = 15)
 
 🆕 v4.0.8 — إصلاحات v4.0.7:
-    🔴 FIX-A: _run_in_pool يقبل **kwargs (كان crash في audio layer)
+    🔴 FIX-A: _run_in_pool يقبل **kwargs
     🟠 FIX-B: install_default_executor — إصلاح API deprecated
     🟠 FIX-C: NSFW lazy load — تقليل احتجاز pool workers
-    🟠 FIX-D: _URL_SIGNATURES — TLD-aware regex (FPs أقل بكثير)
+    🟠 FIX-D: _URL_SIGNATURES — TLD-aware regex
     🟠 FIX-E: _EMOJI_STRIP_RE — ZWJ sequences + modifiers
-    🟡 FIX-G: _analyze_message_full_async — تعليق دقيق + ترتيب أمثل
+    🟡 FIX-G: _analyze_message_full_async — تعليق دقيق
     🟡 FIX-I: type annotations لـ_se_last_failure_ts
     🟡 FIX-J: Lock بدل RLock لـ_BEHAVIOR_LOCK
     🟡 FIX-K: _context_buffers معرّف قبل cleanup_old_data
@@ -21,14 +26,9 @@ Version: 4.0.8 (CRITICAL-FIXES)
     🟡 FIX-O: _domain_rep_cache_get يعيد نسخة
     🟡 FIX-R: _run_in_pool timeout اختياري
 
-🆕 v4.0.7:
-    ✅ FIX-AA..II (FULL-AUDIT-V3)
-
-🆕 v4.0.5/4.0.6:
-    ✅ FIX-R,S,T,U,V,W,X (SHUTDOWN + ASYNC hardening)
-
-🆕 v4.0.4:
-    ✅ FIX-A..Q
+🆕 v4.0.7: FIX-AA..II (FULL-AUDIT-V3)
+🆕 v4.0.5/4.0.6: FIX-R,S,T,U,V,W,X (SHUTDOWN + ASYNC hardening)
+🆕 v4.0.4: FIX-A..Q
 ===============================================================================
 """
 
@@ -69,8 +69,8 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
-_DETECTORS_VERSION = "4.0.8 CRITICAL-FIXES"
-_DETECTORS_VERSION_CLEAN = "4.0.8"
+_DETECTORS_VERSION = "4.0.8.1 DOCS-FIX"
+_DETECTORS_VERSION_CLEAN = "4.0.8.1"
 
 
 def _version_semver(version: str) -> str:
@@ -180,7 +180,6 @@ NORMALIZE_CACHE_MAX = _env_int("NORMALIZE_CACHE_MAX", 512)
 SE_CIRCUIT_FAILURE_THRESHOLD = _env_int("SE_CIRCUIT_FAILURE_THRESHOLD", 5)
 SE_CIRCUIT_OPEN_SEC = _env_float("SE_CIRCUIT_OPEN_SEC", 60.0)
 
-# ✅ FIX-R v4.0.8: timeout افتراضي لمهام pool
 POOL_TASK_TIMEOUT = _env_float("POOL_TASK_TIMEOUT", 60.0)
 
 
@@ -227,7 +226,6 @@ def _shutdown_shared_pool() -> None:
         logger.debug("_shutdown_shared_pool: %s", _e)
 
 
-# ✅ FIX-A v4.0.8: _run_in_pool يقبل **kwargs + timeout اختياري
 async def _run_in_pool(
     fn: Callable[..., Any],
     *args: Any,
@@ -265,7 +263,6 @@ async def _run_in_pool(
     return await fut
 
 
-# ✅ FIX-B v4.0.8: install_default_executor مع API حديث
 def install_default_executor(loop: Optional[asyncio.AbstractEventLoop] = None) -> None:
     """
     ✅ v4.0.8 FIX-B: إصلاح asyncio.get_event_loop() deprecated.
@@ -275,9 +272,6 @@ def install_default_executor(loop: Optional[asyncio.AbstractEventLoop] = None) -
         asyncio.set_event_loop(loop)
         install_default_executor(loop)   # ← مرّر loop صراحة
         loop.run_until_complete(main())
-
-    أو داخل coroutine:
-        install_default_executor()  # يكتشف running loop تلقائياً
     """
     try:
         if loop is None:
@@ -305,15 +299,12 @@ def install_default_executor(loop: Optional[asyncio.AbstractEventLoop] = None) -
         logger.warning("install_default_executor: %r", exc)
 
 
-# ✅ FIX-N v4.0.8: shutdown_default_executor helper
 async def shutdown_default_executor(
     loop: Optional[asyncio.AbstractEventLoop] = None,
     timeout: float = 3.0,
 ) -> None:
     """
     ✅ v4.0.8 FIX-N: يُغلق default executor الخاص بالحلقة ثم pool الداخلي.
-
-    يُستدعى من main.py قبل إغلاق الحلقة.
     idempotent — آمن للاستدعاء المتكرر.
     """
     try:
@@ -334,18 +325,13 @@ async def shutdown_default_executor(
                             shutdown_method(), timeout=timeout,
                         )
                     except (asyncio.TimeoutError, TypeError, AttributeError):
-                        # Python < 3.9 أو لا يدعم timeout arg
                         try:
                             await shutdown_method()
                         except Exception:
                             pass
-                elif hasattr(loop, "run_in_executor"):
-                    # fallback: انتظر انتهاء المهام الجارية
-                    pass
             except Exception as _e:
                 logger.debug("shutdown_default_executor (loop): %s", _e)
 
-        # أغلق pool الداخلي أيضاً
         _shutdown_shared_pool()
     except Exception as exc:
         logger.debug("shutdown_default_executor: %r", exc)
@@ -436,25 +422,17 @@ except Exception:
 
 _nsfw_classifier = None
 _nsfw_load_lock = threading.Lock()
-# ✅ FIX-C v4.0.8: flag لمنع محاولات متكررة (كاش فشل)
 _nsfw_load_attempted = False
 
 
 def _load_nsfw_classifier() -> Any:
-    """
-    ✅ v4.0.8 FIX-C: تحميل كسول محسّن.
-
-    - لا يحجز pool slot إن كانت محاولة سابقة فشلت (كاش فشل).
-    - التحميل يحدث مرة واحدة فقط في عمر التطبيق.
-    - يُوصى بـpreload عبر warmup_all() لتجنب احتجاز slot في أول رسالة.
-    """
+    """✅ v4.0.8 FIX-C: تحميل كسول محسّن مع cache فشل."""
     global _nsfw_classifier, _NSFW_MODEL_AVAILABLE, _nsfw_load_attempted
 
     if _nsfw_classifier is not None:
         return _nsfw_classifier
     if not NSFW_MODEL_ENABLED:
         return None
-    # ✅ FIX-C: لو حاولنا وفشلنا سابقاً → لا نُعيد المحاولة (توفير slots)
     if _nsfw_load_attempted and _nsfw_classifier is None:
         return None
 
@@ -681,17 +659,13 @@ _UNICODE_DOT_TABLE = str.maketrans({
 })
 
 
-# ✅ FIX-E v4.0.8: emoji strip يغطي ZWJ + modifiers + keycaps + flags
 _EMOJI_STRIP_RE = re.compile(
     r"(?:"
-    # ZWJ sequences (families, professions...)
     r"(?:[\U0001F000-\U0001FAFF\u2600-\u27BF\u2B00-\u2BFF]"
-    r"[\U0001F3FB-\U0001F3FF]?"           # skin tone modifier
+    r"[\U0001F3FB-\U0001F3FF]?"
     r"(?:\u200d[\U0001F000-\U0001FAFF]"
     r"[\U0001F3FB-\U0001F3FF]?)*)"
-    # Regional indicators (flags) — two consecutive
     r"|[\U0001F1E6-\U0001F1FF]{2}"
-    # Keycap sequences (1️⃣ 2️⃣ ...)
     r"|[0-9#*]\uFE0F?\u20E3"
     r")"
 )
@@ -794,7 +768,6 @@ _MULTILINE_URL_SCHEME_RE = re.compile(
 _BASE64_RE = re.compile(r"^[A-Za-z0-9+/]{16,}={0,2}$")
 _BASE64_URLSAFE_RE = re.compile(r"^[A-Za-z0-9_-]{16,}={0,2}$")
 
-# ✅ FIX-D v4.0.8: TLD-aware regex بدل substring matching
 _URL_SIGNATURE_RE = re.compile(
     r"(?i)(?:"
     r"https?://"
@@ -3693,7 +3666,6 @@ async def extract_audio_content_async(
             )
             if not audio_bytes:
                 continue
-            # ✅ FIX-A v4.0.8: kwargs مدعومة الآن في _run_in_pool
             text = await _run_in_pool(
                 transcribe_audio,
                 audio_bytes,
@@ -3998,7 +3970,6 @@ def _looks_like_text(text: str) -> bool:
     return (printable / len(text)) >= 0.85
 
 
-# ✅ FIX-D v4.0.8: TLD-aware URL signature
 def _has_url_signature(text: str) -> bool:
     if not text:
         return False
@@ -4110,7 +4081,6 @@ def has_any_obfuscation(text: str) -> bool:
 
 # =============================================================================
 # LAYER 6: BEHAVIORAL
-# ✅ FIX-J v4.0.8: Lock بدل RLock (لا يوجد re-entrancy)
 # =============================================================================
 
 _BEHAVIOR_LOCK = threading.Lock()
@@ -4122,7 +4092,6 @@ _user_edit_times: Dict[int, deque] = defaultdict(lambda: deque(maxlen=20))
 
 _edited_messages: Dict[Tuple[int, int], Dict[str, Any]] = {}
 
-# ✅ FIX-K v4.0.8: _context_buffers قبل cleanup_old_data
 _context_buffers: Dict[int, deque] = defaultdict(lambda: deque(maxlen=10))
 
 _last_cleanup = 0.0
@@ -4253,7 +4222,6 @@ def cleanup_old_data(force: bool = False) -> None:
             if entry.get("time", 0) < cutoff:
                 _edited_messages.pop(key, None)
 
-        # ✅ FIX-K v4.0.8: direct reference (no globals lookup)
         for uid in list(_context_buffers.keys()):
             dq = _context_buffers[uid]
             while dq and dq[0].get("ts", 0) < context_cutoff:
@@ -4446,7 +4414,6 @@ def _detect_image_mime(image_bytes: bytes) -> str:
     return "image/jpeg"
 
 
-# ✅ FIX-I v4.0.8: type annotations
 _se_failure_count: int = 0
 _se_last_failure_ts: float = 0.0
 _se_circuit_lock = threading.Lock()
@@ -5080,14 +5047,12 @@ def _domain_rep_cache_set(domain: str, entry: Dict[str, Any]) -> None:
             _domain_reputation_cache.popitem(last=False)
 
 
-# ✅ FIX-O v4.0.8: إعادة نسخة بدل المرجع (منع التعديل الخارجي)
 def _domain_rep_cache_get(domain: str) -> Optional[Dict[str, Any]]:
     with _DOMAIN_REP_LOCK:
         entry = _domain_reputation_cache.get(domain)
         if entry is None:
             return None
         _domain_reputation_cache.move_to_end(domain)
-        # نسخة سطحية — يمنع تعديل المرجع الأصلي خارج القفل
         return dict(entry)
 
 
@@ -5860,10 +5825,8 @@ async def analyze_message_full_async(
         is_spam=False, total_score=0.0, confidence="none"
     )
 
-    # 1) Text layer أولاً
     text_result = _run_text_layer(message, verdict)
 
-    # 2) Sync layers — قبل الـgather لتسجيل behavior فوراً
     _run_metadata_layer(message, verdict)
     _run_obfuscation_layer(message, verdict)
     _run_behavioral_layer(message, text_result, verdict)
@@ -5872,7 +5835,6 @@ async def analyze_message_full_async(
     _run_cipher_layer(message, verdict)
     _run_domain_rep_layer(text_result, verdict)
 
-    # 3) Async I/O layers — بالتوازي
     sem = asyncio.Semaphore(6)
 
     async def _guarded(coro_fn, *args):
@@ -6196,7 +6158,7 @@ __all__ = [
     "_version_semver",
     "_download_telegram_file", "_download_telegram_file_async",
 
-    # Pool APIs (✅ v4.0.8)
+    # Pool APIs
     "_get_shared_pool", "_shutdown_shared_pool",
     "_run_in_pool", "install_default_executor",
     "shutdown_default_executor",
@@ -6214,7 +6176,7 @@ try:
 
     logger.info(
         "🛡️ handlers_message_detectors %s loaded | "
-        "14 Layers ASYNC-NATIVE | "
+        "15 Layers ASYNC-NATIVE | "
         "Text=%s OCR=%s(PIL=%s) Audio=%s(%s) URL=%s(%s) "
         "Meta=%s Obf=%s Behav=%s Video=%s(%s) NSFW=%s(local_cfg=%s,se=%s) "
         "Sticker=%s Reactions=%s Context=%s Cipher=%s "
