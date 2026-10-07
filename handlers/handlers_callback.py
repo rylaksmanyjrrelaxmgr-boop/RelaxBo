@@ -1,50 +1,33 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-handlers_callback.py - معالج الأزرار (v9.7.12)
+handlers_callback.py - معالج الأزرار (v9.7.13)
 =====================================================================
+🆕 v9.7.13 (UPDATES-CHANNEL-LINK-FIX):
+    🔴 UPD-1: _show_updates_channel — إضافة زر رابط قابل للنقر
+              • يدعم @username → https://t.me/{username}
+              • يدعم https://t.me/... مباشرة
+              • يدعم ID رقمي → يحاول t.me/c/...
+              • يحاول create_chat_invite_link للقنوات الخاصة
+    🔴 UPD-2: _show_admin_update_channel_menu — نفس التحسين
+    🟡 UPD-3: _extract_updates_channel_link — helper مشترك
+    ✅ الحفاظ الكامل على سلوك v9.7.12
+
 🆕 v9.7.12 (SYNTAX-FIX):
-    🔴 SYNTAX-1: إصلاح SyntaxError في _handle_auto_reply (السطر 5502)
-                كان سطران التصقا معاً بدون فاصل:
-                "except (TypeError, ValueError): chat_id = None        if chat_id is None:"
-                → صارا:
-                "except (TypeError, ValueError): chat_id = None"
-                "        if chat_id is None:"
+    🔴 SYNTAX-1: إصلاح SyntaxError في _handle_auto_reply
     ✅ تم التحقق بـ py_compile — لا أخطاء
-    ✅ الحفاظ الكامل على سلوك v9.7.11
 
-🆕 v9.7.11 (PERF-INTEGRATION — تكامل مع handlers_message v7.18.8):
-    🟠 PERF-CB-1: إضافة helper _invalidate_message_caches
-    🟠 PERF-CB-2: ربط الإبطال مع _invalidate_security_settings_cache
-    🟠 PERF-CB-3: ربط الإبطال مع _invalidate_log_channel_menu_cache
-    🟡 PERF-CB-4: log تشخيصي عند فشل استدعاء invalidation
-    🟢 PERF-CB-5: توثيق واضح في docstrings لكل مسار إبطال
+🆕 v9.7.11 (PERF-INTEGRATION):
+    🟠 PERF-CB-1..5: تكامل مع handlers_message v7.18.8
 
-🆕 v9.7.10 (MISSING-METHODS-FIX):
-    🔴 MISSING-1: إضافة 3 دوال كانت تُستدعى بدون تعريف:
-        • _show_updates_channel
-        • _show_metrics_dashboard
-        • _show_admin_update_channel_menu
-    ✅ الحفاظ الكامل على سلوك v9.7.9
-
-🆕 v9.7.9 (CLEANUP-AND-HARDENING):
-    🟡 CLEANUP-1: _get_security_settings_cached — كاش فاسد → إبطال
-    🟡 ORDER-1:  sec_set_del_penalty_duration: قبل sec_set_del_penalty:
-    🟡 ORDER-2:  sec_warn_penalty_duration: قبل sec_warn_penalty:
-    🟡 DEAD-1:   إزالة 'delete_penalty' من _back_map
-    🟡 DOC-1:    توثيق المعالجات "اليتيمة"
-    🟡 LOG-1:    logger.debug عند not_available
-    🟡 IMPORT-1: توثيق bridge_get_security_settings كـ re-export
-
-🆕 v9.7.8 (SECURITY-TABLE-MISMATCH-FIX):
-    🔴 TMF1: _get_security_settings_cached — إزالة تفضيل Bridge.
-    🔴 TMF2: نقل فحص action == "warn" قبل SECURITY_TOGGLE_MAP.
-
-🆕 v9.7.7 (SECURITY-BRIDGE-INTEGRATION): SB1-SB6
-🆕 v9.7.6 (ANTIFLOOD-BUTTONS): NF1-NF6
-🆕 v9.7.5 (NEW SECURITY BUTTONS): NC1-NC3
-🆕 v9.7.4 (SECOND REVIEW FIXES): C1-C5 + M1 + N2, N5
-🆕 v9.7.3 (REVIEW FIXES): FIX-ADV-1, FIX-GR-1, FIX-UPD-1, FIX-ACT-1
+🆕 v9.7.10 (MISSING-METHODS-FIX): إضافة 3 دوال
+🆕 v9.7.9 (CLEANUP-AND-HARDENING)
+🆕 v9.7.8 (SECURITY-TABLE-MISMATCH-FIX)
+🆕 v9.7.7 (SECURITY-BRIDGE-INTEGRATION)
+🆕 v9.7.6 (ANTIFLOOD-BUTTONS)
+🆕 v9.7.5 (NEW SECURITY BUTTONS)
+🆕 v9.7.4 (SECOND REVIEW FIXES)
+🆕 v9.7.3 (REVIEW FIXES)
 =====================================================================
 """
 import asyncio, importlib, logging, json, time, shutil, os, re
@@ -254,6 +237,67 @@ _membership_table_created = False
 
 
 # ═══════════════════════════════════════════════════════════════════
+# 🆕 v9.7.13 UPD-3: Updates-channel link helper
+# ═══════════════════════════════════════════════════════════════════
+
+def _extract_updates_channel_link(ch_raw):
+    """
+    🆕 v9.7.13: استخراج رابط القناة + معرفتها النظيفة.
+
+    المُدخل قد يكون:
+        • "@my_channel"
+        • "my_channel"
+        • "https://t.me/my_channel"
+        • "http://t.me/my_channel"
+        • "t.me/my_channel"
+        • "-1001234567890" (ID رقمي)
+
+    المُخرج:
+        (clean, url_or_None, is_username)
+        • clean: المعرف النظيف (بدون @ أو https://)
+        • url_or_None: رابط t.me إذا كان username، أو None
+        • is_username: True إن كان identifier قابل للاستخدام كـ username
+    """
+    if not ch_raw:
+        return "", None, False
+    try:
+        s = str(ch_raw).strip()
+    except Exception:
+        return "", None, False
+    if not s:
+        return "", None, False
+
+    # إزالة @
+    if s.startswith('@'):
+        s = s[1:]
+
+    # إزالة https://t.me/ أو http://t.me/ أو t.me/
+    for prefix in ("https://t.me/", "http://t.me/",
+                   "https://telegram.me/", "http://telegram.me/",
+                   "t.me/", "telegram.me/"):
+        if s.lower().startswith(prefix):
+            s = s[len(prefix):]
+            break
+
+    # إزالة / في النهاية
+    s = s.rstrip('/')
+
+    # إزالة أي query string
+    if '?' in s:
+        s = s.split('?', 1)[0]
+
+    if not s:
+        return "", None, False
+
+    # هل هو ID رقمي؟
+    if s.lstrip('-').isdigit():
+        return s, None, False
+
+    # username صالح
+    return s, f"https://t.me/{s}", True
+
+
+# ═══════════════════════════════════════════════════════════════════
 # 🆕 v9.7.11 PERF-CB-1: Message-handlers cache invalidation bridge
 # ═══════════════════════════════════════════════════════════════════
 
@@ -297,11 +341,6 @@ async def _invalidate_message_caches(
         • _invalidate_sec_settings_local(chat_id)   (PERF-2 — 5s TTL)
         • _invalidate_admin_check_cache(chat_id)    (PERF-7 — 30s TTL)
 
-    يُنادى من:
-        • _invalidate_security_settings_cache
-        • _invalidate_log_channel_menu_cache
-        • أي مسار يُعدّل إعدادات أمان المجموعة
-
     ⚠️ لا يفشل إذا لم تكن الوحدة متاحة — يُسجّل debug فقط.
     """
     mod = _get_message_handlers_module()
@@ -340,7 +379,6 @@ async def _invalidate_message_caches(
     try:
         inv_admin = getattr(mod, "_invalidate_admin_check_cache", None)
         if callable(inv_admin):
-            # إذا كنا نعرف user_id → إبطال محدد، وإلا → كل المجموعة
             if user_id is not None:
                 inv_admin(chat_id, user_id)
             else:
@@ -836,10 +874,7 @@ def _prune_kicked_notify_state(context, now):
 
 async def _invalidate_log_channel_menu_cache(chat_id):
     """
-    🆕 v9.7.11 PERF-CB-3: إبطال 3 طبقات:
-        1) internal_cache (handlers_callback)
-        2) group_log_{chat_id} (misc)
-        3) handlers_message._invalidate_group_log_cache (PERF-1)
+    🆕 v9.7.11 PERF-CB-3: إبطال 3 طبقات.
     """
     try:
         await internal_cache.invalidate(_log_channel_cache_key(chat_id))
@@ -849,7 +884,6 @@ async def _invalidate_log_channel_menu_cache(chat_id):
         await internal_cache.invalidate(f"group_log_{chat_id}")
     except Exception:
         pass
-    # 🆕 v9.7.11 PERF-CB-3: ربط مع handlers_message
     try:
         await _invalidate_message_caches(
             chat_id=chat_id, reason="log_channel_change"
@@ -1793,14 +1827,7 @@ class CallbackHandlers:
     @staticmethod
     async def _invalidate_security_settings_cache(chat_id):
         """
-        🆕 v9.7.11 PERF-CB-2: إبطال 5 طبقات cache لأي تعديل أمان:
-
-        الطبقات:
-            1) settings_cache (cache.py — DB-level cache)
-            2) _security_stats_cache_local (handlers_callback — stats)
-            3) bridge_invalidate_sec_cache (utils bridge)
-            4) _invalidate_sec_settings_local (handlers_message PERF-2)
-            5) _invalidate_admin_check_cache  (handlers_message PERF-7)
+        🆕 v9.7.11 PERF-CB-2: إبطال 5 طبقات cache لأي تعديل أمان.
         """
         try:
             await settings_cache.invalidate_security(chat_id)
@@ -1817,7 +1844,6 @@ class CallbackHandlers:
                 logger.debug(
                     f"bridge_invalidate_sec_cache({chat_id}) failed: {e}"
                 )
-        # 🆕 v9.7.11 PERF-CB-2: ربط مع handlers_message
         try:
             await _invalidate_message_caches(
                 chat_id=chat_id, reason="security_settings_change"
@@ -3902,7 +3928,6 @@ class CallbackHandlers:
                             share_info = f"\n\n⚠️ {len(others)}"
                     except Exception: pass
                 ok = await DB.remove_group_log_channel(chat_id)
-                # 🆕 v9.7.11 PERF-CB-3: إبطال 3 طبقات
                 await _invalidate_log_channel_menu_cache(chat_id)
                 if not ok:
                     await safe_edit(query,
@@ -4716,7 +4741,6 @@ class CallbackHandlers:
                 if _SECURITY_BRIDGE_AVAILABLE:
                     try: bridge_invalidate_sec_cache(None)
                     except Exception: pass
-                # 🆕 v9.7.11: إبطال كل caches handlers_message
                 try:
                     await _invalidate_message_caches(
                         chat_id=None, reason="admin_refresh_cache"
@@ -5984,8 +6008,19 @@ class CallbackHandlers:
             await safe_edit(query, await _trans('error_occurred', lang, "❌"),
                 bot=context.bot)
 
+    # ═══════════════════════════════════════════════════════════════
+    # 🆕 v9.7.13 UPD-1: _show_updates_channel — مع زر رابط قابل للنقر
+    # ═══════════════════════════════════════════════════════════════
     @staticmethod
     async def _show_updates_channel(query, context, user_id, lang='ar'):
+        """
+        🆕 v9.7.13: عرض قناة التحديثات مع زر رابط فعّال.
+
+        يدعم:
+            • @username أو username → https://t.me/{username}
+            • https://t.me/... → يُنظَّف ويُستخدم
+            • ID رقمي → محاولة t.me/c/... أو invite_link
+        """
         try:
             ch = None
             try:
@@ -5998,19 +6033,68 @@ class CallbackHandlers:
                 'updates_channel_title', lang, "📢 <b>قناة التحديثات</b>"
             )
 
+            rows = []
+
             if ch:
-                ch_str = _html.escape(str(ch))
+                clean, url, is_username = _extract_updates_channel_link(ch)
+                ch_str_escaped = _html.escape(str(ch).strip())
+
                 body = _fmt(
                     await _trans(
                         'updates_channel_set_line', lang,
                         "✅ القناة الحالية: <code>{ch}</code>"
                     ),
-                    ch=ch_str,
+                    ch=ch_str_escaped,
                 )
                 hint = await _trans(
                     'updates_channel_hint_set', lang,
-                    "سيصلك إشعار عند نشر تحديث."
+                    "اضغط على الزر أدناه للدخول إلى القناة."
                 )
+
+                if url:
+                    # username صالح → رابط مباشر
+                    rows.append([InlineKeyboardButton(
+                        await _trans('open_channel_btn', lang,
+                                      "🔗 فتح القناة"),
+                        url=url,
+                    )])
+                elif clean and clean.lstrip('-').isdigit():
+                    # ID رقمي — محاولة إنشاء رابط دعوة
+                    invite_url = None
+                    try:
+                        numeric_id = int(clean)
+                        invite = await context.bot.create_chat_invite_link(
+                            chat_id=numeric_id, member_limit=0,
+                        )
+                        invite_url = getattr(invite, 'invite_link', None)
+                    except Exception as e:
+                        logger.debug(
+                            f"_show_updates_channel: create_invite_link "
+                            f"for {clean} failed: {e}"
+                        )
+                        invite_url = None
+
+                    if invite_url:
+                        rows.append([InlineKeyboardButton(
+                            await _trans('join_channel_btn', lang,
+                                          "🔗 انضم للقناة"),
+                            url=invite_url,
+                        )])
+                    else:
+                        # رابط c/ كخيار أخير (يعمل للأعضاء فقط)
+                        fallback = (f"https://t.me/c/"
+                                    f"{str(clean).lstrip('-')}")
+                        rows.append([InlineKeyboardButton(
+                            await _trans('open_channel_btn', lang,
+                                          "🔗 محاولة الفتح"),
+                            url=fallback,
+                        )])
+                        hint = await _trans(
+                            'updates_channel_numeric_hint', lang,
+                            "⚠️ القناة مُعرّفة بـ ID رقمي. قد لا يعمل "
+                            "الرابط للأعضاء الجدد. تواصل مع المطور "
+                            "لتعيين @username."
+                        )
             else:
                 body = await _trans(
                     'updates_channel_none_line', lang,
@@ -6021,12 +6105,15 @@ class CallbackHandlers:
                     "تواصل مع المطور لتعيينها."
                 )
 
-            text = f"{title}\n━━━━━━━━━━━━━━━━━━━━━━\n\n{body}\n\n<i>{hint}</i>"
+            text = (f"{title}\n━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                    f"{body}\n\n<i>{hint}</i>")
 
-            kb = InlineKeyboardMarkup([[InlineKeyboardButton(
+            rows.append([InlineKeyboardButton(
                 KeyboardFactory.get_text("back", lang),
                 callback_data=CB.BACK,
-            )]])
+            )])
+
+            kb = InlineKeyboardMarkup(rows)
 
             await safe_edit(query, text, reply_markup=kb,
                             parse_mode='HTML', bot=context.bot)
@@ -6116,9 +6203,15 @@ class CallbackHandlers:
             except Exception:
                 pass
 
+    # ═══════════════════════════════════════════════════════════════
+    # 🆕 v9.7.13 UPD-2: _show_admin_update_channel_menu مع رابط
+    # ═══════════════════════════════════════════════════════════════
     @staticmethod
     async def _show_admin_update_channel_menu(query, context, user_id,
                                                 lang='ar'):
+        """
+        🆕 v9.7.13: قائمة إدارة قناة التحديثات (للمطور) مع زر فتح.
+        """
         try:
             ch = None
             try:
@@ -6132,25 +6225,56 @@ class CallbackHandlers:
                 "📢 <b>إدارة قناة التحديثات</b>"
             )
 
+            rows = []
+
             if ch:
-                ch_str = _html.escape(str(ch))
+                clean, url, is_username = _extract_updates_channel_link(ch)
+                ch_str_escaped = _html.escape(str(ch).strip())
+
                 body = _fmt(
                     await _trans(
                         'updates_channel_set_line', lang,
                         "✅ القناة الحالية: <code>{ch}</code>"
                     ),
-                    ch=ch_str,
-                )
-            else:
-                body = await _trans(
-                    'updates_channel_none_line', lang,
-                    "❌ لم يتم تعيين قناة تحديثات بعد."
+                    ch=ch_str_escaped,
                 )
 
-            text = f"{title}\n━━━━━━━━━━━━━━━━━━━━━━\n\n{body}"
+                # زر فتح القناة (نفس منطق _show_updates_channel)
+                if url:
+                    rows.append([InlineKeyboardButton(
+                        await _trans('open_channel_btn', lang,
+                                      "🔗 فتح القناة"),
+                        url=url,
+                    )])
+                elif clean and clean.lstrip('-').isdigit():
+                    invite_url = None
+                    try:
+                        numeric_id = int(clean)
+                        invite = await context.bot.create_chat_invite_link(
+                            chat_id=numeric_id, member_limit=0,
+                        )
+                        invite_url = getattr(invite, 'invite_link', None)
+                    except Exception as e:
+                        logger.debug(
+                            f"_show_admin_update_channel_menu: "
+                            f"create_invite_link for {clean} failed: {e}"
+                        )
+                        invite_url = None
+                    if invite_url:
+                        rows.append([InlineKeyboardButton(
+                            await _trans('join_channel_btn', lang,
+                                          "🔗 انضم للقناة"),
+                            url=invite_url,
+                        )])
+                    else:
+                        fallback = (f"https://t.me/c/"
+                                    f"{str(clean).lstrip('-')}")
+                        rows.append([InlineKeyboardButton(
+                            await _trans('open_channel_btn', lang,
+                                          "🔗 محاولة الفتح"),
+                            url=fallback,
+                        )])
 
-            rows = []
-            if ch:
                 rows.append([InlineKeyboardButton(
                     await _trans('change_channel_btn', lang, "🔄 تغيير"),
                     callback_data="admin_change_update_ch",
@@ -6160,10 +6284,16 @@ class CallbackHandlers:
                     callback_data="admin_remove_update_ch",
                 )])
             else:
+                body = await _trans(
+                    'updates_channel_none_line', lang,
+                    "❌ لم يتم تعيين قناة تحديثات بعد."
+                )
                 rows.append([InlineKeyboardButton(
                     await _trans('set_channel_btn', lang, "🔗 تعيين"),
                     callback_data="admin_change_update_ch",
                 )])
+
+            text = f"{title}\n━━━━━━━━━━━━━━━━━━━━━━\n\n{body}"
 
             rows.append([InlineKeyboardButton(
                 KeyboardFactory.get_text("back", lang),
@@ -6174,7 +6304,8 @@ class CallbackHandlers:
                             reply_markup=InlineKeyboardMarkup(rows),
                             parse_mode='HTML', bot=context.bot)
         except Exception as e:
-            logger.error(f"_show_admin_update_channel_menu: {e}", exc_info=True)
+            logger.error(f"_show_admin_update_channel_menu: {e}",
+                          exc_info=True)
             try:
                 await safe_edit(
                     query,
@@ -6266,14 +6397,17 @@ __all__ = [
     "_get_message_handlers_module",
     "_message_handlers_module",
     "_message_handlers_import_attempted",
+
+    # 🆕 v9.7.13 — Updates-channel link helper
+    "_extract_updates_channel_link",
 ]
 
 try:
     _bridge_icon = "✅" if _SECURITY_BRIDGE_AVAILABLE else "⚠️"
     logger.info(
-        "🛡️ handlers_callback.py v9.7.12 SYNTAX-FIX loaded | "
+        "🛡️ handlers_callback.py v9.7.13 UPDATES-CHANNEL-LINK-FIX loaded | "
         "Bridge=%s | Antiflood-Msgs=%d | Antiflood-Secs=%d | "
-        "Message-Cache-Invalidation=ON",
+        "Message-Cache-Invalidation=ON | Updates-Link=ON",
         _bridge_icon,
         len(_ANTIFLOOD_MESSAGES_OPTIONS),
         len(_ANTIFLOOD_SECONDS_OPTIONS),
