@@ -1,37 +1,14 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-handlers_message.py - v7.18.8
-(متوافق مع detectors v4.0.2 ASYNC-NATIVE — 14 Layers)
+handlers_message.py - v7.18.6 RESTORED
+(متوافق مع detectors v3.0.1 UNIFIED — 7 Layers)
 =============================================================================
-🆕 v7.18.8 — ASYNC-NATIVE INTEGRATION (تكامل مع detectors v4.0.2):
-    🔴 FIX-ASYNC-1: استخدام analyze_message_full_async بدل analyze_message_full
-                    → لا حجب event loop أثناء:
-                      - URL enrichment (Safe Browsing + WHOIS + Expansion)
-                      - OCR على الصور الكبيرة
-                      - Audio transcription (Whisper/Google)
-                      - Video frame extraction + OCR
-                      - NSFW classification
-                      - Steganography LSB scan
-    🔴 FIX-ASYNC-2: import احتياطي (fallback) لـ analyze_message_full
-                    في حال عدم توفر النسخة async → يعمل عبر to_thread
-    🟠 FIX-ASYNC-3: توحيد Wrapper _run_multilayer_analysis
-                    لتبسيط منطق الاستدعاء + fallback واضح
-    🟠 FIX-ASYNC-4: TypeError عند عدم دعم bot kwarg → fallback
-                    عبر asyncio.to_thread(analyze_message_full, message, bot)
-    🟡 FIX-ASYNC-5: قياس زمن التحليل (DEBUG فقط) + log عند > 3s
-    🟢 FIX-ASYNC-6: توثيق واضح لكل مسار (async → sync → thread)
-
-🆕 v7.18.7 — CORRECTIVE RELEASE (بعد مراجعتين دقيقتين):
-    🔴 FIX-1: _apply_ban_add_rate_limit — args معكوسة في _check_flood
-    🟠 FIX-2: _lazy_init_columns — PG ALTER monolithic + fallback فردي
-    🟠 FIX-3: توحيد _POSTBOT_RAW_IDS + _normalize_tg_id
-    🟡 FIX-4: _resolve_penalty — تبسيط منطق try/except المزدوج
-    🟡 FIX-5: _private_handler_signature_cache — سقف 128 إدخال
-    🟢 FIX-6: توثيق سياسة _detect_and_translate صراحةً
-    🟢 FIX-7: MessageOriginHiddenUser — fallback "Hidden User"
-    🟢 FIX-8: _POSTBOT_CHANNEL_IDS — alias deprecated للتوافق
-    📝 FIX-9: log error عند فشل PG migration fallback
+🔄 v7.18.6 RESTORED — استرجاع النسخة التي كانت تعمل:
+    ✅ لا استيراد لـ analyze_message_full_async
+    ✅ متوافق 100% مع handlers_message_detectors.py v3.0.1
+    ✅ كل التحسينات الأخرى محفوظة (PERF-1..PERF-10، FIX-1..FIX-9)
+    ✅ لم يُلمس الاستيراد من detectors — نفس البنية الأصلية
 
 🆕 v7.18.6 — PERFORMANCE HARDENING (تقليل round-trips):
     🟠 PERF-1: cache محلي لـ notify_group_log — 60s TTL لكل chat_id
@@ -104,7 +81,8 @@ logger = logging.getLogger(__name__)
 
 
 # ═════════════════════════════════════════════════════════════════════
-# استيراد محرك الكشف v4.0.2 ASYNC-NATIVE
+# استيراد محرك الكشف v3.0.1 UNIFIED (7 Layers)
+# ⚠️ لم يُلمس هذا الاستيراد — متوافق مع النسخة التي كانت تعمل
 # ═════════════════════════════════════════════════════════════════════
 
 try:
@@ -189,7 +167,6 @@ except ImportError:
 
 _HAS_MULTILAYER = False
 analyze_message_full = None
-analyze_message_full_async = None  # 🆕 v7.18.8
 SpamVerdict = None
 FINAL_THRESHOLD = 5
 LAYER_WEIGHTS: Dict[str, float] = {}
@@ -197,7 +174,6 @@ LAYER_WEIGHTS: Dict[str, float] = {}
 try:
     from handlers.handlers_message_detectors import (
         analyze_message_full as _amf,
-        analyze_message_full_async as _amfa,  # 🆕 v7.18.8
         SpamVerdict as _SV,
         FINAL_THRESHOLD as _FT,
         LAYER_WEIGHTS as _LW,
@@ -210,7 +186,6 @@ try:
         BEHAVIORAL_LAYER_ENABLED as _BLE,
     )
     analyze_message_full = _amf
-    analyze_message_full_async = _amfa
     SpamVerdict = _SV
     FINAL_THRESHOLD = _FT
     LAYER_WEIGHTS = _LW
@@ -226,7 +201,6 @@ except ImportError:
     try:
         from handlers_message_detectors import (
             analyze_message_full as _amf,
-            analyze_message_full_async as _amfa,
             SpamVerdict as _SV,
             FINAL_THRESHOLD as _FT,
             LAYER_WEIGHTS as _LW,
@@ -239,7 +213,6 @@ except ImportError:
             BEHAVIORAL_LAYER_ENABLED as _BLE,
         )
         analyze_message_full = _amf
-        analyze_message_full_async = _amfa
         SpamVerdict = _SV
         FINAL_THRESHOLD = _FT
         LAYER_WEIGHTS = _LW
@@ -255,7 +228,6 @@ except ImportError:
         try:
             from .handlers_message_detectors import (
                 analyze_message_full as _amf,
-                analyze_message_full_async as _amfa,
                 SpamVerdict as _SV,
                 FINAL_THRESHOLD as _FT,
                 LAYER_WEIGHTS as _LW,
@@ -268,7 +240,6 @@ except ImportError:
                 BEHAVIORAL_LAYER_ENABLED as _BLE,
             )
             analyze_message_full = _amf
-            analyze_message_full_async = _amfa
             SpamVerdict = _SV
             FINAL_THRESHOLD = _FT
             LAYER_WEIGHTS = _LW
@@ -283,7 +254,6 @@ except ImportError:
         except ImportError:
             _HAS_MULTILAYER = False
             analyze_message_full = None
-            analyze_message_full_async = None
             SpamVerdict = None
             TEXT_LAYER_ENABLED = False
             OCR_LAYER_ENABLED = False
@@ -425,9 +395,6 @@ _BAN_ADD_RATE_MAX = 10
 _BAN_ADD_RATE_WINDOW = 60.0
 _BOT_DATA_SLOW_MODE_PRUNE_THRESHOLD = 10000
 _BOT_DATA_SLOW_MODE_PRUNE_COOLDOWN = 300.0
-
-# 🆕 v7.18.8: قياس زمن التحليل (للتشخيص فقط)
-_ANALYZE_SLOW_THRESHOLD_SEC = 3.0
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -823,7 +790,7 @@ async def _lazy_init_columns():
         _columns_last_attempt_ts = now
 
         db_type = getattr(DB, "DB_TYPE", "sqlite")
-        logger.info("🔧 v7.18.8: Auto-migration (DB_TYPE=%s)", db_type)
+        logger.info("🔧 v7.18.6: Auto-migration (DB_TYPE=%s)", db_type)
 
         cols = [
             ("delete_protected_any", "INTEGER DEFAULT 0", "TINYINT(1) DEFAULT 0"),
@@ -1326,100 +1293,6 @@ async def _invalidate_banned_words_cache(chat_id=None) -> bool:
     except Exception:
         pass
     return False
-
-
-# ═══════════════════════════════════════════════════════════════════
-# 🆕 v7.18.8: Multi-layer analysis wrapper (async-native)
-# ═══════════════════════════════════════════════════════════════════
-
-async def _run_multilayer_analysis(
-    message: Any,
-    bot: Any,
-    *,
-    label: str = "multilayer",
-) -> Optional[Any]:
-    """
-    🆕 v7.18.8 FIX-ASYNC-1/2/3/4:
-    Wrapper موحّد لاستدعاء محرك كشف الطبقات المتعددة بشكل async.
-
-    الأولويات:
-        1) analyze_message_full_async (v4.0.2) — async native، لا حجب
-        2) analyze_message_full في asyncio.to_thread — fallback آمن
-        3) None — إذا لم يتوفر أي منهما
-
-    يُعيد SpamVerdict أو None عند الفشل.
-    """
-    if not _MULTILAYER_ENABLED:
-        return None
-
-    t0 = time.monotonic()
-    verdict = None
-    mode = None
-
-    # المسار 1: async native (v4.0.2)
-    if analyze_message_full_async is not None:
-        try:
-            verdict = await analyze_message_full_async(message, bot=bot)
-            mode = "async-native"
-        except TypeError:
-            # احتمال: النسخة القديمة لا تدعم bot kwarg
-            try:
-                verdict = await analyze_message_full_async(message)
-                mode = "async-native-no-bot"
-            except Exception as e:
-                logger.debug(
-                    "[%s] analyze_message_full_async(no-bot) failed: %s",
-                    label, e,
-                )
-                verdict = None
-        except Exception as e:
-            logger.debug(
-                "[%s] analyze_message_full_async failed: %s", label, e,
-            )
-            verdict = None
-
-    # المسار 2: sync في thread pool (آمن — لا يحجب event loop)
-    if verdict is None and analyze_message_full is not None:
-        try:
-            verdict = await asyncio.to_thread(
-                analyze_message_full, message, bot,
-            )
-            mode = "sync-thread"
-        except TypeError:
-            try:
-                verdict = await asyncio.to_thread(
-                    analyze_message_full, message,
-                )
-                mode = "sync-thread-no-bot"
-            except Exception as e:
-                logger.debug(
-                    "[%s] analyze_message_full(thread, no-bot) failed: %s",
-                    label, e,
-                )
-                verdict = None
-        except Exception as e:
-            logger.debug(
-                "[%s] analyze_message_full(thread) failed: %s", label, e,
-            )
-            verdict = None
-
-    # قياس الزمن
-    elapsed = time.monotonic() - t0
-    if verdict is not None and elapsed >= _ANALYZE_SLOW_THRESHOLD_SEC:
-        logger.warning(
-            "⏱️ SLOW-ANALYSIS | %s | mode=%s | %.2fs | "
-            "layers=%s | total=%.1f",
-            label, mode, elapsed,
-            getattr(verdict, "layer_scores", {}),
-            float(getattr(verdict, "total_score", 0.0)),
-        )
-    elif _DEBUG_DIAG and verdict is not None:
-        logger.debug(
-            "⏱️ ANALYSIS | %s | mode=%s | %.3fs",
-            label, mode, elapsed,
-        )
-
-    return verdict
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -3253,7 +3126,7 @@ class MessageHandlers:
             and not is_protected_forward
         )
 
-        # 🆕 v7.18.8: Multi-Layer Analysis — ASYNC NATIVE
+        # Multi-Layer Analysis
         _spam_score = 0
         _spam_reasons: List[str] = []
         _spam_layer_scores: Dict[str, float] = {}
@@ -3261,32 +3134,32 @@ class MessageHandlers:
         _analysis_mode = "text-only"
 
         if _spam_enabled:
-            if _MULTILAYER_ENABLED:
-                # 🆕 v7.18.8 FIX-ASYNC-1/2/3/4: wrapper async موحّد
-                _verdict = await _run_multilayer_analysis(
-                    message,
-                    context.bot,
-                    label=f"chat={chat_id} msg={message.message_id}",
-                )
-                if _verdict is not None:
-                    _spam_score = int(
-                        getattr(_verdict, "total_score", 0) or 0
+            if _MULTILAYER_ENABLED and analyze_message_full is not None:
+                try:
+                    _verdict = analyze_message_full(
+                        message, bot=context.bot,
                     )
-                    _spam_layer_scores = dict(
-                        getattr(_verdict, "layer_scores", {}) or {}
-                    )
-                    try:
-                        for _layer, _reasons in (
-                            getattr(_verdict, "layer_reasons", {}) or {}
-                        ).items():
-                            for _r in (_reasons or []):
-                                _spam_reasons.append(f"{_layer}:{_r}")
-                    except Exception:
-                        pass
-                    _analysis_mode = "multilayer"
+                    if _verdict is not None:
+                        _spam_score = int(
+                            getattr(_verdict, "total_score", 0) or 0
+                        )
+                        _spam_layer_scores = dict(
+                            getattr(_verdict, "layer_scores", {}) or {}
+                        )
+                        try:
+                            for _layer, _reasons in (
+                                getattr(_verdict, "layer_reasons", {}) or {}
+                            ).items():
+                                for _r in (_reasons or []):
+                                    _spam_reasons.append(f"{_layer}:{_r}")
+                        except Exception:
+                            pass
+                        _analysis_mode = "multilayer"
+                except Exception as e:
+                    logger.debug("multilayer error: %s", e)
+                    _verdict = None
 
             if _verdict is None:
-                # fallback: text-only scoring (sync سريع، لا شبكة)
                 try:
                     _spam_score, _spam_reasons = _compute_spam_score(ctx)
                     _analysis_mode = "text-only"
@@ -4758,8 +4631,7 @@ __all__ = [
     "_DEFAULT_VIOLATION_MESSAGES",
     "_notify_delete_permission_failure", "analyze_sentiment",
     "_MULTILAYER_ENABLED", "_HAS_MULTILAYER",
-    "analyze_message_full", "analyze_message_full_async",
-    "SpamVerdict",
+    "analyze_message_full", "SpamVerdict",
     "_FORCE_DELETE_BUTTON_LINKS",
     "_FORCE_DELETE_POSTBOT_FORWARDS",
     "_is_postbot_forward", "_is_postbot_channel_name",
@@ -4789,8 +4661,4 @@ __all__ = [
 
     # 🆕 v7.18.7 — FIX caches / helpers
     "_PRIVATE_SIG_CACHE_MAX",
-
-    # 🆕 v7.18.8 — ASYNC-NATIVE integration
-    "_run_multilayer_analysis",
-    "_ANALYZE_SLOW_THRESHOLD_SEC",
 ]
