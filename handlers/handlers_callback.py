@@ -1,27 +1,30 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-handlers_callback.py - معالج الأزرار (v9.7.11)
+handlers_callback.py - معالج الأزرار (v9.7.12)
 =====================================================================
+🆕 v9.7.12 (SYNTAX-FIX):
+    🔴 SYNTAX-1: إصلاح SyntaxError في _handle_auto_reply (السطر 5502)
+                كان سطران التصقا معاً بدون فاصل:
+                "except (TypeError, ValueError): chat_id = None        if chat_id is None:"
+                → صارا:
+                "except (TypeError, ValueError): chat_id = None"
+                "        if chat_id is None:"
+    ✅ تم التحقق بـ py_compile — لا أخطاء
+    ✅ الحفاظ الكامل على سلوك v9.7.11
+
 🆕 v9.7.11 (PERF-INTEGRATION — تكامل مع handlers_message v7.18.8):
     🟠 PERF-CB-1: إضافة helper _invalidate_message_caches
-                  (يُبطل caches handlers_message المحلية بعد تعديل الإعدادات)
-                  • _invalidate_group_log_cache       (PERF-1)
-                  • _invalidate_sec_settings_local    (PERF-2)
-                  • _invalidate_admin_check_cache     (PERF-7)
     🟠 PERF-CB-2: ربط الإبطال مع _invalidate_security_settings_cache
-                  → أي تعديل أمان يُبطل 5 طبقات cache بدل 2
     🟠 PERF-CB-3: ربط الإبطال مع _invalidate_log_channel_menu_cache
-                  → تغيير قناة السجل يُبطل cache handlers_message PERF-1
     🟡 PERF-CB-4: log تشخيصي عند فشل استدعاء invalidation
     🟢 PERF-CB-5: توثيق واضح في docstrings لكل مسار إبطال
-    ✅ الحفاظ الكامل على سلوك v9.7.10
 
 🆕 v9.7.10 (MISSING-METHODS-FIX):
     🔴 MISSING-1: إضافة 3 دوال كانت تُستدعى بدون تعريف:
-        • _show_updates_channel           (زر updates_channel_btn)
-        • _show_metrics_dashboard         (admin_metrics_live/reset)
-        • _show_admin_update_channel_menu (admin_update_ch_btn)
+        • _show_updates_channel
+        • _show_metrics_dashboard
+        • _show_admin_update_channel_menu
     ✅ الحفاظ الكامل على سلوك v9.7.9
 
 🆕 v9.7.9 (CLEANUP-AND-HARDENING):
@@ -542,9 +545,6 @@ async def handle_my_chat_member(update, context):
             getattr(user, 'full_name', None) or '',
             getattr(user, 'username', None), new_status)
     except Exception: pass
-
-    # 🆕 v9.7.11 PERF-CB: عند إضافة البوت لمجموعة جديدة —
-    # لا حاجة لإبطال caches handlers_message لأنها لم تُنشأ بعد
     log_channel = await _membership_get_log_channel()
     if not log_channel: return
     try: text = _membership_build_report_text(chat, user, new_status)
@@ -833,11 +833,6 @@ def _prune_kicked_notify_state(context, now):
                 if isinstance(ts, (int, float)) and now - ts > thr: del bd[k]
             except Exception: pass
     except Exception: pass
-
-
-# ═══════════════════════════════════════════════════════════════════
-# 🆕 v9.7.11 PERF-CB-2: Log-channel cache invalidation (مع ربط)
-# ═══════════════════════════════════════════════════════════════════
 
 async def _invalidate_log_channel_menu_cache(chat_id):
     """
@@ -1795,9 +1790,6 @@ class CallbackHandlers:
                 await _trans('error_occurred', lang, "❌"),
                 bot=context.bot)
 
-    # ═════════════════════════════════════════════════════════════════
-    # 🆕 v9.7.11 PERF-CB-2: ربط 5 طبقات cache
-    # ═════════════════════════════════════════════════════════════════
     @staticmethod
     async def _invalidate_security_settings_cache(chat_id):
         """
@@ -5499,7 +5491,8 @@ class CallbackHandlers:
             stored = context.user_data.get('auto_chat')
             if stored is not None:
                 try: chat_id = int(stored)
-                except (TypeError, ValueError): chat_id = None        if chat_id is None:
+                except (TypeError, ValueError): chat_id = None
+        if chat_id is None:
             await safe_edit(query,
                 await _trans('group_not_specified', lang, "❌"),
                 bot=context.bot); return
@@ -6278,7 +6271,7 @@ __all__ = [
 try:
     _bridge_icon = "✅" if _SECURITY_BRIDGE_AVAILABLE else "⚠️"
     logger.info(
-        "🛡️ handlers_callback.py v9.7.11 PERF-INTEGRATION loaded | "
+        "🛡️ handlers_callback.py v9.7.12 SYNTAX-FIX loaded | "
         "Bridge=%s | Antiflood-Msgs=%d | Antiflood-Secs=%d | "
         "Message-Cache-Invalidation=ON",
         _bridge_icon,
