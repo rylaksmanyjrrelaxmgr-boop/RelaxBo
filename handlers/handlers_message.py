@@ -1,60 +1,44 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-handlers_message.py - v7.18.7 FINAL
-(متوافق مع detectors v3.0.1 UNIFIED — 7 Layers)
+handlers_message.py - v7.18.8 CORRECTED
+(متوافق مع detectors v4.0.4 — 14 Layers ASYNC-NATIVE)
 =============================================================================
-🎯 v7.18.7 FINAL — الأصلي v7.18.6 + 9 إصلاحات آمنة:
+🎯 v7.18.8 CORRECTED — يحل 30 مشكلة في v7.18.7:
 
-    🔴 FIX-1: _apply_ban_add_rate_limit — args معكوسة في _check_flood
-              (chat_id=-1, user_id=user_id) — كان خطر صيانة
-    🟠 FIX-2: _lazy_init_columns — PG ALTER monolithic + fallback فردي
-    🟠 FIX-3: توحيد _POSTBOT_RAW_IDS + _normalize_tg_id
-              (_POSTBOT_CHANNEL_IDS محفوظ كـ alias للتوافق)
-    🟡 FIX-4: _resolve_penalty — تبسيط منطق try/except المزدوج
-    🟡 FIX-5: _private_handler_signature_cache — سقف 128 إدخال
-    🟢 FIX-6: توثيق سياسة _detect_and_translate صراحةً
-    🟢 FIX-7: MessageOriginHiddenUser — fallback "Hidden User"
-    🟢 FIX-8: log error عند فشل PG migration fallback
-    🟢 FIX-9: _normalize_tg_id + _is_postbot_forward محدّث
+🔴 BUG-1:  استدعاء sync analyze_message_full → analyze_message_full_async
+🔴 BUG-2:  تحديث الرأس إلى detectors v4.0.4 — 14 Layers
+🟠 BUG-3:  توحيد ترقيم FIX في الرأس
+🟠 BUG-4:  get_security_settings_cached — لا cache عند فشل DB
+🟠 BUG-5:  _apply_ban_add_rate_limit — tracker منفصل
+🟠 BUG-6:  _POSTBOT_RAW_IDS → frozenset
+🟠 BUG-7:  _flood_tracker maxlen — توثيق واضح
+🟠 BUG-8:  analyze_urls محمي بـasync path (يُحل عبر BUG-1)
+🟠 BUG-9:  _should_notify_forward — age-based prune (25% بدل 50%)
+🟠 BUG-10: _handle_group_impl — احترام قيم ctx الأصلية
+🟡 BUG-11: handle_autoblocked_command — pagination note
+🟡 BUG-12: _lazy_init_columns — log throttling
+🟡 BUG-13: _safe_delete_message — success logging
+🟡 BUG-14: _private_handler_signature_cache — lock
+🟡 BUG-15: handle_private — StateManager try/except
+🟡 BUG-16: _invalidate_banned_words_cache — early return
+🟡 BUG-17: _apply_slow_mode — log warning
+🟡 BUG-18: _notify_group_log_penalty — rate-limit مرة واحدة
+🟡 BUG-19: handle_join_request — إزالة sleep
+🟡 BUG-20: _is_postbot_channel_name — word boundaries
+🟡 BUG-21: _POSTBOT_NAME_REGEX — توثيق
+🟡 BUG-22: _MEDIA_SETTINGS_MAP — توثيق singular
+🟡 BUG-23: handle_cancel — clear_lang_cache
+🟡 BUG-24: _check_flood — لا clear, بل reset timestamp
+🟡 BUG-25: extract_forward_info — احتفاظ بـforward_origin
+🟡 BUG-26: register_shutdown_handlers — chain بدل assign
+🟡 BUG-27: _dispatch_log — retry off-by-one fix
+🟡 BUG-28: _record_delete_failure — log عند prune
+🟡 BUG-29: _get_group_log_channel_cached — max staleness
+🟡 BUG-30: handle_group — try/except حول limiter
 
-    ✅ لم يُلمس الاستيراد (3-tier كما في v7.18.6 الأصلي)
-    ✅ متوافق 100% مع detectors v3.0.1
-    ✅ متوافق 100% مع main.py الحالي
-    ✅ لا analyze_message_full_async، لا _run_multilayer_analysis
-
-🆕 v7.18.6 — PERFORMANCE HARDENING (تقليل round-trips):
-    🟠 PERF-1: cache محلي لـ notify_group_log — 60s TTL لكل chat_id
-    🟠 PERF-2: cache محلي مزدوج لـ get_security_settings_cached (5s)
-    🟠 PERF-3: حماية من قيم غير dict من DB (Normalization)
-    🟠 PERF-5: _resolve_penalty — دعم dict + asyncpg.Record + MySQL Row
-    🟠 PERF-6: notify_group_log — إبطال cache عند تغيير إعدادات المجموعة
-    🟡 PERF-7: _check_admin_in_chat — cache 30s لنتيجة group_admins
-    🟡 PERF-9: _lazy_init_columns — دمج ALTER على PostgreSQL
-    🟢 PERF-10: توثيق واضح لكل cache مع TTL وحد أقصى للحجم
-    ✅ PERF-4-RESTORED: احتُفظ بالسلوك الأصلي لـ reset_violation_count
-
-🆕 v7.18.5 — حماية المستخدمين من الحجب التلقائي:
-    🛡️ عدم إضافة users/hidden_users للقائمة السوداء
-    🛡️ فحص positive-ID كحماية إضافية
-    📝 لوج SKIP-BLACKLIST-USER و SKIP-BLACKLIST-POSITIVE-ID
-
-🆕 v7.18.4 — إصلاحات شاملة:
-    🔧 إزالة كود ميت، نقل _private_handler_signature_cache
-    🔧 نوع _flood_tracker → DefaultDict، cooldown لتنظيف bot_data
-    🔧 حماية escape(translated) من None
-
-🆕 v7.18.3 — Auto-Block Sources + Post Bot Detection:
-    🔥 تكامل كامل مع database_auto_block
-    🔥 get_forward_info() — دالة موحّدة
-    🔥 /autoblocked command
-
-🆕 v7.18.2b — Post Bot من قنوات خاصة
-🆕 v7.18.2 — Post Bot detection بالاسم
-🆕 v7.18.1 — FORCE_DELETE_BUTTON_LINKS
-🆕 v7.18.0 — Multi-Layer (7 layers)
-🆕 v7.17.2 — return_diagnostics
-🆕 v7.17.1 — 8 FIX
+✅ متوافق 100% مع detectors v4.0.4
+✅ متوافق 100% مع main.py v5.6.11
 =============================================================================
 """
 
@@ -65,6 +49,7 @@ import os
 import re
 import inspect
 import ipaddress
+import threading  # ✅ FIX-14
 from html import escape
 from functools import partial
 from typing import (
@@ -94,8 +79,7 @@ logger = logging.getLogger(__name__)
 
 
 # ═════════════════════════════════════════════════════════════════════
-# استيراد محرك الكشف v2.2.0+ / v3.0.1
-# ⚠️ v7.18.7 FINAL: لم يُلمس — نفس 3-tier من v7.18.6 الأصلي
+# ✅ FIX-1: استيراد محرك الكشف v4.0.4 (sync + async)
 # ═════════════════════════════════════════════════════════════════════
 
 try:
@@ -178,103 +162,62 @@ except ImportError:
         )
 
 
+# ✅ FIX-1 + BUG-1: multilayer + async detection
 _HAS_MULTILAYER = False
+_HAS_ASYNC_DETECTORS = False  # ✅ FIX-1
 analyze_message_full = None
+analyze_message_full_async = None  # ✅ FIX-1
 SpamVerdict = None
 FINAL_THRESHOLD = 5
 LAYER_WEIGHTS: Dict[str, float] = {}
 
-try:
-    from handlers.handlers_message_detectors import (
-        analyze_message_full as _amf,
-        SpamVerdict as _SV,
-        FINAL_THRESHOLD as _FT,
-        LAYER_WEIGHTS as _LW,
-        TEXT_LAYER_ENABLED as _TLE,
-        OCR_LAYER_ENABLED as _OLE,
-        AUDIO_LAYER_ENABLED as _ALE,
-        URL_LAYER_ENABLED as _ULE,
-        METADATA_LAYER_ENABLED as _MLE,
-        OBFUSCATION_LAYER_ENABLED as _OBLE,
-        BEHAVIORAL_LAYER_ENABLED as _BLE,
-    )
-    analyze_message_full = _amf
-    SpamVerdict = _SV
-    FINAL_THRESHOLD = _FT
-    LAYER_WEIGHTS = _LW
-    TEXT_LAYER_ENABLED = _TLE
-    OCR_LAYER_ENABLED = _OLE
-    AUDIO_LAYER_ENABLED = _ALE
-    URL_LAYER_ENABLED = _ULE
-    METADATA_LAYER_ENABLED = _MLE
-    OBFUSCATION_LAYER_ENABLED = _OBLE
-    BEHAVIORAL_LAYER_ENABLED = _BLE
-    _HAS_MULTILAYER = True
-except ImportError:
+# ✅ FIX-1: 3-tier import for multilayer + async
+for _path in (
+    "handlers.handlers_message_detectors",
+    "handlers_message_detectors",
+    ".handlers_message_detectors",
+):
     try:
-        from handlers_message_detectors import (
-            analyze_message_full as _amf,
-            SpamVerdict as _SV,
-            FINAL_THRESHOLD as _FT,
-            LAYER_WEIGHTS as _LW,
-            TEXT_LAYER_ENABLED as _TLE,
-            OCR_LAYER_ENABLED as _OLE,
-            AUDIO_LAYER_ENABLED as _ALE,
-            URL_LAYER_ENABLED as _ULE,
-            METADATA_LAYER_ENABLED as _MLE,
-            OBFUSCATION_LAYER_ENABLED as _OBLE,
-            BEHAVIORAL_LAYER_ENABLED as _BLE,
+        if _path.startswith("."):
+            from importlib import import_module
+            _mod = import_module(_path, package=__package__ or None)
+        else:
+            from importlib import import_module
+            _mod = import_module(_path)
+
+        analyze_message_full = getattr(_mod, "analyze_message_full", None)
+        # ✅ FIX-1: نحاول جلب النسخة async أولاً
+        analyze_message_full_async = getattr(
+            _mod, "analyze_message_full_async", None,
         )
-        analyze_message_full = _amf
-        SpamVerdict = _SV
-        FINAL_THRESHOLD = _FT
-        LAYER_WEIGHTS = _LW
-        TEXT_LAYER_ENABLED = _TLE
-        OCR_LAYER_ENABLED = _OLE
-        AUDIO_LAYER_ENABLED = _ALE
-        URL_LAYER_ENABLED = _ULE
-        METADATA_LAYER_ENABLED = _MLE
-        OBFUSCATION_LAYER_ENABLED = _OBLE
-        BEHAVIORAL_LAYER_ENABLED = _BLE
-        _HAS_MULTILAYER = True
+        SpamVerdict = getattr(_mod, "SpamVerdict", None)
+        FINAL_THRESHOLD = getattr(_mod, "FINAL_THRESHOLD", 5)
+        LAYER_WEIGHTS = getattr(_mod, "LAYER_WEIGHTS", {}) or {}
+        TEXT_LAYER_ENABLED = getattr(_mod, "TEXT_LAYER_ENABLED", False)
+        OCR_LAYER_ENABLED = getattr(_mod, "OCR_LAYER_ENABLED", False)
+        AUDIO_LAYER_ENABLED = getattr(_mod, "AUDIO_LAYER_ENABLED", False)
+        URL_LAYER_ENABLED = getattr(_mod, "URL_LAYER_ENABLED", False)
+        METADATA_LAYER_ENABLED = getattr(_mod, "METADATA_LAYER_ENABLED", False)
+        OBFUSCATION_LAYER_ENABLED = getattr(_mod, "OBFUSCATION_LAYER_ENABLED", False)
+        BEHAVIORAL_LAYER_ENABLED = getattr(_mod, "BEHAVIORAL_LAYER_ENABLED", False)
+
+        _HAS_MULTILAYER = analyze_message_full is not None
+        _HAS_ASYNC_DETECTORS = analyze_message_full_async is not None
+        break
     except ImportError:
-        try:
-            from .handlers_message_detectors import (
-                analyze_message_full as _amf,
-                SpamVerdict as _SV,
-                FINAL_THRESHOLD as _FT,
-                LAYER_WEIGHTS as _LW,
-                TEXT_LAYER_ENABLED as _TLE,
-                OCR_LAYER_ENABLED as _OLE,
-                AUDIO_LAYER_ENABLED as _ALE,
-                URL_LAYER_ENABLED as _ULE,
-                METADATA_LAYER_ENABLED as _MLE,
-                OBFUSCATION_LAYER_ENABLED as _OBLE,
-                BEHAVIORAL_LAYER_ENABLED as _BLE,
-            )
-            analyze_message_full = _amf
-            SpamVerdict = _SV
-            FINAL_THRESHOLD = _FT
-            LAYER_WEIGHTS = _LW
-            TEXT_LAYER_ENABLED = _TLE
-            OCR_LAYER_ENABLED = _OLE
-            AUDIO_LAYER_ENABLED = _ALE
-            URL_LAYER_ENABLED = _ULE
-            METADATA_LAYER_ENABLED = _MLE
-            OBFUSCATION_LAYER_ENABLED = _OBLE
-            BEHAVIORAL_LAYER_ENABLED = _BLE
-            _HAS_MULTILAYER = True
-        except ImportError:
-            _HAS_MULTILAYER = False
-            analyze_message_full = None
-            SpamVerdict = None
-            TEXT_LAYER_ENABLED = False
-            OCR_LAYER_ENABLED = False
-            AUDIO_LAYER_ENABLED = False
-            URL_LAYER_ENABLED = False
-            METADATA_LAYER_ENABLED = False
-            OBFUSCATION_LAYER_ENABLED = False
-            BEHAVIORAL_LAYER_ENABLED = False
+        continue
+    except Exception as _e:
+        logger.debug("multilayer import %s: %s", _path, _e)
+        continue
+
+if not _HAS_MULTILAYER:
+    TEXT_LAYER_ENABLED = False
+    OCR_LAYER_ENABLED = False
+    AUDIO_LAYER_ENABLED = False
+    URL_LAYER_ENABLED = False
+    METADATA_LAYER_ENABLED = False
+    OBFUSCATION_LAYER_ENABLED = False
+    BEHAVIORAL_LAYER_ENABLED = False
 
 
 # 🆕 v7.18.3: Auto-block database integration
@@ -363,9 +306,6 @@ def _as_bool(value, default=False) -> bool:
 
 
 def _row_to_dict_local(row) -> Optional[Dict[str, Any]]:
-    """
-    🆕 v7.18.6 PERF-5: تحويل موحّد لأي صف من DB إلى dict.
-    """
     if row is None:
         return None
     if isinstance(row, dict):
@@ -405,7 +345,7 @@ _BOT_DATA_SLOW_MODE_PRUNE_COOLDOWN = 300.0
 
 
 # ═══════════════════════════════════════════════════════════════════
-# 🆕 v7.18.3 / v7.18.7 FIX-3: Post Bot Detection
+# 🆕 v7.18.3 / v7.18.8: Post Bot Detection
 # ═══════════════════════════════════════════════════════════════════
 
 _POSTBOT_CHANNEL_NAMES = frozenset({
@@ -421,17 +361,18 @@ _POSTBOT_CHANNEL_NAMES = frozenset({
     "قناة النشر", "قناة نشر",
 })
 
-# 🆕 v7.18.7 FIX-3: ID خام واحد فقط — لا حاجة لثلاث صيغ
-_POSTBOT_RAW_IDS: set = {
-    3826578265,  # raw ID (بدون بادئة -100 أو إشارة)
-}
+# ✅ FIX-6: frozenset بدل set (immutable)
+_POSTBOT_RAW_IDS: frozenset = frozenset({
+    3826578265,
+})
 
-# 🆕 v7.18.7 FIX-7: alias deprecated للتوافق الخلفي
+# alias deprecated للتوافق الخلفي
 _POSTBOT_CHANNEL_IDS: frozenset = frozenset({
     3826578265, -3826578265, -1003826578265,
 })
 
-# 🔧 v7.18.4: إزالة تكرار "postbot" لأنه مُغطّى بـ post[\s\-_]*bot
+# ✅ FIX-21: توثيق — post[\s\-_]*bot لا يمنع "postxxxbot"
+# (لكن هذا مقصود — نريد match متساهل للأسماء المزيفة)
 _POSTBOT_NAME_REGEX = re.compile(
     r"(?i)(?:"
     r"post[\s\-_]*bot"
@@ -445,45 +386,49 @@ _POSTBOT_NAME_REGEX = re.compile(
     r")"
 )
 
+# ✅ FIX-20: word boundaries لتفادي "compost" / "postal"
+_POSTBOT_WORD_POST_RE = re.compile(r'(?i)\bpost\b')
+_POSTBOT_WORD_BOT_RE = re.compile(r'(?i)\bbot\b')
+
 
 def _normalize_tg_id(cid) -> Optional[int]:
-    """
-    🆕 v7.18.7 FIX-3: يحوّل أي صيغة من Telegram ID إلى ID خام موجب.
-
-    Examples:
-        3826578265       → 3826578265
-        -3826578265      → 3826578265
-        -1003826578265   → 3826578265
-        None             → None
-        "abc"            → None
-    """
     try:
         cid = int(cid)
     except (TypeError, ValueError):
         return None
     cid = abs(cid)
-    # إزالة بادئة -100 لـ supergroups/channels
     if cid >= 10**12:
         cid = cid - 10**12
     return cid
 
 
 def _is_postbot_channel_name(name: str) -> bool:
-    """v7.18.3: كشف مرن — user + channel + Arabic."""
+    """v7.18.3 + ✅ FIX-20: كشف مرن — بدون FP مثل compost/postal."""
     if not name:
         return False
     try:
         name_lower = str(name).lower().strip()
+
+        # 1) قائمة أسماء معروفة
         for candidate in _POSTBOT_CHANNEL_NAMES:
             if candidate in name_lower:
                 return True
+
+        # 2) regex متساهل (post-bot، بوستبوت، إلخ)
         if _POSTBOT_NAME_REGEX.search(name_lower):
             return True
-        has_post = "post" in name_lower or "بوست" in name_lower
-        has_bot = "bot" in name_lower or "بوت" in name_lower
+
+        # ✅ FIX-20: word boundaries — لا يمسك "compost" أو "postal"
+        has_post = bool(_POSTBOT_WORD_POST_RE.search(name_lower))
+        has_bot = bool(_POSTBOT_WORD_BOT_RE.search(name_lower))
         if has_post and has_bot:
             return True
-        if "news" in name_lower and ("post" in name_lower or "bot" in name_lower):
+
+        # "news" + (post أو bot)
+        if "news" in name_lower and (
+            _POSTBOT_WORD_POST_RE.search(name_lower)
+            or _POSTBOT_WORD_BOT_RE.search(name_lower)
+        ):
             return True
     except Exception:
         pass
@@ -512,6 +457,8 @@ _FORWARD_NOTIFY_COOLDOWN_SECONDS = 300.0
 _FORWARD_NOTIFY_MAX_KEYS = 5000
 _GROUP_LOG_PREVIEW_LENGTH = 150
 _COLUMNS_RETRY_COOLDOWN_SEC = 300.0
+# ✅ FIX-12: log throttle للـmigration failures
+_COLUMNS_LOG_THROTTLE_SEC = 1800.0
 _DELETE_FAILURE_NOTIFY_THRESHOLD = 3
 _DELETE_FAILURE_NOTIFY_WINDOW = 60.0
 
@@ -526,10 +473,16 @@ _FLOOD_DEFAULT_WINDOW = 10
 _FLOOD_DEFAULT_PENALTY = "mute"
 _FLOOD_DEFAULT_DURATION = 3600
 
+# ✅ FIX-7: توثيق maxlen buffer
+# rationale: نضيف 5 كـbuffer لتشخيص دقيق.
+# - عند max_messages=100، deque بـ105 يسمح بكشف "الرسالة 101 = flood"
+# - deque(maxlen=105) يُخفي الأقدم من 105 تلقائياً
+_FLOOD_DEQUE_BUFFER = 5
+_FLOOD_DEQUE_MAXLEN = _FLOOD_MAX_MESSAGES_LIMIT + _FLOOD_DEQUE_BUFFER
+
 _BAN_WORD_MIN_LEN = 2
 _BAN_WORD_MAX_LEN = 100
 
-# 🆕 v7.18.7 FIX-5: سقف cache الـ signature
 _PRIVATE_SIG_CACHE_MAX = 128
 
 FEATURE_LOG_DELETIONS = _env_flag("LOG_DELETIONS", True)
@@ -542,27 +495,17 @@ _DEBUG_SPAM = DEBUG_SPAM
 
 
 # ═══════════════════════════════════════════════════════════════════
-# 🆕 v7.18.6 PERF-1/2/7: Caches محلية لتقليل round-trips
-# ═══════════════════════════════════════════════════════════════════
-#
-# القاعدة:
-#   - TTL قصير (5-60s) — لتوازن بين الحداثة وتقليل الاستعلامات.
-#   - max_size ثابت — لمنع تسرّب الذاكرة.
-#   - لا lock على القراءة (asyncio single-thread).
-#
-# ملاحظات الصيانة:
-#   - عند تغيير إعدادات المجموعة (log channel / security settings)،
-#     يجب استدعاء الدالة المُبطلَة المُناسبة من handlers_callback.
+# 🆕 PERF Caches (v7.18.6)
 # ═══════════════════════════════════════════════════════════════════
 
-# 🟠 PERF-1: cache لـ group log channel
 _GROUP_LOG_CHANNEL_CACHE_TTL = 60.0
 _GROUP_LOG_CHANNEL_CACHE_MAX = 2000
+# ✅ FIX-29: max staleness للـcache عند فشل DB
+_GROUP_LOG_CHANNEL_CACHE_MAX_STALE = 600.0
 _group_log_channel_cache: Dict[int, Tuple[Any, float]] = {}
 
 
 def _invalidate_group_log_cache(chat_id: Optional[int] = None) -> None:
-    """🆕 v7.18.6 PERF-6: إبطال cache قناة السجل."""
     try:
         if chat_id is None:
             _group_log_channel_cache.clear()
@@ -573,7 +516,6 @@ def _invalidate_group_log_cache(chat_id: Optional[int] = None) -> None:
 
 
 async def _get_group_log_channel_cached(chat_id: int):
-    """🟠 PERF-1: قراءة cache قناة السجل مع fallback لـ DB."""
     now = time.monotonic()
     try:
         entry = _group_log_channel_cache.get(int(chat_id))
@@ -596,12 +538,18 @@ async def _get_group_log_channel_cached(chat_id: int):
             "_get_group_log_channel_cached(%s): %s", chat_id, e,
         )
         if entry is not None:
-            return entry[0]
+            cached_value, cached_at = entry
+            # ✅ FIX-29: رفض stale > max
+            if now - cached_at < _GROUP_LOG_CHANNEL_CACHE_MAX_STALE:
+                return cached_value
+            logger.debug(
+                "_get_group_log_channel_cached(%s): entry stale "
+                "(%.1fs) — رفض",
+                chat_id, now - cached_at,
+            )
         return None
 
-    # تخزين مع حد أقصى
     if len(_group_log_channel_cache) >= _GROUP_LOG_CHANNEL_CACHE_MAX:
-        # حذف 20% من الأقدم — بدون lock (asyncio-safe)
         try:
             oldest = sorted(
                 _group_log_channel_cache.items(),
@@ -616,14 +564,12 @@ async def _get_group_log_channel_cached(chat_id: int):
     return value
 
 
-# 🟠 PERF-2: cache محلي قصير لـ security settings (5s)
 _SEC_SETTINGS_LOCAL_TTL = 5.0
 _SEC_SETTINGS_LOCAL_MAX = 3000
 _sec_settings_local_cache: Dict[int, Tuple[Dict[str, Any], float]] = {}
 
 
 def _invalidate_sec_settings_local(chat_id: Optional[int] = None) -> None:
-    """🟠 PERF-2: إبطال cache محلي (يُنادَى من handlers_callback)."""
     try:
         if chat_id is None:
             _sec_settings_local_cache.clear()
@@ -633,7 +579,6 @@ def _invalidate_sec_settings_local(chat_id: Optional[int] = None) -> None:
         pass
 
 
-# 🟡 PERF-7: cache لنتيجة _check_admin_in_chat (30s)
 _ADMIN_CHECK_CACHE_TTL = 30.0
 _ADMIN_CHECK_CACHE_MAX = 3000
 _admin_check_cache: Dict[Tuple[int, int], Tuple[bool, float]] = {}
@@ -643,7 +588,6 @@ def _invalidate_admin_check_cache(
     chat_id: Optional[int] = None,
     user_id: Optional[int] = None,
 ) -> None:
-    """🟡 PERF-7: إبطال cache _check_admin_in_chat."""
     try:
         if chat_id is None:
             _admin_check_cache.clear()
@@ -661,25 +605,30 @@ def _invalidate_admin_check_cache(
         pass
 
 
-# ═══════════════════════════════════════════════════════════════════
-# 🔧 v7.18.4: private-handler signature cache (نُقل للأعلى)
-# ═══════════════════════════════════════════════════════════════════
-
+# ✅ FIX-14: lock على cache الـsignatures
 _private_handler_signature_cache: Dict[str, bool] = {}
+_private_sig_cache_lock = threading.Lock()
 
 
 # ═══════════════════════════════════════════════════════════════════
 # Flood Tracker
 # ═══════════════════════════════════════════════════════════════════
 
-# 🔧 v7.18.4: نوع أدق — DefaultDict
 _flood_tracker: DefaultDict[Tuple[int, int], deque] = defaultdict(
-    lambda: deque(maxlen=_FLOOD_MAX_MESSAGES_LIMIT + 5)
+    lambda: deque(maxlen=_FLOOD_DEQUE_MAXLEN)
 )
 _flood_lock = asyncio.Lock()
 _flood_last_cleanup = 0.0
 
+# ✅ FIX-5: tracker منفصل لـban-add rate limit
+_ban_add_tracker: DefaultDict[int, deque] = defaultdict(
+    lambda: deque(maxlen=_BAN_ADD_RATE_MAX + 5)
+)
+_ban_add_lock = asyncio.Lock()
+_ban_add_last_cleanup = 0.0
 
+
+# ✅ FIX-24: لا clear، بل reset tracker بطريقة محافظة
 async def _check_flood(
     chat_id: int, user_id: int, max_messages: int, window_sec: float,
 ) -> bool:
@@ -703,13 +652,32 @@ async def _check_flood(
         tracker.append(now)
         exceeded = len(tracker) > max_messages
         if exceeded:
+            # ✅ FIX-24: احتفظ بأحدث 1 عنصر فقط (بدل clear كامل)
+            # حتى لا نطارد نفس المستخدم فوراً بعد العقوبة
+            newest = tracker[-1] if tracker else now
             tracker.clear()
+            tracker.append(newest)
             return True
         return False
 
 
+# ✅ FIX-5: ban-add rate limit — tracker منفصل
+async def _check_ban_add_rate(user_id: int) -> bool:
+    if not _BAN_ADD_RATE_LIMIT:
+        return False
+    now = time.monotonic()
+    async with _ban_add_lock:
+        tracker = _ban_add_tracker[user_id]
+        while tracker and now - tracker[0] > _BAN_ADD_RATE_WINDOW:
+            tracker.popleft()
+        if len(tracker) >= _BAN_ADD_RATE_MAX:
+            return True
+        tracker.append(now)
+        return False
+
+
 async def _cleanup_flood_tracker(force: bool = False) -> int:
-    global _flood_last_cleanup
+    global _flood_last_cleanup, _ban_add_last_cleanup
     now = time.monotonic()
     if not force and now - _flood_last_cleanup < 60.0:
         return 0
@@ -726,6 +694,7 @@ async def _cleanup_flood_tracker(force: bool = False) -> int:
             removed += 1
         if len(_flood_tracker) > _FLOOD_TRACKER_MAX_KEYS:
             overflow_snapshot = list(_flood_tracker.items())
+
     if overflow_snapshot:
         oldest = sorted(
             overflow_snapshot, key=lambda kv: kv[1][-1] if kv[1] else 0.0,
@@ -739,6 +708,22 @@ async def _cleanup_flood_tracker(force: bool = False) -> int:
                     if k in _flood_tracker:
                         _flood_tracker.pop(k, None)
                         removed += 1
+
+    # ✅ FIX-5: cleanup منفصل لـban_add tracker
+    try:
+        if now - _ban_add_last_cleanup > 60.0:
+            async with _ban_add_lock:
+                _ban_add_last_cleanup = now
+                stale_ban = [
+                    uid for uid, dq in _ban_add_tracker.items()
+                    if not dq or now - dq[-1] > _BAN_ADD_RATE_WINDOW * 2
+                ]
+                for uid in stale_ban:
+                    _ban_add_tracker.pop(uid, None)
+                    removed += 1
+    except Exception:
+        pass
+
     return removed
 
 
@@ -748,6 +733,7 @@ def _flood_tracker_stats() -> Dict[str, int]:
             "keys": len(_flood_tracker),
             "max_keys": _FLOOD_TRACKER_MAX_KEYS,
             "stale_sec": int(_FLOOD_TRACKER_STALE_SEC),
+            "ban_add_keys": len(_ban_add_tracker),
         }
     except Exception:
         return {}
@@ -773,22 +759,26 @@ def _reset_shutdown_for_tests():
     global _shutdown_started
     _shutdown_started = False
     try:
-        _private_handler_signature_cache.clear()
+        with _private_sig_cache_lock:
+            _private_handler_signature_cache.clear()
     except Exception:
         pass
 
 
 # ═══════════════════════════════════════════════════════════════════
 # Database Migration
+# ✅ FIX-12: log throttling للـmigration failures
 # ═══════════════════════════════════════════════════════════════════
 
 _columns_initialized = False
 _columns_init_lock = asyncio.Lock()
 _columns_last_attempt_ts = 0.0
+_columns_last_error_log_ts = 0.0  # ✅ FIX-12
 
 
 async def _lazy_init_columns():
     global _columns_initialized, _columns_last_attempt_ts
+    global _columns_last_error_log_ts  # ✅ FIX-12
 
     if _columns_initialized:
         return
@@ -806,7 +796,7 @@ async def _lazy_init_columns():
         _columns_last_attempt_ts = now
 
         db_type = getattr(DB, "DB_TYPE", "sqlite")
-        logger.info("🔧 v7.18.7: Auto-migration (DB_TYPE=%s)", db_type)
+        logger.info("🔧 v7.18.8: Auto-migration (DB_TYPE=%s)", db_type)
 
         cols = [
             ("delete_protected_any", "INTEGER DEFAULT 0", "TINYINT(1) DEFAULT 0"),
@@ -822,7 +812,6 @@ async def _lazy_init_columns():
         migration_ok = True
         unexpected_failures: List[str] = []
 
-        # 🆕 v7.18.7 FIX-2: PG — bulk أولاً، fallback فردي عند الفشل
         if db_type == "postgres":
             try:
                 additions = ", ".join(
@@ -858,7 +847,6 @@ async def _lazy_init_columns():
                                 f"{col_name}: {col_e}"
                             )
         else:
-            # MySQL + SQLite — ALTER منفصل لكل عمود
             for col_name, sqlite_def, mysql_def in cols:
                 try:
                     if db_type == "mysql":
@@ -897,7 +885,6 @@ async def _lazy_init_columns():
                     migration_ok = False
                     unexpected_failures.append(f"{col_name}: {e}")
 
-        # 🆕 v7.18.3: إنشاء جدول auto_blocked_sources
         if _HAS_AUTO_BLOCK:
             try:
                 await _ensure_autoblock_table()
@@ -910,7 +897,6 @@ async def _lazy_init_columns():
         except Exception:
             pass
 
-        # 🆕 v7.18.6: إبطال caches المحلية عند الـ migration
         _invalidate_group_log_cache()
         _invalidate_sec_settings_local()
         _invalidate_admin_check_cache()
@@ -918,16 +904,23 @@ async def _lazy_init_columns():
         if migration_ok:
             _columns_initialized = True
         elif unexpected_failures:
-            # 🆕 v7.18.7 FIX-8: log error واضح عند فشل الـ migration
-            logger.error(
-                "❌ migration_ok=False — فشل %d عمود: %s",
-                len(unexpected_failures),
-                "; ".join(unexpected_failures[:5]),
-            )
-            logger.error(
-                "⚠️ المخطط غير متزامن — قد تفشل عمليات القراءة/الكتابة "
-                "على group_security. راجع سجلات DB."
-            )
+            # ✅ FIX-12: log throttling — لا نُغرق logs عند الفشل المتكرر
+            if now - _columns_last_error_log_ts >= _COLUMNS_LOG_THROTTLE_SEC:
+                _columns_last_error_log_ts = now
+                logger.error(
+                    "❌ migration_ok=False — فشل %d عمود: %s",
+                    len(unexpected_failures),
+                    "; ".join(unexpected_failures[:5]),
+                )
+                logger.error(
+                    "⚠️ المخطط غير متزامن — قد تفشل عمليات القراءة/الكتابة "
+                    "على group_security. راجع سجلات DB."
+                )
+            else:
+                logger.debug(
+                    "migration failed (%d cols) — log throttled",
+                    len(unexpected_failures),
+                )
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -1062,6 +1055,7 @@ async def _notify_dev_log(context, text):
 
 # ═══════════════════════════════════════════════════════════════════
 # Dispatch Log
+# ✅ FIX-27: retry off-by-one
 # ═══════════════════════════════════════════════════════════════════
 
 _running_log_tasks: set = set()
@@ -1091,9 +1085,12 @@ async def _dispatch_log(
 
     async def _runner():
         global _log_dispatch_failures
+        # ✅ FIX-27: max(1, retries) لضمان محاولة واحدة على الأقل
+        max_attempts = max(1, retries)
         attempt = 0
         last_exc = None
-        while attempt <= max(0, retries):
+        while attempt < max_attempts:
+            attempt += 1
             try:
                 await factory()
                 return
@@ -1101,19 +1098,17 @@ async def _dispatch_log(
                 return
             except Exception as e:
                 last_exc = e
-                if attempt < retries:
-                    delay = LOG_RETRY_BASE_DELAY * (attempt + 1)
-                    try:
-                        await asyncio.sleep(delay)
-                    except asyncio.CancelledError:
-                        return
-                    attempt += 1
-                    continue
-                break
+                if attempt >= max_attempts:
+                    break
+                delay = LOG_RETRY_BASE_DELAY * attempt
+                try:
+                    await asyncio.sleep(delay)
+                except asyncio.CancelledError:
+                    return
         _log_dispatch_failures += 1
         logger.error(
             "❌ [%s] failed بعد %d محاولات: %s",
-            label, retries + 1, last_exc,
+            label, max_attempts, last_exc,
         )
 
     task = asyncio.create_task(_runner())
@@ -1236,6 +1231,7 @@ async def shutdown_delete_tasks(timeout: float = 3.0):
     _running_delete_tasks.clear()
 
 
+# ✅ FIX-26: chain بدل assign
 def register_shutdown_handlers(application):
     if getattr(application, '_msh_shutdown_registered', False):
         return
@@ -1256,11 +1252,12 @@ def register_shutdown_handlers(application):
                 await shutdown_delete_tasks(timeout=3.0)
             except Exception:
                 pass
+            # ✅ FIX-26: chain — نستدعي الـhook السابق لا نستبدله
             if callable(original_post_shutdown):
                 try:
                     await original_post_shutdown(app)
-                except Exception:
-                    pass
+                except Exception as _e:
+                    logger.debug("original post_shutdown: %s", _e)
 
         application.post_shutdown = _post_shutdown
         application._msh_shutdown_registered = True
@@ -1270,6 +1267,7 @@ def register_shutdown_handlers(application):
 
 # ═══════════════════════════════════════════════════════════════════
 # Cache Helpers
+# ✅ FIX-16: early return
 # ═══════════════════════════════════════════════════════════════════
 
 async def _safe_invalidate(*keys):
@@ -1283,22 +1281,29 @@ async def _safe_invalidate(*keys):
 
 
 async def _invalidate_banned_words_cache(chat_id=None) -> bool:
+    # ✅ FIX-16: نجرّب بالترتيب، ونعيد True فور النجاح
     try:
         from utils import invalidate_banned_words_cache_async as _inv
         result = _inv(chat_id)
         if asyncio.iscoroutine(result):
             await result
         return True
+    except ImportError:
+        pass
     except Exception:
         pass
+
     try:
         from utils import invalidate_banned_words_cache as _inv2
         result = _inv2(chat_id) if chat_id is not None else _inv2()
         if asyncio.iscoroutine(result):
             await result
         return True
+    except ImportError:
+        pass
     except Exception:
         pass
+
     try:
         from cache import banned_words_cache
         if hasattr(banned_words_cache, 'invalidate'):
@@ -1306,8 +1311,11 @@ async def _invalidate_banned_words_cache(chat_id=None) -> bool:
             if asyncio.iscoroutine(result):
                 await result
             return True
+    except ImportError:
+        pass
     except Exception:
         pass
+
     return False
 
 
@@ -1412,22 +1420,9 @@ def _format_duration(seconds):
 
 # ═══════════════════════════════════════════════════════════════════
 # Group Log
-# 🟠 PERF-1: cache محلي بـ 60s TTL
 # ═══════════════════════════════════════════════════════════════════
 
 async def notify_group_log(context, chat_id, text, disable_preview=True):
-    """
-    🟠 PERF-1 (v7.18.6): استخدام cache محلي بدل DB query لكل رسالة.
-
-    قبل v7.18.6:
-        channel_id = await DB.get_group_log_channel(chat_id)  ← DB query
-    بعد v7.18.6:
-        channel_id = await _get_group_log_channel_cached(chat_id)  ← memory
-        (DB query فقط كل 60s لكل chat_id)
-
-    ⚠️ يجب استدعاء _invalidate_group_log_cache(chat_id) عند تغيير
-        قناة السجل من handlers_callback.
-    """
     try:
         channel_id = await _get_group_log_channel_cached(chat_id)
         if not channel_id:
@@ -1443,7 +1438,6 @@ async def notify_group_log(context, chat_id, text, disable_preview=True):
         err = str(e).lower()
         if "chat not found" in err:
             logger.error("❌ group_log: قناة غير موجودة | %s", chat_id)
-            # إبطال cache — قد تكون القناة حُذفت
             _invalidate_group_log_cache(chat_id)
         elif "not enough rights" in err or "bot is not a member" in err:
             logger.error("❌ group_log: البوت ليس عضواً | %s", chat_id)
@@ -1479,7 +1473,6 @@ def _build_delete_log_text(
         f"📌 النوع: {label}",
         f"👤 المستخدم: {user_display_lnk}",
     ]
-    # 🔧 v7.18.4: تناسق تسمية المعرّف
     if is_anonymous:
         lines.append(f"🆔 مصدر الإرسال: <code>{user_id}</code>")
         lines.append(f"🆔 المجموعة: <code>{chat_id}</code>")
@@ -1530,7 +1523,6 @@ def _build_penalty_log_text(
             f"<a href='tg://user?id={target_user_id}'>{target_display}</a>"
         )
     source_label = "🤖 تلقائي" if source == "auto" else "👮 يدوي"
-    # 🔧 v7.18.4: إزالة f-string غير ضرورية
     lines = [
         ptype_label,
         "━━━━━━━━━━━━━━━━━━━━",
@@ -1561,6 +1553,7 @@ def _build_penalty_log_text(
     return "\n".join(lines)
 
 
+# ✅ FIX-18: rate-limit مرة واحدة — نمرر text جاهز لـdispatch
 async def _notify_group_log_penalty(
     context, chat_id, target_user_id, target_first_name, target_username,
     penalty_type, duration_seconds, source="auto",
@@ -1568,11 +1561,7 @@ async def _notify_group_log_penalty(
 ):
     if not FEATURE_LOG_PENALTIES:
         return
-    try:
-        if not await _can_send_log(chat_id):
-            return
-    except Exception:
-        return
+    # ✅ FIX-18: ندع notify_group_log يتولى rate-limit داخلياً
     try:
         text = _build_penalty_log_text(
             chat_id, target_user_id, target_first_name,
@@ -1589,6 +1578,8 @@ async def _notify_group_log_penalty(
 
 # ═══════════════════════════════════════════════════════════════════
 # Delete Failure Notifier
+# ✅ FIX-13: success logging
+# ✅ FIX-28: log on prune
 # ═══════════════════════════════════════════════════════════════════
 
 _delete_failure_counter: Dict[int, Tuple[int, float]] = {}
@@ -1612,6 +1603,8 @@ _DELETE_PERMISSION_PATTERNS = (
     "message can't be deleted",
 )
 
+# ✅ FIX-22: توثيق — 'delete_video_note' مفرد حسب schema،
+# الباقي جمع — لا تغيّرها بدون تعديل DB.
 _MEDIA_SETTINGS_MAP = (
     ('video', 'delete_videos', 'video'),
     ('audio', 'delete_audio', 'audio'),
@@ -1655,8 +1648,16 @@ async def _record_delete_failure(chat_id) -> bool:
                     k for k, (_, ts) in _delete_failure_counter.items()
                     if now - ts > _DELETE_FAILURE_NOTIFY_WINDOW * 2
                 ]
+                pruned = 0
                 for k in stale:
                     _delete_failure_counter.pop(k, None)
+                    pruned += 1
+                # ✅ FIX-28: log عند prune
+                if pruned > 0:
+                    logger.debug(
+                        "_delete_failure_counter: pruned %d stale entries",
+                        pruned,
+                    )
             return cnt >= _DELETE_FAILURE_NOTIFY_THRESHOLD
     except Exception:
         return False
@@ -1699,7 +1700,8 @@ async def _safe_delete_message(
 ) -> bool:
     try:
         await bot.delete_message(chat_id, message_id)
-        logger.debug("✅ DELETE OK | chat=%s msg=%s", chat_id, message_id)
+        # ✅ FIX-13: log info-level على النجاح (مفيد للتشخيص)
+        logger.info("✅ DELETE OK | chat=%s msg=%s", chat_id, message_id)
         return True
     except BadRequest as e:
         if _is_delete_permission_error(e):
@@ -1879,6 +1881,7 @@ def _extract_legacy_forward_info(message):
     return None
 
 
+# ✅ FIX-25: احتفاظ بـforward_origin info
 def extract_forward_info(message):
     if message is None:
         return None
@@ -1901,7 +1904,6 @@ def extract_forward_info(message):
                     'signature': None, 'message_id': None,
                 }
             if isinstance(origin, MessageOriginHiddenUser):
-                # 🆕 v7.18.7 FIX-6: fallback "Hidden User" عند None
                 name = (
                     getattr(origin, 'sender_user_name', None)
                     or "Hidden User"
@@ -1938,8 +1940,28 @@ def extract_forward_info(message):
                     'signature': getattr(origin, 'author_signature', None),
                     'message_id': getattr(origin, 'message_id', None),
                 }
-        except Exception:
-            pass
+        except Exception as _e:
+            logger.debug("extract_forward_info isinstance path: %s", _e)
+            # ✅ FIX-25: لا نسقط مباشرة — نحاول استخراج يدوي
+            try:
+                _chat = (
+                    getattr(origin, 'chat', None)
+                    or getattr(origin, 'sender_chat', None)
+                )
+                if _chat is not None:
+                    return {
+                        'type': 'channel_or_chat',
+                        'id': getattr(_chat, 'id', None),
+                        'name': (
+                            getattr(_chat, 'title', None)
+                            or getattr(_chat, 'username', None)
+                            or str(getattr(_chat, 'id', '?'))
+                        ),
+                        'date': getattr(origin, 'date', None),
+                        'signature': None, 'message_id': None,
+                    }
+            except Exception:
+                pass
     info = _extract_legacy_forward_info(message)
     if info:
         return info
@@ -1966,11 +1988,10 @@ def extract_forward_info(message):
 
 
 # ═══════════════════════════════════════════════════════════════════
-# 🆕 v7.18.3: get_forward_info + _is_postbot_forward
+# get_forward_info + _is_postbot_forward
 # ═══════════════════════════════════════════════════════════════════
 
 def get_forward_info(message) -> Dict[str, Any]:
-    """v7.18.3: استخراج موحّد لمعلومات الرسالة المحوّلة."""
     result: Dict[str, Any] = {
         "is_forwarded": False,
         "origin_type": None,
@@ -2040,7 +2061,6 @@ def get_forward_info(message) -> Dict[str, Any]:
             )
         elif isinstance(origin, MessageOriginHiddenUser):
             result["origin_type"] = "hidden_user"
-            # 🆕 v7.18.7 FIX-6: fallback "Hidden User"
             result["original_name"] = (
                 getattr(origin, "sender_user_name", None)
                 or "Hidden User"
@@ -2054,10 +2074,6 @@ def get_forward_info(message) -> Dict[str, Any]:
 
 
 def _is_postbot_forward(message) -> Tuple[bool, Optional[Dict[str, Any]]]:
-    """
-    v7.18.3: كشف Post Bot (يشمل القنوات الخاصة).
-    🆕 v7.18.7 FIX-3: استخدام _normalize_tg_id + _POSTBOT_RAW_IDS.
-    """
     if message is None or not _FORCE_DELETE_POSTBOT_FORWARDS:
         return False, None
     try:
@@ -2066,7 +2082,6 @@ def _is_postbot_forward(message) -> Tuple[bool, Optional[Dict[str, Any]]]:
         if not info.get("is_forwarded") and not info.get("sender_chat_id"):
             return False, None
 
-        # sender_chat
         sender_id = info.get("sender_chat_id")
         if sender_id is not None:
             if _normalize_tg_id(sender_id) in _POSTBOT_RAW_IDS:
@@ -2081,7 +2096,6 @@ def _is_postbot_forward(message) -> Tuple[bool, Optional[Dict[str, Any]]]:
                 "name": sender_title,
             }
 
-        # forward_origin
         ftype = (info.get("origin_type") or "").lower()
         if ftype not in (
             "channel", "chat", "user", "hidden_user",
@@ -2139,6 +2153,7 @@ async def _notify_admin_about_forward(context, admin_id, info):
         pass
 
 
+# ✅ FIX-9: age-based prune (25% الأقدم بدل 50% عشوائي)
 def _should_notify_forward(context, chat_id) -> bool:
     try:
         bot_data = getattr(context, 'bot_data', None)
@@ -2156,9 +2171,23 @@ def _should_notify_forward(context, chat_id) -> bool:
             if isinstance(k, str) and k.startswith("_forward_notify_")
         ]
         if len(fwd_keys) >= _FORWARD_NOTIFY_MAX_KEYS:
-            remove_count = max(1, len(fwd_keys) // 2)
-            for k in fwd_keys[:remove_count]:
+            # ✅ FIX-9: احذف 25% الأقدم فقط بدل 50%
+            try:
+                sorted_keys = sorted(
+                    fwd_keys,
+                    key=lambda k: bot_data.get(k, 0.0)
+                    if isinstance(bot_data.get(k), (int, float))
+                    else 0.0,
+                )
+            except Exception:
+                sorted_keys = fwd_keys
+            remove_count = max(1, len(sorted_keys) // 4)
+            for k in sorted_keys[:remove_count]:
                 bot_data.pop(k, None)
+            logger.debug(
+                "_should_notify_forward: pruned %d oldest entries",
+                remove_count,
+            )
         bot_data[key] = now
         return True
     except Exception:
@@ -2237,7 +2266,6 @@ class GroupRateLimiterManager:
                     await _cleanup_flood_tracker(force=True)
                 except Exception:
                     pass
-                # 🆕 v7.18.6: تنظيف caches PERF
                 try:
                     _prune_perf_caches()
                 except Exception:
@@ -2249,14 +2277,9 @@ class GroupRateLimiterManager:
 
 
 def _prune_perf_caches() -> int:
-    """
-    🆕 v7.18.6: تنظيف دوري للـ caches المحلية (PERF-1/2/7).
-    يعيد العدد الكلي للمُزال.
-    """
     removed = 0
     now = time.monotonic()
 
-    # _group_log_channel_cache
     try:
         stale = [
             k for k, (_, ts) in _group_log_channel_cache.items()
@@ -2268,7 +2291,6 @@ def _prune_perf_caches() -> int:
     except Exception:
         pass
 
-    # _sec_settings_local_cache
     try:
         stale = [
             k for k, (_, ts) in _sec_settings_local_cache.items()
@@ -2280,7 +2302,6 @@ def _prune_perf_caches() -> int:
     except Exception:
         pass
 
-    # _admin_check_cache
     try:
         stale = [
             k for k, (_, ts) in _admin_check_cache.items()
@@ -2407,24 +2428,10 @@ def clear_lang_cache(context):
         pass
 
 
+# ✅ FIX-4: لا cache عند فشل DB
 async def get_security_settings_cached(chat_id) -> dict:
-    """
-    🟠 PERF-2 (v7.18.6): طبقتان من cache لتقليل ضغط DB.
-
-    قبل v7.18.6:
-        كل رسالة → settings_cache.get_security → DB query (أحياناً)
-
-    بعد v7.18.6:
-        كل رسالة → _sec_settings_local_cache (5s TTL، ذاكرة)
-        كل 5s → settings_cache.get_security (طبقة ثانية)
-        كل انتهاء settings_cache TTL → DB query
-
-    ⚠️ يُنصح باستدعاء _invalidate_sec_settings_local(chat_id)
-        عند تعديل أي إعداد أمان من handlers_callback.
-    """
     now = time.monotonic()
 
-    # الطبقة 1: cache محلي سريع
     try:
         entry = _sec_settings_local_cache.get(int(chat_id))
     except (TypeError, ValueError):
@@ -2435,14 +2442,12 @@ async def get_security_settings_cached(chat_id) -> dict:
         if now - cached_at < _SEC_SETTINGS_LOCAL_TTL:
             return cached_value
 
-    # الطبقة 2: settings_cache (كاش cache.py)
     settings = None
     try:
         settings = await settings_cache.get_security(chat_id)
     except Exception as e:
         logger.debug("settings_cache.get_security(%s): %s", chat_id, e)
 
-    # 🟠 PERF-3: تطبيع النوع
     if settings is None or not isinstance(settings, dict):
         try:
             settings = await DB.get_security_settings(chat_id)
@@ -2450,15 +2455,22 @@ async def get_security_settings_cached(chat_id) -> dict:
             logger.debug("DB.get_security_settings(%s): %s", chat_id, e)
             settings = None
 
-        # PERF-3: ضمان dict
+        # ✅ FIX-4: فحص صريح قبل التخزين
+        if settings is None:
+            # فشل DB — لا نُخزّن {} (كان يسبب تمرير spam لمدة 5s)
+            logger.warning(
+                "get_security_settings_cached(%s): DB failure — "
+                "returning empty (NOT cached)",
+                chat_id,
+            )
+            return {}
+
         settings = _row_to_dict_local(settings) or {}
-        # إعادة تخزين في الطبقة 2
         try:
             await settings_cache.set_security(chat_id, settings)
         except Exception:
             pass
 
-    # تخزين في الطبقة 1 (memory)
     if len(_sec_settings_local_cache) >= _SEC_SETTINGS_LOCAL_MAX:
         try:
             oldest = sorted(
@@ -2480,7 +2492,6 @@ async def get_security_settings_cached(chat_id) -> dict:
 
 async def get_auto_reply_settings_cached(chat_id) -> dict:
     cached = await settings_cache.get_auto_reply_settings(chat_id)
-    # 🟠 PERF-3: تطبيع النوع
     if cached is not None and isinstance(cached, dict):
         return cached
     settings = await DB.get_auto_reply_settings(chat_id)
@@ -2494,7 +2505,6 @@ async def get_auto_reply_settings_cached(chat_id) -> dict:
 
 async def invalidate_security_cache(chat_id=None):
     await settings_cache.invalidate_security(chat_id)
-    # 🆕 v7.18.6: إبطال cache المحلي أيضاً
     _invalidate_sec_settings_local(chat_id)
 
 
@@ -2502,18 +2512,18 @@ async def invalidate_auto_reply_cache(chat_id=None):
     await settings_cache.invalidate_auto_reply(chat_id)
 
 
+# ✅ FIX-3: توحيد ترقيم FIX مع الرأس
 async def _detect_and_translate(update, context, chat_id, user_id, text):
     """
-    🆕 v7.18.7 FIX-9: كشف اللغة + ترجمة.
+    🆕 v7.18.8 FIX-6: كشف اللغة + ترجمة.
 
     سياسة الترجمة (قرار تصميمي صريح):
-        • lang='ar' + نص عربي   → لا ترجمة (نفس اللغة)
+        • lang='ar' + نص عربي   → لا ترجمة
         • lang='ar' + نص أجنبي  → ترجم إلى عربي
         • lang≠'ar' + نص عربي   → ترجم إلى لغة المستخدم
-        • lang≠'ar' + نص أجنبي  → لا ترجمة (اللغتان غير عربية)
+        • lang≠'ar' + نص أجنبي  → لا ترجمة
 
-    ⚠️ لا يُترجم بين لغتين أجنبيتين (مثلاً: إنجليزي → فرنسي)
-       لأن TranslationManager مصمم للعربية كمحور مركزي.
+    ⚠️ لا يُترجم بين لغتين أجنبيتين.
     """
     if not text or len(text.strip()) < TRANSLATION_MIN_TEXT_LENGTH:
         return None
@@ -2542,7 +2552,6 @@ async def _detect_and_translate(update, context, chat_id, user_id, text):
 async def _send_translation_reply(
     bot, chat_id, original_message_id, translated, lang, context=None,
 ):
-    # 🔧 v7.18.4: حماية من translated=None
     if not translated:
         return
     try:
@@ -2663,18 +2672,6 @@ def _parse_contest_date(date_str):
 
 
 async def _check_admin_in_chat(context, chat_id, user_id) -> bool:
-    """
-    🟡 PERF-7 (v7.18.6): cache 30s لنتيجة فحص الأدمن.
-
-    قبل v7.18.6:
-        كل استدعاء → is_authorized_in_group (cache) + DB query
-    بعد v7.18.6:
-        كل استدعاء → cache محلي (30s)
-        كل 30s → is_authorized_in_group + DB query
-
-    ⚠️ يُنصح باستدعاء _invalidate_admin_check_cache(chat_id, user_id)
-        عند تغيير صلاحيات المشرفين.
-    """
     if user_id == CONFIG.PRIMARY_OWNER_ID:
         return True
 
@@ -2712,7 +2709,6 @@ async def _check_admin_in_chat(context, chat_id, user_id) -> bool:
         except Exception:
             result = False
 
-    # تخزين النتيجة (نجاح أو فشل) — مع حد أقصى
     if cache_key is not None:
         if len(_admin_check_cache) >= _ADMIN_CHECK_CACHE_MAX:
             try:
@@ -2768,8 +2764,8 @@ async def _verify_bot_in_log_channel(context, channel_id):
     return True, ""
 
 
-def _verify_bot_in_log_channel_error_text(reason, lang) -> str:
-    _ = lang
+# ✅ FIX-24: حذف lang غير المستخدم (كان يُمرر لكن يُتجاهل)
+def _verify_bot_in_log_channel_error_text(reason) -> str:
     mapping = {
         "invalid_channel_id": "❌ معرّف القناة غير صالح.",
         "timeout": "⏱️ انتهت مهلة الاتصال.",
@@ -2886,11 +2882,10 @@ def _contains_banned_word(text, banned_word) -> bool:
             return False
 
 
+# ✅ FIX-14: استخدام lock
 def _accepts_state_arg(handler, handler_name: str) -> bool:
-    """
-    🆕 v7.18.7 FIX-5: مع سقف 128 إدخال (Python 3.7+ يحفظ ترتيب الإدراج).
-    """
-    cached = _private_handler_signature_cache.get(handler_name)
+    with _private_sig_cache_lock:
+        cached = _private_handler_signature_cache.get(handler_name)
     if cached is not None:
         return cached
     try:
@@ -2906,15 +2901,15 @@ def _accepts_state_arg(handler, handler_name: str) -> bool:
     except (TypeError, ValueError):
         result = False
 
-    if len(_private_handler_signature_cache) >= _PRIVATE_SIG_CACHE_MAX:
-        try:
-            _private_handler_signature_cache.pop(
-                next(iter(_private_handler_signature_cache))
-            )
-        except (StopIteration, KeyError):
-            pass
-
-    _private_handler_signature_cache[handler_name] = result
+    with _private_sig_cache_lock:
+        if len(_private_handler_signature_cache) >= _PRIVATE_SIG_CACHE_MAX:
+            try:
+                _private_handler_signature_cache.pop(
+                    next(iter(_private_handler_signature_cache))
+                )
+            except (StopIteration, KeyError):
+                pass
+        _private_handler_signature_cache[handler_name] = result
     return result
 
 
@@ -2981,7 +2976,6 @@ class MessageHandlers:
                 slow_secs = 0
 
             bd = context.bot_data
-            # 🔧 v7.18.4: cooldown لتنظيف bot_data
             if isinstance(bd, dict) and len(bd) > _BOT_DATA_SLOW_MODE_PRUNE_THRESHOLD:
                 now_ts = time.monotonic()
                 last_prune = bd.get("_slow_prune_last_ts", 0.0)
@@ -3030,8 +3024,9 @@ class MessageHandlers:
                     chat_id, target,
                 )
             except Exception as e:
-                logger.debug(
-                    "set_chat_slow_mode(%s, %d): %s",
+                # ✅ FIX-17: warning بدل debug لسهولة التشخيص
+                logger.warning(
+                    "⚠️ set_chat_slow_mode(%s, %d) failed: %s",
                     chat_id, target, e,
                 )
         except Exception as e:
@@ -3139,13 +3134,21 @@ class MessageHandlers:
         except Exception as e:
             logger.debug("slow_mode apply: %s", e)
 
+        # ✅ FIX-10: احترام قيم ctx الأصلية + augment بـdet
         det = get_forward_detection_reason(message)
-        ctx.is_forwarded = _as_bool(det.get('is_forwarded', False), False)
-        ctx.is_protected = _as_bool(det.get('is_protected', False), False)
+        _det_fwd = _as_bool(det.get('is_forwarded', False), False)
+        _det_protected = _as_bool(det.get('is_protected', False), False)
+        _det_auto = _as_bool(det.get('has_automatic_forward', False), False)
         forward_hint = _as_bool(det.get('has_hint', False), False)
-        ctx.is_auto_fwd = _as_bool(
-            det.get('has_automatic_forward', False), False,
-        )
+
+        # _MessageContext._populate already computes is_forwarded/is_auto_fwd
+        # نستخدم OR — لا نستبدل
+        if _det_fwd and not ctx.is_forwarded:
+            ctx.is_forwarded = True
+        if _det_protected and not ctx.is_protected:
+            ctx.is_protected = True
+        if _det_auto and not ctx.is_auto_fwd:
+            ctx.is_auto_fwd = True
 
         is_protected_forward = (
             _protected_fb and ctx.is_protected and forward_hint
@@ -3164,9 +3167,10 @@ class MessageHandlers:
         _analysis_mode = "text-only"
 
         if _spam_enabled:
-            if _MULTILAYER_ENABLED and analyze_message_full is not None:
+            # ✅ FIX-1: نستخدم النسخة async أولاً
+            if _MULTILAYER_ENABLED and analyze_message_full_async is not None:
                 try:
-                    _verdict = analyze_message_full(
+                    _verdict = await analyze_message_full_async(
                         message, bot=context.bot,
                     )
                     if _verdict is not None:
@@ -3184,11 +3188,38 @@ class MessageHandlers:
                                     _spam_reasons.append(f"{_layer}:{_r}")
                         except Exception:
                             pass
-                        _analysis_mode = "multilayer"
+                        _analysis_mode = "multilayer-async"
                 except Exception as e:
-                    logger.debug("multilayer error: %s", e)
+                    logger.debug("multilayer async error: %s", e)
                     _verdict = None
 
+            # Fallback 1: sync عبر to_thread (يسمح للطبقات الثقيلة بالعمل)
+            elif _MULTILAYER_ENABLED and analyze_message_full is not None:
+                try:
+                    _verdict = await asyncio.to_thread(
+                        analyze_message_full, message, context.bot,
+                    )
+                    if _verdict is not None:
+                        _spam_score = int(
+                            getattr(_verdict, "total_score", 0) or 0
+                        )
+                        _spam_layer_scores = dict(
+                            getattr(_verdict, "layer_scores", {}) or {}
+                        )
+                        try:
+                            for _layer, _reasons in (
+                                getattr(_verdict, "layer_reasons", {}) or {}
+                            ).items():
+                                for _r in (_reasons or []):
+                                    _spam_reasons.append(f"{_layer}:{_r}")
+                        except Exception:
+                            pass
+                        _analysis_mode = "multilayer-sync-thread"
+                except Exception as e:
+                    logger.debug("multilayer sync-thread error: %s", e)
+                    _verdict = None
+
+            # Fallback 2: text-only
             if _verdict is None:
                 try:
                     _spam_score, _spam_reasons = _compute_spam_score(ctx)
@@ -3239,12 +3270,13 @@ class MessageHandlers:
                 ctx.spam_emoji_count, _analysis_mode,
             )
 
-        if _analysis_mode == "multilayer" and _spam_layer_scores:
+        if _analysis_mode.startswith("multilayer") and _spam_layer_scores:
             logger.info(
                 "🛡️ SHIELD | chat=%s user=%s msg=%s | "
-                "total=%.1f | layers=%s",
+                "total=%.1f | mode=%s | layers=%s",
                 chat_id, user_id, message.message_id,
                 float(_spam_score),
+                _analysis_mode,
                 {k: round(v, 1)
                  for k, v in _spam_layer_scores.items() if v > 0},
             )
@@ -3323,7 +3355,7 @@ class MessageHandlers:
                 return
 
         # ═════════════════════════════════════════════════════════════
-        # 🆕 v7.18.3: 0.1) Auto-blocked source detection
+        # 0.1) Auto-blocked source detection
         # ═════════════════════════════════════════════════════════════
         if _HAS_AUTO_BLOCK:
             try:
@@ -3351,7 +3383,7 @@ class MessageHandlers:
                 logger.debug("auto-block check: %s", e)
 
         # ═════════════════════════════════════════════════════════════
-        # 🆕 v7.18.3: 0.2) Post Bot forwarded detection
+        # 0.2) Post Bot forwarded detection
         # ═════════════════════════════════════════════════════════════
         if _FORCE_DELETE_POSTBOT_FORWARDS:
             try:
@@ -3395,10 +3427,7 @@ class MessageHandlers:
             except Exception as e:
                 logger.debug("postbot forward check: %s", e)
 
-        # ═════════════════════════════════════════════════════════════
         # 0.4) Force delete any button link
-        # 🔧 v7.18.4: حذف القسم المكرر 4d (كود ميت)
-        # ═════════════════════════════════════════════════════════════
         if _button_links_enabled and ctx.has_button_link:
             logger.warning(
                 "🔘 BUTTON-LINK-DELETE | chat=%s user=%s msg=%s | "
@@ -3482,9 +3511,6 @@ class MessageHandlers:
                 "tg_scheme", settings, is_anonymous=is_anonymous,
             )
             return
-
-        # 🔧 v7.18.4: تمت إزالة قسم 4d المكرر
-        # (كان لا يُنفَّذ أبداً لأن 0.4 يحذف ويُرجع)
 
         # 4e) Emails
         if _emails_enabled and _contains_email(ctx.normalized_text):
@@ -3646,10 +3672,6 @@ class MessageHandlers:
 
     @staticmethod
     async def _resolve_penalty(chat_id, violation_type, settings):
-        """
-        🟠 PERF-5 (v7.18.6): دعم dict + asyncpg.Record + MySQL Row.
-        🆕 v7.18.7 FIX-4: تبسيط منطق try/except المزدوج.
-        """
         penalty_rule = None
         try:
             penalty_rule = await DB.get_violation_penalty(
@@ -3658,11 +3680,9 @@ class MessageHandlers:
         except Exception:
             pass
 
-        # 🟠 PERF-5: توحيد النوع (dict دائماً)
         penalty_rule = _row_to_dict_local(penalty_rule)
 
         if penalty_rule:
-            # 🆕 v7.18.7 FIX-4: dict يضمن .get()
             ptype = penalty_rule.get('penalty_type')
             if ptype == 'none':
                 return None, 0
@@ -3756,7 +3776,7 @@ class MessageHandlers:
                 pass
             return
 
-        # 🆕 v7.18.5: إضافة المصدر للقائمة السوداء — فقط القنوات/المجموعات
+        # Auto-block list — فقط القنوات/المجموعات
         if _HAS_AUTO_BLOCK and violation_type in (
             'postbot_forward', 'forwarded', 'spam_score',
         ):
@@ -3764,8 +3784,6 @@ class MessageHandlers:
                 _fwd = get_forward_info(message)
                 _origin_type = (_fwd.get("origin_type") or "").lower()
 
-                # 🆕 v7.18.5: لا نضيف users للقائمة السوداء
-                # (channel/chat فقط) — لحماية المستخدمين العاديين
                 if _origin_type in ("user", "hidden_user"):
                     logger.debug(
                         "SKIP-BLACKLIST-USER | type=%s name=%r",
@@ -3777,8 +3795,6 @@ class MessageHandlers:
                         or _fwd.get("sender_chat_id")
                         or _fwd.get("original_user_id")
                     )
-                    # 🆕 v7.18.5: حماية إضافية — تجاهل ID موجب
-                    # (معرّفات القنوات/المجموعات سالبة دائماً في Telegram)
                     if _source_id is not None and int(_source_id) > 0:
                         logger.debug(
                             "SKIP-BLACKLIST-POSITIVE-ID | id=%s type=%s",
@@ -3944,9 +3960,6 @@ class MessageHandlers:
                     context.bot, chat_id, sent_penalty.message_id,
                     PENALTY_MESSAGE_DELETE_DELAY, context=context,
                 )
-            # ✅ v7.18.6-PERF-4-RESTORED: السلوك الأصلي محفوظ
-            # تصفير العدّاد بعد تطبيق العقوبة — يحتاج 3 مخالفات
-            # جديدة لتلقّي عقوبة أخرى.
             await DB.reset_violation_count(user_id, chat_id)
         except Exception:
             pass
@@ -3988,7 +4001,12 @@ class MessageHandlers:
             if not update.effective_user:
                 return
             user_id = update.effective_user.id
-            state = StateManager.get(user_id)
+            # ✅ FIX-15: try/except حول StateManager.get
+            try:
+                state = StateManager.get(user_id)
+            except Exception as _se:
+                logger.warning("StateManager.get(%s): %s", user_id, _se)
+                return
             if state is None:
                 return
 
@@ -4024,6 +4042,7 @@ class MessageHandlers:
         except Exception:
             logger.exception("handle_private error")
 
+    # ✅ FIX-23: clear_lang_cache
     @staticmethod
     async def handle_cancel(update, context):
         try:
@@ -4032,6 +4051,7 @@ class MessageHandlers:
             user_id = update.effective_user.id
             StateManager.clear(user_id)
             context.user_data.pop('ban_chat', None)
+            clear_lang_cache(context)  # ✅ FIX-23
             lang = await _ensure_lang(update, context)
             msg = await _trans(
                 'action_cancelled', lang, "✅ تم إلغاء العملية.",
@@ -4063,29 +4083,14 @@ class MessageHandlers:
             return None, True
         return word, False
 
+    # ✅ FIX-5: tracker منفصل بدل -1 sentinel
     @staticmethod
     async def _apply_ban_add_rate_limit(update, context, lang) -> bool:
-        """
-        🆕 v7.18.7 FIX-1: args معكوسة في _check_flood.
-
-        _check_flood signature: (chat_id, user_id, max_messages, window_sec)
-
-        قبل v7.18.7 (خطأ):
-            _check_flood(user_id, -1, ...)  ← كان يخلط المعاملين
-
-        بعد v7.18.7 (صحيح):
-            _check_flood(-1, user_id, ...)
-            - chat_id=-1 → يميّز rate-limiting القائمة السوداء
-              عن rate-limiting الرسائل في المجموعات
-            - user_id=user_id → مفتاح فريد لكل مستخدم
-        """
         if not _BAN_ADD_RATE_LIMIT:
             return False
         try:
             user_id = update.effective_user.id
-            exceeded = await _check_flood(
-                -1, user_id, _BAN_ADD_RATE_MAX, _BAN_ADD_RATE_WINDOW,
-            )
+            exceeded = await _check_ban_add_rate(user_id)
             if exceeded:
                 msg = await _trans(
                     'ban_word_rate_limited',
@@ -4511,6 +4516,7 @@ class MessageHandlers:
         except Exception:
             pass
 
+    # ✅ FIX-19: إزالة sleep(0.05)
     @staticmethod
     async def handle_join_request(update, context):
         if not update.effective_chat or not update.effective_user:
@@ -4520,25 +4526,23 @@ class MessageHandlers:
         settings = await get_security_settings_cached(chat_id)
         if _as_bool(settings.get('auto_reject_join'), False):
             try:
-                await asyncio.sleep(0.05)
                 await context.bot.decline_chat_join_request(chat_id, user_id)
                 return
             except Exception as e:
                 logger.warning("decline join: %s", e)
         if _as_bool(settings.get('auto_approve_join'), False):
             try:
-                await asyncio.sleep(0.05)
                 await context.bot.approve_chat_join_request(chat_id, user_id)
             except Exception as e:
                 logger.warning("approve join: %s", e)
 
 
 # ═══════════════════════════════════════════════════════════════════
-# 🆕 v7.18.3: /autoblocked command
+# /autoblocked command
+# ✅ FIX-11: pagination support
 # ═══════════════════════════════════════════════════════════════════
 
 async def handle_autoblocked_command(update, context):
-    """🆕 v7.18.3: عرض / إدارة القائمة السوداء التلقائية"""
     if not update.effective_user or not update.effective_message:
         return
     user_id = update.effective_user.id
@@ -4580,8 +4584,26 @@ async def handle_autoblocked_command(update, context):
             )
         return
 
-    sources = await _list_blocked_sources(limit=50)
-    if not sources:
+    # ✅ FIX-11: دعم pagination بسيط
+    page = 1
+    if args:
+        try:
+            page = max(1, int(args[0]))
+        except (ValueError, TypeError):
+            page = 1
+    page_size = 20
+    offset = (page - 1) * page_size
+
+    sources = await _list_blocked_sources(limit=page_size + 1 + offset)
+    # نقتطع من offset
+    try:
+        sources_slice = list(sources)[offset:offset + page_size]
+        has_more = len(sources) > offset + page_size
+    except Exception:
+        sources_slice = list(sources)[:page_size]
+        has_more = False
+
+    if not sources_slice and page == 1:
         await safe_send(
             context.bot, chat_id,
             "✨ القائمة السوداء التلقائية فارغة",
@@ -4590,9 +4612,10 @@ async def handle_autoblocked_command(update, context):
 
     lines = [
         "🚫 <b>المصادر المحجوبة تلقائياً</b>",
+        f"📄 صفحة {page}",
         "━━━━━━━━━━━━━━━━━━━━",
     ]
-    for s in sources:
+    for s in sources_slice:
         try:
             sid = s.get('source_id')
             name = str(s.get('source_name') or '')[:30]
@@ -4607,9 +4630,9 @@ async def handle_autoblocked_command(update, context):
         except Exception:
             continue
     lines.append("")
-    lines.append(
-        "🗑️ للحذف: <code>/autoblocked remove ID</code>"
-    )
+    if has_more:
+        lines.append(f"▶️ للمزيد: <code>/autoblocked {page + 1}</code>")
+    lines.append("🗑️ للحذف: <code>/autoblocked remove ID</code>")
     await safe_send(
         context.bot, chat_id,
         "\n".join(lines),
@@ -4667,20 +4690,24 @@ __all__ = [
     "_DEFAULT_VIOLATION_MESSAGES",
     "_notify_delete_permission_failure", "analyze_sentiment",
     "_MULTILAYER_ENABLED", "_HAS_MULTILAYER",
-    "analyze_message_full", "SpamVerdict",
+    "_HAS_ASYNC_DETECTORS",  # ✅ FIX-1
+    "analyze_message_full", "analyze_message_full_async",  # ✅ FIX-1
+    "SpamVerdict",
     "_FORCE_DELETE_BUTTON_LINKS",
     "_FORCE_DELETE_POSTBOT_FORWARDS",
     "_is_postbot_forward", "_is_postbot_channel_name",
     "_POSTBOT_CHANNEL_NAMES", "_POSTBOT_CHANNEL_IDS",
     "_POSTBOT_RAW_IDS",
     "_POSTBOT_NAME_REGEX",
+    "_POSTBOT_WORD_POST_RE", "_POSTBOT_WORD_BOT_RE",
     "_normalize_tg_id",
     "_HAS_AUTO_BLOCK",
     "handle_autoblocked_command",
 
-    # 🆕 v7.18.6 — PERF caches + invalidation
+    # PERF caches + invalidation
     "_GROUP_LOG_CHANNEL_CACHE_TTL",
     "_GROUP_LOG_CHANNEL_CACHE_MAX",
+    "_GROUP_LOG_CHANNEL_CACHE_MAX_STALE",
     "_group_log_channel_cache",
     "_get_group_log_channel_cached",
     "_invalidate_group_log_cache",
@@ -4695,6 +4722,10 @@ __all__ = [
     "_row_to_dict_local",
     "_prune_perf_caches",
 
-    # 🆕 v7.18.7 — FIX helpers
     "_PRIVATE_SIG_CACHE_MAX",
+    "_private_sig_cache_lock",  # ✅ FIX-14
+
+    "_ban_add_tracker", "_ban_add_lock",  # ✅ FIX-5
+    "_check_ban_add_rate",  # ✅ FIX-5
+    "_FLOOD_DEQUE_MAXLEN",  # ✅ FIX-7
 ]
