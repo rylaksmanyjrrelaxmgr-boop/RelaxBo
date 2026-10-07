@@ -1,26 +1,26 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-handlers_callback.py - معالج الأزرار (v9.7.13)
+handlers_callback.py - معالج الأزرار (v9.7.14)
 =====================================================================
+🆕 v9.7.14 (UPDATES-CHANNEL-HEALTH-CHECK):
+    🔴 UPD-HEALTH-1: _check_updates_channel_health — فحص شامل للقناة
+    🔴 UPD-HEALTH-2: إشعار تلقائي للمطور عند مشاكل الصلاحيات
+    🔴 UPD-HEALTH-3: زر "إعادة الفحص" + كاش 5 دقائق
+    🔴 UPD-HEALTH-4: إشعار خفيف للعضو عند مشاكل القناة
+    🟡 UPD-HEALTH-5: _build_updates_channel_health_warning helper
+    🟡 UPD-HEALTH-6: إبطال الكاش عند تغيير/حذف القناة
+
 🆕 v9.7.13 (UPDATES-CHANNEL-LINK-FIX):
-    🔴 UPD-1: _show_updates_channel — إضافة زر رابط قابل للنقر
-              • يدعم @username → https://t.me/{username}
-              • يدعم https://t.me/... مباشرة
-              • يدعم ID رقمي → يحاول t.me/c/...
-              • يحاول create_chat_invite_link للقنوات الخاصة
+    🔴 UPD-1: _show_updates_channel — زر رابط قابل للنقر
     🔴 UPD-2: _show_admin_update_channel_menu — نفس التحسين
     🟡 UPD-3: _extract_updates_channel_link — helper مشترك
-    ✅ الحفاظ الكامل على سلوك v9.7.12
 
 🆕 v9.7.12 (SYNTAX-FIX):
     🔴 SYNTAX-1: إصلاح SyntaxError في _handle_auto_reply
-    ✅ تم التحقق بـ py_compile — لا أخطاء
 
-🆕 v9.7.11 (PERF-INTEGRATION):
-    🟠 PERF-CB-1..5: تكامل مع handlers_message v7.18.8
-
-🆕 v9.7.10 (MISSING-METHODS-FIX): إضافة 3 دوال
+🆕 v9.7.11 (PERF-INTEGRATION): PERF-CB-1..5
+🆕 v9.7.10 (MISSING-METHODS-FIX): 3 دوال
 🆕 v9.7.9 (CLEANUP-AND-HARDENING)
 🆕 v9.7.8 (SECURITY-TABLE-MISMATCH-FIX)
 🆕 v9.7.7 (SECURITY-BRIDGE-INTEGRATION)
@@ -237,7 +237,7 @@ _membership_table_created = False
 
 
 # ═══════════════════════════════════════════════════════════════════
-# 🆕 v9.7.13 UPD-3: Updates-channel link helper
+# 🆕 v9.7.13/9.7.14: Updates-channel helpers
 # ═══════════════════════════════════════════════════════════════════
 
 def _extract_updates_channel_link(ch_raw):
@@ -254,9 +254,6 @@ def _extract_updates_channel_link(ch_raw):
 
     المُخرج:
         (clean, url_or_None, is_username)
-        • clean: المعرف النظيف (بدون @ أو https://)
-        • url_or_None: رابط t.me إذا كان username، أو None
-        • is_username: True إن كان identifier قابل للاستخدام كـ username
     """
     if not ch_raw:
         return "", None, False
@@ -267,11 +264,9 @@ def _extract_updates_channel_link(ch_raw):
     if not s:
         return "", None, False
 
-    # إزالة @
     if s.startswith('@'):
         s = s[1:]
 
-    # إزالة https://t.me/ أو http://t.me/ أو t.me/
     for prefix in ("https://t.me/", "http://t.me/",
                    "https://telegram.me/", "http://telegram.me/",
                    "t.me/", "telegram.me/"):
@@ -279,22 +274,251 @@ def _extract_updates_channel_link(ch_raw):
             s = s[len(prefix):]
             break
 
-    # إزالة / في النهاية
     s = s.rstrip('/')
 
-    # إزالة أي query string
     if '?' in s:
         s = s.split('?', 1)[0]
 
     if not s:
         return "", None, False
 
-    # هل هو ID رقمي؟
     if s.lstrip('-').isdigit():
         return s, None, False
 
-    # username صالح
     return s, f"https://t.me/{s}", True
+
+
+# ═══════════════════════════════════════════════════════════════════
+# 🆕 v9.7.14: Updates channel health check
+# ═══════════════════════════════════════════════════════════════════
+
+_UPDATES_CHANNEL_HEALTH_CACHE: Dict[str, Tuple[dict, float]] = {}
+_UPDATES_CHANNEL_HEALTH_TTL = 300.0
+
+
+async def _check_updates_channel_health(bot, ch_raw):
+    """
+    🆕 v9.7.14: فحص شامل لقناة التحديثات.
+
+    يُعيد dict يحتوي:
+        {
+            'status': 'ok' | 'warn' | 'error' | 'empty',
+            'reason': str,
+            'action_required': str,
+            'url': str | None,
+            'chat_type': str | None,
+            'title': str | None,
+            'bot_is_admin': bool,
+            'bot_can_invite': bool,
+            'checked_at': float,
+        }
+    """
+    now = time.monotonic()
+    cache_key = str(ch_raw or '')
+
+    cached = _UPDATES_CHANNEL_HEALTH_CACHE.get(cache_key)
+    if cached and now - cached[1] < _UPDATES_CHANNEL_HEALTH_TTL:
+        return cached[0]
+
+    report = {
+        'status': 'error',
+        'reason': 'unknown',
+        'action_required': '',
+        'url': None,
+        'chat_type': None,
+        'title': None,
+        'bot_is_admin': False,
+        'bot_can_invite': False,
+        'checked_at': now,
+    }
+
+    if not ch_raw:
+        report.update({
+            'status': 'empty',
+            'reason': 'no_channel_set',
+            'action_required': 'set_channel',
+        })
+        _UPDATES_CHANNEL_HEALTH_CACHE[cache_key] = (report, now)
+        return report
+
+    clean, url, is_username = _extract_updates_channel_link(ch_raw)
+
+    if is_username and url:
+        report.update({
+            'status': 'ok',
+            'reason': 'public_channel',
+            'url': url,
+        })
+        _UPDATES_CHANNEL_HEALTH_CACHE[cache_key] = (report, now)
+        return report
+
+    if not clean or not clean.lstrip('-').isdigit():
+        report.update({
+            'status': 'error',
+            'reason': 'invalid_format',
+            'action_required': 'set_valid_username_or_id',
+        })
+        _UPDATES_CHANNEL_HEALTH_CACHE[cache_key] = (report, now)
+        return report
+
+    numeric_id = int(clean)
+
+    try:
+        chat = await bot.get_chat(numeric_id)
+        report['title'] = getattr(chat, 'title', None)
+        report['chat_type'] = getattr(chat, 'type', None)
+    except Exception as e:
+        logger.debug(
+            f"_check_updates_channel_health: get_chat({numeric_id}) "
+            f"failed: {e}"
+        )
+        report.update({
+            'status': 'error',
+            'reason': 'bot_cannot_access_channel',
+            'action_required': 'add_bot_to_channel',
+            'url': f"https://t.me/c/{clean.lstrip('-')}",
+        })
+        _UPDATES_CHANNEL_HEALTH_CACHE[cache_key] = (report, now)
+        return report
+
+    try:
+        member = await bot.get_chat_member(numeric_id, bot.id)
+        status = getattr(member, 'status', '')
+        report['bot_is_admin'] = status in ('administrator', 'creator')
+        report['bot_can_invite'] = bool(
+            getattr(member, 'can_invite_users', False)
+            or status == 'creator'
+        )
+    except Exception as e:
+        logger.debug(
+            f"_check_updates_channel_health: get_chat_member failed: {e}"
+        )
+
+    invite_url = None
+    invite_error = None
+    try:
+        invite = await bot.create_chat_invite_link(
+            chat_id=numeric_id, member_limit=0,
+        )
+        invite_url = getattr(invite, 'invite_link', None)
+    except Exception as e:
+        invite_error = str(e)[:120]
+        logger.debug(
+            f"_check_updates_channel_health: create_invite_link failed: "
+            f"{invite_error}"
+        )
+
+    if invite_url:
+        report.update({
+            'status': 'ok',
+            'reason': 'private_with_invite_link',
+            'url': invite_url,
+        })
+    else:
+        report['url'] = f"https://t.me/c/{clean.lstrip('-')}"
+
+        if not report['bot_is_admin']:
+            report.update({
+                'status': 'warn',
+                'reason': 'bot_not_admin',
+                'action_required': 'promote_bot_with_invite_permission',
+            })
+        elif not report['bot_can_invite']:
+            report.update({
+                'status': 'warn',
+                'reason': 'bot_missing_invite_permission',
+                'action_required': 'grant_invite_users_permission',
+            })
+        else:
+            report.update({
+                'status': 'warn',
+                'reason': f'invite_creation_failed: {invite_error}',
+                'action_required': 'check_channel_settings',
+            })
+
+    _UPDATES_CHANNEL_HEALTH_CACHE[cache_key] = (report, now)
+    return report
+
+
+def _invalidate_updates_channel_health_cache():
+    """🆕 v9.7.14: إبطال كاش فحص قناة التحديثات."""
+    try:
+        _UPDATES_CHANNEL_HEALTH_CACHE.clear()
+    except Exception:
+        pass
+
+
+def _build_updates_channel_health_warning(report, lang='ar') -> str:
+    """
+    🆕 v9.7.14: بناء نص التحذير للعرض في لوحة الإدارة.
+    """
+    if not report:
+        return ""
+
+    status = report.get('status', 'error')
+    if status in ('ok', 'empty'):
+        return ""
+
+    reason = report.get('reason', '')
+
+    header = "⚠️ <b>تنبيه: قناة التحديثات تحتاج إجراءً</b>"
+    if status == 'error':
+        header = "🔴 <b>خطأ في قناة التحديثات</b>"
+
+    lines = [header, "━━━━━━━━━━━━━━━━━━━━━━", ""]
+
+    title = report.get('title')
+    if title:
+        lines.append(f"📢 <b>القناة:</b> {_html.escape(str(title))}")
+    else:
+        lines.append(f"📢 <b>القناة:</b> <code>{report.get('url') or '?'}</code>")
+    lines.append("")
+
+    reason_messages = {
+        'bot_cannot_access_channel': (
+            "❌ <b>السبب:</b> البوت لا يستطيع الوصول إلى القناة.\n"
+            "✅ <b>الحل:</b> أضف البوت إلى القناة كعضو أو مشرف."
+        ),
+        'bot_not_admin': (
+            "❌ <b>السبب:</b> البوت عضو عادي وليس مشرفاً.\n"
+            "✅ <b>الحل:</b> ارفع البوت إلى مشرف مع تفعيل صلاحية:\n"
+            "   • <b>«دعوة المستخدمين عبر الرابط»</b> (Invite Users)"
+        ),
+        'bot_missing_invite_permission': (
+            "❌ <b>السبب:</b> البوت مشرف لكن بدون صلاحية "
+            "«دعوة المستخدمين».\n"
+            "✅ <b>الحل:</b> افتح إعدادات القناة → المشرفون → "
+            "اختر البوت → فعّل:\n"
+            "   • <b>«دعوة المستخدمين عبر الرابط»</b>\n\n"
+            "💡 <b>بديل أفضل:</b> اجعل القناة عامة بـ @username."
+        ),
+        'invalid_format': (
+            "❌ <b>السبب:</b> صيغة معرف القناة غير صحيحة.\n"
+            "✅ <b>الحل:</b> أدخل @username أو رابط أو ID رقمي."
+        ),
+    }
+
+    msg = reason_messages.get(reason)
+    if msg:
+        lines.append(msg)
+    elif reason.startswith('invite_creation_failed'):
+        lines.append(
+            f"❌ <b>السبب:</b> فشل إنشاء رابط الدعوة.\n"
+            f"<code>{_html.escape(reason)}</code>\n"
+            "✅ <b>الحل:</b> راجع صلاحيات البوت في القناة."
+        )
+    else:
+        lines.append(f"⚠️ <b>السبب:</b> <code>{_html.escape(reason)}</code>")
+
+    lines.append("")
+    lines.append("━━━━━━━━━━━━━━━━━━━━━━")
+    lines.append("")
+    lines.append(
+        "🟡 <i>الرابط الحالي يعمل للأعضاء المضافين فقط. "
+        "الأعضاء الجدد لن يستطيعوا الدخول.</i>"
+    )
+
+    return "\n".join(lines)
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -306,10 +530,7 @@ _message_handlers_import_attempted = False
 
 
 def _get_message_handlers_module():
-    """
-    🆕 v9.7.11: تحميل handlers_message مرة واحدة (lazy).
-    يُعيد الوحدة أو None إذا فشل الاستيراد.
-    """
+    """🆕 v9.7.11: تحميل handlers_message مرة واحدة (lazy)."""
     global _message_handlers_module, _message_handlers_import_attempted
     if _message_handlers_module is not None:
         return _message_handlers_module
@@ -335,25 +556,16 @@ async def _invalidate_message_caches(
 ):
     """
     🆕 v9.7.11 PERF-CB-1: إبطال caches handlers_message المحلية.
-
-    يُبطل:
-        • _invalidate_group_log_cache(chat_id)      (PERF-1 — 60s TTL)
-        • _invalidate_sec_settings_local(chat_id)   (PERF-2 — 5s TTL)
-        • _invalidate_admin_check_cache(chat_id)    (PERF-7 — 30s TTL)
-
-    ⚠️ لا يفشل إذا لم تكن الوحدة متاحة — يُسجّل debug فقط.
     """
     mod = _get_message_handlers_module()
     if mod is None:
         if reason:
             logger.debug(
                 "🧹 PERF-CB: handlers_message غير متاح — تخطي invalidation "
-                "(%s)",
-                reason,
+                "(%s)", reason,
             )
         return
 
-    # 🟠 PERF-2: cache إعدادات الأمان المحلية
     try:
         inv_sec = getattr(mod, "_invalidate_sec_settings_local", None)
         if callable(inv_sec):
@@ -364,7 +576,6 @@ async def _invalidate_message_caches(
             chat_id, e,
         )
 
-    # 🟠 PERF-1: cache قناة السجل
     try:
         inv_log = getattr(mod, "_invalidate_group_log_cache", None)
         if callable(inv_log):
@@ -375,7 +586,6 @@ async def _invalidate_message_caches(
             chat_id, e,
         )
 
-    # 🟡 PERF-7: cache فحص الأدمن
     try:
         inv_admin = getattr(mod, "_invalidate_admin_check_cache", None)
         if callable(inv_admin):
@@ -873,9 +1083,7 @@ def _prune_kicked_notify_state(context, now):
     except Exception: pass
 
 async def _invalidate_log_channel_menu_cache(chat_id):
-    """
-    🆕 v9.7.11 PERF-CB-3: إبطال 3 طبقات.
-    """
+    """🆕 v9.7.11 PERF-CB-3: إبطال 3 طبقات."""
     try:
         await internal_cache.invalidate(_log_channel_cache_key(chat_id))
     except Exception:
@@ -1826,9 +2034,7 @@ class CallbackHandlers:
 
     @staticmethod
     async def _invalidate_security_settings_cache(chat_id):
-        """
-        🆕 v9.7.11 PERF-CB-2: إبطال 5 طبقات cache لأي تعديل أمان.
-        """
+        """🆕 v9.7.11 PERF-CB-2: إبطال 5 طبقات cache."""
         try:
             await settings_cache.invalidate_security(chat_id)
         except Exception:
@@ -4263,6 +4469,17 @@ class CallbackHandlers:
                           "admin_update_ch_btn"):
                 await CallbackHandlers._show_admin_update_channel_menu(
                     query, context, user_id, lang); return
+            # 🆕 v9.7.14: إعادة فحص قناة التحديثات
+            if data == "admin_recheck_update_ch":
+                _invalidate_updates_channel_health_cache()
+                await safe_edit(query,
+                    await _trans('rechecking_channel', lang,
+                                  "🔍 جاري إعادة الفحص..."),
+                    bot=context.bot)
+                await asyncio.sleep(0.3)
+                await CallbackHandlers._show_admin_update_channel_menu(
+                    query, context, user_id, lang)
+                return
             if _match_cb(data, getattr(CB, 'ADMIN_CHANGE_UPDATE_CH', None),
                           "admin_change_update_ch"):
                 StateManager.set(user_id, UserState.WAIT_UPDATE_CH)
@@ -4274,6 +4491,8 @@ class CallbackHandlers:
                           "admin_remove_update_ch"):
                 try: ok = await DB.set_setting('updates_channel', '')
                 except Exception: ok = False
+                # 🆕 v9.7.14: إبطال كاش الفحص
+                _invalidate_updates_channel_health_cache()
                 await safe_edit(query,
                     await _trans('update_channel_removed' if ok else
                                  'save_failed', lang,
@@ -6009,17 +6228,12 @@ class CallbackHandlers:
                 bot=context.bot)
 
     # ═══════════════════════════════════════════════════════════════
-    # 🆕 v9.7.13 UPD-1: _show_updates_channel — مع زر رابط قابل للنقر
+    # 🆕 v9.7.14: _show_updates_channel — مع فحص الصلاحيات + إشعارات
     # ═══════════════════════════════════════════════════════════════
     @staticmethod
     async def _show_updates_channel(query, context, user_id, lang='ar'):
         """
-        🆕 v9.7.13: عرض قناة التحديثات مع زر رابط فعّال.
-
-        يدعم:
-            • @username أو username → https://t.me/{username}
-            • https://t.me/... → يُنظَّف ويُستخدم
-            • ID رقمي → محاولة t.me/c/... أو invite_link
+        🆕 v9.7.14: عرض قناة التحديثات مع فحص الصحة + إشعارات ذكية.
         """
         try:
             ch = None
@@ -6034,9 +6248,14 @@ class CallbackHandlers:
             )
 
             rows = []
+            admin_notice = ""
 
             if ch:
-                clean, url, is_username = _extract_updates_channel_link(ch)
+                report = await _check_updates_channel_health(
+                    context.bot, ch
+                )
+                status = report.get('status', 'error')
+                url = report.get('url')
                 ch_str_escaped = _html.escape(str(ch).strip())
 
                 body = _fmt(
@@ -6052,49 +6271,31 @@ class CallbackHandlers:
                 )
 
                 if url:
-                    # username صالح → رابط مباشر
+                    btn_label = (
+                        await _trans('open_channel_btn', lang, "🔗 فتح القناة")
+                        if status == 'ok' else
+                        await _trans('try_open_channel_btn', lang,
+                                      "🔗 محاولة الفتح")
+                    )
                     rows.append([InlineKeyboardButton(
-                        await _trans('open_channel_btn', lang,
-                                      "🔗 فتح القناة"),
-                        url=url,
+                        btn_label, url=url,
                     )])
-                elif clean and clean.lstrip('-').isdigit():
-                    # ID رقمي — محاولة إنشاء رابط دعوة
-                    invite_url = None
-                    try:
-                        numeric_id = int(clean)
-                        invite = await context.bot.create_chat_invite_link(
-                            chat_id=numeric_id, member_limit=0,
-                        )
-                        invite_url = getattr(invite, 'invite_link', None)
-                    except Exception as e:
-                        logger.debug(
-                            f"_show_updates_channel: create_invite_link "
-                            f"for {clean} failed: {e}"
-                        )
-                        invite_url = None
 
-                    if invite_url:
-                        rows.append([InlineKeyboardButton(
-                            await _trans('join_channel_btn', lang,
-                                          "🔗 انضم للقناة"),
-                            url=invite_url,
-                        )])
-                    else:
-                        # رابط c/ كخيار أخير (يعمل للأعضاء فقط)
-                        fallback = (f"https://t.me/c/"
-                                    f"{str(clean).lstrip('-')}")
-                        rows.append([InlineKeyboardButton(
-                            await _trans('open_channel_btn', lang,
-                                          "🔗 محاولة الفتح"),
-                            url=fallback,
-                        )])
-                        hint = await _trans(
-                            'updates_channel_numeric_hint', lang,
-                            "⚠️ القناة مُعرّفة بـ ID رقمي. قد لا يعمل "
-                            "الرابط للأعضاء الجدد. تواصل مع المطور "
-                            "لتعيين @username."
-                        )
+                if status == 'warn':
+                    hint = await _trans(
+                        'updates_channel_warn_hint', lang,
+                        "⚠️ القناة تحتاج صلاحيات إضافية. تواصل مع المطور."
+                    )
+                elif status == 'error':
+                    hint = await _trans(
+                        'updates_channel_error_hint', lang,
+                        "🔴 القناة غير متاحة حالياً. تواصل مع المطور."
+                    )
+
+                if CONFIG.is_developer(user_id) and status in ('warn', 'error'):
+                    admin_notice = _build_updates_channel_health_warning(
+                        report, lang
+                    )
             else:
                 body = await _trans(
                     'updates_channel_none_line', lang,
@@ -6105,8 +6306,15 @@ class CallbackHandlers:
                     "تواصل مع المطور لتعيينها."
                 )
 
-            text = (f"{title}\n━━━━━━━━━━━━━━━━━━━━━━\n\n"
-                    f"{body}\n\n<i>{hint}</i>")
+            parts_text = [
+                f"{title}\n━━━━━━━━━━━━━━━━━━━━━━\n",
+                body,
+                f"\n<i>{hint}</i>",
+            ]
+            if admin_notice:
+                parts_text.append(f"\n\n{admin_notice}")
+
+            text = "".join(parts_text)
 
             rows.append([InlineKeyboardButton(
                 KeyboardFactory.get_text("back", lang),
@@ -6204,13 +6412,14 @@ class CallbackHandlers:
                 pass
 
     # ═══════════════════════════════════════════════════════════════
-    # 🆕 v9.7.13 UPD-2: _show_admin_update_channel_menu مع رابط
+    # 🆕 v9.7.14: _show_admin_update_channel_menu مع فحص + إشعار
     # ═══════════════════════════════════════════════════════════════
     @staticmethod
     async def _show_admin_update_channel_menu(query, context, user_id,
                                                 lang='ar'):
         """
-        🆕 v9.7.13: قائمة إدارة قناة التحديثات (للمطور) مع زر فتح.
+        🆕 v9.7.14: قائمة إدارة قناة التحديثات (للمطور)
+        مع فحص صحة القناة وإشعارات الصلاحيات.
         """
         try:
             ch = None
@@ -6226,9 +6435,14 @@ class CallbackHandlers:
             )
 
             rows = []
+            health_notice = ""
 
             if ch:
-                clean, url, is_username = _extract_updates_channel_link(ch)
+                report = await _check_updates_channel_health(
+                    context.bot, ch
+                )
+                status = report.get('status', 'error')
+                url = report.get('url')
                 ch_str_escaped = _html.escape(str(ch).strip())
 
                 body = _fmt(
@@ -6239,41 +6453,33 @@ class CallbackHandlers:
                     ch=ch_str_escaped,
                 )
 
-                # زر فتح القناة (نفس منطق _show_updates_channel)
+                status_badge = {
+                    'ok': "🟢 <b>الحالة:</b> سليمة",
+                    'warn': "🟡 <b>الحالة:</b> تحتاج صلاحيات",
+                    'error': "🔴 <b>الحالة:</b> خطأ",
+                }.get(status, '')
+                if status_badge:
+                    body += f"\n{status_badge}"
+
+                if report.get('title'):
+                    body += (f"\n📛 <b>الاسم:</b> "
+                             f"{_html.escape(str(report['title']))}")
+
                 if url:
+                    btn_label = (
+                        await _trans('open_channel_btn', lang, "🔗 فتح القناة")
+                        if status == 'ok' else
+                        await _trans('try_open_channel_btn', lang,
+                                      "🔗 محاولة الفتح")
+                    )
                     rows.append([InlineKeyboardButton(
-                        await _trans('open_channel_btn', lang,
-                                      "🔗 فتح القناة"),
-                        url=url,
+                        btn_label, url=url,
                     )])
-                elif clean and clean.lstrip('-').isdigit():
-                    invite_url = None
-                    try:
-                        numeric_id = int(clean)
-                        invite = await context.bot.create_chat_invite_link(
-                            chat_id=numeric_id, member_limit=0,
-                        )
-                        invite_url = getattr(invite, 'invite_link', None)
-                    except Exception as e:
-                        logger.debug(
-                            f"_show_admin_update_channel_menu: "
-                            f"create_invite_link for {clean} failed: {e}"
-                        )
-                        invite_url = None
-                    if invite_url:
-                        rows.append([InlineKeyboardButton(
-                            await _trans('join_channel_btn', lang,
-                                          "🔗 انضم للقناة"),
-                            url=invite_url,
-                        )])
-                    else:
-                        fallback = (f"https://t.me/c/"
-                                    f"{str(clean).lstrip('-')}")
-                        rows.append([InlineKeyboardButton(
-                            await _trans('open_channel_btn', lang,
-                                          "🔗 محاولة الفتح"),
-                            url=fallback,
-                        )])
+
+                if status in ('warn', 'error'):
+                    health_notice = _build_updates_channel_health_warning(
+                        report, lang
+                    )
 
                 rows.append([InlineKeyboardButton(
                     await _trans('change_channel_btn', lang, "🔄 تغيير"),
@@ -6282,6 +6488,11 @@ class CallbackHandlers:
                 rows.append([InlineKeyboardButton(
                     await _trans('remove_channel_btn', lang, "🗑️ إزالة"),
                     callback_data="admin_remove_update_ch",
+                )])
+                rows.append([InlineKeyboardButton(
+                    await _trans('recheck_channel_btn', lang,
+                                  "🔍 إعادة الفحص"),
+                    callback_data="admin_recheck_update_ch",
                 )])
             else:
                 body = await _trans(
@@ -6294,6 +6505,8 @@ class CallbackHandlers:
                 )])
 
             text = f"{title}\n━━━━━━━━━━━━━━━━━━━━━━\n\n{body}"
+            if health_notice:
+                text += f"\n\n{health_notice}"
 
             rows.append([InlineKeyboardButton(
                 KeyboardFactory.get_text("back", lang),
@@ -6400,14 +6613,22 @@ __all__ = [
 
     # 🆕 v9.7.13 — Updates-channel link helper
     "_extract_updates_channel_link",
+
+    # 🆕 v9.7.14 — Updates-channel health check
+    "_check_updates_channel_health",
+    "_invalidate_updates_channel_health_cache",
+    "_build_updates_channel_health_warning",
+    "_UPDATES_CHANNEL_HEALTH_CACHE",
+    "_UPDATES_CHANNEL_HEALTH_TTL",
 ]
 
 try:
     _bridge_icon = "✅" if _SECURITY_BRIDGE_AVAILABLE else "⚠️"
     logger.info(
-        "🛡️ handlers_callback.py v9.7.13 UPDATES-CHANNEL-LINK-FIX loaded | "
-        "Bridge=%s | Antiflood-Msgs=%d | Antiflood-Secs=%d | "
-        "Message-Cache-Invalidation=ON | Updates-Link=ON",
+        "🛡️ handlers_callback.py v9.7.14 UPDATES-CHANNEL-HEALTH-CHECK "
+        "loaded | Bridge=%s | Antiflood-Msgs=%d | Antiflood-Secs=%d | "
+        "Message-Cache-Invalidation=ON | Updates-Link=ON | "
+        "Updates-Health-Check=ON",
         _bridge_icon,
         len(_ANTIFLOOD_MESSAGES_OPTIONS),
         len(_ANTIFLOOD_SECONDS_OPTIONS),
