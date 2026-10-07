@@ -1,8 +1,33 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-database.py - قاعدة البيانات المتكاملة (v7.7.55 — HARDENED-AUDIT-FIXED)
+database.py - قاعدة البيانات المتكاملة (v7.7.56 — HARDENED-PA6-PA7)
 ================================================================================
+🆕 v7.7.56 (POST-AUDIT FIXES — تصحيحات PA-6 و PA-7 + فحص شامل):
+  🔴 PA-6 HIGH: expire_penalties — إضافة `or batch_expired == 0`
+      لمنع الحلقة اللانهائية عندما يُعيد الاستعلام دفعة كاملة
+      بلا أي تحديث فعلي (فشل UPDATE صامت).
+  🔴 PA-7 HIGH: _executemany_with_conn (PG) — فحص is_in_transaction
+      قبل محاولة fallback فردي. PG يُلغي الـ transaction عند فشل DML،
+      لذا fallback عديم الجدوى ويبتلع الأخطاء → رفع الاستثناء بدل
+      ابتلاعه داخل transaction.
+  🔴 H-3 HIGH: _return_connection — استدعاء _destroy_connection عند
+      فشل pool.release لمنع تسريب الـ connections.
+  🔴 H-4 HIGH: _verify_pairs_belong — int() آمن لكل صف بدل انهيار
+      جماعي عند وجود id غير رقمي واحد.
+  🔴 H-5 HIGH: `#` يُعامَل كتعليق في MySQL فقط — كان يُسبّب قصّ
+      خاطئ لاستعلامات PostgreSQL (JSONB operators مثل #> و #>>)
+      و SQLite.
+  🟠 M-1 MEDIUM: _normalize_params — تحذير لـ set أيضاً (تناظر
+      مع frozenset) لأن الترتيب غير مضمون.
+  🟠 M-2 MEDIUM: _execute_with_retry — انتظار إضافي عندما تكون
+      _recovering_pool نشطة، لمنع إعادة المحاولة على pool ميت.
+  🟠 M-4 MEDIUM: _maybe_refresh_mv — صيغة حساب cooldown أوضح.
+  🟠 M-7 MEDIUM: _convert_placeholders (MySQL) — معالجة `#` كتعليق
+      لمنع تحويل `?` داخل تعليق إلى `%s`.
+  🟡 NEW: _pg_in_transaction() — مساعد آمن موحّد لحالة PG.
+  🟡 L-3 LOW: _redact_slow_query — إضافة نمط بريد إلكتروني/معرّف.
+
 🆕 v7.7.55 (POST-AUDIT FIXES — تصحيحات مراجعة v7.7.54):
   🔴 PA-1 HIGH: _normalize_params — dict يرفع TypeError صريح بدل
       تمريره كـ param واحد (كان asyncpg يرفضه برسالة غامضة).
@@ -17,50 +42,30 @@ database.py - قاعدة البيانات المتكاملة (v7.7.55 — HARDEN
       bootstrap غير حقيقي على MySQL.
 
 🆕 v7.7.54 (HARDENED-AUDIT — إصلاح أخطاء الفحص الشامل):
-  🔴 FIX-1 CRITICAL: _get_pg_query_no_mv_fallback جديد — يُستخدم عند
-      غياب MV بدل الـ fallback الذي كان يشير إلى mv_active_user_limits
-      غائبة → "relation does not exist" مخفي.
-  🔴 FIX-2 CRITICAL: _import_auto_replies hash يشمل الآن media_id و
-      buttons → التغييرات في auto_replies.py لم تعد صامتة.
+  🔴 FIX-1 CRITICAL: _get_pg_query_no_mv_fallback جديد.
+  🔴 FIX-2 CRITICAL: _import_auto_replies hash يشمل media_id/buttons.
   🔴 FIX-3 CRITICAL: safety guard قبل حذف جماعي في banned_words و
-      auto_replies — يمنع فقدان بيانات عند ملف فارغ/تالف.
-  🟠 FIX-4 HIGH: mark_users_as_blocked — جمع select+update داخل معاملة
-      واحدة لمنع race على MySQL.
-  🟠 FIX-5 HIGH: mark_published_batch — التحقق من اقتران
-      (channel_db_id, post_id) قبل UPDATE.
+      auto_replies.
+  🟠 FIX-4 HIGH: mark_users_as_blocked — معاملة واحدة لـ select+update.
+  🟠 FIX-5 HIGH: mark_published_batch — التحقق من (channel_db_id, post_id).
   🟠 FIX-6 HIGH: _import_banned_words + _import_auto_replies —
-      دعم transaction موحّد لكل DBs (وليس فقط PG).
-      ⚠️ PA-5: على MySQL، CREATE/ALTER يُسبّب implicit commit، لذا
-      "المعاملة" فعلياً غير مضمونة على MySQL — لكن لا نستطيع تجاهل
-      هذا القيد (MySQL DDL غير transactional بطبيعته).
-  🟠 FIX-7 HIGH: تحذير عند عدم توفر _ASYNC_MYSQL_ERROR → retry معطّل.
-  🟡 FIX-8 MEDIUM: _normalize_params — dedup تحذير frozenset (warn-once).
+      دعم transaction موحّد لكل DBs. ⚠️ PA-5 على MySQL DDL غير transactional.
+  🟠 FIX-7 HIGH: تحذير عند عدم توفر _ASYNC_MYSQL_ERROR.
+  🟡 FIX-8 MEDIUM: _normalize_params — dedup تحذير frozenset.
   🟡 FIX-9 MEDIUM: _ensure_group_exists — تحديث chat_name عند اختلافه.
-  🟡 FIX-10 MEDIUM: type hints str = None → Optional[str] في 3 دوال.
-  🟡 FIX-11 MEDIUM: expire_penalties — إزالة تكرار query زائد.
+  🟡 FIX-10 MEDIUM: type hints Optional[str] في 3 دوال.
+  🟡 FIX-11 MEDIUM: expire_penalties — إزالة query زائد.
   🟡 FIX-12 MEDIUM: _maybe_refresh_mv — cooldown أقصر عند الفشل.
-  🟢 FIX-13 LOW: _execute_with_logging — redaction regex أقوى
-      (يغطي 5 أرقام + نصوص طويلة).
-  🟢 FIX-14 LOW: get_db_size_kb — cache لمدة 60 ثانية.
-  🟢 FIX-15 LOW: _import_banned_words — fallback owner_id=0 بدل early
-      return المانع لـ hash.
-  🟢 FIX-16 LOW: register_user — COALESCE بدل CASE WHEN لتجنّب
-      مشاكل type hints في MySQL.
-  🟢 FIX-17 LOW: _tune_heavy_tables_autovacuum — استعلام جماعي واحد
-      لفحص وجود الجداول (N+1 → 1).
-  🟢 FIX-18 LOW: register_user — cache invalidation بعد النجاح فقط
-      عند force=True لتجنب إبطال زائد.
+  🟢 FIX-13 LOW: _execute_with_logging — redaction أقوى.
+  🟢 FIX-14 LOW: get_db_size_kb — cache 60 ثانية.
+  🟢 FIX-15 LOW: _import_banned_words — fallback owner_id=0.
+  🟢 FIX-16 LOW: register_user — COALESCE بدل CASE WHEN.
+  🟢 FIX-17 LOW: _tune_heavy_tables_autovacuum — استعلام جماعي واحد.
+  🟢 FIX-18 LOW: register_user — cache invalidation بعد النجاح فقط.
 
 🆕 v7.7.53 (NEW-SECURITY-TYPES — دعم الأزرار الجديدة):
-  ✅ NC1: VALID_VIOLATION_TYPES — إضافة 10 أنواع جديدة:
-      forwarded, spam_score, postbot_pattern, poll_link,
-      at_channel, tg_scheme, button_link, email, vcard_url, venue_url
-  ✅ NC2: _normalize_params — تحذير من frozenset + توثيق أفضل.
-
-🆕 v7.7.52 (REVIEW-FIXES-2):
-  🔴 mark_published_and_advance: إزالة subquery خام WHERE key='...'.
-  🟡 _sql_get_setting_value: LIMIT 1.
-  🟡 _executemany_with_conn (PG fallback): regex أدق.
+  ✅ NC1: VALID_VIOLATION_TYPES — إضافة 10 أنواع جديدة.
+  ✅ NC2: _normalize_params — تحذير من frozenset.
 ================================================================================
 """
 
@@ -83,6 +88,11 @@ database.py - قاعدة البيانات المتكاملة (v7.7.55 — HARDEN
 # [12] v7.7.54: hash-based imports يجب أن تشمل كل الحقول المؤثرة (FIX-2).
 # [13] v7.7.55: كل transaction يحتوي DDL (CREATE/ALTER) على MySQL
 #      = implicit commit → "transaction" غير حقيقي. راجع PA-5.
+# [14] v7.7.56: أي `while True` على DB يجب أن يُحقّق تقدّم فعلي —
+#      وإلا حلقة لا نهائية. راجع PA-6.
+# [15] v7.7.56: PG: فشل DML داخل transaction = ABORTED. لا fallback
+#      فردي بدون SAVEPOINT — راجع PA-7.
+# [16] v7.7.56: `#` تعليق MySQL فقط — ليس PG/SQLite. راجع H-5.
 # =====================================================================
 
 import os
@@ -545,6 +555,11 @@ EXPLAIN_SLOW_QUERIES = os.getenv("EXPLAIN_SLOW_QUERIES", "false").lower() == "tr
 MAX_ACTIVE_PENALTIES_FETCH = 1000
 UTC = timezone.utc
 
+# ✅ v7.7.56 PA-6: سقف تكرارات دفاعي لـ expire_penalties
+EXPIRE_PENALTIES_MAX_ITER = int(
+    os.getenv("EXPIRE_PENALTIES_MAX_ITER", "10000")
+)
+
 GLOBAL_CHAT_ID = -1
 
 # ✅ v7.7.54 FIX-3: عتبات أمان الحذف الجماعي
@@ -740,6 +755,7 @@ def _sql_get_setting_value() -> str:
 # 🆕 v7.7.50: PARAMETER NORMALIZATION
 # ✅ v7.7.54 FIX-8: dedup تحذير frozenset
 # ✅ v7.7.55 PA-1: dict يرفع TypeError صريح
+# ✅ v7.7.56 M-1: set يُحذَّر أيضاً (تناظر مع frozenset)
 # =====================================================================
 
 _FROZENSET_WARN_SITES: Set[str] = set()
@@ -751,15 +767,15 @@ def _normalize_params(params: Any) -> tuple:
 
     ⚠️ v7.7.53: frozenset يُنتج تحذيراً — الترتيب غير مضمون.
     ✅ v7.7.54 FIX-8: التحذير يُسجَّل مرة واحدة لكل call-site.
-    ✅ v7.7.55 PA-1: dict يرفع TypeError بدل تمريره كـ param واحد
-       (كان asyncpg يرفضه برسالة غامضة لاحقاً).
+    ✅ v7.7.55 PA-1: dict يرفع TypeError بدل تمريره كـ param واحد.
+    ✅ v7.7.56 M-1: set يُحذَّر أيضاً (نفس مشكلة frozenset).
     """
     if params is None:
         return ()
     if isinstance(params, tuple):
         return params
-    if isinstance(params, frozenset):
-        # ✅ FIX-8: warn-once per call-site
+    if isinstance(params, (set, frozenset)):
+        # ✅ FIX-8 + M-1: warn-once per call-site
         try:
             frame = inspect.currentframe()
             caller = frame.f_back if frame else None
@@ -771,15 +787,16 @@ def _normalize_params(params: Any) -> tuple:
                 if should_warn:
                     _FROZENSET_WARN_SITES.add(site)
             if should_warn:
+                kind = "frozenset" if isinstance(params, frozenset) else "set"
                 logger.warning(
-                    "_normalize_params: frozenset → ترتيب المعاملات غير "
+                    f"_normalize_params: {kind} → ترتيب المعاملات غير "
                     "مضمون عبر Python runs. استخدم tuple/list. "
                     f"(site={site})"
                 )
         except Exception:
             pass
         return tuple(params)
-    if isinstance(params, (list, set)):
+    if isinstance(params, list):
         return tuple(params)
     if isinstance(params, dict):
         # ✅ PA-1: ارفض dict بصراحة — الطلب كان يمرّره كـ param واحد
@@ -792,7 +809,27 @@ def _normalize_params(params: Any) -> tuple:
     return (params,)
 
 # =====================================================================
+# 🆕 v7.7.56 PA-7: مساعد آمن لحالة معاملة PostgreSQL
+# =====================================================================
+
+def _pg_in_transaction(conn) -> bool:
+    """
+    ✅ v7.7.56 PA-7: مساعد موحّد للتحقق من حالة معاملة PG.
+
+    يعيد True إذا:
+      - conn.is_in_transaction() ترجع True صراحةً
+      - أو فحص الحالة فشل (نفترض الأكثر أماناً)
+    """
+    if not USE_POSTGRES:
+        return False
+    try:
+        return bool(conn.is_in_transaction())
+    except Exception:
+        return True
+
+# =====================================================================
 # Parser للأقواس
+# ✅ v7.7.56 H-5: `#` تعليق MySQL فقط
 # =====================================================================
 
 def _find_values_end(query: str) -> int:
@@ -842,7 +879,8 @@ def _find_values_end(query: str) -> int:
                 in_block_c = True
                 j += 2
                 continue
-            if ch == "#":
+            # ✅ v7.7.56 H-5: `#` تعليق MySQL فقط
+            if ch == "#" and USE_MYSQL:
                 in_line_c = True
                 j += 1
                 continue
@@ -926,7 +964,8 @@ def _insert_before_returning(query: str, clause: str) -> str:
                 in_block_c = True
                 i += 2
                 continue
-            if ch == "#":
+            # ✅ v7.7.56 H-5: `#` تعليق MySQL فقط
+            if ch == "#" and USE_MYSQL:
                 in_line_c = True
                 i += 1
                 continue
@@ -997,7 +1036,8 @@ def _replace_excluded_with_values(set_clause: str) -> str:
                 result.append(ch)
                 i += 1
                 continue
-            if ch == "#":
+            # ✅ v7.7.56 H-5: `#` تعليق MySQL فقط
+            if ch == "#" and USE_MYSQL:
                 in_line_c = True
                 result.append(ch)
                 i += 1
@@ -1369,6 +1409,10 @@ def _convert_placeholders(query: str) -> str:
             if (not in_single and not in_double and not in_block
                     and ch == "-" and i + 1 < len(query)
                     and query[i + 1] == "-"):
+                in_comment = True
+            # ✅ v7.7.56 M-7: `#` تعليق MySQL أيضاً
+            if (not in_single and not in_double and not in_block
+                    and ch == "#"):
                 in_comment = True
             if in_comment:
                 if ch == "\n":
@@ -1795,16 +1839,16 @@ class Database(
         "antiflood", "night_mode", "warn_penalty", "violation_penalty",
 
         # ─── v7.7.53: أنواع المخالفات الجديدة ───
-        "forwarded",          # رسالة معاد توجيهها (بديل عن 'forward')
-        "spam_score",         # حذف بسبب spam score
-        "postbot_pattern",    # نمط PostBot مزعج
-        "poll_link",          # استفتاء يحتوي رابط
-        "at_channel",         # @channel mention
-        "tg_scheme",          # روابط tg://
-        "button_link",        # inline button link
-        "email",              # بريد إلكتروني
-        "vcard_url",          # vCard يحتوي URL
-        "venue_url",          # Venue يحتوي URL
+        "forwarded",
+        "spam_score",
+        "postbot_pattern",
+        "poll_link",
+        "at_channel",
+        "tg_scheme",
+        "button_link",
+        "email",
+        "vcard_url",
+        "venue_url",
     }
 
     VALID_VIOLATION_SETTINGS = {
@@ -2091,7 +2135,6 @@ class Database(
             self._group_security_columns_cache: Optional[set] = None
             self._gsc_columns_lock = asyncio.Lock()
 
-            # ✅ v7.7.54 FIX-14: cache لـ db_size_kb
             self._db_size_kb_cache: Optional[float] = None
             self._db_size_kb_cache_ts: float = 0.0
             self._db_size_kb_lock = asyncio.Lock()
@@ -2169,9 +2212,6 @@ class Database(
             return 0
 
     async def get_dev_log_channel(self) -> str:
-        """
-        ✅ v7.7.51: استخدام _sql_get_setting_value() بدل الاستعلام الخام.
-        """
         try:
             if hasattr(self, 'get_setting'):
                 value = await self.get_setting(
@@ -2216,9 +2256,6 @@ class Database(
             return False
 
     async def get_db_size_kb(self) -> float:
-        """
-        ✅ v7.7.54 FIX-14: cache لمدة DB_SIZE_CACHE_TTL (افتراضي 60s).
-        """
         now = time.monotonic()
         if (self._db_size_kb_cache is not None
                 and now - self._db_size_kb_cache_ts < DB_SIZE_CACHE_TTL):
@@ -2362,9 +2399,6 @@ class Database(
                 )
 
     async def _tune_heavy_tables_autovacuum(self, conn) -> int:
-        """
-        ✅ v7.7.54 FIX-17: استعلام جماعي واحد لفحص الجداول الموجودة.
-        """
         if not USE_POSTGRES:
             return 0
         if self._autovacuum_tuned:
@@ -2379,7 +2413,6 @@ class Database(
             if not all_tables:
                 return 0
 
-            # ✅ FIX-17: query واحد بدل N+1
             existing_rows = await conn.fetch(
                 "SELECT table_name FROM information_schema.tables "
                 "WHERE table_schema = current_schema() "
@@ -2572,10 +2605,6 @@ class Database(
             return False
 
     async def _maybe_refresh_mv(self) -> bool:
-        """
-        ✅ v7.7.54 FIX-12: cooldown أقصر عند الفشل (10% من المدة)
-        بدل انتظار المدة الكاملة (ساعة افتراضية).
-        """
         if not USE_POSTGRES or not self._mv_available:
             return False
         now_mono = time.monotonic()
@@ -2612,13 +2641,15 @@ class Database(
                 if success:
                     self._mv_last_refresh_mono = time.monotonic()
                 else:
-                    # ✅ FIX-12: cooldown قصير عند الفشل
+                    # ✅ FIX-12 + M-4 (v7.7.56): cooldown قصير عند الفشل
+                    # الصيغة: نُرجِع last_refresh إلى الماضي بمقدار
+                    # (cooldown - short_cooldown) بحيث يكون الفارق الفعلي
+                    # = short_cooldown عند الفحص التالي.
                     short_cooldown = max(
                         60.0, self._mv_refresh_cooldown * 0.1
                     )
-                    self._mv_last_refresh_mono = (
-                        time.monotonic() - self._mv_refresh_cooldown
-                        + short_cooldown
+                    self._mv_last_refresh_mono = time.monotonic() - (
+                        self._mv_refresh_cooldown - short_cooldown
                     )
 
     def _spawn_bg_task(self, coro) -> Optional[asyncio.Task]:
@@ -3108,6 +3139,10 @@ class Database(
                 )
 
     async def _return_connection(self, conn):
+        """
+        ✅ v7.7.56 H-3: destroy الاتصال عند فشل release لمنع تسريب
+        connections من الـ pool.
+        """
         if USE_POSTGRES or USE_MYSQL:
             if self._pool is None:
                 if not self._pool_none_warned:
@@ -3120,7 +3155,14 @@ class Database(
             try:
                 await self._pool.release(conn)
             except Exception as e:
-                logger.warning(f"⚠️ release فشل: {e}")
+                logger.warning(f"⚠️ release فشل: {e} — destroy")
+                # ✅ H-3: لا نترك البطاقة مفقودة
+                try:
+                    await self._destroy_connection(conn)
+                except Exception as de:
+                    logger.debug(
+                        f"_destroy_connection بعد release failure: {de}"
+                    )
         else:
             try:
                 if self._sqlite_queue is not None:
@@ -3325,12 +3367,18 @@ class Database(
     def _redact_slow_query(self, query: str, max_len: int = 500) -> str:
         """
         ✅ v7.7.54 FIX-13: redaction أقوى.
-        - يحجب الأرقام من 5 خانات فما فوق
-        - يحجب النصوص الطويلة (>20 حرف)
+        ✅ v7.7.56 L-3: إضافة نمط بريد إلكتروني/معرّف لتقليل تسرّب
+        usernames أو بريد.
         """
         safe = query[:max_len]
         safe = re.sub(r"\b\d{5,}\b", "[REDACTED]", safe)
         safe = re.sub(r"'[^']{20,}'", "'[LONG_STR]'", safe)
+        # L-3: بريد إلكتروني
+        safe = re.sub(
+            r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b",
+            "[EMAIL]",
+            safe,
+        )
         return safe
 
     async def _execute_with_logging(
@@ -3342,7 +3390,6 @@ class Database(
             result = await executor(query, params)
             elapsed = time.monotonic() - start
             if elapsed > self._slow_query_log_threshold:
-                # ✅ FIX-13: redaction أقوى
                 safe_query = self._redact_slow_query(query)
                 logger.warning(f"🐌 بطيء ({elapsed:.2f}s): {safe_query}")
 
@@ -3372,7 +3419,6 @@ class Database(
             return result
         except Exception as e:
             elapsed = time.monotonic() - start
-            # ✅ FIX-13: redaction أقوى
             safe_query = self._redact_slow_query(query)
             logger.error(
                 f"❌ فشل ({elapsed:.2f}s): {safe_query} | {e}"
@@ -3428,6 +3474,10 @@ class Database(
     async def _execute_with_retry(
         self, query: str, params, executor, max_retries=3
     ):
+        """
+        ✅ v7.7.56 M-2: عند تفعيل _recovering_pool، ننتظر زمناً أطول
+        قبل إعادة المحاولة، لمنع محاولة الاتصال على pool ميت.
+        """
         AsyncMySQLError = _ASYNC_MYSQL_ERROR
 
         last_exception = None
@@ -3480,6 +3530,10 @@ class Database(
                         pass
                 if retryable and attempt < max_retries - 1:
                     delay = (0.5 * (attempt + 1)) + (0.1 * attempt)
+                    # ✅ v7.7.56 M-2: إن كانت recovery جارية، انتظر
+                    # أطول قليلاً (recovery نفسها تنام 2s قبل reconnect)
+                    if self._recovering_pool:
+                        delay = max(delay, 2.5)
                     logger.warning(
                         f"⚠️ إعادة {attempt + 1}/{max_retries} "
                         f"بعد {delay:.2f}s: {e}"
@@ -3545,6 +3599,14 @@ class Database(
     async def _executemany_with_conn(
         self, conn, query: str, params_list: List[tuple]
     ) -> int:
+        """
+        ✅ v7.7.56 PA-7: عند فشل executemany على PostgreSQL داخل
+        transaction، الـ transaction تصبح ABORTED — كل استعلام لاحق
+        (بما فيه SELECT) سيرفع "current transaction is aborted".
+        الحل: فحص is_in_transaction قبل محاولة fallback فردي. إن كنا
+        داخل معاملة، نرفع الخطأ بدل ابتلاعه (يمنع hash-update كاذب
+        + rollback غامض لاحق).
+        """
         if not params_list:
             return 0
         q = _convert_placeholders(query)
@@ -3572,7 +3634,21 @@ class Database(
             except Exception as e:
                 if not is_idempotent:
                     raise
-                logger.warning(f"⚠️ executemany فشل: {e}")
+
+                # ✅ PA-7: فحص حالة المعاملة قبل fallback
+                in_tx = _pg_in_transaction(conn)
+                if in_tx:
+                    logger.error(
+                        f"❌ PG executemany فشل داخل transaction — "
+                        f"لا يمكن fallback (tx ملغاة، كل استعلام "
+                        f"لاحق سيفشل). نرفع الخطأ بدل ابتلاعه: {e}"
+                    )
+                    raise
+
+                logger.warning(
+                    f"⚠️ executemany فشل (autocommit) — "
+                    f"fallback فردي: {e}"
+                )
                 total = 0
                 # ✅ v7.7.52: regex أدق
                 rowcount_re = re.compile(
@@ -3588,7 +3664,11 @@ class Database(
                         )
                         m = rowcount_re.search(result or "")
                         total += int(m.group(2)) if m else 1
-                    except Exception:
+                    except Exception as fe:
+                        # ✅ PA-7: لا نبتلع بلا أثر
+                        logger.debug(
+                            f"PG fallback فردي فشل: {fe}"
+                        )
                         continue
                 return total
         elif USE_MYSQL:
@@ -4330,16 +4410,12 @@ class Database(
         added_by: Optional[int] = None,
         auto_register: bool = True,
     ) -> bool:
-        """
-        ✅ v7.7.54 FIX-9: تحديث chat_name عند اختلافه.
-        """
         try:
             row = await self.fetchone(
                 "SELECT chat_name FROM bot_groups WHERE chat_id = ?",
                 (chat_id,),
             )
             if row:
-                # ✅ FIX-9: تحديث الاسم إذا تغيّر
                 cur_name = (row.get("chat_name") or "").strip()
                 new_name = (chat_name or "").strip()
                 if new_name and new_name != cur_name:
@@ -4562,10 +4638,6 @@ class Database(
     def _safety_check_mass_delete(
         self, kind: str, existing_count: int, to_delete_count: int
     ) -> Tuple[bool, str]:
-        """
-        ✅ v7.7.54 FIX-3: فحص أمان قبل حذف جماعي.
-        يعيد (allowed, reason).
-        """
         if to_delete_count <= 0:
             return True, "no_deletions"
         if to_delete_count < IMPORT_MASS_DELETE_MIN_ABSOLUTE:
@@ -4581,10 +4653,6 @@ class Database(
         return True, "ok"
 
     async def _import_banned_words(self, conn):
-        """
-        ✅ v7.7.54 FIX-3: safety guard قبل الحذف الجماعي.
-        ✅ v7.7.54 FIX-15: fallback owner_id=0 بدل early return.
-        """
         try:
             import banned_words
             BANNED_WORDS = getattr(banned_words, "BANNED_WORDS", [])
@@ -4602,7 +4670,6 @@ class Database(
                 logger.info("ℹ️ لا كلمات صالحة بعد التوحيد")
                 return
 
-            # ✅ FIX-2-style: JSON serialize أوضح
             words_snapshot = json.dumps(
                 sorted(normalized_words),
                 ensure_ascii=False,
@@ -4632,7 +4699,6 @@ class Database(
             to_delete = existing_global - normalized_words
             to_insert = normalized_words - existing_global
 
-            # ✅ FIX-3: safety check
             allowed, reason = self._safety_check_mass_delete(
                 "banned_words", len(existing_global), len(to_delete)
             )
@@ -4644,7 +4710,6 @@ class Database(
                 )
                 return
 
-            # ✅ FIX-15: fallback owner_id بدل early return
             owner_id = getattr(CONFIG, "PRIMARY_OWNER_ID", None)
             if not owner_id:
                 owner_id = 0
@@ -4742,11 +4807,6 @@ class Database(
             logger.error(f"❌ banned_words: {e}", exc_info=True)
 
     async def _import_auto_replies(self, conn):
-        """
-        ✅ v7.7.54 FIX-2: hash يشمل media_id و buttons.
-        ✅ v7.7.54 FIX-3: safety guard قبل الحذف الجماعي.
-        ✅ v7.7.55 PA-4: إزالة existing_all (متغيّر ميت).
-        """
         try:
             from auto_replies import AUTO_REPLIES
             if not AUTO_REPLIES:
@@ -4823,7 +4883,6 @@ class Database(
                 logger.info("ℹ️ لا ردود صالحة بعد التطبيع")
                 return
 
-            # ✅ FIX-2: تضمين media_id و buttons في الـ hash
             snapshot_items = sorted(
                 (
                     k[0], k[1],
@@ -4859,7 +4918,6 @@ class Database(
                 conn,
                 "SELECT chat_id, keyword FROM auto_replies",
             )
-            # ✅ PA-4: حذف existing_all — كان متغيّراً ميتاً
             existing_global: Set[Tuple[int, str]] = set()
             for r in (existing_rows or []):
                 cid = r.get("chat_id")
@@ -4875,7 +4933,6 @@ class Database(
             to_delete = existing_global - set(normalized.keys())
             to_upsert = set(normalized.keys())
 
-            # ✅ FIX-3: safety check
             allowed, reason = self._safety_check_mass_delete(
                 "auto_replies", len(existing_global), len(to_delete)
             )
@@ -5786,11 +5843,6 @@ class Database(
         first_name: str = "",
         force: bool = False,
     ) -> bool:
-        """
-        ✅ v7.7.54 FIX-16: COALESCE بدل CASE WHEN (type hints).
-        ✅ v7.7.55 PA-3: invalidate cache فقط عند نجاح فعلي أو عند
-           force=True — لم يعد يُنفَّذ في finally دائماً.
-        """
         invalidate_needed = False
         try:
             async with await self._get_user_lock(user_id):
@@ -5818,7 +5870,6 @@ class Database(
                            first_name != cur_first:
                             need_update = True
                         if need_update:
-                            # ✅ FIX-16: COALESCE مع None normalization
                             uname_param = username if username else None
                             fname_param = first_name if first_name else None
                             await self.execute(
@@ -5831,7 +5882,6 @@ class Database(
                                 TimeUtils.utc_now(), user_id,
                             )
                             invalidate_needed = True
-                        # ✅ PA-3: invalidate فقط إذا تغيّر شيء فعلاً
                         if invalidate_needed:
                             try:
                                 await self._invalidate_user_cache_keys(
@@ -5964,7 +6014,6 @@ class Database(
                             "VALUES (?, 0, 0, 0, NULL)",
                             user_id,
                         )
-            # ✅ PA-3: نجح المسار — إبطال الكاش مرة واحدة
             try:
                 await self._invalidate_user_cache_keys(user_id)
             except Exception:
@@ -6170,10 +6219,6 @@ class Database(
     async def mark_users_as_blocked(
         self, user_ids: List[int]
     ) -> int:
-        """
-        ✅ v7.7.54 FIX-4: كل الدفعات داخل معاملة واحدة لضمان
-        snapshot consistency على MySQL (SELECT + UPDATE لا يتفرّقان).
-        """
         if not user_ids:
             return 0
         try:
@@ -6184,7 +6229,6 @@ class Database(
                     batch = user_ids[i: i + BATCH]
                     placeholders = ",".join(["?"] * len(batch))
                     if USE_MYSQL:
-                        # ✅ FIX-4: داخل نفس المعاملة → snapshot موحد
                         existing_count = await self._fetchval_with_conn(
                             conn,
                             f"SELECT COUNT(*) FROM users "
@@ -6534,16 +6578,17 @@ class Database(
         self, conn, updates: List[Tuple[int, int]]
     ) -> List[Tuple[int, int]]:
         """
-        ✅ v7.7.54 FIX-5: التحقق من أن كل post_id ينتمي فعلاً
-        إلى channel_db_id المُعلن.
+        ✅ v7.7.54 FIX-5: التحقق من أن كل post_id ينتمي فعلاً إلى
+        channel_db_id المُعلن.
         ✅ v7.7.55 PA-2: عند فشل الاستعلام نرفض جميع الأزواج
-        (return []) بدلاً من تمريرها بلا تحقق — كان ثغرة أمنية.
+        (return []) بدلاً من تمريرها بلا تحقق.
+        ✅ v7.7.56 H-4: تحويل int آمن لكل صف بدل انهيار جماعي عند
+        وجود id غير رقمي واحد.
         """
         if not updates:
             return []
         valid: List[Tuple[int, int]] = []
         try:
-            # بنية: [(ch_id, post_id)] → grouped by channel
             by_channel: Dict[int, List[int]] = defaultdict(list)
             for ch_id, post_id in updates:
                 by_channel[ch_id].append(post_id)
@@ -6557,7 +6602,19 @@ class Database(
                     f"  AND id IN ({placeholders})",
                     ch_id, *post_ids,
                 )
-                found_ids = {int(r["id"]) for r in (rows or []) if r.get("id")}
+                # ✅ H-4: تحويل int آمن لكل صف
+                found_ids: Set[int] = set()
+                for r in (rows or []):
+                    rid = r.get("id")
+                    if rid is None:
+                        continue
+                    try:
+                        found_ids.add(int(rid))
+                    except (TypeError, ValueError):
+                        logger.debug(
+                            f"_verify_pairs_belong: id غير صالح {rid!r}"
+                        )
+                        continue
                 for pid in post_ids:
                     if pid in found_ids:
                         valid.append((ch_id, pid))
@@ -6568,7 +6625,6 @@ class Database(
                             f"— تم التخطي"
                         )
         except Exception as e:
-            # ✅ PA-2: رفض كل الأزواج — لا نمرّر ما لم نتحقق منه
             logger.error(
                 f"❌ _verify_pairs_belong: {e} — "
                 f"رفض جميع الأزواج ({len(updates)}) لضمان سلامة البيانات"
@@ -6579,9 +6635,6 @@ class Database(
     async def mark_published_batch(
         self, updates: List[Tuple[int, int]]
     ) -> bool:
-        """
-        ✅ v7.7.54 FIX-5: التحقق من اقتران (channel_db_id, post_id).
-        """
         if not updates:
             return True
 
@@ -6604,7 +6657,6 @@ class Database(
 
         try:
             async with self.transaction() as conn:
-                # ✅ FIX-5: التحقق من الاقتران
                 valid_updates = await self._verify_pairs_belong(
                     conn, valid_updates
                 )
@@ -6733,9 +6785,6 @@ class Database(
     async def get_channels_to_publish(
         self, limit: int = 20
     ) -> List[Dict]:
-        """
-        ✅ v7.7.54 FIX-1: الاستخدام الصحيح للـ fallback بدون MV.
-        """
         now = TimeUtils.utc_now()
         owner_id = getattr(CONFIG, "PRIMARY_OWNER_ID", 0) or 0
 
@@ -6758,7 +6807,6 @@ class Database(
                     query, (owner_id, now, limit)
                 )
 
-            # ✅ FIX-1: عند عدم توفر MV — استخدام نسخة بلا MV حصراً
             if _R_CHANNELS_TO_PUBLISH_SQL_PG_NO_MV is not None:
                 logger.debug(
                     "ℹ️ PG: MV غير جاهز — استخدام PG_NO_MV fallback "
@@ -6769,7 +6817,6 @@ class Database(
                     (now, owner_id, now, limit),
                 )
 
-            # ✅ FIX-1: fallback خاص بلا MV
             logger.debug(
                 "ℹ️ PG: MV غير جاهز — استخدام _get_pg_query_no_mv_fallback"
             )
@@ -6801,11 +6848,26 @@ class Database(
     async def expire_penalties(self) -> int:
         """
         ✅ v7.7.54 FIX-11: إزالة تكرار query زائد.
+        ✅ v7.7.56 PA-6: إضافة `or batch_expired == 0` لمنع حلقة
+        لا نهائية إذا أعاد الاستعلام دفعة كاملة (got_rows == BATCH)
+        لكن لم يُحدَّث أي صف (batch_expired == 0). هذا يحدث عند
+        فشل UPDATE صامت أو عدم تطابق WHERE مع صفوف ACTIVE.
         """
         total_expired = 0
         BATCH = EXPIRED_PENALTIES_BATCH
+        iterations = 0
         try:
             while True:
+                iterations += 1
+                # ✅ PA-6: سقف دفاعي
+                if iterations > EXPIRE_PENALTIES_MAX_ITER:
+                    logger.error(
+                        f"❌ expire_penalties: بلغ سقف التكرارات "
+                        f"({EXPIRE_PENALTIES_MAX_ITER}) — إيقاف "
+                        f"(total_expired={total_expired})"
+                    )
+                    break
+
                 batch_expired = 0
                 got_rows = 0
                 async with self.transaction() as conn:
@@ -6827,8 +6889,17 @@ class Database(
                         )
 
                 total_expired += batch_expired
-                # ✅ FIX-11: loop ينتهي عندما لا يوجد المزيد
-                if got_rows < BATCH:
+                # ✅ FIX-11 + PA-6 (v7.7.56): الخروج عند عدم وجود
+                # المزيد من الصفوف أو عند عدم تحقيق تقدّم فعلي.
+                if got_rows < BATCH or batch_expired == 0:
+                    if (got_rows >= BATCH
+                            and batch_expired == 0
+                            and got_rows > 0):
+                        logger.warning(
+                            f"⚠️ expire_penalties: got_rows={got_rows} "
+                            f"لكن batch_expired=0 — إيقاف لمنع "
+                            f"حلقة لا نهائية (لا تقدّم فعلي)"
+                        )
                     break
                 await asyncio.sleep(0)
 
@@ -6875,9 +6946,6 @@ class Database(
         self, user_id: int, chat_id: int,
         penalty_type: Optional[str] = None,
     ) -> int:
-        """
-        ✅ v7.7.54 FIX-10: type hint صحيح Optional[str].
-        """
         query = (
             "SELECT COUNT(*) FROM user_penalties "
             "WHERE user_id = ? AND chat_id = ? "
@@ -7059,9 +7127,6 @@ class Database(
         self, user_id: int, chat_id: int,
         penalty_type: Optional[str] = None,
     ) -> int:
-        """
-        ✅ v7.7.54 FIX-10: type hint صحيح Optional[str].
-        """
         try:
             async with self.transaction() as conn:
                 query = (
@@ -7088,9 +7153,6 @@ class Database(
         chat_id: Optional[int] = None,
         limit: int = MAX_ACTIVE_PENALTIES_FETCH,
     ) -> List[Dict]:
-        """
-        ✅ v7.7.54 FIX-10: type hint صحيح Optional[int].
-        """
         query = (
             "SELECT * FROM user_penalties "
             "WHERE user_id = ? AND status = 'active'"
@@ -7109,10 +7171,6 @@ class Database(
 # =====================================================================
 
 def _get_pg_query_fallback() -> str:
-    """
-    ✅ v7.7.54 FIX-1: هذا الـ fallback مخصص لحالة
-    self._mv_available=True حيث mv_active_user_limits موجودة.
-    """
     return f"""
         SELECT uc.id, uc.channel_id, uc.user_id,
                u.auto_publish, u.auto_recycle,
@@ -7399,6 +7457,7 @@ __all__ = [
     "PUBLISH_POLLING_COMPENSATION_SECONDS",
     "MAX_POST_FAIL_COUNT", "PENALTY_ARCHIVE_RETENTION_DAYS",
     "SUB_CACHE_TTL", "EXPIRED_PENALTIES_BATCH",
+    "EXPIRE_PENALTIES_MAX_ITER",
     "HEAVY_TABLES_FOR_AUTOVACUUM", "SMALL_TABLES_FOR_AUTOVACUUM",
     "IMPORT_MASS_DELETE_MIN_ABSOLUTE", "IMPORT_MASS_DELETE_MAX_RATIO",
     "DB_SIZE_CACHE_TTL",
@@ -7413,6 +7472,7 @@ __all__ = [
     "_FactoryFailed",
     "_sql_get_setting_value",
     "_normalize_params",
+    "_pg_in_transaction",
     "_find_values_end", "_insert_before_returning",
     "_replace_excluded_with_values",
     "_get_unique_columns", "_find_best_conflict_target",
