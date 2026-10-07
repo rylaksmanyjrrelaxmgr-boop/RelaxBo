@@ -2,37 +2,25 @@
 # -*- coding: utf-8 -*-
 
 """
-config.py - إعدادات البوت الأساسية (v6 — Spam Detection Integration)
+config.py - إعدادات البوت الأساسية (v7 — DETECTORS-v4.0.8-INTEGRATION)
 ================================================================================
+🆕 v7 (DETECTORS-v4.0.8-INTEGRATION):
+    ✅ إصلاح الرأس: v4.0.0 → v4.0.8 (FULL-AUDIT-V3)
+    ✅ إصلاح عدد الطبقات: 14 → 15 (كان خطأ توثيقي)
+    ✅ إضافة ~40 متغير v4.0.8:
+        • ANTIEVASION_* (24 toggle للتفعيل/التعطيل الدقيق)
+        • DETECTOR_POOL_WORKERS + POOL_TASK_TIMEOUT
+        • URL_EXPAND_CONNECT_TIMEOUT + URL_EXPAND_READ_TIMEOUT
+        • SE_CIRCUIT_FAILURE_THRESHOLD + SE_CIRCUIT_OPEN_SEC
+        • NORMALIZE_CACHE_MAX + NSFW_SIGHTENGINE_MAX_BYTES
+        • ASYNC_NETWORK_ENABLED + ASYNC_NETWORK_TIMEOUT
+        • HTTP_TIMEOUT_CONNECT + HTTP_TIMEOUT_READ
+    ✅ get_pool_env() — helper لـ main.py v5.6.12
+    ✅ validate() — تحققات pool + circuit breaker
+    ✅ تقرير الإقلاع مُحدَّث (15 طبقة + pool stats)
+
 🆕 v6 (SPAM-DETECTION-V4-INTEGRATION):
-    ✅ قسم 13 جديد: Spam Detection Engine (v4.0.0 — 14 طبقة)
-        • تفعيل/تعطيل كل طبقة عبر .env
-        • إعدادات الطبقات المتقدمة (Video, NSFW, Cipher, Stego, ...)
-        • Safe Browsing API key
-        • OCR Languages, Audio Whisper, URL enrichment
-        • DEBUG_DIAG, DEBUG_SPAM
-    ✅ تكامل كامل مع:
-        • handlers_message_detectors.py v4.0.0
-        • utils.py v7.10.2 (Security Bridge)
-        • database_tables.py v7.9.0 (7 أعمدة جديدة)
-    ✅ validate() — تحققات إضافية لطبقات الكشف
-    ✅ get_detector_env() — helper لتصدير إعدادات الكشف إلى os.environ
-    ✅ Properties جديدة: SPAM_DETECTION_AVAILABLE, DETECTION_SUMMARY
-    ✅ سجل الإقلاع يُظهر حالة الطبقات
-
-🆕 v5 (REVIEW R4 FIXES):
-    🔴 C1  WEBHOOK_SECRET — مُضاف (مطلوب لـ utils.webhook_handler C2)
-    🟠 M1-M6 + 🟡 m1-m14
-
-🆕 v4 (إصلاح MAX_GLOBAL_BANNED_WORDS):
-    ✅ القيمة الافتراضية: 100 → 10000
-
-🆕 v3 (إعادة تنظيم شاملة):
-    ✅ 12 قسم منطقي
-    ✅ 100% توافق خلفي مع v2
-
-🆕 v2 (2026-09-24):
-    ✅ safe_float() + تحقق WEB_PASSWORD
+    ✅ قسم 13: Spam Detection Engine (v4.0.8 — 15 طبقة)
 ================================================================================
 """
 
@@ -60,7 +48,6 @@ logger = logging.getLogger(__name__)
 # ═══════════════════════════════════════════════════════════════════
 
 def safe_int(value: str, default: int = 0) -> int:
-    """تحويل قيمة نصية إلى رقم صحيح مع إرجاع الافتراضي عند الخطأ."""
     try:
         return int(value.strip())
     except (ValueError, AttributeError, TypeError):
@@ -68,7 +55,6 @@ def safe_int(value: str, default: int = 0) -> int:
 
 
 def safe_float(value: str, default: float = 0.0) -> float:
-    """تحويل قيمة نصية إلى رقم عشري مع إرجاع الافتراضي عند الخطأ."""
     try:
         return float(value.strip())
     except (ValueError, AttributeError, TypeError):
@@ -76,17 +62,12 @@ def safe_float(value: str, default: float = 0.0) -> float:
 
 
 def safe_bool(value: str, default: bool = False) -> bool:
-    """تحويل قيمة نصية إلى منطقية."""
     if value is None:
         return default
     return value.strip().lower() in ('true', '1', 'yes', 'on')
 
 
 def safe_str(value: str, default: str = "", *, single_line: bool = False) -> str:
-    """
-    إرجاع قيمة نصية نظيفة.
-    عند single_line=True يتم طي كل المسافات إلى مسافة واحدة.
-    """
     if value is None:
         return default
     s = str(value).strip()
@@ -96,7 +77,6 @@ def safe_str(value: str, default: str = "", *, single_line: bool = False) -> str
 
 
 def safe_abs_path(value: str, default: str) -> str:
-    """توحيد المسارات — يحوّل المسار النسبي إلى مطلق."""
     raw = (value or "").strip()
     if not raw:
         raw = default
@@ -107,7 +87,6 @@ def safe_abs_path(value: str, default: str) -> str:
 
 
 def _parse_developer_ids() -> Tuple[int, ...]:
-    """إزالة shadowing لـ`id()` builtin + إرجاع tuple."""
     raw = os.getenv("DEVELOPER_IDS", "") or ""
     result: List[int] = []
     for token in raw.split(","):
@@ -121,27 +100,13 @@ def _parse_developer_ids() -> Tuple[int, ...]:
 
 
 # ═══════════════════════════════════════════════════════════════════
-# AppConfig — الإعدادات الرئيسية
+# AppConfig
 # ═══════════════════════════════════════════════════════════════════
 
 @dataclass(frozen=True)
 class AppConfig:
     """
-    إعدادات البوت — مقسّمة إلى 13 قسم منطقي:
-
-      1.  الهوية والملاك        (من أنا؟ من يملكني؟)
-      2.  البيئة والتشخيص       (production/development)
-      3.  قاعدة البيانات        (URL, pool, timeouts)
-      4.  النشر التلقائي        (المحرّك الأساسي للبوت)
-      5.  النسخ الاحتياطي       (الحماية من فقدان البيانات)
-      6.  الكاش والأقفال        (الأداء)
-      7.  الشبكة والبروكسي      (الاتصال)
-      8.  لوحة الويب            (الأمان الخارجي)
-      9.  الميزات الاختيارية    (Redis, QStash, NSFW, 2FA, ...)
-      10. المصادقة الثنائية     (2FA)
-      11. NSFW / Sightengine    (فلترة المحتوى)
-      12. المسارات والملفات     (مكان التخزين)
-      13. 🆕 Spam Detection Engine (v4.0.0 — 14 طبقة)
+    إعدادات البوت — 13 قسم منطقي + قسم 13 الكبير للـdetectors.
     """
 
     # ═══════════════════════════════════════════════════════════════
@@ -369,7 +334,7 @@ class AppConfig:
     )
 
     # ═══════════════════════════════════════════════════════════════
-    # 11. NSFW / Sightengine
+    # 11. NSFW / Sightengine (نظام خارجي — منفصل عن detectors)
     # ═══════════════════════════════════════════════════════════════
 
     NSFW_ENABLED: bool = safe_bool(os.getenv("NSFW_ENABLED", "false"))
@@ -409,10 +374,10 @@ class AppConfig:
     ).upper()
 
     # ═══════════════════════════════════════════════════════════════
-    # 🆕 13. Spam Detection Engine (v4.0.0 — 14 طبقة)
+    # 🆕 13. Spam Detection Engine (v4.0.8 — 15 طبقة)
     # ═══════════════════════════════════════════════════════════════
 
-    # ─── تفعيل الطبقات (افتراضي: الكل مُفعَّل) ───
+    # ─── 13.1: تفعيل الطبقات الأساسية (7 طبقات) ───
     TEXT_LAYER_ENABLED: bool = safe_bool(
         os.getenv("TEXT_LAYER_ENABLED", "true")
     )
@@ -435,7 +400,7 @@ class AppConfig:
         os.getenv("BEHAVIORAL_LAYER_ENABLED", "true")
     )
 
-    # 🆕 v4.0.0 — 7 طبقات إضافية
+    # ─── 13.2: الطبقات المتقدمة (8 طبقات) ───
     VIDEO_LAYER_ENABLED: bool = safe_bool(
         os.getenv("VIDEO_LAYER_ENABLED", "true")
     )
@@ -461,7 +426,7 @@ class AppConfig:
         os.getenv("DOMAIN_REP_LAYER_ENABLED", "true")
     )
 
-    # ─── إعدادات الطبقات المتقدمة ───
+    # ─── 13.3: إعدادات الطبقات المتقدمة ───
 
     # L7: Video
     VIDEO_MAX_FRAMES: int = safe_int(os.getenv("VIDEO_MAX_FRAMES", "8"))
@@ -469,11 +434,13 @@ class AppConfig:
         os.getenv("VIDEO_FRAME_INTERVAL_SEC", "2.0")
     )
 
-    # L8: NSFW Model
+    # L8: NSFW Model (محلي — يتطلب transformers+torch)
     NSFW_MODEL_ENABLED: bool = safe_bool(
         os.getenv("NSFW_MODEL_ENABLED", "false")
     )
-    # NSFW_THRESHOLD أعلاه (قسم 11) — يُستخدم لكلا النظامين
+    NSFW_SIGHTENGINE_MAX_BYTES: int = safe_int(
+        os.getenv("NSFW_SIGHTENGINE_MAX_BYTES", str(10 * 1024 * 1024))
+    )
 
     # L2: Audio
     AUDIO_USE_WHISPER: bool = safe_bool(
@@ -488,6 +455,12 @@ class AppConfig:
         os.getenv("URL_ENRICH_ENABLED", "true")
     )
     URL_EXPAND_TIMEOUT: int = safe_int(os.getenv("URL_EXPAND_TIMEOUT", "5"))
+    URL_EXPAND_CONNECT_TIMEOUT: float = safe_float(
+        os.getenv("URL_EXPAND_CONNECT_TIMEOUT", "3.0")
+    )
+    URL_EXPAND_READ_TIMEOUT: float = safe_float(
+        os.getenv("URL_EXPAND_READ_TIMEOUT", "5.0")
+    )
     URL_EXPAND_MAX_HOPS: int = safe_int(os.getenv("URL_EXPAND_MAX_HOPS", "5"))
     URL_ENRICH_MAX_URLS: int = safe_int(os.getenv("URL_ENRICH_MAX_URLS", "5"))
     WHOIS_ENABLED: bool = safe_bool(os.getenv("WHOIS_ENABLED", "true"))
@@ -503,9 +476,119 @@ class AppConfig:
         os.getenv("OCR_LANGUAGES", "ara+eng+fas+rus"), single_line=True
     )
 
-    # ─── التشخيص ───
+    # ─── 13.4: 🆕 v4.0.8 — Anti-Evasion Toggles (24 متغير) ───
+    ANTIEVASION_ENTITY_LINK: bool = safe_bool(
+        os.getenv("ANTIEVASION_ENTITY_LINK", "true")
+    )
+    ANTIEVASION_BUTTON_LINK: bool = safe_bool(
+        os.getenv("ANTIEVASION_BUTTON_LINK", "true")
+    )
+    ANTIEVASION_SCHEMELESS_URL: bool = safe_bool(
+        os.getenv("ANTIEVASION_SCHEMELESS_URL", "true")
+    )
+    ANTIEVASION_HOMOGLYPH: bool = safe_bool(
+        os.getenv("ANTIEVASION_HOMOGLYPH", "true")
+    )
+    ANTIEVASION_COMBINING: bool = safe_bool(
+        os.getenv("ANTIEVASION_COMBINING", "true")
+    )
+    ANTIEVASION_COMPACT_WORDS: bool = safe_bool(
+        os.getenv("ANTIEVASION_COMPACT_WORDS", "true")
+    )
+    ANTIEVASION_EMOJI_SEPARATOR: bool = safe_bool(
+        os.getenv("ANTIEVASION_EMOJI_SEPARATOR", "true")
+    )
+    ANTIEVASION_BUTTON_WEBAPP: bool = safe_bool(
+        os.getenv("ANTIEVASION_BUTTON_WEBAPP", "true")
+    )
+    ANTIEVASION_BUTTON_LOGINURL: bool = safe_bool(
+        os.getenv("ANTIEVASION_BUTTON_LOGINURL", "true")
+    )
+    ANTIEVASION_LEETSPEAK: bool = safe_bool(
+        os.getenv("ANTIEVASION_LEETSPEAK", "true")
+    )
+    ANTIEVASION_TG_SCHEME: bool = safe_bool(
+        os.getenv("ANTIEVASION_TG_SCHEME", "true")
+    )
+    ANTIEVASION_AT_CHANNEL: bool = safe_bool(
+        os.getenv("ANTIEVASION_AT_CHANNEL", "true")
+    )
+    ANTIEVASION_EMAIL: bool = safe_bool(
+        os.getenv("ANTIEVASION_EMAIL", "true")
+    )
+    ANTIEVASION_PUNYCODE: bool = safe_bool(
+        os.getenv("ANTIEVASION_PUNYCODE", "true")
+    )
+    ANTIEVASION_IPV4_SCHEMELESS: bool = safe_bool(
+        os.getenv("ANTIEVASION_IPV4_SCHEMELESS", "true")
+    )
+    ANTIEVASION_MULTILINE_URL: bool = safe_bool(
+        os.getenv("ANTIEVASION_MULTILINE_URL", "true")
+    )
+    ANTIEVASION_VENUE_VCARD: bool = safe_bool(
+        os.getenv("ANTIEVASION_VENUE_VCARD", "true")
+    )
+    ANTIEVASION_POLL: bool = safe_bool(
+        os.getenv("ANTIEVASION_POLL", "true")
+    )
+    ANTIEVASION_EMOJI_IN_DOMAIN: bool = safe_bool(
+        os.getenv("ANTIEVASION_EMOJI_IN_DOMAIN", "true")
+    )
+    ANTIEVASION_UNICODE_DOTS: bool = safe_bool(
+        os.getenv("ANTIEVASION_UNICODE_DOTS", "true")
+    )
+    ANTIEVASION_EXTENDED_COMBINING: bool = safe_bool(
+        os.getenv("ANTIEVASION_EXTENDED_COMBINING", "true")
+    )
+    ANTIEVASION_EXTRA_SCRIPTS: bool = safe_bool(
+        os.getenv("ANTIEVASION_EXTRA_SCRIPTS", "true")
+    )
+    ANTIEVASION_ALT_SCHEMES: bool = safe_bool(
+        os.getenv("ANTIEVASION_ALT_SCHEMES", "true")
+    )
+    ANTIEVASION_RANDOM_DOMAIN: bool = safe_bool(
+        os.getenv("ANTIEVASION_RANDOM_DOMAIN", "true")
+    )
+
+    # ─── 13.5: 🆕 v4.0.8 — Pool + Async ───
+    DETECTOR_POOL_WORKERS: int = safe_int(
+        os.getenv("DETECTOR_POOL_WORKERS", "8")
+    )
+    POOL_TASK_TIMEOUT: float = safe_float(
+        os.getenv("POOL_TASK_TIMEOUT", "60.0")
+    )
+
+    ASYNC_NETWORK_ENABLED: bool = safe_bool(
+        os.getenv("ASYNC_NETWORK_ENABLED", "true")
+    )
+    ASYNC_NETWORK_TIMEOUT: float = safe_float(
+        os.getenv("ASYNC_NETWORK_TIMEOUT", "5.0")
+    )
+
+    # ─── 13.6: 🆕 v4.0.8 — Circuit Breaker + Cache ───
+    SE_CIRCUIT_FAILURE_THRESHOLD: int = safe_int(
+        os.getenv("SE_CIRCUIT_FAILURE_THRESHOLD", "5")
+    )
+    SE_CIRCUIT_OPEN_SEC: float = safe_float(
+        os.getenv("SE_CIRCUIT_OPEN_SEC", "60.0")
+    )
+
+    NORMALIZE_CACHE_MAX: int = safe_int(
+        os.getenv("NORMALIZE_CACHE_MAX", "512")
+    )
+
+    # ─── 13.7: التشخيص ───
     DEBUG_DIAG: bool = safe_bool(os.getenv("DEBUG_DIAG", "false"))
     DEBUG_SPAM: bool = safe_bool(os.getenv("DEBUG_SPAM", "false"))
+
+    # ─── 13.8: Multi-layer master switches ───
+    MULTILAYER_ENABLED: bool = safe_bool(
+        os.getenv("MULTILAYER_ENABLED", "true")
+    )
+    ANTIFLOOD_ENABLED: bool = safe_bool(
+        os.getenv("ANTIFLOOD_ENABLED", "true")
+    )
+    SLOW_MODE_AUTO: bool = safe_bool(os.getenv("SLOW_MODE_AUTO", "true"))
 
     # ═══════════════════════════════════════════════════════════════
     # Properties (aliases خلفية)
@@ -513,26 +596,21 @@ class AppConfig:
 
     @property
     def DEFAULT_LANG(self) -> str:
-        """alias لـ DEFAULT_LANGUAGE — متوافق مع utils.py."""
         return self.DEFAULT_LANGUAGE
 
     @property
     def TOKEN_FILE(self) -> str:
-        """alias خلفي لـ TWO_FA_TOKEN_FILE."""
         return self.TWO_FA_TOKEN_FILE
 
     @property
     def SPAM_DETECTION_AVAILABLE(self) -> bool:
-        """هل محرك كشف السبام متاح؟"""
         return self.TEXT_LAYER_ENABLED
 
     @property
     def DETECTION_SUMMARY(self) -> Dict[str, bool]:
-        """
-        🆕 v6: ملخّص حالة كل طبقات الكشف.
-        مفيد لـ /health endpoint أو logging.
-        """
+        """ملخّص حالة كل الطبقات الـ15."""
         return {
+            # 7 أساسية
             "text":        self.TEXT_LAYER_ENABLED,
             "ocr":         self.OCR_LAYER_ENABLED,
             "audio":       self.AUDIO_LAYER_ENABLED,
@@ -540,8 +618,9 @@ class AppConfig:
             "metadata":    self.METADATA_LAYER_ENABLED,
             "obfuscation": self.OBFUSCATION_LAYER_ENABLED,
             "behavioral":  self.BEHAVIORAL_LAYER_ENABLED,
+            # 8 متقدمة
             "video":       self.VIDEO_LAYER_ENABLED,
-            "nsfw":        self.NSFW_LAYER_ENABLED and self.NSFW_MODEL_ENABLED,
+            "nsfw":        self.NSFW_LAYER_ENABLED,
             "sticker":     self.STICKER_LAYER_ENABLED,
             "reactions":   self.REACTIONS_LAYER_ENABLED,
             "context":     self.CONTEXT_LAYER_ENABLED,
@@ -552,15 +631,18 @@ class AppConfig:
 
     @property
     def DETECTION_ENABLED_COUNT(self) -> int:
-        """عدد الطبقات المُفعَّلة حالياً (0-15)."""
         return sum(1 for v in self.DETECTION_SUMMARY.values() if v)
+
+    @property
+    def DETECTOR_POOL_SIZE(self) -> int:
+        """alias لـ DETECTOR_POOL_WORKERS — للتوافق."""
+        return self.DETECTOR_POOL_WORKERS
 
     # ═══════════════════════════════════════════════════════════════
     # دوال مساعدة
     # ═══════════════════════════════════════════════════════════════
 
     def get_log_level(self) -> int:
-        """يُرجع numeric logging level من النص."""
         mapping = {
             "DEBUG": logging.DEBUG,
             "INFO": logging.INFO,
@@ -573,20 +655,17 @@ class AppConfig:
         return mapping.get(self.LOG_LEVEL, logging.INFO)
 
     def is_developer(self, user_id: int) -> bool:
-        """هل المستخدم مطور؟ (المالك أو في قائمة المطورين)."""
         return user_id == self.PRIMARY_OWNER_ID or user_id in self.DEVELOPER_IDS
 
     def is_owner(self, user_id: int) -> bool:
-        """هل المستخدم هو المالك؟"""
         return user_id == self.PRIMARY_OWNER_ID
 
     def get_detector_env(self) -> Dict[str, str]:
         """
-        🆕 v6: يُصدّر إعدادات كاشف السبام كـ dict
-        متوافق مع os.environ — مفيد عند استيراد
-        handlers_message_detectors قبل config.
+        🆕 v7: يُصدّر إعدادات الـdetectors كـ dict.
 
-        الاستخدام:
+        الاستخدام الموصى به في bot.py:
+            # قبل استيراد handlers_message_detectors
             for k, v in CONFIG.get_detector_env().items():
                 os.environ.setdefault(k, v)
         """
@@ -594,7 +673,7 @@ class AppConfig:
             return "1" if x else "0"
 
         return {
-            # Layer toggles
+            # ─── Layer toggles (15) ───
             "TEXT_LAYER_ENABLED": _b(self.TEXT_LAYER_ENABLED),
             "OCR_LAYER_ENABLED": _b(self.OCR_LAYER_ENABLED),
             "AUDIO_LAYER_ENABLED": _b(self.AUDIO_LAYER_ENABLED),
@@ -611,32 +690,94 @@ class AppConfig:
             "STEGO_LAYER_ENABLED": _b(self.STEGO_LAYER_ENABLED),
             "DOMAIN_REP_LAYER_ENABLED": _b(self.DOMAIN_REP_LAYER_ENABLED),
 
-            # Settings
+            # ─── Anti-Evasion (24) ───
+            "ANTIEVASION_ENTITY_LINK": _b(self.ANTIEVASION_ENTITY_LINK),
+            "ANTIEVASION_BUTTON_LINK": _b(self.ANTIEVASION_BUTTON_LINK),
+            "ANTIEVASION_SCHEMELESS_URL": _b(self.ANTIEVASION_SCHEMELESS_URL),
+            "ANTIEVASION_HOMOGLYPH": _b(self.ANTIEVASION_HOMOGLYPH),
+            "ANTIEVASION_COMBINING": _b(self.ANTIEVASION_COMBINING),
+            "ANTIEVASION_COMPACT_WORDS": _b(self.ANTIEVASION_COMPACT_WORDS),
+            "ANTIEVASION_EMOJI_SEPARATOR": _b(self.ANTIEVASION_EMOJI_SEPARATOR),
+            "ANTIEVASION_BUTTON_WEBAPP": _b(self.ANTIEVASION_BUTTON_WEBAPP),
+            "ANTIEVASION_BUTTON_LOGINURL": _b(self.ANTIEVASION_BUTTON_LOGINURL),
+            "ANTIEVASION_LEETSPEAK": _b(self.ANTIEVASION_LEETSPEAK),
+            "ANTIEVASION_TG_SCHEME": _b(self.ANTIEVASION_TG_SCHEME),
+            "ANTIEVASION_AT_CHANNEL": _b(self.ANTIEVASION_AT_CHANNEL),
+            "ANTIEVASION_EMAIL": _b(self.ANTIEVASION_EMAIL),
+            "ANTIEVASION_PUNYCODE": _b(self.ANTIEVASION_PUNYCODE),
+            "ANTIEVASION_IPV4_SCHEMELESS": _b(self.ANTIEVASION_IPV4_SCHEMELESS),
+            "ANTIEVASION_MULTILINE_URL": _b(self.ANTIEVASION_MULTILINE_URL),
+            "ANTIEVASION_VENUE_VCARD": _b(self.ANTIEVASION_VENUE_VCARD),
+            "ANTIEVASION_POLL": _b(self.ANTIEVASION_POLL),
+            "ANTIEVASION_EMOJI_IN_DOMAIN": _b(self.ANTIEVASION_EMOJI_IN_DOMAIN),
+            "ANTIEVASION_UNICODE_DOTS": _b(self.ANTIEVASION_UNICODE_DOTS),
+            "ANTIEVASION_EXTENDED_COMBINING": _b(self.ANTIEVASION_EXTENDED_COMBINING),
+            "ANTIEVASION_EXTRA_SCRIPTS": _b(self.ANTIEVASION_EXTRA_SCRIPTS),
+            "ANTIEVASION_ALT_SCHEMES": _b(self.ANTIEVASION_ALT_SCHEMES),
+            "ANTIEVASION_RANDOM_DOMAIN": _b(self.ANTIEVASION_RANDOM_DOMAIN),
+
+            # ─── Layer settings ───
             "VIDEO_MAX_FRAMES": str(self.VIDEO_MAX_FRAMES),
             "VIDEO_FRAME_INTERVAL_SEC": str(self.VIDEO_FRAME_INTERVAL_SEC),
             "NSFW_MODEL_ENABLED": _b(self.NSFW_MODEL_ENABLED),
             "NSFW_THRESHOLD": str(self.NSFW_THRESHOLD),
+            "NSFW_SIGHTENGINE_MAX_BYTES": str(self.NSFW_SIGHTENGINE_MAX_BYTES),
             "AUDIO_USE_WHISPER": _b(self.AUDIO_USE_WHISPER),
             "AUDIO_NOISE_REDUCE": _b(self.AUDIO_NOISE_REDUCE),
             "URL_ENRICH_ENABLED": _b(self.URL_ENRICH_ENABLED),
             "URL_EXPAND_TIMEOUT": str(self.URL_EXPAND_TIMEOUT),
+            "URL_EXPAND_CONNECT_TIMEOUT": str(self.URL_EXPAND_CONNECT_TIMEOUT),
+            "URL_EXPAND_READ_TIMEOUT": str(self.URL_EXPAND_READ_TIMEOUT),
             "URL_EXPAND_MAX_HOPS": str(self.URL_EXPAND_MAX_HOPS),
             "URL_ENRICH_MAX_URLS": str(self.URL_ENRICH_MAX_URLS),
             "WHOIS_ENABLED": _b(self.WHOIS_ENABLED),
             "WHOIS_NEW_DOMAIN_DAYS": str(self.WHOIS_NEW_DOMAIN_DAYS),
             "SAFE_BROWSING_API_KEY": self.SAFE_BROWSING_API_KEY,
             "OCR_LANGUAGES": self.OCR_LANGUAGES,
+
+            # ─── Pool + Async ───
+            "DETECTOR_POOL_WORKERS": str(self.DETECTOR_POOL_WORKERS),
+            "POOL_TASK_TIMEOUT": str(self.POOL_TASK_TIMEOUT),
+            "ASYNC_NETWORK_ENABLED": _b(self.ASYNC_NETWORK_ENABLED),
+            "ASYNC_NETWORK_TIMEOUT": str(self.ASYNC_NETWORK_TIMEOUT),
+
+            # ─── Circuit Breaker + Cache ───
+            "SE_CIRCUIT_FAILURE_THRESHOLD": str(self.SE_CIRCUIT_FAILURE_THRESHOLD),
+            "SE_CIRCUIT_OPEN_SEC": str(self.SE_CIRCUIT_OPEN_SEC),
+            "NORMALIZE_CACHE_MAX": str(self.NORMALIZE_CACHE_MAX),
+
+            # ─── Debug ───
             "DEBUG_DIAG": _b(self.DEBUG_DIAG),
             "DEBUG_SPAM": _b(self.DEBUG_SPAM),
         }
 
+    def get_pool_env(self) -> Dict[str, Any]:
+        """
+        🆕 v7: helper لـ main.py v5.6.12 — إعدادات pool فقط.
+
+        الاستخدام:
+            from config import CONFIG
+            pool_env = CONFIG.get_pool_env()
+            # pool_env["workers"] = 8
+            # pool_env["task_timeout"] = 60.0
+        """
+        return {
+            "workers": self.DETECTOR_POOL_WORKERS,
+            "task_timeout": self.POOL_TASK_TIMEOUT,
+            "async_network_enabled": self.ASYNC_NETWORK_ENABLED,
+            "async_network_timeout": self.ASYNC_NETWORK_TIMEOUT,
+            "circuit_failure_threshold": self.SE_CIRCUIT_FAILURE_THRESHOLD,
+            "circuit_open_sec": self.SE_CIRCUIT_OPEN_SEC,
+            "normalize_cache_max": self.NORMALIZE_CACHE_MAX,
+        }
+
     def apply_detector_env(self, *, override: bool = False) -> int:
         """
-        🆕 v6: يضبط متغيرات كاشف السبام في os.environ.
+        يضبط متغيرات detectors في os.environ.
         Returns: عدد المتغيرات المضبوطة.
 
-        يُستدعى في bot.py مبكراً قبل import handlers_message_detectors
-        لضمان أن CONFIG هو مصدر الحقيقة الوحيد.
+        ⚠️ مهم: استدعِها في bot.py **قبل** استيراد
+        handlers_message_detectors.
         """
         env = self.get_detector_env()
         applied = 0
@@ -651,12 +792,10 @@ class AppConfig:
     # ═══════════════════════════════════════════════════════════════
 
     def validate(self) -> None:
-        """التحقق من القيم المطلوبة — 5 مستويات."""
         errors: List[str] = []
         warnings: List[str] = []
 
-        # ─── 1. الإعدادات الحرجة ───────────────────────────────
-
+        # ─── 1. الإعدادات الحرجة ───
         if not self.TOKEN:
             errors.append("BOT_TOKEN غير موجود في .env")
         elif len(self.TOKEN) < 20:
@@ -681,23 +820,20 @@ class AppConfig:
                 f"سيُعامَل كـ production."
             )
 
-        # ─── 2. إعدادات النشر ──────────────────────────────────
-
+        # ─── 2. النشر ───
         if self.MIN_PUBLISH_INTERVAL < 1:
             errors.append("MIN_PUBLISH_INTERVAL يجب أن يكون أكبر من 0")
 
         if self.DEFAULT_PUBLISH_INTERVAL < self.MIN_PUBLISH_INTERVAL:
             errors.append(
                 f"DEFAULT_PUBLISH_INTERVAL ({self.DEFAULT_PUBLISH_INTERVAL}) "
-                f"يجب أن يكون أكبر من أو يساوي "
-                f"MIN_PUBLISH_INTERVAL ({self.MIN_PUBLISH_INTERVAL})"
+                f"يجب أن يكون >= MIN_PUBLISH_INTERVAL ({self.MIN_PUBLISH_INTERVAL})"
             )
 
         if self.MAX_CHANNELS_PER_CYCLE < 1:
             errors.append("MAX_CHANNELS_PER_CYCLE يجب أن يكون أكبر من 0")
 
-        # ─── 3. الموارد والشبكة ────────────────────────────────
-
+        # ─── 3. الموارد والشبكة ───
         if self.WEB_PORT < 1 or self.WEB_PORT > 65535:
             errors.append(f"WEB_PORT غير صالح: {self.WEB_PORT}")
 
@@ -705,8 +841,7 @@ class AppConfig:
             errors.append("MAX_BACKUPS يجب أن يكون أكبر من 0")
         elif self.MAX_BACKUPS > 100:
             errors.append(
-                f"MAX_BACKUPS مرتفع جداً ({self.MAX_BACKUPS}) — "
-                f"يُستهلك القرص. الحد الأقصى المعقول 100."
+                f"MAX_BACKUPS مرتفع جداً ({self.MAX_BACKUPS}) — الحد 100."
             )
 
         if self.DB_POOL_SIZE < 1 or self.DB_POOL_SIZE > 100:
@@ -718,8 +853,7 @@ class AppConfig:
         if self.DB_POOL_MIN_SIZE >= self.DB_POOL_SIZE:
             errors.append(
                 f"DB_POOL_MIN_SIZE ({self.DB_POOL_MIN_SIZE}) "
-                f"يجب أن يكون أصغر تماماً من "
-                f"DB_POOL_SIZE ({self.DB_POOL_SIZE})"
+                f"يجب أن يكون < DB_POOL_SIZE ({self.DB_POOL_SIZE})"
             )
 
         if self.PUBLISH_DB_CONCURRENCY < 1 or self.PUBLISH_DB_CONCURRENCY > 10:
@@ -730,12 +864,10 @@ class AppConfig:
 
         if self.MAX_GLOBAL_BANNED_WORDS < 1:
             errors.append(
-                f"MAX_GLOBAL_BANNED_WORDS يجب أن يكون أكبر من 0: "
-                f"{self.MAX_GLOBAL_BANNED_WORDS}"
+                f"MAX_GLOBAL_BANNED_WORDS يجب أن يكون > 0"
             )
 
-        # ─── 4. الميزات الاختيارية ─────────────────────────────
-
+        # ─── 4. الميزات الاختيارية ───
         if self.ENABLE_2FA and not self.ADMIN_2FA_SECRET:
             errors.append("ADMIN_2FA_SECRET مطلوب عند تفعيل ENABLE_2FA")
 
@@ -749,36 +881,75 @@ class AppConfig:
         if self.REDIS_AVAILABLE and not self.REDIS_URL:
             errors.append("REDIS_URL مطلوب عند تفعيل REDIS_AVAILABLE")
 
-        # ─── 5. 🆕 v6: طبقات كشف السبام ──────────────────────
+        # ─── 5. 🆕 v7: طبقات كشف السبام ───
 
-        # NSFW_LAYER_ENABLED بدون NSFW_MODEL_ENABLED = تحذير (لن يعمل)
+        # Pool settings
+        if self.DETECTOR_POOL_WORKERS < 1 or self.DETECTOR_POOL_WORKERS > 64:
+            errors.append(
+                f"DETECTOR_POOL_WORKERS خارج النطاق [1-64]: "
+                f"{self.DETECTOR_POOL_WORKERS}"
+            )
+
+        if self.POOL_TASK_TIMEOUT < 1.0 or self.POOL_TASK_TIMEOUT > 600.0:
+            warnings.append(
+                f"POOL_TASK_TIMEOUT ({self.POOL_TASK_TIMEOUT}s) "
+                f"خارج النطاق المُوصى به [1-600]"
+            )
+
+        if self.ASYNC_NETWORK_TIMEOUT < 0.5 or self.ASYNC_NETWORK_TIMEOUT > 60.0:
+            warnings.append(
+                f"ASYNC_NETWORK_TIMEOUT ({self.ASYNC_NETWORK_TIMEOUT}s) "
+                f"خارج النطاق [0.5-60]"
+            )
+
+        if self.SE_CIRCUIT_FAILURE_THRESHOLD < 1:
+            errors.append(
+                f"SE_CIRCUIT_FAILURE_THRESHOLD يجب أن يكون >= 1"
+            )
+
+        if self.SE_CIRCUIT_OPEN_SEC < 5.0 or self.SE_CIRCUIT_OPEN_SEC > 3600.0:
+            warnings.append(
+                f"SE_CIRCUIT_OPEN_SEC ({self.SE_CIRCUIT_OPEN_SEC}s) "
+                f"خارج النطاق [5-3600]"
+            )
+
+        if self.NORMALIZE_CACHE_MAX < 16:
+            errors.append("NORMALIZE_CACHE_MAX صغير جداً (< 16)")
+        elif self.NORMALIZE_CACHE_MAX > 65536:
+            warnings.append(
+                f"NORMALIZE_CACHE_MAX مرتفع جداً ({self.NORMALIZE_CACHE_MAX})"
+            )
+
+        if self.NSFW_SIGHTENGINE_MAX_BYTES < 1024:
+            errors.append("NSFW_SIGHTENGINE_MAX_BYTES صغير جداً")
+
+        # NSFW layer بدون model
         if self.NSFW_LAYER_ENABLED and not self.NSFW_MODEL_ENABLED:
             warnings.append(
                 "NSFW_LAYER_ENABLED=1 لكن NSFW_MODEL_ENABLED=0 — "
-                "طبقة NSFW لن تعمل. "
+                "طبقة NSFW المحلية معطّلة. "
                 "إما فعّل NSFW_MODEL_ENABLED (يتطلب transformers+torch) "
-                "أو عطّل NSFW_LAYER_ENABLED."
+                "أو اعتمد على Sightengine API."
             )
 
-        # URL_LAYER_ENABLED بدون Safe Browsing = تحذير
+        # URL layer بدون Safe Browsing
         if self.URL_LAYER_ENABLED and not self.SAFE_BROWSING_API_KEY:
             warnings.append(
                 "URL_LAYER_ENABLED=1 لكن SAFE_BROWSING_API_KEY فارغ — "
-                "دقة كشف الروابط ستكون أقل (بدون Google Safe Browsing)."
+                "دقة كشف الروابط ستكون أقل."
             )
 
-        # OCR_LAYER_ENABLED بدون tesseract = تحذير
+        # OCR بدون pytesseract
         if self.OCR_LAYER_ENABLED:
             try:
                 import pytesseract  # noqa: F401
             except ImportError:
                 warnings.append(
                     "OCR_LAYER_ENABLED=1 لكن pytesseract غير مثبت — "
-                    "OCR معطّل فعلياً. "
                     "ثبّت: pip install pytesseract Pillow"
                 )
 
-        # VIDEO_LAYER_ENABLED بدون opencv/ffmpeg = تحذير
+        # Video بدون opencv/ffmpeg
         if self.VIDEO_LAYER_ENABLED:
             _has_cv2 = False
             _has_ffmpeg = False
@@ -799,11 +970,10 @@ class AppConfig:
                 pass
             if not (_has_cv2 or _has_ffmpeg):
                 warnings.append(
-                    "VIDEO_LAYER_ENABLED=1 لكن opencv و ffmpeg غير متوفرين — "
-                    "طبقة الفيديو معطّلة فعلياً."
+                    "VIDEO_LAYER_ENABLED=1 لكن opencv/ffmpeg غير متوفرين."
                 )
 
-        # AUDIO_LAYER_ENABLED بدون pydub = تحذير
+        # Audio بدون pydub
         if self.AUDIO_LAYER_ENABLED:
             try:
                 import speech_recognition  # noqa: F401
@@ -811,49 +981,41 @@ class AppConfig:
             except ImportError:
                 warnings.append(
                     "AUDIO_LAYER_ENABLED=1 لكن SpeechRecognition/pydub "
-                    "غير مثبتين — طبقة الصوت معطّلة فعلياً."
+                    "غير مثبتين."
                 )
 
-        # STEGO_LAYER_ENABLED بدون numpy = تحذير
+        # Stego بدون numpy
         if self.STEGO_LAYER_ENABLED:
             try:
                 import numpy  # noqa: F401
             except ImportError:
                 warnings.append(
-                    "STEGO_LAYER_ENABLED=1 لكن numpy غير مثبت — "
-                    "طبقة Steganography معطّلة فعلياً. "
-                    "ثبّت: pip install numpy"
+                    "STEGO_LAYER_ENABLED=1 لكن numpy غير مثبت."
                 )
 
-        # إذا كل طبقات الكشف معطّلة = تحذير
+        # كل الطبقات معطّلة
         if not self.SPAM_DETECTION_AVAILABLE:
             warnings.append(
-                "TEXT_LAYER_ENABLED=0 — محرك كشف السبام معطّل بالكامل! "
-                "لن يكتشف البوت أي سبام."
+                "TEXT_LAYER_ENABLED=0 — محرك كشف السبام معطّل بالكامل!"
             )
 
-        # ─── 6. تحذيرات الإنتاج ────────────────────────────────
-
+        # ─── 6. تحذيرات الإنتاج ───
         if self.ENVIRONMENT == "production" and not self.WEB_PASSWORD:
             warnings.append(
-                "WEB_PASSWORD فارغ في بيئة الإنتاج — "
-                "لوحة الويب غير محمية!"
+                "WEB_PASSWORD فارغ في الإنتاج — لوحة الويب غير محمية!"
             )
 
         if self.ENVIRONMENT == "production" and not self.WEB_SECRET_KEY:
             warnings.append(
-                "WEB_SECRET_KEY فارغ في بيئة الإنتاج — "
-                "جلسات الويب غير آمنة."
+                "WEB_SECRET_KEY فارغ في الإنتاج."
             )
 
         if self.ENVIRONMENT == "production" and not self.WEBHOOK_SECRET:
             warnings.append(
-                "WEBHOOK_SECRET فارغ في بيئة الإنتاج — "
-                "حماية webhook معطّلة."
+                "WEBHOOK_SECRET فارغ في الإنتاج — حماية webhook معطّلة."
             )
 
-        # ─── النتيجة النهائية ──────────────────────────────────
-
+        # ─── النتيجة النهائية ───
         if warnings:
             for w in warnings:
                 logger.warning(f"⚠️ {w}")
@@ -864,14 +1026,10 @@ class AppConfig:
 
 
 # ═══════════════════════════════════════════════════════════════════
-# PathManager — إدارة المسارات
+# PathManager
 # ═══════════════════════════════════════════════════════════════════
 
 class PathManager:
-    """
-    إنشاء وإدارة مسارات المشروع (Singleton).
-    """
-
     _instance = None
     _lock = threading.Lock()
 
@@ -915,17 +1073,18 @@ class PathManager:
 CONFIG = AppConfig()
 PATHS = PathManager()
 
-# 🆕 v6: تصدير إعدادات كاشف السبام إلى os.environ (بدون override)
+# 🆕 v7: تصدير إعدادات detectors إلى os.environ
+# يُوصى بـ apply_detector_env في bot.py قبل import detectors أيضاً.
 try:
     _applied = CONFIG.apply_detector_env(override=False)
     if _applied > 0:
         logger.debug(
-            f"🛡️ تم تصدير {_applied} متغير كشف سبام إلى os.environ"
+            f"🛡️ تم تصدير {_applied} متغير detector إلى os.environ"
         )
 except Exception as e:
     logger.debug(f"apply_detector_env: {e}")
 
-# التحقق من الإعدادات
+# التحقق
 try:
     CONFIG.validate()
 except ValueError as e:
@@ -933,7 +1092,7 @@ except ValueError as e:
     raise SystemExit(1)
 
 # ═══════════════════════════════════════════════════════════════════
-# سجل الإقلاع — v6
+# سجل الإقلاع — v7
 # ═══════════════════════════════════════════════════════════════════
 
 logger.info(
@@ -943,12 +1102,14 @@ logger.info(f"📁 قاعدة البيانات: {PATHS.DB}")
 logger.info(
     f"🔐 المصادقة الثنائية: {'مفعلة' if CONFIG.ENABLE_2FA else 'معطلة'}"
 )
-logger.info(f"📊 NSFW (Sightengine): {'مفعل' if CONFIG.NSFW_ENABLED else 'معطل'}")
+logger.info(
+    f"📊 NSFW (Sightengine): {'مفعل' if CONFIG.NSFW_ENABLED else 'معطل'}"
+)
 logger.info(
     f"🗄️ Redis: {'متاح' if CONFIG.REDIS_AVAILABLE else 'غير متاح'}"
 )
 logger.info(
-    f"🚀 Pool: size={CONFIG.DB_POOL_SIZE} "
+    f"🚀 DB Pool: size={CONFIG.DB_POOL_SIZE} "
     f"min={CONFIG.DB_POOL_MIN_SIZE} "
     f"concurrency={CONFIG.PUBLISH_DB_CONCURRENCY}"
 )
@@ -957,21 +1118,61 @@ logger.info(
     f"{'مُهيَّأ' if CONFIG.WEBHOOK_SECRET else 'غير مُهيَّأ (اختياري)'}"
 )
 
-# 🆕 v6: تقرير طبقات كشف السبام
+# 🆕 v7: تقرير Spam Detection Engine v4.0.8
 _summary = CONFIG.DETECTION_SUMMARY
 _enabled_layers = [k for k, v in _summary.items() if v]
 _disabled_layers = [k for k, v in _summary.items() if not v]
 
 logger.info(
-    f"🛡️ Spam Detection Engine v4.0.0 | "
-    f"مُفعَّلة: {len(_enabled_layers)}/15 طبقة"
+    f"🛡️ Spam Detection Engine v4.0.8 | "
+    f"مُفعَّلة: {len(_enabled_layers)}/{len(_summary)} طبقة"
 )
 if _enabled_layers:
     logger.info(f"   ✅ مُفعَّلة: {', '.join(_enabled_layers)}")
 if _disabled_layers:
     logger.info(f"   ❌ معطّلة: {', '.join(_disabled_layers)}")
 
+logger.info(
+    f"   ⚙️ Pool: workers={CONFIG.DETECTOR_POOL_WORKERS} | "
+    f"task_timeout={CONFIG.POOL_TASK_TIMEOUT}s | "
+    f"async_net={CONFIG.ASYNC_NETWORK_ENABLED}"
+)
+logger.info(
+    f"   🔌 Circuit Breaker: threshold={CONFIG.SE_CIRCUIT_FAILURE_THRESHOLD} | "
+    f"open={CONFIG.SE_CIRCUIT_OPEN_SEC}s"
+)
+
 if CONFIG.SAFE_BROWSING_API_KEY:
     logger.info("   🔗 Safe Browsing API: مُهيَّأ ✅")
 else:
     logger.info("   🔗 Safe Browsing API: غير مُهيَّأ ⚠️ (يُوصى به)")
+
+_antievasion_enabled = sum([
+    CONFIG.ANTIEVASION_ENTITY_LINK,
+    CONFIG.ANTIEVASION_BUTTON_LINK,
+    CONFIG.ANTIEVASION_SCHEMELESS_URL,
+    CONFIG.ANTIEVASION_HOMOGLYPH,
+    CONFIG.ANTIEVASION_COMBINING,
+    CONFIG.ANTIEVASION_COMPACT_WORDS,
+    CONFIG.ANTIEVASION_EMOJI_SEPARATOR,
+    CONFIG.ANTIEVASION_BUTTON_WEBAPP,
+    CONFIG.ANTIEVASION_BUTTON_LOGINURL,
+    CONFIG.ANTIEVASION_LEETSPEAK,
+    CONFIG.ANTIEVASION_TG_SCHEME,
+    CONFIG.ANTIEVASION_AT_CHANNEL,
+    CONFIG.ANTIEVASION_EMAIL,
+    CONFIG.ANTIEVASION_PUNYCODE,
+    CONFIG.ANTIEVASION_IPV4_SCHEMELESS,
+    CONFIG.ANTIEVASION_MULTILINE_URL,
+    CONFIG.ANTIEVASION_VENUE_VCARD,
+    CONFIG.ANTIEVASION_POLL,
+    CONFIG.ANTIEVASION_EMOJI_IN_DOMAIN,
+    CONFIG.ANTIEVASION_UNICODE_DOTS,
+    CONFIG.ANTIEVASION_EXTENDED_COMBINING,
+    CONFIG.ANTIEVASION_EXTRA_SCRIPTS,
+    CONFIG.ANTIEVASION_ALT_SCHEMES,
+    CONFIG.ANTIEVASION_RANDOM_DOMAIN,
+])
+logger.info(
+    f"   🛡️ Anti-Evasion: {_antievasion_enabled}/24 toggle مُفعَّل"
+)
