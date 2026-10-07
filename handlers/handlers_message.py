@@ -1,9 +1,30 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-handlers_message.py - v7.18.5
+handlers_message.py - v7.18.6
 (متوافق مع detectors v3.0.1 UNIFIED — 7 Layers)
 =============================================================================
+🆕 v7.18.6 — PERFORMANCE HARDENING (تقليل round-trips):
+    🟠 PERF-1: cache محلي لـ notify_group_log — 60s TTL لكل chat_id
+                (كان: DB query لكل رسالة محذوفة → 1188)
+    🟠 PERF-2: cache محلي مزدوج لـ get_security_settings_cached
+                (5s TTL) فوق settings_cache لتقليل ضغط DB عند
+                الرسائل المتتابعة → 2106
+    🟠 PERF-3: get_security_settings_cached + get_auto_reply_settings_cached
+                — حماية من قيم غير dict من DB (Normalization)
+    🟠 PERF-5: _resolve_penalty — دعم dict + asyncpg.Record + MySQL Row
+                عبر _row_to_dict_local helper (كان يفشل بصمت مع Record)
+    🟠 PERF-6: notify_group_log — إبطال cache عند تغيير إعدادات
+                المجموعة عبر _invalidate_group_log_cache helper
+    🟡 PERF-7: _check_admin_in_chat — cache 30s لنتيجة group_admins
+    🟡 PERF-9: _lazy_init_columns — دمج ALTER TABLE على PostgreSQL
+                إلى أمر واحد (8 round-trips → 1)
+    🟢 PERF-10: توثيق واضح لكل cache مع TTL وحد أقصى للحجم
+
+    ✅ PERF-4-RESTORED: احتُفظ بالسلوك الأصلي لـ
+       DB.reset_violation_count() بعد العقوبة — العدّاد يُصفَّر
+       فيحتاج العضو 3 مخالفات جديدة لتلقّي عقوبة أخرى.
+
 🆕 v7.18.5 — حماية المستخدمين من الحجب التلقائي:
     🛡️ NEW: عدم إضافة users/hidden_users للقائمة السوداء
     🛡️ NEW: فحص positive-ID كحماية إضافية (قنوات/مجموعات فقط)
@@ -343,6 +364,31 @@ def _as_bool(value, default=False) -> bool:
     return default
 
 
+def _row_to_dict_local(row) -> Optional[Dict[str, Any]]:
+    """
+    🆕 v7.18.6 PERF-5: تحويل موحّد لأي صف من DB إلى dict.
+
+    يدعم:
+        • asyncpg.Record (يدعم [] و .get عبر __getitem__)
+        • MySQL aiomysql/asyncmy Row (يدعم [])
+        • sqlite3.Row (يدعم [])
+        • dict أصلي
+    """
+    if row is None:
+        return None
+    if isinstance(row, dict):
+        return row
+    try:
+        if hasattr(row, 'keys'):
+            return {k: row[k] for k in row.keys()}
+    except Exception:
+        pass
+    try:
+        return dict(row)
+    except (TypeError, ValueError):
+        return None
+
+
 # ═══════════════════════════════════════════════════════════════════
 # Environment Flags
 # ═══════════════════════════════════════════════════════════════════
@@ -476,6 +522,126 @@ FEATURE_LOG_ADMIN_CHANGES = _env_flag("LOG_ADMIN_CHANGES", True)
 
 _DEBUG_DIAG = DEBUG_DIAG
 _DEBUG_SPAM = DEBUG_SPAM
+
+
+# ═══════════════════════════════════════════════════════════════════
+# 🆕 v7.18.6 PERF-1/2/7: Caches محلية لتقليل round-trips
+# ═══════════════════════════════════════════════════════════════════
+#
+# القاعدة:
+#   - TTL قصير (5-60s) — لتوازن بين الحداثة وتقليل الاستعلامات.
+#   - max_size ثابت — لمنع تسرّب الذاكرة.
+#   - لا lock على القراءة (asyncio single-thread).
+#
+# ملاحظات الصيانة:
+#   - عند تغيير إعدادات المجموعة (log channel / security settings)،
+#     يجب استدعاء الدالة المُبطلَة المُناسبة من handlers_callback.
+# ═══════════════════════════════════════════════════════════════════
+
+# 🟠 PERF-1: cache لـ group log channel
+_GROUP_LOG_CHANNEL_CACHE_TTL = 60.0
+_GROUP_LOG_CHANNEL_CACHE_MAX = 2000
+_group_log_channel_cache: Dict[int, Tuple[Any, float]] = {}
+
+
+def _invalidate_group_log_cache(chat_id: Optional[int] = None) -> None:
+    """🆕 v7.18.6 PERF-6: إبطال cache قناة السجل."""
+    try:
+        if chat_id is None:
+            _group_log_channel_cache.clear()
+        else:
+            _group_log_channel_cache.pop(int(chat_id), None)
+    except Exception:
+        pass
+
+
+async def _get_group_log_channel_cached(chat_id: int):
+    """🟠 PERF-1: قراءة cache قناة السجل مع fallback لـ DB."""
+    now = time.monotonic()
+    try:
+        entry = _group_log_channel_cache.get(int(chat_id))
+    except (TypeError, ValueError):
+        entry = None
+
+    if entry is not None:
+        cached_value, cached_at = entry
+        if now - cached_at < _GROUP_LOG_CHANNEL_CACHE_TTL:
+            return cached_value
+
+    getter = getattr(DB, 'get_group_log_channel', None)
+    if not callable(getter):
+        return None
+
+    try:
+        value = await getter(chat_id)
+    except Exception as e:
+        logger.debug(
+            "_get_group_log_channel_cached(%s): %s", chat_id, e,
+        )
+        if entry is not None:
+            return entry[0]
+        return None
+
+    # تخزين مع حد أقصى
+    if len(_group_log_channel_cache) >= _GROUP_LOG_CHANNEL_CACHE_MAX:
+        # حذف 20% من الأقدم — بدون lock (asyncio-safe)
+        try:
+            oldest = sorted(
+                _group_log_channel_cache.items(),
+                key=lambda kv: kv[1][1],
+            )[: max(1, _GROUP_LOG_CHANNEL_CACHE_MAX // 5)]
+            for k, _ in oldest:
+                _group_log_channel_cache.pop(k, None)
+        except Exception:
+            pass
+
+    _group_log_channel_cache[int(chat_id)] = (value, now)
+    return value
+
+
+# 🟠 PERF-2: cache محلي قصير لـ security settings (5s)
+_SEC_SETTINGS_LOCAL_TTL = 5.0
+_SEC_SETTINGS_LOCAL_MAX = 3000
+_sec_settings_local_cache: Dict[int, Tuple[Dict[str, Any], float]] = {}
+
+
+def _invalidate_sec_settings_local(chat_id: Optional[int] = None) -> None:
+    """🟠 PERF-2: إبطال cache محلي (يُنادَى من handlers_callback)."""
+    try:
+        if chat_id is None:
+            _sec_settings_local_cache.clear()
+        else:
+            _sec_settings_local_cache.pop(int(chat_id), None)
+    except Exception:
+        pass
+
+
+# 🟡 PERF-7: cache لنتيجة _check_admin_in_chat (30s)
+_ADMIN_CHECK_CACHE_TTL = 30.0
+_ADMIN_CHECK_CACHE_MAX = 3000
+_admin_check_cache: Dict[Tuple[int, int], Tuple[bool, float]] = {}
+
+
+def _invalidate_admin_check_cache(
+    chat_id: Optional[int] = None,
+    user_id: Optional[int] = None,
+) -> None:
+    """🟡 PERF-7: إبطال cache _check_admin_in_chat."""
+    try:
+        if chat_id is None:
+            _admin_check_cache.clear()
+            return
+        if user_id is None:
+            to_del = [
+                k for k in _admin_check_cache
+                if k[0] == int(chat_id)
+            ]
+            for k in to_del:
+                _admin_check_cache.pop(k, None)
+        else:
+            _admin_check_cache.pop((int(chat_id), int(user_id)), None)
+    except Exception:
+        pass
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -623,7 +789,7 @@ async def _lazy_init_columns():
         _columns_last_attempt_ts = now
 
         db_type = getattr(DB, "DB_TYPE", "sqlite")
-        logger.info("🔧 v7.18.5: Auto-migration (DB_TYPE=%s)", db_type)
+        logger.info("🔧 v7.18.6: Auto-migration (DB_TYPE=%s)", db_type)
 
         cols = [
             ("delete_protected_any", "INTEGER DEFAULT 0", "TINYINT(1) DEFAULT 0"),
@@ -636,42 +802,66 @@ async def _lazy_init_columns():
             ("delete_polls", "INTEGER DEFAULT 0", "TINYINT(1) DEFAULT 0"),
         ]
 
-        # 🔧 v7.18.4: تتبّع الأخطاء الحقيقية بشكل منفصل
         migration_ok = True
         unexpected_failures: List[str] = []
 
-        for col_name, sqlite_def, mysql_def in cols:
+        # 🟡 PERF-9: على PostgreSQL — دمج كل ALTER ADD COLUMN
+        # في أمر واحد (ADD COLUMN IF NOT EXISTS ... , ADD COLUMN ...)
+        if db_type == "postgres":
             try:
-                if db_type == "postgres":
-                    await DB.execute(
-                        "ALTER TABLE group_security ADD COLUMN IF NOT EXISTS "
-                        f"{col_name} {sqlite_def}"
-                    )
-                elif db_type == "mysql":
-                    try:
-                        await DB.execute(
-                            "ALTER TABLE group_security "
-                            f"ADD COLUMN {col_name} {mysql_def}"
-                        )
-                    except Exception as e:
-                        m = str(e).lower()
-                        if "duplicate" not in m and "already exists" not in m:
-                            migration_ok = False
-                            unexpected_failures.append(f"{col_name}: {e}")
-                else:
-                    try:
-                        await DB.execute(
-                            "ALTER TABLE group_security "
-                            f"ADD COLUMN {col_name} {sqlite_def}"
-                        )
-                    except Exception as e:
-                        m = str(e).lower()
-                        if "duplicate" not in m and "already exists" not in m:
-                            migration_ok = False
-                            unexpected_failures.append(f"{col_name}: {e}")
+                additions = ", ".join(
+                    f"ADD COLUMN IF NOT EXISTS {col} {sqlite_def}"
+                    for col, sqlite_def, _ in cols
+                )
+                await DB.execute(
+                    f"ALTER TABLE group_security {additions}"
+                )
+                logger.info(
+                    "✅ PERF-9: عمود %d أُضيفوا في ALTER واحد (PG)",
+                    len(cols),
+                )
             except Exception as e:
                 migration_ok = False
-                unexpected_failures.append(f"{col_name}: {e}")
+                unexpected_failures.append(f"PG-bulk: {e}")
+        else:
+            # MySQL + SQLite — ALTER منفصل لكل عمود
+            for col_name, sqlite_def, mysql_def in cols:
+                try:
+                    if db_type == "mysql":
+                        try:
+                            await DB.execute(
+                                "ALTER TABLE group_security "
+                                f"ADD COLUMN {col_name} {mysql_def}"
+                            )
+                        except Exception as e:
+                            m = str(e).lower()
+                            if (
+                                "duplicate" not in m
+                                and "already exists" not in m
+                            ):
+                                migration_ok = False
+                                unexpected_failures.append(
+                                    f"{col_name}: {e}"
+                                )
+                    else:
+                        try:
+                            await DB.execute(
+                                "ALTER TABLE group_security "
+                                f"ADD COLUMN {col_name} {sqlite_def}"
+                            )
+                        except Exception as e:
+                            m = str(e).lower()
+                            if (
+                                "duplicate" not in m
+                                and "already exists" not in m
+                            ):
+                                migration_ok = False
+                                unexpected_failures.append(
+                                    f"{col_name}: {e}"
+                                )
+                except Exception as e:
+                    migration_ok = False
+                    unexpected_failures.append(f"{col_name}: {e}")
 
         # 🆕 v7.18.3: إنشاء جدول auto_blocked_sources
         if _HAS_AUTO_BLOCK:
@@ -685,6 +875,11 @@ async def _lazy_init_columns():
             logger.info("✅ internal_cache cleared")
         except Exception:
             pass
+
+        # 🆕 v7.18.6: إبطال caches المحلية عند الـ migration
+        _invalidate_group_log_cache()
+        _invalidate_sec_settings_local()
+        _invalidate_admin_check_cache()
 
         if migration_ok:
             _columns_initialized = True
@@ -1178,14 +1373,24 @@ def _format_duration(seconds):
 
 # ═══════════════════════════════════════════════════════════════════
 # Group Log
+# 🟠 PERF-1: cache محلي بـ 60s TTL
 # ═══════════════════════════════════════════════════════════════════
 
 async def notify_group_log(context, chat_id, text, disable_preview=True):
+    """
+    🟠 PERF-1 (v7.18.6): استخدام cache محلي بدل DB query لكل رسالة.
+
+    قبل v7.18.6:
+        channel_id = await DB.get_group_log_channel(chat_id)  ← DB query
+    بعد v7.18.6:
+        channel_id = await _get_group_log_channel_cached(chat_id)  ← memory
+        (DB query فقط كل 60s لكل chat_id)
+
+    ⚠️ يجب استدعاء _invalidate_group_log_cache(chat_id) عند تغيير
+        قناة السجل من handlers_callback.
+    """
     try:
-        getter = getattr(DB, 'get_group_log_channel', None)
-        if not callable(getter):
-            return False
-        channel_id = await getter(chat_id)
+        channel_id = await _get_group_log_channel_cached(chat_id)
         if not channel_id:
             return False
         if isinstance(channel_id, str) and channel_id.lstrip('-').isdigit():
@@ -1199,8 +1404,11 @@ async def notify_group_log(context, chat_id, text, disable_preview=True):
         err = str(e).lower()
         if "chat not found" in err:
             logger.error("❌ group_log: قناة غير موجودة | %s", chat_id)
+            # إبطال cache — قد تكون القناة حُذفت
+            _invalidate_group_log_cache(chat_id)
         elif "not enough rights" in err or "bot is not a member" in err:
             logger.error("❌ group_log: البوت ليس عضواً | %s", chat_id)
+            _invalidate_group_log_cache(chat_id)
         return False
     except Exception as e:
         logger.error("❌ group_log FAILED: %s", e)
@@ -1983,10 +2191,64 @@ class GroupRateLimiterManager:
                     await _cleanup_flood_tracker(force=True)
                 except Exception:
                     pass
+                # 🆕 v7.18.6: تنظيف caches PERF
+                try:
+                    _prune_perf_caches()
+                except Exception:
+                    pass
             except asyncio.CancelledError:
                 raise
             except Exception as e:
                 logger.error("❌ periodic_cleanup: %s", e)
+
+
+def _prune_perf_caches() -> int:
+    """
+    🆕 v7.18.6: تنظيف دوري للـ caches المحلية (PERF-1/2/7).
+    يعيد العدد الكلي للمُزال.
+    """
+    removed = 0
+    now = time.monotonic()
+
+    # _group_log_channel_cache
+    try:
+        stale = [
+            k for k, (_, ts) in _group_log_channel_cache.items()
+            if now - ts > _GROUP_LOG_CHANNEL_CACHE_TTL * 5
+        ]
+        for k in stale:
+            _group_log_channel_cache.pop(k, None)
+        removed += len(stale)
+    except Exception:
+        pass
+
+    # _sec_settings_local_cache
+    try:
+        stale = [
+            k for k, (_, ts) in _sec_settings_local_cache.items()
+            if now - ts > _SEC_SETTINGS_LOCAL_TTL * 5
+        ]
+        for k in stale:
+            _sec_settings_local_cache.pop(k, None)
+        removed += len(stale)
+    except Exception:
+        pass
+
+    # _admin_check_cache
+    try:
+        stale = [
+            k for k, (_, ts) in _admin_check_cache.items()
+            if now - ts > _ADMIN_CHECK_CACHE_TTL * 5
+        ]
+        for k in stale:
+            _admin_check_cache.pop(k, None)
+        removed += len(stale)
+    except Exception:
+        pass
+
+    if removed > 0:
+        logger.debug("🧹 _prune_perf_caches: حُذف %d إدخال", removed)
+    return removed
 
 
 async def _cleanup_delete_failure_counter():
@@ -2100,29 +2362,94 @@ def clear_lang_cache(context):
 
 
 async def get_security_settings_cached(chat_id) -> dict:
-    cached = await settings_cache.get_security(chat_id)
-    if cached is not None:
-        return cached
-    settings = await DB.get_security_settings(chat_id)
-    if settings is None:
-        settings = {}
-    await settings_cache.set_security(chat_id, settings)
+    """
+    🟠 PERF-2 (v7.18.6): طبقتان من cache لتقليل ضغط DB.
+
+    قبل v7.18.6:
+        كل رسالة → settings_cache.get_security → DB query (أحياناً)
+
+    بعد v7.18.6:
+        كل رسالة → _sec_settings_local_cache (5s TTL، ذاكرة)
+        كل 5s → settings_cache.get_security (طبقة ثانية)
+        كل انتهاء settings_cache TTL → DB query
+
+    ⚠️ يُنصح باستدعاء _invalidate_sec_settings_local(chat_id)
+        عند تعديل أي إعداد أمان من handlers_callback.
+    """
+    now = time.monotonic()
+
+    # الطبقة 1: cache محلي سريع
+    try:
+        entry = _sec_settings_local_cache.get(int(chat_id))
+    except (TypeError, ValueError):
+        entry = None
+
+    if entry is not None:
+        cached_value, cached_at = entry
+        if now - cached_at < _SEC_SETTINGS_LOCAL_TTL:
+            return cached_value
+
+    # الطبقة 2: settings_cache (كاش cache.py)
+    settings = None
+    try:
+        settings = await settings_cache.get_security(chat_id)
+    except Exception as e:
+        logger.debug("settings_cache.get_security(%s): %s", chat_id, e)
+
+    # 🟠 PERF-3: تطبيع النوع
+    if settings is None or not isinstance(settings, dict):
+        try:
+            settings = await DB.get_security_settings(chat_id)
+        except Exception as e:
+            logger.debug("DB.get_security_settings(%s): %s", chat_id, e)
+            settings = None
+
+        # PERF-3: ضمان dict
+        settings = _row_to_dict_local(settings) or {}
+        # إعادة تخزين في الطبقة 2
+        try:
+            await settings_cache.set_security(chat_id, settings)
+        except Exception:
+            pass
+
+    # تخزين في الطبقة 1 (memory)
+    if len(_sec_settings_local_cache) >= _SEC_SETTINGS_LOCAL_MAX:
+        try:
+            oldest = sorted(
+                _sec_settings_local_cache.items(),
+                key=lambda kv: kv[1][1],
+            )[: max(1, _SEC_SETTINGS_LOCAL_MAX // 5)]
+            for k, _ in oldest:
+                _sec_settings_local_cache.pop(k, None)
+        except Exception:
+            pass
+
+    try:
+        _sec_settings_local_cache[int(chat_id)] = (settings, now)
+    except (TypeError, ValueError):
+        pass
+
     return settings
 
 
 async def get_auto_reply_settings_cached(chat_id) -> dict:
     cached = await settings_cache.get_auto_reply_settings(chat_id)
-    if cached is not None:
+    # 🟠 PERF-3: تطبيع النوع
+    if cached is not None and isinstance(cached, dict):
         return cached
     settings = await DB.get_auto_reply_settings(chat_id)
-    if settings is None:
-        settings = {}
-    await settings_cache.set_auto_reply_settings(chat_id, settings)
+    settings = _row_to_dict_local(settings) or {}
+    try:
+        await settings_cache.set_auto_reply_settings(chat_id, settings)
+    except Exception:
+        pass
     return settings
 
 
 async def invalidate_security_cache(chat_id=None):
     await settings_cache.invalidate_security(chat_id)
+    # 🆕 v7.18.6: إبطال cache المحلي أيضاً
+    _invalidate_sec_settings_local(chat_id)
 
 
 async def invalidate_auto_reply_cache(chat_id=None):
@@ -2278,25 +2605,73 @@ def _parse_contest_date(date_str):
 
 
 async def _check_admin_in_chat(context, chat_id, user_id) -> bool:
+    """
+    🟡 PERF-7 (v7.18.6): cache 30s لنتيجة فحص الأدمن.
+
+    قبل v7.18.6:
+        كل استدعاء → is_authorized_in_group (cache) + DB query
+    بعد v7.18.6:
+        كل استدعاء → cache محلي (30s)
+        كل 30s → is_authorized_in_group + DB query
+
+    ⚠️ يُنصح باستدعاء _invalidate_admin_check_cache(chat_id, user_id)
+        عند تغيير صلاحيات المشرفين.
+    """
     if user_id == CONFIG.PRIMARY_OWNER_ID:
         return True
+
+    try:
+        cache_key = (int(chat_id), int(user_id))
+    except (TypeError, ValueError):
+        cache_key = None
+
+    if cache_key is not None:
+        now = time.monotonic()
+        entry = _admin_check_cache.get(cache_key)
+        if entry is not None:
+            cached_value, cached_at = entry
+            if now - cached_at < _ADMIN_CHECK_CACHE_TTL:
+                return cached_value
+
+    result = False
     try:
         if await is_authorized_in_group(context.bot, chat_id, user_id):
-            return True
+            result = True
     except Exception:
         pass
-    try:
-        db_type = getattr(DB, "DB_TYPE", "sqlite")
-        if db_type == "postgres":
-            sql = ("SELECT 1 FROM group_admins "
-                   "WHERE chat_id = $1 AND user_id = $2 LIMIT 1")
-        else:
-            sql = ("SELECT 1 FROM group_admins "
-                   "WHERE chat_id = ? AND user_id = ? LIMIT 1")
-        row = await DB.fetchval(sql, (chat_id, user_id))
-        return row is not None
-    except Exception:
-        return False
+
+    if not result:
+        try:
+            db_type = getattr(DB, "DB_TYPE", "sqlite")
+            if db_type == "postgres":
+                sql = ("SELECT 1 FROM group_admins "
+                       "WHERE chat_id = $1 AND user_id = $2 LIMIT 1")
+            else:
+                sql = ("SELECT 1 FROM group_admins "
+                       "WHERE chat_id = ? AND user_id = ? LIMIT 1")
+            row = await DB.fetchval(sql, (chat_id, user_id))
+            result = row is not None
+        except Exception:
+            result = False
+
+    # تخزين النتيجة (نجاح أو فشل) — مع حد أقصى
+    if cache_key is not None:
+        if len(_admin_check_cache) >= _ADMIN_CHECK_CACHE_MAX:
+            try:
+                oldest = sorted(
+                    _admin_check_cache.items(),
+                    key=lambda kv: kv[1][1],
+                )[: max(1, _ADMIN_CHECK_CACHE_MAX // 5)]
+                for k, _ in oldest:
+                    _admin_check_cache.pop(k, None)
+            except Exception:
+                pass
+        try:
+            _admin_check_cache[cache_key] = (result, time.monotonic())
+        except Exception:
+            pass
+
+    return result
 
 
 async def _verify_bot_in_log_channel(context, channel_id):
@@ -3201,6 +3576,16 @@ class MessageHandlers:
 
     @staticmethod
     async def _resolve_penalty(chat_id, violation_type, settings):
+        """
+        🟠 PERF-5 (v7.18.6): دعم dict + asyncpg.Record + MySQL Row.
+
+        قبل v7.18.6:
+            penalty_rule.get('duration_seconds', 0) — يفشل مع asyncpg.Record
+            (لا يدعم .get()) → duration_seconds = 0 دائماً.
+
+        بعد v7.18.6:
+            استخدام _row_to_dict_local() لتوحيد النوع.
+        """
         penalty_rule = None
         try:
             penalty_rule = await DB.get_violation_penalty(
@@ -3209,11 +3594,14 @@ class MessageHandlers:
         except Exception:
             pass
 
+        # 🟠 PERF-5: توحيد النوع
+        penalty_rule = _row_to_dict_local(penalty_rule)
+
         if penalty_rule:
             try:
                 ptype = penalty_rule['penalty_type']
             except (TypeError, KeyError):
-                ptype = None
+                ptype = penalty_rule.get('penalty_type')
             if ptype == 'none':
                 return None, 0
             if ptype in ('mute', 'ban', 'restrict', 'kick', 'warn'):
@@ -3496,6 +3884,9 @@ class MessageHandlers:
                     context.bot, chat_id, sent_penalty.message_id,
                     PENALTY_MESSAGE_DELETE_DELAY, context=context,
                 )
+            # ✅ v7.18.6-PERF-4-RESTORED: السلوك الأصلي محفوظ
+            # تصفير العدّاد بعد تطبيق العقوبة — يحتاج 3 مخالفات
+            # جديدة لتلقّي عقوبة أخرى.
             await DB.reset_violation_count(user_id, chat_id)
         except Exception:
             pass
@@ -4210,4 +4601,21 @@ __all__ = [
     "_POSTBOT_NAME_REGEX",
     "_HAS_AUTO_BLOCK",
     "handle_autoblocked_command",
+
+    # 🆕 v7.18.6 — PERF caches + invalidation
+    "_GROUP_LOG_CHANNEL_CACHE_TTL",
+    "_GROUP_LOG_CHANNEL_CACHE_MAX",
+    "_group_log_channel_cache",
+    "_get_group_log_channel_cached",
+    "_invalidate_group_log_cache",
+    "_SEC_SETTINGS_LOCAL_TTL",
+    "_SEC_SETTINGS_LOCAL_MAX",
+    "_sec_settings_local_cache",
+    "_invalidate_sec_settings_local",
+    "_ADMIN_CHECK_CACHE_TTL",
+    "_ADMIN_CHECK_CACHE_MAX",
+    "_admin_check_cache",
+    "_invalidate_admin_check_cache",
+    "_row_to_dict_local",
+    "_prune_perf_caches",
 ]
