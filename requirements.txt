@@ -25,3 +25,4 @@ SpeechRecognition
 pydub
 requests
 python-whois
+opencv-python-headless
