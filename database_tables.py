@@ -2,46 +2,34 @@
 # -*- coding: utf-8 -*-
 
 """
-database_tables.py — إنشاء الجداول والفهارس لكل قواعد البيانات (v7.9.0)
+database_tables.py — إنشاء الجداول والفهارس لكل قواعد البيانات (v7.9.1)
 ================================================================================
+🆕 v7.9.1 (BANNED-WORDS-ADDED-BY-MIGRATION):
+  🔴 BW-MIG-1 CRITICAL: migration لعمود added_by في banned_words
+      السبب: database.py v7.7.57 يحتاج added_by للفصل بين
+      كلمات الملف (0) وكلمات البوت (user_id). القواعد القديمة
+      ليس لديها هذا العمود → فشل الاستعلام → توقف المزامنة.
+  🔴 BW-MIG-2 CRITICAL: migration لعمود added_by في auto_replies
+      نفس المنطق لـ BW-FIX-2 في database.py v7.7.57.
+  🟡 BW-MIG-3: CURRENT_SCHEMA_VERSION 26 → 27 (لإجبار fast-path
+      الجديد على تشغيل الـ migrations الإضافية).
+  🟡 BW-MIG-4: إضافة _BANNED_WORDS_NEW_COLUMNS و
+      _AUTO_REPLIES_NEW_COLUMNS كقوائم مستقلة.
+  🟢 BW-MIG-5: تحديث __all__ لتصدير القوائم الجديدة.
+
 🆕 v7.9.0 (SECURITY-V7.10.0-COLUMNS):
   ✅ CURRENT_SCHEMA_VERSION: 25 → 26
-  ✅ _GROUP_SECURITY_NEW_COLUMNS: +7 أعمدة (أزرار v7.10.0)
-       • delete_at_channel       (📢 منشن قناة)
-       • delete_tg_scheme        (🔗 روابط tg://)
-       • delete_button_links     (🔘 أزرار بروابط)
-       • delete_emails           (📧 البريد الإلكتروني)
-       • delete_protected_any    (🛡️ محمي متعدد)
-       • delete_postbot_pattern  (🤖 نمط PostBot)
-       • delete_protected_forward (دعم forward toggle)
-  ✅ تعريف group_security محدّث في create_tables_sqlite / _postgres / _mysql
-  ✅ فهرس جديد: idx_group_security_postbot (partial index)
+  ✅ _GROUP_SECURITY_NEW_COLUMNS: +7 أعمدة
   ✅ EXPECTED_INDEX_COUNT: 77 → 78
-  ✅ السبب: الأزرار الستة الجديدة في handlers_callback v9.7.7
-            + utils.py Security Bridge v7.10.2 تحتاج أعمدة في group_security
-            (الجدول الفعلي — وليس group_settings)
 
 🆕 v7.8.0 (FULL-AUTOVACUUM-COVERAGE):
-  ✅ توسيع SMALL_TABLES_FOR_AGGRESSIVE_AUTOVACUUM من 23 → 33 جدولاً
-  ✅ إضافة: admin_logs, banned_words, penalty_archive, user_points,
-            referral_rewards, hidden_owner_groups, support_tickets,
-            user_reminder_settings, user_channels, bot_addition_log
+  ✅ توسيع SMALL_TABLES_FOR_AGGRESSIVE_AUTOVACUUM 23 → 33
   ✅ SCHEMA_VERSION: 24 → 25
-  ✅ EXPECTED_INDEX_COUNT: 77 (بدون تغيير)
 
-🆕 v7.7.0 (AUTO-BLOCKED-SOURCES):
-  ✅ NEW: جدول auto_blocked_sources لحجب المصادر المشبوهة تلقائياً
-  ✅ NEW: دوال _ensure_auto_blocked_table_* (PG/MySQL/SQLite)
-  ✅ NEW: فهرسان جديدان (hit_count DESC, last_seen DESC)
-
-🆕 v7.6.28 (MAINTENANCE-USERS-FIX):
-  ✅ FIX-HIGH: إضافة "users" إلى MAINTENANCE_TABLES
-
-🆕 v7.6.27 (VACUUM-OUTSIDE-TX-FIX) — إصلاح حرج:
-  ✅ FIX-CRITICAL: إزالة _run_maintenance_postgres من fast-path
-
-🚀 v7.6.25 (MIGRATION-ORDER-FIX):
-  ✅ FIX-CRITICAL: إعادة ترتيب الـ migrations
+🆕 v7.7.0 (AUTO-BLOCKED-SOURCES): جدول auto_blocked_sources
+🆕 v7.6.28 (MAINTENANCE-USERS-FIX)
+🆕 v7.6.27 (VACUUM-OUTSIDE-TX-FIX)
+🚀 v7.6.25 (MIGRATION-ORDER-FIX)
 ================================================================================
 """
 
@@ -54,8 +42,8 @@ from datetime import datetime, timezone, timedelta
 # 0. ثوابت
 # =====================================================================
 
-# ✅ v7.9.0: 25 → 26 (إضافة 7 أعمدة في group_security)
-CURRENT_SCHEMA_VERSION = 26
+# ✅ v7.9.1: 26 → 27 (إضافة migrations لـ banned_words + auto_replies)
+CURRENT_SCHEMA_VERSION = 27
 
 CLEANUP_ANONYMOUS_BOT_IDS = (1087968824, 136817688)
 
@@ -80,12 +68,11 @@ MAINTENANCE_TABLES = (
     "banned_words",
     "schedule",
     "admin_logs",
-    "auto_blocked_sources",  # ✅ v7.7.0
+    "auto_blocked_sources",
 )
 
 # ✅ v7.8.0: توسيع من 23 → 33 جدولاً
 SMALL_TABLES_FOR_AGGRESSIVE_AUTOVACUUM = (
-    # ═══ الأساسية (v7.7.0) ═══
     "auto_replies",
     "auto_reply_settings",
     "anonymous_admins",
@@ -307,7 +294,7 @@ COMMON_INDEXES = [
     ("auto_blocked_sources", "idx_auto_blocked_last_seen",
      "auto_blocked_sources(last_seen DESC)"),
 
-    # ✅ v7.9.0: فهرس new للـ postbot (يُستخدم في should_delete_by_security)
+    # ✅ v7.9.0: فهرس new للـ postbot
     ("group_security", "idx_group_security_postbot",
      "group_security(delete_postbot_pattern) "
      "WHERE delete_postbot_pattern = 1"),
@@ -403,7 +390,6 @@ CRITICAL_INDEX_NAMES = frozenset({
     "idx_bot_groups_banned_cover",
     "idx_bot_addition_log_chat",
     "idx_user_channels_removed_at",
-    # ✅ v7.9.0
     "idx_group_security_postbot",
 })
 
@@ -521,7 +507,6 @@ def _is_advanced_index(cols: str) -> bool:
 # =====================================================================
 
 async def _ensure_auto_blocked_table_postgres(conn, logger):
-    """إنشاء جدول auto_blocked_sources إذا لم يكن موجوداً (PostgreSQL)"""
     try:
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS auto_blocked_sources (
@@ -544,7 +529,6 @@ async def _ensure_auto_blocked_table_postgres(conn, logger):
 
 
 async def _ensure_auto_blocked_table_sqlite(conn, logger):
-    """إنشاء جدول auto_blocked_sources إذا لم يكن موجوداً (SQLite)"""
     try:
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS auto_blocked_sources (
@@ -571,7 +555,6 @@ async def _ensure_auto_blocked_table_sqlite(conn, logger):
 
 
 async def _ensure_auto_blocked_table_mysql(conn, logger):
-    """إنشاء جدول auto_blocked_sources إذا لم يكن موجوداً (MySQL)"""
     try:
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS auto_blocked_sources (
@@ -1302,23 +1285,23 @@ async def _run_maintenance_mysql(conn, logger):
 # Migrations — إضافة أعمدة مفقودة
 # =====================================================================
 
-# ✅ v7.9.0: أُضيفت 7 أعمدة للأزرار الستة الجديدة + forward toggle
+# ✅ v7.9.0: 7 أعمدة للأزرار الستة + forward toggle
 _GROUP_SECURITY_NEW_COLUMNS = [
     # ─── الموجودة مسبقًا ───
     ("violation_penalty", "TEXT DEFAULT 'none'"),
     ("violation_penalty_duration", "INTEGER DEFAULT 3600"),
 
     # ═══════════════════════════════════════════════════════════════
-    # 🆕 v7.9.0 (v7.10.0 أزرار): 6 أعمدة الأزرار الستة الجديدة
+    # 🆕 v7.9.0 (v7.10.0 أزرار): 6 أعمدة الأزرار + forward
     # ═══════════════════════════════════════════════════════════════
-    ("delete_at_channel", "INTEGER DEFAULT 0"),        # 📢 منشن قناة
-    ("delete_tg_scheme", "INTEGER DEFAULT 1"),         # 🔗 روابط tg://
-    ("delete_button_links", "INTEGER DEFAULT 1"),      # 🔘 أزرار بروابط
-    ("delete_emails", "INTEGER DEFAULT 0"),            # 📧 البريد الإلكتروني
-    ("delete_protected_any", "INTEGER DEFAULT 0"),     # 🛡️ محمي متعدد
-    ("delete_postbot_pattern", "INTEGER DEFAULT 0"),   # 🤖 نمط PostBot
+    ("delete_at_channel", "INTEGER DEFAULT 0"),
+    ("delete_tg_scheme", "INTEGER DEFAULT 1"),
+    ("delete_button_links", "INTEGER DEFAULT 1"),
+    ("delete_emails", "INTEGER DEFAULT 0"),
+    ("delete_protected_any", "INTEGER DEFAULT 0"),
+    ("delete_postbot_pattern", "INTEGER DEFAULT 0"),
 
-    # ─── دعم forward toggle (يُضيفه handlers_callback) ───
+    # ─── دعم forward toggle ───
     ("delete_protected_forward", "INTEGER DEFAULT 0"),
 ]
 
@@ -1331,6 +1314,16 @@ _CONTESTS_NEW_COLUMNS = [
 _USER_CHANNELS_NEW_COLUMNS = [
     ("removed_at", "TEXT DEFAULT NULL"),
     ("removal_reason", "TEXT DEFAULT NULL"),
+]
+
+# ✅ v7.9.1 BW-MIG-1: عمود added_by لجدول banned_words
+_BANNED_WORDS_NEW_COLUMNS = [
+    ("added_by", "BIGINT DEFAULT 0"),
+]
+
+# ✅ v7.9.1 BW-MIG-2: عمود added_by لجدول auto_replies
+_AUTO_REPLIES_NEW_COLUMNS = [
+    ("added_by", "BIGINT DEFAULT 0"),
 ]
 
 
@@ -1400,6 +1393,50 @@ async def _migrate_missing_columns_sqlite(conn, logger):
             if logger:
                 logger.debug(
                     f"⚠️ SQLite migration user_channels.{col_name}: {e}"
+                )
+
+    # ✅ v7.9.1 BW-MIG-1: banned_words.added_by
+    for col_name, col_def in _BANNED_WORDS_NEW_COLUMNS:
+        checked += 1
+        try:
+            await conn.execute(
+                f"ALTER TABLE banned_words "
+                f"ADD COLUMN {col_name} {col_def}"
+            )
+            added += 1
+            if logger:
+                logger.info(
+                    f"✅ SQLite: أُضيف عمود {col_name} (banned_words)"
+                )
+        except Exception as e:
+            err = str(e).lower()
+            if "duplicate" in err or "already exists" in err:
+                continue
+            if logger:
+                logger.debug(
+                    f"⚠️ SQLite migration banned_words.{col_name}: {e}"
+                )
+
+    # ✅ v7.9.1 BW-MIG-2: auto_replies.added_by
+    for col_name, col_def in _AUTO_REPLIES_NEW_COLUMNS:
+        checked += 1
+        try:
+            await conn.execute(
+                f"ALTER TABLE auto_replies "
+                f"ADD COLUMN {col_name} {col_def}"
+            )
+            added += 1
+            if logger:
+                logger.info(
+                    f"✅ SQLite: أُضيف عمود {col_name} (auto_replies)"
+                )
+        except Exception as e:
+            err = str(e).lower()
+            if "duplicate" in err or "already exists" in err:
+                continue
+            if logger:
+                logger.debug(
+                    f"⚠️ SQLite migration auto_replies.{col_name}: {e}"
                 )
 
     if added:
@@ -1502,6 +1539,68 @@ async def _migrate_missing_columns_postgres(conn, logger):
             if logger:
                 logger.debug(
                     f"⚠️ PG migration user_channels.{col_name}: {e}"
+                )
+
+    # ✅ v7.9.1 BW-MIG-1: banned_words.added_by
+    for col_name, col_def in _BANNED_WORDS_NEW_COLUMNS:
+        try:
+            exists = await conn.fetchval(
+                "SELECT 1 FROM information_schema.columns "
+                "WHERE table_name = 'banned_words' "
+                "AND column_name = $1 "
+                "AND table_schema = current_schema()",
+                col_name,
+            )
+            checked += 1
+            if exists:
+                skipped += 1
+                continue
+
+            await conn.execute(
+                f"ALTER TABLE banned_words "
+                f"ADD COLUMN {col_name} {col_def}"
+            )
+            added += 1
+            if logger:
+                logger.info(
+                    f"✅ PG: أُضيف عمود {col_name} (banned_words) "
+                    f"— BW-MIG-1"
+                )
+        except Exception as e:
+            if logger:
+                logger.debug(
+                    f"⚠️ PG migration banned_words.{col_name}: {e}"
+                )
+
+    # ✅ v7.9.1 BW-MIG-2: auto_replies.added_by
+    for col_name, col_def in _AUTO_REPLIES_NEW_COLUMNS:
+        try:
+            exists = await conn.fetchval(
+                "SELECT 1 FROM information_schema.columns "
+                "WHERE table_name = 'auto_replies' "
+                "AND column_name = $1 "
+                "AND table_schema = current_schema()",
+                col_name,
+            )
+            checked += 1
+            if exists:
+                skipped += 1
+                continue
+
+            await conn.execute(
+                f"ALTER TABLE auto_replies "
+                f"ADD COLUMN {col_name} {col_def}"
+            )
+            added += 1
+            if logger:
+                logger.info(
+                    f"✅ PG: أُضيف عمود {col_name} (auto_replies) "
+                    f"— BW-MIG-2"
+                )
+        except Exception as e:
+            if logger:
+                logger.debug(
+                    f"⚠️ PG migration auto_replies.{col_name}: {e}"
                 )
 
     if logger and checked:
@@ -1651,6 +1750,94 @@ async def _migrate_missing_columns_mysql(conn, logger):
             if logger:
                 logger.debug(
                     f"⚠️ MySQL migration user_channels.{col_name}: {e}"
+                )
+
+    # ✅ v7.9.1 BW-MIG-1: banned_words.added_by
+    _mysql_banned_words_cols = [
+        ("added_by", "BIGINT DEFAULT 0"),
+    ]
+    for col_name, col_def in _mysql_banned_words_cols:
+        checked += 1
+        try:
+            cursor = await conn.cursor()
+            try:
+                await cursor.execute(
+                    "SELECT COUNT(*) FROM information_schema.columns "
+                    "WHERE TABLE_SCHEMA = DATABASE() "
+                    "AND TABLE_NAME = 'banned_words' "
+                    "AND COLUMN_NAME = %s",
+                    (col_name,),
+                )
+                row = await cursor.fetchone()
+                exists = row and row[0] > 0
+            finally:
+                try:
+                    await cursor.close()
+                except Exception:
+                    pass
+
+            if exists:
+                skipped += 1
+                continue
+
+            await conn.execute(
+                f"ALTER TABLE banned_words "
+                f"ADD COLUMN {col_name} {col_def}"
+            )
+            added += 1
+            if logger:
+                logger.info(
+                    f"✅ MySQL: أُضيف عمود {col_name} (banned_words) "
+                    f"— BW-MIG-1"
+                )
+        except Exception as e:
+            if logger:
+                logger.debug(
+                    f"⚠️ MySQL migration banned_words.{col_name}: {e}"
+                )
+
+    # ✅ v7.9.1 BW-MIG-2: auto_replies.added_by
+    _mysql_auto_replies_cols = [
+        ("added_by", "BIGINT DEFAULT 0"),
+    ]
+    for col_name, col_def in _mysql_auto_replies_cols:
+        checked += 1
+        try:
+            cursor = await conn.cursor()
+            try:
+                await cursor.execute(
+                    "SELECT COUNT(*) FROM information_schema.columns "
+                    "WHERE TABLE_SCHEMA = DATABASE() "
+                    "AND TABLE_NAME = 'auto_replies' "
+                    "AND COLUMN_NAME = %s",
+                    (col_name,),
+                )
+                row = await cursor.fetchone()
+                exists = row and row[0] > 0
+            finally:
+                try:
+                    await cursor.close()
+                except Exception:
+                    pass
+
+            if exists:
+                skipped += 1
+                continue
+
+            await conn.execute(
+                f"ALTER TABLE auto_replies "
+                f"ADD COLUMN {col_name} {col_def}"
+            )
+            added += 1
+            if logger:
+                logger.info(
+                    f"✅ MySQL: أُضيف عمود {col_name} (auto_replies) "
+                    f"— BW-MIG-2"
+                )
+        except Exception as e:
+            if logger:
+                logger.debug(
+                    f"⚠️ MySQL migration auto_replies.{col_name}: {e}"
                 )
 
     if logger and checked:
@@ -2667,7 +2854,6 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
         )
     """)
 
-    # ✅ v7.9.0: جدول group_security مع الأعمدة السبعة الجديدة
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS group_security (
             chat_id INTEGER PRIMARY KEY,
@@ -2728,7 +2914,7 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
             violation_penalty TEXT DEFAULT 'none',
             violation_penalty_duration INTEGER DEFAULT 3600,
             -- ═══════════════════════════════════════════════════════
-            -- 🆕 v7.9.0 (v7.10.0 أزرار): 7 أعمدة الأزرار الستة + forward
+            -- 🆕 v7.9.0: 7 أعمدة الأزرار الستة + forward
             -- ═══════════════════════════════════════════════════════
             delete_at_channel INTEGER DEFAULT 0,
             delete_tg_scheme INTEGER DEFAULT 1,
@@ -2740,17 +2926,19 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
         )
     """)
 
+    # ✅ v7.9.1 BW-MIG-1: banned_words مع added_by (للأجهزة الجديدة)
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS banned_words (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             word TEXT,
             chat_id INTEGER,
-            added_by INTEGER,
+            added_by INTEGER DEFAULT 0,
             added_at TEXT,
             UNIQUE(word, chat_id)
         )
     """)
 
+    # ✅ v7.9.1 BW-MIG-2: auto_replies مع added_by (للأجهزة الجديدة)
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS auto_replies (
             chat_id INTEGER,
@@ -2762,6 +2950,7 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
             created_at TEXT,
             is_active INTEGER DEFAULT 1,
             usage_count INTEGER DEFAULT 0,
+            added_by INTEGER DEFAULT 0,
             PRIMARY KEY (chat_id, keyword)
         )
     """)
@@ -3143,7 +3332,7 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
             "(version, applied_at, description) "
             "VALUES (?, ?, ?) ON CONFLICT(version) DO NOTHING",
             (CURRENT_SCHEMA_VERSION, _safe_now_iso(TimeUtils),
-             "v7.9.0-security-v7.10.0-columns"),
+             "v7.9.1-banned-words-added-by"),
         )
         await conn.commit()
     except Exception as e:
@@ -3153,7 +3342,7 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
     if logger:
         logger.info(
             "✅ تم إنشاء جميع جداول SQLite مع الفهارس المحسنة "
-            "(v7.9.0 — 7 أعمدة أزرار جديدة في group_security)"
+            "(v7.9.1 — BW-MIG-1 + BW-MIG-2)"
         )
 
 
@@ -3176,7 +3365,6 @@ async def create_tables_postgres(conn, logger, TimeUtils):
         await _drop_deprecated_indexes_postgres(conn, logger)
         await _cleanup_stale_links_postgres(conn, logger)
         await _cleanup_old_admin_logs_postgres(conn, logger)
-        # ✅ v7.8.0: تطبيق autovacuum tuning على الجداول المُوسَّعة
         await _tune_autovacuum_postgres(conn, logger)
         await _quick_analyze_postgres(conn, logger)
         if logger:
@@ -3349,7 +3537,6 @@ async def create_tables_postgres(conn, logger, TimeUtils):
         )
     """)
 
-    # ✅ v7.9.0: group_security مع الأعمدة السبعة الجديدة
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS group_security (
             chat_id BIGINT PRIMARY KEY,
@@ -3410,7 +3597,7 @@ async def create_tables_postgres(conn, logger, TimeUtils):
             violation_penalty TEXT DEFAULT 'none',
             violation_penalty_duration INTEGER DEFAULT 3600,
             -- ═══════════════════════════════════════════════════════
-            -- 🆕 v7.9.0 (v7.10.0 أزرار): 7 أعمدة الأزرار الستة + forward
+            -- 🆕 v7.9.0: 7 أعمدة الأزرار الستة + forward
             -- ═══════════════════════════════════════════════════════
             delete_at_channel INTEGER DEFAULT 0,
             delete_tg_scheme INTEGER DEFAULT 1,
@@ -3422,17 +3609,19 @@ async def create_tables_postgres(conn, logger, TimeUtils):
         )
     """)
 
+    # ✅ v7.9.1 BW-MIG-1: banned_words مع added_by
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS banned_words (
             id SERIAL PRIMARY KEY,
             word TEXT,
             chat_id BIGINT,
-            added_by BIGINT,
+            added_by BIGINT DEFAULT 0,
             added_at TIMESTAMP,
             UNIQUE(word, chat_id)
         )
     """)
 
+    # ✅ v7.9.1 BW-MIG-2: auto_replies مع added_by
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS auto_replies (
             chat_id BIGINT,
@@ -3444,6 +3633,7 @@ async def create_tables_postgres(conn, logger, TimeUtils):
             created_at TIMESTAMP,
             is_active INTEGER DEFAULT 1,
             usage_count INTEGER DEFAULT 0,
+            added_by BIGINT DEFAULT 0,
             PRIMARY KEY (chat_id, keyword)
         )
     """)
@@ -3822,7 +4012,6 @@ async def create_tables_postgres(conn, logger, TimeUtils):
     await _create_indexes_postgres(conn, logger)
     await _cleanup_stale_links_postgres(conn, logger)
     await _cleanup_old_admin_logs_postgres(conn, logger)
-    # ✅ v7.8.0: تطبيق autovacuum tuning مباشرة بعد الإنشاء
     await _tune_autovacuum_postgres(conn, logger)
     await _quick_analyze_postgres(conn, logger)
 
@@ -3833,7 +4022,7 @@ async def create_tables_postgres(conn, logger, TimeUtils):
             "VALUES ($1, $2, $3) ON CONFLICT (version) DO NOTHING",
             CURRENT_SCHEMA_VERSION,
             _safe_now_dt(TimeUtils),
-            "v7.9.0-security-v7.10.0-columns",
+            "v7.9.1-banned-words-added-by",
         )
     except Exception as e:
         if logger:
@@ -3842,7 +4031,7 @@ async def create_tables_postgres(conn, logger, TimeUtils):
     if logger:
         logger.info(
             "✅ تم إنشاء جميع جداول PostgreSQL مع الفهارس المحسنة "
-            "(v7.9.0 — 7 أعمدة أزرار جديدة في group_security)"
+            "(v7.9.1 — BW-MIG-1 + BW-MIG-2)"
         )
 
 
@@ -4044,7 +4233,6 @@ async def create_tables_mysql(conn, logger, TimeUtils):
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
         """)
 
-        # ✅ v7.9.0: group_security مع الأعمدة السبعة الجديدة
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS group_security (
                 chat_id BIGINT PRIMARY KEY,
@@ -4107,7 +4295,7 @@ async def create_tables_mysql(conn, logger, TimeUtils):
                 violation_penalty VARCHAR(50) DEFAULT 'none',
                 violation_penalty_duration INT DEFAULT 3600,
                 -- ═══════════════════════════════════════════════════════
-                -- 🆕 v7.9.0 (v7.10.0 أزرار): 7 أعمدة الأزرار الستة + forward
+                -- 🆕 v7.9.0: 7 أعمدة الأزرار الستة + forward
                 -- ═══════════════════════════════════════════════════════
                 delete_at_channel TINYINT(1) DEFAULT 0,
                 delete_tg_scheme TINYINT(1) DEFAULT 1,
@@ -4119,17 +4307,19 @@ async def create_tables_mysql(conn, logger, TimeUtils):
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
         """)
 
+        # ✅ v7.9.1 BW-MIG-1: banned_words مع added_by
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS banned_words (
                 id INT PRIMARY KEY AUTO_INCREMENT,
                 word VARCHAR(255),
                 chat_id BIGINT,
-                added_by BIGINT,
+                added_by BIGINT DEFAULT 0,
                 added_at DATETIME,
                 UNIQUE KEY (word, chat_id)
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
         """)
 
+        # ✅ v7.9.1 BW-MIG-2: auto_replies مع added_by
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS auto_replies (
                 chat_id BIGINT,
@@ -4141,6 +4331,7 @@ async def create_tables_mysql(conn, logger, TimeUtils):
                 created_at DATETIME,
                 is_active TINYINT(1) DEFAULT 1,
                 usage_count INT DEFAULT 0,
+                added_by BIGINT DEFAULT 0,
                 PRIMARY KEY (chat_id, keyword)
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
         """)
@@ -4525,7 +4716,7 @@ async def create_tables_mysql(conn, logger, TimeUtils):
                 (
                     CURRENT_SCHEMA_VERSION,
                     _safe_now_iso(TimeUtils),
-                    "v7.9.0-security-v7.10.0-columns",
+                    "v7.9.1-banned-words-added-by",
                 ),
             )
         except Exception as e:
@@ -4535,7 +4726,7 @@ async def create_tables_mysql(conn, logger, TimeUtils):
         if logger:
             logger.info(
                 "✅ تم إنشاء جميع جداول MySQL مع الفهارس المحسنة "
-                "(v7.9.0 — 7 أعمدة أزرار جديدة في group_security)"
+                "(v7.9.1 — BW-MIG-1 + BW-MIG-2)"
             )
 
     finally:
@@ -4580,4 +4771,7 @@ __all__ = [
     "_ensure_auto_blocked_table_postgres",
     "_ensure_auto_blocked_table_sqlite",
     "_ensure_auto_blocked_table_mysql",
+    # ✅ v7.9.1 BW-MIG
+    "_BANNED_WORDS_NEW_COLUMNS",
+    "_AUTO_REPLIES_NEW_COLUMNS",
 ]
