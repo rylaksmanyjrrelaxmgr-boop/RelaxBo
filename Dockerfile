@@ -14,6 +14,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     tesseract-ocr-fas \
     tesseract-ocr-rus \
     ffmpeg \
+    postgresql-client \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
