@@ -1087,5 +1087,47 @@
   "metrics_top_callbacks_empty": "   <i>—</i>",
   "metrics_refresh_btn": "🔄 تحديث",
   "metrics_reset_btn": "♻️ إعادة تعيين",
-  "metrics_admin_btn": "📊 المؤشرات اللحظية"
+  "metrics_admin_btn": "📊 المؤشرات اللحظية",
+
+  "updates_channel_set_line": "✅ القناة الحالية: <code>{ch}</code>",
+  "updates_channel_hint_set": "اضغط على الزر أدناه للدخول إلى القناة.",
+  "updates_channel_none_line": "❌ لم يتم تعيين قناة تحديثات بعد.",
+  "updates_channel_hint_none": "تواصل مع المطور لتعيينها.",
+  "updates_channel_numeric_hint": "⚠️ القناة مُعرّفة بـ ID رقمي. قد لا يعمل الرابط للأعضاء الجدد. تواصل مع المطور لتعيين @username.",
+  "updates_channel_warn_hint": "⚠️ القناة تحتاج صلاحيات إضافية. تواصل مع المطور.",
+  "updates_channel_error_hint": "🔴 القناة غير متاحة حالياً. تواصل مع المطور.",
+  "join_channel_btn": "🔗 انضم للقناة",
+  "try_open_channel_btn": "🔗 محاولة الفتح",
+  "recheck_channel_btn": "🔍 إعادة الفحص",
+  "rechecking_channel": "🔍 جاري إعادة الفحص...",
+  "admin_updates_channel_title": "📢 <b>إدارة قناة التحديثات</b>",
+  "change_channel_btn": "🔄 تغيير",
+  "remove_channel_btn": "🗑️ إزالة",
+  "set_channel_btn": "🔗 تعيين",
+
+  "metrics_dashboard_title": "📊 <b>مقاييس الأداء المباشرة</b>",
+  "reset_btn": "🔄 إعادة تعيين",
+
+  "referral_claim": "🎁 صرف المكافأة",
+  "referral_list": "📋 قائمة المُحالين",
+  "ref_claim": "🎁 صرف المكافأة",
+  "ref_list": "📋 قائمة المُحالين",
+
+  "action_cancelled": "✅ تم إلغاء العملية.",
+  "ban_word_invalid_length": "❌ يجب أن تكون الكلمة بين {min_len} و {max_len} حرف.",
+  "ban_word_rate_limited": "⏱️ تمهّل قليلاً — تجاوزت الحد المسموح.",
+  "ban_add_no_perms": "❌ صلاحيات غير كافية.",
+  "ban_word_added": "✅ تمت إضافة الكلمة: <code>{word}</code>",
+  "ban_word_duplicate": "❌ الكلمة موجودة مسبقاً.",
+  "ban_word_add_failed": "❌ فشل الحفظ — حاول مجدداً.",
+  "ban_word_added_global": "✅ تمت إضافة الكلمة العالمية: <code>{word}</code>",
+  "ban_word_removed": "✅ تمت إزالة الكلمة: <code>{word}</code>",
+  "ban_word_not_found": "❌ الكلمة غير موجودة في القائمة.",
+  "ban_word_remove_failed": "❌ فشلت الإزالة — حاول مجدداً.",
+  "ban_word_removed_global": "✅ تمت إزالة الكلمة العالمية: <code>{word}</code>",
+
+  "log_channel_none": "❌ لا توجد قناة سجل مخصصة",
+  "log_channel_test_btn": "🧪 اختبار قناة السجل",
+  "log_channel_test": "🧪 قناة السجل تعمل بنجاح! ✅",
+  "log_channel_removed": "🗑️ تم حذف قناة السجل"
 }
