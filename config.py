@@ -2,25 +2,19 @@
 # -*- coding: utf-8 -*-
 
 """
-config.py - إعدادات البوت الأساسية (v7 — DETECTORS-v4.0.8-INTEGRATION)
+config.py - إعدادات البوت الأساسية (v7.0.1 — DETECTORS-v4.0.8-INTEGRATION)
 ================================================================================
+🆕 v7.0.1:
+    ✅ إخفاء تحذير NSFW عند استخدام Sightengine API (الوضع الخارجي)
+    ✅ التحذير يظهر فقط عند غياب النموذج المحلي AND غياب Sightengine API
+
 🆕 v7 (DETECTORS-v4.0.8-INTEGRATION):
     ✅ إصلاح الرأس: v4.0.0 → v4.0.8 (FULL-AUDIT-V3)
-    ✅ إصلاح عدد الطبقات: 14 → 15 (كان خطأ توثيقي)
-    ✅ إضافة ~40 متغير v4.0.8:
-        • ANTIEVASION_* (24 toggle للتفعيل/التعطيل الدقيق)
-        • DETECTOR_POOL_WORKERS + POOL_TASK_TIMEOUT
-        • URL_EXPAND_CONNECT_TIMEOUT + URL_EXPAND_READ_TIMEOUT
-        • SE_CIRCUIT_FAILURE_THRESHOLD + SE_CIRCUIT_OPEN_SEC
-        • NORMALIZE_CACHE_MAX + NSFW_SIGHTENGINE_MAX_BYTES
-        • ASYNC_NETWORK_ENABLED + ASYNC_NETWORK_TIMEOUT
-        • HTTP_TIMEOUT_CONNECT + HTTP_TIMEOUT_READ
+    ✅ إصلاح عدد الطبقات: 14 → 15
+    ✅ إضافة ~40 متغير v4.0.8
     ✅ get_pool_env() — helper لـ main.py v5.6.12
     ✅ validate() — تحققات pool + circuit breaker
     ✅ تقرير الإقلاع مُحدَّث (15 طبقة + pool stats)
-
-🆕 v6 (SPAM-DETECTION-V4-INTEGRATION):
-    ✅ قسم 13: Spam Detection Engine (v4.0.8 — 15 طبقة)
 ================================================================================
 """
 
@@ -476,7 +470,7 @@ class AppConfig:
         os.getenv("OCR_LANGUAGES", "ara+eng+fas+rus"), single_line=True
     )
 
-    # ─── 13.4: 🆕 v4.0.8 — Anti-Evasion Toggles (24 متغير) ───
+    # ─── 13.4: Anti-Evasion Toggles (24 متغير) ───
     ANTIEVASION_ENTITY_LINK: bool = safe_bool(
         os.getenv("ANTIEVASION_ENTITY_LINK", "true")
     )
@@ -550,7 +544,7 @@ class AppConfig:
         os.getenv("ANTIEVASION_RANDOM_DOMAIN", "true")
     )
 
-    # ─── 13.5: 🆕 v4.0.8 — Pool + Async ───
+    # ─── 13.5: Pool + Async ───
     DETECTOR_POOL_WORKERS: int = safe_int(
         os.getenv("DETECTOR_POOL_WORKERS", "8")
     )
@@ -565,7 +559,7 @@ class AppConfig:
         os.getenv("ASYNC_NETWORK_TIMEOUT", "5.0")
     )
 
-    # ─── 13.6: 🆕 v4.0.8 — Circuit Breaker + Cache ───
+    # ─── 13.6: Circuit Breaker + Cache ───
     SE_CIRCUIT_FAILURE_THRESHOLD: int = safe_int(
         os.getenv("SE_CIRCUIT_FAILURE_THRESHOLD", "5")
     )
@@ -638,6 +632,13 @@ class AppConfig:
         """alias لـ DETECTOR_POOL_WORKERS — للتوافق."""
         return self.DETECTOR_POOL_WORKERS
 
+    @property
+    def HAS_SIGHTENGINE(self) -> bool:
+        """✅ v7.0.1: هل Sightengine API مُهيَّأ؟"""
+        return bool(
+            self.SIGHTENGINE_API_USER and self.SIGHTENGINE_API_SECRET
+        )
+
     # ═══════════════════════════════════════════════════════════════
     # دوال مساعدة
     # ═══════════════════════════════════════════════════════════════
@@ -662,7 +663,7 @@ class AppConfig:
 
     def get_detector_env(self) -> Dict[str, str]:
         """
-        🆕 v7: يُصدّر إعدادات الـdetectors كـ dict.
+        يُصدّر إعدادات الـdetectors كـ dict.
 
         الاستخدام الموصى به في bot.py:
             # قبل استيراد handlers_message_detectors
@@ -753,13 +754,11 @@ class AppConfig:
 
     def get_pool_env(self) -> Dict[str, Any]:
         """
-        🆕 v7: helper لـ main.py v5.6.12 — إعدادات pool فقط.
+        helper لـ main.py v5.6.12 — إعدادات pool فقط.
 
         الاستخدام:
             from config import CONFIG
             pool_env = CONFIG.get_pool_env()
-            # pool_env["workers"] = 8
-            # pool_env["task_timeout"] = 60.0
         """
         return {
             "workers": self.DETECTOR_POOL_WORKERS,
@@ -775,9 +774,6 @@ class AppConfig:
         """
         يضبط متغيرات detectors في os.environ.
         Returns: عدد المتغيرات المضبوطة.
-
-        ⚠️ مهم: استدعِها في bot.py **قبل** استيراد
-        handlers_message_detectors.
         """
         env = self.get_detector_env()
         applied = 0
@@ -881,7 +877,7 @@ class AppConfig:
         if self.REDIS_AVAILABLE and not self.REDIS_URL:
             errors.append("REDIS_URL مطلوب عند تفعيل REDIS_AVAILABLE")
 
-        # ─── 5. 🆕 v7: طبقات كشف السبام ───
+        # ─── 5. طبقات كشف السبام ───
 
         # Pool settings
         if self.DETECTOR_POOL_WORKERS < 1 or self.DETECTOR_POOL_WORKERS > 64:
@@ -923,14 +919,16 @@ class AppConfig:
         if self.NSFW_SIGHTENGINE_MAX_BYTES < 1024:
             errors.append("NSFW_SIGHTENGINE_MAX_BYTES صغير جداً")
 
-        # NSFW layer بدون model
+        # ✅ v7.0.1: NSFW layer بدون model
+        # إذا Sightengine API مُهيَّأ → لا نحذّر (الوضع الخارجي مقصود)
         if self.NSFW_LAYER_ENABLED and not self.NSFW_MODEL_ENABLED:
-            warnings.append(
-                "NSFW_LAYER_ENABLED=1 لكن NSFW_MODEL_ENABLED=0 — "
-                "طبقة NSFW المحلية معطّلة. "
-                "إما فعّل NSFW_MODEL_ENABLED (يتطلب transformers+torch) "
-                "أو اعتمد على Sightengine API."
-            )
+            if not self.HAS_SIGHTENGINE:
+                warnings.append(
+                    "NSFW_LAYER_ENABLED=1 لكن NSFW_MODEL_ENABLED=0 و "
+                    "Sightengine API غير مُهيَّأ — "
+                    "كشف NSFW معطّل تماماً! "
+                    "أضف SIGHTENGINE_API_USER/SECRET أو فعّل NSFW_MODEL_ENABLED."
+                )
 
         # URL layer بدون Safe Browsing
         if self.URL_LAYER_ENABLED and not self.SAFE_BROWSING_API_KEY:
@@ -1073,8 +1071,7 @@ class PathManager:
 CONFIG = AppConfig()
 PATHS = PathManager()
 
-# 🆕 v7: تصدير إعدادات detectors إلى os.environ
-# يُوصى بـ apply_detector_env في bot.py قبل import detectors أيضاً.
+# تصدير إعدادات detectors إلى os.environ
 try:
     _applied = CONFIG.apply_detector_env(override=False)
     if _applied > 0:
@@ -1092,7 +1089,7 @@ except ValueError as e:
     raise SystemExit(1)
 
 # ═══════════════════════════════════════════════════════════════════
-# سجل الإقلاع — v7
+# سجل الإقلاع
 # ═══════════════════════════════════════════════════════════════════
 
 logger.info(
@@ -1118,7 +1115,7 @@ logger.info(
     f"{'مُهيَّأ' if CONFIG.WEBHOOK_SECRET else 'غير مُهيَّأ (اختياري)'}"
 )
 
-# 🆕 v7: تقرير Spam Detection Engine v4.0.8
+# تقرير Spam Detection Engine v4.0.8
 _summary = CONFIG.DETECTION_SUMMARY
 _enabled_layers = [k for k, v in _summary.items() if v]
 _disabled_layers = [k for k, v in _summary.items() if not v]
@@ -1146,6 +1143,17 @@ if CONFIG.SAFE_BROWSING_API_KEY:
     logger.info("   🔗 Safe Browsing API: مُهيَّأ ✅")
 else:
     logger.info("   🔗 Safe Browsing API: غير مُهيَّأ ⚠️ (يُوصى به)")
+
+# NSFW status — v7.0.1: عرض واضح للوضع
+if CONFIG.NSFW_LAYER_ENABLED:
+    if CONFIG.NSFW_MODEL_ENABLED:
+        logger.info("   🔞 NSFW: نموذج محلي (transformers+torch)")
+    elif CONFIG.HAS_SIGHTENGINE:
+        logger.info("   🔞 NSFW: Sightengine API (خارجي) ✅")
+    else:
+        logger.warning(
+            "   🔞 NSFW: ⚠️ معطّل! لا نموذج محلي ولا Sightengine API"
+        )
 
 _antievasion_enabled = sum([
     CONFIG.ANTIEVASION_ENTITY_LINK,
