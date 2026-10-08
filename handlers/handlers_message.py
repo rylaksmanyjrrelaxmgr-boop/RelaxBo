@@ -1,16 +1,19 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-handlers_message.py - v7.18.10 POOL-BRIDGE
+handlers_message.py - v7.18.11 POOL-BRIDGE
 (متوافق مع detectors v4.0.8 — CRITICAL-FIXES)
 =============================================================================
+🆕 v7.18.11 (SLOW-MODE-DO_API_REQUEST-FIX):
+    🔴 FIX-1: _apply_slow_mode — استخدام do_api_request كـfallback
+    🔴 FIX-2: تقريب قيم slow_mode للمجموعة المسموحة من تيليجرام
+    🔴 FIX-3: تحذير مرة واحدة فقط لكل chat (بدل كل رسالة)
+
 🆕 v7.18.10 (BANNED-WORDS-TUPLE-FIX):
     🔴 FIX-1: handle_add_banned_word — فكّ tuple من DB.add_banned_word
     🔴 FIX-2: handle_add_global_banned_word — فكّ tuple
     السبب: DB.add_banned_word تُعيد (bool, bool) وليس bool مفرد.
            في Python، أي tuple غير فارغ = truthy — حتى (False, False).
-           المُنادي كان يعرض "✅ تمت الإضافة" حتى لو فشلت فعلاً،
-           والكلمة لا تُخزَّن أبداً → عند الحذف "غير موجودة".
 
 🆕 v7.18.9 (POOL-BRIDGE):
     🔗 PATCH-1: ربط _run_in_pool من detectors v4.0.8
@@ -145,7 +148,6 @@ except ImportError:
         )
 
 
-# ✅ FIX-1: multilayer + async detection
 _HAS_MULTILAYER = False
 _HAS_ASYNC_DETECTORS = False
 analyze_message_full = None
@@ -155,7 +157,6 @@ FINAL_THRESHOLD = 5
 LAYER_WEIGHTS: Dict[str, float] = {}
 _detectors_module = None
 
-# 3-tier import for multilayer + async
 for _path in (
     "handlers.handlers_message_detectors",
     "handlers_message_detectors",
@@ -204,9 +205,6 @@ if not _HAS_MULTILAYER:
     BEHAVIORAL_LAYER_ENABLED = False
 
 
-# ═════════════════════════════════════════════════════════════════════
-# ✅ v7.18.9 PATCH-2: ربط _run_in_pool + shutdown_default_executor
-# ═════════════════════════════════════════════════════════════════════
 _HAS_DET_RUN_IN_POOL = False
 _HAS_DET_SHUTDOWN_EXECUTOR = False
 _det_run_in_pool: Optional[Callable[..., Awaitable[Any]]] = None
@@ -241,7 +239,6 @@ if not _HAS_DET_SHUTDOWN_EXECUTOR:
     )
 
 
-# 🆕 v7.18.3: Auto-block database integration
 try:
     from database_auto_block import (
         ensure_table as _ensure_autoblock_table,
@@ -288,10 +285,6 @@ except ImportError:
     MessageOriginChat = MessageOriginChannel = None
     _HAS_MESSAGE_ORIGIN = False
 
-
-# ═══════════════════════════════════════════════════════════════════
-# Local helpers
-# ═══════════════════════════════════════════════════════════════════
 
 def _env_flag(name: str, default: bool = True) -> bool:
     val = os.getenv(name)
@@ -342,19 +335,12 @@ def _row_to_dict_local(row) -> Optional[Dict[str, Any]]:
         return None
 
 
-# ═══════════════════════════════════════════════════════════════════
-# ✅ v7.18.9 PATCH-3: helper موحّد لتشغيل sync في pool
-# ═══════════════════════════════════════════════════════════════════
-
 async def _run_sync_in_pool(
     fn: Callable[..., Any],
     *args: Any,
     timeout: float = 30.0,
     **kwargs: Any,
 ) -> Any:
-    """
-    ✅ v7.18.9: تشغيل دالة sync في thread pool.
-    """
     if _HAS_DET_RUN_IN_POOL and _det_run_in_pool is not None:
         try:
             return await _det_run_in_pool(
@@ -390,13 +376,8 @@ async def _run_sync_in_pool(
 
 
 def _run_sync_in_pool_available() -> bool:
-    """فحص سريع: هل detectors v4.0.7+ متاح؟"""
     return _HAS_DET_RUN_IN_POOL
 
-
-# ═══════════════════════════════════════════════════════════════════
-# Environment Flags
-# ═══════════════════════════════════════════════════════════════════
 
 _ANTIFLOOD_ENABLED = _env_flag("ANTIFLOOD_ENABLED", True)
 _SLOW_MODE_AUTO = _env_flag("SLOW_MODE_AUTO", True)
@@ -416,10 +397,6 @@ _BAN_ADD_RATE_WINDOW = 60.0
 _BOT_DATA_SLOW_MODE_PRUNE_THRESHOLD = 10000
 _BOT_DATA_SLOW_MODE_PRUNE_COOLDOWN = 300.0
 
-
-# ═══════════════════════════════════════════════════════════════════
-# Post Bot Detection
-# ═══════════════════════════════════════════════════════════════════
 
 _POSTBOT_CHANNEL_NAMES = frozenset({
     "news",
@@ -498,10 +475,6 @@ def _is_postbot_channel_name(name: str) -> bool:
     return False
 
 
-# ═══════════════════════════════════════════════════════════════════
-# Constants
-# ═══════════════════════════════════════════════════════════════════
-
 LOG_RATE_LIMIT_PER_MIN = 30
 LOG_RATE_WINDOW_SEC = 60.0
 LOG_RETRY_ATTEMPTS = 3
@@ -551,10 +524,6 @@ FEATURE_LOG_ADMIN_CHANGES = _env_flag("LOG_ADMIN_CHANGES", True)
 _DEBUG_DIAG = DEBUG_DIAG
 _DEBUG_SPAM = DEBUG_SPAM
 
-
-# ═══════════════════════════════════════════════════════════════════
-# PERF Caches
-# ═══════════════════════════════════════════════════════════════════
 
 _GROUP_LOG_CHANNEL_CACHE_TTL = 60.0
 _GROUP_LOG_CHANNEL_CACHE_MAX = 2000
@@ -664,10 +633,6 @@ def _invalidate_admin_check_cache(
 _private_handler_signature_cache: Dict[str, bool] = {}
 _private_sig_cache_lock = threading.Lock()
 
-
-# ═══════════════════════════════════════════════════════════════════
-# Flood Tracker
-# ═══════════════════════════════════════════════════════════════════
 
 _flood_tracker: DefaultDict[Tuple[int, int], deque] = defaultdict(
     lambda: deque(maxlen=_FLOOD_DEQUE_MAXLEN)
@@ -788,10 +753,6 @@ def _flood_tracker_stats() -> Dict[str, int]:
         return {}
 
 
-# ═══════════════════════════════════════════════════════════════════
-# Shutdown State
-# ═══════════════════════════════════════════════════════════════════
-
 _shutdown_started: bool = False
 
 
@@ -813,10 +774,6 @@ def _reset_shutdown_for_tests():
     except Exception:
         pass
 
-
-# ═══════════════════════════════════════════════════════════════════
-# Database Migration
-# ═══════════════════════════════════════════════════════════════════
 
 _columns_initialized = False
 _columns_init_lock = asyncio.Lock()
@@ -970,10 +927,6 @@ async def _lazy_init_columns():
                 )
 
 
-# ═══════════════════════════════════════════════════════════════════
-# Developer Log Cache
-# ═══════════════════════════════════════════════════════════════════
-
 _dev_log_cache = None
 _dev_log_cache_ts = 0.0
 _dev_log_cache_lock = asyncio.Lock()
@@ -1003,10 +956,6 @@ def _invalidate_dev_log_cache():
     _dev_log_cache = None
     _dev_log_cache_ts = 0.0
 
-
-# ═══════════════════════════════════════════════════════════════════
-# Log Rate Limit
-# ═══════════════════════════════════════════════════════════════════
 
 _log_rate_tracker = defaultdict(lambda: deque(maxlen=LOG_RATE_LIMIT_PER_MIN))
 _log_rate_lock = asyncio.Lock()
@@ -1099,10 +1048,6 @@ async def _notify_dev_log(context, text):
     except Exception as e:
         logger.warning("🔔 _notify_dev_log FAILED: %s", e)
 
-
-# ═══════════════════════════════════════════════════════════════════
-# Dispatch Log
-# ═══════════════════════════════════════════════════════════════════
 
 _running_log_tasks: set = set()
 _log_dispatch_failures: int = 0
@@ -1276,7 +1221,6 @@ async def shutdown_delete_tasks(timeout: float = 3.0):
     _running_delete_tasks.clear()
 
 
-# ✅ FIX-26 v7.18.8 + ✅ PATCH-5 v7.18.9: chain + detectors pool shutdown
 def register_shutdown_handlers(application):
     if getattr(application, '_msh_shutdown_registered', False):
         return
@@ -1286,7 +1230,6 @@ def register_shutdown_handlers(application):
         async def _post_shutdown(app):
             _mark_shutdown_started()
 
-            # ─── 1) log dispatcher + bg + delete ───
             try:
                 await shutdown_log_dispatcher(timeout=5.0)
             except Exception:
@@ -1300,7 +1243,6 @@ def register_shutdown_handlers(application):
             except Exception:
                 pass
 
-            # ─── 2) ✅ PATCH-5: إغلاق detectors pool ───
             if _HAS_DET_SHUTDOWN_EXECUTOR and _det_shutdown_default_executor:
                 try:
                     await asyncio.wait_for(
@@ -1319,7 +1261,6 @@ def register_shutdown_handlers(application):
                         "detectors shutdown_default_executor: %s", _e,
                     )
 
-            # ─── 3) chain الـhook السابق ───
             if callable(original_post_shutdown):
                 try:
                     await original_post_shutdown(app)
@@ -1336,10 +1277,6 @@ def register_shutdown_handlers(application):
     except Exception as e:
         logger.warning("register_shutdown_handlers: %s", e)
 
-
-# ═══════════════════════════════════════════════════════════════════
-# Cache Helpers
-# ═══════════════════════════════════════════════════════════════════
 
 async def _safe_invalidate(*keys):
     for key in keys:
@@ -1388,10 +1325,6 @@ async def _invalidate_banned_words_cache(chat_id=None) -> bool:
 
     return False
 
-
-# ═══════════════════════════════════════════════════════════════════
-# Labels
-# ═══════════════════════════════════════════════════════════════════
 
 _VIOLATION_LABELS_AR = {
     'forwarded': '↩️ رسالة مُعاد توجيهها',
@@ -1487,10 +1420,6 @@ def _format_duration(seconds):
         parts.append(f"{secs} ثانية")
     return " و ".join(parts) if parts else f"{seconds} ثانية"
 
-
-# ═══════════════════════════════════════════════════════════════════
-# Group Log
-# ═══════════════════════════════════════════════════════════════════
 
 async def notify_group_log(context, chat_id, text, disable_preview=True):
     try:
@@ -1643,10 +1572,6 @@ async def _notify_group_log_penalty(
     except Exception as e:
         logger.warning("⚠️ _notify_group_log_penalty: %s", e)
 
-
-# ═══════════════════════════════════════════════════════════════════
-# Delete Failure Notifier
-# ═══════════════════════════════════════════════════════════════════
 
 _delete_failure_counter: Dict[int, Tuple[int, float]] = {}
 _delete_failure_counter_lock = asyncio.Lock()
@@ -1808,10 +1733,6 @@ async def _safe_delete_message(
         )
         return False
 
-
-# ═══════════════════════════════════════════════════════════════════
-# Forward Detection
-# ═══════════════════════════════════════════════════════════════════
 
 _PROTECTED_FORWARD_HINTS = (
     "محولة من", "محوّل من", "محوله من",
@@ -2271,10 +2192,6 @@ async def _invalidate_after_channel_change(
             pass
 
 
-# ═══════════════════════════════════════════════════════════════════
-# Group Rate Limiter
-# ═══════════════════════════════════════════════════════════════════
-
 class GroupRateLimiterManager:
     _limiters: Dict[int, Any] = {}
     _last_access: Dict[int, float] = {}
@@ -2408,10 +2325,6 @@ async def _release_group_limiter(limiter, acquired):
     except Exception:
         pass
 
-
-# ═══════════════════════════════════════════════════════════════════
-# Translation Helpers
-# ═══════════════════════════════════════════════════════════════════
 
 async def _trans(key, lang, default=""):
     if not key:
@@ -2564,9 +2477,6 @@ async def invalidate_auto_reply_cache(chat_id=None):
 
 
 async def _detect_and_translate(update, context, chat_id, user_id, text):
-    """
-    🆕 v7.18.8 FIX-6: كشف اللغة + ترجمة.
-    """
     if not text or len(text.strip()) < TRANSLATION_MIN_TEXT_LENGTH:
         return None
     try:
@@ -2652,10 +2562,6 @@ async def apply_violation_penalty(
         logger.error("❌ apply_violation_penalty: %s", e)
         return False, str(e)[:100]
 
-
-# ═══════════════════════════════════════════════════════════════════
-# Admin Helpers
-# ═══════════════════════════════════════════════════════════════════
 
 _BLOCKED_HOST_PATTERNS = (
     "localhost", "127.", "0.0.0.0", "::1",
@@ -2839,10 +2745,6 @@ except ImportError:
         return False
 
 
-# ═══════════════════════════════════════════════════════════════════
-# Banned Word Matching
-# ═══════════════════════════════════════════════════════════════════
-
 _compiled_banned_patterns: "OrderedDict[str, re.Pattern]" = OrderedDict()
 _compiled_spaced_patterns: "OrderedDict[str, re.Pattern]" = OrderedDict()
 
@@ -2953,10 +2855,6 @@ def _accepts_state_arg(handler, handler_name: str) -> bool:
     return result
 
 
-# ═══════════════════════════════════════════════════════════════════
-# MessageHandlers
-# ═══════════════════════════════════════════════════════════════════
-
 class MessageHandlers:
 
     _PRIVATE_HANDLERS_MAP: Dict[Any, str] = {
@@ -3004,8 +2902,17 @@ class MessageHandlers:
         finally:
             await _release_group_limiter(limiter, limiter_acquired)
 
+    # ═══════════════════════════════════════════════════════════════
+    # ✅ v7.18.11: _apply_slow_mode — إصلاح كامل
+    # ═══════════════════════════════════════════════════════════════
     @staticmethod
     async def _apply_slow_mode(context, chat_id, settings):
+        """
+        ✅ v7.18.11: إصلاح set_chat_slow_mode_delay
+
+        python-telegram-bot v22.x لا يُطبّق setChatSlowModeDelay.
+        الحل: do_api_request للوصول المباشر إلى Bot API.
+        """
         if not _SLOW_MODE_AUTO:
             return
         try:
@@ -3052,41 +2959,52 @@ class MessageHandlers:
             if target == 0 and last_applied in (0, -1):
                 return
 
-            try:
-                # ✅ v7.18.10: تصحيح اسم الدالة في python-telegram-bot v20+
-                # الدالة الصحيحة: set_chat_slow_mode_delay
-                # وليس set_chat_slow_mode (غير موجودة في ExtBot).
-                # ملاحظة: تيليجرام يقبل فقط: 0, 10, 30, 60, 300, 900, 3600.
-                # نقرب لأقرب قيمة مقبولة (10 كحد أدنى).
-                _SLOW_ALLOWED = (0, 10, 30, 60, 300, 900, 3600)
-                if target <= 0:
-                    _target_tg = 0
-                else:
-                    _target_tg = min(
-                        _SLOW_ALLOWED,
-                        key=lambda x: abs(x - target) if x >= 10 else 10**9,
-                    )
-                    if _target_tg < 10:
-                        _target_tg = 10
+            _SLOW_ALLOWED = (0, 10, 30, 60, 300, 900, 3600)
+            if target <= 0:
+                _target_tg = 0
+            else:
+                _target_tg = min(
+                    _SLOW_ALLOWED,
+                    key=lambda x: abs(x - target) if x >= 10 else 10**9,
+                )
+                if _target_tg < 10:
+                    _target_tg = 10
 
+            _fn = getattr(context.bot, "set_chat_slow_mode_delay", None)
+            _api_success = False
+
+            if callable(_fn):
                 try:
-                    await context.bot.set_chat_slow_mode_delay(
-                        chat_id=chat_id,
-                        slow_mode_delay=_target_tg,
-                    )
-                except AttributeError:
-                    # fallback لأسماء أخرى محتملة
-                    _fn = (
-                        getattr(context.bot, "set_chat_slow_mode_delay", None)
-                        or getattr(context.bot, "set_slow_mode", None)
-                    )
-                    if _fn is None:
-                        raise
                     await _fn(
                         chat_id=chat_id,
                         slow_mode_delay=_target_tg,
                     )
+                    _api_success = True
+                except Exception as _e:
+                    logger.debug(
+                        "set_chat_slow_mode_delay موجودة لكن فشلت: %s — "
+                        "fallback to do_api_request", _e,
+                    )
 
+            if not _api_success:
+                try:
+                    _do_req = getattr(context.bot, "do_api_request", None)
+                    if callable(_do_req):
+                        await _do_req(
+                            "setChatSlowModeDelay",
+                            api_kwargs={
+                                "chat_id": chat_id,
+                                "slow_mode_delay": _target_tg,
+                            },
+                        )
+                        _api_success = True
+                except Exception as _e:
+                    logger.warning(
+                        "⚠️ setChatSlowModeDelay(%s, %d) failed: %s",
+                        chat_id, _target_tg, _e,
+                    )
+
+            if _api_success:
                 try:
                     if isinstance(context.bot_data, dict):
                         context.bot_data[cache_key] = target
@@ -3096,11 +3014,27 @@ class MessageHandlers:
                     "🐌 SLOW-MODE | chat=%s requested=%d applied=%d",
                     chat_id, target, _target_tg,
                 )
-            except Exception as e:
-                logger.warning(
-                    "⚠️ set_chat_slow_mode_delay(%s, %d) failed: %s",
-                    chat_id, target, e,
-                )
+            else:
+                _warn_key = f"_slow_warn_{chat_id}"
+                _warned = False
+                try:
+                    if isinstance(context.bot_data, dict):
+                        _warned = bool(context.bot_data.get(_warn_key))
+                except Exception:
+                    pass
+                if not _warned:
+                    logger.warning(
+                        "⚠️ SLOW-MODE: تعذّر تفعيل الوضع البطيء لـ %s "
+                        "(python-telegram-bot v22.x لا يدعم "
+                        "setChatSlowModeDelay). الميزة معطّلة.",
+                        chat_id,
+                    )
+                    try:
+                        if isinstance(context.bot_data, dict):
+                            context.bot_data[_warn_key] = True
+                    except Exception:
+                        pass
+
         except Exception as e:
             logger.debug("_apply_slow_mode: %s", e)
 
@@ -3206,7 +3140,6 @@ class MessageHandlers:
         except Exception as e:
             logger.debug("slow_mode apply: %s", e)
 
-        # ✅ FIX-10: احترام قيم ctx الأصلية + augment بـdet
         det = get_forward_detection_reason(message)
         _det_fwd = _as_bool(det.get('is_forwarded', False), False)
         _det_protected = _as_bool(det.get('is_protected', False), False)
@@ -3229,7 +3162,6 @@ class MessageHandlers:
             and not is_protected_forward
         )
 
-        # Multi-Layer Analysis
         _spam_score = 0
         _spam_reasons: List[str] = []
         _spam_layer_scores: Dict[str, float] = {}
@@ -3237,7 +3169,6 @@ class MessageHandlers:
         _analysis_mode = "text-only"
 
         if _spam_enabled:
-            # ✅ FIX-1: async detectors أولاً
             if _MULTILAYER_ENABLED and analyze_message_full_async is not None:
                 try:
                     _verdict = await analyze_message_full_async(
@@ -3263,7 +3194,6 @@ class MessageHandlers:
                     logger.debug("multilayer async error: %s", e)
                     _verdict = None
 
-            # ✅ PATCH-4 v7.18.9: fallback sync عبر pool موحّد
             elif _MULTILAYER_ENABLED and analyze_message_full is not None:
                 try:
                     _verdict = await _run_sync_in_pool(
@@ -3423,7 +3353,6 @@ class MessageHandlers:
                 logger.warning("   🎯 SPAM=%d | %s",
                                _spam_score, _spam_reasons[:10])
 
-        # 0) Service
         if _as_bool(settings.get('delete_service'), False):
             if message.new_chat_members or message.left_chat_member:
                 await _safe_delete_message(
@@ -3431,7 +3360,6 @@ class MessageHandlers:
                 )
                 return
 
-        # 0.1) Auto-blocked source detection
         if _HAS_AUTO_BLOCK:
             try:
                 _fwd_ab = get_forward_info(message)
@@ -3457,7 +3385,6 @@ class MessageHandlers:
             except Exception as e:
                 logger.debug("auto-block check: %s", e)
 
-        # 0.2) Post Bot forwarded detection
         if _FORCE_DELETE_POSTBOT_FORWARDS:
             try:
                 _fwd = get_forward_info(message)
@@ -3500,7 +3427,6 @@ class MessageHandlers:
             except Exception as e:
                 logger.debug("postbot forward check: %s", e)
 
-        # 0.4) Force delete any button link
         if _button_links_enabled and ctx.has_button_link:
             logger.warning(
                 "🔘 BUTTON-LINK-DELETE | chat=%s user=%s msg=%s | "
@@ -3515,7 +3441,6 @@ class MessageHandlers:
             )
             return
 
-        # 0.5) PostBot HARD-BLOCK
         if _postbot_hard_block:
             await MessageHandlers._delete_and_warn(
                 update, context, chat_id, user_id,
@@ -3523,7 +3448,6 @@ class MessageHandlers:
             )
             return
 
-        # 1) Forwarded
         if _df_bool:
             effective_forwarded = (
                 ctx.is_forwarded or ctx.is_auto_fwd
@@ -3536,7 +3460,6 @@ class MessageHandlers:
                 )
                 return
 
-        # 2) Spam Score
         if _is_spam:
             await MessageHandlers._delete_and_warn(
                 update, context, chat_id, user_id,
@@ -3544,7 +3467,6 @@ class MessageHandlers:
             )
             return
 
-        # 3) PostBot Pattern (legacy)
         if _postbot_enabled and _postbot_match:
             await MessageHandlers._delete_and_warn(
                 update, context, chat_id, user_id,
@@ -3552,7 +3474,6 @@ class MessageHandlers:
             )
             return
 
-        # 3b) Poll links
         if _polls_enabled and ctx.poll_urls:
             await MessageHandlers._delete_and_warn(
                 update, context, chat_id, user_id,
@@ -3560,7 +3481,6 @@ class MessageHandlers:
             )
             return
 
-        # 4) Links
         if _as_bool(settings.get('delete_links'), False):
             if ctx.has_any_link:
                 await MessageHandlers._delete_and_warn(
@@ -3569,7 +3489,6 @@ class MessageHandlers:
                 )
                 return
 
-        # 4b) @channel
         if _at_channel_enabled and _contains_at_channel(ctx.normalized_text):
             await MessageHandlers._delete_and_warn(
                 update, context, chat_id, user_id,
@@ -3577,7 +3496,6 @@ class MessageHandlers:
             )
             return
 
-        # 4c) tg://
         if _tg_scheme_enabled and _contains_tg_scheme(ctx.normalized_text):
             await MessageHandlers._delete_and_warn(
                 update, context, chat_id, user_id,
@@ -3585,7 +3503,6 @@ class MessageHandlers:
             )
             return
 
-        # 4e) Emails
         if _emails_enabled and _contains_email(ctx.normalized_text):
             await MessageHandlers._delete_and_warn(
                 update, context, chat_id, user_id,
@@ -3593,7 +3510,6 @@ class MessageHandlers:
             )
             return
 
-        # 5) Mentions
         if _as_bool(settings.get('mentions'), False):
             try:
                 has_mention = TextUtils.contains_mention(ctx.normalized_text)
@@ -3606,7 +3522,6 @@ class MessageHandlers:
                 )
                 return
 
-        # 6) Banned Words
         if _as_bool(settings.get('delete_banned_words'), False):
             banned_words = await get_banned_words_cached(chat_id)
             if banned_words:
@@ -3622,7 +3537,6 @@ class MessageHandlers:
                     )
                     return
 
-        # 7) Max Length
         try:
             max_len = int(settings.get('max_message_length', 0) or 0)
         except (TypeError, ValueError):
@@ -3634,7 +3548,6 @@ class MessageHandlers:
             )
             return
 
-        # 8) Media
         for attr, setting_key, vtype in _MEDIA_SETTINGS_MAP:
             media = getattr(message, attr, None)
             if not media:
@@ -3647,7 +3560,6 @@ class MessageHandlers:
             )
             return
 
-        # 9) Translation
         translate_source = ctx.text or ctx.caption
         if translate_source and not is_anonymous:
             try:
@@ -3664,7 +3576,6 @@ class MessageHandlers:
             except Exception:
                 pass
 
-        # 10) Auto Reply
         if ctx.text:
             await MessageHandlers._process_auto_reply(
                 update, context, chat_id, ctx.text, user_id,
@@ -3849,7 +3760,6 @@ class MessageHandlers:
                 pass
             return
 
-        # Auto-block list — فقط القنوات/المجموعات
         if _HAS_AUTO_BLOCK and violation_type in (
             'postbot_forward', 'forwarded', 'spam_score',
         ):
@@ -4242,9 +4152,6 @@ class MessageHandlers:
 
         success = False
         try:
-            # ✅ FIX v7.18.10: DB.add_banned_word تُعيد (bool, bool)
-            # وليس bool مفرد. في Python، أي tuple غير فارغ = truthy،
-            # لذلك "if added:" كان ينجح دائماً حتى لو فشلت الإضافة.
             result = await DB.add_banned_word(chat_id, word, user_id)
             added_ok, is_duplicate = (
                 result if isinstance(result, tuple) and len(result) == 2
@@ -4344,7 +4251,6 @@ class MessageHandlers:
 
         success = False
         try:
-            # ✅ FIX v7.18.10: فكّ الـtuple بدل معاملته كـbool
             result = await DB.add_banned_word(-1, word, user_id)
             added_ok, is_duplicate = (
                 result if isinstance(result, tuple) and len(result) == 2
@@ -4812,7 +4718,6 @@ __all__ = [
     "_HAS_AUTO_BLOCK",
     "handle_autoblocked_command",
 
-    # PERF caches + invalidation
     "_GROUP_LOG_CHANNEL_CACHE_TTL",
     "_GROUP_LOG_CHANNEL_CACHE_MAX",
     "_GROUP_LOG_CHANNEL_CACHE_MAX_STALE",
@@ -4837,7 +4742,6 @@ __all__ = [
     "_check_ban_add_rate",
     "_FLOOD_DEQUE_MAXLEN",
 
-    # ✅ v7.18.9 PATCH-5: pool bridge API
     "_run_sync_in_pool",
     "_run_sync_in_pool_available",
     "_HAS_DET_RUN_IN_POOL",
