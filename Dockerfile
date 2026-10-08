@@ -6,7 +6,16 @@ ENV PYTHONUNBUFFERED=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     DEBIAN_FRONTEND=noninteractive
 
+# إضافة مفتاح ومستودع PostgreSQL الرسمي (PGDG) لتثبيت pg_dump 18
 RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl ca-certificates gnupg \
+    && curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc \
+        | gpg --dearmor -o /usr/share/keyrings/pgdg.gpg \
+    && echo "deb [signed-by=/usr/share/keyrings/pgdg.gpg] \
+        http://apt.postgresql.org/pub/repos/apt bookworm-pgdg main" \
+        > /etc/apt/sources.list.d/pgdg.list \
+    && apt-get update && apt-get install -y --no-install-recommends \
+    postgresql-client-18 \
     libzbar0 \
     tesseract-ocr \
     tesseract-ocr-ara \
@@ -14,7 +23,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     tesseract-ocr-fas \
     tesseract-ocr-rus \
     ffmpeg \
-    postgresql-client \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
