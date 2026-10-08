@@ -1,9 +1,17 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-handlers_message.py - v7.18.12 POOL-BRIDGE
+handlers_message.py - v7.18.13 POOL-BRIDGE + SHIELD-LOG-LEVEL
 (متوافق مع detectors v4.0.8 — CRITICAL-FIXES)
 =============================================================================
+🆕 v7.18.13 (SHIELD-LOG-LEVEL-OPTIMIZATION):
+    🟢 FIX-1: SHIELD log level يتبع _spam_score
+        - _spam_score > 0  → logger.info (سبام/مشبوه)
+        - _spam_score == 0 → logger.debug (نظيف)
+    🟢 FIX-2: إزالة شرط `and _spam_layer_scores` — الآن يُسجَّل
+        حتى لو كانت الطبقات فارغة (لكن على debug للرسائل النظيفة)
+    📝 الهدف: تقليل ضوضاء السجل مع الاحتفاظ بالتنبيهات الحرجة
+
 🆕 v7.18.12 (SLOW-MODE-DIRECT-HTTP-FIX):
     🔴 FIX-1: _apply_slow_mode — HTTP POST مباشر عبر aiohttp
     🔴 FIX-2: تجاوز do_api_request الذي يرفض setChatSlowModeDelay
@@ -806,7 +814,7 @@ async def _lazy_init_columns():
         _columns_last_attempt_ts = now
 
         db_type = getattr(DB, "DB_TYPE", "sqlite")
-        logger.info("🔧 v7.18.12: Auto-migration (DB_TYPE=%s)", db_type)
+        logger.info("🔧 v7.18.13: Auto-migration (DB_TYPE=%s)", db_type)
 
         cols = [
             ("delete_protected_any", "INTEGER DEFAULT 0", "TINYINT(1) DEFAULT 0"),
@@ -2907,14 +2915,10 @@ class MessageHandlers:
         finally:
             await _release_group_limiter(limiter, limiter_acquired)
 
-    # ═══════════════════════════════════════════════════════════════
-    # ✅ v7.18.12: _apply_slow_mode — HTTP مباشر عبر aiohttp
-    # تجاوز do_api_request الذي يرفض setChatSlowModeDelay
-    # ═══════════════════════════════════════════════════════════════
     @staticmethod
     async def _apply_slow_mode(context, chat_id, settings):
         """
-        ✅ v7.18.12: إصلاح setChatSlowModeDelay نهائياً
+        ✅ v7.18.13: إصلاح setChatSlowModeDelay نهائياً
 
         python-telegram-bot v22.x يرفض setChatSlowModeDelay في:
           - set_chat_slow_mode_delay (غير موجودة)
@@ -2985,7 +2989,6 @@ class MessageHandlers:
             _api_success = False
             _api_error = None
 
-            # ─── المسار 1: دالة المكتبة (نادراً ما توجد في v22.x) ───
             _fn = getattr(context.bot, "set_chat_slow_mode_delay", None)
             if callable(_fn):
                 try:
@@ -3000,7 +3003,6 @@ class MessageHandlers:
                         "fallback to HTTP", _e,
                     )
 
-            # ─── المسار 2: HTTP POST مباشر (الطريقة المضمونة) ───
             if not _api_success:
                 try:
                     import aiohttp
@@ -3046,12 +3048,10 @@ class MessageHandlers:
                         chat_id, _target_tg, _e,
                     )
 
-            # ─── النتيجة ───
             if _api_success:
                 try:
                     if isinstance(context.bot_data, dict):
                         context.bot_data[cache_key] = target
-                        # مسح تحذير سابق (إن وُجد)
                         context.bot_data.pop(
                             f"_slow_warn_{chat_id}", None
                         )
@@ -3336,8 +3336,14 @@ class MessageHandlers:
                 ctx.spam_emoji_count, _analysis_mode,
             )
 
-        if _analysis_mode.startswith("multilayer") and _spam_layer_scores:
-            logger.info(
+        # 🆕 v7.18.13 FIX-1 + FIX-2: SHIELD log level يتبع _spam_score
+        # - _spam_score > 0  → INFO (سبام/مشبوه — يحتاج متابعة)
+        # - _spam_score == 0 → DEBUG (نظيف — تقليل ضوضاء السجل)
+        if _analysis_mode.startswith("multilayer"):
+            _shield_log_fn = (
+                logger.info if _spam_score > 0 else logger.debug
+            )
+            _shield_log_fn(
                 "🛡️ SHIELD | chat=%s user=%s msg=%s | "
                 "total=%.1f | mode=%s | layers=%s",
                 chat_id, user_id, message.message_id,
@@ -4156,9 +4162,6 @@ class MessageHandlers:
         except Exception:
             pass
 
-    # ═══════════════════════════════════════════════════════════════
-    # ✅ FIX v7.18.10: handle_add_banned_word — فكّ الـtuple
-    # ═══════════════════════════════════════════════════════════════
     @staticmethod
     async def handle_add_banned_word(update, context):
         user_id = update.effective_user.id if update.effective_user else None
@@ -4260,9 +4263,6 @@ class MessageHandlers:
                 context, user_id, success,
             )
 
-    # ═══════════════════════════════════════════════════════════════
-    # ✅ FIX v7.18.10: handle_add_global_banned_word — فكّ الـtuple
-    # ═══════════════════════════════════════════════════════════════
     @staticmethod
     async def handle_add_global_banned_word(update, context):
         user_id = update.effective_user.id if update.effective_user else None
