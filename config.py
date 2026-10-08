@@ -2,8 +2,14 @@
 # -*- coding: utf-8 -*-
 
 """
-config.py - إعدادات البوت الأساسية (v7.0.1 — DETECTORS-v4.0.8-INTEGRATION)
+config.py - إعدادات البوت الأساسية (v7.0.2 — DEV-PERMANENT-INTEGRATION)
 ================================================================================
+🆕 v7.0.2:
+    👑 DEV-1: _parse_developer_ids — إزالة التكرار + ترتيب تنازلي
+    👑 DEV-2: is_developer — docstring تفصيلي لاستخدامات DEV-PERMANENT
+    👑 DEV-3: validate — تحذير عند تكرار PRIMARY_OWNER_ID في DEVELOPER_IDS
+    📝 توثيق: كيف تتفاعل CONFIG مع database.py + database_subscriptions.py
+
 🆕 v7.0.1:
     ✅ إخفاء تحذير NSFW عند استخدام Sightengine API (الوضع الخارجي)
     ✅ التحذير يظهر فقط عند غياب النموذج المحلي AND غياب Sightengine API
@@ -81,16 +87,29 @@ def safe_abs_path(value: str, default: str) -> str:
 
 
 def _parse_developer_ids() -> Tuple[int, ...]:
+    """
+    👑 v7.0.2 DEV-1: تحليل DEVELOPER_IDS من متغير البيئة.
+
+    - يقبل صيغة comma-separated: "111,222,333"
+    - يتجاهل الفراغات والقيم غير الصحيحة
+    - يقبل فقط الأرقام الموجبة (> 0)
+    - يزيل التكرار تلقائياً (set)
+    - يُرجع tuple مُرتَّب تصاعدياً (سلوك متوقّع ومستقر)
+
+    Returns:
+        Tuple[int, ...]: مثال (111, 222, 333)
+        () إذا كان المتغير فارغاً أو غير صالح
+    """
     raw = os.getenv("DEVELOPER_IDS", "") or ""
-    result: List[int] = []
+    seen: set = set()
     for token in raw.split(","):
         token = token.strip()
         if not token:
             continue
         uid = safe_int(token, 0)
         if uid > 0:
-            result.append(uid)
-    return tuple(result)
+            seen.add(uid)
+    return tuple(sorted(seen))
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -656,9 +675,33 @@ class AppConfig:
         return mapping.get(self.LOG_LEVEL, logging.INFO)
 
     def is_developer(self, user_id: int) -> bool:
+        """
+        👑 v7.0.2 DEV-2: هل المستخدم مطور/مالك؟
+
+        تُستخدم من:
+          • database.py::Database._is_dev_user
+          • database_subscriptions.py::SubscriptionMixin._is_dev_user
+          • database_channels_posts.py::ChannelsPostsMixin._is_dev_user
+
+        الأثر عند إرجاع True:
+          ✅ منح اشتراك دائم (100 سنة، provider='dev_bypass')
+          ✅ bypass has_active_subscription (True دائماً)
+          ✅ bypass has_used_trial (False دائماً)
+          ✅ activate_trial يُرجع -1 (اشتراكه أطول)
+          ✅ تجاوز فحوصات max_channels / max_posts
+          ✅ expire_expired_subscriptions يتخطى اشتراكه الدائم
+          ✅ get_users_for_reminder لن يُزعجه
+
+        Args:
+            user_id: معرّف المستخدم
+
+        Returns:
+            True إذا كان المالك الأساسي أو ضمن DEVELOPER_IDS
+        """
         return user_id == self.PRIMARY_OWNER_ID or user_id in self.DEVELOPER_IDS
 
     def is_owner(self, user_id: int) -> bool:
+        """هل المستخدم المالك الأساسي فقط (وليس مطوراً إضافياً)؟"""
         return user_id == self.PRIMARY_OWNER_ID
 
     def get_detector_env(self) -> Dict[str, str]:
@@ -806,6 +849,15 @@ class AppConfig:
             errors.append(
                 f"ANONYMOUS_ADMIN_ID يجب أن يكون رقماً موجباً: "
                 f"{self.ANONYMOUS_ADMIN_ID}"
+            )
+
+        # 👑 v7.0.2 DEV-3: تحقق من تكرار المالك في DEVELOPER_IDS
+        if (self.PRIMARY_OWNER_ID > 0
+                and self.PRIMARY_OWNER_ID in self.DEVELOPER_IDS):
+            warnings.append(
+                f"PRIMARY_OWNER_ID ({self.PRIMARY_OWNER_ID}) موجود أيضاً "
+                f"في DEVELOPER_IDS — تكرار غير مؤذٍ لكن زائد. "
+                f"يُفضَّل إزالته من DEVELOPER_IDS."
             )
 
         if self.ENVIRONMENT not in (
@@ -1114,6 +1166,37 @@ logger.info(
     f"🔒 Webhook secret: "
     f"{'مُهيَّأ' if CONFIG.WEBHOOK_SECRET else 'غير مُهيَّأ (اختياري)'}"
 )
+
+# 👑 v7.0.2: سجل المطورين (DEV-PERMANENT)
+_all_dev_ids = tuple(sorted(set(
+    ([CONFIG.PRIMARY_OWNER_ID] if CONFIG.PRIMARY_OWNER_ID else [])
+    + list(CONFIG.DEVELOPER_IDS)
+)))
+if _all_dev_ids:
+    logger.info(
+        f"👑 المطورون (DEV-PERMANENT) — {len(_all_dev_ids)} "
+        f"مُعرَّف: {', '.join(str(u) for u in _all_dev_ids)}"
+    )
+    if CONFIG.PRIMARY_OWNER_ID:
+        logger.info(
+            f"   • المالك الأساسي: {CONFIG.PRIMARY_OWNER_ID}"
+        )
+    if CONFIG.DEVELOPER_IDS:
+        logger.info(
+            f"   • مطورون إضافيون: "
+            f"{', '.join(str(u) for u in CONFIG.DEVELOPER_IDS)}"
+        )
+    logger.info(
+        "   💡 هؤلاء سيحصلون على: اشتراك دائم + "
+        "تجاوز max_channels/max_posts + "
+        "bypass has_active_subscription/has_used_trial"
+    )
+else:
+    logger.warning(
+        "⚠️ لا يوجد مطورون/مالك مُعرَّفون — "
+        "لن يُمنح أحد اشتراكاً دائماً. "
+        "أضف MAIN_ADMIN_ID أو DEVELOPER_IDS."
+    )
 
 # تقرير Spam Detection Engine v4.0.8
 _summary = CONFIG.DETECTION_SUMMARY
