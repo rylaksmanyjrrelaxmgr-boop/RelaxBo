@@ -1,8 +1,25 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-database.py - قاعدة البيانات المتكاملة (v7.7.57 — HARDENED-PA6-PA7-BW-FIX)
+database.py - قاعدة البيانات المتكاملة (v7.7.59 — DEV-PERMANENT + SLOW-QUERY-FIX)
 ================================================================================
+🆕 v7.7.59 (SLOW-QUERY-FIX — 11s queries):
+  🐌 SQ-1: TCP keepalive صريح في _pg_init_connection
+      السبب المُرجّح للاستعلامات 11.7s: اتصال pool ميت لم يُكتشف.
+      الحل: setsockopt(SO_KEEPALIVE) + TCP_KEEPIDLE/INTVL/CNT.
+  🐌 SQ-2: كاش لـ schedule في mark_published_and_advance (60s)
+      + إبطال تلقائي في update_schedule و add_channel.
+  🐌 SQ-3: توصيات server_settings في pool: statement_timeout=8s،
+      idle_in_transaction_session_timeout=30s، tcp_keepalives_*.
+  🐌 SQ-4: EXPLAIN_SLOW_QUERIES يجب أن يكون false في الإنتاج.
+
+🆕 v7.7.58 (DEV-PERMANENT):
+  👑 DEV-1: _is_dev_user + _get_dev_ids
+  👑 DEV-2: has_active_subscription — bypass فوري للمطور
+  👑 DEV-3: ensure_dev_subscription (اشتراك دائم 100 سنة)
+  👑 DEV-4: ensure_all_dev_subscriptions
+  👑 DEV-5: استدعاء تلقائي في _do_bootstrap_inner
+
 🆕 v7.7.57 (BANNED-WORDS-USER-PRESERVE-FIX):
   🔴 BW-FIX-1 CRITICAL: _import_banned_words — فصل كلمات الملف عن
       كلمات المستخدم عبر علامة added_by=0 (من الملف) vs added_by=user_id
@@ -46,6 +63,7 @@ database.py - قاعدة البيانات المتكاملة (v7.7.57 — HARDEN
 # [15] v7.7.56: PG فشل DML = ABORTED
 # [16] v7.7.56: `#` تعليق MySQL فقط
 # [17] v7.7.57: import من ملف → added_by=0
+# [18] v7.7.59: TCP keepalive + كاش schedule
 # =====================================================================
 
 import os
@@ -55,6 +73,7 @@ import asyncio
 import logging
 import time
 import sqlite3
+import socket          # 🆕 v7.7.59: TCP keepalive
 import secrets
 import re
 import hashlib
@@ -1720,7 +1739,59 @@ class Database(
     _instance = None
     _MAX_USER_LOCKS = MAX_USER_LOCKS_CONFIG
 
+    # 🆕 v7.7.58: ثوابت اشتراك المطور
+    _DEV_PROVIDER = 'dev_bypass'
+    _DEV_DURATION_DAYS = 36500   # 100 سنة
+
     BOOTSTRAP_DATA_VERSION = 8
+
+    # ═════════════════════════════════════════════════════════════════
+    #  👑 v7.7.58 DEV-1: كشف المطور/المالك
+    # ═════════════════════════════════════════════════════════════════
+
+    def _is_dev_user(self, user_id: int) -> bool:
+        """هل المستخدم مطور/مالك؟"""
+        try:
+            cfg = getattr(self, "CONFIG", None)
+            if cfg is None:
+                return False
+            fn = getattr(cfg, "is_developer", None)
+            if callable(fn):
+                try:
+                    return bool(fn(user_id))
+                except Exception:
+                    pass
+            owner = getattr(cfg, "PRIMARY_OWNER_ID", 0) or 0
+            devs = getattr(cfg, "DEVELOPER_IDS", ()) or ()
+            try:
+                devs = tuple(devs)
+            except Exception:
+                devs = ()
+            return user_id == owner or user_id in devs
+        except Exception as e:
+            logger.debug(f"_is_dev_user: {e}")
+            return False
+
+    def _get_dev_ids(self) -> Tuple[int, ...]:
+        """قائمة كل معرّفات المطورين/المالك."""
+        try:
+            cfg = getattr(self, "CONFIG", None)
+            if cfg is None:
+                return ()
+            ids = set()
+            owner = getattr(cfg, "PRIMARY_OWNER_ID", 0) or 0
+            if owner:
+                ids.add(int(owner))
+            devs = getattr(cfg, "DEVELOPER_IDS", ()) or ()
+            try:
+                for d in devs:
+                    ids.add(int(d))
+            except Exception:
+                pass
+            return tuple(sorted(ids))
+        except Exception as e:
+            logger.debug(f"_get_dev_ids: {e}")
+            return ()
 
     VALID_PENALTY_TYPES = {"mute", "ban", "restrict", "kick", "warn"}
     VALID_REPLY_TYPES = {
@@ -2030,6 +2101,9 @@ class Database(
             self._db_size_kb_cache: Optional[float] = None
             self._db_size_kb_cache_ts: float = 0.0
             self._db_size_kb_lock = asyncio.Lock()
+
+            # 🆕 v7.7.58: علم منع إعادة تأمين الاشتراكات في نفس الجلسة
+            self._dev_subscription_ensured = False
 
             self._singleton_init_done = True
         except Exception:
@@ -2638,7 +2712,7 @@ class Database(
                     f"(min={max(5, self._min_connections)}, "
                     f"max={self._max_connections}) "
                     f"[synchronous_commit=off, "
-                    f"max_inactive_lifetime=60s, TCP-keepalive=30s]"
+                    f"max_inactive_lifetime=30s, TCP-keepalive=20s]"
                 )
             elif USE_MYSQL:
                 self._pool = await _create_pool_with_retry(
@@ -2738,6 +2812,94 @@ class Database(
                 except Exception:
                     pass
             return None
+
+    # ═════════════════════════════════════════════════════════════════
+    #  🐌 v7.7.59 SQ-1: TCP keepalive صريح لاتصالات PostgreSQL
+    # ═════════════════════════════════════════════════════════════════
+
+    async def _pg_init_connection(self, conn) -> None:
+        """
+        🐌 v7.7.59: تهيئة كل اتصال PG جديد بـ TCP keepalive.
+
+        السبب: اتصالات pool idle قد تموت من جهة السيرفر (Supabase/
+        Render idle timeout) لكن OS لا يكتشفها حتى يرسل packet.
+        keepalive يكتشف الموت في ~20s بدل ~7200s الافتراضي.
+
+        تُمرَّر لـ asyncpg.create_pool(init=self._pg_init_connection).
+        """
+        try:
+            transport = None
+            try:
+                transport = getattr(conn, "_transport", None)
+                if transport is None:
+                    protocol = getattr(conn, "_protocol", None)
+                    if protocol is not None:
+                        transport = getattr(protocol, "_transport", None)
+            except Exception as te:
+                logger.debug(
+                    f"_pg_init_connection transport lookup: {te}"
+                )
+
+            if transport is None:
+                logger.debug(
+                    "_pg_init_connection: transport غير متاح "
+                    "(إصدار asyncpg مختلف) — تخطي socket options"
+                )
+                return
+
+            sock = None
+            try:
+                sock = transport.get_extra_info("socket")
+            except Exception as se:
+                logger.debug(f"get_extra_info: {se}")
+
+            if sock is None:
+                return
+
+            try:
+                sock.setsockopt(
+                    socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1
+                )
+            except (OSError, AttributeError) as ke:
+                logger.debug(f"SO_KEEPALIVE: {ke}")
+                return
+
+            if hasattr(socket, "TCP_KEEPIDLE"):
+                try:
+                    sock.setsockopt(
+                        socket.IPPROTO_TCP,
+                        socket.TCP_KEEPIDLE,
+                        20,
+                    )
+                except OSError as e:
+                    logger.debug(f"TCP_KEEPIDLE: {e}")
+
+            if hasattr(socket, "TCP_KEEPINTVL"):
+                try:
+                    sock.setsockopt(
+                        socket.IPPROTO_TCP,
+                        socket.TCP_KEEPINTVL,
+                        5,
+                    )
+                except OSError as e:
+                    logger.debug(f"TCP_KEEPINTVL: {e}")
+
+            if hasattr(socket, "TCP_KEEPCNT"):
+                try:
+                    sock.setsockopt(
+                        socket.IPPROTO_TCP,
+                        socket.TCP_KEEPCNT,
+                        3,
+                    )
+                except OSError as e:
+                    logger.debug(f"TCP_KEEPCNT: {e}")
+
+            logger.debug(
+                "🔌 PG conn: TCP keepalive مُفعَّل "
+                "(idle=20s, intvl=5s, cnt=3)"
+            )
+        except Exception as e:
+            logger.debug(f"_pg_init_connection: {e}")
 
     async def _sqlite_is_alive(self, conn) -> bool:
         if not self._use_alive_cache or self._sqlite_alive_ts is None:
@@ -4574,12 +4736,6 @@ class Database(
             - علامة added_by=0 للصفوف المُستوردة من الملف.
             - to_delete = file_words_before - normalized_words
             - كلمات البوت (added_by=user_id) محصّنة ضد الحذف.
-
-        سيناريو الفشل السابق:
-            1. المستخدم: /autoblock → يضيف "spam" → DB: added_by=8763481548
-            2. Render redeploy → _import_banned_words
-            3. to_delete يشمل "spam" → DELETE → كلمة المستخدم تُمسح
-            4. المستخدم: حذف "spam" → "غير موجودة" ← BUG!
         """
         try:
             import banned_words
@@ -5207,7 +5363,19 @@ class Database(
                 return cls.__dict__[name]
         return None
 
+    # ═════════════════════════════════════════════════════════════════
+    #  has_active_subscription + DEV-PERMANENT (v7.7.58)
+    # ═════════════════════════════════════════════════════════════════
+
     async def has_active_subscription(self, user_id: int) -> bool:
+        """
+        👑 v7.7.58 DEV-2: bypass فوري للمطور (True دائماً).
+        ✅ v7.7.29: JOIN plans + p.is_active = 1.
+        """
+        # 👑 DEV-BYPASS: المطور دائماً مشترك
+        if self._is_dev_user(user_id):
+            return True
+
         cache_key = f"has_active_sub_{user_id}"
         cached = await internal_cache.get(cache_key)
         if cached is not None:
@@ -5245,8 +5413,183 @@ class Database(
         )
         return result
 
+    # ═════════════════════════════════════════════════════════════════
+    #  👑 v7.7.58 DEV-3/4: اشتراك المطور الدائم
+    # ═════════════════════════════════════════════════════════════════
+
+    async def ensure_dev_subscription(self, user_id: int) -> bool:
+        """
+        👑 v7.7.58 DEV-3: يضمن اشتراكاً دائماً نشطاً للمطور.
+        - Idempotent (لا يُنشئ مرتين).
+        - provider='dev_bypass' كعلامة.
+        - المدة: 36500 يوم (100 سنة).
+        """
+        if not self._is_dev_user(user_id):
+            return False
+
+        try:
+            async with await self._get_user_lock(user_id):
+                async with self.transaction() as conn:
+                    # فحص الوجود
+                    sql_existing = (
+                        "SELECT 1 FROM subscriptions "
+                        "WHERE user_id = ? "
+                        "AND provider = ? "
+                        "AND status = 'active' "
+                        "AND end_date > ? "
+                        "LIMIT 1"
+                    )
+                    now_param = (
+                        TimeUtils.utc_now() if USE_POSTGRES
+                        else TimeUtils.sql_iso()
+                    )
+                    existing = await self._fetchval_with_conn(
+                        conn, sql_existing,
+                        user_id, self._DEV_PROVIDER, now_param,
+                    )
+                    if existing:
+                        return True
+
+                    # أفضل خطة نشطة
+                    plan_id = await self._fetchval_with_conn(
+                        conn,
+                        "SELECT id FROM plans WHERE is_active = 1 "
+                        "ORDER BY price DESC LIMIT 1",
+                    )
+                    if not plan_id:
+                        logger.warning(
+                            f"⚠️ ensure_dev_subscription: لا توجد "
+                            f"خطط نشطة — تعذّر منح اشتراك دائم "
+                            f"للمستخدم {user_id}"
+                        )
+                        return False
+
+                    far_future = (
+                        TimeUtils.utc_now()
+                        + timedelta(days=self._DEV_DURATION_DAYS)
+                    )
+
+                    if USE_POSTGRES:
+                        await self._execute_with_conn(
+                            conn,
+                            "INSERT INTO subscriptions "
+                            "(user_id, plan_id, status, start_date, "
+                            " end_date, auto_renew, provider, "
+                            " provider_subscription_id, "
+                            " created_at, updated_at) "
+                            "VALUES (?,?,?,?,?,?,?,?,?,?)",
+                            user_id, plan_id, 'active',
+                            TimeUtils.utc_now(), far_future, 0,
+                            self._DEV_PROVIDER, 'permanent',
+                            TimeUtils.utc_now(), TimeUtils.utc_now(),
+                        )
+                    else:
+                        await self._execute_with_conn(
+                            conn,
+                            "INSERT INTO subscriptions "
+                            "(user_id, plan_id, status, start_date, "
+                            " end_date, auto_renew, provider, "
+                            " provider_subscription_id, "
+                            " created_at, updated_at) "
+                            "VALUES (?,?,?,?,?,?,?,?,?,?)",
+                            user_id, plan_id, 'active',
+                            TimeUtils.sql_iso(),
+                            far_future.strftime('%Y-%m-%d %H:%M:%S'),
+                            0, self._DEV_PROVIDER, 'permanent',
+                            TimeUtils.sql_iso(), TimeUtils.sql_iso(),
+                        )
+
+                    await self._refresh_user_subscription_end(
+                        conn, user_id
+                    )
+                    await user_cache.invalidate(user_id)
+                    logger.info(
+                        f"👑 اشتراك دائم أُنشئ للمطور {user_id} "
+                        f"(plan={plan_id}, +{self._DEV_DURATION_DAYS} يوم)"
+                    )
+                    return True
+        except Exception as e:
+            logger.error(
+                f"❌ ensure_dev_subscription({user_id}): {e}",
+                exc_info=True,
+            )
+            return False
+
+    async def ensure_all_dev_subscriptions(self) -> int:
+        """
+        👑 v7.7.58 DEV-4: حلقة على كل المطورين/المالك.
+        تُستدعى من _do_bootstrap_inner.
+        """
+        dev_ids = self._get_dev_ids()
+        if not dev_ids:
+            logger.info(
+                "ℹ️ ensure_all_dev_subscriptions: لا مطورين مُعرَّفين"
+            )
+            return 0
+
+        count = 0
+        for dev_id in dev_ids:
+            if await self.ensure_dev_subscription(dev_id):
+                count += 1
+            else:
+                logger.warning(
+                    f"⚠️ فشل تأمين اشتراك دائم للمطور {dev_id}"
+                )
+        logger.info(
+            f"👑 ensure_all_dev_subscriptions: "
+            f"{count}/{len(dev_ids)} مطورين جاهزون"
+        )
+        return count
+
     async def invalidate_subscription_cache(self, user_id: int):
         await self._invalidate_user_cache_keys(user_id)
+
+    async def _refresh_user_subscription_end(
+        self, conn, user_id: int
+    ) -> None:
+        """يُحدّث users.subscription_end = MAX(end_date) للاشتراكات النشطة."""
+        if USE_POSTGRES:
+            end = await self._fetchval_with_conn(
+                conn,
+                "SELECT MAX(end_date) FROM subscriptions "
+                "WHERE user_id = $1 AND status = 'active' "
+                "AND end_date > CURRENT_TIMESTAMP AT TIME ZONE 'UTC'",
+                user_id,
+            )
+            await self._execute_with_conn(
+                conn,
+                "UPDATE users SET subscription_end = $1, updated_at = $2 "
+                "WHERE user_id = $3",
+                end, TimeUtils.utc_now(), user_id,
+            )
+        elif USE_MYSQL:
+            end = await self._fetchval_with_conn(
+                conn,
+                "SELECT MAX(end_date) FROM subscriptions "
+                "WHERE user_id = %s AND status = 'active' "
+                "AND end_date > UTC_TIMESTAMP()",
+                user_id,
+            )
+            await self._execute_with_conn(
+                conn,
+                "UPDATE users SET subscription_end = %s, updated_at = %s "
+                "WHERE user_id = %s",
+                end, TimeUtils.sql_iso(), user_id,
+            )
+        else:
+            end = await self._fetchval_with_conn(
+                conn,
+                "SELECT MAX(end_date) FROM subscriptions "
+                "WHERE user_id = ? AND status = 'active' "
+                "AND end_date > datetime('now')",
+                user_id,
+            )
+            await self._execute_with_conn(
+                conn,
+                "UPDATE users SET subscription_end = ?, updated_at = ? "
+                "WHERE user_id = ?",
+                end, TimeUtils.sql_iso(), user_id,
+            )
 
     async def _do_bootstrap_inner(self, conn) -> bool:
         """
@@ -5336,6 +5679,17 @@ class Database(
 
         await self._import_banned_words(conn)
         await self._import_auto_replies(conn)
+
+        # 👑 v7.7.58 DEV-5: تأمين اشتراكات المطورين الدائمة
+        if not self._dev_subscription_ensured:
+            try:
+                await self.ensure_all_dev_subscriptions()
+                self._dev_subscription_ensured = True
+            except Exception as e:
+                logger.warning(
+                    f"⚠️ ensure_all_dev_subscriptions: {e}",
+                    exc_info=True,
+                )
 
         if USE_POSTGRES:
             try:
@@ -5463,6 +5817,9 @@ class Database(
         data["has_subscription"] = (
             data.pop("has_sub", None) is not None
         )
+        # 👑 v7.7.58: احترام bypass المطور
+        if not data["has_subscription"] and self._is_dev_user(user_id):
+            data["has_subscription"] = True
         data["channels_count"] = data.get("channels_count") or 0
         data["groups_count"] = data.get("groups_count") or 0
         data["unpublished_posts"] = (
@@ -5557,6 +5914,9 @@ class Database(
             result["has_subscription"] = (
                 result.pop("has_sub", None) is not None
             )
+            # 👑 v7.7.58: احترام bypass المطور
+            if not result["has_subscription"] and self._is_dev_user(user_id):
+                result["has_subscription"] = True
             result["channels_count"] = (
                 result.get("channels_count") or 0
             )
@@ -5627,6 +5987,10 @@ class Database(
                                     "has_subscription", False
                                 )
                             )
+                            # 👑 v7.7.58: احترام bypass المطور
+                            if (not user_data["has_subscription"]
+                                    and self._is_dev_user(user_id)):
+                                user_data["has_subscription"] = True
                             user_data["channels_count"] = (
                                 cached_data.get("channels_count", 0)
                             )
@@ -5697,6 +6061,10 @@ class Database(
                 data["has_subscription"] = (
                     data.pop("has_sub", None) is not None
                 )
+                # 👑 v7.7.58: احترام bypass المطور
+                if (not data["has_subscription"]
+                        and self._is_dev_user(user_id)):
+                    data["has_subscription"] = True
                 data["channels_count"] = (
                     data.get("channels_count") or 0
                 )
@@ -6288,6 +6656,13 @@ class Database(
         )
         try:
             await self.execute(query, tuple(values))
+            # 🐌 v7.7.59 SQ-2: إبطال كاش schedule
+            try:
+                await internal_cache.invalidate(
+                    f"schedule_{channel_db_id}"
+                )
+            except Exception:
+                pass
             return True
         except Exception as e:
             logger.error(f"❌ update_schedule فشل: {e}")
@@ -6397,6 +6772,14 @@ class Database(
                 "WHERE channel_db_id = ?",
                 next_date, channel_db_id,
             )
+
+        # 🐌 v7.7.59 SQ-2: إبطال كاش schedule
+        try:
+            await internal_cache.invalidate(
+                f"schedule_{channel_db_id}"
+            )
+        except Exception:
+            pass
         return True
 
     def _compute_publish_interval(self, row: Optional[Dict]) -> int:
@@ -6490,15 +6873,27 @@ class Database(
                     channel_db_id, now,
                 )
 
-                row = await self._fetchone_with_conn(
-                    conn,
-                    "SELECT schedule_type, interval_minutes, "
-                    "interval_hours, interval_days "
-                    "FROM schedule WHERE channel_db_id = ?",
-                    channel_db_id,
-                )
+                # 🐌 v7.7.59 SQ-2: كاش schedule (60s)
+                sched_cache_key = f"schedule_{channel_db_id}"
+                row = await internal_cache.get(sched_cache_key)
+                if row is None:
+                    row = await self._fetchone_with_conn(
+                        conn,
+                        "SELECT schedule_type, interval_minutes, "
+                        "interval_hours, interval_days "
+                        "FROM schedule WHERE channel_db_id = ?",
+                        channel_db_id,
+                    )
+                    if row:
+                        await internal_cache.set(
+                            sched_cache_key,
+                            dict(row),
+                            ttl=60,
+                        )
                 if row is None:
                     row = {}
+                elif not isinstance(row, dict):
+                    row = dict(row)
 
                 try:
                     gi_raw = await self._fetchval_with_conn(
@@ -6526,6 +6921,14 @@ class Database(
                     "next_publish_date = excluded.next_publish_date",
                     channel_db_id, next_date,
                 )
+
+            # 🐌 v7.7.59 SQ-2: إبطال كاش schedule بعد التحديث
+            try:
+                await internal_cache.invalidate(
+                    f"schedule_{channel_db_id}"
+                )
+            except Exception:
+                pass
 
             try:
                 if CACHE_AVAILABLE:
@@ -6726,6 +7129,15 @@ class Database(
                     logger.debug(
                         f"posts_cache invalidate (batch): {ce}"
                     )
+
+            # 🐌 v7.7.59 SQ-2: إبطال كاش schedule للجميع
+            try:
+                for unique_ch in set(ch_ids):
+                    await internal_cache.invalidate(
+                        f"schedule_{unique_ch}"
+                    )
+            except Exception:
+                pass
 
             return True
         except Exception as e:
