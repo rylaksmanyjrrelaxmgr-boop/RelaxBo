@@ -1,9 +1,12 @@
 services:
   - type: web
-    name: relax-bot
+    name: relaxbo-rsns
     env: python
+    plan: starter
     buildCommand: apt-get update -qq && apt-get install -y -qq tesseract-ocr tesseract-ocr-ara tesseract-ocr-eng tesseract-ocr-fas tesseract-ocr-rus libzbar0 ffmpeg && pip install --upgrade pip && pip install -r requirements.txt
     startCommand: python bot.py
+    healthCheckPath: /health
+    autoDeploy: true
     envVars:
       # ═══════════════════════════════════════════════════════
       # Core
@@ -17,17 +20,23 @@ services:
       - key: BOT_USERNAME
         value: Reelaaaxbot
       - key: MAX_FILE_SIZE
-        value: 20971520
+        value: "20971520"
       - key: PORT
-        value: 10000
+        value: "10000"
       - key: PYTHON_VERSION
-        value: 3.11.0
+        value: 3.12.0
+      - key: DATABASE_URL
+        sync: false
+      - key: LOG_LEVEL
+        value: INFO
 
       # ═══════════════════════════════════════════════════════
-      # 🆕 v3.0.1 — Multi-Layer Detection (7 Layers)
+      # Multi-Layer Detection — 15 طبقة
       # ═══════════════════════════════════════════════════════
       - key: MULTILAYER_ENABLED
         value: "1"
+
+      # ─── الطبقات الأساسية (7) ───
       - key: TEXT_LAYER_ENABLED
         value: "1"
       - key: OCR_LAYER_ENABLED
@@ -43,15 +52,41 @@ services:
       - key: BEHAVIORAL_LAYER_ENABLED
         value: "1"
 
-      # ─── Layer 1: OCR ──────────────────────────────────
+      # ─── الطبقات المتقدمة (8) ───
+      - key: VIDEO_LAYER_ENABLED
+        value: "1"
+      - key: NSFW_LAYER_ENABLED
+        value: "1"
+      - key: STICKER_LAYER_ENABLED
+        value: "1"
+      - key: REACTIONS_LAYER_ENABLED
+        value: "1"
+      - key: CONTEXT_LAYER_ENABLED
+        value: "1"
+      - key: CIPHER_LAYER_ENABLED
+        value: "1"
+      - key: STEGO_LAYER_ENABLED
+        value: "1"
+      - key: DOMAIN_REP_LAYER_ENABLED
+        value: "1"
+
+      # ─── NSFW: cloud فقط (بدون torch) ───
+      - key: NSFW_MODEL_ENABLED
+        value: "0"
+      - key: SIGHTENGINE_API_USER
+        sync: false
+      - key: SIGHTENGINE_API_SECRET
+        sync: false
+
+      # ─── Layer 1: OCR ───
       - key: OCR_LANGUAGES
         value: ara+eng+fas+rus
 
-      # ─── Layer 2: Audio ────────────────────────────────
+      # ─── Layer 2: Audio ───
       - key: AUDIO_USE_WHISPER
         value: "0"
 
-      # ─── Layer 3: URL Enrichment ───────────────────────
+      # ─── Layer 3: URL Enrichment ───
       - key: URL_ENRICH_ENABLED
         value: "1"
       - key: WHOIS_ENABLED
@@ -60,15 +95,23 @@ services:
         value: "5"
       - key: URL_ENRICH_MAX_URLS
         value: "5"
-      # ⚠️ أضف SAFE_BROWSING_API_KEY من Dashboard → Environment
-      #     إذا أردت تفعيل Google Safe Browsing
       - key: SAFE_BROWSING_API_KEY
         sync: false
 
-      # ─── Debug (عطّل في الإنتاج) ────────────────────────
+      # ─── Debug (معطّل في الإنتاج) ───
       - key: DEBUG_DIAG
         value: "0"
       - key: DEBUG_SPAM
         value: "0"
       - key: DIAG_INCOMING
         value: "0"
+      - key: ANTIFLOOD_ENABLED
+        value: "1"
+      - key: SLOW_MODE_AUTO
+        value: "1"
+      - key: FORCE_DELETE_BUTTON_LINKS
+        value: "1"
+      - key: FORCE_DELETE_POSTBOT_FORWARDS
+        value: "1"
+      - key: BAN_ADD_RATE_LIMIT
+        value: "1"
