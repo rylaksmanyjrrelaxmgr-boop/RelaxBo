@@ -954,6 +954,7 @@
   "pen_mute": "🔇 كتم",
   "pen_kick": "👢 طرد",
   "pen_warn": "⚠️ تحذير",
+  "penalty": "⚖️ عقوبات",
 
   "updates_channel_btn": "📢 قناة التحديثات",
   "updates_channel_title": "📢 قناة التحديثات",
@@ -975,6 +976,14 @@
   "sec_game": "🎮 لعبة",
   "sec_voice": "🎤 صوتي",
   "sec_videonote": "🎥 فيديو نوت",
+
+  "sec_at_channel": "📢 منشن القناة",
+  "sec_tg_scheme": "🔗 روابط tg://",
+  "sec_button_links": "🔘 أزرار بروابط",
+  "sec_emails": "📧 بريد إلكتروني",
+  "sec_protected_any": "🛡️ محمي متعدد",
+  "sec_postbot": "🤖 نمط PostBot",
+
   "sec_banned_words": "🚫 كلمات محظورة",
   "sec_toggle_banned_words": "✅ حذف عند / ❌ إيقاف",
   "banned_words_btn_on": "✅ حذف الكلمات المحظورة: مفعّل (اضغط للتعطيل)",
