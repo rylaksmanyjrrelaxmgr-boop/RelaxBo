@@ -6,7 +6,6 @@ ENV PYTHONUNBUFFERED=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     DEBIAN_FRONTEND=noninteractive
 
-# إضافة مستودع PostgreSQL الرسمي (PGDG) لتثبيت pg_dump 18
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl ca-certificates gnupg \
     && curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc \
