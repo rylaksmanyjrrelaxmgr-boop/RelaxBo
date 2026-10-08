@@ -384,6 +384,7 @@ def _run_sync_in_pool_available() -> bool:
 
 _ANTIFLOOD_ENABLED = _env_flag("ANTIFLOOD_ENABLED", True)
 _SLOW_MODE_AUTO = _env_flag("SLOW_MODE_AUTO", True)
+_SLOW_MODE_UNSUPPORTED = False
 
 _MULTILAYER_ENABLED = (
     _env_flag("MULTILAYER_ENABLED", True) and _HAS_MULTILAYER
@@ -769,8 +770,9 @@ def _is_shutting_down() -> bool:
 
 
 def _reset_shutdown_for_tests():
-    global _shutdown_started
+    global _shutdown_started, _SLOW_MODE_UNSUPPORTED
     _shutdown_started = False
+    _SLOW_MODE_UNSUPPORTED = False
     try:
         with _private_sig_cache_lock:
             _private_handler_signature_cache.clear()
@@ -2920,7 +2922,10 @@ class MessageHandlers:
 
         الحل: HTTP POST مباشر إلى Telegram Bot API عبر aiohttp.
         """
+        global _SLOW_MODE_UNSUPPORTED
         if not _SLOW_MODE_AUTO:
+            return
+        if _SLOW_MODE_UNSUPPORTED:
             return
         try:
             slow_on = _as_bool(settings.get('slow_mode', 0), False)
@@ -3057,24 +3062,35 @@ class MessageHandlers:
                     chat_id, target, _target_tg,
                 )
             else:
-                _warn_key = f"_slow_warn_{chat_id}"
-                _warned = False
-                try:
-                    if isinstance(context.bot_data, dict):
-                        _warned = bool(context.bot_data.get(_warn_key))
-                except Exception:
-                    pass
-                if not _warned:
-                    logger.warning(
-                        "⚠️ SLOW-MODE: تعذّر تفعيل الوضع البطيء لـ %s "
-                        "— السبب: %s",
-                        chat_id, _api_error or "unknown",
-                    )
+                _err_lower = (_api_error or "").lower()
+                if "not found" in _err_lower or "404" in _err_lower:
+                    if not _SLOW_MODE_UNSUPPORTED:
+                        _SLOW_MODE_UNSUPPORTED = True
+                        logger.warning(
+                            "⚠️ SLOW-MODE: معطّل نهائياً — "
+                            "Telegram Bot API لا يوفّر "
+                            "setChatSlowModeDelay. سيتم تجاهل "
+                            "المحاولات المستقبلية."
+                        )
+                else:
+                    _warn_key = f"_slow_warn_{chat_id}"
+                    _warned = False
                     try:
                         if isinstance(context.bot_data, dict):
-                            context.bot_data[_warn_key] = True
+                            _warned = bool(context.bot_data.get(_warn_key))
                     except Exception:
                         pass
+                    if not _warned:
+                        logger.warning(
+                            "⚠️ SLOW-MODE: تعذّر تفعيل الوضع البطيء لـ %s "
+                            "— السبب: %s",
+                            chat_id, _api_error or "unknown",
+                        )
+                        try:
+                            if isinstance(context.bot_data, dict):
+                                context.bot_data[_warn_key] = True
+                        except Exception:
+                            pass
 
         except Exception as e:
             logger.debug("_apply_slow_mode: %s", e)
@@ -4746,6 +4762,8 @@ __all__ = [
     "_notify_delete_permission_failure", "analyze_sentiment",
     "_MULTILAYER_ENABLED", "_HAS_MULTILAYER",
     "_HAS_ASYNC_DETECTORS",
+    "_SLOW_MODE_UNSUPPORTED",
+    "_SLOW_MODE_AUTO",
     "analyze_message_full", "analyze_message_full_async",
     "SpamVerdict",
     "_FORCE_DELETE_BUTTON_LINKS",
