@@ -2,79 +2,41 @@
 # -*- coding: utf-8 -*-
 
 """
-utils.py - الأدوات المساعدة للبوت (v7.10.5 — SECURITY-CACHE-ISOLATION-FIX)
+utils.py - الأدوات المساعدة للبوت (v7.10.6 — DEV-PERMANENT-INTEGRATION + CHATMIGRATED)
 =================================================================================
+🆕 v7.10.6 (DEV-PERMANENT + REVIEW-FIXES):
+    👑 DEV-1: apply_penalty — فحص CONFIG.is_developer قبل أي عقوبة
+              (كان يمكن معاقبة المالك إن لم يُفحص قبل الاستدعاء)
+    👑 DEV-2: _PENALTY_I18N — إضافة "cannot_penalize_dev" (ar/en)
+    🟠 FIX-1: safe_send — معالجة ChatMigrated (ترقية المجموعة)
+              + تسجيل الإشعار في DB.bot_groups (لا تفشل بصمت)
+    🟠 FIX-2: check_all_security — فحص صريح لـ `verdict is None`
+    🟡 FIX-3: warmup_all — timeout=2s + تشغيل DB fetch في الخلفية
+              (كان يجمّد الإقلاع 5s إذا كانت DB بطيئة)
+    🟡 FIX-4: نقل _security_settings_cache + _SEC_SETTINGS_TTL للأعلى
+              (قبل استخدامها في BackgroundTasks.cleanup_old_data)
+
 🟢 v7.10.5 (SECURITY-CACHE-ISOLATION-FIX):
     🟡 FIX-PA-1: get_security_settings يُرجع نسخة (dict) بدل المرجع
-        المشترك من _security_settings_cache. السبب: كان المتصل يستطيع
-        تعديل dict رجعه من الكاش فيلوّث الإعدادات لمدة TTL كامل (60s)
-        ويؤثر على جميع مستدعي الدالة بنفس chat_id.
-        الأثر قبل الإصلاح: تعديل عرضي في أي handler يستدعي
-                          get_security_settings كان يُفسد الكاش.
-        الأثر بعد الإصلاح: كل متصل يحصل على نسخة مستقلة.
+        المشترك من _security_settings_cache.
 
 🔴 v7.10.4 (SECURITY-TOGGLE-MAP-FIX):
     🔴 FIX-CRITICAL: SECURITY_TOGGLE_MAP — حذف بادئة "sec_" من كل المفاتيح
-        السبب: handlers_callback._handle_security يُزيل "sec_" من action
-              قبل الفحص (`action = prefix0[4:]`)، مما يجعل مطابقة
-              المفاتيح ذات البادئة "sec_" تفشل دائماً.
-        الأثر قبل الإصلاح: جميع أزرار الأمان (toggles) في المجموعات
-                          لا تعمل — تُضغط بصمت دون تأثير.
-        الأثر بعد الإصلاح: الأزرار تعمل بشكل صحيح (mutual مع fallback
-                          المحلي في handlers_callback.py).
 
 🆕 v7.10.3 (PENALTY-RESTORED):
-    🔴 FIX: إعادة لصق قسم Penalty I18N المفقود:
-        • _PENALTY_I18N  — قاموس ترجمات العقوبات (ar/en)
-        • _penalty_t()   — ترجمة موحّدة مع fallback
-        • _format_duration() — تنسيق مدة العقوبة
-        • apply_penalty() — الدالة الموحّدة لتطبيق العقوبات
-        هذه الأسماء كانت مدرجة في __all__ لكن غير معرّفة في الملف
-        → كانت تُسبّب ImportError في handlers_command و handlers_message
+    🔴 FIX: إعادة لصق قسم Penalty I18N المفقود
 
 🆕 v7.10.2 (SECURITY-BRIDGE-INTEGRATION):
     🟢 NEW: قسم 22 — Security Bridge
-        • get_security_settings(chat_id)          — جلب إعدادات الأمان (with cache)
-        • invalidate_security_settings_cache()    — إبطال الكاش عند toggle
-        • should_delete_by_security(message, ctx) — الفحص الرئيسي لكل زر
-        • check_all_security(message, bot)        — فحص شامل (أزرار + محرك)
-        • _lazy_import_detectors()                — import مؤجل لتجنّب circular
-
-        يربط:
-            • SECURITY_TOGGLE_MAP (v7.10.0)
-            • NEW_SECURITY_DEFAULTS (v7.10.0)
-            • handlers_message_detectors v4.0.0 (18 طبقة كشف)
-        بالطريقة الآتية:
-            sec_at_channel      → _contains_at_channel()
-            sec_tg_scheme       → _contains_tg_scheme()
-            sec_button_links    → ctx.button_link_urls
-            sec_emails          → _contains_email()
-            sec_protected_any   → ctx.is_protected && ctx.is_forwarded
-            sec_postbot         → _is_postbot_pattern() + confidence>=6
-
-        بدون أي ملف جديد — كل شيء داخل utils.py
-
-🆕 v7.10.2-FIX (REVIEW-CLEANUP):
-    🟠 FIX-2: check_all_security يدعم analyze_message_full
-              sync و async على السواء (asyncio.iscoroutine)
-    🟠 FIX-3: check_bot_permissions — إضافة 'can_pin': False
-              في مساري الفشل لمنع KeyError
-    🟡 FIX-4: Load Beacon لا يستدعي _lazy_import_detectors() بشكل
-              eager — للحفاظ على ميزة lazy import (منع circular)
-    🟡 FIX-5: should_delete_by_security — كل نداء detector ملفوف
-              بـ try/except منفصل + logger.debug لتشخيص أنظف
 
 🆕 v7.10.1 (PUBLISH-TIMEOUT-FIX):
     🔴 FIX-CRITICAL: BackgroundTasks._publish_post
-        - timeouts مخصصة: read=60s, write=60s, connect=30s, pool=15s
-        - retry تلقائي 2 مرات على TimedOut مع backoff (3s، 6s)
-        - fallback نهائي: إعادة الإرسال بدون caption إن فشل الـcaption
 
 🆕 v7.10.0 (NEW SECURITY BUTTONS):
-    ✅ NC1-NC5 — 6 ثوابت + 6 نصوص + 3 صفوف أزرار جديدة
+    ✅ NC1-NC5
 
 🆕 v7.9.19 (REVIEW R3 FIXES):
-    🔴 C1, C2  + 🟠 M1-M5 + 🟡 m1-m17
+    🔴 C1, C2 + 🟠 M1-M5 + 🟡 m1-m17
 =================================================================================
 """
 
@@ -106,7 +68,7 @@ except ImportError:
 
 import aiohttp
 from telegram import InlineKeyboardMarkup, InlineKeyboardButton, ChatPermissions, Update
-from telegram.error import BadRequest, TimedOut, RetryAfter, Forbidden
+from telegram.error import BadRequest, TimedOut, RetryAfter, Forbidden, ChatMigrated
 from telegram.ext import ContextTypes
 from cachetools import TTLCache
 
@@ -133,6 +95,14 @@ _ALLOWED_JSON_HOSTS: frozenset = frozenset({
 _FALLBACK_PENALTY_TYPES: frozenset = frozenset({
     "ban", "mute", "kick", "warn", "restrict", "unban",
 })
+
+# ═══════════════════════════════════════════════════════════════════
+# 🆕 v7.10.6: كاش إعدادات الأمان — مُعرَّف مسبقاً لتفادي
+#            الاستخدام قبل التعريف في BackgroundTasks
+# ═══════════════════════════════════════════════════════════════════
+_security_settings_cache: Dict[int, Tuple[float, Dict[str, int]]] = {}
+_SEC_SETTINGS_TTL = 60
+_SEC_SETTINGS_MAX_SIZE = 5000
 
 # ═══════════════════════════════════════════════════════════════════
 # تطبيع عربي موحّد
@@ -2307,6 +2277,53 @@ async def _send_media(bot, chat_id, media_type, media_file_id,
                                       parse_mode=parse_mode, **kwargs)
 
 
+async def _handle_chat_migrated(chat_id: int, new_chat_id: int) -> None:
+    """
+    🆕 v7.10.6 FIX-1: معالجة ترقية مجموعة إلى supergroup.
+
+    يحاول تحديث chat_id في قاعدة البيانات، مع فشل هادئ لو تعذّر.
+    """
+    try:
+        logger.warning(
+            f"🔄 ChatMigrated: {chat_id} → {new_chat_id} — "
+            f"محاولة تحديث قاعدة البيانات"
+        )
+        # تحديث في bot_groups
+        try:
+            await DB.execute(
+                "UPDATE bot_groups SET chat_id = ? WHERE chat_id = ?",
+                (new_chat_id, chat_id),
+            )
+        except Exception as _e:
+            logger.debug(f"ChatMigrated: bot_groups update: {_e}")
+
+        # تحديث في user_groups_link
+        try:
+            await DB.execute(
+                "UPDATE user_groups_link SET chat_id = ? WHERE chat_id = ?",
+                (new_chat_id, chat_id),
+            )
+        except Exception as _e:
+            logger.debug(f"ChatMigrated: user_groups_link update: {_e}")
+
+        # إبطال كاش المجموعة
+        try:
+            from cache import groups_cache as _gc
+            with suppress(Exception):
+                await _gc.invalidate(chat_id)
+            with suppress(Exception):
+                await _gc.invalidate(new_chat_id)
+        except Exception as _e:
+            logger.debug(f"ChatMigrated: cache invalidate: {_e}")
+
+        logger.info(
+            f"✅ ChatMigrated: تم تحديث {chat_id} → {new_chat_id} "
+            f"(قد يحتاج تدخل يدوي إذا فشل تحديث بعض الجداول)"
+        )
+    except Exception as e:
+        logger.error(f"ChatMigrated handler: {e}", exc_info=True)
+
+
 async def safe_send(bot, chat_id: int, text: str, reply_markup=None,
                     parse_mode: str = None, **kwargs):
     if not text and not any(
@@ -2350,6 +2367,44 @@ async def safe_send(bot, chat_id: int, text: str, reply_markup=None,
                     reply_markup=reply_markup,
                     parse_mode=parse_mode, **kwargs
                 )
+        except ChatMigrated as e:
+            # 🆕 v7.10.6 FIX-1: معالجة ترقية المجموعة
+            new_chat_id = getattr(e, 'new_chat_id', None)
+            if new_chat_id:
+                # إشعار لا-حاجب
+                asyncio.create_task(
+                    _handle_chat_migrated(chat_id, new_chat_id)
+                )
+                logger.info(
+                    f"🔄 ChatMigrated: {chat_id} → {new_chat_id} — "
+                    f"محاولة إعادة الإرسال"
+                )
+                # محاولة واحدة فقط مع chat_id الجديد
+                try:
+                    if media_type:
+                        return await _send_media(
+                            bot, new_chat_id, media_type, media_file_id,
+                            caption=caption_text or None,
+                            reply_markup=reply_markup,
+                            parse_mode=parse_mode,
+                            **kwargs
+                        )
+                    else:
+                        return await bot.send_message(
+                            chat_id=new_chat_id, text=text,
+                            reply_markup=reply_markup,
+                            parse_mode=parse_mode, **kwargs
+                        )
+                except Exception as e2:
+                    logger.warning(
+                        f"⚠️ ChatMigrated re-send failed: {e2}"
+                    )
+                    return None
+            else:
+                logger.warning(
+                    f"⚠️ ChatMigrated بدون new_chat_id: {e}"
+                )
+                return None
         except RetryAfter as e:
             wait = int(getattr(e, 'retry_after', 1)) + 1
             RATE_LIMITER.report_429()
@@ -2591,7 +2646,7 @@ class PenaltyFactory:
 
 
 # =====================================================================
-# 14b. Penalty I18N + apply_penalty (v7.10.1 / v7.10.3)
+# 14b. Penalty I18N + apply_penalty (v7.10.1 / v7.10.3 / v7.10.6)
 # =====================================================================
 
 _PENALTY_I18N: Dict[str, Dict[str, str]] = {
@@ -2617,6 +2672,8 @@ _PENALTY_I18N: Dict[str, Dict[str, str]] = {
         "fail_unban": "❌ فشل فك الحظر",
         "cannot_penalize_bot": "❌ لا يمكن معاقبة البوت نفسه",
         "cannot_penalize_admin": "❌ لا يمكن معاقبة مشرف",
+        # 🆕 v7.10.6 DEV-2
+        "cannot_penalize_dev": "❌ لا يمكن معاقبة مطور/مالك البوت",
         "unknown_penalty": "❌ نوع عقوبة غير معروف: {ptype}",
         "reason_label": "📋 السبب",
         "duration_label": "⏱️ المدة",
@@ -2646,6 +2703,8 @@ _PENALTY_I18N: Dict[str, Dict[str, str]] = {
         "fail_unban": "❌ Unban failed",
         "cannot_penalize_bot": "❌ Cannot penalize the bot",
         "cannot_penalize_admin": "❌ Cannot penalize an admin",
+        # 🆕 v7.10.6 DEV-2
+        "cannot_penalize_dev": "❌ Cannot penalize bot developer/owner",
         "unknown_penalty": "❌ Unknown penalty: {ptype}",
         "reason_label": "📋 Reason",
         "duration_label": "⏱️ Duration",
@@ -2705,7 +2764,9 @@ async def apply_penalty(
     lang: str = "ar",
 ) -> Tuple[bool, str]:
     """
-    تطبيق العقوبة الموحّد (v7.10.1 / v7.10.3).
+    تطبيق العقوبة الموحّد (v7.10.1 / v7.10.3 / v7.10.6).
+
+    👑 v7.10.6 DEV-1: يرفض معاقبة المطور/المالك (طبقة دفاع إضافية).
 
     Returns:
         (success: bool, message: str)
@@ -2717,6 +2778,17 @@ async def apply_penalty(
             return False, _penalty_t(
                 lang, "unknown_penalty", ptype=penalty_type,
             )
+
+        # 🆕 v7.10.6 DEV-1: رفض معاقبة المطور/المالك
+        try:
+            if CONFIG.is_developer(user_id):
+                logger.warning(
+                    f"👑 apply_penalty: رفض معاقبة المطور/المالك "
+                    f"{user_id} بـ {penalty_type} (chat={chat_id})"
+                )
+                return False, _penalty_t(lang, "cannot_penalize_dev")
+        except Exception as _dev_e:
+            logger.debug(f"apply_penalty dev check: {_dev_e}")
 
         try:
             bot_id = getattr(bot, "id", None)
@@ -3862,7 +3934,7 @@ class BackgroundTasks:
                 BackgroundTasks._group_admins_cache.clear()
                 BackgroundTasks._group_admins_access_count.clear()
 
-                # ✅ v7.10.2: تنظيف كاش الأمان أيضاً
+                # ✅ v7.10.2 / 🆕 v7.10.6 FIX-4: تنظيف كاش الأمان
                 _security_settings_cache.clear()
 
                 async with _banned_words_locks_guard:
@@ -3895,8 +3967,23 @@ class BackgroundTasks:
 
 
 # =====================================================================
-# 18. Warmup
+# 18. Warmup (🆕 v7.10.6 FIX-3: timeout أقصر + مهام خلفية)
 # =====================================================================
+
+async def _bg_warmup_db_words() -> None:
+    """يُشغَّل في الخلفية — لا يُعطّل الإقلاع."""
+    try:
+        if hasattr(DB, 'get_banned_words'):
+            db_words = await asyncio.wait_for(
+                DB.get_banned_words(-1), timeout=8
+            )
+            logger.info(
+                f"🔥 Background warmup: {len(db_words or [])} كلمة "
+                f"محظورة من DB"
+            )
+    except Exception as e:
+        logger.debug(f"bg_warmup db_words: {e}")
+
 
 async def warmup_all() -> Dict[str, Any]:
     result = {
@@ -3917,20 +4004,20 @@ async def warmup_all() -> Dict[str, Any]:
             KeyboardFactory.preload_all
         )
 
+        # 🆕 FIX-3: timeout=2s بدل 5s
         try:
-            words = await asyncio.wait_for(_get_global_words_cached(), timeout=5)
+            words = await asyncio.wait_for(
+                _get_global_words_cached(), timeout=2
+            )
             result['banned_words_loaded'] = len(words)
         except Exception as e:
             logger.debug(f"warmup banned_words (utils): {e}")
 
+        # 🆕 FIX-3: DB fetch في الخلفية — لا يجمّد الإقلاع
         try:
-            if hasattr(DB, 'get_banned_words'):
-                db_words = await asyncio.wait_for(
-                    DB.get_banned_words(-1), timeout=5
-                )
-                result['db_banned_words_loaded'] = len(db_words or [])
+            asyncio.create_task(_bg_warmup_db_words())
         except Exception as e:
-            logger.debug(f"warmup banned_words (DB): {e}")
+            logger.debug(f"spawn bg_warmup_db_words: {e}")
 
         result['replies_loaded'] = len(_REPLIES_FROM_FILE) if _REPLIES_FROM_FILE else 0
 
@@ -3942,9 +4029,8 @@ async def warmup_all() -> Dict[str, Any]:
         f"🔥 Warmup: {result['translations_loaded']} لغة + "
         f"{result['buttons_loaded']} أزرار + "
         f"{result['banned_words_loaded']} كلمة (utils) + "
-        f"{result['db_banned_words_loaded']} كلمة (DB) + "
         f"{result['replies_loaded']} رد — "
-        f"{result['total_ms']}ms"
+        f"{result['total_ms']}ms (DB words in background)"
     )
     return result
 
@@ -4076,10 +4162,6 @@ class ErrorHandler:
 #   handlers_callback._handle_security يُزيل البادئة "sec_" من action
 #   قبل الفحص: `action = prefix0[4:] if prefix0.startswith("sec_") else prefix0`
 #   لذلك المفاتيح هنا يجب أن تكون بدون "sec_".
-#
-#   قبل v7.10.4: كانت المفاتيح تحمل البادئة "sec_" → لا تطابق أبداً
-#               → جميع أزرار الأمان (toggles) كانت لا تعمل!
-#   بعد v7.10.4: المفاتيح بدون "sec_" → تطابق صحيح مع action.
 # =====================================================================
 
 SECURITY_TOGGLE_MAP: Dict[str, str] = {
@@ -4128,20 +4210,8 @@ NEW_SECURITY_DEFAULTS: Dict[str, int] = {
 
 # =====================================================================
 # 22. Security Bridge (v7.10.2) — ربط أزرار الأمان بمحرك الكشف
-# ═════════════════════════════════════════════════════════════════════
-# ✅ الجديد في v7.10.2
-# هذا القسم يوفر:
-#   • get_security_settings(chat_id)          — جلب إعدادات الأمان مع cache
-#   • invalidate_security_settings_cache()    — إبطال الكاش عند toggle
-#   • should_delete_by_security(message, ctx) — الفحص الرئيسي لكل زر
-#   • check_all_security(message, bot)        — فحص شامل (أزرار + محرك)
-#
-# الاعتماد:
-#   • handlers_message_detectors v4.0.0 (lazy import — لا circular)
-#   • SECURITY_TOGGLE_MAP + NEW_SECURITY_DEFAULTS (v7.10.0)
 # =====================================================================
 
-# Lazy imports من handlers_message_detectors
 _detector_imports: Optional[Dict[str, Any]] = None
 _detector_import_lock = threading.Lock()
 
@@ -4152,8 +4222,6 @@ def _lazy_import_detectors() -> Dict[str, Any]:
     يُخزّن النتيجة في `_detector_imports` لتجنّب إعادة الاستيراد.
 
     لا يُرفع استثناء إذا كان الملف غير متاح — يُرجع {} بدلاً منه.
-
-    ✅ v7.10.3.1 FIX: 3-tier fallback (root → handlers → relative)
     """
     global _detector_imports
 
@@ -4249,19 +4317,13 @@ def _lazy_import_detectors() -> Dict[str, Any]:
         return _detector_imports
 
 
-# =====================================================================
-# كاش إعدادات الأمان (per-chat، TTL=60s)
-# =====================================================================
-
-_security_settings_cache: Dict[int, Tuple[float, Dict[str, int]]] = {}
-_SEC_SETTINGS_TTL = 60
-
-
 async def get_security_settings(chat_id: int) -> Dict[str, int]:
     """
     جلب إعدادات الأمان لمجموعة من DB.
 
     ✅ v7.10.5 FIX-PA-1: يُرجع نسخة (dict) بدل المرجع المشترك من الكاش.
+    🆕 v7.10.6 FIX-4: يستخدم _SEC_SETTINGS_MAX_SIZE + _SEC_SETTINGS_TTL
+                     المُعرَّفَين في أعلى الملف.
 
     Returns:
         dict: {delete_links: 0/1, delete_emails: 0/1, ...}
@@ -4324,6 +4386,24 @@ async def get_security_settings(chat_id: int) -> Dict[str, int]:
     except Exception as e:
         logger.debug(f"get_security_settings({chat_id}): {e}")
 
+    # 🆕 FIX-4: تنظيف الكاش إذا تجاوز الحد
+    if len(_security_settings_cache) >= _SEC_SETTINGS_MAX_SIZE:
+        # إزالة ربع الأقدم
+        try:
+            sorted_items = sorted(
+                _security_settings_cache.items(),
+                key=lambda kv: kv[1][0],  # timestamp
+            )
+            to_remove = len(sorted_items) // 4
+            for k, _ in sorted_items[:to_remove]:
+                _security_settings_cache.pop(k, None)
+            logger.debug(
+                f"🧹 security_settings_cache: أُزيل {to_remove} مدخل "
+                f"(تجاوز الحد {_SEC_SETTINGS_MAX_SIZE})"
+            )
+        except Exception as _e:
+            logger.debug(f"security_settings_cache cleanup: {_e}")
+
     _security_settings_cache[chat_id] = (now, settings)
     # ✅ PA-1: نسخة — لا تُسمح للمتصل بتلويث الكاش
     return dict(settings)
@@ -4339,10 +4419,6 @@ def invalidate_security_settings_cache(chat_id: Optional[int] = None) -> None:
     else:
         _security_settings_cache.pop(chat_id, None)
 
-
-# =====================================================================
-# الفحص الرئيسي — أزرار الأمان المخصصة
-# =====================================================================
 
 async def should_delete_by_security(
     message: Any,
@@ -4515,10 +4591,6 @@ async def should_delete_by_security(
         return False, None
 
 
-# =====================================================================
-# الفحص الشامل — أزرار الأمان + محرك السبام الكامل
-# =====================================================================
-
 async def check_all_security(
     message: Any,
     bot: Any = None,
@@ -4580,6 +4652,14 @@ async def check_all_security(
         if asyncio.iscoroutine(verdict):
             verdict = await verdict
 
+        # 🆕 v7.10.6 FIX-2: فحص صريح — قد يُرجع None
+        if verdict is None:
+            logger.debug(
+                "check_all_security: analyze_message_full رجع None "
+                "— تخطي تقييم محرك السبام"
+            )
+            return result
+
         result["spam_score"] = float(getattr(verdict, "total_score", 0.0))
         result["spam_confidence"] = str(
             getattr(verdict, "confidence", "none")
@@ -4620,7 +4700,7 @@ async def check_all_security(
 
 
 # =====================================================================
-# v7.10.4: تصدير الجسر للاستخدام من handlers
+# v7.10.6: تصدير الجسر للاستخدام من handlers
 # =====================================================================
 
 __all__ = [
@@ -4657,6 +4737,9 @@ __all__ = [
 
     # v7.10.1
     '_PUBLISH_TIMEOUTS',
+
+    # 🆕 v7.10.6
+    '_handle_chat_migrated',
 ]
 
 # v7.10.1: ثوابت timeouts مُصدَّرة
@@ -4669,7 +4752,7 @@ _PUBLISH_TIMEOUTS = {
 
 
 # =====================================================================
-# LOAD BEACON — v7.10.5
+# LOAD BEACON — v7.10.6
 # =====================================================================
 # 🟡 FIX-4: لا نستدعي _lazy_import_detectors() بشكل eager —
 #           للحفاظ على ميزة lazy import ومنع circular imports
@@ -4677,12 +4760,14 @@ _PUBLISH_TIMEOUTS = {
 
 try:
     logger.info(
-        "🛡️ utils.py v7.10.5 SECURITY-CACHE-ISOLATION-FIX loaded | "
+        "🛡️ utils.py v7.10.6 DEV-PERMANENT + CHATMIGRATED loaded | "
         "Detectors=lazy | Langs=%d | Buttons=✅ | Security-Bridge=✅ | "
-        "Penalty=✅ | ToggleMap=✅(no sec_ prefix, %d keys) | "
-        "Cache-Iso=✅",
+        "Penalty=✅ | DevGuard=✅ | ChatMigrated=✅ | "
+        "ToggleMap=✅(no sec_ prefix, %d keys) | "
+        "Cache-Iso=✅ | SecurityCache=✅(max=%d)",
         len(_AVAILABLE_LANGUAGES),
         len(SECURITY_TOGGLE_MAP),
+        _SEC_SETTINGS_MAX_SIZE,
     )
 except Exception:
     pass
