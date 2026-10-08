@@ -22,13 +22,9 @@ GroupsMixin:
 🆕 v7.4.13 — ROOT-CAUSE-FIX (نهائي):
   🔴 F1: عكس ترتيب المعاملات في add_banned_word / remove_banned_word
          التوقيع الجديد: (chat_id, word, added_by) و (chat_id, word)
-         السبب المُثبَت من السجلات:
-             add_banned_word: word وصل int=-1 | chat_id='صباح الخير'
-         المُنادي يمرّر (chat_id, word, added_by) بشكل ثابت، لكن
-         التوقيع كان (word, chat_id, added_by) → انعكاس كامل →
-         فحص النوع يفشل → الكلمة لا تُخزَّن أبداً → عند الحذف
-         "غير موجودة".
-         الحل: مطابقة التوقيع مع ما يمرّره المُنادي فعلاً.
+         متطابق مع ما يمرّره handlers_message.py v7.18.10.
+  🔴 F2: add_banned_word تُعيد (bool, bool) — والمُنادي يفكّها.
+  🔴 F3: remove_banned_word مع fallback تشخيصي عند عدم العثور.
 
 🆕 v7.4.12 — CRITICAL-FIX:
   🔴 F1: add_banned_word — تحقق نوع شامل قبل .strip()
@@ -1348,21 +1344,30 @@ class GroupsMixin:
             await self.banned_words_cache.set(chat_id, result)
         return result
 
-    # ─────────────────────────────────────────────────────────────────
-    # 🆕 v7.4.13: التوقيع الجديد = (chat_id, word, added_by)
-    #             يطابق ما يمرّره المُنادي فعلاً.
-    # ─────────────────────────────────────────────────────────────────
+    # ═════════════════════════════════════════════════════════════════
+    # ✅ v7.4.13: التوقيع = (chat_id, word, added_by)
+    #             يُرجع: (added_ok, is_duplicate)
+    # ═════════════════════════════════════════════════════════════════
     async def add_banned_word(
         self, chat_id: int, word: str, added_by: int
     ) -> Tuple[bool, bool]:
         """
-        ✅ v7.4.13: التوقيع الآن (chat_id, word, added_by) — مطابق
-        لما يمرّره المُنادي فعلاً (كان مُعكَساً سابقاً).
+        إضافة كلمة محظورة.
+
+        ⚠️ التوقيع الحالي: (chat_id, word, added_by)
+        ⚠️ القيمة المُرجعة: tuple (added_ok: bool, is_duplicate: bool)
+
+        ⚠️ تحذير مهم للمُنادِين:
+            هذه الدالة تُعيد **tuple** وليس bool مفرد!
+            في Python: if (False, True): → truthy!
+            لا تكتب: `if await add_banned_word(...):` — بل افكّها:
+                added_ok, is_dup = await add_banned_word(...)
+                if added_ok: ...
 
         يُرجع:
             (True,  False) → أُضيفت بنجاح
-            (False, True)  → موجودة مسبقاً (duplicate)
-            (False, False) → رُفضت (سبب آخر — يُسجَّل بالتفصيل)
+            (False, True)  → موجودة مسبقاً
+            (False, False) → رُفضت (تجاوز الحد / فشل DB)
         """
         # ─── ✅ v7.4.12/13: تحقق نوع شامل ───
         if not isinstance(chat_id, int):
@@ -1379,6 +1384,16 @@ class GroupsMixin:
                 f"وصل {type(word).__name__}={word!r} | "
                 f"chat_id={chat_id!r}, added_by={added_by!r}"
             )
+            # رصد انعكاس معاملات محتمل
+            if isinstance(word, int) and isinstance(chat_id, int):
+                logger.error(
+                    f"   💡 السبب المُرجَّح: انعكاس ترتيب المعاملات "
+                    f"في المُنادي!\n"
+                    f"   التوقيع الحالي: "
+                    f"add_banned_word(chat_id, word, added_by)\n"
+                    f"   ✅ الإصلاح في المُنادي: "
+                    f"await DB.add_banned_word(chat_id, word, user_id)"
+                )
             return False, False
 
         if not isinstance(added_by, int):
@@ -1411,7 +1426,6 @@ class GroupsMixin:
                         default=0,
                     )
 
-                    # ✅ v7.4.10: قراءة آمنة + fallback = 10000
                     max_words = getattr(
                         self.CONFIG,
                         "MAX_GLOBAL_BANNED_WORDS",
@@ -1492,16 +1506,17 @@ class GroupsMixin:
             )
             return False, False
 
-    # ─────────────────────────────────────────────────────────────────
-    # 🆕 v7.4.13: التوقيع الجديد = (chat_id, word)
-    #             يطابق ما يمرّره المُنادي فعلاً.
-    # ─────────────────────────────────────────────────────────────────
+    # ═════════════════════════════════════════════════════════════════
+    # ✅ v7.4.13: التوقيع = (chat_id, word)
+    #             يُرجع: bool
+    # ═════════════════════════════════════════════════════════════════
     async def remove_banned_word(
         self, chat_id: int, word: str
     ) -> bool:
         """
-        ✅ v7.4.13: التوقيع الآن (chat_id, word) — مطابق لما يمرّره
-        المُنادي فعلاً (كان مُعكَساً سابقاً).
+        إزالة كلمة محظورة.
+
+        ⚠️ التوقيع الحالي: (chat_id, word)
 
         عند فشل الحذف، يبحث بدون lower/strip لعرض ما هو موجود فعلاً
         في DB — يساعد على كشف اختلافات التطبيع.
