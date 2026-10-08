@@ -1,9 +1,14 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-handlers_message.py - v7.18.11 POOL-BRIDGE
+handlers_message.py - v7.18.12 POOL-BRIDGE
 (متوافق مع detectors v4.0.8 — CRITICAL-FIXES)
 =============================================================================
+🆕 v7.18.12 (SLOW-MODE-DIRECT-HTTP-FIX):
+    🔴 FIX-1: _apply_slow_mode — HTTP POST مباشر عبر aiohttp
+    🔴 FIX-2: تجاوز do_api_request الذي يرفض setChatSlowModeDelay
+    🔴 FIX-3: مسح تحذير سابق عند النجاح
+
 🆕 v7.18.11 (SLOW-MODE-DO_API_REQUEST-FIX):
     🔴 FIX-1: _apply_slow_mode — استخدام do_api_request كـfallback
     🔴 FIX-2: تقريب قيم slow_mode للمجموعة المسموحة من تيليجرام
@@ -12,8 +17,6 @@ handlers_message.py - v7.18.11 POOL-BRIDGE
 🆕 v7.18.10 (BANNED-WORDS-TUPLE-FIX):
     🔴 FIX-1: handle_add_banned_word — فكّ tuple من DB.add_banned_word
     🔴 FIX-2: handle_add_global_banned_word — فكّ tuple
-    السبب: DB.add_banned_word تُعيد (bool, bool) وليس bool مفرد.
-           في Python، أي tuple غير فارغ = truthy — حتى (False, False).
 
 🆕 v7.18.9 (POOL-BRIDGE):
     🔗 PATCH-1: ربط _run_in_pool من detectors v4.0.8
@@ -801,7 +804,7 @@ async def _lazy_init_columns():
         _columns_last_attempt_ts = now
 
         db_type = getattr(DB, "DB_TYPE", "sqlite")
-        logger.info("🔧 v7.18.9: Auto-migration (DB_TYPE=%s)", db_type)
+        logger.info("🔧 v7.18.12: Auto-migration (DB_TYPE=%s)", db_type)
 
         cols = [
             ("delete_protected_any", "INTEGER DEFAULT 0", "TINYINT(1) DEFAULT 0"),
@@ -2903,15 +2906,19 @@ class MessageHandlers:
             await _release_group_limiter(limiter, limiter_acquired)
 
     # ═══════════════════════════════════════════════════════════════
-    # ✅ v7.18.11: _apply_slow_mode — إصلاح كامل
+    # ✅ v7.18.12: _apply_slow_mode — HTTP مباشر عبر aiohttp
+    # تجاوز do_api_request الذي يرفض setChatSlowModeDelay
     # ═══════════════════════════════════════════════════════════════
     @staticmethod
     async def _apply_slow_mode(context, chat_id, settings):
         """
-        ✅ v7.18.11: إصلاح set_chat_slow_mode_delay
+        ✅ v7.18.12: إصلاح setChatSlowModeDelay نهائياً
 
-        python-telegram-bot v22.x لا يُطبّق setChatSlowModeDelay.
-        الحل: do_api_request للوصول المباشر إلى Bot API.
+        python-telegram-bot v22.x يرفض setChatSlowModeDelay في:
+          - set_chat_slow_mode_delay (غير موجودة)
+          - do_api_request (Endpoint not found)
+
+        الحل: HTTP POST مباشر إلى Telegram Bot API عبر aiohttp.
         """
         if not _SLOW_MODE_AUTO:
             return
@@ -2970,9 +2977,11 @@ class MessageHandlers:
                 if _target_tg < 10:
                     _target_tg = 10
 
-            _fn = getattr(context.bot, "set_chat_slow_mode_delay", None)
             _api_success = False
+            _api_error = None
 
+            # ─── المسار 1: دالة المكتبة (نادراً ما توجد في v22.x) ───
+            _fn = getattr(context.bot, "set_chat_slow_mode_delay", None)
             if callable(_fn):
                 try:
                     await _fn(
@@ -2982,32 +2991,65 @@ class MessageHandlers:
                     _api_success = True
                 except Exception as _e:
                     logger.debug(
-                        "set_chat_slow_mode_delay موجودة لكن فشلت: %s — "
-                        "fallback to do_api_request", _e,
+                        "set_chat_slow_mode_delay فشلت: %s — "
+                        "fallback to HTTP", _e,
                     )
 
+            # ─── المسار 2: HTTP POST مباشر (الطريقة المضمونة) ───
             if not _api_success:
                 try:
-                    _do_req = getattr(context.bot, "do_api_request", None)
-                    if callable(_do_req):
-                        await _do_req(
-                            "setChatSlowModeDelay",
-                            api_kwargs={
-                                "chat_id": chat_id,
-                                "slow_mode_delay": _target_tg,
-                            },
-                        )
+                    import aiohttp
+
+                    _token = getattr(context.bot, "token", None)
+                    if not _token:
+                        raise RuntimeError("bot.token غير متاح")
+
+                    _url = (
+                        f"https://api.telegram.org/bot{_token}"
+                        f"/setChatSlowModeDelay"
+                    )
+                    _payload = {
+                        "chat_id": chat_id,
+                        "slow_mode_delay": _target_tg,
+                    }
+                    _timeout = aiohttp.ClientTimeout(total=10)
+
+                    async with aiohttp.ClientSession(
+                        timeout=_timeout
+                    ) as _session:
+                        async with _session.post(
+                            _url, json=_payload
+                        ) as _resp:
+                            _data = await _resp.json()
+
+                    if _data.get("ok"):
                         _api_success = True
+                    else:
+                        _api_error = _data.get(
+                            "description", "unknown error"
+                        )
+                        logger.warning(
+                            "⚠️ setChatSlowModeDelay(%s, %d) "
+                            "API error: %s",
+                            chat_id, _target_tg, _api_error,
+                        )
                 except Exception as _e:
+                    _api_error = str(_e)
                     logger.warning(
-                        "⚠️ setChatSlowModeDelay(%s, %d) failed: %s",
+                        "⚠️ setChatSlowModeDelay(%s, %d) "
+                        "HTTP failed: %s",
                         chat_id, _target_tg, _e,
                     )
 
+            # ─── النتيجة ───
             if _api_success:
                 try:
                     if isinstance(context.bot_data, dict):
                         context.bot_data[cache_key] = target
+                        # مسح تحذير سابق (إن وُجد)
+                        context.bot_data.pop(
+                            f"_slow_warn_{chat_id}", None
+                        )
                 except Exception:
                     pass
                 logger.info(
@@ -3025,9 +3067,8 @@ class MessageHandlers:
                 if not _warned:
                     logger.warning(
                         "⚠️ SLOW-MODE: تعذّر تفعيل الوضع البطيء لـ %s "
-                        "(python-telegram-bot v22.x لا يدعم "
-                        "setChatSlowModeDelay). الميزة معطّلة.",
-                        chat_id,
+                        "— السبب: %s",
+                        chat_id, _api_error or "unknown",
                     )
                     try:
                         if isinstance(context.bot_data, dict):
