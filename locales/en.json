@@ -1096,5 +1096,47 @@
   "metrics_top_callbacks_empty": "   <i>—</i>",
   "metrics_refresh_btn": "🔄 Refresh",
   "metrics_reset_btn": "♻️ Reset",
-  "metrics_admin_btn": "📊 Live Metrics"
+  "metrics_admin_btn": "📊 Live Metrics",
+
+  "updates_channel_set_line": "✅ Current channel: <code>{ch}</code>",
+  "updates_channel_hint_set": "Press the button below to enter the channel.",
+  "updates_channel_none_line": "❌ No updates channel set yet.",
+  "updates_channel_hint_none": "Contact the developer to set it.",
+  "updates_channel_numeric_hint": "⚠️ Channel is defined by numeric ID. The link may not work for new members. Contact the developer to set @username.",
+  "updates_channel_warn_hint": "⚠️ Channel needs additional permissions. Contact the developer.",
+  "updates_channel_error_hint": "🔴 Channel is currently unavailable. Contact the developer.",
+  "join_channel_btn": "🔗 Join Channel",
+  "try_open_channel_btn": "🔗 Try to Open",
+  "recheck_channel_btn": "🔍 Recheck",
+  "rechecking_channel": "🔍 Rechecking...",
+  "admin_updates_channel_title": "📢 <b>Updates Channel Management</b>",
+  "change_channel_btn": "🔄 Change",
+  "remove_channel_btn": "🗑️ Remove",
+  "set_channel_btn": "🔗 Set",
+
+  "metrics_dashboard_title": "📊 <b>Live Performance Metrics</b>",
+  "reset_btn": "🔄 Reset",
+
+  "referral_claim": "🎁 Claim Reward",
+  "referral_list": "📋 Referred Users",
+  "ref_claim": "🎁 Claim Reward",
+  "ref_list": "📋 Referred Users",
+
+  "action_cancelled": "✅ Operation cancelled.",
+  "ban_word_invalid_length": "❌ Word length must be between {min_len} and {max_len} characters.",
+  "ban_word_rate_limited": "⏱️ Slow down — you've exceeded the allowed rate.",
+  "ban_add_no_perms": "❌ Insufficient permissions.",
+  "ban_word_added": "✅ Word added: <code>{word}</code>",
+  "ban_word_duplicate": "❌ Word already exists.",
+  "ban_word_add_failed": "❌ Failed to save — try again.",
+  "ban_word_added_global": "✅ Global word added: <code>{word}</code>",
+  "ban_word_removed": "✅ Word removed: <code>{word}</code>",
+  "ban_word_not_found": "❌ Word not found in the list.",
+  "ban_word_remove_failed": "❌ Failed to remove — try again.",
+  "ban_word_removed_global": "✅ Global word removed: <code>{word}</code>",
+
+  "log_channel_none": "❌ No custom log channel set",
+  "log_channel_test_btn": "🧪 Test Log Channel",
+  "log_channel_test": "🧪 Log channel is working! ✅",
+  "log_channel_removed": "🗑️ Log channel removed"
 }
