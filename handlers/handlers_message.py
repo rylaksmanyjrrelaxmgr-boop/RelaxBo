@@ -1,9 +1,17 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-handlers_message.py - v7.18.9 POOL-BRIDGE
+handlers_message.py - v7.18.10 POOL-BRIDGE
 (متوافق مع detectors v4.0.8 — CRITICAL-FIXES)
 =============================================================================
+🆕 v7.18.10 (BANNED-WORDS-TUPLE-FIX):
+    🔴 FIX-1: handle_add_banned_word — فكّ tuple من DB.add_banned_word
+    🔴 FIX-2: handle_add_global_banned_word — فكّ tuple
+    السبب: DB.add_banned_word تُعيد (bool, bool) وليس bool مفرد.
+           في Python، أي tuple غير فارغ = truthy — حتى (False, False).
+           المُنادي كان يعرض "✅ تمت الإضافة" حتى لو فشلت فعلاً،
+           والكلمة لا تُخزَّن أبداً → عند الحذف "غير موجودة".
+
 🆕 v7.18.9 (POOL-BRIDGE):
     🔗 PATCH-1: ربط _run_in_pool من detectors v4.0.8
     🔗 PATCH-2: helper _run_sync_in_pool مع fallback إلى asyncio.to_thread
@@ -346,16 +354,6 @@ async def _run_sync_in_pool(
 ) -> Any:
     """
     ✅ v7.18.9: تشغيل دالة sync في thread pool.
-
-    المسار الأول: _run_in_pool من detectors v4.0.7+
-      - يستخدم pool مُتحكَّم فيه (workers محدود)
-      - يدعم timeout داخلياً
-      - يُغلَق بوضوح عند shutdown
-
-    المسار الاحتياطي: asyncio.to_thread
-      - يعتمد على default executor (والذي هو أيضاً detectors pool
-        بعد install_default_executor من main.py v5.6.12)
-      - نلفّه بـ asyncio.wait_for للحصول على timeout
     """
     if _HAS_DET_RUN_IN_POOL and _det_run_in_pool is not None:
         try:
@@ -373,7 +371,6 @@ async def _run_sync_in_pool(
                 "_run_in_pool failed (%s) — using asyncio.to_thread", _e,
             )
 
-    # ─── Fallback: asyncio.to_thread ───
     if kwargs:
         fn = functools.partial(fn, **kwargs)
 
@@ -2569,12 +2566,6 @@ async def invalidate_auto_reply_cache(chat_id=None):
 async def _detect_and_translate(update, context, chat_id, user_id, text):
     """
     🆕 v7.18.8 FIX-6: كشف اللغة + ترجمة.
-
-    سياسة الترجمة:
-        • lang='ar' + نص عربي   → لا ترجمة
-        • lang='ar' + نص أجنبي  → ترجم إلى عربي
-        • lang≠'ar' + نص عربي   → ترجم إلى لغة المستخدم
-        • lang≠'ar' + نص أجنبي  → لا ترجمة
     """
     if not text or len(text.strip()) < TRANSLATION_MIN_TEXT_LENGTH:
         return None
@@ -3062,19 +3053,52 @@ class MessageHandlers:
                 return
 
             try:
-                await context.bot.set_chat_slow_mode(chat_id, target)
+                # ✅ v7.18.10: تصحيح اسم الدالة في python-telegram-bot v20+
+                # الدالة الصحيحة: set_chat_slow_mode_delay
+                # وليس set_chat_slow_mode (غير موجودة في ExtBot).
+                # ملاحظة: تيليجرام يقبل فقط: 0, 10, 30, 60, 300, 900, 3600.
+                # نقرب لأقرب قيمة مقبولة (10 كحد أدنى).
+                _SLOW_ALLOWED = (0, 10, 30, 60, 300, 900, 3600)
+                if target <= 0:
+                    _target_tg = 0
+                else:
+                    _target_tg = min(
+                        _SLOW_ALLOWED,
+                        key=lambda x: abs(x - target) if x >= 10 else 10**9,
+                    )
+                    if _target_tg < 10:
+                        _target_tg = 10
+
+                try:
+                    await context.bot.set_chat_slow_mode_delay(
+                        chat_id=chat_id,
+                        slow_mode_delay=_target_tg,
+                    )
+                except AttributeError:
+                    # fallback لأسماء أخرى محتملة
+                    _fn = (
+                        getattr(context.bot, "set_chat_slow_mode_delay", None)
+                        or getattr(context.bot, "set_slow_mode", None)
+                    )
+                    if _fn is None:
+                        raise
+                    await _fn(
+                        chat_id=chat_id,
+                        slow_mode_delay=_target_tg,
+                    )
+
                 try:
                     if isinstance(context.bot_data, dict):
                         context.bot_data[cache_key] = target
                 except Exception:
                     pass
                 logger.info(
-                    "🐌 SLOW-MODE | chat=%s seconds=%d",
-                    chat_id, target,
+                    "🐌 SLOW-MODE | chat=%s requested=%d applied=%d",
+                    chat_id, target, _target_tg,
                 )
             except Exception as e:
                 logger.warning(
-                    "⚠️ set_chat_slow_mode(%s, %d) failed: %s",
+                    "⚠️ set_chat_slow_mode_delay(%s, %d) failed: %s",
                     chat_id, target, e,
                 )
         except Exception as e:
@@ -4165,6 +4189,9 @@ class MessageHandlers:
         except Exception:
             pass
 
+    # ═══════════════════════════════════════════════════════════════
+    # ✅ FIX v7.18.10: handle_add_banned_word — فكّ الـtuple
+    # ═══════════════════════════════════════════════════════════════
     @staticmethod
     async def handle_add_banned_word(update, context):
         user_id = update.effective_user.id if update.effective_user else None
@@ -4215,8 +4242,16 @@ class MessageHandlers:
 
         success = False
         try:
-            added = await DB.add_banned_word(chat_id, word, user_id)
-            if added:
+            # ✅ FIX v7.18.10: DB.add_banned_word تُعيد (bool, bool)
+            # وليس bool مفرد. في Python، أي tuple غير فارغ = truthy،
+            # لذلك "if added:" كان ينجح دائماً حتى لو فشلت الإضافة.
+            result = await DB.add_banned_word(chat_id, word, user_id)
+            added_ok, is_duplicate = (
+                result if isinstance(result, tuple) and len(result) == 2
+                else (bool(result), False)
+            )
+
+            if added_ok:
                 await _invalidate_banned_words_cache(chat_id)
                 tmpl = await _trans(
                     'ban_word_added', lang,
@@ -4228,13 +4263,24 @@ class MessageHandlers:
                     parse_mode='HTML',
                 )
                 success = True
-            else:
+            elif is_duplicate:
                 msg = await _trans(
                     'ban_word_duplicate', lang,
                     "❌ الكلمة موجودة مسبقاً.",
                 )
                 await safe_send(context.bot, user_id, msg)
                 success = True
+            else:
+                logger.error(
+                    "❌ add_banned_word(%r, %r) رجعت (False, False) "
+                    "— فشل حقيقي (تجاوز الحد؟ مشكلة DB؟)",
+                    chat_id, word,
+                )
+                msg = await _trans(
+                    'ban_word_add_failed', lang,
+                    "❌ فشل الحفظ — حاول مجدداً.",
+                )
+                await safe_send(context.bot, user_id, msg)
         except Exception as e:
             logger.error("add_banned_word(%s): %s", chat_id, e)
             try:
@@ -4250,6 +4296,9 @@ class MessageHandlers:
                 context, user_id, success,
             )
 
+    # ═══════════════════════════════════════════════════════════════
+    # ✅ FIX v7.18.10: handle_add_global_banned_word — فكّ الـtuple
+    # ═══════════════════════════════════════════════════════════════
     @staticmethod
     async def handle_add_global_banned_word(update, context):
         user_id = update.effective_user.id if update.effective_user else None
@@ -4295,8 +4344,14 @@ class MessageHandlers:
 
         success = False
         try:
-            added = await DB.add_banned_word(-1, word, user_id)
-            if added:
+            # ✅ FIX v7.18.10: فكّ الـtuple بدل معاملته كـbool
+            result = await DB.add_banned_word(-1, word, user_id)
+            added_ok, is_duplicate = (
+                result if isinstance(result, tuple) and len(result) == 2
+                else (bool(result), False)
+            )
+
+            if added_ok:
                 await _invalidate_banned_words_cache(None)
                 tmpl = await _trans(
                     'ban_word_added_global', lang,
@@ -4308,13 +4363,24 @@ class MessageHandlers:
                     parse_mode='HTML',
                 )
                 success = True
-            else:
+            elif is_duplicate:
                 msg = await _trans(
                     'ban_word_duplicate', lang,
                     "❌ الكلمة موجودة مسبقاً.",
                 )
                 await safe_send(context.bot, user_id, msg)
                 success = True
+            else:
+                logger.error(
+                    "❌ add_banned_word(−1, %r) رجعت (False, False) "
+                    "— فشل حقيقي (تجاوز الحد؟ مشكلة DB؟)",
+                    word,
+                )
+                msg = await _trans(
+                    'ban_word_add_failed', lang,
+                    "❌ فشل الحفظ — حاول مجدداً.",
+                )
+                await safe_send(context.bot, user_id, msg)
         except Exception as e:
             logger.error("add_global_banned_word: %s", e)
             try:
