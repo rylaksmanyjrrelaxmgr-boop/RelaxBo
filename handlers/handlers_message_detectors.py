@@ -5,12 +5,19 @@
 handlers_message_detectors.py
 ===============================================================================
 🛡️ Relax Manager — Advanced Spam / Anti-Evasion Detection Engine
-Version: 4.0.8.1 (DOCS-FIX)
+Version: 4.0.9 (ARABIC-SHORT-WHITELIST)
+
+🆕 v4.0.9 — إصلاح الرسائل العربية القصيرة (CRITICAL):
+    🔴 FIX-AR-1: _ARABIC_GREETINGS whitelist — تحيات عربية (لن تُحذف)
+    🔴 FIX-AR-2: _looks_like_normal_conversation — تحسين كشف العربية
+    🔴 FIX-AR-3: analyze_context_window — استثناء النصوص العربية القصيرة
+    🟡 FIX-AR-4: _compute_spam_score — early-exit للنصوص العربية القصيرة
+    🟡 FIX-AR-5: FINAL_THRESHOLD قابل للضبط عبر ENV
+    🟢 FIX-AR-6: _is_arabic_dominant() helper جديدة
+    🟢 FIX-AR-7: توثيق التغييرات
 
 🆕 v4.0.8.1 — إصلاح توثيقي:
     🟡 FIX-DOC-1: Load Beacon — "14 Layers" → "15 Layers"
-                  (كان يخبر 14 بينما LAYER_WEIGHTS يحتوي 15 مفتاحاً:
-                   7 أساسية + 8 متقدمة = 15)
 
 🆕 v4.0.8 — إصلاحات v4.0.7:
     🔴 FIX-A: _run_in_pool يقبل **kwargs
@@ -69,8 +76,8 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
-_DETECTORS_VERSION = "4.0.8.1 DOCS-FIX"
-_DETECTORS_VERSION_CLEAN = "4.0.8.1"
+_DETECTORS_VERSION = "4.0.9 ARABIC-SHORT-WHITELIST"
+_DETECTORS_VERSION_CLEAN = "4.0.9"
 
 
 def _version_semver(version: str) -> str:
@@ -155,6 +162,14 @@ ANTIEVASION_EXTRA_SCRIPTS = _env_bool("ANTIEVASION_EXTRA_SCRIPTS", True)
 ANTIEVASION_ALT_SCHEMES = _env_bool("ANTIEVASION_ALT_SCHEMES", True)
 ANTIEVASION_RANDOM_DOMAIN = _env_bool("ANTIEVASION_RANDOM_DOMAIN", True)
 
+# 🆕 v4.0.9: whitelist للرسائل العربية القصيرة
+ARABIC_SHORT_WHITELIST_ENABLED = _env_bool(
+    "ARABIC_SHORT_WHITELIST_ENABLED", True
+)
+ARABIC_SHORT_MAX_CHARS = _env_int("ARABIC_SHORT_MAX_CHARS", 40)
+ARABIC_SHORT_MAX_WORDS = _env_int("ARABIC_SHORT_MAX_WORDS", 6)
+ARABIC_DOMINANCE_RATIO = _env_float("ARABIC_DOMINANCE_RATIO", 0.6)
+
 SAFE_BROWSING_API_KEY = os.getenv("SAFE_BROWSING_API_KEY", "")
 URL_ENRICH_ENABLED = _env_bool("URL_ENRICH_ENABLED", True)
 URL_EXPAND_TIMEOUT = _env_int("URL_EXPAND_TIMEOUT", 5)
@@ -235,11 +250,6 @@ async def _run_in_pool(
     """
     ✅ v4.0.8 FIX-A: يدعم keyword arguments عبر functools.partial.
     ✅ v4.0.8 FIX-R: timeout اختياري (افتراضي POOL_TASK_TIMEOUT).
-
-    Examples:
-        await _run_in_pool(func, arg1, arg2)
-        await _run_in_pool(func, arg1, key=value)
-        await _run_in_pool(func, arg1, timeout=5.0)
     """
     if kwargs:
         fn = functools.partial(fn, **kwargs)
@@ -266,12 +276,6 @@ async def _run_in_pool(
 def install_default_executor(loop: Optional[asyncio.AbstractEventLoop] = None) -> None:
     """
     ✅ v4.0.8 FIX-B: إصلاح asyncio.get_event_loop() deprecated.
-
-    الاستخدام الموصى به:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        install_default_executor(loop)   # ← مرّر loop صراحة
-        loop.run_until_complete(main())
     """
     try:
         if loop is None:
@@ -305,7 +309,6 @@ async def shutdown_default_executor(
 ) -> None:
     """
     ✅ v4.0.8 FIX-N: يُغلق default executor الخاص بالحلقة ثم pool الداخلي.
-    idempotent — آمن للاستدعاء المتكرر.
     """
     try:
         if loop is None:
@@ -487,7 +490,8 @@ CROSS_MSG_WINDOW = 30
 
 _CONTEXT_WINDOW_SEC = 120
 
-FINAL_THRESHOLD = 5
+# 🆕 v4.0.9 FIX-AR-5: FINAL_THRESHOLD قابل للتعديل عبر ENV
+FINAL_THRESHOLD = _env_int("FINAL_THRESHOLD", 5)
 
 LAYER_WEIGHTS = {
     "text": 1.0, "ocr": 1.2, "audio": 1.1, "url": 1.5,
@@ -637,6 +641,203 @@ _LEET_TARGETS = frozenset({
     "casino", "betting", "bet", "poker", "roulette",
     "trading", "signals", "forex", "pump",
 })
+
+
+# =============================================================================
+# 🆕 v4.0.9 FIX-AR-1: Arabic Short Whitelist
+# =============================================================================
+
+_ARABIC_GREETINGS = frozenset({
+    # تحيات صباحية/مسائية
+    "صباح", "صباحا", "صباحاً", "صباحو", "صباحي", "صبحك",
+    "مساء", "مساءا", "مساءاً", "مساءو", "مسائي", "مساك",
+    "صبح", "مسا",
+    # تحيات عامة
+    "اهلا", "أهلا", "اهلاوسهلا", "أهلاوسهلا", "اهلاً", "أهلاً",
+    "مرحبا", "مرحباً", "مرحبتين", "هلا", "هلاوالله", "هلاوسهلا",
+    "السلام", "سلام", "سلامو", "سلاما", "سلاماً", "سلامي",
+    "عليكم", "عليكمالسلام", "عليكمورحمة", "عليكمورحمةالله",
+    # كلمات polite / small-talk
+    "شكرا", "شكراً", "شكرالك", "شكراكتير", "شكراكتير",
+    "مشكور", "مشكورة", "مشكورين", "مشكوره",
+    "عفوا", "عفواً", "العفو",
+    "تسلم", "تسلمي", "تسلملي", "تسلموا",
+    "جزاك", "جزاكالله", "جزاكم", "جزاكمالله",
+    "بارك", "باركالله", "باركك",
+    "تحياتي", "تحيات", "تحية", "تحياتنا",
+    "خير", "بخير", "الحمدلله", "الحمد",
+    "كيف", "كيفك", "كيفكم", "كيفحالك", "كيفحالكم", "شلونك",
+    "شلونكم", "شخبارك", "شخباركم",
+    "نورت", "نورتي", "نورتوا",
+    "الود", "الورد", "ورد", "زهر", "زهور",
+    "الخير", "الخيرات", "الخيروالبركة",
+    "التوفيق", "بالنجاح", "بالتوفيق",
+    "الرحمة", "الرحمن", "الرحيم", "المغفرة",
+    "الجميل", "الجميلة", "الحلو", "الحلوة",
+    "الطيب", "الطيبة", "الكريم", "الكريمة",
+    "الحبيب", "الحبيبة", "الغالي", "الغالية",
+    "الله", "سبحان", "الحمدلله", "لاالهالاالله",
+    "انشاءالله", "إنشاءالله", "مافيه", "ماشاءالله",
+    "يعطيك", "يعطيكالعافية", "يعطيكم", "يعطيكمالعافية",
+    "اللهيعطيك", "اللهيعافيك",
+    # ردود قصيرة
+    "تمام", "تم", "طيب", "اوك", "اوكي", "اوكيه",
+    "حسناً", "حسنا", "زين", "طيبين", "بخير",
+    "نعم", "لا", "اكيد", "بالتاكيد", "بالتأكيد",
+    "احسنت", "احسنتي", "برافو", "ممتاز", "رائع", "رائعة",
+    "جميل", "جميلة", "حلو", "حلوة",
+})
+
+# كلمات spam العربية التي **يجب** أن تُبطل whitelist (لا تُعامل كتحية)
+_ARABIC_SPAM_OVERRIDE = frozenset({
+    "تسريب", "تسريبات", "مسرب", "مسربة", "مسرّب", "مسرّبة",
+    "حصري", "حصريه", "حصرية", "فيديو", "فيديوهات",
+    "مقاطع", "مقطع", "صور", "ممنوع", "ممنوعة",
+    "جنس", "جنسي", "جنسية", "اباحي", "إباحي", "اباحية", "إباحية",
+    "بورن", "سكس", "نيك", "عاري", "عاري", "عارية",
+    "ربح", "ارباح", "أرباح", "استثمار", "تداول", "محفظة",
+    "بيتكوين", "اثيريوم", "كريبتو", "عملات", "عملة",
+    "كازينو", "مراهنات", "بوكر", "يانصيب", "جوائز",
+    "رابط", "روابط", "رابطمباشر", "رابطالقناة",
+    "اضغط", "شاهد", "مشاهدة", "شوف", "ادخل", "دخول",
+    "انضم", "اشترك", "تحميل", "حمل", "حمّل",
+    "احصل", "اربح", "استلم", "استقبل", "اطلب",
+    "مجاناً", "مجانا", "مجانية", "مجاني",
+    "هدية", "جوائز", "جائزة", "بونص", "بونوس",
+    "خصم", "عرض", "تخفيض", "متجر", "شراء",
+    "مليونير", "ثري", "مضاعفة", "مضاعف",
+})
+
+
+def _arabic_char_ratio(text: str) -> float:
+    """🆕 v4.0.9: نسبة الحروف العربية من إجمالي الحروف."""
+    if not text:
+        return 0.0
+    arabic = 0
+    total_letters = 0
+    for ch in text:
+        if ch.isalpha():
+            total_letters += 1
+            if "\u0600" <= ch <= "\u06FF" or "\u0750" <= ch <= "\u077F":
+                arabic += 1
+    if total_letters == 0:
+        return 0.0
+    return arabic / total_letters
+
+
+def _is_arabic_dominant(text: str) -> bool:
+    """
+    🆕 v4.0.9 FIX-AR-6: هل النص عربي غالباً؟
+    """
+    if not text:
+        return False
+    return _arabic_char_ratio(text) >= ARABIC_DOMINANCE_RATIO
+
+
+def _strip_arabic_diacritics(text: str) -> str:
+    """🆕 v4.0.9: إزالة التشكيل العربي للمقارنة."""
+    if not text:
+        return ""
+    # Arabic diacritics: Fatha, Damma, Kasra, Shadda, Sukun, Tanwin, etc.
+    diacritics = re.compile(
+        r"[\u064B-\u065F\u0670\u06D6-\u06DC\u06DF-\u06E8"
+        r"\u06EA-\u06ED\u0640]"
+    )
+    return diacritics.sub("", text)
+
+
+def _normalize_arabic_for_compare(text: str) -> str:
+    """🆕 v4.0.9: تطبيع للعربية للمقارنة (للـwhitelist)."""
+    if not text:
+        return ""
+    # 1. إزالة التشكيل
+    s = _strip_arabic_diacritics(text)
+    # 2. إزالة "ال" التعريف من البداية لكل كلمة
+    s = re.sub(r"(?<!\S)ال", "", s)
+    # 3. إزالة علامات الترقيم والرموز
+    s = re.sub(r"[^\u0600-\u06FF\s]", "", s)
+    # 4. تطبيع الهمزات
+    s = s.replace("أ", "ا").replace("إ", "ا").replace("آ", "ا")
+    # 5. تطبيع ى → ي، ة → ه
+    s = s.replace("ى", "ي").replace("ة", "ه")
+    # 6. تبسيط المسافات
+    s = re.sub(r"\s+", "", s)
+    return s.strip()
+
+
+def _is_arabic_short_whitelisted(text: str) -> bool:
+    """
+    🆕 v4.0.9 FIX-AR-1: هل النص رسالة عربية قصيرة طبيعية (تحية/ردود)؟
+
+    الشروط:
+        1. ARABIC_SHORT_WHITELIST_ENABLED مفعّل
+        2. النص عربي غالباً (_is_arabic_dominant)
+        3. عدد الأحرف ≤ ARABIC_SHORT_MAX_CHARS (40 افتراضي)
+        4. عدد الكلمات ≤ ARABIC_SHORT_MAX_WORDS (6 افتراضي)
+        5. كل كلمات النص في _ARABIC_GREETINGS (بعد التطبيع)
+        6. النص لا يحتوي على أي كلمة من _ARABIC_SPAM_OVERRIDE
+        7. لا يحتوي على روابط (@, http, t.me)
+
+    Returns:
+        True إذا كان whitelisted (يجب عدم حذفه)
+    """
+    if not ARABIC_SHORT_WHITELIST_ENABLED:
+        return False
+    if not text:
+        return False
+
+    text = text.strip()
+    if not text:
+        return False
+
+    # 1. الطول
+    if len(text) > ARABIC_SHORT_MAX_CHARS:
+        return False
+
+    # 2. عدد الكلمات
+    words = re.findall(r"[^\s]+", text)
+    if len(words) > ARABIC_SHORT_MAX_WORDS:
+        return False
+
+    # 3. عربي غالباً
+    if not _is_arabic_dominant(text):
+        return False
+
+    # 4. لا يوجد روابط/منشن/إيميل
+    if re.search(r"(?:https?://|www\.|t\.me/|@[A-Za-z0-9_])", text):
+        return False
+
+    # 5. تطبيع للمقارنة
+    normalized_full = _normalize_arabic_for_compare(text)
+    if not normalized_full:
+        return False
+
+    # 6. فحص كل كلمة
+    for word in words:
+        word_norm = _normalize_arabic_for_compare(word)
+        if not word_norm:
+            continue
+        # 6a. spam override؟
+        if word_norm in _ARABIC_SPAM_OVERRIDE:
+            return False
+        # 6b. التحقق من subwords (كلمة "مساءالورد" بدون مسافة)
+        # نبحث عن أي تطابق في _ARABIC_GREETINGS
+        found_greeting = False
+        for greeting in _ARABIC_GREETINGS:
+            greeting_norm = _normalize_arabic_for_compare(greeting)
+            if greeting_norm and greeting_norm in word_norm:
+                found_greeting = True
+                break
+        if not found_greeting:
+            return False
+
+    # 7. فحص spam override في النص الكامل
+    for spam_word in _ARABIC_SPAM_OVERRIDE:
+        spam_norm = _normalize_arabic_for_compare(spam_word)
+        if spam_norm and spam_norm in normalized_full:
+            return False
+
+    return True
 
 
 # =============================================================================
@@ -1872,6 +2073,8 @@ class _MessageContext:
         "ai_generated_score",
         "has_video", "has_nsfw_media", "has_sticker",
         "sticker_emoji", "reactions_count", "message_id", "chat_id",
+        # 🆕 v4.0.9: Arabic short whitelist flag
+        "is_arabic_short_whitelisted",
     )
 
     def __init__(self, message: Any = None, **kwargs: Any) -> None:
@@ -1931,6 +2134,8 @@ class _MessageContext:
         self.reactions_count = 0
         self.message_id = 0
         self.chat_id = 0
+        # 🆕 v4.0.9
+        self.is_arabic_short_whitelisted = False
 
         for key, value in kwargs.items():
             if key in self.__slots__:
@@ -2005,6 +2210,10 @@ class _MessageContext:
         )
         ctx.has_any_link = _contains_link_enhanced(
             ctx.analysis_text, include_usernames=False
+        )
+        # 🆕 v4.0.9: فحص whitelist
+        ctx.is_arabic_short_whitelisted = _is_arabic_short_whitelisted(
+            ctx.analysis_text
         )
         return ctx
 
@@ -2184,6 +2393,14 @@ class _MessageContext:
                     )
             except Exception:
                 pass
+
+            # 🆕 v4.0.9 FIX-AR-1: فحص whitelist للعربية القصيرة
+            try:
+                self.is_arabic_short_whitelisted = (
+                    _is_arabic_short_whitelisted(self.analysis_text)
+                )
+            except Exception:
+                self.is_arabic_short_whitelisted = False
 
             if DEBUG_DIAG and self.button_count > 0:
                 try:
@@ -2658,9 +2875,21 @@ def _detect_structural_evasion(
     return min(score, 4), reasons
 
 
+# =============================================================================
+# 🆕 v4.0.9 FIX-AR-2: _looks_like_normal_conversation — Enhanced
+# =============================================================================
+
 def _looks_like_normal_conversation(text: str) -> bool:
+    """
+    🆕 v4.0.9 FIX-AR-2: تحسين كشف المحادثات الطبيعية، خاصة العربية القصيرة.
+    """
     if not text:
         return True
+
+    # 🆕 v4.0.9: فحص العربية القصيرة أولاً
+    if _is_arabic_short_whitelisted(text):
+        return True
+
     normalized = _normalize_text(text)
     words = _extract_words(normalized)
     if not words:
@@ -2678,6 +2907,18 @@ def _looks_like_normal_conversation(text: str) -> bool:
     link = _contains_link_enhanced(
         normalized, include_usernames=False, already_normalized=True
     )
+    # 🆕 v4.0.9: رسائل عربية قصيرة بدون spam
+    if (
+        _is_arabic_dominant(text)
+        and len(text) <= ARABIC_SHORT_MAX_CHARS
+        and len(words) <= ARABIC_SHORT_MAX_WORDS
+        and strong_hits == 0
+        and promo_hits == 0
+        and financial_hits == 0
+        and not link
+    ):
+        return True
+
     if (
         generic_hits >= 1 and strong_hits == 0
         and promo_hits <= 1 and financial_hits == 0
@@ -2721,6 +2962,29 @@ def _compute_spam_score(
                 "is_button_only_case": False,
             }
             return result if return_diagnostics else (0, [])
+
+        # 🆕 v4.0.9 FIX-AR-4: EARLY EXIT للرسائل العربية القصيرة
+        if getattr(ctx, "is_arabic_short_whitelisted", False):
+            if DEBUG_SPAM:
+                try:
+                    logger.debug(
+                        "[SPAM] score=0 (arabic_short_whitelist) "
+                        "text=%r",
+                        text[:60],
+                    )
+                except Exception:
+                    pass
+            result = {
+                "score": 0, "reasons": ["arabic_short_whitelist"],
+                "confidence": "none", "hard": False, "critical": False,
+                "postbot_confidence": 0,
+                "signal_categories": ["whitelist"],
+                "independent_signals": 0,
+                "random_domains": [], "has_random_domain": False,
+                "is_button_only_case": False,
+                "category_scores": {},
+            }
+            return result if return_diagnostics else (0, ["arabic_short_whitelist"])
 
         merged_text = ctx.normalized_url_text or _merge_split_urls(normalized)
 
@@ -4792,6 +5056,10 @@ def record_context_message(user_id: int, text: str, has_url: bool) -> None:
         )
 
 
+# =============================================================================
+# 🆕 v4.0.9 FIX-AR-3: analyze_context_window — استثناء العربية القصيرة
+# =============================================================================
+
 def analyze_context_window(user_id: int) -> Tuple[int, List[str]]:
     if not CONTEXT_LAYER_ENABLED:
         return 0, []
@@ -4811,14 +5079,35 @@ def analyze_context_window(user_id: int) -> Tuple[int, List[str]]:
     score = 0
     reasons: List[str] = []
 
+    # 🆕 v4.0.9 FIX-AR-3: إذا كل الرسائل عربية قصيرة → تجاهل السياق
+    all_arabic_short = all(
+        _is_arabic_dominant(m.get("text", ""))
+        and len(m.get("text", "")) <= ARABIC_SHORT_MAX_CHARS
+        and not m.get("has_url", False)
+        for m in recent
+        if m.get("text")
+    )
+    if all_arabic_short and len(recent) > 0:
+        return 0, []
+
     if len(recent) >= 10:
         score += 3
         reasons.append(f"context_flood:{len(recent)}")
 
     short_count = sum(1 for m in recent if len(m["text"]) < 20)
     if short_count >= 5:
-        score += 2
-        reasons.append(f"context_short:{short_count}")
+        # 🆕 v4.0.9: تخفيف إذا كل قصيرة عربية
+        arabic_short_count = sum(
+            1 for m in recent
+            if _is_arabic_dominant(m.get("text", ""))
+            and len(m.get("text", "")) < 20
+        )
+        if arabic_short_count >= short_count * 0.8:
+            # معظمها عربية قصيرة → تجاهل
+            pass
+        else:
+            score += 2
+            reasons.append(f"context_short:{short_count}")
 
     url_count = sum(1 for m in recent if m["has_url"])
     if url_count >= 5:
@@ -4829,8 +5118,14 @@ def analyze_context_window(user_id: int) -> Tuple[int, List[str]]:
     if len(texts) >= 3:
         unique_ratio = len(set(texts)) / len(texts)
         if unique_ratio < 0.4:
-            score += 3
-            reasons.append("context_repetition")
+            # 🆕 v4.0.9: تجاهل التكرار إذا كل الرسائل عربية قصيرة (وهذا طبيعي في المحادثات)
+            arabic_short_repeats = sum(
+                1 for t in texts
+                if _is_arabic_dominant(t) and len(t) < 30
+            )
+            if arabic_short_repeats < len(texts) * 0.7:
+                score += 3
+                reasons.append("context_repetition")
 
     return min(score, 10), reasons
 
@@ -5152,7 +5447,7 @@ def analyze_domain_reputation(url: str) -> Tuple[int, List[str]]:
 
 
 # =============================================================================
-# ORCHESTRATOR (14 layers)
+# ORCHESTRATOR (15 layers)
 # =============================================================================
 
 @dataclass
@@ -5811,15 +6106,10 @@ async def analyze_message_full_async(
     ✅ v4.0.8 FIX-G: تعليق دقيق حول الترتيب.
 
     الترتيب:
-      1) text layer (sync سريعة) — تُنتج text_result المطلوب للطبقات التالية.
+      1) text layer (sync سريعة) — تُنتج text_result.
       2) sync سريعة (behavioral, context, reactions, ...) — تسجّل سلوك
-         المستخدم بأسرع وقت قبل أي I/O. هذه الطبقات محمية بـ_BEHAVIOR_LOCK
-         ولا تتعارض مع async layers.
+         المستخدم بأسرع وقت قبل أي I/O.
       3) async I/O layers — بالتوازي عبر asyncio.gather مع Semaphore(6).
-
-    ملاحظة: الطبقات الـsync لا تلمس أي ملف/شبكة، لذا تنفيذها قبل الـgather
-    لا يُبطئ أي شيء جوهري ويضمن تسجيل user behavior قبل أي محاولة تحميل ملف
-    قد تفشل وتُغير مسار التحليل.
     """
     verdict = SpamVerdict(
         is_spam=False, total_score=0.0, confidence="none"
@@ -5905,6 +6195,7 @@ def analyze_message(message: Any) -> Dict[str, Any]:
         "ai_generated_score": ctx.ai_generated_score,
         "random_domains": list(ctx.random_domains),
         "has_random_domain": ctx.has_random_domain,
+        "is_arabic_short_whitelisted": ctx.is_arabic_short_whitelisted,
     })
     return result
 
@@ -6030,6 +6321,13 @@ def get_spam_diagnostics(message: Any) -> Dict[str, Any]:
                 ),
                 "confidence": score_info["postbot_confidence"],
             },
+            # 🆕 v4.0.9
+            "arabic_short_whitelist": {
+                "enabled": ARABIC_SHORT_WHITELIST_ENABLED,
+                "is_whitelisted": ctx.is_arabic_short_whitelisted,
+                "max_chars": ARABIC_SHORT_MAX_CHARS,
+                "max_words": ARABIC_SHORT_MAX_WORDS,
+            },
         }
     except Exception as exc:
         return {
@@ -6061,6 +6359,14 @@ __all__ = [
     "URL_EXPAND_CONNECT_TIMEOUT", "URL_EXPAND_READ_TIMEOUT",
     "URL_EXPAND_TIMEOUT", "URL_EXPAND_MAX_HOPS", "URL_ENRICH_MAX_URLS",
     "_POOL_MAX_WORKERS", "POOL_TASK_TIMEOUT",
+
+    # 🆕 v4.0.9: Arabic short whitelist
+    "ARABIC_SHORT_WHITELIST_ENABLED", "ARABIC_SHORT_MAX_CHARS",
+    "ARABIC_SHORT_MAX_WORDS", "ARABIC_DOMINANCE_RATIO",
+    "_ARABIC_GREETINGS", "_ARABIC_SPAM_OVERRIDE",
+    "_is_arabic_dominant", "_is_arabic_short_whitelisted",
+    "_arabic_char_ratio", "_normalize_arabic_for_compare",
+    "_strip_arabic_diacritics",
 
     # Anti-evasion toggles
     "ANTIEVASION_ENTITY_LINK", "ANTIEVASION_BUTTON_LINK",
@@ -6183,7 +6489,8 @@ try:
         "Stego=%s(numpy=%s,pil=%s) DomainRep=%s | "
         "SPAM_THRESHOLD=%d HARD=%d CRITICAL=%d | "
         "TLDs=%d RANDOM_DOMAIN=%s ASYNC_NET=%s POOL=%d "
-        "SE_CIRCUIT=%d/%ds TIMEOUT=%.1fs",
+        "SE_CIRCUIT=%d/%ds TIMEOUT=%.1fs | "
+        "AR_SHORT_WHITELIST=%s (max=%d chars/%d words, ratio=%.2f)",
         _DETECTORS_VERSION,
         TEXT_LAYER_ENABLED,
         OCR_LAYER_ENABLED, _PIL_AVAILABLE,
@@ -6210,6 +6517,10 @@ try:
         SE_CIRCUIT_FAILURE_THRESHOLD,
         int(SE_CIRCUIT_OPEN_SEC),
         POOL_TASK_TIMEOUT,
+        ARABIC_SHORT_WHITELIST_ENABLED,
+        ARABIC_SHORT_MAX_CHARS,
+        ARABIC_SHORT_MAX_WORDS,
+        ARABIC_DOMINANCE_RATIO,
     )
 except Exception:
     pass
