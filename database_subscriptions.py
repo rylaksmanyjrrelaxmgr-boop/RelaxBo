@@ -5,7 +5,7 @@ database_subscriptions.py - وحدة الباقات والاشتراكات وا�
 v7.7.31 — دعم كامل لـ SQLite + PostgreSQL + MySQL
 =====================================================================
 🆕 v7.7.31 (DEV-PERMANENT-SUBSCRIPTION):
-    👑 DEV-1: _is_dev_user + _get_dev_ids — نفس منطق channels_posts
+    👑 DEV-1: _is_dev_user + _get_dev_ids — كشف المطور/المالك
     👑 DEV-2: has_active_subscription — bypass فوري للمطور (True دائماً)
     👑 DEV-3: has_used_trial — bypass فوري للمطور (False دائماً)
     👑 DEV-4: activate_trial — يرجع -1 للمطور (اشتراكه أطول)
@@ -1328,7 +1328,8 @@ class SubscriptionMixin:
     ) -> bool:
         """
         ✅ v7.7.29: نطاق زمني [day_start, day_end) بدل date(created_at).
-        ✅ v7.7.30 FIX-2: تمرير التواريخ كسلاسل نصية لـ MySQL/SQLite.
+        ✅ v7.7.30 FIX-2: تمرير التواريخ كسلاسل نصية لـ MySQL/SQLite
+        — يضمن تطابق تنسيق المقارنة مع القيم المخزّنة.
         """
         if referrer_id == referred_id:
             return False
@@ -1553,7 +1554,8 @@ class SubscriptionMixin:
         ✅ v7.7.29: HAVING يكرر التعبير بدل استخدام alias —
         PostgreSQL لا يسمح بـ SELECT aliases في HAVING.
 
-        📝 v7.7.30: EXTRACT(DAY FROM interval) يُقرّب لأسفل.
+        📝 v7.7.30: EXTRACT(DAY FROM interval) يُقرّب لأسفل
+        (سلوك مقصود — "الأيام المتبقية كاملة").
 
         👑 v7.7.31: المطور سيظهر تلقائياً (اشتراك دائم 100 سنة)
         لكن days_left سيكون ~36500 > reminder_days_before
@@ -1647,4 +1649,5 @@ __all__ = [
     "SubscriptionMixin", "SubscriptionsMixin", "TimeUtils",
     "USE_POSTGRES", "USE_MYSQL", "PATHS", "CONFIG",
     "user_cache", "_table_exists", "_ph", "_phs",
+    "_DEV_PROVIDER", "_DEV_DURATION_DAYS",
 ]
