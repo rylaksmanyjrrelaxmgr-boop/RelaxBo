@@ -4,30 +4,39 @@
 """
 database_channels_posts.py - دوال القنوات والمنشورات (Mixin)
 ================================================================================
+🆕 v7.5.27 (SOFT-DELETE-CONSISTENCY):
+    🔒 GAP-1: add_posts — فحص removed_at IS NULL في الملكية
+              (كان المطور يستطيع إضافة منشورات لقناة مُزالة منطقياً)
+    🔒 GAP-2: reset_posts — نفس الفحص
+    🔒 GAP-3: delete_post — نفس الفحص
+    🔒 GAP-4: get_user_posts — نفس الفحص
+    📝 ملاحظة: get_channel_by_user / get_channel_by_id تُركت بدون
+              فلترة removed_at بشكل مقصود — لأن add_channel يعتمد
+              عليها لاسترجاع القنوات المُزالة (restore logic).
+
+🆕 v7.5.26 (CACHE-RACE-FIXES):
+    🎯 FIX-A: increment_post_fail — إبطال كاش القناة بعد كل فشل
+    🎯 FIX-B: mark_post_published — إبطال كاش القناة بدل الكاش العام
+    🎯 FIX-E: mark_post_published — UPDATE شرطي لمنع النشر المزدوج
+    ➕ Helper جديد: _invalidate_post_cache(post_id)
+
+🆕 v7.5.25 (PRECISION-FIXES):
+    🔧 FIX-1: _removed_col_cache على مستوى الـ instance
+    🔧 FIX-2: delete_channel — تنظيف صريح للجداول المرتبطة
+    🔧 FIX-3: get_channel_stats — احترام removed_at
+    🔧 FIX-4: count_user_posts — فحص الملكية + removed_at
+    🔧 FIX-5: add_posts — current_count الحقيقي للمطور
+    🔧 FIX-6: get_next_post — auto_recycle default=0
+    🔧 FIX-7: get_channel_by_id — توثيق صريح
+
 🆕 v7.5.24 (DEVELOPER-BYPASS-FIX):
-    🔴 DEV-FIX-1: add_channel — تجاوز فحص max_channels للمطور/المالك
-    🔴 DEV-FIX-2: add_posts — تجاوز فحص max_posts للمطور/المالك
-    السبب: إذا لم يكن للمستخدم اشتراك نشط، max_channels = NULL → 0،
-           و `0 >= 0` = True دائماً → رفض دائم.
-           المطور عادة بلا اشتراك → يرفض دائماً.
+    🔴 DEV-FIX-1: add_channel — تجاوز فحص max_channels للمطور
+    🔴 DEV-FIX-2: add_posts — تجاوز فحص max_posts للمطور
 
 🆕 v7.5.23 (SOFT-DELETE-INTEGRATION):
-    ✅ SOFT-1: دالة جديدة _has_removed_at_column() — فحص cached
-    ✅ SOFT-2: add_channel — استرجاع تلقائي عند إعادة الإضافة
-    ✅ SOFT-3: get_user_channels — يُخفي المُزالة
-    ✅ SOFT-4: get_active_channel — يتجاهل المُزالة
-    ✅ SOFT-5: get_channel_info — يُخفي المُزالة
-    ✅ SOFT-6: soft_delete_channel(channel_db_id, reason)
-    ✅ SOFT-7: restore_channel(channel_db_id)
-    ✅ SOFT-8: get_removed_channels(user_id)
-    ✅ SOFT-9: hard_delete_removed_channels_before(cutoff)
-    ✅ SOFT-10: is_channel_owner — القناة غير مُزالة
+    ✅ SOFT-1 → SOFT-10 (راجع التاريخ الكامل أسفل)
 
-📌 v7.5.22 (PERFORMANCE-FIX — get_next_post)
-📌 v7.5.21 (تحديد القناة التالية تلقائياً عند حذف النشطة)
-📌 v7.5.20 (نفس السلوك + إصلاحات آمنة)
-🆕 v7.5.18 (إصلاح PostgreSQL: reset_posts)
-📌 v7.2: استخراج من database.py
+📌 v7.5.22, v7.5.21, v7.5.20, v7.5.18, v7.2
 ================================================================================
 """
 
@@ -39,17 +48,13 @@ from typing import Dict, List, Optional, Tuple
 logger = logging.getLogger(__name__)
 
 
-# ═════════════════════════════════════════════════════════════════════
-# ✅ v7.5.23: Cache لوجود عمود removed_at
-# ═════════════════════════════════════════════════════════════════════
-
-_removed_col_cache: Optional[bool] = None
-
-
 class ChannelsPostsMixin:
     """
     Mixin يجمع دوال القنوات والمنشورات.
     """
+
+    # ✅ v7.5.25 FIX-1: كاش على مستوى الـ instance (لا global)
+    _removed_col_cache: Optional[bool] = None
 
     def _is_dev_user(self, user_id: int) -> bool:
         """
@@ -75,9 +80,9 @@ class ChannelsPostsMixin:
     # ═════════════════════════════════════════════════════════════════
 
     async def _has_removed_at_column(self) -> bool:
-        global _removed_col_cache
-        if _removed_col_cache is not None:
-            return _removed_col_cache
+        cached = getattr(self, "_removed_col_cache", None)
+        if cached is not None:
+            return cached
 
         try:
             from database import USE_POSTGRES, USE_MYSQL
@@ -113,8 +118,8 @@ class ChannelsPostsMixin:
                     except Exception:
                         pass
 
-            _removed_col_cache = bool(exists)
-            if _removed_col_cache:
+            self._removed_col_cache = bool(exists)
+            if self._removed_col_cache:
                 logger.info(
                     "✅ user_channels.removed_at موجود — "
                     "Soft Delete مُفعَّل"
@@ -124,12 +129,47 @@ class ChannelsPostsMixin:
                     "ℹ️ user_channels.removed_at غير موجود — "
                     "ترقية database_tables.py مطلوبة"
                 )
-            return _removed_col_cache
+            return self._removed_col_cache
 
         except Exception as e:
             logger.debug(f"_has_removed_at_column: {e}")
-            _removed_col_cache = False
+            self._removed_col_cache = False
             return False
+
+    # ═════════════════════════════════════════════════════════════════
+    #     ✅ v7.5.26: Helper لإبطال كاش القناة الخاصة بمنشور
+    # ═════════════════════════════════════════════════════════════════
+
+    async def _invalidate_post_cache(self, post_id: int) -> None:
+        """
+        ✅ v7.5.26 FIX-A/B: إبطال كاش القناة الخاصة بالمنشور فقط.
+
+        يستخدم channel-specific invalidation بدل الكاش العام:
+            posts_cache.invalidate(channel_db_id)
+        مع fallback تلقائي للكاش العام لو التوقيع قديم.
+        """
+        from database import CACHE_AVAILABLE, posts_cache
+
+        if not CACHE_AVAILABLE:
+            return
+
+        try:
+            channel_db_id = await self.fetchval(
+                "SELECT channel_db_id FROM posts WHERE id = ?",
+                (post_id,),
+            )
+            if channel_db_id is not None:
+                try:
+                    await posts_cache.invalidate(channel_db_id)
+                except TypeError:
+                    await posts_cache.invalidate()
+            else:
+                await posts_cache.invalidate()
+        except Exception as e:
+            logger.debug(
+                f"_invalidate_post_cache({post_id}): "
+                f"{type(e).__name__}: {e}"
+            )
 
     # ═════════════════════════════════════════════════════════════════
     #                    🎬 دوال القنوات
@@ -159,7 +199,6 @@ class ChannelsPostsMixin:
             async with await self._get_user_lock(user_id):
                 async with self.transaction() as conn:
                     # ─── 1) فحص حدود الباقة ───
-                    # ✅ v7.5.24 DEV-FIX-1: تخطي للمطور
                     if not is_dev:
                         if USE_POSTGRES:
                             plan_row = await self._fetchone_with_conn(
@@ -199,9 +238,10 @@ class ChannelsPostsMixin:
                                 f"الأقصى للقنوات ({max_channels})"
                             )
                             return None
-                    # المطور يتجاوز الفحص بلا قيود
 
                     # ─── 2) إدراج أو تحديث القناة ───
+                    # 📝 ملاحظة مقصودة: لا فلترة removed_at هنا —
+                    #    نُريد إيجاد القناة المُزالة لاسترجاعها.
                     existing = await self._fetchone_with_conn(
                         conn,
                         "SELECT id FROM user_channels "
@@ -572,11 +612,19 @@ class ChannelsPostsMixin:
     async def get_channel_stats(
         self, user_id: int, channel_db_id: int
     ) -> Dict:
-        exists = await self.fetchval(
-            "SELECT 1 FROM user_channels "
-            "WHERE id = ? AND user_id = ?",
-            (channel_db_id, user_id),
-        )
+        # ✅ v7.5.25 FIX-3: احترام removed_at
+        if await self._has_removed_at_column():
+            exists = await self.fetchval(
+                "SELECT 1 FROM user_channels "
+                "WHERE id = ? AND user_id = ? AND removed_at IS NULL",
+                (channel_db_id, user_id),
+            )
+        else:
+            exists = await self.fetchval(
+                "SELECT 1 FROM user_channels "
+                "WHERE id = ? AND user_id = ?",
+                (channel_db_id, user_id),
+            )
         if not exists:
             return {"total": 0, "published": 0, "unpublished": 0}
 
@@ -598,11 +646,18 @@ class ChannelsPostsMixin:
     async def get_unpublished_posts_count(
         self, user_id: int, channel_db_id: int
     ) -> int:
-        owner = await self.fetchval(
-            "SELECT 1 FROM user_channels "
-            "WHERE id=? AND user_id=?",
-            (channel_db_id, user_id), default=0,
-        )
+        if await self._has_removed_at_column():
+            owner = await self.fetchval(
+                "SELECT 1 FROM user_channels "
+                "WHERE id=? AND user_id=? AND removed_at IS NULL",
+                (channel_db_id, user_id), default=0,
+            )
+        else:
+            owner = await self.fetchval(
+                "SELECT 1 FROM user_channels "
+                "WHERE id=? AND user_id=?",
+                (channel_db_id, user_id), default=0,
+            )
         if not owner:
             return 0
         return await self.fetchval(
@@ -614,6 +669,13 @@ class ChannelsPostsMixin:
     async def get_channel_by_user(
         self, user_id: int, channel_id: int
     ) -> Optional[Dict]:
+        """
+        جلب قناة عبر Telegram channel_id (المُعرّف الرقمي للقناة).
+
+        ⚠️ v7.5.27: لا تُفلتر removed_at بشكل مقصود — لأن هذه الدالة
+        تُستخدم في منطق الاسترجاع (add_channel). للعرض للمستخدم
+        استخدم get_user_channels / get_channel_info.
+        """
         return await self.fetchone(
             "SELECT * FROM user_channels "
             "WHERE user_id = ? AND channel_id = ?",
@@ -623,6 +685,12 @@ class ChannelsPostsMixin:
     async def get_channel_by_id(
         self, user_id: int, channel_id: int
     ) -> Optional[Dict]:
+        """
+        ✅ v7.5.25 FIX-7: alias فعلي لـ get_channel_by_user (نفس الاستعلام).
+        للبحث بـ channel_db_id الداخلي، استخدم get_channel_info.
+
+        ⚠️ v7.5.27: لا تُفلتر removed_at (نفس سبب get_channel_by_user).
+        """
         return await self.fetchone(
             "SELECT * FROM user_channels "
             "WHERE user_id = ? AND channel_id = ?",
@@ -661,6 +729,41 @@ class ChannelsPostsMixin:
                 )
                 if deleted <= 0:
                     return False
+
+                # ✅ v7.5.25 FIX-2: تنظيف صريح للجداول المرتبطة
+                try:
+                    await self._execute_with_conn(
+                        conn,
+                        "DELETE FROM schedule WHERE channel_db_id = ?",
+                        channel_db_id,
+                    )
+                except Exception as _e:
+                    logger.debug(
+                        f"delete_channel: تنظيف schedule فشل "
+                        f"(محتمل CASCADE): {_e}"
+                    )
+                try:
+                    await self._execute_with_conn(
+                        conn,
+                        "DELETE FROM last_publish WHERE channel_db_id = ?",
+                        channel_db_id,
+                    )
+                except Exception as _e:
+                    logger.debug(
+                        f"delete_channel: تنظيف last_publish فشل "
+                        f"(محتمل CASCADE): {_e}"
+                    )
+                try:
+                    await self._execute_with_conn(
+                        conn,
+                        "DELETE FROM posts WHERE channel_db_id = ?",
+                        channel_db_id,
+                    )
+                except Exception as _e:
+                    logger.debug(
+                        f"delete_channel: تنظيف posts فشل "
+                        f"(محتمل CASCADE): {_e}"
+                    )
 
                 if was_active:
                     if await self._has_removed_at_column():
@@ -883,6 +986,25 @@ class ChannelsPostsMixin:
     async def count_user_posts(
         self, user_id: int, channel_db_id: int
     ) -> int:
+        """
+        عدد منشورات القناة (مع فحص الملكية).
+        ✅ v7.5.25 FIX-4: كانت user_id مُهمَلة تماماً — ثغرة منطقية.
+        """
+        if await self._has_removed_at_column():
+            owner = await self.fetchval(
+                "SELECT 1 FROM user_channels "
+                "WHERE id = ? AND user_id = ? "
+                "AND removed_at IS NULL",
+                (channel_db_id, user_id), default=0,
+            )
+        else:
+            owner = await self.fetchval(
+                "SELECT 1 FROM user_channels "
+                "WHERE id = ? AND user_id = ?",
+                (channel_db_id, user_id), default=0,
+            )
+        if not owner:
+            return 0
         return await self.fetchval(
             "SELECT COUNT(*) FROM posts WHERE channel_db_id = ?",
             (channel_db_id,), default=0,
@@ -900,6 +1022,8 @@ class ChannelsPostsMixin:
         إضافة منشورات للقناة.
 
         ✅ v7.5.24 DEV-FIX-2: تجاوز فحص max_posts للمطور/المالك.
+        ✅ v7.5.25 FIX-5: للمطور — current_count الحقيقي بدل 0 الوهمي.
+        ✅ v7.5.27 GAP-1: فحص removed_at IS NULL في الملكية.
         """
         from database import USE_POSTGRES, USE_MYSQL, TimeUtils
         from database import internal_cache, CACHE_AVAILABLE
@@ -911,24 +1035,46 @@ class ChannelsPostsMixin:
                 return 0
 
             is_dev = self._is_dev_user(user_id)
+            has_removed = await self._has_removed_at_column()
 
             async with await self._get_user_lock(user_id):
                 async with self.transaction() as conn:
                     # ─── 1) فحص الملكية ───
-                    row = await self._fetchone_with_conn(
-                        conn,
-                        "SELECT 1 FROM user_channels "
-                        "WHERE id = ? AND user_id = ? AND banned = 0",
-                        channel_db_id, user_id,
-                    )
+                    # 🔒 v7.5.27 GAP-1: فلترة removed_at إن وُجد العمود
+                    if has_removed:
+                        row = await self._fetchone_with_conn(
+                            conn,
+                            "SELECT 1 FROM user_channels "
+                            "WHERE id = ? AND user_id = ? "
+                            "AND banned = 0 AND removed_at IS NULL",
+                            channel_db_id, user_id,
+                        )
+                    else:
+                        row = await self._fetchone_with_conn(
+                            conn,
+                            "SELECT 1 FROM user_channels "
+                            "WHERE id = ? AND user_id = ? AND banned = 0",
+                            channel_db_id, user_id,
+                        )
                     if not row:
+                        logger.debug(
+                            f"add_posts: القناة {channel_db_id} "
+                            f"غير متاحة للمستخدم {user_id} "
+                            f"(ملكية/حظر/soft-delete)"
+                        )
                         return 0
 
                     # ─── 2) فحص حدود الباقة ───
-                    # ✅ v7.5.24 DEV-FIX-2: تخطي للمطور
                     if is_dev:
                         max_posts = 10**9  # بلا حد
-                        current_count = 0
+                        # ✅ v7.5.25 FIX-5: القيمة الحقيقية
+                        current_count = await self._fetchval_with_conn(
+                            conn,
+                            "SELECT COUNT(*) FROM posts "
+                            "WHERE channel_db_id = ? AND published = 0",
+                            channel_db_id,
+                            default=0,
+                        )
                         has_text_hash = (
                             await self._ensure_text_hash_column(conn)
                         )
@@ -1100,6 +1246,17 @@ class ChannelsPostsMixin:
     async def get_next_post(
         self, channel_db_id: int
     ) -> Tuple[Optional[Dict], bool]:
+        """
+        جلب المنشور التالي للنشر.
+
+        Returns:
+            (post_dict, was_recycled)
+            - post_dict=None إذا لا يوجد
+            - was_recycled=True إذا حصل تدوير تلقائي
+
+        ✅ إعادة التدوير تلقائية لكن on-demand (عند نفاد المنشورات)
+           وليست time-based.
+        """
         from database import CACHE_AVAILABLE, posts_cache
 
         async with await self._get_channel_lock(channel_db_id):
@@ -1124,11 +1281,12 @@ class ChannelsPostsMixin:
                     )
                 return post_row, False
 
+            # ✅ v7.5.25 FIX-6: default=0
             auto_recycle = await self.fetchval(
                 """SELECT u.auto_recycle FROM users u
                    JOIN user_channels uc ON u.user_id = uc.user_id
                    WHERE uc.id = ?""",
-                (channel_db_id,), default=1,
+                (channel_db_id,), default=0,
             )
             if auto_recycle != 1:
                 return None, False
@@ -1139,6 +1297,13 @@ class ChannelsPostsMixin:
                 "WHERE channel_db_id = ? AND published = 1",
                 (channel_db_id,),
             )
+
+            # بعد التدوير: نُبطل الكاش لأن كل الصفوف تغيّرت
+            if CACHE_AVAILABLE:
+                try:
+                    await posts_cache.invalidate(channel_db_id)
+                except TypeError:
+                    await posts_cache.invalidate()
 
             post_row = await self.fetchone(
                 """SELECT p.id, p.text, p.media_type,
@@ -1157,39 +1322,82 @@ class ChannelsPostsMixin:
             return None, False
 
     async def mark_post_published(self, post_id: int) -> bool:
-        from database import TimeUtils, CACHE_AVAILABLE, posts_cache
+        """
+        وسم منشور كمنشور.
 
-        result = await self.execute(
+        ✅ v7.5.26 FIX-E: UPDATE شرطي (WHERE published = 0) لمنع
+           النشر المزدوج بين workers متعددين — atomic claim.
+        ✅ v7.5.26 FIX-B: إبطال كاش القناة فقط بدل الكاش العام.
+
+        Returns:
+            True: المنشور الآن published=1 (سواء بأيدينا أو بواسطة worker آخر)
+            False: المنشور غير موجود
+        """
+        from database import TimeUtils
+
+        affected = await self.execute(
             "UPDATE posts SET published = 1, published_at = ?, "
-            "fail_count = 0 WHERE id = ?",
+            "fail_count = 0 WHERE id = ? AND published = 0",
             (TimeUtils.utc_now(), post_id),
-        ) > 0
-        if result and CACHE_AVAILABLE:
-            try:
-                await posts_cache.invalidate()
-            except Exception:
-                pass
-        return result
+        )
+
+        if affected <= 0:
+            exists = await self.fetchval(
+                "SELECT 1 FROM posts WHERE id = ?",
+                (post_id,),
+            )
+            if not exists:
+                return False
+            logger.debug(
+                f"mark_post_published({post_id}): "
+                f"already published (idempotent)"
+            )
+
+        # ✅ v7.5.26 FIX-B: إبطال كاش القناة فقط
+        await self._invalidate_post_cache(post_id)
+        return True
 
     async def increment_post_fail(self, post_id: int) -> bool:
-        return await self.execute(
+        """
+        زيادة عدّاد فشل المنشور.
+
+        ✅ v7.5.26 FIX-A: إبطال كاش القناة بعد الزيادة.
+        """
+        result = await self.execute(
             "UPDATE posts SET fail_count = fail_count + 1 "
             "WHERE id = ?",
             (post_id,),
         ) > 0
 
+        if result:
+            await self._invalidate_post_cache(post_id)
+
+        return result
+
     async def delete_post(
         self, user_id: int, post_id: int, channel_db_id: int
     ) -> bool:
+        """
+        حذف منشور.
+        ✅ v7.5.27 GAP-3: فحص removed_at IS NULL في الملكية.
+        """
         from database import internal_cache, CACHE_AVAILABLE
         from database import invalidate_user_cache, posts_cache
         from database import channels_cache
 
-        exists = await self.fetchval(
-            "SELECT 1 FROM user_channels "
-            "WHERE id = ? AND user_id = ?",
-            (channel_db_id, user_id),
-        )
+        if await self._has_removed_at_column():
+            exists = await self.fetchval(
+                "SELECT 1 FROM user_channels "
+                "WHERE id = ? AND user_id = ? "
+                "AND removed_at IS NULL",
+                (channel_db_id, user_id),
+            )
+        else:
+            exists = await self.fetchval(
+                "SELECT 1 FROM user_channels "
+                "WHERE id = ? AND user_id = ?",
+                (channel_db_id, user_id),
+            )
         if not exists:
             return False
 
@@ -1216,22 +1424,37 @@ class ChannelsPostsMixin:
     async def reset_posts(
         self, user_id: int, channel_db_id: int
     ) -> int:
+        """
+        إعادة تعيين كل منشورات القناة (published=0).
+        ✅ v7.5.27 GAP-2: فحص removed_at IS NULL في الملكية.
+        """
         from database import internal_cache, CACHE_AVAILABLE
         from database import invalidate_user_cache, posts_cache
         from database import channels_cache
 
         try:
             async with self.transaction() as conn:
-                owns = await self._fetchval_with_conn(
-                    conn,
-                    "SELECT 1 FROM user_channels "
-                    "WHERE id = ? AND user_id = ? AND banned = 0",
-                    channel_db_id, user_id,
-                )
+                # 🔒 v7.5.27 GAP-2: فلترة removed_at إن وُجد العمود
+                if await self._has_removed_at_column():
+                    owns = await self._fetchval_with_conn(
+                        conn,
+                        "SELECT 1 FROM user_channels "
+                        "WHERE id = ? AND user_id = ? AND banned = 0 "
+                        "AND removed_at IS NULL",
+                        channel_db_id, user_id,
+                    )
+                else:
+                    owns = await self._fetchval_with_conn(
+                        conn,
+                        "SELECT 1 FROM user_channels "
+                        "WHERE id = ? AND user_id = ? AND banned = 0",
+                        channel_db_id, user_id,
+                    )
                 if not owns:
                     logger.warning(
                         f"⚠️ reset_posts: المستخدم {user_id} "
-                        f"لا يملك القناة {channel_db_id}"
+                        f"لا يملك القناة {channel_db_id} "
+                        f"(أو مُزالة/محظورة)"
                     )
                     return 0
 
@@ -1277,13 +1500,26 @@ class ChannelsPostsMixin:
     async def get_user_posts(
         self, user_id: int, channel_db_id: int, limit: int = 10
     ) -> List[Dict]:
+        """
+        جلب آخر منشورات القناة.
+        ✅ v7.5.27 GAP-4: فحص removed_at IS NULL في الملكية.
+        """
         from database import CACHE_AVAILABLE, posts_cache
 
-        exists = await self.fetchval(
-            "SELECT 1 FROM user_channels "
-            "WHERE id = ? AND user_id = ?",
-            (channel_db_id, user_id),
-        )
+        # 🔒 v7.5.27 GAP-4: فلترة removed_at إن وُجد العمود
+        if await self._has_removed_at_column():
+            exists = await self.fetchval(
+                "SELECT 1 FROM user_channels "
+                "WHERE id = ? AND user_id = ? "
+                "AND removed_at IS NULL",
+                (channel_db_id, user_id),
+            )
+        else:
+            exists = await self.fetchval(
+                "SELECT 1 FROM user_channels "
+                "WHERE id = ? AND user_id = ?",
+                (channel_db_id, user_id),
+            )
         if not exists:
             return []
 
