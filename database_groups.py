@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-database_groups.py - دوال المجموعات (v7.4.12)
+database_groups.py - دوال المجموعات (v7.4.13)
 ================================================================================
 GroupsMixin:
   1.  كاش الكلمات المحظورة المحلي
@@ -19,15 +19,20 @@ GroupsMixin:
   13. المخالفات (Violations)
   14. انتهاء العقوبات (Expire Penalties — fallback)
 
+🆕 v7.4.13 — ROOT-CAUSE-FIX (نهائي):
+  🔴 F1: عكس ترتيب المعاملات في add_banned_word / remove_banned_word
+         التوقيع الجديد: (chat_id, word, added_by) و (chat_id, word)
+         السبب المُثبَت من السجلات:
+             add_banned_word: word وصل int=-1 | chat_id='صباح الخير'
+         المُنادي يمرّر (chat_id, word, added_by) بشكل ثابت، لكن
+         التوقيع كان (word, chat_id, added_by) → انعكاس كامل →
+         فحص النوع يفشل → الكلمة لا تُخزَّن أبداً → عند الحذف
+         "غير موجودة".
+         الحل: مطابقة التوقيع مع ما يمرّره المُنادي فعلاً.
+
 🆕 v7.4.12 — CRITICAL-FIX:
   🔴 F1: add_banned_word — تحقق نوع شامل قبل .strip()
-         السبب: كان `word` يصل int أحياناً (انعكاس معاملات في المُنادي)
-         → AttributeError: 'int' object has no attribute 'strip'
-         → الكلمة لا تُخزَّن، لكن المُنادي يعرض "تم" → عند الحذف
-           يقول "غير موجودة" (لأنها فعلاً غير موجودة).
-         الحل: فحص isinstance + log تشخيصي يوضح القيم الفعلية.
   🔴 F2: remove_banned_word — نفس التحقق + fallback تشخيصي
-         يبحث بدون lower/strip لعرض ما هو موجود فعلاً في DB.
 
 🆕 v7.4.11 — REVIEW-FIXES:
   🟠 M1: increment_violation_count — قفل per-(user,chat)
@@ -75,9 +80,6 @@ def _safe_normalize_word(word: Any) -> Optional[str]:
     يُرجع:
       - النص المُطبَّع (str) إذا كان word نصاً صالحاً
       - None إذا كان word غير نصي (int/None/...) → يعني خطأ في المُنادي
-
-    ملاحظة: هذا الكشف يكشف الحالة الشائعة عندما يُمرَّر chat_id
-    (int) في معامل word بسبب انعكاس الترتيب في المُنادي.
     """
     if word is None:
         return None
@@ -642,8 +644,6 @@ class GroupsMixin:
     async def _get_group_security_columns(self) -> set:
         """
         جلب أعمدة group_security الفعلية (مع كاش).
-
-        ✅ v7.4.11: قفل مخصص يمنع race عند أول استدعاء متزامن.
         """
         # fast path (بلا قفل)
         if self._group_security_columns_cache is not None:
@@ -1348,56 +1348,36 @@ class GroupsMixin:
             await self.banned_words_cache.set(chat_id, result)
         return result
 
+    # ─────────────────────────────────────────────────────────────────
+    # 🆕 v7.4.13: التوقيع الجديد = (chat_id, word, added_by)
+    #             يطابق ما يمرّره المُنادي فعلاً.
+    # ─────────────────────────────────────────────────────────────────
     async def add_banned_word(
-        self, word: Any, chat_id: int, added_by: int
+        self, chat_id: int, word: str, added_by: int
     ) -> Tuple[bool, bool]:
         """
-        ✅ v7.4.12: إصلاح جذري لمشكلة "الكلمة تُقبل لكنها غير موجودة".
-
-        ─── التشخيص ───
-        المشكلة السابقة: كان `word` يصل أحياناً كـ int (chat_id) بسبب
-        انعكاس المعاملات في المُنادي → `word.strip()` يفشل بـ
-        AttributeError → الدالة تُرجع (False, False) → الكلمة لا
-        تُخزَّن أصلاً → عند الحذف يقول "غير موجودة".
-
-        ─── الحل ───
-        1. تحقق نوع شامل قبل .strip()
-        2. رصد انعكاس المعاملات (word=int, chat_id=int)
-        3. log تشخيصي يوضح القيم الفعلية
+        ✅ v7.4.13: التوقيع الآن (chat_id, word, added_by) — مطابق
+        لما يمرّره المُنادي فعلاً (كان مُعكَساً سابقاً).
 
         يُرجع:
             (True,  False) → أُضيفت بنجاح
             (False, True)  → موجودة مسبقاً (duplicate)
             (False, False) → رُفضت (سبب آخر — يُسجَّل بالتفصيل)
         """
-        # ─── ✅ v7.4.12: تحقق نوع شامل ───
-        if not isinstance(word, str):
-            logger.error(
-                f"❌ add_banned_word: word يجب أن يكون str، "
-                f"وصل {type(word).__name__}={word!r} | "
-                f"chat_id={chat_id!r} ({type(chat_id).__name__}) | "
-                f"added_by={added_by!r}"
-            )
-            # 🆕 v7.4.12: رصد انعكاس المعاملات الشائع
-            if isinstance(word, int) and isinstance(chat_id, int):
-                logger.error(
-                    f"   💡 السبب المُرجَّح: انعكاس ترتيب المعاملات "
-                    f"في المُنادي!\n"
-                    f"   التوقيع الحالي: "
-                    f"add_banned_word(word, chat_id, added_by)\n"
-                    f"   ما يبدو أن المُنادي يمرّره: "
-                    f"add_banned_word(chat_id={word}, "
-                    f"word={chat_id}, added_by={added_by})\n"
-                    f"   ✅ الإصلاح: بدّل الترتيب في المُنادي إلى "
-                    f"add_banned_word(word, chat_id, added_by)"
-                )
-            return False, False
-
+        # ─── ✅ v7.4.12/13: تحقق نوع شامل ───
         if not isinstance(chat_id, int):
             logger.error(
                 f"❌ add_banned_word: chat_id يجب أن يكون int، "
                 f"وصل {type(chat_id).__name__}={chat_id!r} | "
-                f"word={word!r}"
+                f"word={word!r}, added_by={added_by!r}"
+            )
+            return False, False
+
+        if not isinstance(word, str):
+            logger.error(
+                f"❌ add_banned_word: word يجب أن يكون str، "
+                f"وصل {type(word).__name__}={word!r} | "
+                f"chat_id={chat_id!r}, added_by={added_by!r}"
             )
             return False, False
 
@@ -1405,7 +1385,7 @@ class GroupsMixin:
             logger.error(
                 f"❌ add_banned_word: added_by يجب أن يكون int، "
                 f"وصل {type(added_by).__name__}={added_by!r} | "
-                f"word={word!r}, chat_id={chat_id}"
+                f"chat_id={chat_id!r}, word={word!r}"
             )
             return False, False
 
@@ -1506,44 +1486,40 @@ class GroupsMixin:
         except Exception as e:
             logger.error(
                 f"❌ Error in add_banned_word: {e} | "
-                f"word={word!r}, chat_id={chat_id}, "
+                f"chat_id={chat_id}, word={word!r}, "
                 f"added_by={added_by}",
                 exc_info=True,
             )
             return False, False
 
+    # ─────────────────────────────────────────────────────────────────
+    # 🆕 v7.4.13: التوقيع الجديد = (chat_id, word)
+    #             يطابق ما يمرّره المُنادي فعلاً.
+    # ─────────────────────────────────────────────────────────────────
     async def remove_banned_word(
-        self, word: Any, chat_id: int
+        self, chat_id: int, word: str
     ) -> bool:
         """
-        ✅ v7.4.12: نفس التحقق النوعي الشامل + fallback تشخيصي.
+        ✅ v7.4.13: التوقيع الآن (chat_id, word) — مطابق لما يمرّره
+        المُنادي فعلاً (كان مُعكَساً سابقاً).
 
         عند فشل الحذف، يبحث بدون lower/strip لعرض ما هو موجود فعلاً
-        في DB — يساعد على كشف اختلافات التطبيع (مسافات، حالة أحرف،
-        محارف عربية مختلفة).
+        في DB — يساعد على كشف اختلافات التطبيع.
         """
-        # ─── ✅ v7.4.12: تحقق نوع شامل ───
-        if not isinstance(word, str):
-            logger.error(
-                f"❌ remove_banned_word: word يجب أن يكون str، "
-                f"وصل {type(word).__name__}={word!r} | "
-                f"chat_id={chat_id!r}"
-            )
-            if isinstance(word, int) and isinstance(chat_id, int):
-                logger.error(
-                    f"   💡 السبب المُرجَّح: انعكاس ترتيب المعاملات!\n"
-                    f"   التوقيع الحالي: "
-                    f"remove_banned_word(word, chat_id)\n"
-                    f"   ✅ الإصلاح: بدّل الترتيب في المُنادي إلى "
-                    f"remove_banned_word(word, chat_id)"
-                )
-            return False
-
+        # ─── ✅ v7.4.12/13: تحقق نوع شامل ───
         if not isinstance(chat_id, int):
             logger.error(
                 f"❌ remove_banned_word: chat_id يجب أن يكون int، "
                 f"وصل {type(chat_id).__name__}={chat_id!r} | "
                 f"word={word!r}"
+            )
+            return False
+
+        if not isinstance(word, str):
+            logger.error(
+                f"❌ remove_banned_word: word يجب أن يكون str، "
+                f"وصل {type(word).__name__}={word!r} | "
+                f"chat_id={chat_id!r}"
             )
             return False
 
@@ -1569,7 +1545,6 @@ class GroupsMixin:
                 # ─── 🆕 v7.4.12: fallback تشخيصي عند عدم العثور ───
                 if deleted == 0:
                     try:
-                        # ابحث بدون تطبيع لعرض ما هو موجود فعلاً
                         all_words = await self._fetchall_with_conn(
                             conn,
                             "SELECT word FROM banned_words "
@@ -1610,7 +1585,7 @@ class GroupsMixin:
         except Exception as e:
             logger.error(
                 f"❌ Error in remove_banned_word: {e} | "
-                f"word={word!r}, chat_id={chat_id}",
+                f"chat_id={chat_id}, word={word!r}",
                 exc_info=True,
             )
             return False
