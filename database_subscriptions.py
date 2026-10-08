@@ -2,16 +2,34 @@
 # -*- coding: utf-8 -*-
 """
 database_subscriptions.py - وحدة الباقات والاشتراكات والفواتير والإحالات
-v7.7.29 — دعم كامل لـ SQLite + PostgreSQL + MySQL
+v7.7.31 — دعم كامل لـ SQLite + PostgreSQL + MySQL
 =====================================================================
+🆕 v7.7.31 (DEV-PERMANENT-SUBSCRIPTION):
+    👑 DEV-1: _is_dev_user + _get_dev_ids — نفس منطق channels_posts
+    👑 DEV-2: has_active_subscription — bypass فوري للمطور (True دائماً)
+    👑 DEV-3: has_used_trial — bypass فوري للمطور (False دائماً)
+    👑 DEV-4: activate_trial — يرجع -1 للمطور (اشتراكه أطول)
+    👑 DEV-5: ensure_dev_subscription(user_id) — دالة جديدة تُنشئ
+              اشتراكاً دائماً في DB (100 سنة) للمطور عند أول استدعاء.
+              idempotent — لا تُنشئ مرتين.
+    👑 DEV-6: ensure_all_dev_subscriptions() — حلقة على كل المطورين،
+              تُستدعى عند بدء البوت من main.py / bot initialization.
+    👑 DEV-7: expire_expired_subscriptions — استثناء provider='dev_bypass'
+              من الإنهاء (حتى لو انتهى end_date لأي سبب).
+
+✅ v7.7.30 — إصلاحات ما بعد التدقيق الدقيق:
+  1) activate_trial: إزالة default=1 الخطير لـ trial_plan_id
+  2) add_referral: تمرير تواريخ كسلاسل نصية لـ MySQL/SQLite
+  3) create_subscription: نقل جلب الخطة داخل الـ lock والمعاملة
+  4) _refresh_user_subscription_end: توضيح docstring
+  5) get_users_for_reminder: توضيح EXTRACT(DAY FROM interval)
+
 ✅ v7.7.29 — إصلاحات ما بعد التدقيق:
-  1) get_users_for_reminder: HAVING بلا alias — PG كان يفشل بالكامل
-  2) add_referral: نطاق زمني بدل date() — أسرع + متوافق مع asyncpg
-  3) redeem_gift_code: UPDATE ذرّي (WHERE used_by IS NULL) — منع سباق
+  1) get_users_for_reminder: HAVING بلا alias — PG كان يفشل
+  2) add_referral: نطاق زمني بدل date()
+  3) redeem_gift_code: UPDATE ذرّي (WHERE used_by IS NULL)
   4) has_active_subscription: JOIN plans + p.is_active = 1
-     (توحيد مع Database.has_active_subscription)
   5) expire_expired_subscriptions: تُرجع عدد المنتهين
-     + استخدام _execute_with_conn للـ rowcount الصحيح
 
 ✅ v7.7.0 — إصلاحات حرجة (محفوظة):
   1) activate_trial: فحص ذرّي لـ trial_used
@@ -27,7 +45,7 @@ import json
 import logging
 import secrets
 from datetime import datetime, timedelta, timezone
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -76,6 +94,7 @@ except ImportError:
 
     class CONFIG:
         PRIMARY_OWNER_ID = 0
+        DEVELOPER_IDS = ()
         MAX_DAILY_REFERRALS = 10
         MAX_GLOBAL_BANNED_WORDS = 500
 
@@ -183,6 +202,13 @@ async def _table_exists(conn, table: str) -> bool:
         return False
 
 
+# ═════════════════════════════════════════════════════════════════════
+#  🆕 v7.7.31: ثوابت خاصة باشتراك المطور الدائم
+# ═════════════════════════════════════════════════════════════════════
+_DEV_PROVIDER = 'dev_bypass'          # مُعرّف الاشتراك الدائم
+_DEV_DURATION_DAYS = 36500            # 100 سنة
+
+
 # =====================================================================
 # 5) SubscriptionMixin
 # =====================================================================
@@ -195,6 +221,60 @@ class SubscriptionMixin:
       self._fetchval_with_conn/_execute_with_conn
       self._get_user_lock
     """
+
+    # ═════════════════════════════════════════════════════════════════
+    #  🆕 v7.7.31: كشف المطور (نفس منطق channels_posts)
+    # ═════════════════════════════════════════════════════════════════
+
+    def _is_dev_user(self, user_id: int) -> bool:
+        """
+        👑 v7.7.31: هل المستخدم مطور/مالك؟
+        يُستخدم لمنح اشتراك دائم + تجاوز فحوصات الأهلية.
+        """
+        try:
+            cfg = getattr(self, "CONFIG", None)
+            if cfg is None:
+                return False
+            fn = getattr(cfg, "is_developer", None)
+            if callable(fn):
+                try:
+                    return bool(fn(user_id))
+                except Exception:
+                    pass
+            owner = getattr(cfg, "PRIMARY_OWNER_ID", 0) or 0
+            devs = getattr(cfg, "DEVELOPER_IDS", ()) or ()
+            try:
+                devs = tuple(devs)
+            except Exception:
+                devs = ()
+            return user_id == owner or user_id in devs
+        except Exception as e:
+            logger.debug(f"_is_dev_user: {e}")
+            return False
+
+    def _get_dev_ids(self) -> Tuple[int, ...]:
+        """
+        👑 v7.7.31: قائمة بكل معرّفات المطورين/المالك.
+        تُستخدم في ensure_all_dev_subscriptions().
+        """
+        try:
+            cfg = getattr(self, "CONFIG", None)
+            if cfg is None:
+                return ()
+            ids = set()
+            owner = getattr(cfg, "PRIMARY_OWNER_ID", 0) or 0
+            if owner:
+                ids.add(int(owner))
+            devs = getattr(cfg, "DEVELOPER_IDS", ()) or ()
+            try:
+                for d in devs:
+                    ids.add(int(d))
+            except Exception:
+                pass
+            return tuple(sorted(ids))
+        except Exception as e:
+            logger.debug(f"_get_dev_ids: {e}")
+            return ()
 
     # -----------------------------------------------------------------
     # Helper داخلي: جلب MAX(end_date) من الاشتراكات الفعّالة
@@ -394,13 +474,129 @@ class SubscriptionMixin:
         return await self._fetchone_with_conn(conn, sql, user_id)
 
     # =================================================================
+    #  🆕 v7.7.31: اشتراك المطور الدائم
+    # =================================================================
+
+    async def ensure_dev_subscription(self, user_id: int) -> bool:
+        """
+        👑 v7.7.31 DEV-5: يضمن أن المطور لديه اشتراك دائم نشط.
+
+        - Idempotent: لا يُنشئ مرتين.
+        - يستخدم provider='dev_bypass' كعلامة مميزة.
+        - المدة: 36500 يوم (100 سنة).
+        - لو لا توجد خطط نشطة → يفشل بهدوء (يرجع False).
+
+        Returns:
+            True: الاشتراك الدائم موجود (سواء أنشأه الآن أو مسبقاً)
+            False: المستخدم ليس مطوراً، أو لا توجد خطط، أو خطأ
+        """
+        if not self._is_dev_user(user_id):
+            return False
+
+        try:
+            async with await self._get_user_lock(user_id):
+                async with self.transaction() as conn:
+                    # ─── فحص إذا كان الاشتراك الدائم موجوداً ───
+                    sql_existing = (
+                        f"SELECT 1 FROM subscriptions "
+                        f"WHERE user_id = {_ph(1)} "
+                        f"AND provider = {_ph(2)} "
+                        f"AND status = 'active' "
+                        f"AND end_date > {_ph(3)} "
+                        f"LIMIT 1"
+                    )
+                    now_param = (
+                        TimeUtils.utc_now() if USE_POSTGRES
+                        else TimeUtils.sql_iso()
+                    )
+                    existing = await self._fetchval_with_conn(
+                        conn, sql_existing,
+                        user_id, _DEV_PROVIDER, now_param,
+                    )
+                    if existing:
+                        return True
+
+                    # ─── البحث عن أي خطة نشطة (الأعلى سعراً) ───
+                    plan_id = await self._fetchval_with_conn(
+                        conn,
+                        "SELECT id FROM plans WHERE is_active = 1 "
+                        "ORDER BY price DESC LIMIT 1",
+                    )
+                    if not plan_id:
+                        logger.warning(
+                            f"⚠️ ensure_dev_subscription: لا توجد "
+                            f"خطط نشطة — تعذّر منح اشتراك دائم "
+                            f"للمستخدم {user_id}"
+                        )
+                        return False
+
+                    # ─── إنشاء الاشتراك الدائم ───
+                    far_future = (
+                        TimeUtils.utc_now()
+                        + timedelta(days=_DEV_DURATION_DAYS)
+                    )
+                    await self._insert_subscription_full(
+                        conn, user_id, plan_id, far_future,
+                        _DEV_PROVIDER,
+                        provider_sub_id='permanent',
+                    )
+                    await self._refresh_user_subscription_end(
+                        conn, user_id
+                    )
+                    await user_cache.invalidate(user_id)
+                    logger.info(
+                        f"👑 اشتراك دائم أُنشئ للمطور {user_id} "
+                        f"(plan={plan_id}, +{_DEV_DURATION_DAYS} يوم)"
+                    )
+                    return True
+        except Exception as e:
+            logger.error(
+                f"❌ ensure_dev_subscription({user_id}): {e}",
+                exc_info=True,
+            )
+            return False
+
+    async def ensure_all_dev_subscriptions(self) -> int:
+        """
+        👑 v7.7.31 DEV-6: حلقة على كل المطورين/المالك.
+        تُستدعى عند بدء البوت من main.py.
+
+        Returns:
+            عدد المطورين الذين تم تأمين اشتراكهم بنجاح
+        """
+        dev_ids = self._get_dev_ids()
+        if not dev_ids:
+            logger.info(
+                "ℹ️ ensure_all_dev_subscriptions: لا يوجد مطورون مُعرَّفون"
+            )
+            return 0
+
+        count = 0
+        for dev_id in dev_ids:
+            if await self.ensure_dev_subscription(dev_id):
+                count += 1
+            else:
+                logger.warning(
+                    f"⚠️ فشل تأمين اشتراك دائم للمطور {dev_id}"
+                )
+        logger.info(
+            f"👑 ensure_all_dev_subscriptions: "
+            f"{count}/{len(dev_ids)} مطورين جاهزون"
+        )
+        return count
+
+    # =================================================================
     # الاشتراك الأساسي
     # =================================================================
     async def has_active_subscription(self, user_id: int) -> bool:
         """
         ✅ v7.7.29: JOIN plans + p.is_active = 1
-        (توحيد مع Database.has_active_subscription v7.7.26)
+        👑 v7.7.31 DEV-2: bypass فوري للمطور (True دائماً).
         """
+        # 👑 DEV-BYPASS
+        if self._is_dev_user(user_id):
+            return True
+
         sql = (
             f"SELECT 1 FROM subscriptions s "
             f"JOIN plans p ON s.plan_id = p.id "
@@ -414,6 +610,14 @@ class SubscriptionMixin:
         return result is not None
 
     async def has_used_trial(self, user_id: int) -> bool:
+        """
+        👑 v7.7.31 DEV-3: bypass — المطور لم يستخدم التجربة
+        (لأنه لديه اشتراك دائم، فلا داعي لمنحه تجربة).
+        """
+        # 👑 DEV-BYPASS: المطور لا يحتاج التجربة
+        if self._is_dev_user(user_id):
+            return False
+
         sql = f"SELECT trial_used FROM users WHERE user_id = {_ph(1)}"
         result = await self.fetchval(sql, (user_id,), default=0)
         return result == 1
@@ -422,9 +626,22 @@ class SubscriptionMixin:
         """
         Returns:
             30   : تم تفعيل التجربة
-            0    : فشل، أو المستخدم استخدم التجربة مسبقاً
+            0    : فشل، أو المستخدم استخدم التجربة مسبقاً،
+                   أو لا توجد خطة تجربة نشطة
             -1   : فُعّلت، لكن اشتراك المستخدم الحالي أطول
+
+        ✅ v7.7.30 FIX-1: إزالة default=1 الخطير لـ trial_plan_id.
+        👑 v7.7.31 DEV-4: bypass — المطور له اشتراك دائم → -1.
         """
+        # 👑 DEV-BYPASS: تأمين اشتراك دائم ثم إرجاع -1
+        if self._is_dev_user(user_id):
+            await self.ensure_dev_subscription(user_id)
+            logger.info(
+                f"👑 activate_trial: المطور {user_id} "
+                f"لديه اشتراك دائم — تجاهل التجربة"
+            )
+            return -1
+
         try:
             async with await self._get_user_lock(user_id):
                 now = TimeUtils.utc_now()
@@ -439,12 +656,19 @@ class SubscriptionMixin:
                     if trial_used == 1:
                         return 0
 
+                    # ✅ v7.7.30 FIX-1: فحص صريح — لا fallback خطير
                     trial_plan_id = await self._fetchval_with_conn(
                         conn,
                         "SELECT id FROM plans WHERE name = 'تجربة' "
                         "AND is_active = 1 LIMIT 1",
-                        default=1,
                     )
+                    if not trial_plan_id:
+                        logger.warning(
+                            f"⚠️ activate_trial: لا توجد خطة 'تجربة' "
+                            f"نشطة — إجهاض التفعيل للمستخدم {user_id}"
+                        )
+                        return 0
+
                     current_end_dt = await self._get_current_end(conn, user_id)
 
                     if current_end_dt and current_end_dt > trial_end:
@@ -617,7 +841,6 @@ class SubscriptionMixin:
                         conn, sql_upd, user_id, used_at, gift_code['id']
                     )
                     if updated == 0:
-                        # سباق — استُبدل الكود من process آخر
                         logger.info(
                             f"ℹ️ gift_code '{code}' سُبق في الاسترداد"
                         )
@@ -707,13 +930,28 @@ class SubscriptionMixin:
         self, user_id: int, plan_id: int,
         provider: str = 'xtr', provider_sub_id: Optional[str] = None,
     ) -> int:
+        """
+        ✅ v7.7.30 FIX-3: جلب الخطة داخل الـ lock/transaction لمنع
+        race مع تعطيل الخطة (is_active=0) بين الفحص والإدراج.
+        """
         try:
-            plan = await self.get_plan(plan_id)
-            if not plan:
-                return 0
-
             async with await self._get_user_lock(user_id):
                 async with self.transaction() as conn:
+                    # ✅ v7.7.30 FIX-3: فحص الخطة داخل المعاملة
+                    sql_plan = (
+                        f"SELECT duration_days FROM plans "
+                        f"WHERE id = {_ph(1)} AND is_active = 1"
+                    )
+                    plan = await self._fetchone_with_conn(
+                        conn, sql_plan, plan_id
+                    )
+                    if not plan:
+                        logger.warning(
+                            f"⚠️ create_subscription: الخطة {plan_id} "
+                            f"غير نشطة/غير موجودة"
+                        )
+                        return 0
+
                     current_end = await self._get_current_end(conn, user_id)
                     now = TimeUtils.utc_now()
                     base = (
@@ -786,7 +1024,7 @@ class SubscriptionMixin:
     async def expire_expired_subscriptions(self) -> int:
         """
         ✅ v7.7.29: تُرجع عدد الاشتراكات المُنتهية.
-        تستخدم _execute_with_conn لـ rowcount موحد عبر DBs.
+        👑 v7.7.31 DEV-7: استثناء provider='dev_bypass' من الإنهاء.
         """
         expired_count = 0
         try:
@@ -796,39 +1034,51 @@ class SubscriptionMixin:
                         conn,
                         "SELECT DISTINCT user_id FROM subscriptions "
                         "WHERE status = 'active' "
+                        "AND provider <> $1 "
                         "AND end_date <= CURRENT_TIMESTAMP AT TIME ZONE 'UTC'",
+                        _DEV_PROVIDER,
                     )
                     expired_count = await self._execute_with_conn(
                         conn,
                         "UPDATE subscriptions SET status = 'expired' "
                         "WHERE status = 'active' "
+                        "AND provider <> $1 "
                         "AND end_date <= CURRENT_TIMESTAMP AT TIME ZONE 'UTC'",
+                        _DEV_PROVIDER,
                     )
                 elif USE_MYSQL:
                     soon_expiring = await self._fetchall_with_conn(
                         conn,
                         "SELECT DISTINCT user_id FROM subscriptions "
                         "WHERE status = 'active' "
+                        "AND provider <> %s "
                         "AND end_date <= UTC_TIMESTAMP()",
+                        _DEV_PROVIDER,
                     )
                     expired_count = await self._execute_with_conn(
                         conn,
                         "UPDATE subscriptions SET status = 'expired' "
                         "WHERE status = 'active' "
+                        "AND provider <> %s "
                         "AND end_date <= UTC_TIMESTAMP()",
+                        _DEV_PROVIDER,
                     )
                 else:
                     soon_expiring = await self._fetchall_with_conn(
                         conn,
                         "SELECT DISTINCT user_id FROM subscriptions "
                         "WHERE status = 'active' "
+                        "AND provider <> ? "
                         "AND end_date <= datetime('now')",
+                        _DEV_PROVIDER,
                     )
                     expired_count = await self._execute_with_conn(
                         conn,
                         "UPDATE subscriptions SET status = 'expired' "
                         "WHERE status = 'active' "
+                        "AND provider <> ? "
                         "AND end_date <= datetime('now')",
+                        _DEV_PROVIDER,
                     )
 
                 for user in soon_expiring:
@@ -843,6 +1093,10 @@ class SubscriptionMixin:
         return expired_count or 0
 
     async def _refresh_user_subscription_end(self, conn, user_id: int) -> None:
+        """
+        يُحدّث users.subscription_end = MAX(end_date) للاشتراكات النشطة.
+        لو لا يوجد اشتراك نشط → subscription_end = NULL.
+        """
         if USE_POSTGRES:
             end = await self._fetchval_with_conn(
                 conn,
@@ -1074,8 +1328,7 @@ class SubscriptionMixin:
     ) -> bool:
         """
         ✅ v7.7.29: نطاق زمني [day_start, day_end) بدل date(created_at).
-        - يستفيد من index على created_at
-        - متوافق مع asyncpg (لا اعتماد على implicit cast text→date)
+        ✅ v7.7.30 FIX-2: تمرير التواريخ كسلاسل نصية لـ MySQL/SQLite.
         """
         if referrer_id == referred_id:
             return False
@@ -1094,11 +1347,22 @@ class SubscriptionMixin:
                         f"AND created_at >= {_ph(2)} "
                         f"AND created_at < {_ph(3)}"
                     )
-                    count = await self._fetchval_with_conn(
-                        conn, sql_cnt,
-                        referrer_id, day_start, day_end,
-                        default=0,
-                    )
+
+                    # ✅ v7.7.30 FIX-2: تمرير صريح حسب نوع DB
+                    if USE_POSTGRES:
+                        count = await self._fetchval_with_conn(
+                            conn, sql_cnt,
+                            referrer_id, day_start, day_end,
+                            default=0,
+                        )
+                    else:
+                        count = await self._fetchval_with_conn(
+                            conn, sql_cnt,
+                            referrer_id,
+                            day_start.strftime('%Y-%m-%d %H:%M:%S'),
+                            day_end.strftime('%Y-%m-%d %H:%M:%S'),
+                            default=0,
+                        )
 
                     max_ref = getattr(CONFIG, 'MAX_DAILY_REFERRALS', 10)
                     if count >= max_ref:
@@ -1287,8 +1551,13 @@ class SubscriptionMixin:
     async def get_users_for_reminder(self) -> List[Dict]:
         """
         ✅ v7.7.29: HAVING يكرر التعبير بدل استخدام alias —
-        PostgreSQL لا يسمح بـ SELECT aliases في HAVING
-        (كان الاستعلام يفشل بالكامل على PG قبل هذا الإصلاح).
+        PostgreSQL لا يسمح بـ SELECT aliases في HAVING.
+
+        📝 v7.7.30: EXTRACT(DAY FROM interval) يُقرّب لأسفل.
+
+        👑 v7.7.31: المطور سيظهر تلقائياً (اشتراك دائم 100 سنة)
+        لكن days_left سيكون ~36500 > reminder_days_before
+        → لن يُدرج في النتائج (لا إزعاج).
         """
         now = TimeUtils.utc_now()
         if USE_POSTGRES:
