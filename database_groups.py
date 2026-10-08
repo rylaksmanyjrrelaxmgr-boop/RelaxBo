@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-database_groups.py - دوال المجموعات (v7.4.11)
+database_groups.py - دوال المجموعات (v7.4.12)
 ================================================================================
 GroupsMixin:
   1.  كاش الكلمات المحظورة المحلي
@@ -17,40 +17,40 @@ GroupsMixin:
   11. إعدادات العقوبات (Penalty Settings)
   12. قناة السجل للمجموعة (Group Log Channel)
   13. المخالفات (Violations)
-  14. ✅ NEW: انتهاء العقوبات (Expire Penalties — fallback)
+  14. انتهاء العقوبات (Expire Penalties — fallback)
+
+🆕 v7.4.12 — CRITICAL-FIX:
+  🔴 F1: add_banned_word — تحقق نوع شامل قبل .strip()
+         السبب: كان `word` يصل int أحياناً (انعكاس معاملات في المُنادي)
+         → AttributeError: 'int' object has no attribute 'strip'
+         → الكلمة لا تُخزَّن، لكن المُنادي يعرض "تم" → عند الحذف
+           يقول "غير موجودة" (لأنها فعلاً غير موجودة).
+         الحل: فحص isinstance + log تشخيصي يوضح القيم الفعلية.
+  🔴 F2: remove_banned_word — نفس التحقق + fallback تشخيصي
+         يبحث بدون lower/strip لعرض ما هو موجود فعلاً في DB.
 
 🆕 v7.4.11 — REVIEW-FIXES:
-  🟠 M1: increment_violation_count — قفل per-(user,chat) بدل self._lock
-         السبب: self._lock عالمي → يُخنق كل البوت عند مخالفات متزامنة
-         الحل: _get_penalty_lock(user_id, chat_id) مع fallback آمن
-  🟠 M2: update_penalty_settings — try/except + قائمة أعمدة فعلية
-         السبب: schema drift يُسبِّب crash بلا التقاط
-  🟠 M3: reset_auto_replies — إبطال settings_cache + internal_cache
-         السبب: إعدادات قديمة معروضة لثوانٍ بعد الحذف
-  🟠 M4: get_auto_reply — _spawn_bg_task بدل create_task اليدوي
-         السبب: task غير متتبَّع → تحذير عند shutdown
-  🟡 m1: get_violation_count — إضافة last_violation_time=NULL عند reset
-  🟡 m2: add_user_warning — ON CONFLICT ... user_warnings.warnings + 1
-  🟡 m3: _get_group_security_columns — قفل مخصص لمنع race
+  🟠 M1: increment_violation_count — قفل per-(user,chat)
+  🟠 M2: update_penalty_settings — try/except + أعمدة فعلية
+  🟠 M3: reset_auto_replies — إبطال settings_cache
+  🟠 M4: get_auto_reply — _spawn_bg_task
+  🟡 m1: get_violation_count — last_violation_time=NULL
+  🟡 m2: add_user_warning — ON CONFLICT صريح
+  🟡 m3: _get_group_security_columns — قفل مخصص
 
-🆕 v7.4.11 — NEW FALLBACKS (defensive):
+🆕 v7.4.11 — NEW FALLBACKS:
   🔴 _expire_penalties_pg / _expire_penalties_mysql /
      _expire_penalties_sqlite + _expire_penalties_generic
-     السبب: expire_penalties() في database.py يستدعي هذه الدوال
-     بحسب DB_TYPE. إن لم يُعرّفها RefactorMixin → العقوبات
-     المؤقتة لا تنتهي أبداً (mute/ban مؤقت = دائم).
-     هذا تعريف احتياطي يُستخدم فقط إذا فُقد الأصل.
-     إذا كان RefactorMixin يُعرّفها، MRO يُفضّله تلقائياً.
 
-🆕 v7.4.10 — FIX نهائي: add_banned_word (fallback 500 → 10000)
-🆕 v7.4.9 — FIX: قراءة آمنة لـ MAX_GLOBAL_BANNED_WORDS
-🆕 v7.4.8 — PERFORMANCE-FIX (get_user_groups ~50ms)
-🆕 v7.4.7 — PERFORMANCE-FIX (get_user_groups من 1.59s → ~1s)
-🆕 v7.4.6 — إصلاح إغلاق cursor + توثيق
-🆕 v7.4.5 — قناة السجل للمجموعة (DB-native)
-🆕 v7.4.4 — دعم conn للتوحيد
-📌 v7.4.3 — تحسينات عامة
-📌 v7.4.2 — تحسينات update_security_settings
+🆕 v7.4.10 — add_banned_word fallback 500 → 10000
+🆕 v7.4.9  — قراءة آمنة لـ MAX_GLOBAL_BANNED_WORDS
+🆕 v7.4.8  — PERFORMANCE (get_user_groups ~50ms)
+🆕 v7.4.7  — PERFORMANCE (get_user_groups من 1.59s → ~1s)
+🆕 v7.4.6  — إصلاح إغلاق cursor + توثيق
+🆕 v7.4.5  — قناة السجل للمجموعة (DB-native)
+🆕 v7.4.4  — دعم conn للتوحيد
+📌 v7.4.3  — تحسينات عامة
+📌 v7.4.2  — تحسينات update_security_settings
 ================================================================================
 """
 
@@ -65,8 +65,26 @@ logger = logging.getLogger(__name__)
 
 
 # ✅ v7.4.10: القيمة الافتراضية للحد الأقصى للكلمات المحظورة العالمية
-# (يمكن تجاوزها من config.CONFIG.MAX_GLOBAL_BANNED_WORDS)
 _DEFAULT_MAX_GLOBAL_BANNED_WORDS = 10000
+
+
+def _safe_normalize_word(word: Any) -> Optional[str]:
+    """
+    🆕 v7.4.12: تطبيع آمن لكلمة محظورة مع كشف انعكاس المعاملات.
+
+    يُرجع:
+      - النص المُطبَّع (str) إذا كان word نصاً صالحاً
+      - None إذا كان word غير نصي (int/None/...) → يعني خطأ في المُنادي
+
+    ملاحظة: هذا الكشف يكشف الحالة الشائعة عندما يُمرَّر chat_id
+    (int) في معامل word بسبب انعكاس الترتيب في المُنادي.
+    """
+    if word is None:
+        return None
+    if not isinstance(word, str):
+        return None
+    normalized = word.strip().lower()
+    return normalized if normalized else None
 
 
 class GroupsMixin:
@@ -200,16 +218,6 @@ class GroupsMixin:
     async def get_user_groups(self, user_id: int) -> List[Dict]:
         """
         🆕 v7.4.8: PERFORMANCE-FIX — استعلامان بسيطان + دمج Python.
-
-        المشكلة القديمة (1.03s):
-          • UNION خارجي + 5 UNION داخلية = 6 Sort/HashAggregate
-          • IN + UNION لا يستفيد من الفهارس بشكل optimal
-
-        الحل الجديد (~50ms):
-          • Query 1: bot_groups WHERE added_by = user_id (فهرس مباشر)
-          • Query 2: bot_groups WHERE chat_id IN (subqueries بسيطة)
-          • دمج في Python مع set للـ dedup — O(1)
-          • لا Sort/HashAggregate على الإطلاق
         """
         # ─── 1) الكاش ───
         if self.CACHE_AVAILABLE:
@@ -226,7 +234,6 @@ class GroupsMixin:
             FROM bot_groups WHERE added_by = ?
         """
 
-        # كل subquery على عمود مفرد → يستخدم فهرس مباشر
         query2 = """
             SELECT bg.chat_id, bg.chat_name,
                    bg.username, bg.banned
@@ -636,9 +643,7 @@ class GroupsMixin:
         """
         جلب أعمدة group_security الفعلية (مع كاش).
 
-        ✅ v7.4.11: قفل مخصص يمنع race عند أول استدعاء متزامن —
-        بدونه، N coroutines تُطلق N استعلامات information_schema
-        متوازية قبل أن يُملأ الكاش.
+        ✅ v7.4.11: قفل مخصص يمنع race عند أول استدعاء متزامن.
         """
         # fast path (بلا قفل)
         if self._group_security_columns_cache is not None:
@@ -903,12 +908,7 @@ class GroupsMixin:
         self, user_id: int, chat_id: int
     ) -> int:
         """
-        🟡 v7.4.11: ON CONFLICT ... DO UPDATE بصيغة صريحة
-        (user_warnings.warnings + 1) — أوضح عبر DBs الثلاثة.
-
-        ملاحظة: `_convert_upsert` (MySQL) يُحوِّل الصيغة تلقائياً
-        إلى ON DUPLICATE KEY UPDATE, و`user_warnings.warnings`
-        سيُفسَّر كالعمود الحالي — صحيح على MySQL/PG/SQLite.
+        🟡 v7.4.11: ON CONFLICT ... DO UPDATE بصيغة صريحة.
         """
         await self.execute(
             """INSERT INTO user_warnings (user_id, chat_id, warnings)
@@ -1136,8 +1136,7 @@ class GroupsMixin:
         self, keyword: str, chat_id: int
     ) -> Optional[Dict]:
         """
-        🟠 v7.4.11: استخدام _spawn_bg_task بدل create_task اليدوي،
-        حتى يُتتبَّع الـtask ويُلغى بأمان عند close().
+        🟠 v7.4.11: استخدام _spawn_bg_task بدل create_task اليدوي.
         """
         keyword = keyword.lower().strip()
         if not keyword:
@@ -1170,7 +1169,6 @@ class GroupsMixin:
 
                     task.add_done_callback(_log_task_exc)
             except Exception as e:
-                # لا نُفشل القراءة إن فشل تتبّع الـtask
                 logger.debug(
                     f"increment_usage_count spawn: {e}"
                 )
@@ -1192,8 +1190,7 @@ class GroupsMixin:
 
     async def reset_auto_replies(self, chat_id: int) -> bool:
         """
-        🟠 v7.4.11: إبطال الكاش بعد الحذف — وإلا بقيت إعدادات
-        قديمة (enabled=1) معروضة لثوانٍ → تناقض مع الحالة الفعلية.
+        🟠 v7.4.11: إبطال الكاش بعد الحذف.
         """
         try:
             rc = await self.execute(
@@ -1352,25 +1349,79 @@ class GroupsMixin:
         return result
 
     async def add_banned_word(
-        self, word: str, chat_id: int, added_by: int
+        self, word: Any, chat_id: int, added_by: int
     ) -> Tuple[bool, bool]:
         """
-        ✅ v7.4.10: الحد الافتراضي = 10000 (بدل 500).
+        ✅ v7.4.12: إصلاح جذري لمشكلة "الكلمة تُقبل لكنها غير موجودة".
+
+        ─── التشخيص ───
+        المشكلة السابقة: كان `word` يصل أحياناً كـ int (chat_id) بسبب
+        انعكاس المعاملات في المُنادي → `word.strip()` يفشل بـ
+        AttributeError → الدالة تُرجع (False, False) → الكلمة لا
+        تُخزَّن أصلاً → عند الحذف يقول "غير موجودة".
+
+        ─── الحل ───
+        1. تحقق نوع شامل قبل .strip()
+        2. رصد انعكاس المعاملات (word=int, chat_id=int)
+        3. log تشخيصي يوضح القيم الفعلية
 
         يُرجع:
-            (True, False)  → أُضيفت بنجاح
-            (False, True)  → موجودة مسبقاً
-            (False, False) → رُفضت (سبب آخر — يُسجَّل)
+            (True,  False) → أُضيفت بنجاح
+            (False, True)  → موجودة مسبقاً (duplicate)
+            (False, False) → رُفضت (سبب آخر — يُسجَّل بالتفصيل)
         """
-        try:
-            word = word.strip().lower()
-            if not word:
-                logger.warning(
-                    f"⚠️ add_banned_word: word فارغة "
-                    f"(chat_id={chat_id}, added_by={added_by})"
+        # ─── ✅ v7.4.12: تحقق نوع شامل ───
+        if not isinstance(word, str):
+            logger.error(
+                f"❌ add_banned_word: word يجب أن يكون str، "
+                f"وصل {type(word).__name__}={word!r} | "
+                f"chat_id={chat_id!r} ({type(chat_id).__name__}) | "
+                f"added_by={added_by!r}"
+            )
+            # 🆕 v7.4.12: رصد انعكاس المعاملات الشائع
+            if isinstance(word, int) and isinstance(chat_id, int):
+                logger.error(
+                    f"   💡 السبب المُرجَّح: انعكاس ترتيب المعاملات "
+                    f"في المُنادي!\n"
+                    f"   التوقيع الحالي: "
+                    f"add_banned_word(word, chat_id, added_by)\n"
+                    f"   ما يبدو أن المُنادي يمرّره: "
+                    f"add_banned_word(chat_id={word}, "
+                    f"word={chat_id}, added_by={added_by})\n"
+                    f"   ✅ الإصلاح: بدّل الترتيب في المُنادي إلى "
+                    f"add_banned_word(word, chat_id, added_by)"
                 )
-                return False, False
+            return False, False
 
+        if not isinstance(chat_id, int):
+            logger.error(
+                f"❌ add_banned_word: chat_id يجب أن يكون int، "
+                f"وصل {type(chat_id).__name__}={chat_id!r} | "
+                f"word={word!r}"
+            )
+            return False, False
+
+        if not isinstance(added_by, int):
+            logger.error(
+                f"❌ add_banned_word: added_by يجب أن يكون int، "
+                f"وصل {type(added_by).__name__}={added_by!r} | "
+                f"word={word!r}, chat_id={chat_id}"
+            )
+            return False, False
+
+        # ─── التطبيع بعد التحقق ───
+        normalized = _safe_normalize_word(word)
+        if not normalized:
+            logger.warning(
+                f"⚠️ add_banned_word: word فارغة بعد التطبيع "
+                f"(chat_id={chat_id}, added_by={added_by}, "
+                f"raw={word!r})"
+            )
+            return False, False
+
+        word = normalized
+
+        try:
             async with self.transaction() as conn:
                 if chat_id == -1:
                     count = await self._fetchval_with_conn(
@@ -1386,7 +1437,6 @@ class GroupsMixin:
                         "MAX_GLOBAL_BANNED_WORDS",
                         _DEFAULT_MAX_GLOBAL_BANNED_WORDS,
                     )
-                    # fallback: None / 0 / غير رقمي → 10000
                     if not isinstance(max_words, int) or max_words <= 0:
                         logger.warning(
                             f"⚠️ MAX_GLOBAL_BANNED_WORDS غير صالح "
@@ -1455,14 +1505,58 @@ class GroupsMixin:
             return True, False
         except Exception as e:
             logger.error(
-                f"❌ Error in add_banned_word: {e}", exc_info=True
+                f"❌ Error in add_banned_word: {e} | "
+                f"word={word!r}, chat_id={chat_id}, "
+                f"added_by={added_by}",
+                exc_info=True,
             )
             return False, False
 
     async def remove_banned_word(
-        self, word: str, chat_id: int
+        self, word: Any, chat_id: int
     ) -> bool:
-        word = word.strip().lower()
+        """
+        ✅ v7.4.12: نفس التحقق النوعي الشامل + fallback تشخيصي.
+
+        عند فشل الحذف، يبحث بدون lower/strip لعرض ما هو موجود فعلاً
+        في DB — يساعد على كشف اختلافات التطبيع (مسافات، حالة أحرف،
+        محارف عربية مختلفة).
+        """
+        # ─── ✅ v7.4.12: تحقق نوع شامل ───
+        if not isinstance(word, str):
+            logger.error(
+                f"❌ remove_banned_word: word يجب أن يكون str، "
+                f"وصل {type(word).__name__}={word!r} | "
+                f"chat_id={chat_id!r}"
+            )
+            if isinstance(word, int) and isinstance(chat_id, int):
+                logger.error(
+                    f"   💡 السبب المُرجَّح: انعكاس ترتيب المعاملات!\n"
+                    f"   التوقيع الحالي: "
+                    f"remove_banned_word(word, chat_id)\n"
+                    f"   ✅ الإصلاح: بدّل الترتيب في المُنادي إلى "
+                    f"remove_banned_word(word, chat_id)"
+                )
+            return False
+
+        if not isinstance(chat_id, int):
+            logger.error(
+                f"❌ remove_banned_word: chat_id يجب أن يكون int، "
+                f"وصل {type(chat_id).__name__}={chat_id!r} | "
+                f"word={word!r}"
+            )
+            return False
+
+        normalized = _safe_normalize_word(word)
+        if not normalized:
+            logger.warning(
+                f"⚠️ remove_banned_word: word فارغة بعد التطبيع "
+                f"(chat_id={chat_id}, raw={word!r})"
+            )
+            return False
+
+        word = normalized
+
         try:
             async with self.connection() as conn:
                 deleted = await self._execute_with_conn(
@@ -1471,6 +1565,35 @@ class GroupsMixin:
                     "WHERE word = ? AND chat_id = ?",
                     word, chat_id,
                 )
+
+                # ─── 🆕 v7.4.12: fallback تشخيصي عند عدم العثور ───
+                if deleted == 0:
+                    try:
+                        # ابحث بدون تطبيع لعرض ما هو موجود فعلاً
+                        all_words = await self._fetchall_with_conn(
+                            conn,
+                            "SELECT word FROM banned_words "
+                            "WHERE chat_id = ? LIMIT 20",
+                            chat_id,
+                        )
+                        existing = [
+                            r.get("word") for r in all_words
+                        ]
+                        logger.warning(
+                            f"⚠️ remove_banned_word: "
+                            f"لم تُوجد {word!r} في chat_id={chat_id}\n"
+                            f"   💡 عيّنة من الكلمات الموجودة فعلاً "
+                            f"({len(existing)} من أصل الحد): "
+                            f"{existing[:10]}\n"
+                            f"   💡 إن كانت الكلمة موجودة بصيغة مختلفة "
+                            f"(مسافة/حالة أحرف/محرف عربي مختلف) → "
+                            f"هذا هو السبب."
+                        )
+                    except Exception as diag_e:
+                        logger.debug(
+                            f"remove_banned_word diagnostic: {diag_e}"
+                        )
+
             if deleted > 0:
                 await self._invalidate_banned_words_local_cache(
                     chat_id
@@ -1479,10 +1602,15 @@ class GroupsMixin:
                     await self.banned_words_cache.invalidate(
                         chat_id
                     )
+                logger.info(
+                    f"✅ حُذفت كلمة محظورة: {word!r} "
+                    f"(chat_id={chat_id})"
+                )
             return deleted > 0
         except Exception as e:
             logger.error(
-                f"❌ Error in remove_banned_word: {e}",
+                f"❌ Error in remove_banned_word: {e} | "
+                f"word={word!r}, chat_id={chat_id}",
                 exc_info=True,
             )
             return False
@@ -1558,15 +1686,12 @@ class GroupsMixin:
         self, chat_id: int, **kwargs
     ) -> bool:
         """
-        🟠 v7.4.11: إضافة try/except + فحص فعلي للأعمدة عبر
-        _get_group_security_columns() — بدل قائمة ثابتة قد لا تُطابق
-        الـschema الفعلي.
+        🟠 v7.4.11: try/except + فحص فعلي للأعمدة.
         """
         if not kwargs:
             return False
 
         try:
-            # فحص الأعمدة الفعلية (مع كاش)
             actual_columns = await self._get_group_security_columns()
             allowed_columns = {
                 "mute_default_duration", "ban_default_duration",
@@ -1598,7 +1723,6 @@ class GroupsMixin:
                 )
                 return False
 
-            # التأكد من وجود الصف
             await self.execute(
                 "INSERT OR IGNORE INTO group_security "
                 "(chat_id) VALUES (?)",
@@ -1873,15 +1997,7 @@ class GroupsMixin:
     ) -> int:
         """
         🟠 v7.4.11: قفل per-(user, chat) بدل self._lock العالمي.
-
-        السبب: self._lock هو قفل على مستوى كامل الـDatabase.
-        كل مخالفة من أي مستخدم/مجموعة كانت تُنتظر بالتتابع →
-        عنق زجاجة حقيقي عند النشاط العالي.
-
-        الحل: _get_penalty_lock(user_id, chat_id) مع fallback
-        آمن إلى self._lock إن لم تكن الدالة متوفرة.
         """
-        # قفل per-(user, chat) — fallback آمن
         lock = None
         try:
             get_plock = getattr(self, "_get_penalty_lock", None)
@@ -1950,22 +2066,7 @@ class GroupsMixin:
         ) > 0
 
     # =====================================================================
-    # 14) ✅ v7.4.11 NEW: انتهاء العقوبات (Expire Penalties — fallback)
-    # =====================================================================
-    #
-    # 🔴 السبب: expire_penalties() في database.py يستدعي:
-    #     self._expire_penalties_pg(conn, BATCH)
-    #     self._expire_penalties_mysql(conn, BATCH)
-    #     self._expire_penalties_sqlite(conn, BATCH)
-    # بحسب DB_TYPE.
-    #
-    # إن لم تكن معرَّفة في RefactorMixin (أو كان التعريف فارغاً بسبب
-    # فشل استيراد)، فإن الاستدعاء يفشل بـ AttributeError → يُلتقط في
-    # except Exception → العقوبات المؤقتة (mute/ban) لا تنتهي أبداً.
-    #
-    # ⚠️ MRO: Database يرث RefactorMixin أولاً، ثم GroupsMixin.
-    # إذا عرَّف RefactorMixin هذه الدوال، فسيُستخدم تعريفه تلقائياً.
-    # هذا تعريف احتياطي يُستخدم فقط عند فقد الأصل.
+    # 14) ✅ v7.4.11: انتهاء العقوبات (Expire Penalties — fallback)
     # =====================================================================
 
     async def _expire_penalties_generic(self, conn, batch: int):
