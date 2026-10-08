@@ -1,45 +1,28 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-database.py - قاعدة البيانات المتكاملة (v7.7.59 — DEV-PERMANENT + SLOW-QUERY-FIX)
+database.py - قاعدة البيانات المتكاملة (v7.7.60 — POOL-KEEPALIVE-FINAL)
 ================================================================================
-🆕 v7.7.59 (SLOW-QUERY-FIX — 11s queries):
-  🐌 SQ-1: TCP keepalive صريح في _pg_init_connection
-      السبب المُرجّح للاستعلامات 11.7s: اتصال pool ميت لم يُكتشف.
-      الحل: setsockopt(SO_KEEPALIVE) + TCP_KEEPIDLE/INTVL/CNT.
-  🐌 SQ-2: كاش لـ schedule في mark_published_and_advance (60s)
-      + إبطال تلقائي في update_schedule و add_channel.
-  🐌 SQ-3: توصيات server_settings في pool: statement_timeout=8s،
-      idle_in_transaction_session_timeout=30s، tcp_keepalives_*.
-  🐌 SQ-4: EXPLAIN_SLOW_QUERIES يجب أن يكون false في الإنتاج.
+🆕 v7.7.60 (POOL-KEEPALIVE-FINAL):
+  🐌 SQ-1: _pg_pool_factory — max_inactive_connection_lifetime 60→15s
+  🐌 SQ-2: _pg_init_connection — TCP keepalive صريح
+  🐌 SQ-3: ping-before-use — فحص الاتصال قبل الاستخدام بعد idle>5s
+  🐌 SQ-4: _connection() — alias لـ connection()
+  🐌 SQ-5: تعريفات pool factories — كانت مُستدعاة لكن غير معرَّفة
+
+🆕 v7.7.59 (SLOW-QUERY-FIX):
+  🐌 SQ-1: TCP keepalive صريح
+  🐌 SQ-2: كاش schedule في mark_published_and_advance (60s)
+  🐌 SQ-3: server_settings pool: statement_timeout=8s
+  🐌 SQ-4: توثيق EXPLAIN_SLOW_QUERIES
 
 🆕 v7.7.58 (DEV-PERMANENT):
-  👑 DEV-1: _is_dev_user + _get_dev_ids
-  👑 DEV-2: has_active_subscription — bypass فوري للمطور
-  👑 DEV-3: ensure_dev_subscription (اشتراك دائم 100 سنة)
-  👑 DEV-4: ensure_all_dev_subscriptions
-  👑 DEV-5: استدعاء تلقائي في _do_bootstrap_inner
+  👑 DEV-1..5: _is_dev_user + ensure_dev_subscription + integration
 
 🆕 v7.7.57 (BANNED-WORDS-USER-PRESERVE-FIX):
-  🔴 BW-FIX-1 CRITICAL: _import_banned_words — فصل كلمات الملف عن
-      كلمات المستخدم عبر علامة added_by=0 (من الملف) vs added_by=user_id
-      (من البوت).
-  🔴 BW-FIX-2 CRITICAL: نفس الإصلاح لـ _import_auto_replies.
-  🟡 BW-FIX-3: توثيق سيناريو المشكلة في الـdocstring.
-  🟢 BW-FIX-4: تحسين رسائل الـlog لتوضيح المصدر.
+  🔴 BW-FIX-1..4
 
-🆕 v7.7.56 (POST-AUDIT FIXES — PA-6 و PA-7):
-  🔴 PA-6 HIGH: expire_penalties — `or batch_expired == 0`
-  🔴 PA-7 HIGH: _executemany_with_conn (PG) — is_in_transaction
-  🔴 H-3 HIGH: _return_connection — destroy عند فشل release
-  🔴 H-4 HIGH: _verify_pairs_belong — int() آمن
-  🔴 H-5 HIGH: `#` تعليق MySQL فقط
-  🟠 M-1..M-7 MEDIUM
-  🟡 L-3 LOW
-
-🆕 v7.7.55: PA-1..PA-5
-🆕 v7.7.54: FIX-1..FIX-18
-🆕 v7.7.53: NC1, NC2
+📌 v7.7.56 (POST-AUDIT PA-6/PA-7) .. v7.2 — (راجع الأرشيف)
 ================================================================================
 """
 
@@ -64,6 +47,7 @@ database.py - قاعدة البيانات المتكاملة (v7.7.59 — DEV-PE
 # [16] v7.7.56: `#` تعليق MySQL فقط
 # [17] v7.7.57: import من ملف → added_by=0
 # [18] v7.7.59: TCP keepalive + كاش schedule
+# [19] v7.7.60: pool lifecycle 15s + ping-before-use
 # =====================================================================
 
 import os
@@ -73,7 +57,7 @@ import asyncio
 import logging
 import time
 import sqlite3
-import socket          # 🆕 v7.7.59: TCP keepalive
+import socket
 import secrets
 import re
 import hashlib
@@ -228,6 +212,7 @@ except ImportError:
 
     class CONFIG:
         PRIMARY_OWNER_ID = 0
+        DEVELOPER_IDS = ()
         MAX_DAILY_REFERRALS = 10
         MAX_GLOBAL_BANNED_WORDS = 500
 
@@ -540,8 +525,23 @@ IMPORT_MASS_DELETE_MAX_RATIO = float(
 
 DB_SIZE_CACHE_TTL = float(os.getenv("DB_SIZE_CACHE_TTL", "60"))
 
-# ✅ v7.7.57 BW-FIX: علامة صفوف الملف
 IMPORT_MARKER_ADDED_BY = 0
+
+PG_MAX_INACTIVE_LIFETIME = float(
+    os.getenv("PG_MAX_INACTIVE_LIFETIME", "15.0")
+)
+PG_CONN_PING_IDLE_THRESHOLD = float(
+    os.getenv("PG_CONN_PING_IDLE_THRESHOLD", "5.0")
+)
+PG_CONN_PING_TIMEOUT = float(
+    os.getenv("PG_CONN_PING_TIMEOUT", "2.0")
+)
+PG_TCP_KEEPIDLE = int(os.getenv("PG_TCP_KEEPIDLE", "20"))
+PG_TCP_KEEPINTVL = int(os.getenv("PG_TCP_KEEPINTVL", "5"))
+PG_TCP_KEEPCNT = int(os.getenv("PG_TCP_KEEPCNT", "3"))
+PG_STATEMENT_TIMEOUT_MS = int(os.getenv("PG_STATEMENT_TIMEOUT_MS", "8000"))
+PG_IDLE_TX_TIMEOUT_MS = int(os.getenv("PG_IDLE_TX_TIMEOUT_MS", "30000"))
+PG_COMMAND_TIMEOUT = float(os.getenv("PG_COMMAND_TIMEOUT", "10.0"))
 
 if REFACTOR_MIXIN_AVAILABLE and _R_DEFAULT_PUBLISH_INTERVAL_MINUTES is not None:
     DEFAULT_PUBLISH_INTERVAL_MINUTES = _R_DEFAULT_PUBLISH_INTERVAL_MINUTES
@@ -597,10 +597,6 @@ SMALL_TABLES_FOR_AUTOVACUUM = (
 SLOW_QUERY_FULL_STACK = (
     os.getenv("SLOW_QUERY_FULL_STACK", "true").lower() == "true"
 )
-
-# =====================================================================
-# ثوابت مساعدة
-# =====================================================================
 
 KNOWN_UNIQUE_FALLBACK = {
     'users': ['user_id'],
@@ -1739,15 +1735,10 @@ class Database(
     _instance = None
     _MAX_USER_LOCKS = MAX_USER_LOCKS_CONFIG
 
-    # 🆕 v7.7.58: ثوابت اشتراك المطور
     _DEV_PROVIDER = 'dev_bypass'
-    _DEV_DURATION_DAYS = 36500   # 100 سنة
+    _DEV_DURATION_DAYS = 36500
 
     BOOTSTRAP_DATA_VERSION = 8
-
-    # ═════════════════════════════════════════════════════════════════
-    #  👑 v7.7.58 DEV-1: كشف المطور/المالك
-    # ═════════════════════════════════════════════════════════════════
 
     def _is_dev_user(self, user_id: int) -> bool:
         """هل المستخدم مطور/مالك؟"""
@@ -2102,17 +2093,15 @@ class Database(
             self._db_size_kb_cache_ts: float = 0.0
             self._db_size_kb_lock = asyncio.Lock()
 
-            # 🆕 v7.7.58: علم منع إعادة تأمين الاشتراكات في نفس الجلسة
             self._dev_subscription_ensured = False
+
+            self._conn_last_used: Dict[int, float] = {}
+            self._conn_used_lock = asyncio.Lock()
 
             self._singleton_init_done = True
         except Exception:
             self._singleton_init_done = False
             raise
-
-    # ─────────────────────────────────────────────────────────────────
-    # Diagnostics
-    # ─────────────────────────────────────────────────────────────────
 
     def _get_caller_info(self, skip_frames: int = 0) -> Dict[str, Any]:
         try:
@@ -2181,10 +2170,6 @@ class Database(
             logger.warning(f"⚠️ clear_slow_queries_log: {e}")
             return 0
 
-    # ─────────────────────────────────────────────────────────────────
-    # Dev log channel
-    # ─────────────────────────────────────────────────────────────────
-
     async def get_dev_log_channel(self) -> str:
         try:
             if hasattr(self, 'get_setting'):
@@ -2228,10 +2213,6 @@ class Database(
         except Exception as e:
             logger.warning(f"set_dev_log_channel: {e}")
             return False
-
-    # ─────────────────────────────────────────────────────────────────
-    # DB size
-    # ─────────────────────────────────────────────────────────────────
 
     async def get_db_size_kb(self) -> float:
         now = time.monotonic()
@@ -2283,10 +2264,6 @@ class Database(
             self._db_size_kb_cache_ts = now
             return value
 
-    # ─────────────────────────────────────────────────────────────────
-    # Pool stats
-    # ─────────────────────────────────────────────────────────────────
-
     async def get_pool_stats(self) -> Dict[str, Any]:
         if not (USE_POSTGRES or USE_MYSQL):
             return {"type": "sqlite_or_other"}
@@ -2323,9 +2300,72 @@ class Database(
         except Exception as e:
             return {"type": "error", "message": str(e)}
 
-    # ─────────────────────────────────────────────────────────────────
-    # Vacuum
-    # ─────────────────────────────────────────────────────────────────
+    async def _pg_pool_factory(self):
+        try:
+            pool = await asyncpg.create_pool(
+                DATABASE_URL,
+                min_size=max(5, self._min_connections),
+                max_size=self._max_connections,
+                max_inactive_connection_lifetime=PG_MAX_INACTIVE_LIFETIME,
+                command_timeout=PG_COMMAND_TIMEOUT,
+                init=self._pg_init_connection,
+                server_settings={
+                    "application_name": "relax_bot",
+                    "synchronous_commit": "off",
+                    "tcp_keepalives_idle": str(PG_TCP_KEEPIDLE),
+                    "tcp_keepalives_interval": str(PG_TCP_KEEPINTVL),
+                    "tcp_keepalives_count": str(PG_TCP_KEEPCNT),
+                    "statement_timeout": str(PG_STATEMENT_TIMEOUT_MS),
+                    "idle_in_transaction_session_timeout": str(PG_IDLE_TX_TIMEOUT_MS),
+                },
+            )
+            return pool
+        except Exception as e:
+            raise _FactoryFailed(f"PG pool creation failed: {e}", None) from e
+
+    async def _pg_pool_cleanup(self, pool) -> None:
+        if pool is None:
+            return
+        try:
+            await pool.close()
+        except Exception as e:
+            logger.debug(f"_pg_pool_cleanup: {e}")
+
+    async def _mysql_pool_factory(self):
+        try:
+            pool = await asyncmy.create_pool(
+                host=os.getenv("MYSQL_HOST", "localhost"),
+                port=int(os.getenv("MYSQL_PORT", "3306")),
+                user=os.getenv("MYSQL_USER", "root"),
+                password=os.getenv("MYSQL_PASSWORD", ""),
+                db=os.getenv("MYSQL_DB", "relax_bot"),
+                minsize=self._min_connections,
+                maxsize=self._max_connections,
+                pool_recycle=1800,
+                charset="utf8mb4",
+                use_unicode=True,
+                autocommit=False,
+            )
+            return pool
+        except Exception as e:
+            raise _FactoryFailed(f"MySQL pool creation failed: {e}", None) from e
+
+    async def _mysql_pool_cleanup(self, pool) -> None:
+        if pool is None:
+            return
+        try:
+            pool.close()
+            await pool.wait_closed()
+        except Exception as e:
+            logger.debug(f"_mysql_pool_cleanup: {e}")
+
+    async def _sqlite_pool_factory(self):
+        conn = await self._create_sqlite_connection()
+        if conn is None:
+            raise _FactoryFailed(
+                "SQLite connection creation failed", None
+            )
+        return conn
 
     async def vacuum(self, table: str) -> None:
         if DB_TYPE == "sqlite":
@@ -2683,10 +2723,6 @@ class Database(
             except (TypeError, KeyError):
                 pass
 
-    # ─────────────────────────────────────────────────────────────────
-    # Lifecycle
-    # ─────────────────────────────────────────────────────────────────
-
     async def initialize(self):
         if self._initialized:
             return
@@ -2712,7 +2748,8 @@ class Database(
                     f"(min={max(5, self._min_connections)}, "
                     f"max={self._max_connections}) "
                     f"[synchronous_commit=off, "
-                    f"max_inactive_lifetime=30s, TCP-keepalive=20s]"
+                    f"max_inactive_lifetime={PG_MAX_INACTIVE_LIFETIME:.0f}s, "
+                    f"TCP-keepalive={PG_TCP_KEEPIDLE}s]"
                 )
             elif USE_MYSQL:
                 self._pool = await _create_pool_with_retry(
@@ -2813,20 +2850,8 @@ class Database(
                     pass
             return None
 
-    # ═════════════════════════════════════════════════════════════════
-    #  🐌 v7.7.59 SQ-1: TCP keepalive صريح لاتصالات PostgreSQL
-    # ═════════════════════════════════════════════════════════════════
-
     async def _pg_init_connection(self, conn) -> None:
-        """
-        🐌 v7.7.59: تهيئة كل اتصال PG جديد بـ TCP keepalive.
-
-        السبب: اتصالات pool idle قد تموت من جهة السيرفر (Supabase/
-        Render idle timeout) لكن OS لا يكتشفها حتى يرسل packet.
-        keepalive يكتشف الموت في ~20s بدل ~7200s الافتراضي.
-
-        تُمرَّر لـ asyncpg.create_pool(init=self._pg_init_connection).
-        """
+        """تهيئة كل اتصال PG جديد بـ TCP keepalive."""
         try:
             transport = None
             try:
@@ -2869,7 +2894,7 @@ class Database(
                     sock.setsockopt(
                         socket.IPPROTO_TCP,
                         socket.TCP_KEEPIDLE,
-                        20,
+                        PG_TCP_KEEPIDLE,
                     )
                 except OSError as e:
                     logger.debug(f"TCP_KEEPIDLE: {e}")
@@ -2879,7 +2904,7 @@ class Database(
                     sock.setsockopt(
                         socket.IPPROTO_TCP,
                         socket.TCP_KEEPINTVL,
-                        5,
+                        PG_TCP_KEEPINTVL,
                     )
                 except OSError as e:
                     logger.debug(f"TCP_KEEPINTVL: {e}")
@@ -2889,14 +2914,16 @@ class Database(
                     sock.setsockopt(
                         socket.IPPROTO_TCP,
                         socket.TCP_KEEPCNT,
-                        3,
+                        PG_TCP_KEEPCNT,
                     )
                 except OSError as e:
                     logger.debug(f"TCP_KEEPCNT: {e}")
 
             logger.debug(
                 "🔌 PG conn: TCP keepalive مُفعَّل "
-                "(idle=20s, intvl=5s, cnt=3)"
+                f"(idle={PG_TCP_KEEPIDLE}s, "
+                f"intvl={PG_TCP_KEEPINTVL}s, "
+                f"cnt={PG_TCP_KEEPCNT})"
             )
         except Exception as e:
             logger.debug(f"_pg_init_connection: {e}")
@@ -3130,6 +3157,9 @@ class Database(
             self._recovering_pool = False
 
     async def _get_connection(self):
+        """
+        🆕 v7.7.60 SQ-3: ping-before-use للاتصالات التي كانت idle >5s.
+        """
         if self._closing:
             raise RuntimeError("Database is closing")
         if not self._initialized:
@@ -3150,6 +3180,40 @@ class Database(
                         )
                     except Exception:
                         pass
+                elif USE_POSTGRES:
+                    try:
+                        conn_id = id(conn)
+                        now = time.monotonic()
+                        last_used = self._conn_last_used.get(conn_id, 0.0)
+                        if now - last_used > PG_CONN_PING_IDLE_THRESHOLD:
+                            try:
+                                await asyncio.wait_for(
+                                    conn.fetchval("SELECT 1"),
+                                    timeout=PG_CONN_PING_TIMEOUT,
+                                )
+                            except (asyncio.TimeoutError, Exception) as _pe:
+                                logger.debug(
+                                    f"🔌 stale PG conn detected "
+                                    f"(idle={now - last_used:.1f}s) — "
+                                    f"recycling: {_pe}"
+                                )
+                                try:
+                                    await self._destroy_connection(conn)
+                                except Exception:
+                                    pass
+                                try:
+                                    await self._pool.release(conn)
+                                except Exception:
+                                    pass
+                                conn = await asyncio.wait_for(
+                                    self._pool.acquire(),
+                                    timeout=self._connection_timeout,
+                                )
+                        self._conn_last_used[conn_id] = now
+                    except Exception as _pbe:
+                        logger.debug(
+                            f"ping-before-use error (non-fatal): {_pbe}"
+                        )
                 return conn
             except asyncio.TimeoutError:
                 raise RuntimeError("DB pool acquire timeout")
@@ -3213,6 +3277,12 @@ class Database(
                 )
 
     async def _return_connection(self, conn):
+        try:
+            if USE_POSTGRES:
+                self._conn_last_used[id(conn)] = time.monotonic()
+        except Exception:
+            pass
+
         if USE_POSTGRES or USE_MYSQL:
             if self._pool is None:
                 if not self._pool_none_warned:
@@ -3275,6 +3345,10 @@ class Database(
                     await conn.close()
             except Exception as e:
                 logger.debug(f"PG destroy: {e}")
+            try:
+                self._conn_last_used.pop(id(conn), None)
+            except Exception:
+                pass
         elif USE_MYSQL:
             destroyed = False
             force_close = getattr(conn, "force_close", None)
@@ -3365,6 +3439,8 @@ class Database(
             else:
                 await self._return_connection(conn)
 
+    _connection = connection
+
     @asynccontextmanager
     async def transaction(self):
         conn = await self._get_connection()
@@ -3432,10 +3508,6 @@ class Database(
                     )
             else:
                 await self._return_connection(conn)
-
-    # ─────────────────────────────────────────────────────────────────
-    # Query executors
-    # ─────────────────────────────────────────────────────────────────
 
     def _redact_slow_query(self, query: str, max_len: int = 500) -> str:
         safe = query[:max_len]
@@ -3875,10 +3947,6 @@ class Database(
                 except Exception:
                     pass
 
-    # ─────────────────────────────────────────────────────────────────
-    # Public API
-    # ─────────────────────────────────────────────────────────────────
-
     async def execute(self, query: str, params: tuple = ()) -> int:
         params = _normalize_params(params)
 
@@ -3973,10 +4041,6 @@ class Database(
         except asyncio.TimeoutError:
             logger.error(f"❌ timeout executemany: {query[:100]}")
             raise
-
-    # ─────────────────────────────────────────────────────────────────
-    # Locks
-    # ─────────────────────────────────────────────────────────────────
 
     async def _get_user_lock(self, user_id: int) -> asyncio.Lock:
         async with self._user_locks_lock:
@@ -4208,6 +4272,17 @@ class Database(
                 await self.cleanup_channel_locks()
                 await self.cleanup_group_locks()
                 await self.cleanup_penalty_locks()
+                try:
+                    if len(self._conn_last_used) > 1000:
+                        now = time.monotonic()
+                        stale = [
+                            k for k, ts in self._conn_last_used.items()
+                            if now - ts > 3600
+                        ]
+                        for k in stale:
+                            self._conn_last_used.pop(k, None)
+                except Exception:
+                    pass
             except asyncio.CancelledError:
                 logger.info("🛑 cleanup مُلغى")
                 break
@@ -4217,10 +4292,6 @@ class Database(
                 await asyncio.sleep(3600)
             except asyncio.CancelledError:
                 break
-
-    # ─────────────────────────────────────────────────────────────────
-    # Schema management
-    # ─────────────────────────────────────────────────────────────────
 
     async def _create_tables(self, conn=None):
         if not TABLES_MODULE_AVAILABLE:
@@ -4437,10 +4508,6 @@ class Database(
             pass
         except Exception as e:
             logger.error(f"❌ فهارس: {e}")
-
-    # ─────────────────────────────────────────────────────────────────
-    # Ensure user/group
-    # ─────────────────────────────────────────────────────────────────
 
     async def _ensure_user_exists(
         self,
@@ -4718,25 +4785,7 @@ class Database(
                 )
         return True, "ok"
 
-    # ─────────────────────────────────────────────────────────────────
-    # BW-FIX-1: _import_banned_words
-    # ─────────────────────────────────────────────────────────────────
-
     async def _import_banned_words(self, conn):
-        """
-        🆕 v7.7.57 BW-FIX-1 CRITICAL:
-        فصل كلمات الملف (banned_words.py) عن كلمات البوت.
-
-        قبل الإصلاح:
-            to_delete = existing_global - normalized_words
-            → كل كلمة أضافها المستخدم عبر البوت (chat_id=-1) كانت
-              تُحذف في كل إعادة تشغيل لأنها ليست في banned_words.py.
-
-        بعد الإصلاح:
-            - علامة added_by=0 للصفوف المُستوردة من الملف.
-            - to_delete = file_words_before - normalized_words
-            - كلمات البوت (added_by=user_id) محصّنة ضد الحذف.
-        """
         try:
             import banned_words
             BANNED_WORDS = getattr(banned_words, "BANNED_WORDS", [])
@@ -4771,7 +4820,6 @@ class Database(
                 )
                 return
 
-            # ✅ BW-FIX-1: جلب فقط صفوف الملف (added_by=0)
             existing_rows = await self._fetchall_with_conn(
                 conn,
                 "SELECT word FROM banned_words "
@@ -4784,7 +4832,6 @@ class Database(
                 if row.get("word")
             }
 
-            # ✅ BW-FIX-1: to_delete = كلمات الملف المُزالة من المصدر فقط
             to_delete = existing_file_words - normalized_words
             to_insert = normalized_words - existing_file_words
 
@@ -4823,7 +4870,6 @@ class Database(
                     batch = delete_list[i: i + batch_size]
                     placeholders = ",".join(["?"] * len(batch))
                     try:
-                        # ✅ BW-FIX-1: قيد إضافي added_by=0
                         rc = await self._execute_with_conn(
                             conn,
                             f"DELETE FROM banned_words "
@@ -4853,7 +4899,6 @@ class Database(
                         for w in batch_words
                     ]
                     try:
-                        # ✅ BW-FIX-1: added_by=0 للكلمات من الملف
                         rc = await self._executemany_with_conn(
                             conn,
                             """INSERT OR IGNORE INTO banned_words
@@ -4912,18 +4957,7 @@ class Database(
         except Exception as e:
             logger.error(f"❌ banned_words: {e}", exc_info=True)
 
-    # ─────────────────────────────────────────────────────────────────
-    # BW-FIX-2: _import_auto_replies
-    # ─────────────────────────────────────────────────────────────────
-
     async def _import_auto_replies(self, conn):
-        """
-        🆕 v7.7.57 BW-FIX-2 CRITICAL:
-        نفس منطق BW-FIX-1 لكن لـ auto_replies.
-
-        علامة: added_by=0 للردود المُستوردة من auto_replies.py.
-        الردود المُضافة عبر البوت (added_by=user_id) محصّنة.
-        """
         try:
             from auto_replies import AUTO_REPLIES
             if not AUTO_REPLIES:
@@ -5034,7 +5068,6 @@ class Database(
                 )
                 return
 
-            # ✅ BW-FIX-2: جلب فقط صفوف الملف (added_by=0)
             existing_rows = await self._fetchall_with_conn(
                 conn,
                 "SELECT chat_id, keyword FROM auto_replies "
@@ -5053,7 +5086,6 @@ class Database(
                     if cid_int == GLOBAL_CHAT_ID:
                         existing_file_keys.add((cid_int, kw))
 
-            # ✅ BW-FIX-2: to_delete = ردود الملف المُزالة من المصدر فقط
             to_delete = existing_file_keys - set(normalized.keys())
             to_upsert = set(normalized.keys())
 
@@ -5076,7 +5108,6 @@ class Database(
             if to_delete:
                 for chat_id, keyword in to_delete:
                     try:
-                        # ✅ BW-FIX-2: قيد إضافي added_by=0
                         rc = await self._execute_with_conn(
                             conn,
                             "DELETE FROM auto_replies "
@@ -5109,7 +5140,7 @@ class Database(
                             data.get("media_id"),
                             data.get("buttons"),
                             TimeUtils.utc_now(), 1,
-                            IMPORT_MARKER_ADDED_BY,  # ✅ added_by=0
+                            IMPORT_MARKER_ADDED_BY,
                         ))
                     try:
                         rc = await self._executemany_with_conn(
@@ -5363,16 +5394,7 @@ class Database(
                 return cls.__dict__[name]
         return None
 
-    # ═════════════════════════════════════════════════════════════════
-    #  has_active_subscription + DEV-PERMANENT (v7.7.58)
-    # ═════════════════════════════════════════════════════════════════
-
     async def has_active_subscription(self, user_id: int) -> bool:
-        """
-        👑 v7.7.58 DEV-2: bypass فوري للمطور (True دائماً).
-        ✅ v7.7.29: JOIN plans + p.is_active = 1.
-        """
-        # 👑 DEV-BYPASS: المطور دائماً مشترك
         if self._is_dev_user(user_id):
             return True
 
@@ -5413,24 +5435,13 @@ class Database(
         )
         return result
 
-    # ═════════════════════════════════════════════════════════════════
-    #  👑 v7.7.58 DEV-3/4: اشتراك المطور الدائم
-    # ═════════════════════════════════════════════════════════════════
-
     async def ensure_dev_subscription(self, user_id: int) -> bool:
-        """
-        👑 v7.7.58 DEV-3: يضمن اشتراكاً دائماً نشطاً للمطور.
-        - Idempotent (لا يُنشئ مرتين).
-        - provider='dev_bypass' كعلامة.
-        - المدة: 36500 يوم (100 سنة).
-        """
         if not self._is_dev_user(user_id):
             return False
 
         try:
             async with await self._get_user_lock(user_id):
                 async with self.transaction() as conn:
-                    # فحص الوجود
                     sql_existing = (
                         "SELECT 1 FROM subscriptions "
                         "WHERE user_id = ? "
@@ -5450,7 +5461,6 @@ class Database(
                     if existing:
                         return True
 
-                    # أفضل خطة نشطة
                     plan_id = await self._fetchval_with_conn(
                         conn,
                         "SELECT id FROM plans WHERE is_active = 1 "
@@ -5516,10 +5526,6 @@ class Database(
             return False
 
     async def ensure_all_dev_subscriptions(self) -> int:
-        """
-        👑 v7.7.58 DEV-4: حلقة على كل المطورين/المالك.
-        تُستدعى من _do_bootstrap_inner.
-        """
         dev_ids = self._get_dev_ids()
         if not dev_ids:
             logger.info(
@@ -5547,7 +5553,6 @@ class Database(
     async def _refresh_user_subscription_end(
         self, conn, user_id: int
     ) -> None:
-        """يُحدّث users.subscription_end = MAX(end_date) للاشتراكات النشطة."""
         if USE_POSTGRES:
             end = await self._fetchval_with_conn(
                 conn,
@@ -5592,10 +5597,6 @@ class Database(
             )
 
     async def _do_bootstrap_inner(self, conn) -> bool:
-        """
-        ⚠️ PA-5 (v7.7.55): على MySQL، CREATE/ALTER TABLE يُسبّب implicit
-        commit — أي أن "المعاملة" المُحيطة بهذه الدالة غير حقيقية.
-        """
         tables_hash = self._compute_tables_hash()
         legacy_tables_hash = self._compute_legacy_tables_hash()
         stored_tables_hash = await self._fetchval_with_conn(
@@ -5680,7 +5681,6 @@ class Database(
         await self._import_banned_words(conn)
         await self._import_auto_replies(conn)
 
-        # 👑 v7.7.58 DEV-5: تأمين اشتراكات المطورين الدائمة
         if not self._dev_subscription_ensured:
             try:
                 await self.ensure_all_dev_subscriptions()
@@ -5817,7 +5817,6 @@ class Database(
         data["has_subscription"] = (
             data.pop("has_sub", None) is not None
         )
-        # 👑 v7.7.58: احترام bypass المطور
         if not data["has_subscription"] and self._is_dev_user(user_id):
             data["has_subscription"] = True
         data["channels_count"] = data.get("channels_count") or 0
@@ -5914,7 +5913,6 @@ class Database(
             result["has_subscription"] = (
                 result.pop("has_sub", None) is not None
             )
-            # 👑 v7.7.58: احترام bypass المطور
             if not result["has_subscription"] and self._is_dev_user(user_id):
                 result["has_subscription"] = True
             result["channels_count"] = (
@@ -5987,7 +5985,6 @@ class Database(
                                     "has_subscription", False
                                 )
                             )
-                            # 👑 v7.7.58: احترام bypass المطور
                             if (not user_data["has_subscription"]
                                     and self._is_dev_user(user_id)):
                                 user_data["has_subscription"] = True
@@ -6061,7 +6058,6 @@ class Database(
                 data["has_subscription"] = (
                     data.pop("has_sub", None) is not None
                 )
-                # 👑 v7.7.58: احترام bypass المطور
                 if (not data["has_subscription"]
                         and self._is_dev_user(user_id)):
                     data["has_subscription"] = True
@@ -6656,7 +6652,6 @@ class Database(
         )
         try:
             await self.execute(query, tuple(values))
-            # 🐌 v7.7.59 SQ-2: إبطال كاش schedule
             try:
                 await internal_cache.invalidate(
                     f"schedule_{channel_db_id}"
@@ -6773,7 +6768,6 @@ class Database(
                 next_date, channel_db_id,
             )
 
-        # 🐌 v7.7.59 SQ-2: إبطال كاش schedule
         try:
             await internal_cache.invalidate(
                 f"schedule_{channel_db_id}"
@@ -6873,7 +6867,6 @@ class Database(
                     channel_db_id, now,
                 )
 
-                # 🐌 v7.7.59 SQ-2: كاش schedule (60s)
                 sched_cache_key = f"schedule_{channel_db_id}"
                 row = await internal_cache.get(sched_cache_key)
                 if row is None:
@@ -6922,7 +6915,6 @@ class Database(
                     channel_db_id, next_date,
                 )
 
-            # 🐌 v7.7.59 SQ-2: إبطال كاش schedule بعد التحديث
             try:
                 await internal_cache.invalidate(
                     f"schedule_{channel_db_id}"
@@ -6949,11 +6941,6 @@ class Database(
     async def _verify_pairs_belong(
         self, conn, updates: List[Tuple[int, int]]
     ) -> List[Tuple[int, int]]:
-        """
-        ✅ v7.7.54 FIX-5: التحقق من أن كل post_id ينتمي فعلاً.
-        ✅ v7.7.55 PA-2: عند فشل الاستعلام نرفض جميع الأزواج.
-        ✅ v7.7.56 H-4: تحويل int آمن لكل صف.
-        """
         if not updates:
             return []
         valid: List[Tuple[int, int]] = []
@@ -7130,7 +7117,6 @@ class Database(
                         f"posts_cache invalidate (batch): {ce}"
                     )
 
-            # 🐌 v7.7.59 SQ-2: إبطال كاش schedule للجميع
             try:
                 for unique_ch in set(ch_ids):
                     await internal_cache.invalidate(
@@ -7223,10 +7209,6 @@ class Database(
             )
 
     async def expire_penalties(self) -> int:
-        """
-        ✅ v7.7.54 FIX-11: إزالة تكرار query زائد.
-        ✅ v7.7.56 PA-6: `or batch_expired == 0` لمنع حلقة لا نهائية.
-        """
         total_expired = 0
         BATCH = EXPIRED_PENALTIES_BATCH
         iterations = 0
@@ -7536,7 +7518,6 @@ class Database(
         params.append(limit)
         return await self.fetchall(query, tuple(params))
 
-
 # =====================================================================
 # 3.1) Fallback queries
 # =====================================================================
@@ -7599,9 +7580,6 @@ def _get_pg_query_fallback() -> str:
     """
 
 def _get_pg_query_no_mv_fallback() -> str:
-    """
-    ✅ v7.7.54 FIX-1: نسخة مستقلة تماماً عن mv_active_user_limits.
-    """
     return f"""
         SELECT uc.id, uc.channel_id, uc.user_id,
                u.auto_publish, u.auto_recycle,
@@ -7800,7 +7778,6 @@ def _get_sqlite_query_fallback() -> str:
         LIMIT ?
     """
 
-
 # =====================================================================
 # 4) كائن عالمي
 # =====================================================================
@@ -7829,6 +7806,12 @@ __all__ = [
     "IMPORT_MASS_DELETE_MIN_ABSOLUTE", "IMPORT_MASS_DELETE_MAX_RATIO",
     "DB_SIZE_CACHE_TTL",
     "IMPORT_MARKER_ADDED_BY",
+    "PG_MAX_INACTIVE_LIFETIME",
+    "PG_CONN_PING_IDLE_THRESHOLD",
+    "PG_CONN_PING_TIMEOUT",
+    "PG_TCP_KEEPIDLE", "PG_TCP_KEEPINTVL", "PG_TCP_KEEPCNT",
+    "PG_STATEMENT_TIMEOUT_MS", "PG_IDLE_TX_TIMEOUT_MS",
+    "PG_COMMAND_TIMEOUT",
     "internal_cache", "InternalQueryCache", "SimpleCache",
     "SettingsCache",
     "user_cache", "banned_words_cache", "settings_cache",
