@@ -162,7 +162,6 @@ ANTIEVASION_EXTRA_SCRIPTS = _env_bool("ANTIEVASION_EXTRA_SCRIPTS", True)
 ANTIEVASION_ALT_SCHEMES = _env_bool("ANTIEVASION_ALT_SCHEMES", True)
 ANTIEVASION_RANDOM_DOMAIN = _env_bool("ANTIEVASION_RANDOM_DOMAIN", True)
 
-# 🆕 v4.0.9: whitelist للرسائل العربية القصيرة
 ARABIC_SHORT_WHITELIST_ENABLED = _env_bool(
     "ARABIC_SHORT_WHITELIST_ENABLED", True
 )
@@ -490,7 +489,6 @@ CROSS_MSG_WINDOW = 30
 
 _CONTEXT_WINDOW_SEC = 120
 
-# 🆕 v4.0.9 FIX-AR-5: FINAL_THRESHOLD قابل للتعديل عبر ENV
 FINAL_THRESHOLD = _env_int("FINAL_THRESHOLD", 5)
 
 LAYER_WEIGHTS = {
@@ -648,16 +646,13 @@ _LEET_TARGETS = frozenset({
 # =============================================================================
 
 _ARABIC_GREETINGS = frozenset({
-    # تحيات صباحية/مسائية
     "صباح", "صباحا", "صباحاً", "صباحو", "صباحي", "صبحك",
     "مساء", "مساءا", "مساءاً", "مساءو", "مسائي", "مساك",
     "صبح", "مسا",
-    # تحيات عامة
     "اهلا", "أهلا", "اهلاوسهلا", "أهلاوسهلا", "اهلاً", "أهلاً",
     "مرحبا", "مرحباً", "مرحبتين", "هلا", "هلاوالله", "هلاوسهلا",
     "السلام", "سلام", "سلامو", "سلاما", "سلاماً", "سلامي",
     "عليكم", "عليكمالسلام", "عليكمورحمة", "عليكمورحمةالله",
-    # كلمات polite / small-talk
     "شكرا", "شكراً", "شكرالك", "شكراكتير", "شكراكتير",
     "مشكور", "مشكورة", "مشكورين", "مشكوره",
     "عفوا", "عفواً", "العفو",
@@ -680,7 +675,6 @@ _ARABIC_GREETINGS = frozenset({
     "انشاءالله", "إنشاءالله", "مافيه", "ماشاءالله",
     "يعطيك", "يعطيكالعافية", "يعطيكم", "يعطيكمالعافية",
     "اللهيعطيك", "اللهيعافيك",
-    # ردود قصيرة
     "تمام", "تم", "طيب", "اوك", "اوكي", "اوكيه",
     "حسناً", "حسنا", "زين", "طيبين", "بخير",
     "نعم", "لا", "اكيد", "بالتاكيد", "بالتأكيد",
@@ -688,7 +682,6 @@ _ARABIC_GREETINGS = frozenset({
     "جميل", "جميلة", "حلو", "حلوة",
 })
 
-# كلمات spam العربية التي **يجب** أن تُبطل whitelist (لا تُعامل كتحية)
 _ARABIC_SPAM_OVERRIDE = frozenset({
     "تسريب", "تسريبات", "مسرب", "مسربة", "مسرّب", "مسرّبة",
     "حصري", "حصريه", "حصرية", "فيديو", "فيديوهات",
@@ -738,7 +731,6 @@ def _strip_arabic_diacritics(text: str) -> str:
     """🆕 v4.0.9: إزالة التشكيل العربي للمقارنة."""
     if not text:
         return ""
-    # Arabic diacritics: Fatha, Damma, Kasra, Shadda, Sukun, Tanwin, etc.
     diacritics = re.compile(
         r"[\u064B-\u065F\u0670\u06D6-\u06DC\u06DF-\u06E8"
         r"\u06EA-\u06ED\u0640]"
@@ -750,17 +742,11 @@ def _normalize_arabic_for_compare(text: str) -> str:
     """🆕 v4.0.9: تطبيع للعربية للمقارنة (للـwhitelist)."""
     if not text:
         return ""
-    # 1. إزالة التشكيل
     s = _strip_arabic_diacritics(text)
-    # 2. إزالة "ال" التعريف من البداية لكل كلمة
     s = re.sub(r"(?<!\S)ال", "", s)
-    # 3. إزالة علامات الترقيم والرموز
     s = re.sub(r"[^\u0600-\u06FF\s]", "", s)
-    # 4. تطبيع الهمزات
     s = s.replace("أ", "ا").replace("إ", "ا").replace("آ", "ا")
-    # 5. تطبيع ى → ي، ة → ه
     s = s.replace("ى", "ي").replace("ة", "ه")
-    # 6. تبسيط المسافات
     s = re.sub(r"\s+", "", s)
     return s.strip()
 
@@ -768,18 +754,6 @@ def _normalize_arabic_for_compare(text: str) -> str:
 def _is_arabic_short_whitelisted(text: str) -> bool:
     """
     🆕 v4.0.9 FIX-AR-1: هل النص رسالة عربية قصيرة طبيعية (تحية/ردود)؟
-
-    الشروط:
-        1. ARABIC_SHORT_WHITELIST_ENABLED مفعّل
-        2. النص عربي غالباً (_is_arabic_dominant)
-        3. عدد الأحرف ≤ ARABIC_SHORT_MAX_CHARS (40 افتراضي)
-        4. عدد الكلمات ≤ ARABIC_SHORT_MAX_WORDS (6 افتراضي)
-        5. كل كلمات النص في _ARABIC_GREETINGS (بعد التطبيع)
-        6. النص لا يحتوي على أي كلمة من _ARABIC_SPAM_OVERRIDE
-        7. لا يحتوي على روابط (@, http, t.me)
-
-    Returns:
-        True إذا كان whitelisted (يجب عدم حذفه)
     """
     if not ARABIC_SHORT_WHITELIST_ENABLED:
         return False
@@ -790,38 +764,29 @@ def _is_arabic_short_whitelisted(text: str) -> bool:
     if not text:
         return False
 
-    # 1. الطول
     if len(text) > ARABIC_SHORT_MAX_CHARS:
         return False
 
-    # 2. عدد الكلمات
     words = re.findall(r"[^\s]+", text)
     if len(words) > ARABIC_SHORT_MAX_WORDS:
         return False
 
-    # 3. عربي غالباً
     if not _is_arabic_dominant(text):
         return False
 
-    # 4. لا يوجد روابط/منشن/إيميل
     if re.search(r"(?:https?://|www\.|t\.me/|@[A-Za-z0-9_])", text):
         return False
 
-    # 5. تطبيع للمقارنة
     normalized_full = _normalize_arabic_for_compare(text)
     if not normalized_full:
         return False
 
-    # 6. فحص كل كلمة
     for word in words:
         word_norm = _normalize_arabic_for_compare(word)
         if not word_norm:
             continue
-        # 6a. spam override؟
         if word_norm in _ARABIC_SPAM_OVERRIDE:
             return False
-        # 6b. التحقق من subwords (كلمة "مساءالورد" بدون مسافة)
-        # نبحث عن أي تطابق في _ARABIC_GREETINGS
         found_greeting = False
         for greeting in _ARABIC_GREETINGS:
             greeting_norm = _normalize_arabic_for_compare(greeting)
@@ -831,7 +796,6 @@ def _is_arabic_short_whitelisted(text: str) -> bool:
         if not found_greeting:
             return False
 
-    # 7. فحص spam override في النص الكامل
     for spam_word in _ARABIC_SPAM_OVERRIDE:
         spam_norm = _normalize_arabic_for_compare(spam_word)
         if spam_norm and spam_norm in normalized_full:
@@ -2073,7 +2037,6 @@ class _MessageContext:
         "ai_generated_score",
         "has_video", "has_nsfw_media", "has_sticker",
         "sticker_emoji", "reactions_count", "message_id", "chat_id",
-        # 🆕 v4.0.9: Arabic short whitelist flag
         "is_arabic_short_whitelisted",
     )
 
@@ -2134,7 +2097,6 @@ class _MessageContext:
         self.reactions_count = 0
         self.message_id = 0
         self.chat_id = 0
-        # 🆕 v4.0.9
         self.is_arabic_short_whitelisted = False
 
         for key, value in kwargs.items():
@@ -2211,7 +2173,6 @@ class _MessageContext:
         ctx.has_any_link = _contains_link_enhanced(
             ctx.analysis_text, include_usernames=False
         )
-        # 🆕 v4.0.9: فحص whitelist
         ctx.is_arabic_short_whitelisted = _is_arabic_short_whitelisted(
             ctx.analysis_text
         )
@@ -2394,7 +2355,6 @@ class _MessageContext:
             except Exception:
                 pass
 
-            # 🆕 v4.0.9 FIX-AR-1: فحص whitelist للعربية القصيرة
             try:
                 self.is_arabic_short_whitelisted = (
                     _is_arabic_short_whitelisted(self.analysis_text)
@@ -2876,7 +2836,7 @@ def _detect_structural_evasion(
 
 
 # =============================================================================
-# 🆕 v4.0.9 FIX-AR-2: _looks_like_normal_conversation — Enhanced
+# NORMAL CONVERSATION DETECTION — Enhanced for Arabic
 # =============================================================================
 
 def _looks_like_normal_conversation(text: str) -> bool:
@@ -2886,7 +2846,6 @@ def _looks_like_normal_conversation(text: str) -> bool:
     if not text:
         return True
 
-    # 🆕 v4.0.9: فحص العربية القصيرة أولاً
     if _is_arabic_short_whitelisted(text):
         return True
 
@@ -2907,7 +2866,6 @@ def _looks_like_normal_conversation(text: str) -> bool:
     link = _contains_link_enhanced(
         normalized, include_usernames=False, already_normalized=True
     )
-    # 🆕 v4.0.9: رسائل عربية قصيرة بدون spam
     if (
         _is_arabic_dominant(text)
         and len(text) <= ARABIC_SHORT_MAX_CHARS
@@ -2963,7 +2921,6 @@ def _compute_spam_score(
             }
             return result if return_diagnostics else (0, [])
 
-        # 🆕 v4.0.9 FIX-AR-4: EARLY EXIT للرسائل العربية القصيرة
         if getattr(ctx, "is_arabic_short_whitelisted", False):
             if DEBUG_SPAM:
                 try:
@@ -5056,10 +5013,6 @@ def record_context_message(user_id: int, text: str, has_url: bool) -> None:
         )
 
 
-# =============================================================================
-# 🆕 v4.0.9 FIX-AR-3: analyze_context_window — استثناء العربية القصيرة
-# =============================================================================
-
 def analyze_context_window(user_id: int) -> Tuple[int, List[str]]:
     if not CONTEXT_LAYER_ENABLED:
         return 0, []
@@ -5079,7 +5032,6 @@ def analyze_context_window(user_id: int) -> Tuple[int, List[str]]:
     score = 0
     reasons: List[str] = []
 
-    # 🆕 v4.0.9 FIX-AR-3: إذا كل الرسائل عربية قصيرة → تجاهل السياق
     all_arabic_short = all(
         _is_arabic_dominant(m.get("text", ""))
         and len(m.get("text", "")) <= ARABIC_SHORT_MAX_CHARS
@@ -5096,14 +5048,12 @@ def analyze_context_window(user_id: int) -> Tuple[int, List[str]]:
 
     short_count = sum(1 for m in recent if len(m["text"]) < 20)
     if short_count >= 5:
-        # 🆕 v4.0.9: تخفيف إذا كل قصيرة عربية
         arabic_short_count = sum(
             1 for m in recent
             if _is_arabic_dominant(m.get("text", ""))
             and len(m.get("text", "")) < 20
         )
         if arabic_short_count >= short_count * 0.8:
-            # معظمها عربية قصيرة → تجاهل
             pass
         else:
             score += 2
@@ -5118,7 +5068,6 @@ def analyze_context_window(user_id: int) -> Tuple[int, List[str]]:
     if len(texts) >= 3:
         unique_ratio = len(set(texts)) / len(texts)
         if unique_ratio < 0.4:
-            # 🆕 v4.0.9: تجاهل التكرار إذا كل الرسائل عربية قصيرة (وهذا طبيعي في المحادثات)
             arabic_short_repeats = sum(
                 1 for t in texts
                 if _is_arabic_dominant(t) and len(t) < 30
@@ -6321,7 +6270,6 @@ def get_spam_diagnostics(message: Any) -> Dict[str, Any]:
                 ),
                 "confidence": score_info["postbot_confidence"],
             },
-            # 🆕 v4.0.9
             "arabic_short_whitelist": {
                 "enabled": ARABIC_SHORT_WHITELIST_ENABLED,
                 "is_whitelisted": ctx.is_arabic_short_whitelisted,
@@ -6342,7 +6290,6 @@ def get_spam_diagnostics(message: Any) -> Dict[str, Any]:
 # =============================================================================
 
 __all__ = [
-    # Configuration
     "DEBUG_DIAG", "DEBUG_SPAM",
     "TEXT_LAYER_ENABLED", "OCR_LAYER_ENABLED", "AUDIO_LAYER_ENABLED",
     "URL_LAYER_ENABLED", "METADATA_LAYER_ENABLED",
@@ -6360,7 +6307,6 @@ __all__ = [
     "URL_EXPAND_TIMEOUT", "URL_EXPAND_MAX_HOPS", "URL_ENRICH_MAX_URLS",
     "_POOL_MAX_WORKERS", "POOL_TASK_TIMEOUT",
 
-    # 🆕 v4.0.9: Arabic short whitelist
     "ARABIC_SHORT_WHITELIST_ENABLED", "ARABIC_SHORT_MAX_CHARS",
     "ARABIC_SHORT_MAX_WORDS", "ARABIC_DOMINANCE_RATIO",
     "_ARABIC_GREETINGS", "_ARABIC_SPAM_OVERRIDE",
@@ -6368,7 +6314,6 @@ __all__ = [
     "_arabic_char_ratio", "_normalize_arabic_for_compare",
     "_strip_arabic_diacritics",
 
-    # Anti-evasion toggles
     "ANTIEVASION_ENTITY_LINK", "ANTIEVASION_BUTTON_LINK",
     "ANTIEVASION_SCHEMELESS_URL", "ANTIEVASION_HOMOGLYPH",
     "ANTIEVASION_COMBINING", "ANTIEVASION_COMPACT_WORDS",
@@ -6382,17 +6327,14 @@ __all__ = [
     "ANTIEVASION_EXTENDED_COMBINING", "ANTIEVASION_EXTRA_SCRIPTS",
     "ANTIEVASION_ALT_SCHEMES", "ANTIEVASION_RANDOM_DOMAIN",
 
-    # Thresholds
     "SPAM_SCORE_THRESHOLD", "POSTBOT_AUTO_BLOCK_CONFIDENCE",
     "SPAM_HARD_THRESHOLD", "SPAM_CRITICAL_THRESHOLD",
     "RANDOM_DOMAIN_MIN_LENGTH", "RANDOM_DOMAIN_MAX_VOWEL_RATIO",
     "FINAL_THRESHOLD", "LAYER_WEIGHTS", "LAYER_SCORE_CAPS",
     "MAX_TOTAL_SCORE", "_MAX_EXTRACTED_URLS", "_CONTEXT_WINDOW_SEC",
 
-    # Classes
     "SpamVerdict", "_MessageContext",
 
-    # Core helpers
     "_strip_combining_marks", "_deleet", "_apply_homoglyphs_safe",
     "_normalize_text", "_do_normalize", "_normalize_text_cached",
     "_strip_emoji_for_domain", "_has_hidden_chars", "_merge_split_urls",
@@ -6420,7 +6362,6 @@ __all__ = [
     "_extract_random_domains", "_extract_random_domains_from_merged",
     "_shannon_entropy",
 
-    # Extractors
     "extract_text_from_image", "extract_qr_codes",
     "extract_image_content", "extract_image_content_async",
     "transcribe_audio", "extract_audio_content",
@@ -6438,13 +6379,11 @@ __all__ = [
     "_extract_video_frames", "extract_video_content",
     "extract_video_content_async",
 
-    # NSFW
     "_check_nsfw_via_sightengine", "_analyze_nsfw_image",
     "_load_nsfw_classifier", "_has_any_nsfw_provider",
     "_detect_image_mime",
     "extract_nsfw_from_message", "extract_nsfw_from_message_async",
 
-    # Other layers
     "_extract_sticker_text", "_extract_sticker_text_async",
     "analyze_reactions",
     "record_context_message", "analyze_context_window",
@@ -6454,17 +6393,14 @@ __all__ = [
     "extract_stego_content_async",
     "_domain_heuristic_analysis", "analyze_domain_reputation",
 
-    # Public API
     "analyze_message_full", "analyze_message_full_async",
     "analyze_message", "get_spam_diagnostics",
     "is_spam", "is_high_confidence_spam", "is_critical_spam",
     "should_ignore_as_low_signal",
 
-    # Utilities
     "_version_semver",
     "_download_telegram_file", "_download_telegram_file_async",
 
-    # Pool APIs
     "_get_shared_pool", "_shutdown_shared_pool",
     "_run_in_pool", "install_default_executor",
     "shutdown_default_executor",
