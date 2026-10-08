@@ -2,8 +2,16 @@
 # -*- coding: utf-8 -*-
 
 """
-config.py - إعدادات البوت الأساسية (v7.0.2 — DEV-PERMANENT-INTEGRATION)
+config.py - إعدادات البوت الأساسية (v7.0.3 — FULL-ENV-COVERAGE)
 ================================================================================
+🆕 v7.0.3:
+    ✅ إضافة DIAG_INCOMING — مُتغيّر تشخيصي جديد
+    ✅ التحقق من تغطية كاملة لكل متغيرات .env
+    ✅ توثيق مُحدَّث مع DEV-PERMANENT وملاحظات المُشغّل
+    ✅ إضافة SB_SECRET في التحقق (اختياري)
+    ✅ إضافة WEBHOOK_SECRET للتحقق الإنتاجي
+    ✅ توافق كامل مع .env المُقدَّم
+
 🆕 v7.0.2:
     👑 DEV-1: _parse_developer_ids — إزالة التكرار + ترتيب تنازلي
     👑 DEV-2: is_developer — docstring تفصيلي لاستخدامات DEV-PERMANENT
@@ -154,6 +162,9 @@ class AppConfig:
     DEFAULT_LANGUAGE: str = safe_str(
         os.getenv("DEFAULT_LANGUAGE", "ar")
     ).lower() or "ar"
+
+    # 🆕 v7.0.3: تشخيص الرسائل الواردة
+    DIAG_INCOMING: bool = safe_bool(os.getenv("DIAG_INCOMING", "false"))
 
     # ═══════════════════════════════════════════════════════════════
     # 3. قاعدة البيانات
@@ -387,7 +398,7 @@ class AppConfig:
     ).upper()
 
     # ═══════════════════════════════════════════════════════════════
-    # 🆕 13. Spam Detection Engine (v4.0.8 — 15 طبقة)
+    # 🆕 13. Spam Detection Engine (v4.0.9 — 15 طبقة)
     # ═══════════════════════════════════════════════════════════════
 
     # ─── 13.1: تفعيل الطبقات الأساسية (7 طبقات) ───
@@ -603,6 +614,46 @@ class AppConfig:
     )
     SLOW_MODE_AUTO: bool = safe_bool(os.getenv("SLOW_MODE_AUTO", "true"))
 
+    # ─── 13.9: Arabic Short Whitelist (v4.0.9) 🆕 ───
+    ARABIC_SHORT_WHITELIST_ENABLED: bool = safe_bool(
+        os.getenv("ARABIC_SHORT_WHITELIST_ENABLED", "true")
+    )
+    ARABIC_SHORT_MAX_CHARS: int = safe_int(
+        os.getenv("ARABIC_SHORT_MAX_CHARS", "40")
+    )
+    ARABIC_SHORT_MAX_WORDS: int = safe_int(
+        os.getenv("ARABIC_SHORT_MAX_WORDS", "6")
+    )
+    ARABIC_DOMINANCE_RATIO: float = safe_float(
+        os.getenv("ARABIC_DOMINANCE_RATIO", "0.6")
+    )
+
+    # ─── 13.10: FINAL_THRESHOLD (v4.0.9) 🆕 ───
+    FINAL_THRESHOLD: int = safe_int(os.getenv("FINAL_THRESHOLD", "5"))
+
+    # ─── 13.11: PostgreSQL Pool Tuning (v7.7.60) 🆕 ───
+    PG_MAX_INACTIVE_LIFETIME: float = safe_float(
+        os.getenv("PG_MAX_INACTIVE_LIFETIME", "15.0")
+    )
+    PG_CONN_PING_IDLE_THRESHOLD: float = safe_float(
+        os.getenv("PG_CONN_PING_IDLE_THRESHOLD", "5.0")
+    )
+    PG_CONN_PING_TIMEOUT: float = safe_float(
+        os.getenv("PG_CONN_PING_TIMEOUT", "2.0")
+    )
+    PG_TCP_KEEPIDLE: int = safe_int(os.getenv("PG_TCP_KEEPIDLE", "20"))
+    PG_TCP_KEEPINTVL: int = safe_int(os.getenv("PG_TCP_KEEPINTVL", "5"))
+    PG_TCP_KEEPCNT: int = safe_int(os.getenv("PG_TCP_KEEPCNT", "3"))
+    PG_STATEMENT_TIMEOUT_MS: int = safe_int(
+        os.getenv("PG_STATEMENT_TIMEOUT_MS", "8000")
+    )
+    PG_IDLE_TX_TIMEOUT_MS: int = safe_int(
+        os.getenv("PG_IDLE_TX_TIMEOUT_MS", "30000")
+    )
+    PG_COMMAND_TIMEOUT: float = safe_float(
+        os.getenv("PG_COMMAND_TIMEOUT", "10.0")
+    )
+
     # ═══════════════════════════════════════════════════════════════
     # Properties (aliases خلفية)
     # ═══════════════════════════════════════════════════════════════
@@ -623,7 +674,6 @@ class AppConfig:
     def DETECTION_SUMMARY(self) -> Dict[str, bool]:
         """ملخّص حالة كل الطبقات الـ15."""
         return {
-            # 7 أساسية
             "text":        self.TEXT_LAYER_ENABLED,
             "ocr":         self.OCR_LAYER_ENABLED,
             "audio":       self.AUDIO_LAYER_ENABLED,
@@ -631,7 +681,6 @@ class AppConfig:
             "metadata":    self.METADATA_LAYER_ENABLED,
             "obfuscation": self.OBFUSCATION_LAYER_ENABLED,
             "behavioral":  self.BEHAVIORAL_LAYER_ENABLED,
-            # 8 متقدمة
             "video":       self.VIDEO_LAYER_ENABLED,
             "nsfw":        self.NSFW_LAYER_ENABLED,
             "sticker":     self.STICKER_LAYER_ENABLED,
@@ -657,6 +706,21 @@ class AppConfig:
         return bool(
             self.SIGHTENGINE_API_USER and self.SIGHTENGINE_API_SECRET
         )
+
+    @property
+    def HAS_SAFE_BROWSING(self) -> bool:
+        """🆕 v7.0.3: هل Safe Browsing API مُهيَّأ؟"""
+        return bool(self.SAFE_BROWSING_API_KEY)
+
+    @property
+    def HAS_REDIS(self) -> bool:
+        """🆕 v7.0.3: هل Redis مُهيَّأ؟"""
+        return bool(self.REDIS_AVAILABLE and self.REDIS_URL)
+
+    @property
+    def HAS_QSTASH(self) -> bool:
+        """🆕 v7.0.3: هل QStash مُهيَّأ؟"""
+        return bool(self.QSTASH_TOKEN and self.QSTASH_URL)
 
     # ═══════════════════════════════════════════════════════════════
     # دوال مساعدة
@@ -793,6 +857,13 @@ class AppConfig:
             # ─── Debug ───
             "DEBUG_DIAG": _b(self.DEBUG_DIAG),
             "DEBUG_SPAM": _b(self.DEBUG_SPAM),
+
+            # ─── Arabic Short Whitelist (v4.0.9) 🆕 ───
+            "ARABIC_SHORT_WHITELIST_ENABLED": _b(self.ARABIC_SHORT_WHITELIST_ENABLED),
+            "ARABIC_SHORT_MAX_CHARS": str(self.ARABIC_SHORT_MAX_CHARS),
+            "ARABIC_SHORT_MAX_WORDS": str(self.ARABIC_SHORT_MAX_WORDS),
+            "ARABIC_DOMINANCE_RATIO": str(self.ARABIC_DOMINANCE_RATIO),
+            "FINAL_THRESHOLD": str(self.FINAL_THRESHOLD),
         }
 
     def get_pool_env(self) -> Dict[str, Any]:
@@ -811,6 +882,23 @@ class AppConfig:
             "circuit_failure_threshold": self.SE_CIRCUIT_FAILURE_THRESHOLD,
             "circuit_open_sec": self.SE_CIRCUIT_OPEN_SEC,
             "normalize_cache_max": self.NORMALIZE_CACHE_MAX,
+        }
+
+    def get_pg_pool_env(self) -> Dict[str, Any]:
+        """
+        🆕 v7.0.3: إعدادات PostgreSQL pool lifecycle.
+        helper لـ database.py v7.7.60+.
+        """
+        return {
+            "max_inactive_lifetime": self.PG_MAX_INACTIVE_LIFETIME,
+            "ping_idle_threshold": self.PG_CONN_PING_IDLE_THRESHOLD,
+            "ping_timeout": self.PG_CONN_PING_TIMEOUT,
+            "tcp_keepidle": self.PG_TCP_KEEPIDLE,
+            "tcp_keepintvl": self.PG_TCP_KEEPINTVL,
+            "tcp_keepcnt": self.PG_TCP_KEEPCNT,
+            "statement_timeout_ms": self.PG_STATEMENT_TIMEOUT_MS,
+            "idle_tx_timeout_ms": self.PG_IDLE_TX_TIMEOUT_MS,
+            "command_timeout": self.PG_COMMAND_TIMEOUT,
         }
 
     def apply_detector_env(self, *, override: bool = False) -> int:
@@ -915,6 +1003,18 @@ class AppConfig:
                 f"MAX_GLOBAL_BANNED_WORDS يجب أن يكون > 0"
             )
 
+        # 🆕 v7.0.3: تحقق من DB pool tuning
+        if self.PG_MAX_INACTIVE_LIFETIME < 5.0:
+            warnings.append(
+                f"PG_MAX_INACTIVE_LIFETIME ({self.PG_MAX_INACTIVE_LIFETIME}s) "
+                f"منخفض جداً — قد يسبب إعادة إنشاء اتصالات متكررة."
+            )
+        elif self.PG_MAX_INACTIVE_LIFETIME > 300.0:
+            warnings.append(
+                f"PG_MAX_INACTIVE_LIFETIME ({self.PG_MAX_INACTIVE_LIFETIME}s) "
+                f"مرتفع جداً — قد يسبب استعلامات بطيئة على اتصالات ميتة."
+            )
+
         # ─── 4. الميزات الاختيارية ───
         if self.ENABLE_2FA and not self.ADMIN_2FA_SECRET:
             errors.append("ADMIN_2FA_SECRET مطلوب عند تفعيل ENABLE_2FA")
@@ -972,7 +1072,6 @@ class AppConfig:
             errors.append("NSFW_SIGHTENGINE_MAX_BYTES صغير جداً")
 
         # ✅ v7.0.1: NSFW layer بدون model
-        # إذا Sightengine API مُهيَّأ → لا نحذّر (الوضع الخارجي مقصود)
         if self.NSFW_LAYER_ENABLED and not self.NSFW_MODEL_ENABLED:
             if not self.HAS_SIGHTENGINE:
                 warnings.append(
@@ -987,6 +1086,34 @@ class AppConfig:
             warnings.append(
                 "URL_LAYER_ENABLED=1 لكن SAFE_BROWSING_API_KEY فارغ — "
                 "دقة كشف الروابط ستكون أقل."
+            )
+
+        # 🆕 v7.0.3: Arabic Short Whitelist validation
+        if self.ARABIC_SHORT_WHITELIST_ENABLED:
+            if self.ARABIC_SHORT_MAX_CHARS < 10:
+                warnings.append(
+                    f"ARABIC_SHORT_MAX_CHARS ({self.ARABIC_SHORT_MAX_CHARS}) "
+                    f"منخفض جداً — قد لا يعمل whitelist بشكل صحيح."
+                )
+            if self.ARABIC_SHORT_MAX_WORDS < 2:
+                warnings.append(
+                    f"ARABIC_SHORT_MAX_WORDS ({self.ARABIC_SHORT_MAX_WORDS}) "
+                    f"منخفض جداً — قد لا يعمل whitelist بشكل صحيح."
+                )
+            if self.ARABIC_DOMINANCE_RATIO < 0.3:
+                warnings.append(
+                    f"ARABIC_DOMINANCE_RATIO ({self.ARABIC_DOMINANCE_RATIO}) "
+                    f"منخفض جداً — نصوص مختلطة قد تُصنَّف عربية."
+                )
+            elif self.ARABIC_DOMINANCE_RATIO > 0.95:
+                warnings.append(
+                    f"ARABIC_DOMINANCE_RATIO ({self.ARABIC_DOMINANCE_RATIO}) "
+                    f"مرتفع جداً — رسائل عربية بها كلمات إنجليزية لن تُدرج."
+                )
+
+        if self.FINAL_THRESHOLD < 1 or self.FINAL_THRESHOLD > 50:
+            warnings.append(
+                f"FINAL_THRESHOLD ({self.FINAL_THRESHOLD}) خارج النطاق المُوصى به [1-50]"
             )
 
         # OCR بدون pytesseract
@@ -1063,6 +1190,12 @@ class AppConfig:
         if self.ENVIRONMENT == "production" and not self.WEBHOOK_SECRET:
             warnings.append(
                 "WEBHOOK_SECRET فارغ في الإنتاج — حماية webhook معطّلة."
+            )
+
+        # 🆕 v7.0.3: SB_SECRET اختياري
+        if not self.SB_SECRET:
+            warnings.append(
+                "SB_SECRET فارغ — قد يُعطّل بعض حمايات الحماية الخارجية."
             )
 
         # ─── النتيجة النهائية ───
@@ -1155,7 +1288,12 @@ logger.info(
     f"📊 NSFW (Sightengine): {'مفعل' if CONFIG.NSFW_ENABLED else 'معطل'}"
 )
 logger.info(
-    f"🗄️ Redis: {'متاح' if CONFIG.REDIS_AVAILABLE else 'غير متاح'}"
+    f"🗄️ Redis: "
+    f"{'متاح ✅' if CONFIG.HAS_REDIS else 'غير متاح'}"
+)
+logger.info(
+    f"📨 QStash: "
+    f"{'مُهيَّأ ✅' if CONFIG.HAS_QSTASH else 'غير مُهيَّأ'}"
 )
 logger.info(
     f"🚀 DB Pool: size={CONFIG.DB_POOL_SIZE} "
@@ -1163,8 +1301,18 @@ logger.info(
     f"concurrency={CONFIG.PUBLISH_DB_CONCURRENCY}"
 )
 logger.info(
+    f"🐘 PG Pool Tuning: "
+    f"max_inactive={CONFIG.PG_MAX_INACTIVE_LIFETIME:.0f}s "
+    f"ping_idle={CONFIG.PG_CONN_PING_IDLE_THRESHOLD:.0f}s "
+    f"stmt_timeout={CONFIG.PG_STATEMENT_TIMEOUT_MS}ms"
+)
+logger.info(
     f"🔒 Webhook secret: "
-    f"{'مُهيَّأ' if CONFIG.WEBHOOK_SECRET else 'غير مُهيَّأ (اختياري)'}"
+    f"{'مُهيَّأ ✅' if CONFIG.WEBHOOK_SECRET else 'غير مُهيَّأ (اختياري)'}"
+)
+logger.info(
+    f"🛡️ Safe Browsing API: "
+    f"{'مُهيَّأ ✅' if CONFIG.HAS_SAFE_BROWSING else 'غير مُهيَّأ ⚠️'}"
 )
 
 # 👑 v7.0.2: سجل المطورين (DEV-PERMANENT)
@@ -1198,13 +1346,13 @@ else:
         "أضف MAIN_ADMIN_ID أو DEVELOPER_IDS."
     )
 
-# تقرير Spam Detection Engine v4.0.8
+# تقرير Spam Detection Engine v4.0.9
 _summary = CONFIG.DETECTION_SUMMARY
 _enabled_layers = [k for k, v in _summary.items() if v]
 _disabled_layers = [k for k, v in _summary.items() if not v]
 
 logger.info(
-    f"🛡️ Spam Detection Engine v4.0.8 | "
+    f"🛡️ Spam Detection Engine v4.0.9 | "
     f"مُفعَّلة: {len(_enabled_layers)}/{len(_summary)} طبقة"
 )
 if _enabled_layers:
@@ -1221,11 +1369,16 @@ logger.info(
     f"   🔌 Circuit Breaker: threshold={CONFIG.SE_CIRCUIT_FAILURE_THRESHOLD} | "
     f"open={CONFIG.SE_CIRCUIT_OPEN_SEC}s"
 )
-
-if CONFIG.SAFE_BROWSING_API_KEY:
-    logger.info("   🔗 Safe Browsing API: مُهيَّأ ✅")
-else:
-    logger.info("   🔗 Safe Browsing API: غير مُهيَّأ ⚠️ (يُوصى به)")
+logger.info(
+    f"   🇸🇦 Arabic Short Whitelist: "
+    f"{'✅ مُفعَّل' if CONFIG.ARABIC_SHORT_WHITELIST_ENABLED else '❌ معطّل'} "
+    f"(max={CONFIG.ARABIC_SHORT_MAX_CHARS} chars/"
+    f"{CONFIG.ARABIC_SHORT_MAX_WORDS} words, "
+    f"ratio={CONFIG.ARABIC_DOMINANCE_RATIO})"
+)
+logger.info(
+    f"   🎯 FINAL_THRESHOLD: {CONFIG.FINAL_THRESHOLD}"
+)
 
 # NSFW status — v7.0.1: عرض واضح للوضع
 if CONFIG.NSFW_LAYER_ENABLED:
@@ -1266,4 +1419,10 @@ _antievasion_enabled = sum([
 ])
 logger.info(
     f"   🛡️ Anti-Evasion: {_antievasion_enabled}/24 toggle مُفعَّل"
+)
+
+# 🆕 v7.0.3: تشخيص الواردات
+logger.info(
+    f"   🔍 DIAG_INCOMING: "
+    f"{'✅ مُفعَّل' if CONFIG.DIAG_INCOMING else '❌ معطّل'}"
 )
