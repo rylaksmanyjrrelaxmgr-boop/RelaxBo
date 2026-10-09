@@ -1,742 +1,1645 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+
 """
-handlers_callback_base.py — ثوابت ودوال مساعدة لـ handlers_callback
-=====================================================================
-هذا الملف جزء من تقسيم handlers_callback.py (v9.4.32 → v9.7.9)
+handlers_channels_list.py - واجهة قائمة القنوات + إضافة المنشورات (v2.2.0)
+================================================================================
+🆕 v2.2.0 (ADDING-POSTS-HANDLER):
+    🔴 FIX-CRITICAL: حل جذري لمشكلة "❌ لم أتعرف على العملية" عند
+       إضافة منشور (state=UserState.ADDING_POSTS).
+       السبب: لا يوجد handler مسجَّل لحالة ADDING_POSTS في المشروع.
+       الحل: معالج جديد `handle_adding_posts` يستقبل النص/الصورة/الفيديو
+             ويستدعي DB.add_posts() للقناة النشطة.
+    ✨ posts_add_callback يضبط الآن الحالة ADDING_POSTS عند الضغط.
+    ✨ زر /cancel منفصل للخروج من وضع إضافة المنشورات.
+    🟠 التسجيل في group=-2 (قبل handlers_message) لتفادي UNHANDLED STATE.
 
-المحتوى:
-    • ثوابت رقمية/نصية للاستخدام في كل الوحدات
-    • قوائم القوائم (CONTEST_DURATIONS, _ANALYTICS_ALIASES ...)
-    • دوال نقية بلا حالة:
-        _trans, _fmt, _group_number, _row_to_dict,
-        _coerce_int, _coerce_float, _safe_str,
-        _md_to_html, _is_valid_url, _mask_id,
-        _log_channel_cache_key, _make_user_cache_keys,
-        _is_primary_owner
+🆕 v2.1.0 (WAIT-CHANNEL-ROUTING-FIX):
+    🔴 FIX-1 CRITICAL: حل جذري لمشكلة "❌ تعذّر معالجة معرف القناة".
+    🟠 FIX-2: استيراد ApplicationHandlerStop.
+    🟡 FIX-3: تنظيم منطق مسح الحالة في helper موحّد.
 
-⚠️ لا تنقل هنا أي شيء يعتمد على:
-    - ACTIVE_TASKS / _publish_semaphore
-    - _sec_auth_cache / _post_count_cache / _security_stats_cache_local
-    - context / update / query
-هذه تبقى في handlers_callback.py (أو تُنقل في ملفات لاحقة).
-
-=====================================================================
-🆕 v9.7.9 (ALL-TYPO-FIX):
-    🔴 FIX-CRITICAL: __all__ — حرف سيريلي "в" في "_CANвCANCEL_EXTRA_KEYS"
-             تم استبداله بـ "_CANCEL_EXTRA_KEYS" الصحيح.
-             الأثر قبل الإصلاح:
-                • `from handlers_callback_base import *` يفشل بـ
-                  AttributeError لأن الاسم غير معرَّف.
-                • `from handlers_callback_base import _CANCEL_EXTRA_KEYS`
-                  يفشل بسبب __all__ يحتوي اسمًا غير موجود.
-             الأثر بعد الإصلاح: الاستيراد يعمل بشكل طبيعي.
-
-🆕 v9.7.8 (SECURITY-PREFIXES-FIX):
-    🔴 FIX-1: إضافة _SECURITY_PREFIXES صريحة (22+ زر)
-             السبب: dir(CB) قد لا يلتقط كل sec_* إذا لم تكن
-             معرّفة في utils.CB.
-    🔴 FIX-2: إضافة _SECURITY_SUB_PREFIXES (set_, sec_set_, sec_penalty_)
-             السبب: الأزرار الفرعية تحتاج prefix لتوجيهها.
-    🔴 FIX-3: إضافة _ACTION_PREFIXES (ban_, act_, pen_)
-             السبب: أزرار الإجراءات تحتاج توجيه.
-    🟠 FIX-4: إضافة _CONFIRM_SUFFIXES لتوجيه التأكيدات.
-    🟠 FIX-5: إضافة _MENU_PREFIXES (auto_reply_, sched_, analytics_).
-    🟢 NEW:   _ALL_KNOWN_PREFIXES = union of everything
-    🟢 NEW:   دالة _is_known_prefix(data) للفحص السريع
-
-🆕 v9.5.x:
-    • تقسيم handlers_callback.py إلى وحدات
-    • دوال مساعدة نقية
-=====================================================================
+🆕 v2.0.3: (POLISH-FIXES)
+🆕 v2.0.2: (إصلاح اعتراض الرسائل)
+🆕 v2.0.1: (إصلاح answer() المزدوج)
+🆕 v2.0.0: (إصلاح أخطاء حرجة)
+================================================================================
 """
 
 import logging
 import re
-from typing import Dict, List, Optional, Tuple, Any, Set
+from datetime import timedelta
+from typing import Optional
 
-from config import CONFIG
-
-try:
-    from utils import (
-        get_text, CB, TranslationManager,
-    )
-except ImportError:
-    from .utils import (
-        get_text, CB, TranslationManager,
-    )
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.ext import (
+    ContextTypes, CallbackQueryHandler, MessageHandler, filters,
+    CommandHandler, ApplicationHandlerStop,
+)
 
 logger = logging.getLogger(__name__)
 
 
 # =====================================================================
-# خريطة أسماء أزرار التحليلات
-# =====================================================================
-
-_ANALYTICS_ALIASES: Dict[str, str] = {
-    "growth_30d_btn": "user_growth",
-    "top_channels_btn": "top_channels",
-    "publish_stats_btn": "publish_stats",
-    "channels_rate_btn": "channels_rate",
-    "subscriptions_btn": "subscriptions",
-    "pool_live_btn": "pool",
-    "slow_queries_btn": "slow",
-    "export_excel_btn": "export",
-    "user_growth": "user_growth",
-    "top_channels": "top_channels",
-    "publish_stats": "publish_stats",
-    "channels_rate": "channels_rate",
-    "subscriptions": "subscriptions",
-    "pool": "pool",
-    "slow": "slow",
-    "export": "export",
-}
-
-
-# =====================================================================
-# مدد المسابقات الجاهزة (key, fallback_label, seconds)
-# =====================================================================
-
-CONTEST_DURATIONS: Dict[str, Tuple[str, int]] = {
-    "1h":  ("⏰ ساعة واحدة",  1 * 3600),
-    "6h":  ("🕐 6 ساعات",     6 * 3600),
-    "1d":  ("📅 يوم واحد",    1 * 86400),
-    "3d":  ("📅 3 أيام",      3 * 86400),
-    "1w":  ("📅 أسبوع",       7 * 86400),
-    "2w":  ("📅 أسبوعان",     14 * 86400),
-    "1mo": ("📅 شهر",         30 * 86400),
-    "2mo": ("📅 شهران",       60 * 86400),
-    "3mo": ("📅 3 أشهر",      90 * 86400),
-    "6mo": ("📅 6 أشهر",      180 * 86400),
-    "1y":  ("📅 سنة",         365 * 86400),
-}
-
-
-# =====================================================================
-# ثوابت عامة
-# =====================================================================
-
-MAX_CAPTION_LENGTH = 1024
-MAX_MESSAGE_LENGTH = 4096
-MAX_BACKUPS = getattr(CONFIG, "MAX_BACKUPS", 10)
-MAX_CONCURRENT_PUBLISH = 2
-MAX_PUBLISH_DELAY_SECONDS = 60
-MAX_TG_FILE_SIZE = 49 * 1024 * 1024
-CALLBACK_MIN_INTERVAL = 0.5
-RATE_LIMIT_WINDOW = 60
-RATE_LIMIT_CLEANUP_EVERY = 100
-ADMIN_PAGE_SIZE = 10
-SEC_AUTH_CACHE_TTL = 300
-PUBLISH_ACQUIRE_TIMEOUT = 30
-SEC_SETTINGS_CACHE_TTL = 5
-SEC_STATS_CACHE_TTL = 30
-LOG_CHANNEL_MENU_CACHE_TTL = 30
-SUCCESS_RATE_GOOD_THRESHOLD = 70
-SUCCESS_RATE_WARN_THRESHOLD = 30
-DEFAULT_SUCCESS_RATE = 100.0
-
-SEC_AUTH_CACHE_MAX_SIZE = 5000
-POST_COUNT_CACHE_TTL = 5
-POST_COUNT_CACHE_MAX_SIZE = 200
-
-_BOLD_MD_PATTERN = re.compile(r"\*\*(.+?)\*\*", re.DOTALL)
-_VALID_URL_PATTERN = re.compile(r'^https?://[^\s]+$')
-
-
-# =====================================================================
-# PRIMARY_OWNER_ID — log critical عند الفشل
+# استيراد آمن
 # =====================================================================
 
 try:
-    _PRIMARY_OWNER_ID = int(CONFIG.PRIMARY_OWNER_ID)
-    if _PRIMARY_OWNER_ID <= 0:
-        raise ValueError(
-            f"PRIMARY_OWNER_ID must be positive (got {_PRIMARY_OWNER_ID})"
-        )
-except (TypeError, ValueError, AttributeError) as _poe:
-    logger.critical(
-        f"❌ PRIMARY_OWNER_ID غير صالح: {_poe} — "
-        f"المالك سيفقد صلاحياته كاملة! "
-        f"تحقق من CONFIG.PRIMARY_OWNER_ID"
-    )
-    _PRIMARY_OWNER_ID = None
+    from database import DB, TimeUtils
+except ImportError:
+    logger.error("❌ فشل استيراد database.py")
+    DB = None
+    TimeUtils = None
+
+
+try:
+    from utils import StateManager, UserState
+    _STATE_AVAILABLE = True
+except ImportError:
+    logger.warning("⚠️ StateManager/UserState غير متاح")
+    StateManager = None
+    UserState = None
+    _STATE_AVAILABLE = False
+
+
+try:
+    from utils.keyboards import get_back_button
+except (ImportError, AttributeError):
+    def get_back_button():
+        return InlineKeyboardButton("↩️ رجوع", callback_data="main_menu")
 
 
 # =====================================================================
-# مفاتيح السياق التي تُنظَّف عند إلغاء الحالة
+# 🆕 v2.1.0: حالات إضافة القناة المسموح بها
 # =====================================================================
 
-_CONTEXT_KEYS_TO_CLEAR = (
-    'security_chat_id', 'auto_chat', 'adv_chat', 'schedule_ch',
-    'ban_chat', 'contest_join', 'channel_page', 'post_page', 'sec_chat',
-    'contest_title', 'contest_desc', 'contest_prize',
-    'contest_end_date', 'contest_duration_label',
-    'contest_duration_seconds',
+_CHANNEL_ADD_STATES = (
+    "WAIT_CHANNEL",
+    "WAIT_ADD_CHANNEL",
+    "WAIT_UPDATE_CH",
+    "WAIT_UPDATE_CHANNEL",
+    "WAIT_LOG_CH",
 )
-_CANCEL_EXTRA_KEYS = ('pin_msg_id',)
-
-
-GROUP_NUMBER_EMOJIS = [
-    "1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣",
-    "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟",
-]
 
 
 # =====================================================================
-# 🆕 v9.7.8: قوائم prefixes صريحة
+# 0. أدوات مساعدة
 # =====================================================================
 
-# ─── 1. أزرار الأمان الرئيسية ───
-_SECURITY_PREFIXES: Set[str] = {
-    # 🆕 v7.10.0 — الأزرار الستة الجديدة
-    "sec_at_channel",
-    "sec_tg_scheme",
-    "sec_button_links",
-    "sec_emails",
-    "sec_protected_any",
-    "sec_postbot",
-
-    # الأزرار الأساسية
-    "sec_links",
-    "sec_mentions",
-    "sec_forward",
-    "sec_video",
-    "sec_audio",
-    "sec_anim",
-    "sec_doc",
-    "sec_sticker",
-    "sec_service",
-    "sec_poll",
-    "sec_game",
-    "sec_voice",
-    "sec_videonote",
-    "sec_nsfw",
-    "sec_flood",
-    "sec_slow",
-    "sec_night",
-    "sec_welcome",
-    "sec_goodbye",
-    "sec_approve_join",
-    "sec_reject_join",
-    "sec_banned_words",
-    "sec_warn",
-
-    # أزرار المجموعة
-    "sec_welcome_text",
-    "sec_goodbye_text",
-    "sec_slow_mode_seconds",
-    "sec_maxlen",
-    "sec_penalty",
-    "sec_del_pen",
-    "sec_adv_act",
-    "sec_act_log",
-    "sec_auto_reply_menu",
-    "sec_antiflood_settings",
-    "sec_night_settings",
-    "sec_violation_penalties",
-    "sec_violation_settings",
-    "sec_penalty_durations",
-    "sec_warn_count",
-    "sec_warn_penalty",
-    "sec_warn_penalty_duration",
-    "sec_warn_toggle",
-
-    # أوامر التفعيل/التعطيل
-    "sec_activate_all",
-    "sec_deactivate_all",
-    "sec_enable_all",
-    "sec_disable_all",
-    "sec_activate_all_confirm",
-    "sec_deactivate_all_confirm",
-
-    # إغلاق ورجوع
-    "sec_close",
-    "sec_back",
-}
-
-
-# ─── 2. الأزرار الفرعية (set_*, sec_set_*, sec_penalty_*) ───
-_SECURITY_SUB_PREFIXES: Set[str] = {
-    "set_warn_count",
-    "set_duration",
-    "set_warn_penalty",
-    "set_antiflood_messages",
-    "set_antiflood_seconds",
-    "sec_set_mute_duration",
-    "sec_set_ban_duration",
-    "sec_set_restrict_duration",
-    "sec_set_del_penalty",
-    "sec_set_del_penalty_duration",
-    "sec_set_violation_strikes",
-    "sec_set_violation_duration",
-    "sec_set_violation_penalty",
-    "sec_set_antiflood_messages",
-    "sec_set_antiflood_seconds",
-    "sec_set_antiflood_penalty",
-    "sec_set_night_start",
-    "sec_set_night_end",
-    "sec_set_night_action",
-    "sec_antiflood_penalty",
-    "sec_antiflood_duration",
-    "sec_night_action",
-    "sec_night_duration",
-    "sec_penalty_ban",
-    "sec_penalty_mute",
-    "sec_penalty_kick",
-    "sec_penalty_restrict",
-    "sec_penalty_none",
-    "sec_violation_penalty",
-    "sec_toggle_banned_words",
-}
-
-
-# ─── 3. أزرار الإجراءات (ban_*, act_*, pen_*) ───
-_ACTION_PREFIXES: Set[str] = {
-    "ban_add",
-    "ban_list",
-    "ban_rem",
-    "act_ban",
-    "act_mute",
-    "act_warn",
-    "act_kick",
-    "act_restrict",
-    "act_unban",
-    "act_pin",
-    "act_log",
-    "pen_ban",
-    "pen_mute",
-    "pen_kick",
-    "pen_warn",
-    "pen_restrict",
-}
-
-
-# ─── 4. القوائم الفرعية ───
-_MENU_PREFIXES: Set[str] = {
-    # auto_reply
-    "auto_reply_menu",
-    "auto_reply_toggle",
-    "auto_reply_admins",
-    "auto_reply_add",
-    "auto_reply_del",
-    "auto_reply_list",
-    "auto_reply_stats",
-    "auto_reply_reset",
-    "auto_reply_reset_confirm",
-    "auto_reply_manage",
-
-    # schedule
-    "sched_open",
-    "sched_min",
-    "sched_hour",
-    "sched_day",
-    "sched_time",
-
-    # log channel
-    "log_channel_menu",
-    "log_channel_set",
-    "log_channel_test",
-    "log_channel_remove",
-    "log_channel_btn",
-    "log_channel_change",
-
-    # analytics
-    "analytics_user_growth",
-    "analytics_top_channels",
-    "analytics_publish_stats",
-    "analytics_channels_rate",
-    "analytics_subscriptions",
-    "analytics_pool",
-    "analytics_slow",
-    "analytics_export",
-}
-
-
-# ─── 5. أزرار التأكيد ───
-_CONFIRM_SUFFIXES: Set[str] = {
-    "ch_del_confirm",
-    "post_del_confirm",
-    "grp_del_confirm",
-    "delete_post_confirm",
-    "post_clear_confirm",
-}
-
-
-# ─── 6. أزرار المسابقات ───
-_CONTEST_PREFIXES: Set[str] = {
-    "contest_duration",
-    "contest_type_raffle",
-    "contest_type_quiz",
-    "contest_join",
-    "contest_winners",
-    "declare_winner_sel",
-    "admin_declare_winner_sel",
-    "admin_delete_contest",
-}
-
-
-# ─── 7. أزرار الإدارة ───
-_ADMIN_PREFIXES: Set[str] = {
-    "admin_toggle_ch",
-    "admin_toggle_gr",
-    "admin_restore_file",
-    "admin_delete_contest",
-    "adm_ch_page",
-    "adm_gr_page",
-}
-
-
-# =====================================================================
-# 🆕 v9.7.8: _KNOWN_CB_PREFIXES — توليد ديناميكي + صريح
-# =====================================================================
-
-_KNOWN_CB_PREFIXES: Set[str] = set()
-
-# ─── 1. من CB.* (تلقائي) ───
-try:
-    for _attr_name in dir(CB):
-        if _attr_name.startswith('_'):
-            continue
-        try:
-            _val = getattr(CB, _attr_name)
-        except Exception:
-            continue
-        if isinstance(_val, str) and _val:
-            _KNOWN_CB_PREFIXES.add(_val)
-except Exception as _e_cb:
-    logger.warning(f"⚠️ _KNOWN_CB_PREFIXES build from CB.* failed: {_e_cb}")
-
-
-# ─── 2. إضافات صريحة (v9.5.x القديمة) ───
-_KNOWN_CB_PREFIXES.update({
-    "finish_posts",
-    "gift_plans",
-    "redeem_gift",
-    "updates_channel_btn",
-    "admin_analytics",
-    "refresh_btn",
-})
-
-
-# ─── 3. 🆕 v9.7.8: أزرار الأمان ───
-_KNOWN_CB_PREFIXES.update(_SECURITY_PREFIXES)
-_KNOWN_CB_PREFIXES.update(_SECURITY_SUB_PREFIXES)
-
-
-# ─── 4. 🆕 v9.7.8: أزرار الإجراءات ───
-_KNOWN_CB_PREFIXES.update(_ACTION_PREFIXES)
-
-
-# ─── 5. 🆕 v9.7.8: القوائم الفرعية ───
-_KNOWN_CB_PREFIXES.update(_MENU_PREFIXES)
-
-
-# ─── 6. 🆕 v9.7.8: أزرار التأكيد ───
-_KNOWN_CB_PREFIXES.update(_CONFIRM_SUFFIXES)
-
-
-# ─── 7. 🆕 v9.7.8: المسابقات ───
-_KNOWN_CB_PREFIXES.update(_CONTEST_PREFIXES)
-
-
-# ─── 8. 🆕 v9.7.8: الإدارة ───
-_KNOWN_CB_PREFIXES.update(_ADMIN_PREFIXES)
-
-
-# ─── 9. 🆕 v9.7.8: أزرار عامة إضافية ───
-_KNOWN_CB_PREFIXES.update({
-    # Buy subscription
-    "buy_sub",
-    "buy_gift",
-
-    # Channel/Group management
-    "ch_page",
-    "post_page",
-    "grp_del",
-    "grp_set",
-
-    # Gift
-    "gift",
-
-    # Referral
-    "ref_claim",
-    "ref_list",
-
-    # Support
-    "support_ticket",
-
-    # Panel
-    "panel_lock",
-    "panel_unlock",
-    "panel_close",
-})
-
-
-# ─── Union موحّد للسريع ───
-_ALL_KNOWN_PREFIXES: Set[str] = set(_KNOWN_CB_PREFIXES)
-
-
-# =====================================================================
-# 🆕 v9.7.8: دالة الفحص السريع
-# =====================================================================
-
-def _is_known_prefix(data: str) -> bool:
-    """
-    فحص سريع: هل data يبدأ بـ prefix معروف؟
-
-    الاستخدام:
-        if _is_known_prefix(data):
-            # طابق base_data = parts[0]
-        else:
-            # استخدم data كاملاً
-    """
-    if not data:
-        return False
-
-    # فحص مباشر
-    if data in _ALL_KNOWN_PREFIXES:
-        return True
-
-    # فحص إذا كان هناك ':' → اختبر الجزء قبلها
-    if ':' in data:
-        prefix = data.split(':', 1)[0]
-        return prefix in _ALL_KNOWN_PREFIXES
-
-    return False
-
-
-def _get_base_prefix(data: str) -> str:
-    """
-    استخراج الـ base prefix من data.
-
-    مثلاً:
-        "sec_forward:-100123"  → "sec_forward"
-        "sec_close"            → "sec_close"
-        "unknown_xyz:99"       → "unknown_xyz:99" (كاملاً)
-    """
-    if not data:
-        return data
-
-    if data in _ALL_KNOWN_PREFIXES:
-        return data
-
-    if ':' in data:
-        prefix = data.split(':', 1)[0]
-        if prefix in _ALL_KNOWN_PREFIXES:
-            return prefix
-
-    return data
-
-
-# =====================================================================
-# الترجمة الموحدة
-# =====================================================================
-
-async def _trans(key: str, lang: str, default: str = "") -> str:
-    if not key:
-        return default or ""
-    try:
-        if lang and lang != 'off':
-            text = TranslationManager.get_text(lang, key)
-            if text and text != key:
-                return text
-    except Exception as e:
-        logger.debug(f"_trans({key},{lang}) TM: {e}")
-    try:
-        if lang and lang != 'off':
-            text = await get_text(lang, key)
-            if text and text != key:
-                return text
-    except Exception as e:
-        logger.debug(f"_trans({key},{lang}) get_text: {e}")
-    return default or key
-
-
-def _fmt(text: str, **kwargs) -> str:
-    try:
-        return text.format(**kwargs)
-    except (KeyError, IndexError):
-        return text
-
-
-# =====================================================================
-# دوال مساعدة نقية
-# =====================================================================
-
-def _group_number(index: int) -> str:
-    if 1 <= index <= len(GROUP_NUMBER_EMOJIS):
-        return GROUP_NUMBER_EMOJIS[index - 1]
-    return f"{index}."
-
-
-def _is_primary_owner(user_id: int) -> bool:
-    return _PRIMARY_OWNER_ID is not None and user_id == _PRIMARY_OWNER_ID
-
-
-def _row_to_dict(row) -> Optional[Dict[str, Any]]:
-    if row is None:
-        return None
-    if isinstance(row, dict):
-        return row
-    try:
-        return dict(row)
-    except (TypeError, ValueError):
-        return None
-
-
-def _coerce_int(value, default=0) -> int:
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return default
-
-
-def _coerce_float(value, default=0.0) -> float:
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return default
-
-
-def _safe_str(value, default='?') -> str:
-    if value is None:
-        return default
-    s = str(value)
-    return s if s.strip() else default
-
-
-def _md_to_html(text: str) -> str:
-    if not text or '**' not in text:
-        return text
-    return _BOLD_MD_PATTERN.sub(r"<b>\1</b>", text)
-
-
-def _log_channel_cache_key(chat_id: int) -> str:
-    return f"log_ch_menu_{chat_id}"
-
-
-def _is_valid_url(url: Optional[str]) -> bool:
-    if not url:
-        return False
-    if not isinstance(url, str):
-        return False
-    url_stripped = url.strip()
-    if not url_stripped:
-        return False
-    if ' ' in url_stripped or '\n' in url_stripped or '\t' in url_stripped:
-        return False
-    if not _VALID_URL_PATTERN.match(url_stripped):
+def _db_ready() -> bool:
+    if DB is None:
+        logger.error("❌ DB غير مهيأة — تخطي handler")
         return False
     return True
 
 
-def _mask_id(id_value, prefix=3, suffix=2) -> str:
-    if id_value is None:
-        return "***"
-    s = str(id_value)
-    if len(s) <= 5:
-        return "***"
-    return s[:prefix] + "***" + s[-suffix:]
+def _row_to_dict(row) -> dict:
+    if row is None:
+        return {}
+    if isinstance(row, dict):
+        return row
+    try:
+        if hasattr(row, 'keys'):
+            return {k: row[k] for k in row.keys()}
+    except Exception:
+        pass
+    try:
+        return dict(row)
+    except (TypeError, ValueError):
+        return {}
 
 
-def _make_user_cache_keys(
-    user_id: int,
-    channel_db_id: Optional[int] = None,
-) -> List[str]:
-    """
-    تُنشئ قائمة مفاتيح الكاش المرتبطة بمستخدم معيّن.
+def _get_state_str(user_id: int) -> str:
+    if not _STATE_AVAILABLE or StateManager is None:
+        return ""
+    try:
+        state = StateManager.get(user_id)
+        if state is None:
+            return ""
+        return str(state) or ""
+    except Exception as e:
+        logger.debug(f"_get_state_str({user_id}): {e}")
+        return ""
 
-    ⚠️ تحذير الصيانة:
-        أنماط المفاتيح هذه مُنسَّقة لتطابق cache.py.
-        إذا تغيّر نمط المفاتيح هناك، يجب تحديث هذه الدالة.
-    """
-    keys = [
-        f"start_data_{user_id}",
-        f"user_{user_id}",
-        f"user_{user_id}_True",
-        f"user_{user_id}_False",
-        f"channels_{user_id}",
-    ]
-    if channel_db_id is not None:
-        keys.append(f"channel_info_{channel_db_id}")
-    return keys
+
+def _is_channel_add_state(state_str: str) -> bool:
+    if not state_str:
+        return False
+    return any(s in state_str for s in _CHANNEL_ADD_STATES)
+
+
+def _is_adding_posts_state(state_str: str) -> bool:
+    """🆕 v2.2.0: هل المستخدم في حالة إضافة منشورات؟"""
+    if not state_str:
+        return False
+    return "ADDING_POSTS" in state_str
+
+
+def _clear_user_state(user_id: int) -> None:
+    if not _STATE_AVAILABLE or StateManager is None:
+        return
+    try:
+        StateManager.clear(user_id)
+        logger.debug(f"🔄 state cleared for user {user_id}")
+    except Exception as e:
+        logger.debug(f"_clear_user_state({user_id}): {e}")
+
+
+def _set_user_state(user_id: int, state) -> bool:
+    """🆕 v2.2.0: ضبط حالة المستخدم بأمان."""
+    if not _STATE_AVAILABLE or StateManager is None:
+        return False
+    try:
+        StateManager.set(user_id, state)
+        logger.debug(f"✅ state set for user {user_id}: {state}")
+        return True
+    except Exception as e:
+        logger.warning(f"_set_user_state({user_id}): {e}")
+        return False
+
+
+def _user_has_pending_state(user_id: int) -> bool:
+    if not _STATE_AVAILABLE or StateManager is None:
+        return False
+    try:
+        state = StateManager.get(user_id)
+        if state is None:
+            return False
+
+        state_str = str(state) or ""
+
+        if _is_channel_add_state(state_str):
+            return False
+        if _is_adding_posts_state(state_str):
+            return False
+
+        if UserState is not None:
+            none_state = getattr(UserState, "NONE", None)
+            if none_state is not None:
+                return state != none_state
+        return True
+    except Exception as e:
+        logger.debug(f"_user_has_pending_state({user_id}): {e}")
+        return False
+
+
+async def _safe_answer(query, text: str = None, show_alert: bool = False) -> None:
+    try:
+        if text is not None:
+            await query.answer(text, show_alert=show_alert)
+        else:
+            await query.answer()
+    except Exception as e:
+        logger.debug(f"_safe_answer: {e}")
+
+
+def _format_date(dt_value) -> str:
+    if not dt_value:
+        return "غير محدد"
+    if TimeUtils is None:
+        return str(dt_value)
+    try:
+        dt = TimeUtils.safe_parse_iso(dt_value)
+        if not dt:
+            return "غير محدد"
+        local_dt = dt + timedelta(hours=3)
+        return local_dt.strftime("%Y-%m-%d %H:%M")
+    except Exception:
+        return str(dt_value)
+
+
+async def _get_active_channel_id(user_id: int) -> Optional[int]:
+    try:
+        return await DB.fetchval(
+            "SELECT active_channel FROM users WHERE user_id = ?",
+            (user_id,),
+            default=None,
+        )
+    except Exception as e:
+        logger.debug(f"_get_active_channel_id({user_id}): {e}")
+        return None
 
 
 # =====================================================================
-# 🆕 v9.7.8: diagnostics
+# 1. عرض قائمة القنوات
 # =====================================================================
 
-def _log_prefixes_status() -> None:
-    """يُسجّل عدد الـ prefixes المعروفة عند الإقلاع."""
-    logger.info(
-        "📋 _KNOWN_CB_PREFIXES: %d إجمالي | "
-        "security=%d sub=%d action=%d menu=%d confirm=%d "
-        "contest=%d admin=%d",
-        len(_KNOWN_CB_PREFIXES),
-        len(_SECURITY_PREFIXES),
-        len(_SECURITY_SUB_PREFIXES),
-        len(_ACTION_PREFIXES),
-        len(_MENU_PREFIXES),
-        len(_CONFIRM_SUFFIXES),
-        len(_CONTEST_PREFIXES),
-        len(_ADMIN_PREFIXES),
+async def show_channels_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _db_ready():
+        return
+
+    user_id = update.effective_user.id
+    channels = await _get_channels_with_stats(user_id)
+
+    if not channels:
+        text = (
+            "📭 <b>لا توجد قنوات</b>\n\n"
+            "أضف أول قناة لك بالنقر على زر <b>➕ إضافة قناة</b>"
+        )
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("➕ إضافة قناة", callback_data="add_channel")],
+            [InlineKeyboardButton("↩️ رجوع للقائمة الرئيسية", callback_data="main_menu")],
+        ])
+    else:
+        active_channel_id = await _get_active_channel_id(user_id)
+        text = _build_channels_text(channels, active_channel_id)
+        keyboard = _build_channels_keyboard(channels, active_channel_id)
+
+    if update.callback_query:
+        await _safe_answer(update.callback_query)
+        try:
+            await update.callback_query.edit_message_text(
+                text, reply_markup=keyboard, parse_mode="HTML",
+            )
+        except Exception as e:
+            logger.warning(f"edit_message_text: {e}")
+            try:
+                if update.callback_query.message is not None:
+                    await update.callback_query.message.reply_text(
+                        text, reply_markup=keyboard, parse_mode="HTML",
+                    )
+            except Exception as e2:
+                logger.error(f"reply_text fallback: {e2}")
+    else:
+        try:
+            if update.message is not None:
+                await update.message.reply_text(
+                    text, reply_markup=keyboard, parse_mode="HTML",
+                )
+        except Exception as e:
+            logger.error(f"reply_text: {e}")
+
+
+async def _get_channels_with_stats(user_id: int):
+    query = """
+        SELECT
+            uc.id AS channel_db_id,
+            uc.channel_id,
+            uc.channel_name,
+            uc.banned,
+            uc.created_at,
+            (SELECT COUNT(*) FROM posts p
+             WHERE p.channel_db_id = uc.id AND p.published = 0
+            ) AS unpublished,
+            (SELECT COUNT(*) FROM posts p
+             WHERE p.channel_db_id = uc.id AND p.published = 1
+            ) AS published,
+            (SELECT s.next_publish_date FROM schedule s
+             WHERE s.channel_db_id = uc.id
+            ) AS next_publish
+        FROM user_channels uc
+        WHERE uc.user_id = ?
+        ORDER BY uc.created_at DESC
+    """
+    try:
+        rows = await DB.fetchall(query, (user_id,))
+        return [_row_to_dict(r) for r in (rows or [])]
+    except Exception as e:
+        logger.error(f"❌ _get_channels_with_stats: {e}", exc_info=True)
+        return []
+
+
+def _build_channels_text(channels, active_channel_id) -> str:
+    lines = [f"📡 <b>قنواتك ({len(channels)})</b>\n"]
+
+    total_unpub = sum(c.get("unpublished", 0) or 0 for c in channels)
+    total_pub = sum(c.get("published", 0) or 0 for c in channels)
+
+    lines.append(f"📥 إجمالي غير منشور: <b>{total_unpub}</b>")
+    lines.append(f"📤 إجمالي منشور: <b>{total_pub}</b>\n")
+    lines.append("─" * 30 + "\n")
+
+    for i, ch in enumerate(channels, 1):
+        ch_db_id = ch.get("channel_db_id")
+        name = ch.get("channel_name") or "قناة بدون اسم"
+        unpublished = ch.get("unpublished", 0) or 0
+        published = ch.get("published", 0) or 0
+        banned = ch.get("banned", 0)
+
+        if banned:
+            icon = "🚫"
+            status = "(محظورة)"
+        elif ch_db_id == active_channel_id:
+            icon = "🟢"
+            status = "(نشطة)"
+        else:
+            icon = "⚪"
+            status = ""
+
+        if len(name) > 25:
+            name = name[:22] + "..."
+
+        lines.append(
+            f"{icon} <b>{i}. {name}</b> {status}\n"
+            f"   📥 {unpublished} | 📤 {published}\n"
+        )
+
+    return "\n".join(lines)
+
+
+def _build_channels_keyboard(channels, active_channel_id):
+    keyboard = []
+
+    for ch in channels:
+        ch_db_id = ch.get("channel_db_id")
+        name = ch.get("channel_name") or "قناة"
+
+        if len(name) > 20:
+            name = name[:18] + "..."
+
+        if ch.get("banned", 0):
+            select_icon = "🚫"
+        elif ch_db_id == active_channel_id:
+            select_icon = "✅"
+        else:
+            select_icon = "⚪"
+
+        keyboard.append([
+            InlineKeyboardButton(
+                f"{select_icon} {name}",
+                callback_data=f"ch_select:{ch_db_id}"
+            ),
+            InlineKeyboardButton(
+                "ℹ️",
+                callback_data=f"ch_info:{ch_db_id}"
+            ),
+        ])
+
+    keyboard.append([
+        InlineKeyboardButton("➕ إضافة قناة", callback_data="add_channel"),
+    ])
+    keyboard.append([
+        InlineKeyboardButton("🗑️ حذف قناة", callback_data="ch_delete_menu"),
+    ])
+    keyboard.append([
+        InlineKeyboardButton("↩️ رجوع للقائمة الرئيسية", callback_data="main_menu"),
+    ])
+
+    return InlineKeyboardMarkup(keyboard)
+
+
+# =====================================================================
+# 2. اختيار قناة (تعيينها نشطة)
+# =====================================================================
+
+async def channel_select_callback(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+):
+    if not _db_ready():
+        return
+
+    query = update.callback_query
+    user_id = query.from_user.id
+
+    try:
+        ch_db_id = int(query.data.split(":")[1])
+    except (ValueError, IndexError):
+        await _safe_answer(query, "⚠️ بيانات غير صالحة", show_alert=True)
+        return
+
+    try:
+        owns = await DB.is_channel_owner(user_id, ch_db_id)
+        if not owns:
+            await _safe_answer(query, "⚠️ لا تملك هذه القناة", show_alert=True)
+            return
+
+        success = await DB.set_active_channel(user_id, ch_db_id)
+        if success:
+            await _safe_answer(query, "✅ تم تعيينها كقناة نشطة")
+            await show_channels_list(update, context)
+        else:
+            await _safe_answer(query, "⚠️ فشل التحديث", show_alert=True)
+    except Exception as e:
+        logger.error(f"❌ channel_select: {e}", exc_info=True)
+        await _safe_answer(query, "⚠️ خطأ غير متوقع", show_alert=True)
+
+
+# =====================================================================
+# 3. تفاصيل قناة
+# =====================================================================
+
+async def _render_channel_info(query, user_id: int, ch_db_id: int) -> None:
+    try:
+        ch_raw = await DB.get_channel_by_id(user_id, ch_db_id)
+        ch = _row_to_dict(ch_raw)
+        if not ch:
+            await _safe_answer(query, "⚠️ القناة غير موجودة", show_alert=True)
+            return
+
+        stats_raw = await DB.get_channel_stats(user_id, ch_db_id) or {}
+        stats = _row_to_dict(stats_raw)
+        active_channel_id = await _get_active_channel_id(user_id)
+
+        try:
+            schedule_raw = await DB.get_schedule(ch_db_id)
+            schedule = _row_to_dict(schedule_raw)
+            interval_min = schedule.get("interval_minutes", 12) or 12
+            next_publish = schedule.get("next_publish_date")
+        except Exception:
+            interval_min = 12
+            next_publish = None
+
+        name = ch.get("channel_name") or "قناة بدون اسم"
+        ch_telegram_id = ch.get("channel_id") or "غير معروف"
+        banned = ch.get("banned", 0)
+
+        status_icon = "🚫 محظورة" if banned else (
+            "🟢 نشطة" if ch_db_id == active_channel_id else "⚪ غير نشطة"
+        )
+
+        text = (
+            f"📡 <b>{name}</b>\n\n"
+            f"<b>المعرف:</b> <code>{ch_telegram_id}</code>\n"
+            f"<b>الحالة:</b> {status_icon}\n\n"
+            f"<b>📊 الإحصائيات:</b>\n"
+            f"├ 📝 إجمالي: <b>{stats.get('total', 0)}</b>\n"
+            f"├ 📥 غير منشور: <b>{stats.get('unpublished', 0)}</b>\n"
+            f"└ 📤 منشور: <b>{stats.get('published', 0)}</b>\n\n"
+            f"<b>⚙️ الجدولة:</b>\n"
+            f"├ ⏱ كل: <b>{interval_min} دقيقة</b>\n"
+            f"└ 📅 التالي: <b>{_format_date(next_publish)}</b>"
+        )
+
+        buttons = []
+
+        if ch_db_id != active_channel_id and not banned:
+            buttons.append([
+                InlineKeyboardButton(
+                    "✅ تعيين نشطة",
+                    callback_data=f"ch_select:{ch_db_id}"
+                )
+            ])
+
+        buttons.append([
+            InlineKeyboardButton(
+                "⚙️ تعديل الجدولة",
+                callback_data=f"ch_schedule:{ch_db_id}"
+            ),
+        ])
+        buttons.append([
+            InlineKeyboardButton(
+                "♻️ إعادة تدوير الآن",
+                callback_data=f"ch_recycle:{ch_db_id}"
+            ),
+        ])
+        buttons.append([
+            InlineKeyboardButton(
+                "🗑️ حذف القناة",
+                callback_data=f"ch_delete_confirm:{ch_db_id}"
+            ),
+        ])
+        buttons.append([
+            InlineKeyboardButton("↩️ رجوع للقائمة", callback_data="ch_list")
+        ])
+        buttons.append([
+            InlineKeyboardButton("🏠 القائمة الرئيسية", callback_data="main_menu")
+        ])
+
+        await query.edit_message_text(
+            text,
+            reply_markup=InlineKeyboardMarkup(buttons),
+            parse_mode="HTML",
+        )
+    except Exception as e:
+        logger.error(f"❌ _render_channel_info: {e}", exc_info=True)
+        try:
+            if query.message is not None:
+                await query.message.reply_text(
+                    "⚠️ فشل عرض تفاصيل القناة. حاول لاحقاً.",
+                    parse_mode="HTML",
+                )
+        except Exception:
+            pass
+
+
+async def channel_info_callback(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+):
+    if not _db_ready():
+        return
+
+    query = update.callback_query
+    user_id = query.from_user.id
+
+    try:
+        ch_db_id = int(query.data.split(":")[1])
+    except (ValueError, IndexError):
+        await _safe_answer(query, "⚠️ بيانات غير صالحة", show_alert=True)
+        return
+
+    await _safe_answer(query)
+    await _render_channel_info(query, user_id, ch_db_id)
+
+
+# =====================================================================
+# 4. حذف القنوات
+# =====================================================================
+
+async def channel_delete_menu_callback(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+):
+    if not _db_ready():
+        return
+
+    query = update.callback_query
+    user_id = query.from_user.id
+
+    channels = await _get_channels_with_stats(user_id)
+    if not channels:
+        await _safe_answer(query, "📭 لا توجد قنوات", show_alert=True)
+        return
+
+    await _safe_answer(query)
+
+    text = (
+        "🗑️ <b>حذف قناة</b>\n\n"
+        "اختر القناة التي تريد حذفها:\n"
+        "<i>⚠️ الحذف لا يمكن التراجع عنه، وسيتم حذف كل المنشورات!</i>"
     )
-    # تحقق من وجود الأزرار الحرجة
-    critical = [
-        "sec_forward", "sec_links", "sec_mentions",
-        "sec_at_channel", "sec_tg_scheme", "sec_button_links",
-        "sec_emails", "sec_protected_any", "sec_postbot",
-    ]
-    missing = [p for p in critical if p not in _KNOWN_CB_PREFIXES]
-    if missing:
-        logger.warning(
-            "⚠️ _KNOWN_CB_PREFIXES: مفقود حرج: %s", missing
+
+    buttons = []
+    for ch in channels:
+        ch_db_id = ch.get("channel_db_id")
+        name = ch.get("channel_name") or "قناة"
+        if len(name) > 25:
+            name = name[:22] + "..."
+
+        buttons.append([
+            InlineKeyboardButton(
+                f"🗑️ {name}",
+                callback_data=f"ch_delete_confirm:{ch_db_id}"
+            )
+        ])
+
+    buttons.append([
+        InlineKeyboardButton("↩️ رجوع للقائمة", callback_data="ch_list")
+    ])
+
+    try:
+        await query.edit_message_text(
+            text,
+            reply_markup=InlineKeyboardMarkup(buttons),
+            parse_mode="HTML",
+        )
+    except Exception as e:
+        logger.warning(f"edit_message_text: {e}")
+
+
+async def channel_delete_confirm_callback(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+):
+    if not _db_ready():
+        return
+
+    query = update.callback_query
+    user_id = query.from_user.id
+
+    try:
+        ch_db_id = int(query.data.split(":")[1])
+    except (ValueError, IndexError):
+        await _safe_answer(query, "⚠️ بيانات غير صالحة", show_alert=True)
+        return
+
+    try:
+        ch_raw = await DB.get_channel_by_id(user_id, ch_db_id)
+        ch = _row_to_dict(ch_raw)
+        if not ch:
+            await _safe_answer(query, "⚠️ القناة غير موجودة", show_alert=True)
+            return
+
+        await _safe_answer(query)
+
+        name = ch.get("channel_name") or "قناة"
+        stats_raw = await DB.get_channel_stats(user_id, ch_db_id) or {}
+        stats = _row_to_dict(stats_raw)
+
+        text = (
+            f"⚠️ <b>تأكيد الحذف</b>\n\n"
+            f"هل أنت متأكد من حذف القناة:\n"
+            f"<b>{name}</b>\n\n"
+            f"<b>سيتم حذف:</b>\n"
+            f"├ 📝 {stats.get('total', 0)} منشور\n"
+            f"├ 📥 {stats.get('unpublished', 0)} غير منشور\n"
+            f"└ 📤 {stats.get('published', 0)} منشور\n\n"
+            f"<i>⚠️ لا يمكن التراجع!</i>"
+        )
+
+        buttons = [
+            [
+                InlineKeyboardButton(
+                    "🗑️ نعم، احذف",
+                    callback_data=f"ch_delete_execute:{ch_db_id}"
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    "❌ إلغاء",
+                    callback_data=f"ch_info:{ch_db_id}"
+                ),
+            ],
+        ]
+
+        await query.edit_message_text(
+            text,
+            reply_markup=InlineKeyboardMarkup(buttons),
+            parse_mode="HTML",
+        )
+    except Exception as e:
+        logger.error(f"❌ channel_delete_confirm: {e}", exc_info=True)
+
+
+async def channel_delete_execute_callback(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+):
+    if not _db_ready():
+        return
+
+    query = update.callback_query
+    user_id = query.from_user.id
+
+    try:
+        ch_db_id = int(query.data.split(":")[1])
+    except (ValueError, IndexError):
+        await _safe_answer(query, "⚠️ بيانات غير صالحة", show_alert=True)
+        return
+
+    try:
+        success = await DB.delete_channel(user_id, ch_db_id)
+
+        if not success:
+            await _safe_answer(query, "⚠️ فشل الحذف", show_alert=True)
+            return
+
+        await _safe_answer(query, "✅ تم الحذف", show_alert=True)
+        logger.info(f"✅ حُذفت القناة {ch_db_id} بواسطة {user_id}")
+
+        await show_channels_list(update, context)
+    except Exception as e:
+        logger.error(f"❌ channel_delete_execute: {e}", exc_info=True)
+        await _safe_answer(query, "⚠️ خطأ غير متوقع", show_alert=True)
+
+
+# =====================================================================
+# 5. إعادة تدوير
+# =====================================================================
+
+async def channel_recycle_callback(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+):
+    if not _db_ready():
+        return
+
+    query = update.callback_query
+    user_id = query.from_user.id
+
+    try:
+        ch_db_id = int(query.data.split(":")[1])
+    except (ValueError, IndexError):
+        await _safe_answer(query, "⚠️ بيانات غير صالحة", show_alert=True)
+        return
+
+    try:
+        owns = await DB.is_channel_owner(user_id, ch_db_id)
+        if not owns:
+            await _safe_answer(query, "⚠️ لا تملك هذه القناة", show_alert=True)
+            return
+
+        count = await DB.reset_posts(user_id, ch_db_id)
+
+        await _safe_answer(
+            query,
+            f"✅ تم إعادة تدوير {count} منشور",
+            show_alert=True,
+        )
+
+        await _render_channel_info(query, user_id, ch_db_id)
+    except Exception as e:
+        logger.error(f"❌ channel_recycle: {e}", exc_info=True)
+        await _safe_answer(query, "⚠️ خطأ غير متوقع", show_alert=True)
+
+
+# =====================================================================
+# 6. الجدولة
+# =====================================================================
+
+async def channel_schedule_callback(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+):
+    if not _db_ready():
+        return
+
+    query = update.callback_query
+    user_id = query.from_user.id
+
+    try:
+        ch_db_id = int(query.data.split(":")[1])
+    except (ValueError, IndexError):
+        await _safe_answer(query, "⚠️ بيانات غير صالحة", show_alert=True)
+        return
+
+    try:
+        owns = await DB.is_channel_owner(user_id, ch_db_id)
+        if not owns:
+            await _safe_answer(query, "⚠️ لا تملك هذه القناة", show_alert=True)
+            return
+
+        await _safe_answer(query)
+
+        try:
+            schedule_raw = await DB.get_schedule(ch_db_id)
+            schedule = _row_to_dict(schedule_raw)
+            current = schedule.get("interval_minutes", 12) or 12
+        except Exception:
+            current = 12
+
+        text = (
+            f"⚙️ <b>تعديل الجدولة</b>\n\n"
+            f"التردد الحالي: <b>{current} دقيقة</b>\n\n"
+            f"اختر التردد الجديد:"
+        )
+
+        intervals = [5, 10, 15, 30, 60, 120, 360, 720, 1440]
+        buttons = []
+        row = []
+
+        for minutes in intervals:
+            if minutes < 60:
+                label = f"{minutes} د"
+            elif minutes < 1440:
+                label = f"{minutes // 60} س"
+            else:
+                label = "يوم"
+
+            row.append(InlineKeyboardButton(
+                label,
+                callback_data=f"ch_sched_set:{ch_db_id}:{minutes}"
+            ))
+
+            if len(row) == 3:
+                buttons.append(row)
+                row = []
+
+        if row:
+            buttons.append(row)
+
+        buttons.append([
+            InlineKeyboardButton("↩️ رجوع", callback_data=f"ch_info:{ch_db_id}")
+        ])
+
+        await query.edit_message_text(
+            text,
+            reply_markup=InlineKeyboardMarkup(buttons),
+            parse_mode="HTML",
+        )
+    except Exception as e:
+        logger.error(f"❌ channel_schedule: {e}", exc_info=True)
+
+
+async def channel_schedule_set_callback(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+):
+    if not _db_ready():
+        return
+
+    query = update.callback_query
+    user_id = query.from_user.id
+
+    try:
+        parts = query.data.split(":")
+        ch_db_id = int(parts[1])
+        minutes = int(parts[2])
+    except (ValueError, IndexError):
+        await _safe_answer(query, "⚠️ بيانات غير صالحة", show_alert=True)
+        return
+
+    if minutes <= 0 or minutes > 30 * 24 * 60:
+        await _safe_answer(query, "⚠️ قيمة غير مسموحة", show_alert=True)
+        return
+
+    try:
+        owns = await DB.is_channel_owner(user_id, ch_db_id)
+        if not owns:
+            await _safe_answer(query, "⚠️ لا تملك هذه القناة", show_alert=True)
+            return
+
+        success = await DB.update_schedule(
+            ch_db_id,
+            schedule_type="interval_minutes",
+            interval_minutes=minutes,
+        )
+
+        if not success:
+            await _safe_answer(query, "⚠️ فشل التحديث", show_alert=True)
+            return
+
+        try:
+            await DB.update_next_publish(ch_db_id)
+        except Exception as e:
+            logger.debug(f"update_next_publish: {e}")
+
+        await _safe_answer(query, f"✅ التردد الجديد: {minutes} دقيقة")
+
+        await _render_channel_info(query, user_id, ch_db_id)
+    except Exception as e:
+        logger.error(f"❌ channel_schedule_set: {e}", exc_info=True)
+        await _safe_answer(query, "⚠️ خطأ غير متوقع", show_alert=True)
+
+
+# =====================================================================
+# 7. الرجوع للقائمة الرئيسية
+# =====================================================================
+
+async def back_to_main_menu_callback(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+):
+    query = update.callback_query
+    await _safe_answer(query)
+
+    try:
+        if query.message is not None:
+            await query.message.delete()
+    except Exception as e:
+        logger.debug(f"حذف الرسالة: {e}")
+
+    try:
+        from handlers.handlers_command import CommandHandlers
+        try:
+            await CommandHandlers.start(update, context)
+            return
+        except (AttributeError, TypeError) as e:
+            logger.debug(f"CommandHandlers.start فشل: {e}")
+    except ImportError as e:
+        logger.debug(f"handlers.handlers_command غير متاح: {e}")
+
+    try:
+        await _send_main_menu_fallback(context, query.from_user.id)
+    except Exception as e:
+        logger.error(f"❌ back_to_main_menu fallback: {e}", exc_info=True)
+        try:
+            await context.bot.send_message(
+                query.from_user.id,
+                "⚠️ فشل عرض القائمة الرئيسية.\nأرسل /start",
+            )
+        except Exception:
+            pass
+
+
+async def _send_main_menu_fallback(context, user_id: int):
+    text = "🌿 <b>Relax Manager</b>\n\nاختر من القائمة:"
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("📡 قنواتي", callback_data="ch_list")],
+        [InlineKeyboardButton("📋 منشوراتي", callback_data="posts_menu")],
+        [InlineKeyboardButton("💎 اشتراكي", callback_data="subscription_info")],
+        [InlineKeyboardButton("⚙️ الإعدادات", callback_data="settings_menu")],
+        [InlineKeyboardButton("❓ مساعدة", callback_data="help_menu")],
+    ])
+    await context.bot.send_message(
+        user_id, text, reply_markup=kb, parse_mode="HTML",
+    )
+
+
+# =====================================================================
+# 8. إضافة قناة (زر → تعليمات)
+# =====================================================================
+
+async def add_channel_redirect_callback(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+):
+    query = update.callback_query
+    await _safe_answer(query)
+
+    user_id = query.from_user.id
+
+    _clear_user_state(user_id)
+
+    if context.user_data is not None:
+        context.user_data["awaiting_channel_add"] = True
+
+    try:
+        text = (
+            "➕ <b>إضافة قناة جديدة</b>\n\n"
+            "لإضافة قناة، اختر إحدى الطرق التالية:\n\n"
+            "1️⃣ <b>أرسل معرف القناة</b> في المحادثة\n"
+            "   مثال: <code>@my_channel</code>\n\n"
+            "2️⃣ <b>أعد توجيه رسالة</b> من القناة إلى البوت\n\n"
+            "3️⃣ <b>أرسل رابط القناة</b>\n"
+            "   مثال: <code>https://t.me/my_channel</code>\n\n"
+            "⚠️ <b>مهم:</b> تأكد من أن البوت <b>مشرف</b> في القناة!\n\n"
+            "━━━━━━━━━━━━━━━━\n"
+            "💡 <i>أرسل الآن اسم القناة أو رابطها للبدء</i>"
+        )
+
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("↩️ رجوع للقائمة", callback_data="ch_list")],
+            [InlineKeyboardButton("🏠 القائمة الرئيسية", callback_data="main_menu")],
+        ])
+
+        await query.edit_message_text(
+            text, reply_markup=keyboard, parse_mode="HTML",
+        )
+    except Exception as e:
+        logger.error(f"❌ add_channel_redirect: {e}", exc_info=True)
+
+
+# =====================================================================
+# 9. معالج الرسائل النصية لإضافة قناة
+# =====================================================================
+
+_USERNAME_RE = re.compile(r"^@([a-zA-Z][a-zA-Z0-9_]{3,31})$")
+_URL_RE = re.compile(
+    r"^(?:https?://)?(?:www\.)?t\.me/([a-zA-Z][a-zA-Z0-9_]{3,31})/?$",
+    re.IGNORECASE,
+)
+
+_FILTER_REGEX = (
+    r"^(?:@[a-zA-Z][a-zA-Z0-9_]{3,31}|"
+    r"(?:https?://)?(?:www\.)?t\.me/[a-zA-Z][a-zA-Z0-9_]{3,31}/?)$"
+)
+
+
+def _extract_channel_username(text: str) -> Optional[str]:
+    text = text.strip()
+    m = _USERNAME_RE.match(text)
+    if m:
+        return m.group(1)
+    m = _URL_RE.match(text)
+    if m:
+        return m.group(1)
+    return None
+
+
+async def add_channel_from_message(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+):
+    if not _db_ready():
+        return
+
+    message = update.message
+    if not message or not message.text:
+        return
+
+    user_id = message.from_user.id
+
+    state_str = _get_state_str(user_id)
+    is_channel_add_ctx = _is_channel_add_state(state_str)
+
+    if _user_has_pending_state(user_id):
+        logger.debug(
+            f"⏭️ add_channel_from_message: تجاهل — "
+            f"المستخدم {user_id} في حالة معلقة ({state_str})"
+        )
+        return
+
+    text = message.text.strip()
+
+    channel_username = _extract_channel_username(text)
+    if not channel_username:
+        if (context.user_data and context.user_data.get("awaiting_channel_add")) \
+                or is_channel_add_ctx:
+            try:
+                await message.reply_text(
+                    "⚠️ <b>صيغة غير صحيحة</b>\n\n"
+                    "أرسل:\n"
+                    "• <code>@my_channel</code>\n"
+                    "• <code>https://t.me/my_channel</code>",
+                    parse_mode="HTML",
+                )
+            except Exception:
+                pass
+            _clear_user_state(user_id)
+            if context.user_data:
+                context.user_data.pop("awaiting_channel_add", None)
+            raise ApplicationHandlerStop
+        return
+
+    logger.info(
+        f"📥 محاولة إضافة قناة: @{channel_username} من {user_id} "
+        f"(state={state_str or 'none'})"
+    )
+
+    if context.user_data is not None:
+        if context.user_data.get("_adding_channel_lock"):
+            logger.debug(
+                f"🔒 add_channel_from_message: قفل مسبق للمستخدم {user_id}"
+            )
+            raise ApplicationHandlerStop
+        context.user_data["_adding_channel_lock"] = True
+
+    processing_msg = None
+    try:
+        try:
+            user_raw = await DB.get_user_full_data(user_id, include_stats=True)
+            user = _row_to_dict(user_raw)
+            if not user:
+                await _edit_or_send(
+                    processing_msg, message,
+                    "⚠️ الرجاء إرسال /start أولاً."
+                )
+                _clear_user_state(user_id)
+                raise ApplicationHandlerStop
+
+            if user.get("banned"):
+                await _edit_or_send(
+                    processing_msg, message,
+                    "🚫 أنت محظور من استخدام البوت."
+                )
+                _clear_user_state(user_id)
+                raise ApplicationHandlerStop
+
+            if not user.get("has_subscription"):
+                await _edit_or_send(
+                    processing_msg, message,
+                    "💎 <b>يجب أن يكون لديك اشتراك نشط</b>\n\n"
+                    "استخدم /subscribe للاشتراك."
+                )
+                _clear_user_state(user_id)
+                raise ApplicationHandlerStop
+
+            channels_count = user.get("channels_count", 0) or 0
+            active_sub_raw = await DB.get_active_subscription(user_id)
+            active_sub = _row_to_dict(active_sub_raw)
+            if active_sub:
+                max_channels = active_sub.get("max_channels", 0) or 0
+                if channels_count >= max_channels:
+                    await _edit_or_send(
+                        processing_msg, message,
+                        f"⚠️ <b>وصلت للحد الأقصى</b>\n\n"
+                        f"عدد قنواتك: {channels_count}/{max_channels}"
+                    )
+                    _clear_user_state(user_id)
+                    raise ApplicationHandlerStop
+
+        except ApplicationHandlerStop:
+            raise
+        except Exception as e:
+            logger.error(f"❌ فحص الصلاحيات: {e}", exc_info=True)
+            await _edit_or_send(
+                processing_msg, message,
+                "⚠️ حدث خطأ. حاول لاحقاً."
+            )
+            _clear_user_state(user_id)
+            raise ApplicationHandlerStop
+
+        try:
+            processing_msg = await message.reply_text(
+                f"⏳ جاري التحقق من <code>@{channel_username}</code>...",
+                parse_mode="HTML",
+            )
+        except Exception:
+            processing_msg = None
+
+        try:
+            chat = await context.bot.get_chat(f"@{channel_username}")
+        except Exception as e:
+            logger.warning(f"⚠️ فشل جلب القناة @{channel_username}: {e}")
+            await _edit_or_send(
+                processing_msg, message,
+                f"❌ <b>لم أتمكن من الوصول للقناة</b>\n\n"
+                f"تأكد أن:\n"
+                f"• القناة موجودة\n"
+                f"• المعرّف صحيح: <code>@{channel_username}</code>\n"
+                f"• القناة عامة (public)"
+            )
+            _clear_user_state(user_id)
+            raise ApplicationHandlerStop
+
+        try:
+            bot_member = await context.bot.get_chat_member(
+                chat.id, context.bot.id)
+            bot_status = getattr(bot_member, "status", "")
+
+            if bot_status not in ("administrator", "creator"):
+                await _edit_or_send(
+                    processing_msg, message,
+                    f"⚠️ <b>البوت ليس مشرفاً في القناة</b>\n\n"
+                    f"📌 القناة: <b>{chat.title}</b>\n\n"
+                    f"<b>الحل:</b>\n"
+                    f"1. أضف البوت إلى القناة\n"
+                    f"2. ارقِّه إلى <b>مشرف</b>\n"
+                    f"3. امنحه صلاحية <b>نشر الرسائل</b>\n"
+                    f"4. أعد إرسال <code>@{channel_username}</code>"
+                )
+                _clear_user_state(user_id)
+                raise ApplicationHandlerStop
+
+            can_post = getattr(bot_member, "can_post_messages", True)
+            if not can_post:
+                await _edit_or_send(
+                    processing_msg, message,
+                    f"⚠️ <b>البوت لا يملك صلاحية النشر</b>\n\n"
+                    f"امنح البوت صلاحية <b>Post Messages</b>."
+                )
+                _clear_user_state(user_id)
+                raise ApplicationHandlerStop
+
+        except ApplicationHandlerStop:
+            raise
+        except Exception as e:
+            logger.error(f"❌ فحص صلاحيات البوت: {e}", exc_info=True)
+            await _edit_or_send(
+                processing_msg, message,
+                "⚠️ لم أتمكن من التحقق من صلاحيات البوت."
+            )
+            _clear_user_state(user_id)
+            raise ApplicationHandlerStop
+
+        try:
+            result = await DB.add_channel(
+                user_id=user_id,
+                channel_id=chat.id,
+                channel_name=chat.title,
+                set_active=True,
+            )
+        except Exception as e:
+            logger.error(f"❌ فشل add_channel: {e}", exc_info=True)
+            await _edit_or_send(
+                processing_msg, message,
+                "❌ حدث خطأ أثناء إضافة القناة."
+            )
+            _clear_user_state(user_id)
+            raise ApplicationHandlerStop
+
+        result_d = _row_to_dict(result)
+        if result_d or result:
+            channel_name = (
+                result_d.get("channel_name")
+                if result_d else chat.title
+            ) or chat.title
+            posts_count = (
+                result_d.get("posts_count", 0)
+                if result_d else 0
+            ) or 0
+
+            success_text = (
+                f"✅ <b>تم إضافة القناة بنجاح!</b>\n\n"
+                f"📡 <b>{channel_name}</b>\n"
+                f"🆔 <code>{chat.id}</code>\n"
+                f"🔗 @{channel_username}\n\n"
+                f"📥 منشورات موجودة: {posts_count}\n"
+                f"🟢 تم تعيينها <b>القناة النشطة</b>"
+            )
+
+            keyboard = InlineKeyboardMarkup([
+                [InlineKeyboardButton("📡 قنواتي", callback_data="ch_list")],
+                [InlineKeyboardButton("➕ إضافة منشورات", callback_data="post_add")],
+                [InlineKeyboardButton("🏠 القائمة الرئيسية", callback_data="main_menu")],
+            ])
+
+            try:
+                if processing_msg:
+                    await processing_msg.edit_text(
+                        success_text, reply_markup=keyboard, parse_mode="HTML",
+                    )
+                else:
+                    await message.reply_text(
+                        success_text, reply_markup=keyboard, parse_mode="HTML",
+                    )
+            except Exception:
+                try:
+                    await message.reply_text(
+                        success_text, reply_markup=keyboard, parse_mode="HTML",
+                    )
+                except Exception:
+                    pass
+
+            logger.info(
+                f"✅ تم إضافة القناة @{channel_username} للمستخدم {user_id}"
+            )
+        else:
+            await _edit_or_send(
+                processing_msg, message,
+                f"❌ <b>فشل إضافة القناة</b>\n\n"
+                f"قد تكون مسجلة مسبقاً."
+            )
+
+        _clear_user_state(user_id)
+        if context.user_data:
+            context.user_data.pop("awaiting_channel_add", None)
+            context.user_data.pop("_adding_channel_lock", None)
+        raise ApplicationHandlerStop
+
+    except ApplicationHandlerStop:
+        if context.user_data is not None:
+            context.user_data.pop("_adding_channel_lock", None)
+        raise
+    except Exception as e:
+        logger.error(
+            f"❌ add_channel_from_message غير متوقع: {e}",
+            exc_info=True,
+        )
+        _clear_user_state(user_id)
+        if context.user_data:
+            context.user_data.pop("awaiting_channel_add", None)
+            context.user_data.pop("_adding_channel_lock", None)
+        try:
+            await message.reply_text(
+                "⚠️ حدث خطأ غير متوقع. حاول مجدداً.",
+                parse_mode="HTML",
+            )
+        except Exception:
+            pass
+        raise ApplicationHandlerStop
+
+
+async def _edit_or_send(processing_msg, message, text: str):
+    if processing_msg is not None:
+        try:
+            mid = getattr(processing_msg, "message_id", None)
+            if mid:
+                await processing_msg.edit_text(text, parse_mode="HTML")
+                return
+        except Exception as e:
+            logger.debug(f"_edit_or_send edit_text: {e}")
+
+    try:
+        await message.reply_text(text, parse_mode="HTML")
+    except Exception as e:
+        logger.debug(f"_edit_or_send reply_text: {e}")
+
+
+# =====================================================================
+# 🆕 v2.2.0: معالج إضافة المنشورات (ADDING_POSTS)
+# =====================================================================
+
+async def handle_adding_posts(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+):
+    """
+    🆕 v2.2.0: معالج حالة ADDING_POSTS.
+
+    يستقبل: نص / صورة / فيديو / مستند / صوت / فويس من المستخدم
+    ويضيفه للقناة النشطة عبر DB.add_posts().
+    """
+    if not _db_ready():
+        return
+
+    message = update.message or update.effective_message
+    if not message:
+        return
+
+    user_id = message.from_user.id if message.from_user else None
+    if not user_id:
+        return
+
+    # ─── تحقق من الحالة ───
+    state_str = _get_state_str(user_id)
+    if not _is_adding_posts_state(state_str):
+        # ليست حالته — لا نتدخل
+        return
+
+    logger.info(
+        f"📝 handle_adding_posts: user={user_id} state={state_str}"
+    )
+
+    # ─── جلب القناة النشطة ───
+    channel_db_id = await _get_active_channel_id(user_id)
+    if not channel_db_id:
+        try:
+            await context.bot.send_message(
+                user_id,
+                "⚠️ <b>لا توجد قناة نشطة</b>\n\n"
+                "اختر قناة أولاً من <b>📡 قنواتي</b>.",
+                parse_mode="HTML",
+            )
+        except Exception:
+            pass
+        _clear_user_state(user_id)
+        raise ApplicationHandlerStop
+
+    # ─── استخراج المحتوى ───
+    text = (message.text or message.caption or "")
+    media_type = ""
+    media_file_id = ""
+
+    try:
+        if getattr(message, "photo", None):
+            media_type = "photo"
+            media_file_id = message.photo[-1].file_id
+        elif getattr(message, "video", None):
+            media_type = "video"
+            media_file_id = message.video.file_id
+        elif getattr(message, "document", None):
+            media_type = "document"
+            media_file_id = message.document.file_id
+        elif getattr(message, "animation", None):
+            media_type = "animation"
+            media_file_id = message.animation.file_id
+        elif getattr(message, "voice", None):
+            media_type = "voice"
+            media_file_id = message.voice.file_id
+        elif getattr(message, "audio", None):
+            media_type = "audio"
+            media_file_id = message.audio.file_id
+        elif getattr(message, "video_note", None):
+            media_type = "video_note"
+            media_file_id = message.video_note.file_id
+    except Exception as e:
+        logger.debug("handle_adding_posts media extract: %s", e)
+
+    if not text and not media_file_id:
+        try:
+            await context.bot.send_message(
+                user_id,
+                "⚠️ <b>لا يوجد محتوى قابل للإضافة</b>\n\n"
+                "أرسل نصاً، أو صورة، أو فيديو، أو مستنداً.",
+                parse_mode="HTML",
+            )
+        except Exception:
+            pass
+        raise ApplicationHandlerStop
+
+    # ─── إضافة المنشور ───
+    try:
+        added = await DB.add_posts(
+            user_id=user_id,
+            channel_db_id=channel_db_id,
+            posts=[(text, media_type, media_file_id)],
+        )
+    except Exception as e:
+        logger.error(
+            "handle_adding_posts add_posts: %s", e, exc_info=True)
+        added = 0
+
+    # ─── الرد ───
+    try:
+        if added and added > 0:
+            await context.bot.send_message(
+                user_id,
+                "✅ <b>تمت إضافة المنشور</b>\n\n"
+                "أرسل المزيد، أو /cancel للخروج.",
+                parse_mode="HTML",
+            )
+        else:
+            await context.bot.send_message(
+                user_id,
+                "⚠️ <b>لم يُضف المنشور</b>\n\n"
+                "• قد يكون مكرراً\n"
+                "• أو وصلت للحد الأقصى\n"
+                "• أو القناة غير متاحة\n\n"
+                "للمتابعة أرسل المزيد، أو /cancel للخروج.",
+                parse_mode="HTML",
+            )
+    except Exception:
+        pass
+
+    # ⚠️ نرفع Stop حتى لا يصل الحدث لـ handlers_message
+    raise ApplicationHandlerStop
+
+
+async def cancel_adding_posts_command(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+):
+    """
+    🆕 v2.2.0: /cancel للخروج من وضع إضافة المنشورات.
+    """
+    message = update.message or update.effective_message
+    if not message:
+        return
+
+    user_id = message.from_user.id if message.from_user else None
+    if not user_id:
+        return
+
+    state_str = _get_state_str(user_id)
+    if not _is_adding_posts_state(state_str):
+        # ليس في حالتنا — لا نتدخل
+        return
+
+    _clear_user_state(user_id)
+
+    try:
+        await context.bot.send_message(
+            user_id,
+            "✅ <b>تم الخروج من وضع إضافة المنشورات</b>",
+            parse_mode="HTML",
+        )
+    except Exception:
+        pass
+
+    raise ApplicationHandlerStop
+
+
+async def posts_add_callback(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+):
+    """
+    🆕 v2.2.0: يضبط الآن الحالة ADDING_POSTS لاستقبال المنشورات.
+    """
+    if not _db_ready():
+        return
+
+    query = update.callback_query
+    user_id = query.from_user.id
+    await _safe_answer(query)
+
+    # ─── جلب اسم القناة النشطة ───
+    ch_name = None
+    try:
+        row = await DB.fetchone(
+            """
+            SELECT uc.channel_name
+            FROM users u
+            JOIN user_channels uc ON uc.id = u.active_channel
+            WHERE u.user_id = ? AND uc.banned = 0
+            """,
+            (user_id,),
+        )
+        row_d = _row_to_dict(row)
+        if row_d:
+            ch_name = row_d.get("channel_name")
+    except Exception as e:
+        logger.error(f"posts_add_callback query: {e}")
+
+    if ch_name:
+        # 🆕 v2.2.0: ضبط الحالة
+        if _STATE_AVAILABLE and UserState is not None:
+            adding_state = getattr(UserState, "ADDING_POSTS", None)
+            if adding_state is not None:
+                _set_user_state(user_id, adding_state)
+                logger.info(
+                    f"✅ posts_add_callback: state set to ADDING_POSTS "
+                    f"for user {user_id}"
+                )
+            else:
+                logger.warning(
+                    "⚠️ UserState.ADDING_POSTS غير موجود في enum!"
+                )
+        else:
+            logger.warning(
+                "⚠️ StateManager/UserState غير متاح — "
+                "لا يمكن ضبط حالة إضافة المنشورات"
+            )
+
+        text = (
+            f"➕ <b>إضافة منشورات</b>\n\n"
+            f"📡 القناة النشطة: <b>{ch_name}</b>\n\n"
+            f"<b>📌 طرق الإضافة:</b>\n"
+            f"• أرسل <b>نص</b> مباشرة في المحادثة\n"
+            f"• أرسل <b>صورة/فيديو/ملف</b> مع تعليق\n"
+            f"• أرسل <b>عدة رسائل</b> — كلها تُضاف تلقائياً\n\n"
+            f"<b>🛑 للخروج:</b> /cancel\n\n"
+            f"💡 <i>ابدأ بإرسال المحتوى الآن</i>"
         )
     else:
-        logger.debug("✅ كل prefixes الحرجة موجودة")
+        text = (
+            "⚠️ <b>لا توجد قناة نشطة</b>\n\n"
+            "اختر قناة أولاً من قائمة قنواتك."
+        )
+
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("📡 قنواتي", callback_data="ch_list")],
+        [InlineKeyboardButton("🏠 القائمة الرئيسية", callback_data="main_menu")],
+    ])
+
+    try:
+        await query.edit_message_text(
+            text, reply_markup=keyboard, parse_mode="HTML",
+        )
+    except Exception as e:
+        logger.debug(f"edit_message_text: {e}")
+        try:
+            if query.message is not None:
+                await query.message.reply_text(
+                    text, reply_markup=keyboard, parse_mode="HTML",
+                )
+        except Exception as e2:
+            logger.error(f"reply_text: {e2}")
 
 
-# استدعاء التشخيص عند الاستيراد (log level INFO)
-try:
-    _log_prefixes_status()
-except Exception as _e:
-    logger.debug(f"_log_prefixes_status: {_e}")
+# =====================================================================
+# 11. التسجيل
+# =====================================================================
 
+def register_channels_list_handlers(application):
+    """تسجيل كل handlers قائمة القنوات + إضافة المنشورات."""
+    try:
+        # ═══ الرجوع للقائمة الرئيسية ═══
+        application.add_handler(
+            CallbackQueryHandler(
+                back_to_main_menu_callback,
+                pattern=r"^(main_menu|back_to_main|back_to_main_menu|home)$"
+            )
+        )
 
-__all__ = [
-    # ثوابت
-    "MAX_CAPTION_LENGTH", "MAX_MESSAGE_LENGTH", "MAX_BACKUPS",
-    "MAX_CONCURRENT_PUBLISH", "MAX_PUBLISH_DELAY_SECONDS",
-    "MAX_TG_FILE_SIZE", "CALLBACK_MIN_INTERVAL", "RATE_LIMIT_WINDOW",
-    "RATE_LIMIT_CLEANUP_EVERY", "ADMIN_PAGE_SIZE", "SEC_AUTH_CACHE_TTL",
-    "PUBLISH_ACQUIRE_TIMEOUT", "SEC_SETTINGS_CACHE_TTL",
-    "SEC_STATS_CACHE_TTL", "LOG_CHANNEL_MENU_CACHE_TTL",
-    "SUCCESS_RATE_GOOD_THRESHOLD", "SUCCESS_RATE_WARN_THRESHOLD",
-    "DEFAULT_SUCCESS_RATE", "SEC_AUTH_CACHE_MAX_SIZE",
-    "POST_COUNT_CACHE_TTL", "POST_COUNT_CACHE_MAX_SIZE",
-    "CONTEST_DURATIONS", "GROUP_NUMBER_EMOJIS",
-    "_ANALYTICS_ALIASES", "_CONTEXT_KEYS_TO_CLEAR", "_CANCEL_EXTRA_KEYS",
-    "_BOLD_MD_PATTERN", "_VALID_URL_PATTERN",
-    "_PRIMARY_OWNER_ID", "_KNOWN_CB_PREFIXES",
+        # ═══ إضافة قناة (زر) ═══
+        application.add_handler(
+            CallbackQueryHandler(
+                add_channel_redirect_callback,
+                pattern=r"^add_channel$"
+            )
+        )
 
-    # 🆕 v9.7.8 — قوائم prefixes
-    "_SECURITY_PREFIXES",
-    "_SECURITY_SUB_PREFIXES",
-    "_ACTION_PREFIXES",
-    "_MENU_PREFIXES",
-    "_CONFIRM_SUFFIXES",
-    "_CONTEST_PREFIXES",
-    "_ADMIN_PREFIXES",
-    "_ALL_KNOWN_PREFIXES",
+        # ═══ إضافة منشورات (سريع) ═══
+        application.add_handler(
+            CallbackQueryHandler(
+                posts_add_callback,
+                pattern=r"^(post_add|posts_add)$"
+            )
+        )
 
-    # دوال
-    "_trans", "_fmt", "_group_number", "_is_primary_owner",
-    "_row_to_dict", "_coerce_int", "_coerce_float", "_safe_str",
-    "_md_to_html", "_log_channel_cache_key", "_is_valid_url",
-    "_mask_id", "_make_user_cache_keys",
+        # ═══ قائمة القنوات ═══
+        application.add_handler(
+            CallbackQueryHandler(show_channels_list, pattern=r"^ch_list$")
+        )
 
-    # 🆕 v9.7.8 — دوال الفحص
-    "_is_known_prefix",
-    "_get_base_prefix",
-    "_log_prefixes_status",
-]
+        # ═══ اختيار/تفاصيل ═══
+        application.add_handler(
+            CallbackQueryHandler(channel_select_callback, pattern=r"^ch_select:")
+        )
+        application.add_handler(
+            CallbackQueryHandler(channel_info_callback, pattern=r"^ch_info:")
+        )
+
+        # ═══ الحذف ═══
+        application.add_handler(
+            CallbackQueryHandler(
+                channel_delete_menu_callback, pattern=r"^ch_delete_menu$"
+            )
+        )
+        application.add_handler(
+            CallbackQueryHandler(
+                channel_delete_confirm_callback, pattern=r"^ch_delete_confirm:"
+            )
+        )
+        application.add_handler(
+            CallbackQueryHandler(
+                channel_delete_execute_callback, pattern=r"^ch_delete_execute:"
+            )
+        )
+
+        # ═══ إعادة التدوير ═══
+        application.add_handler(
+            CallbackQueryHandler(
+                channel_recycle_callback, pattern=r"^ch_recycle:"
+            )
+        )
+
+        # ═══ الجدولة ═══
+        application.add_handler(
+            CallbackQueryHandler(
+                channel_schedule_callback, pattern=r"^ch_schedule:"
+            )
+        )
+        application.add_handler(
+            CallbackQueryHandler(
+                channel_schedule_set_callback, pattern=r"^ch_sched_set:"
+            )
+        )
+
+        # ═══════════════════════════════════════════════════════════
+        # 🆕 v2.2.0: /cancel لإضافة المنشورات (group=-3)
+        # ═══════════════════════════════════════════════════════════
+        application.add_handler(
+            CommandHandler(
+                "cancel",
+                cancel_adding_posts_command,
+            ),
+            group=-3,
+        )
+
+        # ═══════════════════════════════════════════════════════════
+        # 🆕 v2.2.0: معالج ADDING_POSTS (group=-2)
+        #   يقبل: نص، صورة، فيديو، مستند، صوت، فويس، animation، video_note
+        #   يعمل فقط إذا كان المستخدم في حالة ADDING_POSTS.
+        # ═══════════════════════════════════════════════════════════
+        application.add_handler(
+            MessageHandler(
+                (
+                    filters.TEXT
+                    | filters.PHOTO
+                    | filters.VIDEO
+                    | filters.Document.ALL
+                    | filters.AUDIO
+                    | filters.VOICE
+                    | filters.ANIMATION
+                    | filters.VIDEO_NOTE
+                )
+                & filters.ChatType.PRIVATE
+                & ~filters.COMMAND,
+                handle_adding_posts,
+            ),
+            group=-2,
+        )
+
+        # ═══════════════════════════════════════════════════════════
+        # معالج الرسائل النصية لإضافة قناة (group=-1)
+        # ═══════════════════════════════════════════════════════════
+        application.add_handler(
+            MessageHandler(
+                filters.TEXT
+                & filters.ChatType.PRIVATE
+                & ~filters.COMMAND
+                & filters.Regex(_FILTER_REGEX),
+                add_channel_from_message,
+            ),
+            group=-1,
+        )
+
+        logger.info(
+            "✅ تم تسجيل handlers قائمة القنوات (v2.2.0 — "
+            "WAIT-CHANNEL + ADDING-POSTS)"
+        )
+        return True
+    except Exception as e:
+        logger.error(f"❌ فشل تسجيل handlers: {e}", exc_info=True)
+        return False
