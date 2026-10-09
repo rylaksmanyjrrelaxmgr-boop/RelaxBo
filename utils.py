@@ -1,8 +1,20 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-utils.py - الأدوات المساعدة للبوت (v7.10.10 — HTML-FIXES)
+utils.py - الأدوات المساعدة للبوت (v7.10.11 — TIMEOUT-DIAGNOSTICS)
 =================================================================================
+🆕 v7.10.11 (TIMEOUT-DIAGNOSTICS-2026-R5):
+    🔴 TIMEOUT-FIX-1: safe_send — سياق كامل في تحذير TimedOut
+                       (chat_id + media_type + text_len + preview + err).
+    🔴 TIMEOUT-FIX-2: safe_send — backoff تصاعدي 1s, 2s بدل 1s ثابت.
+    🔴 TIMEOUT-FIX-3: safe_send — تسجيل ERROR نهائي عند فشل كل المحاولات
+                       (بدل صمت).
+    🟡 TIMEOUT-FIX-4: safe_send — timeouts ديناميكية حسب حجم النص/نوع media.
+    🟡 TIMEOUT-FIX-5: _send_media — timeouts ديناميكية للـ captions.
+    🟢 TIMEOUT-FIX-6: _send_media — تسجيل سياق عند TimedOut.
+    🟢 TIMEOUT-FIX-7: _check_telegram_latency — دالة تشخيص جديدة.
+    🟢 TIMEOUT-FIX-8: get_telegram_latency_text — لتقرير المطور.
+
 🆕 v7.10.10 (HTML-FIXES-2026-R4):
     🔴 HTML-FIX-1: safe_send — parse_mode افتراضي "HTML" بدل None.
                    (كانت وسوم <b> تظهر كنص في Telegram)
@@ -108,6 +120,19 @@ _ALLOWED_JSON_HOSTS: frozenset = frozenset({
 _FALLBACK_PENALTY_TYPES: frozenset = frozenset({
     "ban", "mute", "kick", "warn", "restrict", "unban",
 })
+
+# 🆕 TIMEOUT-FIX-4: حدود timeouts ديناميكية
+_TIMEOUT_FAST = {
+    "read_timeout": 30.0,
+    "write_timeout": 30.0,
+    "connect_timeout": 15.0,
+}
+_TIMEOUT_SLOW = {
+    "read_timeout": 60.0,
+    "write_timeout": 60.0,
+    "connect_timeout": 30.0,
+}
+_TEXT_LONG_THRESHOLD = 2000  # حرف — بعد هذا نستخدم slow timeouts
 
 # 🆕 FIX-SC2: monotonic + prune
 _security_settings_cache: Dict[int, Tuple[float, Dict[str, int]]] = {}
@@ -1367,11 +1392,12 @@ class KeyboardFactory:
                 ["back"],
             ],
             "analytics": [
-                ["growth_30d_btn"], ["top_channels_btn"],
-                ["publish_stats_btn"], ["channels_rate_btn"],
-                ["subscriptions_btn"], ["pool_live_btn"],
-                ["slow_queries_btn"], ["export_excel_btn"],
-                ["refresh_btn"], ["back"],
+                ["growth_30d_btn", "top_channels_btn"],
+                ["publish_stats_btn", "channels_rate_btn"],
+                ["subscriptions_btn", "pool_live_btn"],
+                ["slow_queries_btn", "export_excel_btn"],
+                ["refresh_btn"],
+                ["back"],
             ],
             "admin_panel": [
                 ["admin_analytics"],
@@ -1999,6 +2025,48 @@ async def check_bot_permissions(bot, chat_id: int) -> dict:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
+# 11.b) 🆕 TIMEOUT-FIX-7/8: تشخيص latency
+# ═══════════════════════════════════════════════════════════════════════════
+
+async def _check_telegram_latency(bot, timeout: float = 10.0) -> float:
+    """
+    🆕 TIMEOUT-FIX-7: قياس زمن الاستجابة لـ Telegram API.
+
+    Returns:
+        float: زمن الاستجابة بالـ milliseconds، أو -1 عند الفشل.
+    """
+    if bot is None:
+        return -1.0
+    try:
+        t0 = time.monotonic()
+        await bot.get_me(read_timeout=timeout, write_timeout=timeout,
+                         connect_timeout=timeout)
+        return (time.monotonic() - t0) * 1000.0
+    except Exception as e:
+        logger.debug("Telegram latency check failed: %s", e)
+        return -1.0
+
+
+async def get_telegram_latency_text(bot) -> str:
+    """
+    🆕 TIMEOUT-FIX-8: نص جاهز لعرض latency في تقرير المطور.
+
+    Returns:
+        str: نص HTML مثل "🟢 Telegram: 145ms" أو "🔴 فشل".
+    """
+    latency = await _check_telegram_latency(bot)
+    if latency < 0:
+        return "🔴 Telegram: <b>فشل الاتصال</b>"
+    if latency < 200:
+        color = "🟢"
+    elif latency < 500:
+        color = "🟡"
+    else:
+        color = "🔴"
+    return f"{color} Telegram: <b>{latency:.0f}ms</b>"
+
+
+# ═══════════════════════════════════════════════════════════════════════════
 # 12. إرسال آمن + ChatMigrated
 # ═══════════════════════════════════════════════════════════════════════════
 
@@ -2100,6 +2168,15 @@ async def _handle_chat_migrated(chat_id: int, new_chat_id: int) -> None:
         logger.error("ChatMigrated handler: %s", e, exc_info=True)
 
 
+def _timeouts_for(text_len: int, is_media: bool = False) -> Dict[str, float]:
+    """
+    🆕 TIMEOUT-FIX-4: اختيار timeouts مناسبة حسب حجم النص/نوع media.
+    """
+    if is_media or text_len > _TEXT_LONG_THRESHOLD:
+        return dict(_TIMEOUT_SLOW)
+    return dict(_TIMEOUT_FAST)
+
+
 async def _send_media(bot, chat_id, media_type, media_file_id,
                       caption=None, reply_markup=None,
                       parse_mode: str = "HTML",  # 🆕 HTML-FIX-2
@@ -2108,6 +2185,8 @@ async def _send_media(bot, chat_id, media_type, media_file_id,
     🆕 HTML-FIX-2 + HTML-FIX-3:
     - parse_mode="HTML" افتراضي.
     - تمرير parse_mode الصحيح لـ caption في voice/sticker/video_note.
+    🆕 TIMEOUT-FIX-5: timeouts ديناميكية للـ captions.
+    🆕 TIMEOUT-FIX-6: تسجيل سياق عند TimedOut.
     """
     _reply_to = kwargs.get('reply_to_message_id')
 
@@ -2120,13 +2199,25 @@ async def _send_media(bot, chat_id, media_type, media_file_id,
             caption_kwargs['reply_to_message_id'] = _reply_to
         if extra_kwargs:
             caption_kwargs.update(extra_kwargs)
+        # 🆕 TIMEOUT-FIX-5
+        caption_kwargs.setdefault('read_timeout', _TIMEOUT_SLOW['read_timeout'])
+        caption_kwargs.setdefault('write_timeout', _TIMEOUT_SLOW['write_timeout'])
+        caption_kwargs.setdefault('connect_timeout', _TIMEOUT_SLOW['connect_timeout'])
         try:
             await bot.send_message(
                 chat_id, caption, parse_mode=parse_mode, **caption_kwargs)
+        except TimedOut as _te:
+            logger.warning(
+                "⚠️ caption-followup TimedOut | chat=%s | len=%d | err=%s",
+                chat_id, len(caption), str(_te)[:80])
+            try:
+                await bot.send_message(
+                    chat_id, caption, parse_mode=None, **caption_kwargs)
+            except Exception as _e2:
+                logger.warning("⚠️ caption-followup retry failed: %s", _e2)
         except BadRequest as _e:
             if "can't parse entities" in str(_e).lower() \
                or "parse" in str(_e).lower():
-                # fallback بدون parse_mode
                 with suppress(Exception):
                     await bot.send_message(
                         chat_id, caption, parse_mode=None, **caption_kwargs)
@@ -2182,10 +2273,10 @@ async def safe_send(bot, chat_id: int, text: str, reply_markup=None,
     """
     🆕 HTML-FIX-1: parse_mode افتراضي "HTML" بدل None.
     🆕 HTML-FIX-4: fallback ثاني للـ media بدون HTML.
-
-    عند فشل Parse:
-    - نص: يُعاد بـ parse_mode=None
-    - media: يُعاد بـ parse_mode=None
+    🆕 TIMEOUT-FIX-1: سياق كامل في تحذير TimedOut.
+    🆕 TIMEOUT-FIX-2: backoff تصاعدي 1s, 2s.
+    🆕 TIMEOUT-FIX-3: ERROR نهائي عند فشل كل المحاولات.
+    🆕 TIMEOUT-FIX-4: timeouts ديناميكية.
     """
     if not text and not any(
         k in kwargs for k in ['photo', 'video', 'document', 'audio',
@@ -2206,6 +2297,13 @@ async def safe_send(bot, chat_id: int, text: str, reply_markup=None,
             media_file_id = kwargs.pop(mt)
             break
     caption_text = text[:1024] if media_type else text
+
+    # 🆕 TIMEOUT-FIX-4: timeouts ديناميكية
+    _text_len = len(text) if text else 0
+    _default_timeouts = _timeouts_for(_text_len, bool(media_type))
+    for _k, _v in _default_timeouts.items():
+        kwargs.setdefault(_k, _v)
+
     max_attempts = 3
     for attempt in range(max_attempts):
         try:
@@ -2274,14 +2372,34 @@ async def safe_send(bot, chat_id: int, text: str, reply_markup=None,
         except RetryAfter as e:
             wait = int(getattr(e, 'retry_after', 1)) + 1
             RATE_LIMITER.report_429()
-            logger.warning("⏳ RetryAfter %ds (attempt %d)", wait, attempt + 1)
+            logger.warning(
+                "⏳ RetryAfter %ds (attempt %d/%d) | chat=%s%s",
+                wait, attempt + 1, max_attempts, chat_id,
+                f" media={media_type}" if media_type else "")
             await asyncio.sleep(wait)
             continue
-        except TimedOut:
-            logger.warning("⚠️ TimedOut (attempt %d)", attempt + 1)
+        except TimedOut as _te:
+            # 🆕 TIMEOUT-FIX-1: سياق كامل
+            _preview = ""
+            if text:
+                _preview = text[:60].replace("\n", " ")
+            _media_info = f" media={media_type}" if media_type else ""
+            logger.warning(
+                "⚠️ TimedOut (attempt %d/%d) | chat=%s%s | "
+                "text_len=%d | preview=%r | err=%s",
+                attempt + 1, max_attempts, chat_id,
+                _media_info, _text_len, _preview, str(_te)[:80],
+            )
             if attempt < max_attempts - 1:
-                await asyncio.sleep(1)
+                # 🆕 TIMEOUT-FIX-2: backoff تصاعدي
+                _delay = 1.0 * (attempt + 1)
+                await asyncio.sleep(_delay)
                 continue
+            # 🆕 TIMEOUT-FIX-3: ERROR نهائي
+            logger.error(
+                "❌ TimedOut نهائي بعد %d محاولات | chat=%s%s | text_len=%d",
+                max_attempts, chat_id, _media_info, _text_len,
+            )
             return None
         except Forbidden as e:
             err_lower = str(e).lower()
@@ -4393,6 +4511,8 @@ __all__ = [
     'is_authorized_in_group', 'invalidate_auth_cache',
     'invalidate_auth_cache_async', 'check_bot_permissions',
     'safe_send', 'get_ram_usage',
+    # 🆕 TIMEOUT-FIX-7/8
+    '_check_telegram_latency', 'get_telegram_latency_text',
     'ban_user_by_id', 'unban_user_by_id',
     'PenaltyStrategy', 'BanPenalty', 'MutePenalty', 'KickPenalty',
     'WarnPenalty', 'RestrictPenalty', 'UnbanPenalty', 'PenaltyFactory',
@@ -4415,6 +4535,9 @@ __all__ = [
     '_security_stats_cache',
     # 🆕 HTML-FIX: للاختبارات
     '_send_media',
+    # 🆕 TIMEOUT-FIX-4/5: للاختبارات
+    '_timeouts_for', '_TIMEOUT_FAST', '_TIMEOUT_SLOW',
+    '_TEXT_LONG_THRESHOLD',
 ]
 
 
@@ -4424,8 +4547,9 @@ __all__ = [
 
 try:
     logger.info(
-        "🛡️ utils.py v7.10.10 HTML-FIXES loaded | "
-        "safe_send=HTML(default) | _send_media=HTML(default) | "
+        "🛡️ utils.py v7.10.11 TIMEOUT-DIAGNOSTICS loaded | "
+        "safe_send=HTML+backoff+diag | _send_media=HTML+dynamic-TTL | "
+        "TimedOut-Context=✅ | Latency-Check=✅ | "
         "Detectors=lazy+async | Langs=%d | Buttons=✅ | "
         "Security-Bridge=✅(A3) | Penalty=✅(DEV1) | "
         "ChatMigrated=✅(%d ops incl. log_channel_id) | "
