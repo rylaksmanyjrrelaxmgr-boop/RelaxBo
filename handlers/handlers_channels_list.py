@@ -2,35 +2,39 @@
 # -*- coding: utf-8 -*-
 
 """
-handlers_channels_list.py - واجهة قائمة القنوات مع حالتها (v2.1.0)
+handlers_channels_list.py - واجهة قائمة القنوات مع حالتها (v2.1.1)
 ================================================================================
+🆕 v2.1.1 (REVIEW-FIXES):
+    🔴 FIX-1 CRITICAL: ربط صريح بين add_channel_from_message و
+       handlers_message._handle_wait_channel_text عبر علم
+       context.user_data["_channel_add_handled"] — بدل الاعتماد
+       الهشّ على مسح الحالة فقط.
+    🔴 FIX-2 CRITICAL: بعد حذف القناة النشطة، يُمسح users.active_channel
+       (كان يُشير إلى channel_db_id غير موجود).
+    🟡 FIX-3: _row_to_dict موحّد — يستورد من handlers_callback_base
+       عند التوفّر (نفس السلوك)، وإلا fallback محلي.
+    🟡 FIX-4: _get_active_channel_id — تحويل صريح إلى int (توافق PG
+       Decimal / SQLite).
+    🟡 FIX-5: _user_has_pending_state — فحص NONE ثلاثي (متوافق مع
+       handlers_message.handle_private).
+    🟡 FIX-6: القفل في add_channel_from_message قبل كل الفحوص
+       (أمان مستقبلي ضد async).
+    🟡 FIX-7: _get_channels_with_stats — LEFT JOIN بدل subqueries
+       متعددة (أداء أفضل مع كبر الحجم).
+    🟢 FIX-8: _CHANNEL_ADD_STATES — توثيق substring match.
+
 🆕 v2.1.0 (WAIT-CHANNEL-ROUTING-FIX):
-    🔴 FIX-1 CRITICAL: حل جذري لمشكلة "❌ تعذّر معالجة معرف القناة"
-       عند إضافة قناة من حالة WAIT_CHANNEL.
-       السبب: add_channel_from_message كان يرفض العمل بسبب
-              _user_has_pending_state، ثم _handle_wait_channel_text
-              لا يجد معالجاً فعلياً فيعرض رسالة الفشل.
-       الحل:
-         • _user_has_pending_state الآن تقبل حالات إضافة القناة
-           (WAIT_CHANNEL, WAIT_ADD_CHANNEL, WAIT_UPDATE_CH, ...).
-         • add_channel_from_message يمسح الحالة بعد المعالجة
-           (نجاحاً أو فشلاً).
-         • add_channel_from_message يرفع ApplicationHandlerStop
-           لمنع handlers_message._handle_wait_channel_text من
-           إظهار رسالة مكررة/خاطئة.
+    🔴 FIX-1: _user_has_pending_state تقبل حالات إضافة القناة.
     🟠 FIX-2: استيراد ApplicationHandlerStop من telegram.ext.
-    🟡 FIX-3: تنظيم منطق مسح الحالة في helper موحّد.
+    🟡 FIX-3: helper موحّد لمسح الحالة.
 
 🆕 v2.0.3 (POLISH-FIXES):
-    🔴 FIX-A: _USERNAME_RE / _URL_RE — تطبيق قواعد Telegram الفعلية
-              (يجب أن يبدأ بحرف، 5..32 حرف) لمنع قبول "@1234" ونحوه.
-    🟠 FIX-B: _user_has_pending_state — معالجة حالة StateManager.get
-              تُعيد None + UserState.NONE قد تكون غير موجودة.
-    🟠 FIX-C: show_channels_list — حماية update.callback_query.message
-              من None قبل استدعاء reply_text (fallback).
-    🟡 FIX-D: _row_to_dict helper موحّد — يضمن dict على كل DBs.
+    🔴 FIX-A: _USERNAME_RE / _URL_RE — قواعد Telegram الفعلية.
+    🟠 FIX-B: _user_has_pending_state — تعامل مع NONE.
+    🟠 FIX-C: show_channels_list — حماية message من None.
+    🟡 FIX-D: _row_to_dict helper موحّد.
     🟡 FIX-E: _edit_or_send — فحص processing_msg.message_id.
-    🟡 FIX-F: تسجيل version في سجل التسجيل النهائي موحّد.
+    🟡 FIX-F: تسجيل version موحّد.
 ================================================================================
 """
 
@@ -78,10 +82,26 @@ except (ImportError, AttributeError):
         return InlineKeyboardButton("↩️ رجوع", callback_data="main_menu")
 
 
+# 🆕 v2.1.1 FIX-3: استيراد _row_to_dict الموحّد من handlers_callback_base
+try:
+    from handlers_callback_base import _row_to_dict as _row_to_dict_shared
+    _HAS_SHARED_ROW_TO_DICT = True
+except ImportError:
+    try:
+        from handlers.handlers_callback_base import (
+            _row_to_dict as _row_to_dict_shared)
+        _HAS_SHARED_ROW_TO_DICT = True
+    except ImportError:
+        _row_to_dict_shared = None
+        _HAS_SHARED_ROW_TO_DICT = False
+
+
 # =====================================================================
 # 🆕 v2.1.0: حالات إضافة القناة المسموح بها
 # =====================================================================
 
+# 🆕 v2.1.1 FIX-8: substring match مقصود لدعم الحالات المُشتقّة
+# (مثل "WAIT_CHANNEL_V2" أو "WAIT_CHANNEL_PENDING").
 _CHANNEL_ADD_STATES = (
     "WAIT_CHANNEL",
     "WAIT_ADD_CHANNEL",
@@ -105,11 +125,19 @@ def _db_ready() -> bool:
 
 def _row_to_dict(row) -> dict:
     """
-    ✅ v2.0.3 FIX-D: تحويل موحّد لأي صف إلى dict.
+    ✅ v2.0.3 FIX-D + 🆕 v2.1.1 FIX-3:
+    يستورد من handlers_callback_base إن توفّر (توحيد السلوك)،
+    وإلا fallback محلي.
 
-    SQLite: sqlite3.Row يدعم dict(row) لكن ليس .get().
-    PG/MySQL: dict مباشرة أو None.
+    السلوك: يُعيد دائماً dict (فارغ عند None أو الفشل).
     """
+    if _HAS_SHARED_ROW_TO_DICT and _row_to_dict_shared is not None:
+        result = _row_to_dict_shared(row)
+        # _row_to_dict_shared قد تُعيد None عند الفشل
+        if result is None:
+            return {}
+        return result
+    # ─── Fallback محلي ───
     if row is None:
         return {}
     if isinstance(row, dict):
@@ -167,11 +195,11 @@ def _clear_user_state(user_id: int) -> None:
 
 def _user_has_pending_state(user_id: int) -> bool:
     """
-    ✅ v2.0.2 + v2.1.0 FIX-1:
+    ✅ v2.0.2 + v2.1.0 FIX-1 + 🆕 v2.1.1 FIX-5:
       - StateManager.get قد تُعيد None
       - UserState.NONE قد لا تكون موجودة
       - 🆕 حالات إضافة القناة (WAIT_CHANNEL*) لا تُعتبر "معلقة"
-        حتى يسمح add_channel_from_message بمعالجتها.
+      - 🆕 فحص NONE ثلاثي (متوافق مع handlers_message.handle_private)
     """
     if not _STATE_AVAILABLE or StateManager is None:
         return False
@@ -186,10 +214,14 @@ def _user_has_pending_state(user_id: int) -> bool:
         if _is_channel_add_state(state_str):
             return False
 
-        if UserState is not None:
-            none_state = getattr(UserState, "NONE", None)
-            if none_state is not None:
-                return state != none_state
+        # 🆕 v2.1.1 FIX-5: فحص NONE ثلاثي
+        if state_str in ("UserState.NONE", "NONE"):
+            return False
+        none_member = getattr(UserState, "NONE", None) if UserState else None
+        if none_member is not None:
+            if state is none_member or state == none_member:
+                return False
+
         return True
     except Exception as e:
         logger.debug(f"_user_has_pending_state({user_id}): {e}")
@@ -225,14 +257,21 @@ def _format_date(dt_value) -> str:
 
 async def _get_active_channel_id(user_id: int) -> Optional[int]:
     """
-    ✅ v2.0.0: استعلام مباشر بدل الاعتماد على DB.get_active_channel.
+    ✅ v2.0.0: استعلام مباشر.
+    🆕 v2.1.1 FIX-4: تحويل صريح إلى int (توافق PG Decimal).
     """
     try:
-        return await DB.fetchval(
+        val = await DB.fetchval(
             "SELECT active_channel FROM users WHERE user_id = ?",
             (user_id,),
             default=None,
         )
+        if val is None:
+            return None
+        try:
+            return int(val)
+        except (TypeError, ValueError):
+            return None
     except Exception as e:
         logger.debug(f"_get_active_channel_id({user_id}): {e}")
         return None
@@ -295,7 +334,12 @@ async def show_channels_list(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 
 async def _get_channels_with_stats(user_id: int):
-    """جلب كل قنوات المستخدم مع إحصائياتها."""
+    """
+    جلب كل قنوات المستخدم مع إحصائياتها.
+
+    🆕 v2.1.1 FIX-7: LEFT JOIN مجمّع بدل subqueries متعددة
+    (أداء أفضل مع كبر الحجم: >20 قناة أو >10k منشور).
+    """
     query = """
         SELECT
             uc.id AS channel_db_id,
@@ -303,16 +347,20 @@ async def _get_channels_with_stats(user_id: int):
             uc.channel_name,
             uc.banned,
             uc.created_at,
-            (SELECT COUNT(*) FROM posts p
-             WHERE p.channel_db_id = uc.id AND p.published = 0
-            ) AS unpublished,
-            (SELECT COUNT(*) FROM posts p
-             WHERE p.channel_db_id = uc.id AND p.published = 1
-            ) AS published,
-            (SELECT s.next_publish_date FROM schedule s
-             WHERE s.channel_db_id = uc.id
-            ) AS next_publish
+            COALESCE(pc.unpublished, 0) AS unpublished,
+            COALESCE(pc.published, 0) AS published,
+            s.next_publish_date AS next_publish
         FROM user_channels uc
+        LEFT JOIN (
+            SELECT channel_db_id,
+                   SUM(CASE WHEN published = 0 THEN 1 ELSE 0 END)
+                       AS unpublished,
+                   SUM(CASE WHEN published = 1 THEN 1 ELSE 0 END)
+                       AS published
+            FROM posts
+            GROUP BY channel_db_id
+        ) pc ON pc.channel_db_id = uc.id
+        LEFT JOIN schedule s ON s.channel_db_id = uc.id
         WHERE uc.user_id = ?
         ORDER BY uc.created_at DESC
     """
@@ -321,7 +369,36 @@ async def _get_channels_with_stats(user_id: int):
         return [_row_to_dict(r) for r in (rows or [])]
     except Exception as e:
         logger.error(f"❌ _get_channels_with_stats: {e}", exc_info=True)
-        return []
+        # 🆕 FIX-7: fallback للاستعلام القديم إن فشل LEFT JOIN
+        try:
+            fallback_query = """
+                SELECT
+                    uc.id AS channel_db_id,
+                    uc.channel_id,
+                    uc.channel_name,
+                    uc.banned,
+                    uc.created_at,
+                    (SELECT COUNT(*) FROM posts p
+                     WHERE p.channel_db_id = uc.id AND p.published = 0
+                    ) AS unpublished,
+                    (SELECT COUNT(*) FROM posts p
+                     WHERE p.channel_db_id = uc.id AND p.published = 1
+                    ) AS published,
+                    (SELECT s.next_publish_date FROM schedule s
+                     WHERE s.channel_db_id = uc.id
+                    ) AS next_publish
+                FROM user_channels uc
+                WHERE uc.user_id = ?
+                ORDER BY uc.created_at DESC
+            """
+            rows = await DB.fetchall(fallback_query, (user_id,))
+            logger.info(
+                "ℹ️ _get_channels_with_stats: استُخدم fallback "
+                "(subqueries) — راجع سبب فشل LEFT JOIN أعلاه")
+            return [_row_to_dict(r) for r in (rows or [])]
+        except Exception as e2:
+            logger.error(f"❌ fallback أيضاً فشل: {e2}")
+            return []
 
 
 def _build_channels_text(channels, active_channel_id) -> str:
@@ -683,7 +760,13 @@ async def channel_delete_confirm_callback(
 async def channel_delete_execute_callback(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ):
-    """تنفيذ الحذف."""
+    """
+    تنفيذ الحذف.
+
+    🆕 v2.1.1 FIX-2: إذا كانت القناة المحذوفة هي النشطة،
+    يُمسح users.active_channel (كان يُشير إلى channel_db_id
+    غير موجود).
+    """
     if not _db_ready():
         return
 
@@ -697,11 +780,35 @@ async def channel_delete_execute_callback(
         return
 
     try:
+        # 🆕 FIX-2: احفظ active_channel قبل الحذف
+        active_id = await _get_active_channel_id(user_id)
+
         success = await DB.delete_channel(user_id, ch_db_id)
 
         if not success:
             await _safe_answer(query, "⚠️ فشل الحذف", show_alert=True)
             return
+
+        # 🆕 FIX-2: امسح active_channel إذا كانت القناة النشطة
+        if active_id is not None and ch_db_id == active_id:
+            try:
+                await DB.execute(
+                    "UPDATE users SET active_channel = NULL "
+                    "WHERE user_id = ?",
+                    (user_id,))
+                logger.info(
+                    f"✅ مسح active_channel للمستخدم {user_id} "
+                    f"(القناة {ch_db_id} حُذفت)")
+            except Exception as e:
+                logger.warning(
+                    f"⚠️ فشل مسح active_channel: {e} — "
+                    f"قد يُشير إلى قناة محذوفة")
+            # إبطال كاش المستخدم
+            try:
+                from cache import invalidate_user_cache
+                await invalidate_user_cache(user_id)
+            except Exception:
+                pass
 
         await _safe_answer(query, "✅ تم الحذف", show_alert=True)
         logger.info(f"✅ حُذفت القناة {ch_db_id} بواسطة {user_id}")
@@ -1013,6 +1120,19 @@ def _extract_channel_username(text: str) -> Optional[str]:
     return None
 
 
+def _mark_channel_add_handled(context) -> None:
+    """
+    🆕 v2.1.1 FIX-1: علم صريح لـ handlers_message
+    (_handle_wait_channel_text) بأن add_channel_from_message
+    عالج الرسالة — بدل الاعتماد الهشّ على مسح الحالة.
+    """
+    try:
+        if context is not None and context.user_data is not None:
+            context.user_data["_channel_add_handled"] = True
+    except Exception as e:
+        logger.debug(f"_mark_channel_add_handled: {e}")
+
+
 async def add_channel_from_message(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ):
@@ -1020,11 +1140,15 @@ async def add_channel_from_message(
     معالج الرسائل النصية لإضافة قناة.
 
     ✅ v2.1.0 FIX-1 (WAIT-CHANNEL-ROUTING-FIX):
-      - يعمل حتى لو كان المستخدم في WAIT_CHANNEL (لم يعد "معلقاً").
+      - يعمل حتى لو كان المستخدم في WAIT_CHANNEL.
       - بعد النجاح أو الفشل: يمسح الحالة.
       - يرفع ApplicationHandlerStop لمنع
-        handlers_message._handle_wait_channel_text من
-        إظهار "❌ تعذّر معالجة معرف القناة".
+        handlers_message._handle_wait_channel_text.
+
+    🆕 v2.1.1 FIX-1 + FIX-6:
+      - علم صريح "_channel_add_handled" في context.user_data
+        لمنع المسار الثاني حتى لو فشل raise.
+      - القفل قبل كل الفحوص (أمان مستقبلي ضد async).
     """
     if not _db_ready():
         return
@@ -1036,49 +1160,8 @@ async def add_channel_from_message(
     user_id = message.from_user.id
 
     # ═══════════════════════════════════════════════════════════════
-    # ✅ v2.1.0: لا تعترض إذا كان المستخدم في حالة معلقة
-    #          (لكن حالات إضافة القناة مسموحة الآن)
+    # 🆕 v2.1.1 FIX-6: القفل قبل كل الفحوص
     # ═══════════════════════════════════════════════════════════════
-    state_str = _get_state_str(user_id)
-    is_channel_add_ctx = _is_channel_add_state(state_str)
-
-    if _user_has_pending_state(user_id):
-        logger.debug(
-            f"⏭️ add_channel_from_message: تجاهل — "
-            f"المستخدم {user_id} في حالة معلقة ({state_str})"
-        )
-        return
-
-    text = message.text.strip()
-
-    channel_username = _extract_channel_username(text)
-    if not channel_username:
-        # إذا لم تكن الصيغة صحيحة، نتحقق من نية الإضافة
-        if (context.user_data and context.user_data.get("awaiting_channel_add")) \
-                or is_channel_add_ctx:
-            try:
-                await message.reply_text(
-                    "⚠️ <b>صيغة غير صحيحة</b>\n\n"
-                    "أرسل:\n"
-                    "• <code>@my_channel</code>\n"
-                    "• <code>https://t.me/my_channel</code>",
-                    parse_mode="HTML",
-                )
-            except Exception:
-                pass
-            # 🆕 امنع handlers_message من إظهار رسالة أخرى
-            _clear_user_state(user_id)
-            if context.user_data:
-                context.user_data.pop("awaiting_channel_add", None)
-            raise ApplicationHandlerStop
-        return
-
-    logger.info(
-        f"📥 محاولة إضافة قناة: @{channel_username} من {user_id} "
-        f"(state={state_str or 'none'})"
-    )
-
-    # 🆕 v2.1.0: حماية من مسارين متوازيين
     if context.user_data is not None:
         if context.user_data.get("_adding_channel_lock"):
             logger.debug(
@@ -1087,228 +1170,300 @@ async def add_channel_from_message(
             raise ApplicationHandlerStop
         context.user_data["_adding_channel_lock"] = True
 
-    processing_msg = None
     try:
-        # ═══ فحص المستخدم ═══
-        try:
-            user_raw = await DB.get_user_full_data(user_id, include_stats=True)
-            user = _row_to_dict(user_raw)
-            if not user:
-                await _reply_or_edit(
-                    processing_msg, message,
-                    "⚠️ الرجاء إرسال /start أولاً."
-                )
-                _clear_user_state(user_id)
-                raise ApplicationHandlerStop
+        # ═══════════════════════════════════════════════════════════
+        # ✅ v2.1.0: لا تعترض إذا كان المستخدم في حالة معلقة
+        #          (لكن حالات إضافة القناة مسموحة الآن)
+        # ═══════════════════════════════════════════════════════════
+        state_str = _get_state_str(user_id)
+        is_channel_add_ctx = _is_channel_add_state(state_str)
 
-            if user.get("banned"):
-                await _reply_or_edit(
-                    processing_msg, message,
-                    "🚫 أنت محظور من استخدام البوت."
-                )
-                _clear_user_state(user_id)
-                raise ApplicationHandlerStop
-
-            if not user.get("has_subscription"):
-                await _reply_or_edit(
-                    processing_msg, message,
-                    "💎 <b>يجب أن يكون لديك اشتراك نشط</b>\n\n"
-                    "استخدم /subscribe للاشتراك."
-                )
-                _clear_user_state(user_id)
-                raise ApplicationHandlerStop
-
-            channels_count = user.get("channels_count", 0) or 0
-            active_sub_raw = await DB.get_active_subscription(user_id)
-            active_sub = _row_to_dict(active_sub_raw)
-            if active_sub:
-                max_channels = active_sub.get("max_channels", 0) or 0
-                if channels_count >= max_channels:
-                    await _reply_or_edit(
-                        processing_msg, message,
-                        f"⚠️ <b>وصلت للحد الأقصى</b>\n\n"
-                        f"عدد قنواتك: {channels_count}/{max_channels}"
-                    )
-                    _clear_user_state(user_id)
-                    raise ApplicationHandlerStop
-
-        except ApplicationHandlerStop:
-            raise
-        except Exception as e:
-            logger.error(f"❌ فحص الصلاحيات: {e}", exc_info=True)
-            await _reply_or_edit(
-                processing_msg, message,
-                "⚠️ حدث خطأ. حاول لاحقاً."
+        if _user_has_pending_state(user_id):
+            logger.debug(
+                f"⏭️ add_channel_from_message: تجاهل — "
+                f"المستخدم {user_id} في حالة معلقة ({state_str})"
             )
-            _clear_user_state(user_id)
-            raise ApplicationHandlerStop
+            return
 
-        # ═══ إرسال رسالة "جاري التحقق" ═══
-        try:
-            processing_msg = await message.reply_text(
-                f"⏳ جاري التحقق من <code>@{channel_username}</code>...",
-                parse_mode="HTML",
-            )
-        except Exception:
-            processing_msg = None
+        text = message.text.strip()
 
-        # ═══ جلب القناة ═══
-        try:
-            chat = await context.bot.get_chat(f"@{channel_username}")
-        except Exception as e:
-            logger.warning(f"⚠️ فشل جلب القناة @{channel_username}: {e}")
-            await _edit_or_send(
-                processing_msg, message,
-                f"❌ <b>لم أتمكن من الوصول للقناة</b>\n\n"
-                f"تأكد أن:\n"
-                f"• القناة موجودة\n"
-                f"• المعرّف صحيح: <code>@{channel_username}</code>\n"
-                f"• القناة عامة (public)"
-            )
-            _clear_user_state(user_id)
-            raise ApplicationHandlerStop
-
-        # ═══ فحص صلاحيات البوت ═══
-        try:
-            bot_member = await context.bot.get_chat_member(
-                chat.id, context.bot.id)
-            bot_status = getattr(bot_member, "status", "")
-
-            if bot_status not in ("administrator", "creator"):
-                await _edit_or_send(
-                    processing_msg, message,
-                    f"⚠️ <b>البوت ليس مشرفاً في القناة</b>\n\n"
-                    f"📌 القناة: <b>{chat.title}</b>\n\n"
-                    f"<b>الحل:</b>\n"
-                    f"1. أضف البوت إلى القناة\n"
-                    f"2. ارقِّه إلى <b>مشرف</b>\n"
-                    f"3. امنحه صلاحية <b>نشر الرسائل</b>\n"
-                    f"4. أعد إرسال <code>@{channel_username}</code>"
-                )
-                _clear_user_state(user_id)
-                raise ApplicationHandlerStop
-
-            can_post = getattr(bot_member, "can_post_messages", True)
-            if not can_post:
-                await _edit_or_send(
-                    processing_msg, message,
-                    f"⚠️ <b>البوت لا يملك صلاحية النشر</b>\n\n"
-                    f"امنح البوت صلاحية <b>Post Messages</b>."
-                )
-                _clear_user_state(user_id)
-                raise ApplicationHandlerStop
-
-        except ApplicationHandlerStop:
-            raise
-        except Exception as e:
-            logger.error(f"❌ فحص صلاحيات البوت: {e}", exc_info=True)
-            await _edit_or_send(
-                processing_msg, message,
-                "⚠️ لم أتمكن من التحقق من صلاحيات البوت."
-            )
-            _clear_user_state(user_id)
-            raise ApplicationHandlerStop
-
-        # ═══ إضافة القناة ═══
-        try:
-            result = await DB.add_channel(
-                user_id=user_id,
-                channel_id=chat.id,
-                channel_name=chat.title,
-                set_active=True,
-            )
-        except Exception as e:
-            logger.error(f"❌ فشل add_channel: {e}", exc_info=True)
-            await _edit_or_send(
-                processing_msg, message,
-                "❌ حدث خطأ أثناء إضافة القناة."
-            )
-            _clear_user_state(user_id)
-            raise ApplicationHandlerStop
-
-        # ═══ النتيجة ═══
-        result_d = _row_to_dict(result)
-        if result_d or result:
-            channel_name = (
-                result_d.get("channel_name")
-                if result_d else chat.title
-            ) or chat.title
-            posts_count = (
-                result_d.get("posts_count", 0)
-                if result_d else 0
-            ) or 0
-
-            success_text = (
-                f"✅ <b>تم إضافة القناة بنجاح!</b>\n\n"
-                f"📡 <b>{channel_name}</b>\n"
-                f"🆔 <code>{chat.id}</code>\n"
-                f"🔗 @{channel_username}\n\n"
-                f"📥 منشورات موجودة: {posts_count}\n"
-                f"🟢 تم تعيينها <b>القناة النشطة</b>"
-            )
-
-            keyboard = InlineKeyboardMarkup([
-                [InlineKeyboardButton("📡 قنواتي", callback_data="ch_list")],
-                [InlineKeyboardButton("➕ إضافة منشورات", callback_data="post_add")],
-                [InlineKeyboardButton("🏠 القائمة الرئيسية", callback_data="main_menu")],
-            ])
-
-            try:
-                if processing_msg:
-                    await processing_msg.edit_text(
-                        success_text, reply_markup=keyboard, parse_mode="HTML",
-                    )
-                else:
-                    await message.reply_text(
-                        success_text, reply_markup=keyboard, parse_mode="HTML",
-                    )
-            except Exception:
+        channel_username = _extract_channel_username(text)
+        if not channel_username:
+            # إذا لم تكن الصيغة صحيحة، نتحقق من نية الإضافة
+            if ((context.user_data
+                 and context.user_data.get("awaiting_channel_add"))
+                    or is_channel_add_ctx):
                 try:
                     await message.reply_text(
-                        success_text, reply_markup=keyboard, parse_mode="HTML",
+                        "⚠️ <b>صيغة غير صحيحة</b>\n\n"
+                        "أرسل:\n"
+                        "• <code>@my_channel</code>\n"
+                        "• <code>https://t.me/my_channel</code>",
+                        parse_mode="HTML",
                     )
                 except Exception:
                     pass
+                # 🆕 FIX-1: علّم handlers_message
+                _mark_channel_add_handled(context)
+                _clear_user_state(user_id)
+                if context.user_data:
+                    context.user_data.pop("awaiting_channel_add", None)
+                raise ApplicationHandlerStop
+            return
 
-            logger.info(
-                f"✅ تم إضافة القناة @{channel_username} للمستخدم {user_id}"
+        logger.info(
+            f"📥 محاولة إضافة قناة: @{channel_username} من {user_id} "
+            f"(state={state_str or 'none'})"
+        )
+
+        processing_msg = None
+        try:
+            # ═══ فحص المستخدم ═══
+            try:
+                user_raw = await DB.get_user_full_data(
+                    user_id, include_stats=True)
+                user = _row_to_dict(user_raw)
+                if not user:
+                    await _reply_or_edit(
+                        processing_msg, message,
+                        "⚠️ الرجاء إرسال /start أولاً."
+                    )
+                    _mark_channel_add_handled(context)
+                    _clear_user_state(user_id)
+                    raise ApplicationHandlerStop
+
+                if user.get("banned"):
+                    await _reply_or_edit(
+                        processing_msg, message,
+                        "🚫 أنت محظور من استخدام البوت."
+                    )
+                    _mark_channel_add_handled(context)
+                    _clear_user_state(user_id)
+                    raise ApplicationHandlerStop
+
+                if not user.get("has_subscription"):
+                    await _reply_or_edit(
+                        processing_msg, message,
+                        "💎 <b>يجب أن يكون لديك اشتراك نشط</b>\n\n"
+                        "استخدم /subscribe للاشتراك."
+                    )
+                    _mark_channel_add_handled(context)
+                    _clear_user_state(user_id)
+                    raise ApplicationHandlerStop
+
+                channels_count = user.get("channels_count", 0) or 0
+                active_sub_raw = await DB.get_active_subscription(user_id)
+                active_sub = _row_to_dict(active_sub_raw)
+                if active_sub:
+                    max_channels = active_sub.get("max_channels", 0) or 0
+                    if channels_count >= max_channels:
+                        await _reply_or_edit(
+                            processing_msg, message,
+                            f"⚠️ <b>وصلت للحد الأقصى</b>\n\n"
+                            f"عدد قنواتك: {channels_count}/{max_channels}"
+                        )
+                        _mark_channel_add_handled(context)
+                        _clear_user_state(user_id)
+                        raise ApplicationHandlerStop
+
+            except ApplicationHandlerStop:
+                raise
+            except Exception as e:
+                logger.error(f"❌ فحص الصلاحيات: {e}", exc_info=True)
+                await _reply_or_edit(
+                    processing_msg, message,
+                    "⚠️ حدث خطأ. حاول لاحقاً."
+                )
+                _mark_channel_add_handled(context)
+                _clear_user_state(user_id)
+                raise ApplicationHandlerStop
+
+            # ═══ إرسال رسالة "جاري التحقق" ═══
+            try:
+                processing_msg = await message.reply_text(
+                    f"⏳ جاري التحقق من <code>@{channel_username}</code>...",
+                    parse_mode="HTML",
+                )
+            except Exception:
+                processing_msg = None
+
+            # ═══ جلب القناة ═══
+            try:
+                chat = await context.bot.get_chat(f"@{channel_username}")
+            except Exception as e:
+                logger.warning(
+                    f"⚠️ فشل جلب القناة @{channel_username}: {e}")
+                await _edit_or_send(
+                    processing_msg, message,
+                    f"❌ <b>لم أتمكن من الوصول للقناة</b>\n\n"
+                    f"تأكد أن:\n"
+                    f"• القناة موجودة\n"
+                    f"• المعرّف صحيح: <code>@{channel_username}</code>\n"
+                    f"• القناة عامة (public)"
+                )
+                _mark_channel_add_handled(context)
+                _clear_user_state(user_id)
+                raise ApplicationHandlerStop
+
+            # ═══ فحص صلاحيات البوت ═══
+            try:
+                bot_member = await context.bot.get_chat_member(
+                    chat.id, context.bot.id)
+                bot_status = getattr(bot_member, "status", "")
+
+                if bot_status not in ("administrator", "creator"):
+                    await _edit_or_send(
+                        processing_msg, message,
+                        f"⚠️ <b>البوت ليس مشرفاً في القناة</b>\n\n"
+                        f"📌 القناة: <b>{chat.title}</b>\n\n"
+                        f"<b>الحل:</b>\n"
+                        f"1. أضف البوت إلى القناة\n"
+                        f"2. ارقِّه إلى <b>مشرف</b>\n"
+                        f"3. امنحه صلاحية <b>نشر الرسائل</b>\n"
+                        f"4. أعد إرسال <code>@{channel_username}</code>"
+                    )
+                    _mark_channel_add_handled(context)
+                    _clear_user_state(user_id)
+                    raise ApplicationHandlerStop
+
+                can_post = getattr(
+                    bot_member, "can_post_messages", True)
+                if not can_post:
+                    await _edit_or_send(
+                        processing_msg, message,
+                        f"⚠️ <b>البوت لا يملك صلاحية النشر</b>\n\n"
+                        f"امنح البوت صلاحية <b>Post Messages</b>."
+                    )
+                    _mark_channel_add_handled(context)
+                    _clear_user_state(user_id)
+                    raise ApplicationHandlerStop
+
+            except ApplicationHandlerStop:
+                raise
+            except Exception as e:
+                logger.error(
+                    f"❌ فحص صلاحيات البوت: {e}", exc_info=True)
+                await _edit_or_send(
+                    processing_msg, message,
+                    "⚠️ لم أتمكن من التحقق من صلاحيات البوت."
+                )
+                _mark_channel_add_handled(context)
+                _clear_user_state(user_id)
+                raise ApplicationHandlerStop
+
+            # ═══ إضافة القناة ═══
+            try:
+                result = await DB.add_channel(
+                    user_id=user_id,
+                    channel_id=chat.id,
+                    channel_name=chat.title,
+                    set_active=True,
+                )
+            except Exception as e:
+                logger.error(f"❌ فشل add_channel: {e}", exc_info=True)
+                await _edit_or_send(
+                    processing_msg, message,
+                    "❌ حدث خطأ أثناء إضافة القناة."
+                )
+                _mark_channel_add_handled(context)
+                _clear_user_state(user_id)
+                raise ApplicationHandlerStop
+
+            # ═══ النتيجة ═══
+            result_d = _row_to_dict(result)
+            if result_d or result:
+                channel_name = (
+                    result_d.get("channel_name")
+                    if result_d else chat.title
+                ) or chat.title
+                posts_count = (
+                    result_d.get("posts_count", 0)
+                    if result_d else 0
+                ) or 0
+
+                success_text = (
+                    f"✅ <b>تم إضافة القناة بنجاح!</b>\n\n"
+                    f"📡 <b>{channel_name}</b>\n"
+                    f"🆔 <code>{chat.id}</code>\n"
+                    f"🔗 @{channel_username}\n\n"
+                    f"📥 منشورات موجودة: {posts_count}\n"
+                    f"🟢 تم تعيينها <b>القناة النشطة</b>"
+                )
+
+                keyboard = InlineKeyboardMarkup([
+                    [InlineKeyboardButton(
+                        "📡 قنواتي", callback_data="ch_list")],
+                    [InlineKeyboardButton(
+                        "➕ إضافة منشورات", callback_data="post_add")],
+                    [InlineKeyboardButton(
+                        "🏠 القائمة الرئيسية",
+                        callback_data="main_menu")],
+                ])
+
+                try:
+                    if processing_msg:
+                        await processing_msg.edit_text(
+                            success_text,
+                            reply_markup=keyboard,
+                            parse_mode="HTML",
+                        )
+                    else:
+                        await message.reply_text(
+                            success_text,
+                            reply_markup=keyboard,
+                            parse_mode="HTML",
+                        )
+                except Exception:
+                    try:
+                        await message.reply_text(
+                            success_text,
+                            reply_markup=keyboard,
+                            parse_mode="HTML",
+                        )
+                    except Exception:
+                        pass
+
+                logger.info(
+                    f"✅ تم إضافة القناة @{channel_username} "
+                    f"للمستخدم {user_id}"
+                )
+            else:
+                await _edit_or_send(
+                    processing_msg, message,
+                    f"❌ <b>فشل إضافة القناة</b>\n\n"
+                    f"قد تكون مسجلة مسبقاً."
+                )
+
+            # 🆕 v2.1.1: مسح الحالة + منع المسار الثاني
+            _mark_channel_add_handled(context)
+            _clear_user_state(user_id)
+            if context.user_data:
+                context.user_data.pop("awaiting_channel_add", None)
+            raise ApplicationHandlerStop
+
+        except ApplicationHandlerStop:
+            raise
+        except Exception as e:
+            logger.error(
+                f"❌ add_channel_from_message غير متوقع: {e}",
+                exc_info=True,
             )
-        else:
-            await _edit_or_send(
-                processing_msg, message,
-                f"❌ <b>فشل إضافة القناة</b>\n\n"
-                f"قد تكون مسجلة مسبقاً."
-            )
-
-        # 🆕 v2.1.0: مسح الحالة + منع المسار الثاني
-        _clear_user_state(user_id)
-        if context.user_data:
-            context.user_data.pop("awaiting_channel_add", None)
-            context.user_data.pop("_adding_channel_lock", None)
-        raise ApplicationHandlerStop
-
-    except ApplicationHandlerStop:
-        # نظّف القفل لكن أعد رفع الاستثناء
+            _mark_channel_add_handled(context)
+            _clear_user_state(user_id)
+            if context.user_data:
+                context.user_data.pop("awaiting_channel_add", None)
+            try:
+                await message.reply_text(
+                    "⚠️ حدث خطأ غير متوقع. حاول مجدداً.",
+                    parse_mode="HTML",
+                )
+            except Exception:
+                pass
+            raise ApplicationHandlerStop
+    finally:
+        # 🆕 FIX-6: تنظيف القفل دائماً
         if context.user_data is not None:
             context.user_data.pop("_adding_channel_lock", None)
-        raise
-    except Exception as e:
-        logger.error(
-            f"❌ add_channel_from_message غير متوقع: {e}",
-            exc_info=True,
-        )
-        _clear_user_state(user_id)
-        if context.user_data:
-            context.user_data.pop("awaiting_channel_add", None)
-            context.user_data.pop("_adding_channel_lock", None)
-        try:
-            await message.reply_text(
-                "⚠️ حدث خطأ غير متوقع. حاول مجدداً.",
-                parse_mode="HTML",
-            )
-        except Exception:
-            pass
-        raise ApplicationHandlerStop
 
 
 async def _edit_or_send(processing_msg, message, text: str):
@@ -1332,7 +1487,7 @@ async def _edit_or_send(processing_msg, message, text: str):
 
 
 async def _reply_or_edit(processing_msg, message, text: str):
-    """🆕 v2.1.0: alias لـ _edit_or_send (للاستخدام في المسار الجديد)."""
+    """🆕 v2.1.0: alias لـ _edit_or_send."""
     await _edit_or_send(processing_msg, message, text)
 
 
@@ -1386,7 +1541,8 @@ async def posts_add_callback(
 
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton("📡 قنواتي", callback_data="ch_list")],
-        [InlineKeyboardButton("🏠 القائمة الرئيسية", callback_data="main_menu")],
+        [InlineKeyboardButton(
+            "🏠 القائمة الرئيسية", callback_data="main_menu")],
     ])
 
     try:
@@ -1442,10 +1598,12 @@ def register_channels_list_handlers(application):
 
         # ═══ اختيار/تفاصيل ═══
         application.add_handler(
-            CallbackQueryHandler(channel_select_callback, pattern=r"^ch_select:")
+            CallbackQueryHandler(
+                channel_select_callback, pattern=r"^ch_select:")
         )
         application.add_handler(
-            CallbackQueryHandler(channel_info_callback, pattern=r"^ch_info:")
+            CallbackQueryHandler(
+                channel_info_callback, pattern=r"^ch_info:")
         )
 
         # ═══ الحذف ═══
@@ -1456,12 +1614,14 @@ def register_channels_list_handlers(application):
         )
         application.add_handler(
             CallbackQueryHandler(
-                channel_delete_confirm_callback, pattern=r"^ch_delete_confirm:"
+                channel_delete_confirm_callback,
+                pattern=r"^ch_delete_confirm:"
             )
         )
         application.add_handler(
             CallbackQueryHandler(
-                channel_delete_execute_callback, pattern=r"^ch_delete_execute:"
+                channel_delete_execute_callback,
+                pattern=r"^ch_delete_execute:"
             )
         )
 
@@ -1486,9 +1646,8 @@ def register_channels_list_handlers(application):
 
         # ═══ معالج الرسائل النصية لإضافة قناة ═══
         # ✅ v2.1.0: يعمل حتى في حالة WAIT_CHANNEL.
-        #            يرفع ApplicationHandlerStop لمنع
-        #            handlers_message._handle_wait_channel_text
-        #            من إظهار رسالة مكررة.
+        # 🆕 v2.1.1 FIX-1: يرفع ApplicationHandlerStop + علم صريح
+        #                  لمنع handlers_message من إظهار رسالة مكررة.
         application.add_handler(
             MessageHandler(
                 filters.TEXT
@@ -1501,10 +1660,50 @@ def register_channels_list_handlers(application):
         )
 
         logger.info(
-            "✅ تم تسجيل handlers قائمة القنوات (v2.1.0 — "
-            "WAIT-CHANNEL-ROUTING-FIX)"
+            "✅ تم تسجيل handlers قائمة القنوات (v2.1.1 — "
+            "WAIT-CHANNEL-ROUTING-FIX + REVIEW-FIXES)"
         )
         return True
     except Exception as e:
         logger.error(f"❌ فشل تسجيل handlers: {e}", exc_info=True)
         return False
+
+
+# =====================================================================
+# 12. __all__
+# =====================================================================
+
+__all__ = [
+    "show_channels_list",
+    "channel_select_callback",
+    "channel_info_callback",
+    "channel_delete_menu_callback",
+    "channel_delete_confirm_callback",
+    "channel_delete_execute_callback",
+    "channel_recycle_callback",
+    "channel_schedule_callback",
+    "channel_schedule_set_callback",
+    "back_to_main_menu_callback",
+    "add_channel_redirect_callback",
+    "add_channel_from_message",
+    "posts_add_callback",
+    "register_channels_list_handlers",
+    "_extract_channel_username",
+    "_mark_channel_add_handled",
+]
+
+
+# =====================================================================
+# LOAD BEACON
+# =====================================================================
+
+try:
+    logger.debug(
+        "✅ handlers_channels_list v2.1.1 loaded | "
+        "fixes=(FIX-1..FIX-8) | "
+        "WAIT-CHANNEL=handled-with-flag | "
+        "row_to_dict=%s",
+        "shared" if _HAS_SHARED_ROW_TO_DICT else "fallback",
+    )
+except Exception:
+    pass
