@@ -1,8 +1,18 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-utils.py - الأدوات المساعدة للبوت (v7.10.9 — PERF-FIXES)
+utils.py - الأدوات المساعدة للبوت (v7.10.10 — HTML-FIXES)
 =================================================================================
+🆕 v7.10.10 (HTML-FIXES-2026-R4):
+    🔴 HTML-FIX-1: safe_send — parse_mode افتراضي "HTML" بدل None.
+                   (كانت وسوم <b> تظهر كنص في Telegram)
+    🔴 HTML-FIX-2: _send_media — parse_mode="HTML" افتراضي.
+    🔴 HTML-FIX-3: _send_media — تمرير parse_mode الصحيح لـ caption
+                   في voice/sticker/video_note.
+    🟡 HTML-FIX-4: safe_send — إضافة fallback ثاني للـ media بدون HTML.
+    🟡 HTML-FIX-5: TextUtils.escape_html_safe — دالة مساعدة جديدة.
+    🟢 HTML-FIX-6: تحسين logging عند تحميل ar.json.
+
 🆕 v7.10.9 (PERF-FIXES-2026-R3):
     🔴 PERF-FIX-1: get_security_settings — TTL 300s + negative cache (30s)
                     + timeout 3s صارم على كل استعلام DB.
@@ -352,6 +362,18 @@ class TextUtils:
         return html.escape(text)
 
     @staticmethod
+    def escape_html_safe(text: str) -> str:
+        """
+        🆕 HTML-FIX-5: escaping آمن للاستخدام داخل HTML.
+        يُهرّب فقط < > & (لا يلمس النص العادي).
+        """
+        if not text:
+            return ""
+        return (text.replace("&", "&amp;")
+                    .replace("<", "&lt;")
+                    .replace(">", "&gt;"))
+
+    @staticmethod
     def truncate(text: str, max_len: int = 200) -> str:
         return text[:max_len] + ("..." if len(text) > max_len else "")
 
@@ -611,9 +633,16 @@ class TranslationManager:
         try:
             with open(file_path, "r", encoding="utf-8") as f:
                 loaded = json.load(f)
+            # 🆕 HTML-FIX-6: تسجيل أوضح مع النوع
+            marker = "🟢 (افتراضي)" if lang == cls._default_lang else ""
             logger.info(
-                f"✅ تم تحميل ملف الترجمة {lang}.json: {len(loaded)} مفتاح")
+                f"✅ تم تحميل ملف الترجمة {lang}.json: {len(loaded)} مفتاح {marker}")
         except FileNotFoundError:
+            # 🆕 HTML-FIX-6: تنبيه واضح إذا الافتراضي مفقود
+            if lang == cls._default_lang:
+                logger.error(
+                    f"❌ ملف اللغة الافتراضية {lang}.json مفقود! "
+                    f"تحقق من {file_path}")
             if lang != cls._default_lang:
                 return cls._load_translation_cached(cls._default_lang)
             loaded = {}
@@ -1141,10 +1170,15 @@ class KeyboardFactory:
         try:
             with open(file_path, "r", encoding="utf-8") as f:
                 loaded = json.load(f)
+                marker = "🟢 (افتراضي)" if lang == cls._default_lang else ""
                 logger.info(
                     f"✅ تم تحميل buttons_config_{lang}.json: "
-                    f"{len(loaded.get('texts', {}))} مفتاح")
+                    f"{len(loaded.get('texts', {}))} مفتاح {marker}")
         except FileNotFoundError:
+            if lang == cls._default_lang:
+                logger.error(
+                    f"❌ ملف الأزرار الافتراضي buttons_config_{lang}.json "
+                    f"مفقود! تحقق من {file_path}")
             if lang != cls._default_lang:
                 return cls._load_config_for_lang(cls._default_lang)
             loaded = {"texts": cls._default_texts, "menus": {}}
@@ -2067,8 +2101,40 @@ async def _handle_chat_migrated(chat_id: int, new_chat_id: int) -> None:
 
 
 async def _send_media(bot, chat_id, media_type, media_file_id,
-                      caption=None, reply_markup=None, parse_mode=None, **kwargs):
+                      caption=None, reply_markup=None,
+                      parse_mode: str = "HTML",  # 🆕 HTML-FIX-2
+                      **kwargs):
+    """
+    🆕 HTML-FIX-2 + HTML-FIX-3:
+    - parse_mode="HTML" افتراضي.
+    - تمرير parse_mode الصحيح لـ caption في voice/sticker/video_note.
+    """
     _reply_to = kwargs.get('reply_to_message_id')
+
+    async def _send_caption_followup(extra_kwargs=None):
+        """🆕 HTML-FIX-3: إرسال caption منفصل مع parse_mode الصحيح."""
+        if not caption:
+            return
+        caption_kwargs = {}
+        if _reply_to is not None:
+            caption_kwargs['reply_to_message_id'] = _reply_to
+        if extra_kwargs:
+            caption_kwargs.update(extra_kwargs)
+        try:
+            await bot.send_message(
+                chat_id, caption, parse_mode=parse_mode, **caption_kwargs)
+        except BadRequest as _e:
+            if "can't parse entities" in str(_e).lower() \
+               or "parse" in str(_e).lower():
+                # fallback بدون parse_mode
+                with suppress(Exception):
+                    await bot.send_message(
+                        chat_id, caption, parse_mode=None, **caption_kwargs)
+            else:
+                logger.warning("⚠️ caption-followup BadRequest: %s", _e)
+        except Exception as _e:
+            logger.warning("⚠️ caption-followup: %s", _e)
+
     if media_type == 'photo':
         return await bot.send_photo(
             chat_id, media_file_id, caption=caption,
@@ -2088,13 +2154,7 @@ async def _send_media(bot, chat_id, media_type, media_file_id,
     elif media_type == 'voice':
         sent = await bot.send_voice(
             chat_id, media_file_id, reply_markup=reply_markup, **kwargs)
-        if caption:
-            caption_kwargs = {}
-            if _reply_to is not None:
-                caption_kwargs['reply_to_message_id'] = _reply_to
-            with suppress(Exception):
-                await bot.send_message(
-                    chat_id, caption, parse_mode=parse_mode, **caption_kwargs)
+        await _send_caption_followup()  # 🆕 HTML-FIX-3
         return sent
     elif media_type == 'animation':
         return await bot.send_animation(
@@ -2103,24 +2163,12 @@ async def _send_media(bot, chat_id, media_type, media_file_id,
     elif media_type == 'sticker':
         sent = await bot.send_sticker(
             chat_id, media_file_id, reply_markup=reply_markup)
-        if caption:
-            caption_kwargs = {}
-            if _reply_to is not None:
-                caption_kwargs['reply_to_message_id'] = _reply_to
-            with suppress(Exception):
-                await bot.send_message(
-                    chat_id, caption, parse_mode=parse_mode, **caption_kwargs)
+        await _send_caption_followup()  # 🆕 HTML-FIX-3
         return sent
     elif media_type == 'video_note':
         sent = await bot.send_video_note(
             chat_id, media_file_id, reply_markup=reply_markup)
-        if caption:
-            caption_kwargs = {}
-            if _reply_to is not None:
-                caption_kwargs['reply_to_message_id'] = _reply_to
-            with suppress(Exception):
-                await bot.send_message(
-                    chat_id, caption, parse_mode=parse_mode, **caption_kwargs)
+        await _send_caption_followup()  # 🆕 HTML-FIX-3
         return sent
     else:
         return await bot.send_message(
@@ -2129,7 +2177,16 @@ async def _send_media(bot, chat_id, media_type, media_file_id,
 
 
 async def safe_send(bot, chat_id: int, text: str, reply_markup=None,
-                    parse_mode: str = None, **kwargs):
+                    parse_mode: str = "HTML",  # 🆕 HTML-FIX-1
+                    **kwargs):
+    """
+    🆕 HTML-FIX-1: parse_mode افتراضي "HTML" بدل None.
+    🆕 HTML-FIX-4: fallback ثاني للـ media بدون HTML.
+
+    عند فشل Parse:
+    - نص: يُعاد بـ parse_mode=None
+    - media: يُعاد بـ parse_mode=None
+    """
     if not text and not any(
         k in kwargs for k in ['photo', 'video', 'document', 'audio',
                               'voice', 'animation', 'sticker', 'video_note']
@@ -2245,6 +2302,7 @@ async def safe_send(bot, chat_id: int, text: str, reply_markup=None,
         except BadRequest as e:
             error_msg = str(e).lower()
             if "can't parse entities" in error_msg or "parse" in error_msg:
+                # 🆕 HTML-FIX-4: fallback شامل (نص + media)
                 try:
                     if media_type:
                         return await _send_media(
@@ -2258,7 +2316,9 @@ async def safe_send(bot, chat_id: int, text: str, reply_markup=None,
                             reply_markup=reply_markup,
                             parse_mode=None, **kwargs)
                 except Exception as e2:
-                    logger.error("❌ فشل الإرسال النهائي: %s", e2)
+                    logger.error("❌ فشل الإرسال النهائي (no-parse): %s", e2)
+                    return None
+            logger.warning("⚠️ BadRequest (attempt %d): %s", attempt + 1, e)
             return None
         except Exception as e:
             logger.warning("⚠️ فشل الإرسال (attempt %d): %s", attempt + 1, e)
@@ -4353,6 +4413,8 @@ __all__ = [
     # 🆕 PERF-FIX-5: للاختبارات
     '_security_settings_cache', '_sec_settings_neg_cache',
     '_security_stats_cache',
+    # 🆕 HTML-FIX: للاختبارات
+    '_send_media',
 ]
 
 
@@ -4362,7 +4424,8 @@ __all__ = [
 
 try:
     logger.info(
-        "🛡️ utils.py v7.10.9 PERF-FIXES loaded | "
+        "🛡️ utils.py v7.10.10 HTML-FIXES loaded | "
+        "safe_send=HTML(default) | _send_media=HTML(default) | "
         "Detectors=lazy+async | Langs=%d | Buttons=✅ | "
         "Security-Bridge=✅(A3) | Penalty=✅(DEV1) | "
         "ChatMigrated=✅(%d ops incl. log_channel_id) | "
