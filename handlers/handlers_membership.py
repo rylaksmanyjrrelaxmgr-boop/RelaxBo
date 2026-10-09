@@ -2,8 +2,29 @@
 # -*- coding: utf-8 -*-
 
 """
-handlers_membership.py - مراقبة إضافة/إزالة البوت (v1.3.1-final)
+handlers_membership.py - مراقبة إضافة/إزالة البوت (v1.3.2-final)
 =====================================================================
+🆕 v1.3.2-final — POST-AUDIT FIXES (D–H):
+    🔴 FIX-D: _restore_channel_if_soft_deleted — تصفير banned=0 أيضاً
+              عند الاسترجاع. السبب: عند طرد البوت (Forbidden أثناء
+              النشر) كان يُضبط banned=1. لاحقاً عند الإزالة يُضبط
+              removed_at. عند إعادة الإضافة، كانت removed_at تُصفَّر
+              فقط — بينما banned=1 يبقى → القناة تُظهر "مُسترجَعة"
+              لكن لا تنشر أبداً (كل الاستعلامات تشترط banned=0).
+              الأثر: إرباك المستخدم + شلل النشر بعد الاسترجاع.
+    🟠 FIX-E: _recent_reports — إضافة حد أقصى _MAX_RECENT_REPORTS
+              مع pruning LRU عند التجاوز. السبب: بدون حد، لو تفاعل
+              البوت مع آلاف القنوات دون إضافات فعلية، الذاكرة تتضخم
+              (prune TTL الحالي يعمل فقط عند _should_send=True).
+    🟠 FIX-F: _save_addition_to_db — رفع مستوى الفشل من debug → warning
+              مع نوع الاستثناء. السبب: الفشل المتكرر (schema قديم،
+              أعمدة مفقودة) كان صامتاً ويصعب تشخيصه.
+    🟡 FIX-G: _ensure_table_exists — asyncio.Lock للـ double-check
+              بدل bool فقط. يضمن تزامن صحيح تحت coroutines متعددة.
+    🟡 FIX-H: _build_report_text — تصحيح رسالة "منشوراتها (N صف)"
+              إلى "N صف في user_channels" (كانت مضلِّلة — N هو عدد
+              صفوف user_channels، وليس المنشورات).
+
 🆕 v1.3.1-final — POST-AUDIT FIXES:
     🔴 FIX-A: _get_effective_log_channel — استخدام
               _sql_get_setting_value() بدل الاستعلام الخام.
@@ -38,6 +59,7 @@ handlers_membership.py - مراقبة إضافة/إزالة البوت (v1.3.1-f
 =====================================================================
 """
 
+import asyncio
 import html
 import logging
 import time
@@ -73,87 +95,99 @@ logger = logging.getLogger(__name__)
 _DEBOUNCE_SECONDS = 30.0
 _DEBOUNCE_STALE_AGE = _DEBOUNCE_SECONDS * 20  # 10 دقائق
 
+# ✅ v1.3.2 FIX-E: حد أقصى لعدد الإدخالات في _recent_reports
+_MAX_RECENT_REPORTS = 10000
+
 _OUT_STATUSES = frozenset(('left', 'kicked'))
 _IN_STATUSES = frozenset(('member', 'administrator'))
 
 
 # ═════════════════════════════════════════════════════════════════════
 # حالة الجدول
+# ✅ v1.3.2 FIX-G: asyncio.Lock للـ double-check
 # ═════════════════════════════════════════════════════════════════════
 
 _table_created: bool = False
+_table_lock: asyncio.Lock = asyncio.Lock()
 
 
 async def _ensure_table_exists() -> None:
     """
     ✅ v1.2.0 (FIX-4..7): إنشاء جدول bot_addition_log.
+    ✅ v1.3.2 FIX-G: double-checked locking تحت asyncio.Lock.
 
     - PostgreSQL/MySQL: يُنشأ من database_tables.py → فحص فقط
     - SQLite: إنشاء محلي (للتوافق)
     """
     global _table_created
+
     if _table_created:
         return
 
-    try:
-        if getattr(DB, 'USE_POSTGRES', False) or \
-           getattr(DB, 'USE_MYSQL', False):
-            try:
-                if getattr(DB, 'USE_POSTGRES', False):
-                    exists = await DB.fetchval(
-                        "SELECT 1 FROM information_schema.tables "
-                        "WHERE table_name = 'bot_addition_log' "
-                        "AND table_schema = current_schema()"
-                    )
-                else:
-                    exists = await DB.fetchval(
-                        "SELECT 1 FROM information_schema.tables "
-                        "WHERE table_name = 'bot_addition_log' "
-                        "AND table_schema = DATABASE()"
-                    )
+    async with _table_lock:
+        if _table_created:
+            return
 
-                if exists:
-                    _table_created = True
+        try:
+            if getattr(DB, 'USE_POSTGRES', False) or \
+               getattr(DB, 'USE_MYSQL', False):
+                try:
+                    if getattr(DB, 'USE_POSTGRES', False):
+                        exists = await DB.fetchval(
+                            "SELECT 1 FROM information_schema.tables "
+                            "WHERE table_name = 'bot_addition_log' "
+                            "AND table_schema = current_schema()"
+                        )
+                    else:
+                        exists = await DB.fetchval(
+                            "SELECT 1 FROM information_schema.tables "
+                            "WHERE table_name = 'bot_addition_log' "
+                            "AND table_schema = DATABASE()"
+                        )
+
+                    if exists:
+                        _table_created = True
+                        logger.debug(
+                            "✅ جدول bot_addition_log موجود "
+                            "(مُنشأ من database_tables.py)")
+                        return
+                    else:
+                        logger.warning(
+                            "⚠️ bot_addition_log غير موجود على "
+                            f"{'PostgreSQL' if getattr(DB, 'USE_POSTGRES', False) else 'MySQL'} "
+                            "— تأكد من رفع database_tables.py المُصحَّح")
+                        return
+                except Exception as e:
                     logger.debug(
-                        "✅ جدول bot_addition_log موجود "
-                        "(مُنشأ من database_tables.py)")
+                        f"_ensure_table_exists check failed: {e}")
                     return
-                else:
-                    logger.warning(
-                        "⚠️ bot_addition_log غير موجود على "
-                        f"{'PostgreSQL' if getattr(DB, 'USE_POSTGRES', False) else 'MySQL'} "
-                        "— تأكد من رفع database_tables.py المُصحَّح")
-                    return
-            except Exception as e:
-                logger.debug(
-                    f"_ensure_table_exists check failed: {e}")
-                return
 
-        # SQLite
-        await DB.execute(
-            "CREATE TABLE IF NOT EXISTS bot_addition_log ("
-            "id INTEGER PRIMARY KEY AUTOINCREMENT, "
-            "chat_id INTEGER NOT NULL, "
-            "chat_title TEXT, "
-            "chat_type TEXT, "
-            "chat_username TEXT, "
-            "added_by_id INTEGER NOT NULL, "
-            "added_by_name TEXT, "
-            "added_by_username TEXT, "
-            "bot_status TEXT, "
-            "added_at TEXT NOT NULL"
-            ")"
-        )
-        _table_created = True
-        logger.debug("✅ جدول bot_addition_log جاهز (SQLite)")
+            # SQLite
+            await DB.execute(
+                "CREATE TABLE IF NOT EXISTS bot_addition_log ("
+                "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+                "chat_id INTEGER NOT NULL, "
+                "chat_title TEXT, "
+                "chat_type TEXT, "
+                "chat_username TEXT, "
+                "added_by_id INTEGER NOT NULL, "
+                "added_by_name TEXT, "
+                "added_by_username TEXT, "
+                "bot_status TEXT, "
+                "added_at TEXT NOT NULL"
+                ")"
+            )
+            _table_created = True
+            logger.debug("✅ جدول bot_addition_log جاهز (SQLite)")
 
-    except Exception as e:
-        logger.debug(
-            f"_ensure_table_exists: {type(e).__name__}: {e}")
+        except Exception as e:
+            logger.debug(
+                f"_ensure_table_exists: {type(e).__name__}: {e}")
 
 
 # ═════════════════════════════════════════════════════════════════════
 # Debounce
+# ✅ v1.3.2 FIX-E: حد أقصى + pruning LRU
 # ═════════════════════════════════════════════════════════════════════
 
 _recent_reports: Dict[int, float] = {}
@@ -163,12 +197,38 @@ def _should_send(chat_id: int) -> bool:
     if chat_id is None:
         return False
     now = time.monotonic()
+
+    # ✅ FIX-E: pruning TTL عند كل فحص (ليس فقط بعد النجاح)
+    # + cap على الحجم
+    if len(_recent_reports) > 0:
+        try:
+            _prune_recent_reports()
+        except Exception:
+            pass
+
     last = _recent_reports.get(chat_id, 0.0)
     if now - last < _DEBOUNCE_SECONDS:
         logger.debug(
             f"⏭️ report debounced for chat {chat_id} "
             f"(elapsed={now - last:.1f}s)")
         return False
+
+    # ✅ FIX-E: إن امتلأ، نُفرغ 25% من الأقدم (LRU بسيط)
+    if len(_recent_reports) >= _MAX_RECENT_REPORTS:
+        try:
+            sorted_items = sorted(
+                _recent_reports.items(), key=lambda kv: kv[1])
+            remove_n = max(1, len(sorted_items) // 4)
+            for k, _ in sorted_items[:remove_n]:
+                _recent_reports.pop(k, None)
+            logger.warning(
+                f"⚠️ _recent_reports تجاوز الحد "
+                f"({_MAX_RECENT_REPORTS}) — حُذف {remove_n} "
+                f"من الأقدم (المتبقي: {len(_recent_reports)})")
+        except Exception as e:
+            logger.debug(f"_recent_reports cap prune: {e}")
+            _recent_reports.clear()
+
     _recent_reports[chat_id] = now
     return True
 
@@ -282,6 +342,7 @@ def _normalize_datetime(value: Any) -> datetime:
 # ═════════════════════════════════════════════════════════════════════
 # ✅ v1.3.0 (FIX-11): استرجاع تلقائي للقناة المُعلَّمة كمُزالة
 # ✅ v1.3.1 FIX-B: تحسين التسجيل
+# ✅ v1.3.2 FIX-D: تصفير banned=0 أيضاً + تصحيح رسالة اللوج
 # ═════════════════════════════════════════════════════════════════════
 
 async def _restore_channel_if_soft_deleted(chat_id: int) -> int:
@@ -291,7 +352,13 @@ async def _restore_channel_if_soft_deleted(chat_id: int) -> int:
     عند إعادة إضافة البوت لقناة كانت مُزالة سابقاً (Soft delete)،
     تُلغى العلامة تلقائياً + تُستعاد القناة مع منشوراتها.
 
-    ⚠️ v1.3.1 FIX-B: التسجيل رُفع لمستوى أوضح:
+    ✅ v1.3.2 FIX-D: يُصفَّر banned=0 أيضاً.
+       السبب: عند طرد البوت (Forbidden أثناء النشر) يُضبط banned=1.
+       لاحقاً عند الإزالة يُضبط removed_at. عند إعادة الإضافة،
+       كانت removed_at تُصفَّر فقط → banned=1 يبقى → القناة لا تنشر
+       أبداً. الآن: استرجاع كامل (removed_at=NULL, banned=0).
+
+    ✅ v1.3.1 FIX-B: التسجيل رُفع لمستوى أوضح:
        - نجاح حقيقي → logger.info (كان debug)
        - فشل استعلام → logger.warning (كان debug في caller)
        - عدم وجود علامة → logger.debug (طبيعي، لا يهم)
@@ -306,9 +373,10 @@ async def _restore_channel_if_soft_deleted(chat_id: int) -> int:
         return 0
 
     try:
+        # ✅ FIX-D: تصفير banned=0 مع removed_at=NULL
         result = await DB.execute(
             "UPDATE user_channels "
-            "SET removed_at = NULL, removal_reason = NULL "
+            "SET removed_at = NULL, removal_reason = NULL, banned = 0 "
             "WHERE channel_id = ? AND removed_at IS NOT NULL",
             (chat_id,),
         )
@@ -319,9 +387,10 @@ async def _restore_channel_if_soft_deleted(chat_id: int) -> int:
             restored = result
 
         if restored > 0:
+            # ✅ FIX-D: رسالة دقيقة — N صف في user_channels (ليس منشورات)
             logger.info(
-                f"♻️ استُرجعت القناة {chat_id} + منشوراتها "
-                f"({restored} صف) — أُلغيت علامة الإزالة"
+                f"♻️ استُرجعت القناة {chat_id}: "
+                f"removed_at=NULL, banned=0 ({restored} صف في user_channels)"
             )
         else:
             logger.debug(
@@ -338,8 +407,9 @@ async def _restore_channel_if_soft_deleted(chat_id: int) -> int:
         if "column" in err_msg.lower() or "unknown" in err_msg.lower():
             logger.warning(
                 f"⚠️ _restore_channel_if_soft_deleted({chat_id}): "
-                f"عمود removed_at/removal_reason غير موجود في schema "
-                f"— تأكد من migrations ({err_type}: {err_msg})"
+                f"عمود removed_at/removal_reason/banned غير موجود "
+                f"في schema — تأكد من migrations "
+                f"({err_type}: {err_msg})"
             )
         else:
             logger.warning(
@@ -426,6 +496,7 @@ async def _get_effective_log_channel(
 
 # ═════════════════════════════════════════════════════════════════════
 # حفظ في قاعدة البيانات
+# ✅ v1.3.2 FIX-F: رفع مستوى الفشل من debug → warning
 # ═════════════════════════════════════════════════════════════════════
 
 async def _save_addition_to_db(
@@ -442,6 +513,7 @@ async def _save_addition_to_db(
     حفظ حدث الإضافة في قاعدة البيانات.
 
     ✅ v1.2.2 (FIX-9): يمرر datetime دائماً لـ added_at.
+    ✅ v1.3.2 FIX-F: الفشل يُسجَّل كـ warning مع نوع الاستثناء.
     """
     try:
         await _ensure_table_exists()
@@ -472,9 +544,23 @@ async def _save_addition_to_db(
         )
         return True
     except Exception as e:
-        logger.debug(
-            f"_save_addition_to_db failed: "
-            f"{type(e).__name__}: {e}")
+        # ✅ FIX-F: warning بدل debug — الفشل المتكرر يجب أن يظهر
+        err_type = type(e).__name__
+        err_msg = str(e)[:200]
+        # كشف خاص: جدول مفقود (schema قديم على PG/MySQL)
+        if "does not exist" in err_msg.lower() or \
+           "no such table" in err_msg.lower():
+            logger.warning(
+                f"⚠️ _save_addition_to_db({chat_id}): "
+                f"جدول bot_addition_log غير موجود — "
+                f"تأكد من database_tables.py "
+                f"({err_type}: {err_msg})"
+            )
+        else:
+            logger.warning(
+                f"⚠️ _save_addition_to_db({chat_id}): "
+                f"{err_type}: {err_msg}"
+            )
         return False
 
 
@@ -640,6 +726,7 @@ async def handle_my_chat_member(
 
     يُرسل تقريراً لقناة السجل عند الإضافة.
     ✅ v1.3.0: يستدعي _restore_channel_if_soft_deleted تلقائياً.
+    ✅ v1.3.2 FIX-D: الاسترجاع يُصفّر banned=0 أيضاً.
     """
     result = update.my_chat_member
     if result is None:
@@ -678,7 +765,8 @@ async def handle_my_chat_member(
     _prune_recent_reports()
 
     # ═══════════════════════════════════════════════════════════
-    # ✅ v1.3.0 (FIX-11): استرجاع تلقائي إن كانت مُعلَّمة كمُزالة
+    # ✅ v1.3.0 (FIX-11) + v1.3.2 (FIX-D):
+    # استرجاع تلقائي إن كانت مُعلَّمة كمُزالة (مع banned=0)
     # ═══════════════════════════════════════════════════════════
     try:
         restored = await _restore_channel_if_soft_deleted(chat.id)
@@ -819,7 +907,7 @@ def register_handlers(application) -> None:
         application.add_handler(handler, group=-1)
         logger.info(
             "✅ تم تسجيل ChatMemberHandler لمراقبة "
-            "إضافة/إزالة البوت (v1.3.1)"
+            "إضافة/إزالة البوت (v1.3.2)"
         )
     except Exception as e:
         logger.error(
@@ -841,12 +929,14 @@ __all__ = [
     "_save_addition_to_db",
     "_ensure_table_exists",
     "_normalize_datetime",
-    "_restore_channel_if_soft_deleted",   # ✅ v1.3.0
+    "_restore_channel_if_soft_deleted",   # ✅ v1.3.0 + v1.3.2 FIX-D
     "_build_report_text",
     "_build_report_keyboard",
     "_try_get_chat_photo",
     "_recent_reports",
     "_table_created",
+    "_table_lock",                         # ✅ v1.3.2 FIX-G
+    "_MAX_RECENT_REPORTS",                 # ✅ v1.3.2 FIX-E
     "_DEBOUNCE_SECONDS",
     "_DEBOUNCE_STALE_AGE",
     "_OUT_STATUSES",
