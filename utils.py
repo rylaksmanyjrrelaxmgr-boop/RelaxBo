@@ -1,15 +1,29 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-utils.py - الأدوات المساعدة للبوت (v7.10.7 — REVIEW-FIXES-2026)
+utils.py - الأدوات المساعدة للبوت (v7.10.8 — REVIEW-FIXES-2026-R2)
 =================================================================================
+🆕 v7.10.8 (REVIEW-FIXES-2026-R2):
+    🔴 FIX-MIG1: _CHAT_MIGRATION_TABLES — إضافة (table, column) مزدوجة
+                 لتغطية bot_groups.log_channel_id (كان يُترك بالـ chat_id
+                 القديم بعد migration → فشل إرسال السجل).
+    🔴 FIX-WH2: _NON_RETRYABLE_WEBHOOK_ERRORS — توسيع ليشمل
+                jsondecodeerror/typeerror/valueerror/keyerror، منعاً
+                لحلقة 500 → إعادة إرسال لا نهائية.
+    🟡 FIX-PUB1: _publish_post — تسجيل warn عند فشل caption-follow-up
+                 (voice/sticker/video_note) — كان صامتاً بـ suppress.
+    🟡 FIX-AUTH1: _do_auth_check — UNION بدل UNION ALL لتوقف أسرع.
+    🟡 FIX-MIG2: _handle_chat_migrated invocation — task tracking عبر
+                 _warmup_bg_tasks لمنع تسرّب مهام غير مُلغاة.
+    🟡 FIX-DEV1: apply_penalty — allow owner to test self-penalty.
+
 🆕 v7.10.7 (REVIEW-FIXES-2026):
-    🔴 FIX-A3: get_security_settings — جدول group_security (كان group_settings).
-    🔴 FIX-B4: invalidate_auth_cache — تنفيذ فعلي بدل `return None`.
-    🔴 FIX-B5: _handle_chat_migrated — تحديث 16 جدولاً + task tracking.
+    🔴 FIX-A3: get_security_settings — جدول group_security.
+    🔴 FIX-B4: invalidate_auth_cache — تنفيذ فعلي.
+    🔴 FIX-B5: _handle_chat_migrated — 16 جدولاً + task tracking.
     🔴 FIX-D15: report_internal_timeout — مسار منفصل عن report_429.
     🟡 FIX-D14: _ARABIC_TEXT_PATTERN — نطاقات عربية موسّعة.
-    🟡 FIX-SC1: SmartCache.get_or_set — Task كـ key بدل id(task).
+    🟡 FIX-SC1: SmartCache.get_or_set — Task كـ key.
     🟡 FIX-WH1: webhook_handler — 500 لأخطاء التهيئة.
     🟡 FIX-EX1: _PUBLISH_TIMEOUTS قبل __all__.
     🟡 FIX-SC2: _security_settings_cache — monotonic + prune دوري.
@@ -336,7 +350,7 @@ class TextUtils:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# 3. RateLimiter (🆕 FIX-D15)
+# 3. RateLimiter
 # ═══════════════════════════════════════════════════════════════════════════
 
 class RateLimiter:
@@ -1814,6 +1828,11 @@ async def get_min_publish_interval() -> int:
 # ═══════════════════════════════════════════════════════════════════════════
 
 async def _do_auth_check(bot, chat_id: int, user_id: int) -> bool:
+    """
+    فحص صلاحيات في مجموعة.
+
+    🆕 v7.10.8 FIX-AUTH1: UNION (بدون ALL) لتوقف أسرع عند أول مطابقة.
+    """
     try:
         member = await bot.get_chat_member(chat_id, user_id)
         if member.status in ('administrator', 'creator'):
@@ -1822,13 +1841,22 @@ async def _do_auth_check(bot, chat_id: int, user_id: int) -> bool:
         logger.debug(f"Telegram API auth check failed: {e}")
     try:
         row = await DB.fetchone("""
-            SELECT 1 FROM hidden_owner_groups WHERE chat_id=? AND owner_id=?
-            UNION ALL
-            SELECT 1 FROM hidden_admins WHERE chat_id=? AND admin_id=?
-            UNION ALL
-            SELECT 1 FROM anonymous_admins WHERE chat_id=? AND (user_id=? OR (user_id IS NULL AND anonymous_id=?))
+            SELECT 1 FROM (
+                SELECT 1 FROM hidden_owner_groups
+                    WHERE chat_id=? AND owner_id=?
+                UNION
+                SELECT 1 FROM hidden_admins
+                    WHERE chat_id=? AND admin_id=?
+                UNION
+                SELECT 1 FROM anonymous_admins
+                    WHERE chat_id=? AND (
+                        user_id=?
+                        OR (user_id IS NULL AND anonymous_id=?)
+                    )
+            ) AS x
             LIMIT 1
-        """, (chat_id, user_id, chat_id, user_id, chat_id, user_id, user_id))
+        """, (chat_id, user_id, chat_id, user_id,
+              chat_id, user_id, user_id))
         if row is not None:
             return True
     except Exception as e:
@@ -1924,62 +1952,79 @@ async def check_bot_permissions(bot, chat_id: int) -> dict:
 # 12. إرسال آمن + ChatMigrated
 # ═══════════════════════════════════════════════════════════════════════════
 
-# 🆕 FIX-B5: قائمة الجداول التي تحتاج تحديث chat_id
-_CHAT_MIGRATION_TABLES: Tuple[Tuple[str, bool], ...] = (
-    ("bot_groups", True),
-    ("user_groups_link", False),
-    ("group_security", True),
-    ("user_penalties", False),
-    ("user_warnings", False),
-    ("user_violations", False),
-    ("admin_logs", False),
-    ("auto_replies", False),
-    ("hidden_owner_groups", False),
-    ("hidden_admins", False),
-    ("anonymous_admins", False),
-    ("banned_words", False),
-    ("chat_locks", True),
-    ("bot_addition_log", False),
-    ("group_admins", False),
-    ("group_rules", True),
-    ("user_messages", False),
-    ("violation_penalties", False),
+# 🆕 v7.10.8 FIX-MIG1: (table, column, has_unique)
+# يسمح بترحيل عدة أعمدة في نفس الجدول (bot_groups.chat_id + log_channel_id).
+_CHAT_MIGRATION_TABLES: Tuple[Tuple[str, str, bool], ...] = (
+    # (table, column, has_unique)
+    ("bot_groups", "chat_id", True),
+    ("bot_groups", "log_channel_id", False),   # 🆕 FIX-MIG1
+    ("user_groups_link", "chat_id", False),
+    ("group_security", "chat_id", True),
+    ("user_penalties", "chat_id", False),
+    ("user_warnings", "chat_id", False),
+    ("user_violations", "chat_id", False),
+    ("admin_logs", "chat_id", False),
+    ("auto_replies", "chat_id", False),
+    ("hidden_owner_groups", "chat_id", False),
+    ("hidden_admins", "chat_id", False),
+    ("anonymous_admins", "chat_id", False),
+    ("banned_words", "chat_id", False),
+    ("chat_locks", "chat_id", True),
+    ("bot_addition_log", "chat_id", False),
+    ("group_admins", "chat_id", False),
+    ("group_rules", "chat_id", True),
+    ("user_messages", "chat_id", False),
+    ("violation_penalties", "chat_id", False),
 )
 
 
 async def _handle_chat_migrated(chat_id: int, new_chat_id: int) -> None:
     """
-    🆕 v7.10.7 FIX-B5: تحديث 16+ جدولاً (كان 2 فقط).
+    🆕 v7.10.7 FIX-B5 + v7.10.8 FIX-MIG1:
+    تحديث الأعمدة في الجداول المرتبطة بالمجموعة.
+
+    - bot_groups: chat_id (PK) + log_channel_id (عمود إضافي).
+    - الجداول ذات has_unique=True: pre-DELETE لتجنّب تعارض UNIQUE.
     """
     try:
         logger.warning(
-            "🔄 ChatMigrated: %s → %s — تحديث %d جدول",
+            "🔄 ChatMigrated: %s → %s — تحديث %d عمود",
             chat_id, new_chat_id, len(_CHAT_MIGRATION_TABLES))
         success_count = 0
-        failed_tables: List[str] = []
-        for table, has_unique in _CHAT_MIGRATION_TABLES:
+        failed: List[str] = []
+        for table, column, has_unique in _CHAT_MIGRATION_TABLES:
             if not re.match(r"^[a-zA-Z_][a-zA-Z0-9_]*$", table):
+                continue
+            if not re.match(r"^[a-zA-Z_][a-zA-Z0-9_]*$", column):
                 continue
             try:
                 if has_unique:
                     try:
                         await DB.execute(
-                            f"DELETE FROM {table} WHERE chat_id = ?",
+                            f"DELETE FROM {table} WHERE {column} = ?",
                             (new_chat_id,))
                     except Exception as _de:
-                        logger.debug("ChatMigrated pre-delete %s: %s",
-                                     table, _de)
+                        logger.debug(
+                            "ChatMigrated pre-delete %s.%s: %s",
+                            table, column, _de)
                 await DB.execute(
-                    f"UPDATE {table} SET chat_id = ? WHERE chat_id = ?",
+                    f"UPDATE {table} SET {column} = ? WHERE {column} = ?",
                     (new_chat_id, chat_id))
                 success_count += 1
             except Exception as _e:
                 err_lower = str(_e).lower()
-                if "no such table" in err_lower or "doesn't exist" in err_lower:
-                    logger.debug("ChatMigrated: %s غير موجود", table)
+                if ("no such table" in err_lower
+                        or "doesn't exist" in err_lower
+                        or "no such column" in err_lower
+                        or "unknown column" in err_lower                        or "undefined column" in err_lower):
+                    logger.debug(
+                        "ChatMigrated: %s.%s غير موجود",
+                        table, column)
                     continue
-                failed_tables.append(table)
-                logger.warning("⚠️ ChatMigrated: %s فشل: %s", table, _e)
+                failed.append(f"{table}.{column}")
+                logger.warning(
+                    "⚠️ ChatMigrated: %s.%s فشل: %s",
+                    table, column, _e)
         try:
             from cache import groups_cache as _gc
             with suppress(Exception):
@@ -1993,14 +2038,19 @@ async def _handle_chat_migrated(chat_id: int, new_chat_id: int) -> None:
             invalidate_security_settings_cache(new_chat_id)
         except Exception:
             pass
-        if failed_tables:
+        try:
+            invalidate_auth_cache(chat_id)
+            invalidate_auth_cache(new_chat_id)
+        except Exception:
+            pass
+        if failed:
             logger.error(
                 "⚠️ ChatMigrated: %d/%d نجح، %d فشل: %s",
                 success_count, len(_CHAT_MIGRATION_TABLES),
-                len(failed_tables), failed_tables)
+                len(failed), failed)
         else:
             logger.info(
-                "✅ ChatMigrated: تم تحديث %d جدول", success_count)
+                "✅ ChatMigrated: تم تحديث %d عمود", success_count)
     except Exception as e:
         logger.error("ChatMigrated handler: %s", e, exc_info=True)
 
@@ -2077,7 +2127,6 @@ async def safe_send(bot, chat_id: int, text: str, reply_markup=None,
     try:
         await asyncio.wait_for(RATE_LIMITER.acquire(), timeout=5.0)
     except asyncio.TimeoutError:
-        # 🆕 FIX-D15: internal timeout ≠ 429
         RATE_LIMITER.report_internal_timeout()
     text = TextUtils.sanitize(text, max_len=4096) if text else ""
     media_type = None
@@ -2106,7 +2155,7 @@ async def safe_send(bot, chat_id: int, text: str, reply_markup=None,
         except ChatMigrated as e:
             new_chat_id = getattr(e, 'new_chat_id', None)
             if new_chat_id:
-                # 🆕 FIX-B5: task tracking
+                # 🆕 FIX-MIG2: task tracking عبر _warmup_bg_tasks
                 try:
                     _mig_task = asyncio.create_task(
                         _handle_chat_migrated(chat_id, new_chat_id))
@@ -2114,8 +2163,14 @@ async def safe_send(bot, chat_id: int, text: str, reply_markup=None,
                     logger.debug("spawn ChatMigrated: %s", _te)
                     _mig_task = None
                 if _mig_task is not None:
+                    try:
+                        _warmup_bg_tasks.add(_mig_task)
+                    except Exception:
+                        pass
+
                     def _log_mig_exc(t):
                         try:
+                            _warmup_bg_tasks.discard(t)
                             if not t.cancelled():
                                 exc = t.exception()
                                 if exc:
@@ -2482,16 +2537,23 @@ async def apply_penalty(bot, chat_id, user_id, penalty_type,
                         duration=0, reason="", *, moderator=None,
                         username="", first_name="", chat_name="",
                         lang="ar"):
+    """
+    🆕 v7.10.8 FIX-DEV1: يسمح للمطور بمعاقبة نفسه (اختبار ذاتي).
+    """
     try:
         if penalty_type not in (
             "ban", "mute", "kick", "restrict", "warn", "unban"):
             return False, _penalty_t(
                 lang, "unknown_penalty", ptype=penalty_type)
         try:
-            if CONFIG.is_developer(user_id):
+            moderator_id = moderator or getattr(bot, "id", 0) or 0
+            is_dev_target = CONFIG.is_developer(user_id)
+            # 🆕 FIX-DEV1: اسمح للمطور بمعاقبة نفسه (اختبار)
+            is_self_penalty = (moderator_id == user_id)
+            if is_dev_target and not is_self_penalty:
                 logger.warning(
-                    "👑 رفض معاقبة المطور %s بـ %s",
-                    user_id, penalty_type)
+                    "👑 رفض معاقبة المطور %s بـ %s (moderator=%s)",
+                    user_id, penalty_type, moderator_id)
                 return False, _penalty_t(lang, "cannot_penalize_dev")
         except Exception as _dev_e:
             logger.debug("apply_penalty dev check: %s", _dev_e)
@@ -2559,7 +2621,6 @@ async def apply_penalty(bot, chat_id, user_id, penalty_type,
 _usage_updates: Dict[Tuple[int, str], int] = {}
 _USAGE_FLUSH_LIMIT = 50
 _USAGE_FLUSH_INTERVAL = 60
-# 🆕 FIX-FL1: حد لإعادة الإدخالات الفاشلة
 _USAGE_FAILURE_MAX_RETRIES = 5
 _usage_failure_counts: Dict[Tuple[int, str], int] = {}
 _usage_lock = asyncio.Lock()
@@ -2591,13 +2652,11 @@ async def _flush_usage_updates():
                     "UPDATE auto_replies SET usage_count = usage_count + ? "
                     "WHERE chat_id=? AND keyword=?",
                     (count, chat_id, keyword))
-                # نجاح — صفّر عداد الفشل
                 _usage_failure_counts.pop((chat_id, keyword), None)
             except Exception as e:
                 logger.error(
                     "❌ فشل usage_count (%s, %s): %s",
                     chat_id, keyword, e)
-                # 🆕 FIX-FL1: تتبّع الفشل وحد الإعادة
                 fk = (chat_id, keyword)
                 fails = _usage_failure_counts.get(fk, 0) + 1
                 _usage_failure_counts[fk] = fails
@@ -3078,6 +3137,12 @@ class BackgroundTasks:
 
     @staticmethod
     async def _publish_post(bot, channel_id: int, post: dict) -> bool:
+        """
+        نشر منشور واحد.
+
+        🆕 v7.10.8 FIX-PUB1: تسجيل warn عند فشل caption-follow-up
+        بدل suppress الصامت.
+        """
         _SEND_KWARGS = {
             "read_timeout": 60.0, "write_timeout": 60.0,
             "connect_timeout": 30.0, "pool_timeout": 15.0,
@@ -3088,6 +3153,17 @@ class BackgroundTasks:
         media_type = post.get('media_type')
         media_file_id = post.get('media_file_id')
         caption = text[:1024] if text else None
+
+        async def _send_followup_text():
+            """🆕 FIX-PUB1: تسجيل الفشل بدل suppress الصامت."""
+            if not text:
+                return
+            try:
+                await bot.send_message(channel_id, text, **_SEND_KWARGS)
+            except Exception as _fex:
+                logger.warning(
+                    "⚠️ Publish follow-up text فشل | ch=%s media=%s: %s",
+                    channel_id, media_type, _fex)
 
         async def _send(with_caption: bool = True):
             _cap = caption if with_caption else None
@@ -3106,10 +3182,8 @@ class BackgroundTasks:
             elif media_type == 'voice' and media_file_id:
                 sent = await bot.send_voice(
                     channel_id, media_file_id, **_SEND_KWARGS)
-                if text and with_caption:
-                    with suppress(Exception):
-                        await bot.send_message(
-                            channel_id, text, **_SEND_KWARGS)
+                if with_caption:
+                    await _send_followup_text()
                 return sent
             elif media_type == 'animation' and media_file_id:
                 return await bot.send_animation(
@@ -3117,18 +3191,14 @@ class BackgroundTasks:
             elif media_type == 'sticker' and media_file_id:
                 sent = await bot.send_sticker(
                     channel_id, media_file_id, **_SEND_KWARGS)
-                if text and with_caption:
-                    with suppress(Exception):
-                        await bot.send_message(
-                            channel_id, text, **_SEND_KWARGS)
+                if with_caption:
+                    await _send_followup_text()
                 return sent
             elif media_type == 'video_note' and media_file_id:
                 sent = await bot.send_video_note(
                     channel_id, media_file_id, **_SEND_KWARGS)
-                if text and with_caption:
-                    with suppress(Exception):
-                        await bot.send_message(
-                            channel_id, text, **_SEND_KWARGS)
+                if with_caption:
+                    await _send_followup_text()
                 return sent
             else:
                 if text and len(text) > 4096:
@@ -3472,7 +3542,6 @@ class BackgroundTasks:
             await asyncio.sleep(CONFIG.HEARTBEAT_INTERVAL)
             try:
                 ram = get_ram_usage()
-                # 🆕 HTML بدل Markdown
                 msg = (
                     f"💓 <b>Heartbeat</b>\n\n"
                     f"🕐 <code>{TimeUtils.mecca_iso()}</code>\n"
@@ -3575,7 +3644,7 @@ class BackgroundTasks:
                 BackgroundTasks._group_admins_cache.clear()
                 BackgroundTasks._group_admins_access_count.clear()
                 _security_settings_cache.clear()
-                # 🆕 FIX-SC2: prune دوري للـ caches مُنمّية
+                # 🆕 FIX-SC2: prune دوري
                 now_mono = time.monotonic()
                 if _security_settings_cache:
                     stale = [
@@ -3629,6 +3698,10 @@ def _spawn_warmup_task(coro, label: str = "warmup"):
         except Exception:
             pass
         return None
+    try:
+        task.set_name(label)
+    except Exception:
+        pass
     _warmup_bg_tasks.add(task)
 
     def _cleanup(t):
@@ -3674,7 +3747,6 @@ async def warmup_all() -> Dict[str, Any]:
             result['banned_words_loaded'] = len(words)
         except Exception as e:
             logger.debug("warmup banned_words: %s", e)
-        # 🆕 FIX-WU1: task tracking
         try:
             _spawn_warmup_task(
                 _bg_warmup_db_words(), label="db_words")
@@ -3697,13 +3769,16 @@ async def warmup_all() -> Dict[str, Any]:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# 19. خادم الويب (🆕 FIX-WH1)
+# 19. خادم الويب
 # ═══════════════════════════════════════════════════════════════════════════
 
 _telegram_app = None
 
+# 🆕 v7.10.8 FIX-WH2: توسيع القائمة
 _NON_RETRYABLE_WEBHOOK_ERRORS = frozenset({
     "updateparseerror", "updateerror", "telegramerror",
+    "jsondecodeerror", "typeerror", "valueerror", "keyerror",
+    "attributeerror", "indexerror",
 })
 
 
@@ -3758,7 +3833,7 @@ async def webhook_handler(request):
     except Exception as e:
         err_type = type(e).__name__.lower()
         err_msg = str(e)[:200]
-        # 🆕 FIX-WH1: 200 لأخطاء لا تُشفى، 500 لأخطاء قابلة للإعادة
+        # 🆕 v7.10.8 FIX-WH2: منع حلقة 500
         if any(k in err_type for k in _NON_RETRYABLE_WEBHOOK_ERRORS):
             logger.warning(
                 "⚠️ Webhook non-retryable [%s]: %s",
@@ -3855,7 +3930,7 @@ NEW_SECURITY_DEFAULTS: Dict[str, int] = {
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# 22. Security Bridge (🆕 FIX-A3, FIX-LZ1)
+# 22. Security Bridge
 # ═══════════════════════════════════════════════════════════════════════════
 
 _detector_imports: Optional[Dict[str, Any]] = None
@@ -3910,7 +3985,7 @@ def _do_import_detectors() -> Dict[str, Any]:
 
 
 def _lazy_import_detectors() -> Dict[str, Any]:
-    """Import مؤجل (sync — للاستخدام من سياق sync فقط)."""
+    """Import مؤجل (sync)."""
     global _detector_imports
     if _detector_imports is not None:
         return _detector_imports
@@ -3938,7 +4013,7 @@ async def _lazy_import_detectors_async() -> Dict[str, Any]:
 async def get_security_settings(chat_id: int) -> Dict[str, int]:
     """
     جلب إعدادات الأمان. 🆕 FIX-A3: يستخدم DB.get_security_settings
-    الرسمية (جدول group_security). Fallback: استعلام مباشر صحيح.
+    الرسمية (جدول group_security). Fallback: استعلام مباشر.
     """
     now = time.monotonic()
     cached = _security_settings_cache.get(chat_id)
@@ -3959,7 +4034,6 @@ async def get_security_settings(chat_id: int) -> Dict[str, int]:
     })
 
     row_dict: Dict[str, Any] = {}
-    # 🆕 FIX-A3: المسار الرسمي
     db_getter = getattr(DB, "get_security_settings", None)
     if callable(db_getter):
         try:
@@ -3977,7 +4051,6 @@ async def get_security_settings(chat_id: int) -> Dict[str, int]:
         except Exception as e:
             logger.debug("DB.get_security_settings(%s): %s", chat_id, e)
 
-    # Fallback: استعلام على group_security
     if not row_dict:
         try:
             row = await DB.fetchone(
@@ -4025,7 +4098,7 @@ def invalidate_security_settings_cache(chat_id: Optional[int] = None) -> None:
 
 
 def _try_detector_call(fn, text: str, **extra_kwargs) -> Any:
-    """🆕 helper: try already_normalized=True ثم بدونه."""
+    """helper: try already_normalized=True ثم بدونه."""
     if fn is None or not text:
         return False
     try:
@@ -4193,7 +4266,7 @@ async def check_all_security(message: Any, bot: Any = None,
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# 23. ثوابت timeouts (🆕 FIX-EX1: قبل __all__)
+# 23. ثوابت timeouts (قبل __all__)
 # ═══════════════════════════════════════════════════════════════════════════
 
 _PUBLISH_TIMEOUTS = {
@@ -4245,13 +4318,16 @@ __all__ = [
 
 try:
     logger.info(
-        "🛡️ utils.py v7.10.7 REVIEW-FIXES loaded | "
+        "🛡️ utils.py v7.10.8 REVIEW-FIXES-R2 loaded | "
         "Detectors=lazy+async | Langs=%d | Buttons=✅ | "
-        "Security-Bridge=✅(A3-fix) | Penalty=✅ | DevGuard=✅ | "
-        "ChatMigrated=✅(16-tables) | ToggleMap=%d keys | "
-        "Cache-Iso=✅ | SecurityCache=✅(max=%d) | "
-        "AuthCache=✅(B4-fix) | RateLimit=✅(D15-fix)",
+        "Security-Bridge=✅(A3) | Penalty=✅(DEV1) | "
+        "ChatMigrated=✅(%d ops incl. log_channel_id) | "
+        "ToggleMap=%d | Cache-Iso=✅ | SecCache=✅(max=%d) | "
+        "AuthCache=✅(B4) | AuthCheck=UNION(AUTH1) | "
+        "RateLimit=✅(D15) | Webhook=✅(WH2) | "
+        "Publish=✅(PUB1) | MigTrack=✅(MIG2)",
         len(_AVAILABLE_LANGUAGES),
+        len(_CHAT_MIGRATION_TABLES),
         len(SECURITY_TOGGLE_MAP),
         _SEC_SETTINGS_MAX_SIZE,
     )
