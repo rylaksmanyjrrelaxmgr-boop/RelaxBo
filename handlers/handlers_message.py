@@ -1,50 +1,30 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-handlers_message.py - v7.18.18 CACHE-STATS-INTEGRATION
-(متوافق مع detectors v4.1.0 + banned_words_manager v1.1.1)
+handlers_message.py - v7.18.19 ROUTING-FIX-2026
+(متوافق مع detectors v4.1.0 + banned_words_manager v1.2.0)
 =============================================================================
+🆕 v7.18.19 (ROUTING-FIX-2026):
+    🔴 FIX-ROUTE-1 CRITICAL: handle_private كان يصمت عند استقبال حالة
+       غير مدرجة في _PRIVATE_HANDLERS_MAP (مثل WAIT_CHANNEL عند
+       إرسال معرف قناة). الإصلاح:
+       • إضافة fallback إلى CommandHandlers.handle_text.
+       • إضافة "ملاذ أخير" — إبلاغ المستخدم بدل الصمت.
+       • تسجيل warning واضح للـ states غير المُعالَجة.
+    🔴 FIX-BWM-3 CRITICAL: فحص الكلمات المحظورة — fallback معطوب
+       (كان لا يُستدعى عند فشل BannedWordsManager لأن الشرط كان
+       يستخدم _HAS_BWM بدل تتبّع فشل الاستدعاء الفعلي).
+    🟡 FIX-COL-1: delete_protected_forward مفقود من _lazy_init_columns.
+    🟡 FIX-EDIT-1: handle_edited — فحص effective_message قبل acquire
+       بدل بعده.
+    🟡 FIX-STATE-1: توثيق أن StateManager TTL = 900s الآن (كان 300).
+
 🆕 v7.18.18 (CACHE-STATS-INTEGRATION):
-    ✨ handle_cache_stats_command — أمر /cache_stats للمطور:
-       • يعرض 10 أقسام من الـ caches الحية
-       • Banned Words (من banned_words_manager v1.1.1)
-       • handlers_message caches (group_log, sec_settings, admin_check)
-       • dev_log, flood tracker, delete failures
-       • private handlers, compiled patterns, group limiters
-       • log rate trackers, background tasks, detectors pool
-    ✅ لا تغييرات وظيفية — إضافة فقط.
-
-🆕 v7.18.17 (DETECTORS-v4.1.0-COMPAT):
-    ✅ متوافق مع detectors v4.1.0 — لا تغييرات وظيفية مطلوبة.
-    📌 ملاحظة (REC-1): sync fallback (analyze_message_full) يعمل بشكل
-       محدود — طبقات OCR/Audio/Video/NSFW/Sticker/Stego معطّلة تقنياً
-       بسبب تعطيل _download_telegram_file (FIX-DL-1 في detectors).
-       المسار المُعتمد: analyze_message_full_async.
-    📌 ملاحظة (REC-2): _analysis_mode يميّز الآن الوضع المُخفَّض:
-       "multilayer-sync-pool-DEGRADED" بدلاً من "multilayer-sync-pool".
-
-🆕 v7.18.16 (FULL-REWRITE-FIXES):
-    🔴 FIX-RPL-1: handle_add_reply يُدير 3 حالات
-    🔴 FIX-RPL-2: _save_reply_and_finish (helper)
-    🔴 FIX-RPL-3: _process_auto_reply — _increment_usage_async لـ file_reply
-    🔴 FIX-PERM-1: إزالة فحص الصلاحيات المكرر
-    🔴 FIX-EDIT-1: handle_edited يتجاوز فحص الفيضان
-    🔴 FIX-DET-1: _HAS_ASYNC_DETECTORS يُستخدم فعلاً
-    🔴 FIX-BWM-3: fallback محسَّن عند فشل BannedWordsManager
-
-🆕 v7.18.15 (BANNED-MANAGER-INTEGRATION + REPLIES-FIX):
-    🔴 FIX-BWM-1: استيراد BannedWordsManager من handlers.messages
-    🔴 FIX-BWM-2: استبدال فحص الكلمات المحظورة بـ check_message()
-    🔴 FIX-RPL-1: مفاتيح الردود في _PRIVATE_HANDLERS_MAP
-    🔴 FIX-RPL-2: handle_add_reply + handle_remove_reply
-    🔴 FIX-RPL-3: دعم caption في _process_auto_reply
-    🔴 FIX-RPL-4: invalidate_auto_reply_cache بعد الإضافة
-
-🆕 v7.18.14 (IDLE-TX-AUDIT-INTEGRATION):
-    🔍 IDLE-1: handle_db_idle_command — أمر /db_idle للمطور
-    🔍 IDLE-2: _notify_dev_about_idle_tx — إشعار تلقائي عند idle-in-tx
-    🔍 IDLE-3: _lazy_init_columns يقبل bot= اختيارياً
-    🔍 IDLE-4: عند فشل DB حرج (migration_ok=False) → فحص idle-tx + إشعار
+    ✨ handle_cache_stats_command — أمر /cache_stats للمطور
+🆕 v7.18.17 (DETECTORS-v4.1.0-COMPAT)
+🆕 v7.18.16 (FULL-REWRITE-FIXES)
+🆕 v7.18.15 (BANNED-MANAGER-INTEGRATION + REPLIES-FIX)
+🆕 v7.18.14 (IDLE-TX-AUDIT-INTEGRATION)
 =============================================================================
 """
 
@@ -72,7 +52,7 @@ from config import CONFIG
 from database import DB, TimeUtils, internal_cache
 from utils import (
     TextUtils, safe_send, is_authorized_in_group,
-    apply_penalty, METRICS, get_text, StateManager,
+    apply_penalty, METRICS, get_text, StateManager, UserState,
     RateLimiter,
     get_banned_words_cached,
     get_reply_from_file,
@@ -86,7 +66,7 @@ logger = logging.getLogger(__name__)
 
 
 # ═════════════════════════════════════════════════════════════════════
-# 🆕 v7.18.15 FIX-BWM-1: BannedWordsManager (مساران منفصلان)
+# v7.18.15 FIX-BWM-1: BannedWordsManager (مساران منفصلان)
 # ═════════════════════════════════════════════════════════════════════
 
 try:
@@ -108,8 +88,7 @@ except ImportError:
         )
         _HAS_BWM = True
         logger.info(
-            "✅ handlers_message: BannedWordsManager محمّل (relative)"
-        )
+            "✅ handlers_message: BannedWordsManager محمّل (relative)")
     except ImportError:
         _HAS_BWM = False
         BannedWordsManager = None
@@ -118,8 +97,7 @@ except ImportError:
         _bwm_is_greeting = None
         logger.warning(
             "⚠️ BannedWordsManager غير متاح — "
-            "سيُستخدم النظام القديم"
-        )
+            "سيُستخدم النظام القديم")
 
 
 # ═════════════════════════════════════════════════════════════════════
@@ -146,7 +124,8 @@ try:
         _contains_email, _contains_at_channel, _contains_tg_scheme,
         _has_button_link, _extract_button_link_urls,
         _extract_spam_words, _count_unique_matches, _count_text_urls,
-        _compute_spam_score, _is_postbot_pattern, _postbot_pattern_confidence,
+        _compute_spam_score, _is_postbot_pattern,
+        _postbot_pattern_confidence,
         analyze_message, get_spam_diagnostics,
         is_spam, is_high_confidence_spam, is_critical_spam,
         should_ignore_as_low_signal,
@@ -230,8 +209,7 @@ for _path in (
 
         analyze_message_full = getattr(_mod, "analyze_message_full", None)
         analyze_message_full_async = getattr(
-            _mod, "analyze_message_full_async", None,
-        )
+            _mod, "analyze_message_full_async", None)
         SpamVerdict = getattr(_mod, "SpamVerdict", None)
         FINAL_THRESHOLD = getattr(_mod, "FINAL_THRESHOLD", 5)
         LAYER_WEIGHTS = getattr(_mod, "LAYER_WEIGHTS", {}) or {}
@@ -271,16 +249,14 @@ _det_shutdown_default_executor: Optional[Callable[..., Awaitable[Any]]] = None
 if _detectors_module is not None:
     try:
         _det_run_in_pool = getattr(
-            _detectors_module, "_run_in_pool", None,
-        )
+            _detectors_module, "_run_in_pool", None)
         _HAS_DET_RUN_IN_POOL = callable(_det_run_in_pool)
     except Exception:
         _HAS_DET_RUN_IN_POOL = False
 
     try:
         _det_shutdown_default_executor = getattr(
-            _detectors_module, "shutdown_default_executor", None,
-        )
+            _detectors_module, "shutdown_default_executor", None)
         _HAS_DET_SHUTDOWN_EXECUTOR = callable(_det_shutdown_default_executor)
     except Exception:
         _HAS_DET_SHUTDOWN_EXECUTOR = False
@@ -288,13 +264,11 @@ if _detectors_module is not None:
 if not _HAS_DET_RUN_IN_POOL:
     logger.debug(
         "detectors: _run_in_pool غير متاح "
-        "(detectors أقدم من v4.0.7) — سيُستخدم asyncio.to_thread"
-    )
+        "(detectors أقدم من v4.0.7) — سيُستخدم asyncio.to_thread")
 if not _HAS_DET_SHUTDOWN_EXECUTOR:
     logger.debug(
         "detectors: shutdown_default_executor غير متاح "
-        "(detectors أقدم من v4.0.8)"
-    )
+        "(detectors أقدم من v4.0.8)")
 
 
 try:
@@ -402,18 +376,15 @@ async def _run_sync_in_pool(
     if _HAS_DET_RUN_IN_POOL and _det_run_in_pool is not None:
         try:
             return await _det_run_in_pool(
-                fn, *args, timeout=timeout, **kwargs,
-            )
+                fn, *args, timeout=timeout, **kwargs)
         except asyncio.TimeoutError:
             logger.warning(
                 "_run_sync_in_pool: timeout after %.1fs — fn=%s",
-                timeout, getattr(fn, "__name__", repr(fn)),
-            )
+                timeout, getattr(fn, "__name__", repr(fn)))
             raise
         except Exception as _e:
             logger.debug(
-                "_run_in_pool failed (%s) — using asyncio.to_thread", _e,
-            )
+                "_run_in_pool failed (%s) — using asyncio.to_thread", _e)
 
     if kwargs:
         fn = functools.partial(fn, **kwargs)
@@ -421,14 +392,11 @@ async def _run_sync_in_pool(
     if timeout and timeout > 0:
         try:
             return await asyncio.wait_for(
-                asyncio.to_thread(fn, *args),
-                timeout=timeout,
-            )
+                asyncio.to_thread(fn, *args), timeout=timeout)
         except asyncio.TimeoutError:
             logger.warning(
                 "_run_sync_in_pool (fallback): timeout after %.1fs — fn=%s",
-                timeout, getattr(fn, "__name__", repr(fn)),
-            )
+                timeout, getattr(fn, "__name__", repr(fn)))
             raise
     return await asyncio.to_thread(fn, *args)
 
@@ -442,13 +410,11 @@ _SLOW_MODE_AUTO = _env_flag("SLOW_MODE_AUTO", True)
 _SLOW_MODE_UNSUPPORTED = False
 
 _MULTILAYER_ENABLED = (
-    _env_flag("MULTILAYER_ENABLED", True) and _HAS_MULTILAYER
-)
+    _env_flag("MULTILAYER_ENABLED", True) and _HAS_MULTILAYER)
 
 _FORCE_DELETE_BUTTON_LINKS = _env_flag("FORCE_DELETE_BUTTON_LINKS", True)
 _FORCE_DELETE_POSTBOT_FORWARDS = _env_flag(
-    "FORCE_DELETE_POSTBOT_FORWARDS", True
-)
+    "FORCE_DELETE_POSTBOT_FORWARDS", True)
 
 _BAN_ADD_RATE_LIMIT = _env_flag("BAN_ADD_RATE_LIMIT", True)
 _BAN_ADD_RATE_MAX = 10
@@ -457,9 +423,7 @@ _BOT_DATA_SLOW_MODE_PRUNE_THRESHOLD = 10000
 _BOT_DATA_SLOW_MODE_PRUNE_COOLDOWN = 300.0
 
 _POSTBOT_CHANNEL_NAMES = frozenset({
-    "news",
-    "news post bot",
-    "news (post bot)",
+    "news", "news post bot", "news (post bot)",
     "post bot", "postbot", "post-bot", "post_bot",
     "news postbot", "news post-bot", "news post_bot",
     "post bot news", "postbotnews", "postbot news",
@@ -469,9 +433,7 @@ _POSTBOT_CHANNEL_NAMES = frozenset({
     "قناة النشر", "قناة نشر",
 })
 
-_POSTBOT_RAW_IDS: frozenset = frozenset({
-    3826578265,
-})
+_POSTBOT_RAW_IDS: frozenset = frozenset({3826578265})
 
 _POSTBOT_CHANNEL_IDS: frozenset = frozenset({
     3826578265, -3826578265, -1003826578265,
@@ -510,19 +472,15 @@ def _is_postbot_channel_name(name: str) -> bool:
         return False
     try:
         name_lower = str(name).lower().strip()
-
         for candidate in _POSTBOT_CHANNEL_NAMES:
             if candidate in name_lower:
                 return True
-
         if _POSTBOT_NAME_REGEX.search(name_lower):
             return True
-
         has_post = bool(_POSTBOT_WORD_POST_RE.search(name_lower))
         has_bot = bool(_POSTBOT_WORD_BOT_RE.search(name_lower))
         if has_post and has_bot:
             return True
-
         if "news" in name_lower and (
             _POSTBOT_WORD_POST_RE.search(name_lower)
             or _POSTBOT_WORD_BOT_RE.search(name_lower)
@@ -608,28 +566,23 @@ async def _get_group_log_channel_cached(chat_id: int):
         entry = _group_log_channel_cache.get(int(chat_id))
     except (TypeError, ValueError):
         entry = None
-
     if entry is not None:
         cached_value, cached_at = entry
         if now - cached_at < _GROUP_LOG_CHANNEL_CACHE_TTL:
             return cached_value
-
     getter = getattr(DB, 'get_group_log_channel', None)
     if not callable(getter):
         return None
-
     try:
         value = await getter(chat_id)
     except Exception as e:
         logger.debug(
-            "_get_group_log_channel_cached(%s): %s", chat_id, e,
-        )
+            "_get_group_log_channel_cached(%s): %s", chat_id, e)
         if entry is not None:
             cached_value, cached_at = entry
             if now - cached_at < _GROUP_LOG_CHANNEL_CACHE_MAX_STALE:
                 return cached_value
         return None
-
     if len(_group_log_channel_cache) >= _GROUP_LOG_CHANNEL_CACHE_MAX:
         try:
             oldest = sorted(
@@ -640,9 +593,10 @@ async def _get_group_log_channel_cached(chat_id: int):
                 _group_log_channel_cache.pop(k, None)
         except Exception:
             pass
-
     _group_log_channel_cache[int(chat_id)] = (value, now)
     return value
+
+
 _SEC_SETTINGS_LOCAL_TTL = 5.0
 _SEC_SETTINGS_LOCAL_MAX = 3000
 _sec_settings_local_cache: Dict[int, Tuple[Dict[str, Any], float]] = {}
@@ -689,14 +643,12 @@ _private_sig_cache_lock = threading.Lock()
 
 
 _flood_tracker: DefaultDict[Tuple[int, int], deque] = defaultdict(
-    lambda: deque(maxlen=_FLOOD_DEQUE_MAXLEN)
-)
+    lambda: deque(maxlen=_FLOOD_DEQUE_MAXLEN))
 _flood_lock = asyncio.Lock()
 _flood_last_cleanup = 0.0
 
 _ban_add_tracker: DefaultDict[int, deque] = defaultdict(
-    lambda: deque(maxlen=_BAN_ADD_RATE_MAX + 5)
-)
+    lambda: deque(maxlen=_BAN_ADD_RATE_MAX + 5))
 _ban_add_lock = asyncio.Lock()
 _ban_add_last_cleanup = 0.0
 
@@ -711,8 +663,7 @@ async def _check_flood(
     try:
         window_sec = max(
             float(_FLOOD_MIN_WINDOW_SEC),
-            min(float(window_sec), float(_FLOOD_MAX_WINDOW_SEC)),
-        )
+            min(float(window_sec), float(_FLOOD_MAX_WINDOW_SEC)))
     except (TypeError, ValueError):
         window_sec = float(_FLOOD_DEFAULT_WINDOW)
     now = time.monotonic()
@@ -763,11 +714,10 @@ async def _cleanup_flood_tracker(force: bool = False) -> int:
             removed += 1
         if len(_flood_tracker) > _FLOOD_TRACKER_MAX_KEYS:
             overflow_snapshot = list(_flood_tracker.items())
-
     if overflow_snapshot:
         oldest = sorted(
-            overflow_snapshot, key=lambda kv: kv[1][-1] if kv[1] else 0.0,
-        )
+            overflow_snapshot,
+            key=lambda kv: kv[1][-1] if kv[1] else 0.0)
         async with _flood_lock:
             current_size = len(_flood_tracker)
             if current_size > _FLOOD_TRACKER_MAX_KEYS:
@@ -777,7 +727,6 @@ async def _cleanup_flood_tracker(force: bool = False) -> int:
                     if k in _flood_tracker:
                         _flood_tracker.pop(k, None)
                         removed += 1
-
     try:
         if now - _ban_add_last_cleanup > 60.0:
             async with _ban_add_lock:
@@ -791,7 +740,6 @@ async def _cleanup_flood_tracker(force: bool = False) -> int:
                     removed += 1
     except Exception:
         pass
-
     return removed
 
 
@@ -837,10 +785,7 @@ _columns_last_error_log_ts = 0.0
 
 
 async def _notify_dev_about_idle_tx(
-    bot,
-    reason: str = "",
-    *,
-    force: bool = False,
+    bot, reason: str = "", *, force: bool = False,
 ) -> Optional[Dict[str, Any]]:
     try:
         audit_fn = getattr(DB, 'audit_idle_in_transactions', None)
@@ -848,64 +793,47 @@ async def _notify_dev_about_idle_tx(
             logger.debug(
                 "_notify_dev_about_idle_tx: "
                 "DB.audit_idle_in_transactions غير متاح "
-                "(يتطلب database.py v7.7.62+)"
-            )
+                "(يتطلب database.py v7.7.62+)")
             return None
-
         try:
             report = await audit_fn()
         except Exception as e:
             logger.warning(
-                "_notify_dev_about_idle_tx: audit query failed: %s", e,
-            )
+                "_notify_dev_about_idle_tx: audit query failed: %s", e)
             return None
-
         if not isinstance(report, dict):
             return None
-
         count = int(report.get('count') or 0)
         if count == 0:
             logger.debug(
-                "_notify_dev_about_idle_tx: نظيف (reason=%s)", reason,
-            )
+                "_notify_dev_about_idle_tx: نظيف (reason=%s)", reason)
             return report
-
         if not force:
             now = time.monotonic()
             last = _idle_tx_last_notify.get(0, 0.0)
             if now - last < _IDLE_TX_NOTIFY_COOLDOWN:
                 logger.debug(
                     "_notify_dev_about_idle_tx: cooldown نشط "
-                    "(count=%d، سيُبلغ لاحقاً)",
-                    count,
-                )
+                    "(count=%d، سيُبلغ لاحقاً)", count)
                 return report
-
             async with _idle_tx_notify_lock:
                 now = time.monotonic()
                 last = _idle_tx_last_notify.get(0, 0.0)
                 if now - last < _IDLE_TX_NOTIFY_COOLDOWN:
                     return report
                 _idle_tx_last_notify[0] = now
-
         if bot is None:
             logger.warning(
                 "_notify_dev_about_idle_tx: bot=None — "
-                "لا يمكن إرسال الإشعار (count=%d)",
-                count,
-            )
+                "لا يمكن إرسال الإشعار (count=%d)", count)
             return report
-
         owner_id = int(getattr(CONFIG, 'PRIMARY_OWNER_ID', 0) or 0)
         if not owner_id:
             logger.warning(
-                "_notify_dev_about_idle_tx: PRIMARY_OWNER_ID غير محدّد",
-            )
+                "_notify_dev_about_idle_tx: PRIMARY_OWNER_ID غير محدّد")
             return report
-
         app_matches = int(report.get('app_matches') or 0)
         total = int(report.get('total_idle_tx') or 0)
-
         lines = [
             "🔴 <b>idle-in-transaction detected</b>",
             "━━━━━━━━━━━━━━━━━━━━",
@@ -913,16 +841,13 @@ async def _notify_dev_about_idle_tx(
         ]
         if app_matches:
             lines.append(
-                f"🚨 من <code>relax_bot</code>: <b>{app_matches}</b>"
-            )
+                f"🚨 من <code>relax_bot</code>: <b>{app_matches}</b>")
         if total != count:
             lines.append(
-                f"📈 إجمالي كل التطبيقات: <b>{total}</b>"
-            )
+                f"📈 إجمالي كل التطبيقات: <b>{total}</b>")
         if reason:
             lines.append(f"📌 السبب: <code>{escape(reason)}</code>")
         lines.append("")
-
         items = report.get('items') or []
         for item in items[:5]:
             try:
@@ -932,56 +857,50 @@ async def _notify_dev_about_idle_tx(
                 tx_age = item.get('tx_age_sec', 0)
                 xmin = item.get('backend_xmin') or '—'
                 q = (item.get('query') or '')[:120]
-
                 lines.append(
                     f"🔴 pid=<code>{pid}</code> "
-                    f"[<code>{escape(str(app))}</code>]"
-                )
+                    f"[<code>{escape(str(app))}</code>]")
                 lines.append(
                     f"   idle=<b>{idle}s</b> "
                     f"tx_age=<b>{tx_age}s</b> "
-                    f"xmin=<code>{escape(str(xmin))}</code>"
-                )
+                    f"xmin=<code>{escape(str(xmin))}</code>")
                 if q:
                     lines.append(f"   <i>{escape(q)}</i>")
                 lines.append("")
             except Exception:
                 continue
-
         if count > 5:
             lines.append(f"<i>… و{count - 5} اتصال آخر</i>")
             lines.append("")
-
         lines.append("━━━━━━━━━━━━━━━━━━━━")
         lines.append("💡 راجع database.py v7.7.61 (TX-1..4)")
         lines.append(
-            "🔧 استخدم <code>/db_idle</code> للتفاصيل الكاملة."
-        )
-
+            "🔧 استخدم <code>/db_idle</code> للتفاصيل الكاملة.")
         text = "\n".join(lines)
         if len(text) > 4000:
             text = text[:4000] + "\n…"
-
         try:
             await safe_send(bot, owner_id, text, parse_mode='HTML')
             logger.warning(
                 "🔔 idle-tx notification sent (count=%d، ours=%d، reason=%s)",
-                count, app_matches, reason or "n/a",
-            )
+                count, app_matches, reason or "n/a")
         except Exception as e:
             logger.warning(
-                "_notify_dev_about_idle_tx: safe_send failed: %s", e,
-            )
-
+                "_notify_dev_about_idle_tx: safe_send failed: %s", e)
         return report
     except Exception as e:
         logger.warning(
-            "_notify_dev_about_idle_tx: unexpected: %s", e, exc_info=True,
-        )
+            "_notify_dev_about_idle_tx: unexpected: %s", e, exc_info=True)
         return None
 
 
 async def _lazy_init_columns(bot=None):
+    """
+    🆕 v7.18.19 FIX-COL-1: أُضيف delete_protected_forward.
+
+    ملاحظة: الجدول قد يحتوي أعمدة إضافية، لكن القائمة هنا
+    هي الحد الأدنى الذي يحتاجه handlers_message.
+    """
     global _columns_initialized, _columns_last_attempt_ts
     global _columns_last_error_log_ts
 
@@ -1001,17 +920,29 @@ async def _lazy_init_columns(bot=None):
         _columns_last_attempt_ts = now
 
         db_type = getattr(DB, "DB_TYPE", "sqlite")
-        logger.info("🔧 v7.18.18: Auto-migration (DB_TYPE=%s)", db_type)
+        logger.info("🔧 v7.18.19: Auto-migration (DB_TYPE=%s)", db_type)
 
+        # 🆕 FIX-COL-1: أُضيف delete_protected_forward
         cols = [
-            ("delete_protected_any", "INTEGER DEFAULT 0", "TINYINT(1) DEFAULT 0"),
-            ("delete_postbot_pattern", "INTEGER DEFAULT 0", "TINYINT(1) DEFAULT 0"),
-            ("delete_spam_score", "INTEGER DEFAULT 1", "TINYINT(1) DEFAULT 1"),
-            ("delete_at_channel", "INTEGER DEFAULT 0", "TINYINT(1) DEFAULT 0"),
-            ("delete_tg_scheme", "INTEGER DEFAULT 1", "TINYINT(1) DEFAULT 1"),
-            ("delete_button_links", "INTEGER DEFAULT 1", "TINYINT(1) DEFAULT 1"),
-            ("delete_emails", "INTEGER DEFAULT 0", "TINYINT(1) DEFAULT 0"),
-            ("delete_polls", "INTEGER DEFAULT 0", "TINYINT(1) DEFAULT 0"),
+            ("delete_protected_any", "INTEGER DEFAULT 0",
+             "TINYINT(1) DEFAULT 0"),
+            ("delete_postbot_pattern", "INTEGER DEFAULT 0",
+             "TINYINT(1) DEFAULT 0"),
+            ("delete_spam_score", "INTEGER DEFAULT 1",
+             "TINYINT(1) DEFAULT 1"),
+            ("delete_at_channel", "INTEGER DEFAULT 0",
+             "TINYINT(1) DEFAULT 0"),
+            ("delete_tg_scheme", "INTEGER DEFAULT 1",
+             "TINYINT(1) DEFAULT 1"),
+            ("delete_button_links", "INTEGER DEFAULT 1",
+             "TINYINT(1) DEFAULT 1"),
+            ("delete_emails", "INTEGER DEFAULT 0",
+             "TINYINT(1) DEFAULT 0"),
+            ("delete_polls", "INTEGER DEFAULT 0",
+             "TINYINT(1) DEFAULT 0"),
+            # 🆕 FIX-COL-1
+            ("delete_protected_forward", "INTEGER DEFAULT 0",
+             "TINYINT(1) DEFAULT 0"),
         ]
 
         migration_ok = True
@@ -1021,36 +952,28 @@ async def _lazy_init_columns(bot=None):
             try:
                 additions = ", ".join(
                     f"ADD COLUMN IF NOT EXISTS {col} {sqlite_def}"
-                    for col, sqlite_def, _ in cols
-                )
+                    for col, sqlite_def, _ in cols)
                 await DB.execute(
-                    f"ALTER TABLE group_security {additions}"
-                )
+                    f"ALTER TABLE group_security {additions}")
                 logger.info(
                     "✅ PERF-9: عمود %d أُضيفوا في ALTER واحد (PG)",
-                    len(cols),
-                )
+                    len(cols))
             except Exception as bulk_e:
                 logger.warning(
-                    "⚠️ PG bulk ALTER فشل — fallback فردي: %s", bulk_e,
-                )
+                    "⚠️ PG bulk ALTER فشل — fallback فردي: %s", bulk_e)
                 for col_name, sqlite_def, _ in cols:
                     try:
                         await DB.execute(
                             f"ALTER TABLE group_security "
                             f"ADD COLUMN IF NOT EXISTS "
-                            f"{col_name} {sqlite_def}"
-                        )
+                            f"{col_name} {sqlite_def}")
                     except Exception as col_e:
                         m = str(col_e).lower()
-                        if (
-                            "already exists" not in m
-                            and "duplicate" not in m
-                        ):
+                        if ("already exists" not in m
+                                and "duplicate" not in m):
                             migration_ok = False
                             unexpected_failures.append(
-                                f"{col_name}: {col_e}"
-                            )
+                                f"{col_name}: {col_e}")
         else:
             for col_name, sqlite_def, mysql_def in cols:
                 try:
@@ -1058,34 +981,26 @@ async def _lazy_init_columns(bot=None):
                         try:
                             await DB.execute(
                                 "ALTER TABLE group_security "
-                                f"ADD COLUMN {col_name} {mysql_def}"
-                            )
+                                f"ADD COLUMN {col_name} {mysql_def}")
                         except Exception as e:
                             m = str(e).lower()
-                            if (
-                                "duplicate" not in m
-                                and "already exists" not in m
-                            ):
+                            if ("duplicate" not in m
+                                    and "already exists" not in m):
                                 migration_ok = False
                                 unexpected_failures.append(
-                                    f"{col_name}: {e}"
-                                )
+                                    f"{col_name}: {e}")
                     else:
                         try:
                             await DB.execute(
                                 "ALTER TABLE group_security "
-                                f"ADD COLUMN {col_name} {sqlite_def}"
-                            )
+                                f"ADD COLUMN {col_name} {sqlite_def}")
                         except Exception as e:
                             m = str(e).lower()
-                            if (
-                                "duplicate" not in m
-                                and "already exists" not in m
-                            ):
+                            if ("duplicate" not in m
+                                    and "already exists" not in m):
                                 migration_ok = False
                                 unexpected_failures.append(
-                                    f"{col_name}: {e}"
-                                )
+                                    f"{col_name}: {e}")
                 except Exception as e:
                     migration_ok = False
                     unexpected_failures.append(f"{col_name}: {e}")
@@ -1114,18 +1029,14 @@ async def _lazy_init_columns(bot=None):
                 logger.error(
                     "❌ migration_ok=False — فشل %d عمود: %s",
                     len(unexpected_failures),
-                    "; ".join(unexpected_failures[:5]),
-                )
+                    "; ".join(unexpected_failures[:5]))
                 logger.error(
                     "⚠️ المخطط غير متزامن — قد تفشل عمليات القراءة/الكتابة "
-                    "على group_security. راجع سجلات DB."
-                )
+                    "على group_security. راجع سجلات DB.")
             else:
                 logger.debug(
                     "migration failed (%d cols) — log throttled",
-                    len(unexpected_failures),
-                )
-
+                    len(unexpected_failures))
             if bot is not None:
                 try:
                     _spawn_tracked_task(
@@ -1133,15 +1044,11 @@ async def _lazy_init_columns(bot=None):
                             bot,
                             reason=(
                                 f"migration_failed:"
-                                f"{len(unexpected_failures)}_cols"
-                            ),
-                        ),
-                        label="idle-tx-notify-migration",
-                    )
+                                f"{len(unexpected_failures)}_cols")),
+                        label="idle-tx-notify-migration")
                 except Exception as _e_it:
                     logger.debug(
-                        "idle-tx spawn after migration fail: %s", _e_it,
-                    )
+                        "idle-tx spawn after migration fail: %s", _e_it)
 
 
 _dev_log_cache = None
@@ -1174,7 +1081,8 @@ def _invalidate_dev_log_cache():
     _dev_log_cache_ts = 0.0
 
 
-_log_rate_tracker = defaultdict(lambda: deque(maxlen=LOG_RATE_LIMIT_PER_MIN))
+_log_rate_tracker = defaultdict(
+    lambda: deque(maxlen=LOG_RATE_LIMIT_PER_MIN))
 _log_rate_lock = asyncio.Lock()
 _log_rate_warn_last: Dict[Any, float] = {}
 _LOG_RATE_WARN_COOLDOWN = 300.0
@@ -1187,10 +1095,8 @@ async def _can_send_log(chat_id) -> bool:
     async with _log_rate_lock:
         now = time.monotonic()
         tracker = _log_rate_tracker[chat_id]
-        if (
-            len(tracker) >= LOG_RATE_LIMIT_PER_MIN
-            and now - tracker[0] < LOG_RATE_WINDOW_SEC
-        ):
+        if (len(tracker) >= LOG_RATE_LIMIT_PER_MIN
+                and now - tracker[0] < LOG_RATE_WINDOW_SEC):
             last = _log_rate_warn_last.get(chat_id, 0.0)
             if now - last >= _LOG_RATE_WARN_COOLDOWN:
                 _log_rate_warn_last[chat_id] = now
@@ -1202,10 +1108,8 @@ async def _can_send_log(chat_id) -> bool:
 async def _can_send_dev_log() -> bool:
     async with _dev_log_rate_lock:
         now = time.monotonic()
-        if (
-            len(_dev_log_rate_tracker) >= LOG_RATE_LIMIT_PER_MIN
-            and now - _dev_log_rate_tracker[0] < LOG_RATE_WINDOW_SEC
-        ):
+        if (len(_dev_log_rate_tracker) >= LOG_RATE_LIMIT_PER_MIN
+                and now - _dev_log_rate_tracker[0] < LOG_RATE_WINDOW_SEC):
             return False
         _dev_log_rate_tracker.append(now)
         return True
@@ -1254,14 +1158,12 @@ async def _notify_dev_log(context, text):
             target = (
                 f"@{tail}"
                 if not tail.lstrip('-').isdigit()
-                else int(tail)
-            )
+                else int(tail))
         else:
             target = f"@{ch_str}"
         await context.bot.send_message(
             chat_id=target, text=text, parse_mode='HTML',
-            disable_web_page_preview=True,
-        )
+            disable_web_page_preview=True)
     except Exception as e:
         logger.warning("🔔 _notify_dev_log FAILED: %s", e)
 
@@ -1315,8 +1217,7 @@ async def _dispatch_log(
         _log_dispatch_failures += 1
         logger.error(
             "❌ [%s] failed بعد %d محاولات: %s",
-            label, max_attempts, last_exc,
-        )
+            label, max_attempts, last_exc)
 
     task = asyncio.create_task(_runner())
     _running_log_tasks.add(task)
@@ -1337,8 +1238,8 @@ async def shutdown_log_dispatcher(timeout: float = 5.0):
             t.cancel()
     try:
         await asyncio.wait_for(
-            asyncio.gather(*tasks, return_exceptions=True), timeout=timeout,
-        )
+            asyncio.gather(*tasks, return_exceptions=True),
+            timeout=timeout)
     except Exception:
         pass
     _running_log_tasks.clear()
@@ -1378,8 +1279,8 @@ async def shutdown_bg_tasks(timeout: float = 3.0):
             t.cancel()
     try:
         await asyncio.wait_for(
-            asyncio.gather(*tasks, return_exceptions=True), timeout=timeout,
-        )
+            asyncio.gather(*tasks, return_exceptions=True),
+            timeout=timeout)
     except Exception:
         pass
     _running_bg_tasks.clear()
@@ -1393,8 +1294,7 @@ async def _delete_after_delay(bot, chat_id, message_id, delay=10, context=None):
         if delay > 0:
             await asyncio.sleep(delay)
         await _safe_delete_message(
-            bot, chat_id, message_id, context=context, notify_owner=False,
-        )
+            bot, chat_id, message_id, context=context, notify_owner=False)
     except asyncio.CancelledError:
         raise
     except Exception:
@@ -1411,8 +1311,7 @@ def _spawn_delete_after_delay(bot, chat_id, message_id, delay=10, context=None):
     if d < 0:
         d = 0.0
     task = asyncio.create_task(
-        _delete_after_delay(bot, chat_id, message_id, d, context=context)
-    )
+        _delete_after_delay(bot, chat_id, message_id, d, context=context))
     _running_delete_tasks.add(task)
 
     def _cleanup(t):
@@ -1431,8 +1330,8 @@ async def shutdown_delete_tasks(timeout: float = 3.0):
             t.cancel()
     try:
         await asyncio.wait_for(
-            asyncio.gather(*tasks, return_exceptions=True), timeout=timeout,
-        )
+            asyncio.gather(*tasks, return_exceptions=True),
+            timeout=timeout)
     except Exception:
         pass
     _running_delete_tasks.clear()
@@ -1442,11 +1341,11 @@ def register_shutdown_handlers(application):
     if getattr(application, '_msh_shutdown_registered', False):
         return
     try:
-        original_post_shutdown = getattr(application, 'post_shutdown', None)
+        original_post_shutdown = getattr(
+            application, 'post_shutdown', None)
 
         async def _post_shutdown(app):
             _mark_shutdown_started()
-
             try:
                 await shutdown_log_dispatcher(timeout=5.0)
             except Exception:
@@ -1459,25 +1358,19 @@ def register_shutdown_handlers(application):
                 await shutdown_delete_tasks(timeout=3.0)
             except Exception:
                 pass
-
             if _HAS_DET_SHUTDOWN_EXECUTOR and _det_shutdown_default_executor:
                 try:
                     await asyncio.wait_for(
                         _det_shutdown_default_executor(timeout=3.0),
-                        timeout=4.0,
-                    )
+                        timeout=4.0)
                     logger.info(
-                        "✅ detectors pool: closed via post_shutdown"
-                    )
+                        "✅ detectors pool: closed via post_shutdown")
                 except asyncio.TimeoutError:
                     logger.warning(
-                        "⚠️ detectors shutdown_default_executor: timeout"
-                    )
+                        "⚠️ detectors shutdown_default_executor: timeout")
                 except Exception as _e:
                     logger.debug(
-                        "detectors shutdown_default_executor: %s", _e,
-                    )
-
+                        "detectors shutdown_default_executor: %s", _e)
             if callable(original_post_shutdown):
                 try:
                     await original_post_shutdown(app)
@@ -1487,10 +1380,9 @@ def register_shutdown_handlers(application):
         application.post_shutdown = _post_shutdown
         application._msh_shutdown_registered = True
         logger.info(
-            "✅ register_shutdown_handlers: chain + detectors pool shutdown "
-            "(helper=%s)",
-            "yes" if _HAS_DET_SHUTDOWN_EXECUTOR else "no",
-        )
+            "✅ register_shutdown_handlers: chain + detectors pool "
+            "shutdown (helper=%s)",
+            "yes" if _HAS_DET_SHUTDOWN_EXECUTOR else "no")
     except Exception as e:
         logger.warning("register_shutdown_handlers: %s", e)
 
@@ -1516,7 +1408,6 @@ async def _invalidate_banned_words_cache(chat_id=None) -> bool:
         pass
     except Exception:
         pass
-
     try:
         from utils import invalidate_banned_words_cache as _inv2
         result = _inv2(chat_id) if chat_id is not None else _inv2()
@@ -1527,7 +1418,6 @@ async def _invalidate_banned_words_cache(chat_id=None) -> bool:
         pass
     except Exception:
         pass
-
     try:
         from cache import banned_words_cache
         if hasattr(banned_words_cache, 'invalidate'):
@@ -1539,23 +1429,17 @@ async def _invalidate_banned_words_cache(chat_id=None) -> bool:
         pass
     except Exception:
         pass
-
     return False
 
 
 _VIOLATION_LABELS_AR = {
     'forwarded': '↩️ رسالة مُعاد توجيهها',
-    'link': '🔗 رابط',
-    'mention': '📢 منشن',
+    'link': '🔗 رابط', 'mention': '📢 منشن',
     'banned_word': '🚫 كلمة محظورة',
-    'max_len': '📏 طول زائد',
-    'video': '🎬 فيديو',
-    'photo': '📷 صورة',
-    'audio': '🎵 صوت',
-    'voice': '🎤 فويس',
-    'sticker': '🖼️ ملصق',
-    'document': '📄 ملف',
-    'animation': '🎞️ أنيميشن',
+    'max_len': '📏 طول زائد', 'video': '🎬 فيديو',
+    'photo': '📷 صورة', 'audio': '🎵 صوت',
+    'voice': '🎤 فويس', 'sticker': '🖼️ ملصق',
+    'document': '📄 ملف', 'animation': '🎞️ أنيميشن',
     'video_note': '🎥 فيديو نوت',
     'postbot_pattern': '🤖 نمط Post Bot',
     'postbot_forward': '📰 Post Bot (محوّل)',
@@ -1572,17 +1456,16 @@ _VIOLATION_LABELS_AR = {
 }
 
 _FORWARD_TYPE_LABELS_AR = {
-    'user': '👤 مستخدم',
-    'hidden_user': '👻 مستخدم مخفي',
-    'chat': '👥 مجموعة',
-    'channel': '📢 قناة',
+    'user': '👤 مستخدم', 'hidden_user': '👻 مستخدم مخفي',
+    'chat': '👥 مجموعة', 'channel': '📢 قناة',
     'protected': '🛡️ محتوى محمي',
     'protected_any': '🛡️ محتوى محمي',
 }
 
 _PENALTY_LABELS_AR = {
     'ban': '🚫 حظر', 'mute': '🔇 كتم', 'kick': '👢 طرد',
-    'restrict': '🔒 تقييد', 'warn': '⚠️ تحذير', 'unban': '✅ فك حظر',
+    'restrict': '🔒 تقييد', 'warn': '⚠️ تحذير',
+    'unban': '✅ فك حظر',
 }
 
 _DEFAULT_VIOLATION_MESSAGES = {
@@ -1647,8 +1530,7 @@ async def notify_group_log(context, chat_id, text, disable_preview=True):
             channel_id = int(channel_id)
         await context.bot.send_message(
             chat_id=channel_id, text=text, parse_mode='HTML',
-            disable_web_page_preview=disable_preview,
-        )
+            disable_web_page_preview=disable_preview)
         return True
     except BadRequest as e:
         err = str(e).lower()
@@ -1677,12 +1559,10 @@ def _build_delete_log_text(
         if user_username:
             user_display_lnk = (
                 f"<a href='tg://user?id={user_id}'>"
-                f"{user_display}</a> (@{escape(user_username)})"
-            )
+                f"{user_display}</a> (@{escape(user_username)})")
         else:
             user_display_lnk = (
-                f"<a href='tg://user?id={user_id}'>{user_display}</a>"
-            )
+                f"<a href='tg://user?id={user_id}'>{user_display}</a>")
     lines = [
         "🗑️ <b>حذف رسالة</b>",
         "━━━━━━━━━━━━━━━━━━━━",
@@ -1712,7 +1592,8 @@ def _build_delete_log_text(
                 fname_str = fname_str[:60] + "…"
             lines.append(f"   • الاسم: {escape(fname_str)}")
         if forward_info.get('id'):
-            lines.append(f"   • المعرّف: <code>{forward_info['id']}</code>")
+            lines.append(
+                f"   • المعرّف: <code>{forward_info['id']}</code>")
     try:
         now_str = TimeUtils.mecca_now().strftime('%Y-%m-%d %H:%M:%S')
     except Exception:
@@ -1732,12 +1613,10 @@ def _build_penalty_log_text(
     if target_username:
         target_lnk = (
             f"<a href='tg://user?id={target_user_id}'>"
-            f"{target_display}</a> (@{escape(target_username)})"
-        )
+            f"{target_display}</a> (@{escape(target_username)})")
     else:
         target_lnk = (
-            f"<a href='tg://user?id={target_user_id}'>{target_display}</a>"
-        )
+            f"<a href='tg://user?id={target_user_id}'>{target_display}</a>")
     source_label = "🤖 تلقائي" if source == "auto" else "👮 يدوي"
     lines = [
         ptype_label,
@@ -1757,8 +1636,7 @@ def _build_penalty_log_text(
         lines.append("")
         lines.append(
             f"👮 المشرف: <a href='tg://user?id={moderator_id}'>"
-            f"{mod_display}</a>"
-        )
+            f"{mod_display}</a>")
     lines.append(f"💬 المجموعة: <code>{chat_id}</code>")
     try:
         now_str = TimeUtils.mecca_now().strftime('%Y-%m-%d %H:%M:%S')
@@ -1780,12 +1658,10 @@ async def _notify_group_log_penalty(
         text = _build_penalty_log_text(
             chat_id, target_user_id, target_first_name,
             target_username, penalty_type, duration_seconds,
-            source, violation_type, moderator_id, moderator_name,
-        )
+            source, violation_type, moderator_id, moderator_name)
         await _dispatch_log(
             partial(notify_group_log, context, chat_id, text),
-            label=f"penalty-{penalty_type}",
-        )
+            label=f"penalty-{penalty_type}")
     except Exception as e:
         logger.warning("⚠️ _notify_group_log_penalty: %s", e)
 
@@ -1885,7 +1761,8 @@ async def _notify_delete_permission_failure(context, chat_id):
         try:
             await safe_send(context.bot, owner_id, msg, parse_mode='HTML')
         except Exception as e:
-            logger.warning("_notify_delete_permission_failure: %s", e)
+            logger.warning(
+                "_notify_delete_permission_failure: %s", e)
     except Exception:
         pass
 
@@ -1902,22 +1779,22 @@ async def _safe_delete_message(
         if _is_delete_permission_error(e):
             logger.error(
                 "❌ DELETE FAILED (perm) | chat=%s msg=%s",
-                chat_id, message_id,
-            )
+                chat_id, message_id)
             if notify_owner and context is not None:
                 try:
                     should_notify = await _record_delete_failure(chat_id)
                     if should_notify:
                         _spawn_tracked_task(
-                            _notify_delete_permission_failure(context, chat_id),
-                            label="delete-perm-notify",
-                        )
+                            _notify_delete_permission_failure(
+                                context, chat_id),
+                            label="delete-perm-notify")
                 except Exception:
                     pass
             return False
         if _is_delete_ignore_error(e):
             return True
-        logger.warning("⚠️ DELETE failed | chat=%s msg=%s", chat_id, message_id)
+        logger.warning(
+            "⚠️ DELETE failed | chat=%s msg=%s", chat_id, message_id)
         return False
     except asyncio.CancelledError:
         raise
@@ -1928,17 +1805,17 @@ async def _safe_delete_message(
                     should_notify = await _record_delete_failure(chat_id)
                     if should_notify:
                         _spawn_tracked_task(
-                            _notify_delete_permission_failure(context, chat_id),
-                            label="delete-perm-notify",
-                        )
+                            _notify_delete_permission_failure(
+                                context, chat_id),
+                            label="delete-perm-notify")
                 except Exception:
                     pass
             return False
         if _is_delete_ignore_error(e):
             return True
         logger.warning(
-            "⚠️ DELETE failed | chat=%s msg=%s | %s", chat_id, message_id, e,
-        )
+            "⚠️ DELETE failed | chat=%s msg=%s | %s",
+            chat_id, message_id, e)
         return False
 
 
@@ -1972,17 +1849,16 @@ def is_forwarded(
         if getattr(message, attr, None) is not None:
             return True
     is_protected = _as_bool(
-        getattr(message, 'has_protected_content', False), False,
-    )
-    is_auto = _as_bool(getattr(message, 'is_automatic_forward', False), False)
+        getattr(message, 'has_protected_content', False), False)
+    is_auto = _as_bool(
+        getattr(message, 'is_automatic_forward', False), False)
     if allow_protected_any and is_protected and not is_auto:
         return True
     if allow_protected_fallback and is_protected:
         caption = (
             getattr(message, 'caption', None)
             or getattr(message, 'text', None)
-            or ""
-        )
+            or "")
         if _has_forward_hint(caption):
             return True
     return False
@@ -2004,17 +1880,14 @@ def get_forward_detection_reason(message) -> Dict[str, Any]:
         }
     any_present = any(f["present"] for f in fields.values())
     protected = _as_bool(
-        getattr(message, 'has_protected_content', False), False,
-    )
+        getattr(message, 'has_protected_content', False), False)
     caption = (
         getattr(message, 'caption', None)
         or getattr(message, 'text', None)
-        or ""
-    )
+        or "")
     hint = _has_forward_hint(caption) if protected else False
     auto_fwd = _as_bool(
-        getattr(message, 'is_automatic_forward', False), False,
-    )
+        getattr(message, 'is_automatic_forward', False), False)
     return {
         "is_forwarded": any_present,
         "is_protected": protected,
@@ -2037,8 +1910,7 @@ def _extract_legacy_forward_info(message):
                 full_name = (
                     getattr(fwd_from, 'full_name', None)
                     or getattr(fwd_from, 'first_name', None)
-                    or ""
-                )
+                    or "")
             except Exception:
                 full_name = ""
             return {
@@ -2056,8 +1928,7 @@ def _extract_legacy_forward_info(message):
                 'name': (
                     getattr(fwd_from_chat, 'title', None)
                     or getattr(fwd_from_chat, 'username', None)
-                    or str(getattr(fwd_from_chat, 'id', 'Chat'))
-                ),
+                    or str(getattr(fwd_from_chat, 'id', 'Chat'))),
                 'date': fwd_date, 'signature': fwd_signature,
                 'message_id': None,
             }
@@ -2084,8 +1955,7 @@ def extract_forward_info(message):
                     name = (
                         getattr(user, 'full_name', None)
                         or getattr(user, 'first_name', None)
-                        or str(getattr(user, 'id', 'User'))
-                    )
+                        or str(getattr(user, 'id', 'User')))
                 except Exception:
                     name = str(getattr(user, 'id', 'User'))
                 return {
@@ -2096,8 +1966,7 @@ def extract_forward_info(message):
             if isinstance(origin, MessageOriginHiddenUser):
                 name = (
                     getattr(origin, 'sender_user_name', None)
-                    or "Hidden User"
-                )
+                    or "Hidden User")
                 return {
                     'type': 'hidden_user', 'id': None,
                     'name': name,
@@ -2111,10 +1980,10 @@ def extract_forward_info(message):
                     'name': (
                         getattr(chat, 'title', None)
                         or getattr(chat, 'username', None)
-                        or str(getattr(chat, 'id', 'Chat'))
-                    ),
+                        or str(getattr(chat, 'id', 'Chat'))),
                     'date': getattr(origin, 'date', None),
-                    'signature': getattr(origin, 'author_signature', None),
+                    'signature': getattr(
+                        origin, 'author_signature', None),
                     'message_id': None,
                 }
             if isinstance(origin, MessageOriginChannel):
@@ -2124,19 +1993,19 @@ def extract_forward_info(message):
                     'name': (
                         getattr(chat, 'title', None)
                         or getattr(chat, 'username', None)
-                        or str(getattr(chat, 'id', 'Channel'))
-                    ),
+                        or str(getattr(chat, 'id', 'Channel'))),
                     'date': getattr(origin, 'date', None),
-                    'signature': getattr(origin, 'author_signature', None),
+                    'signature': getattr(
+                        origin, 'author_signature', None),
                     'message_id': getattr(origin, 'message_id', None),
                 }
         except Exception as _e:
-            logger.debug("extract_forward_info isinstance path: %s", _e)
+            logger.debug(
+                "extract_forward_info isinstance path: %s", _e)
             try:
                 _chat = (
                     getattr(origin, 'chat', None)
-                    or getattr(origin, 'sender_chat', None)
-                )
+                    or getattr(origin, 'sender_chat', None))
                 if _chat is not None:
                     return {
                         'type': 'channel_or_chat',
@@ -2144,8 +2013,7 @@ def extract_forward_info(message):
                         'name': (
                             getattr(_chat, 'title', None)
                             or getattr(_chat, 'username', None)
-                            or str(getattr(_chat, 'id', '?'))
-                        ),
+                            or str(getattr(_chat, 'id', '?'))),
                         'date': getattr(origin, 'date', None),
                         'signature': None, 'message_id': None,
                     }
@@ -2155,14 +2023,12 @@ def extract_forward_info(message):
     if info:
         return info
     is_protected = _as_bool(
-        getattr(message, 'has_protected_content', False), False,
-    )
+        getattr(message, 'has_protected_content', False), False)
     if is_protected:
         caption = (
             getattr(message, 'caption', None)
             or getattr(message, 'text', None)
-            or ""
-        )
+            or "")
         if _has_forward_hint(caption):
             return {
                 'type': 'protected', 'id': None,
@@ -2170,41 +2036,33 @@ def extract_forward_info(message):
                 'date': None, 'signature': None, 'message_id': None,
             }
         return {
-            'type': 'protected_any', 'id': None, 'name': '🛡️ محتوى محمي',
+            'type': 'protected_any', 'id': None,
+            'name': '🛡️ محتوى محمي',
             'date': None, 'signature': None, 'message_id': None,
         }
     return None
+
+
 def get_forward_info(message) -> Dict[str, Any]:
     result: Dict[str, Any] = {
-        "is_forwarded": False,
-        "origin_type": None,
-        "original_chat_id": None,
-        "original_message_id": None,
-        "original_user_id": None,
-        "original_username": None,
-        "original_name": None,
-        "origin_date": None,
-        "sender_chat_id": None,
-        "sender_chat_title": None,
+        "is_forwarded": False, "origin_type": None,
+        "original_chat_id": None, "original_message_id": None,
+        "original_user_id": None, "original_username": None,
+        "original_name": None, "origin_date": None,
+        "sender_chat_id": None, "sender_chat_title": None,
         "is_automatic_forward": False,
     }
-
     if message is None:
         return result
-
     try:
         sender_chat = getattr(message, "sender_chat", None)
         if sender_chat is not None:
             result["sender_chat_id"] = getattr(sender_chat, "id", None)
             result["sender_chat_title"] = (
                 getattr(sender_chat, "title", None)
-                or getattr(sender_chat, "username", None)
-            )
-
+                or getattr(sender_chat, "username", None))
         result["is_automatic_forward"] = bool(
-            getattr(message, "is_automatic_forward", False)
-        )
-
+            getattr(message, "is_automatic_forward", False))
         origin = getattr(message, "forward_origin", None)
         if origin is None:
             legacy = _extract_legacy_forward_info(message)
@@ -2215,44 +2073,43 @@ def get_forward_info(message) -> Dict[str, Any]:
                 result["original_name"] = legacy.get("name")
                 result["origin_date"] = legacy.get("date")
             return result
-
         result["is_forwarded"] = True
         result["origin_date"] = getattr(origin, "date", None)
-
         if isinstance(origin, MessageOriginChannel):
             result["origin_type"] = "channel"
-            result["original_chat_id"] = getattr(origin.chat, "id", None)
-            result["original_message_id"] = getattr(origin, "message_id", None)
-            result["original_username"] = getattr(origin.chat, "username", None)
-            result["original_name"] = getattr(origin.chat, "title", None)
+            result["original_chat_id"] = getattr(
+                origin.chat, "id", None)
+            result["original_message_id"] = getattr(
+                origin, "message_id", None)
+            result["original_username"] = getattr(
+                origin.chat, "username", None)
+            result["original_name"] = getattr(
+                origin.chat, "title", None)
         elif isinstance(origin, MessageOriginUser):
             result["origin_type"] = "user"
             user = origin.sender_user
             result["original_user_id"] = getattr(user, "id", None)
-            result["original_username"] = getattr(user, "username", None)
+            result["original_username"] = getattr(
+                user, "username", None)
             result["original_name"] = (
                 getattr(user, "full_name", None)
-                or getattr(user, "first_name", None)
-            )
+                or getattr(user, "first_name", None))
         elif isinstance(origin, MessageOriginChat):
             result["origin_type"] = "chat"
             chat = origin.sender_chat
             result["original_chat_id"] = getattr(chat, "id", None)
             result["original_name"] = (
                 getattr(chat, "title", None)
-                or getattr(chat, "username", None)
-            )
+                or getattr(chat, "username", None))
         elif isinstance(origin, MessageOriginHiddenUser):
             result["origin_type"] = "hidden_user"
             result["original_name"] = (
                 getattr(origin, "sender_user_name", None)
-                or "Hidden User"
-            )
+                or "Hidden User")
         else:
             result["origin_type"] = type(origin).__name__
     except Exception as e:
         logger.debug("get_forward_info error: %s", e)
-
     return result
 
 
@@ -2261,10 +2118,8 @@ def _is_postbot_forward(message) -> Tuple[bool, Optional[Dict[str, Any]]]:
         return False, None
     try:
         info = get_forward_info(message)
-
         if not info.get("is_forwarded") and not info.get("sender_chat_id"):
             return False, None
-
         sender_id = info.get("sender_chat_id")
         if sender_id is not None:
             if _normalize_tg_id(sender_id) in _POSTBOT_RAW_IDS:
@@ -2278,14 +2133,12 @@ def _is_postbot_forward(message) -> Tuple[bool, Optional[Dict[str, Any]]]:
                 "type": "channel", "id": sender_id,
                 "name": sender_title,
             }
-
         ftype = (info.get("origin_type") or "").lower()
         if ftype not in (
             "channel", "chat", "user", "hidden_user",
             "protected", "protected_any",
         ):
             return False, None
-
         for id_key in ("original_chat_id", "original_user_id"):
             oid = info.get(id_key)
             if oid is None:
@@ -2296,12 +2149,12 @@ def _is_postbot_forward(message) -> Tuple[bool, Optional[Dict[str, Any]]]:
                     "name": info.get("original_name"),
                     "message_id": info.get("original_message_id"),
                 }
-
         name = info.get("original_name") or ""
         if _is_postbot_channel_name(name):
             return True, {
                 "type": ftype,
-                "id": info.get("original_chat_id") or info.get("original_user_id"),
+                "id": info.get("original_chat_id")
+                or info.get("original_user_id"),
                 "name": name,
                 "message_id": info.get("original_message_id"),
             }
@@ -2315,23 +2168,33 @@ async def _notify_admin_about_forward(context, admin_id, info):
         return
     try:
         type_labels = {
-            'user': '👤 مستخدم', 'hidden_user': '👻 مستخدم مخفي',
+            'user': '👤 مستخدم',
+            'hidden_user': '👻 مستخدم مخفي',
             'chat': '👥 مجموعة', 'channel': '📢 قناة',
-            'protected': '🛡️ محتوى محمي', 'protected_any': '🛡️ محتوى محمي',
+            'protected': '🛡️ محتوى محمي',
+            'protected_any': '🛡️ محتوى محمي',
         }
-        label = type_labels.get(info.get('type', ''), f"❔ {info.get('type')}")
-        lines = ["↩️ <b>رسالة مُعاد توجيهها</b>", "", f"📌 النوع: {label}"]
+        label = type_labels.get(
+            info.get('type', ''), f"❔ {info.get('type')}")
+        lines = [
+            "↩️ <b>رسالة مُعاد توجيهها</b>",
+            "", f"📌 النوع: {label}",
+        ]
         if info.get('id'):
-            lines.append(f"🆔 المصدر: <code>{info['id']}</code>")
+            lines.append(
+                f"🆔 المصدر: <code>{info['id']}</code>")
         if info.get('name'):
-            lines.append(f"📛 الاسم: {escape(str(info['name']))}")
+            lines.append(
+                f"📛 الاسم: {escape(str(info['name']))}")
         if info.get('message_id'):
-            lines.append(f"🔢 رقم الرسالة: <code>{info['message_id']}</code>")
+            lines.append(
+                f"🔢 رقم الرسالة: <code>{info['message_id']}</code>")
         if info.get('date'):
-            lines.append(f"📅 التاريخ: <code>{info['date']}</code>")
+            lines.append(
+                f"📅 التاريخ: <code>{info['date']}</code>")
         await safe_send(
-            context.bot, admin_id, "\n".join(lines), parse_mode='HTML',
-        )
+            context.bot, admin_id, "\n".join(lines),
+            parse_mode='HTML')
     except Exception:
         pass
 
@@ -2358,8 +2221,7 @@ def _should_notify_forward(context, chat_id) -> bool:
                     fwd_keys,
                     key=lambda k: bot_data.get(k, 0.0)
                     if isinstance(bot_data.get(k), (int, float))
-                    else 0.0,
-                )
+                    else 0.0)
             except Exception:
                 sorted_keys = fwd_keys
             remove_count = max(1, len(sorted_keys) // 4)
@@ -2406,16 +2268,14 @@ class GroupRateLimiterManager:
             now = time.time()
             if len(cls._limiters) >= cls.MAX_SIZE and chat_id not in cls._limiters:
                 sorted_items = sorted(
-                    cls._last_access.items(), key=lambda item: item[1],
-                )
+                    cls._last_access.items(), key=lambda item: item[1])
                 to_remove = sorted_items[: max(1, cls.MAX_SIZE // 5)]
                 for cid, _ in to_remove:
                     cls._limiters.pop(cid, None)
                     cls._last_access.pop(cid, None)
             if chat_id not in cls._limiters:
                 cls._limiters[chat_id] = RateLimiter(
-                    max_concurrent=5, max_per_second=10,
-                )
+                    max_concurrent=5, max_per_second=10)
             cls._last_access[chat_id] = now
             return cls._limiters[chat_id]
 
@@ -2452,7 +2312,6 @@ class GroupRateLimiterManager:
 def _prune_perf_caches() -> int:
     removed = 0
     now = time.monotonic()
-
     try:
         stale = [
             k for k, (_, ts) in _group_log_channel_cache.items()
@@ -2463,7 +2322,6 @@ def _prune_perf_caches() -> int:
         removed += len(stale)
     except Exception:
         pass
-
     try:
         stale = [
             k for k, (_, ts) in _sec_settings_local_cache.items()
@@ -2474,7 +2332,6 @@ def _prune_perf_caches() -> int:
         removed += len(stale)
     except Exception:
         pass
-
     try:
         stale = [
             k for k, (_, ts) in _admin_check_cache.items()
@@ -2485,7 +2342,6 @@ def _prune_perf_caches() -> int:
         removed += len(stale)
     except Exception:
         pass
-
     if removed > 0:
         logger.debug("🧹 _prune_perf_caches: حُذف %d إدخال", removed)
     return removed
@@ -2562,8 +2418,7 @@ async def _ensure_lang(update, context) -> str:
     try:
         user_id = (
             update.effective_user.id
-            if update and update.effective_user else None
-        )
+            if update and update.effective_user else None)
     except Exception:
         user_id = None
     if user_id:
@@ -2578,8 +2433,7 @@ async def _ensure_lang(update, context) -> str:
             pass
         try:
             lang = await asyncio.wait_for(
-                DB.get_user_language(user_id), timeout=2.0,
-            ) or 'ar'
+                DB.get_user_language(user_id), timeout=2.0) or 'ar'
             context.user_data['lang'] = lang
             return lang
         except Exception:
@@ -2599,44 +2453,35 @@ def clear_lang_cache(context):
 
 async def get_security_settings_cached(chat_id) -> dict:
     now = time.monotonic()
-
     try:
         entry = _sec_settings_local_cache.get(int(chat_id))
     except (TypeError, ValueError):
         entry = None
-
     if entry is not None:
         cached_value, cached_at = entry
         if now - cached_at < _SEC_SETTINGS_LOCAL_TTL:
             return cached_value
-
     settings = None
     try:
         settings = await settings_cache.get_security(chat_id)
     except Exception as e:
         logger.debug("settings_cache.get_security(%s): %s", chat_id, e)
-
     if settings is None or not isinstance(settings, dict):
         try:
             settings = await DB.get_security_settings(chat_id)
         except Exception as e:
             logger.debug("DB.get_security_settings(%s): %s", chat_id, e)
             settings = None
-
         if settings is None:
             logger.warning(
                 "get_security_settings_cached(%s): DB failure — "
-                "returning empty (NOT cached)",
-                chat_id,
-            )
+                "returning empty (NOT cached)", chat_id)
             return {}
-
         settings = _row_to_dict_local(settings) or {}
         try:
             await settings_cache.set_security(chat_id, settings)
         except Exception:
             pass
-
     if len(_sec_settings_local_cache) >= _SEC_SETTINGS_LOCAL_MAX:
         try:
             oldest = sorted(
@@ -2647,12 +2492,10 @@ async def get_security_settings_cached(chat_id) -> dict:
                 _sec_settings_local_cache.pop(k, None)
         except Exception:
             pass
-
     try:
         _sec_settings_local_cache[int(chat_id)] = (settings, now)
     except (TypeError, ValueError):
         pass
-
     return settings
 
 
@@ -2711,8 +2554,7 @@ async def _send_translation_reply(
     try:
         label = (
             TranslationManager.get_text(lang, "translation_label")
-            or "🌐 <b>Translation:</b>"
-        )
+            or "🌐 <b>Translation:</b>")
     except Exception:
         label = "🌐 <b>Translation:</b>"
     try:
@@ -2728,9 +2570,7 @@ async def _send_translation_reply(
         if sent and getattr(sent, 'message_id', None):
             _spawn_delete_after_delay(
                 bot, chat_id, sent.message_id,
-                TRANSLATION_REPLY_DELETE_DELAY,
-                context=context,
-            )
+                TRANSLATION_REPLY_DELETE_DELAY, context=context)
     except Exception:
         pass
 
@@ -2756,8 +2596,7 @@ async def apply_violation_penalty(
             f"violation: {violation_type}",
             moderator=context.bot.id,
             username=username, first_name=first_name, chat_name=chat_name,
-            lang=lang,
-        )
+            lang=lang)
     except asyncio.CancelledError:
         raise
     except Exception as e:
@@ -2824,12 +2663,10 @@ def _parse_contest_date(date_str):
 async def _check_admin_in_chat(context, chat_id, user_id) -> bool:
     if user_id == CONFIG.PRIMARY_OWNER_ID:
         return True
-
     try:
         cache_key = (int(chat_id), int(user_id))
     except (TypeError, ValueError):
         cache_key = None
-
     if cache_key is not None:
         now = time.monotonic()
         entry = _admin_check_cache.get(cache_key)
@@ -2837,14 +2674,12 @@ async def _check_admin_in_chat(context, chat_id, user_id) -> bool:
             cached_value, cached_at = entry
             if now - cached_at < _ADMIN_CHECK_CACHE_TTL:
                 return cached_value
-
     result = False
     try:
         if await is_authorized_in_group(context.bot, chat_id, user_id):
             result = True
     except Exception:
         pass
-
     if not result:
         try:
             db_type = getattr(DB, "DB_TYPE", "sqlite")
@@ -2858,7 +2693,6 @@ async def _check_admin_in_chat(context, chat_id, user_id) -> bool:
             result = row is not None
         except Exception:
             result = False
-
     if cache_key is not None:
         if len(_admin_check_cache) >= _ADMIN_CHECK_CACHE_MAX:
             try:
@@ -2871,10 +2705,10 @@ async def _check_admin_in_chat(context, chat_id, user_id) -> bool:
             except Exception:
                 pass
         try:
-            _admin_check_cache[cache_key] = (result, time.monotonic())
+            _admin_check_cache[cache_key] = (
+                result, time.monotonic())
         except Exception:
             pass
-
     return result
 
 
@@ -2889,8 +2723,8 @@ async def _verify_bot_in_log_channel(context, channel_id):
         return False, "bot_id_missing"
     try:
         member = await asyncio.wait_for(
-            context.bot.get_chat_member(channel_id, bot_id), timeout=10.0,
-        )
+            context.bot.get_chat_member(channel_id, bot_id),
+            timeout=10.0)
     except asyncio.TimeoutError:
         return False, "timeout"
     except BadRequest as e:
@@ -2930,7 +2764,8 @@ def _verify_bot_in_log_channel_error_text(reason) -> str:
 try:
     from database_settings import _is_valid_channel_ref  # noqa: F401
 except ImportError:
-    _TG_USERNAME_RE_FALLBACK = re.compile(r'^[a-zA-Z][a-zA-Z0-9_]{3,31}$')
+    _TG_USERNAME_RE_FALLBACK = re.compile(
+        r'^[a-zA-Z][a-zA-Z0-9_]{3,31}$')
 
     def _is_valid_channel_ref(value):
         if value is None:
@@ -2941,7 +2776,8 @@ except ImportError:
         if value_str.lstrip('-').isdigit():
             return True
         if value_str.startswith('@'):
-            return bool(_TG_USERNAME_RE_FALLBACK.match(value_str[1:]))
+            return bool(
+                _TG_USERNAME_RE_FALLBACK.match(value_str[1:]))
         if _TG_USERNAME_RE_FALLBACK.match(value_str):
             return True
         return False
@@ -2961,8 +2797,7 @@ def _get_banned_pattern(banned_word: str) -> Optional[re.Pattern]:
     try:
         escaped = re.escape(banned_word).replace(r'\ ', r'\s+')
         pattern = re.compile(
-            rf'(?<!\w){escaped}(?!\w)', re.IGNORECASE | re.UNICODE,
-        )
+            rf'(?<!\w){escaped}(?!\w)', re.IGNORECASE | re.UNICODE)
     except Exception:
         return None
     _compiled_banned_patterns[banned_word] = pattern
@@ -2981,11 +2816,9 @@ def _get_spaced_banned_pattern(banned_word: str) -> Optional[re.Pattern]:
             return None
         chars = list(banned_word)
         body = r'[\s\-_.|/*+=~^`•●○▪▫■□♦♢※]{1,2}'.join(
-            re.escape(c) for c in chars
-        )
+            re.escape(c) for c in chars)
         pattern = re.compile(
-            rf'(?<!\w){body}(?!\w)', re.IGNORECASE | re.UNICODE,
-        )
+            rf'(?<!\w){body}(?!\w)', re.IGNORECASE | re.UNICODE)
     except Exception:
         return None
     _compiled_spaced_patterns[banned_word] = pattern
@@ -2996,7 +2829,7 @@ def _get_spaced_banned_pattern(banned_word: str) -> Optional[re.Pattern]:
 
 def _contains_banned_word(text, banned_word) -> bool:
     """
-    ⚠️ v7.18.18: للتوافق القديم فقط.
+    ⚠️ v7.18.19: للتوافق القديم فقط.
     المسار الحديث يستخدم BannedWordsManager.check_message.
     """
     if not text or not banned_word:
@@ -3004,11 +2837,8 @@ def _contains_banned_word(text, banned_word) -> bool:
     if len(text) > 4000:
         text = text[:4000]
     try:
-        # إذا كان المدير الجديد متاحاً — استخدمه
         if _HAS_BWM and _bwm_contains is not None:
             return _bwm_contains(text, banned_word)
-
-        # fallback: النظام القديم
         normalized_text = _normalize_text(text).lower()
         normalized_word = _normalize_text(str(banned_word)).lower()
         if not normalized_word:
@@ -3030,8 +2860,7 @@ def _contains_banned_word(text, banned_word) -> bool:
         try:
             return (
                 str(banned_word).strip().lower()
-                == str(text).strip().lower()
-            )
+                == str(text).strip().lower())
         except Exception:
             return False
 
@@ -3053,13 +2882,11 @@ def _accepts_state_arg(handler, handler_name: str) -> bool:
         result = len(params) >= 3
     except (TypeError, ValueError):
         result = False
-
     with _private_sig_cache_lock:
         if len(_private_handler_signature_cache) >= _PRIVATE_SIG_CACHE_MAX:
             try:
                 _private_handler_signature_cache.pop(
-                    next(iter(_private_handler_signature_cache))
-                )
+                    next(iter(_private_handler_signature_cache)))
             except (StopIteration, KeyError):
                 pass
         _private_handler_signature_cache[handler_name] = result
@@ -3068,17 +2895,33 @@ def _accepts_state_arg(handler, handler_name: str) -> bool:
 
 class MessageHandlers:
 
-    # 🔴 v7.18.15 FIX-RPL-1: مفاتيح الردود مُضافة
+    # ═══════════════════════════════════════════════════════════════════
+    # 🆕 v7.18.19 FIX-ROUTE-1: _PRIVATE_HANDLERS_MAP مُوسَّعة + fallback
+    # ═══════════════════════════════════════════════════════════════════
+    # المبدأ:
+    #   - الحالات المُعالَجة محلياً في MessageHandlers → اسم الدالة
+    #   - أي حالة أخرى → handle_private يحوّلها إلى CommandHandlers
+    #     عبر fallback (FIX-ROUTE-1).
+    #
+    # هذا يحل مشكلة "الصمت عند إرسال معرف القناة" لأن
+    # WAIT_CHANNEL (وأي حالة أخرى) ستُمرَّر إلى CommandHandlers.
+    # ═══════════════════════════════════════════════════════════════════
     _PRIVATE_HANDLERS_MAP: Dict[Any, str] = {
+        # ─── معالجات محلية ───
         "WAIT_GROUP_BAN": "handle_add_banned_word",
         "WAIT_GLOBAL_BAN": "handle_add_global_banned_word",
         "WAIT_REM_GROUP_BAN": "handle_remove_banned_word",
         "WAIT_REM_GLOBAL_BAN": "handle_remove_global_banned_word",
-        # 🆕 v7.18.15: مسارات الردود
         "WAIT_REPLY_TRIGGER": "handle_add_reply",
         "WAIT_REPLY_RESPONSE": "handle_add_reply",
         "WAIT_REPLY_ADD": "handle_add_reply",
         "WAIT_REPLY_REMOVE": "handle_remove_reply",
+        # ─── حالات أخرى تُمرَّر إلى CommandHandlers.handle_text ───
+        # WAIT_CHANNEL, WAIT_MIN, WAIT_HOUR, WAIT_DAY, WAIT_PUB_TIME,
+        # WAIT_ADMIN_ADD, WAIT_ADMIN_REM, WAIT_BROADCAST, WAIT_UPDATE,
+        # WAIT_UPDATE_CH, WAIT_FORCE, WAIT_BAN, WAIT_MUTE, WAIT_WARN,
+        # WAIT_KICK, WAIT_RESTRICT, WAIT_UNBAN, WAIT_PIN, WAIT_KEYWORD,
+        # WAIT_REPLY, WAIT_LOG_CH, WAIT_CONTEST_*, WAIT_MAX_LEN, ...
     }
 
     @staticmethod
@@ -3101,20 +2944,23 @@ class MessageHandlers:
 
     @staticmethod
     async def handle_edited(update, context):
+        """
+        🆕 v7.18.19 FIX-EDIT-1: فحص effective_message **قبل** acquire
+        limiter (كان بعده → قد يستهلك limit دون داعٍ).
+        """
         if (not update or not update.effective_chat
                 or not update.edited_message):
+            return
+        # 🆕 FIX-EDIT-1: الفحص قبل acquire
+        if update.effective_message is None:
             return
         chat_id = update.effective_chat.id
         limiter = None
         limiter_acquired = False
         try:
             limiter, limiter_acquired = await _acquire_group_limiter(chat_id)
-            if update.effective_message is None:
-                return
-            # 🔴 v7.18.16 FIX-EDIT-1: تجاوز فحص الفيضان عند التعديل
             await MessageHandlers._handle_group_impl(
-                update, context, skip_flood=True,
-            )
+                update, context, skip_flood=True)
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -3132,17 +2978,19 @@ class MessageHandlers:
         try:
             slow_on = _as_bool(settings.get('slow_mode', 0), False)
             try:
-                slow_secs = int(settings.get('slow_mode_seconds', 0) or 0)
+                slow_secs = int(
+                    settings.get('slow_mode_seconds', 0) or 0)
             except (TypeError, ValueError):
                 slow_secs = 0
-
             bd = context.bot_data
-            if isinstance(bd, dict) and len(bd) > _BOT_DATA_SLOW_MODE_PRUNE_THRESHOLD:
+            if (isinstance(bd, dict)
+                    and len(bd) > _BOT_DATA_SLOW_MODE_PRUNE_THRESHOLD):
                 now_ts = time.monotonic()
                 last_prune = bd.get("_slow_prune_last_ts", 0.0)
                 if not isinstance(last_prune, (int, float)):
                     last_prune = 0.0
-                if now_ts - last_prune >= _BOT_DATA_SLOW_MODE_PRUNE_COOLDOWN:
+                if (now_ts - last_prune
+                        >= _BOT_DATA_SLOW_MODE_PRUNE_COOLDOWN):
                     prefix = "_slow_applied_"
                     stale = [
                         k for k in list(bd.keys())
@@ -3151,9 +2999,7 @@ class MessageHandlers:
                     for k in stale[:max(1, len(stale) // 2)]:
                         bd.pop(k, None)
                     bd["_slow_prune_last_ts"] = now_ts
-
             cache_key = f"_slow_applied_{chat_id}"
-
             try:
                 if isinstance(bd, dict):
                     last_applied = bd.get(cache_key, -1)
@@ -3161,119 +3007,99 @@ class MessageHandlers:
                     last_applied = -1
             except Exception:
                 last_applied = -1
-
             target = slow_secs if (slow_on and slow_secs > 0) else 0
             if target < 0:
                 target = 0
             if target > 3600:
                 target = 3600
-
             if target == last_applied:
                 return
             if target == 0 and last_applied in (0, -1):
                 return
-
             _SLOW_ALLOWED = (0, 10, 30, 60, 300, 900, 3600)
             if target <= 0:
                 _target_tg = 0
             else:
                 _target_tg = min(
                     _SLOW_ALLOWED,
-                    key=lambda x: abs(x - target) if x >= 10 else 10**9,
-                )
+                    key=lambda x: abs(x - target)
+                    if x >= 10 else 10**9)
                 if _target_tg < 10:
                     _target_tg = 10
-
             _api_success = False
             _api_error = None
-
-            _fn = getattr(context.bot, "set_chat_slow_mode_delay", None)
+            _fn = getattr(
+                context.bot, "set_chat_slow_mode_delay", None)
             if callable(_fn):
                 try:
                     await _fn(
-                        chat_id=chat_id,
-                        slow_mode_delay=_target_tg,
-                    )
+                        chat_id=chat_id, slow_mode_delay=_target_tg)
                     _api_success = True
                 except Exception as _e:
                     logger.debug(
                         "set_chat_slow_mode_delay فشلت: %s — "
-                        "fallback to HTTP", _e,
-                    )
-
+                        "fallback to HTTP", _e)
             if not _api_success:
                 try:
                     import aiohttp
-
                     _token = getattr(context.bot, "token", None)
                     if not _token:
                         raise RuntimeError("bot.token غير متاح")
-
                     _url = (
                         f"https://api.telegram.org/bot{_token}"
-                        f"/setChatSlowModeDelay"
-                    )
+                        f"/setChatSlowModeDelay")
                     _payload = {
                         "chat_id": chat_id,
                         "slow_mode_delay": _target_tg,
                     }
                     _timeout = aiohttp.ClientTimeout(total=10)
-
                     async with aiohttp.ClientSession(
-                        timeout=_timeout
-                    ) as _session:
+                            timeout=_timeout) as _session:
                         async with _session.post(
-                            _url, json=_payload
-                        ) as _resp:
+                                _url, json=_payload) as _resp:
                             _data = await _resp.json()
-
                     if _data.get("ok"):
                         _api_success = True
                     else:
                         _api_error = _data.get(
-                            "description", "unknown error"
-                        )
+                            "description", "unknown error")
                 except Exception as _e:
                     _api_error = str(_e)
-
             if _api_success:
                 try:
                     if isinstance(context.bot_data, dict):
                         context.bot_data[cache_key] = target
                         context.bot_data.pop(
-                            f"_slow_warn_{chat_id}", None
-                        )
+                            f"_slow_warn_{chat_id}", None)
                 except Exception:
                     pass
                 logger.info(
                     "🐌 SLOW-MODE | chat=%s requested=%d applied=%d",
-                    chat_id, target, _target_tg,
-                )
+                    chat_id, target, _target_tg)
             else:
                 _err_lower = (_api_error or "").lower()
-                if "not found" in _err_lower or "404" in _err_lower:
+                if ("not found" in _err_lower
+                        or "404" in _err_lower):
                     if not _SLOW_MODE_UNSUPPORTED:
                         _SLOW_MODE_UNSUPPORTED = True
                         logger.warning(
                             "⚠️ SLOW-MODE: معطّل نهائياً — "
-                            "Telegram Bot API لا يوفّر setChatSlowModeDelay"
-                        )
+                            "Telegram Bot API لا يوفّر "
+                            "setChatSlowModeDelay")
         except Exception as e:
             logger.debug("_apply_slow_mode: %s", e)
 
     @staticmethod
     async def _handle_group_impl(update, context, skip_flood=False):
         """
-        🔴 v7.18.16: skip_flood=True عند التعديل (handle_edited).
-        🆕 v7.18.17 REC-2: _analysis_mode يميّز الوضع المُخفَّض.
+        🔴 v7.18.16: skip_flood=True عند التعديل.
+        🆕 v7.18.19 FIX-BWM-3: fallback صحيح عند فشل BWM.
         """
         if not update.effective_chat or not update.effective_message:
             return
         chat_id = update.effective_chat.id
         await _lazy_init_columns(bot=context.bot)
-
         message = update.effective_message
-
         is_anonymous = False
         if update.effective_user:
             user_id = update.effective_user.id
@@ -3282,13 +3108,11 @@ class MessageHandlers:
             is_anonymous = True
         else:
             return
-
         try:
             ctx = _MessageContext(message)
         except Exception as e:
             logger.debug("_MessageContext build failed: %s", e)
             return
-
         try:
             METRICS.increment_messages()
         except Exception:
@@ -3301,101 +3125,86 @@ class MessageHandlers:
         _df_raw = settings.get('delete_forwarded')
         _df_bool = _as_bool(_df_raw, False)
         _protected_fb = _as_bool(
-            settings.get('delete_protected_forward'), False,
-        )
-        _protected_any = _as_bool(settings.get('delete_protected_any'), False)
+            settings.get('delete_protected_forward'), False)
+        _protected_any = _as_bool(
+            settings.get('delete_protected_any'), False)
         _spam_enabled = _as_bool(
-            settings.get('delete_spam_score', True), True,
-        )
+            settings.get('delete_spam_score', True), True)
         _postbot_enabled = _as_bool(
-            settings.get('delete_postbot_pattern', 0), False,
-        )
+            settings.get('delete_postbot_pattern', 0), False)
         _at_channel_enabled = _as_bool(
-            settings.get('delete_at_channel', 0), False,
-        )
+            settings.get('delete_at_channel', 0), False)
         _tg_scheme_enabled = _as_bool(
-            settings.get('delete_tg_scheme', 1), True,
-        )
+            settings.get('delete_tg_scheme', 1), True)
         _button_links_enabled = (
             _FORCE_DELETE_BUTTON_LINKS
-            or _as_bool(settings.get('delete_button_links', 1), True)
-        )
-        _emails_enabled = _as_bool(settings.get('delete_emails', 0), False)
-        _polls_enabled = _as_bool(settings.get('delete_polls', 0), False)
+            or _as_bool(settings.get('delete_button_links', 1), True))
+        _emails_enabled = _as_bool(
+            settings.get('delete_emails', 0), False)
+        _polls_enabled = _as_bool(
+            settings.get('delete_polls', 0), False)
         _banned_words_enabled = _as_bool(
-            settings.get('delete_banned_words', 0), False,
-        )
+            settings.get('delete_banned_words', 0), False)
 
         _antiflood_enabled = _as_bool(
-            settings.get('antiflood_enabled', 0), False,
-        )
-        if (
-            _antiflood_enabled
-            and _ANTIFLOOD_ENABLED
-            and not is_anonymous
-            and not skip_flood
-        ):
+            settings.get('antiflood_enabled', 0), False)
+        if (_antiflood_enabled and _ANTIFLOOD_ENABLED
+                and not is_anonymous and not skip_flood):
             try:
                 _af_max_raw = settings.get(
-                    'antiflood_messages', _FLOOD_DEFAULT_MESSAGES,
-                )
+                    'antiflood_messages', _FLOOD_DEFAULT_MESSAGES)
                 _af_win_raw = settings.get(
-                    'antiflood_seconds', _FLOOD_DEFAULT_WINDOW,
-                )
+                    'antiflood_seconds', _FLOOD_DEFAULT_WINDOW)
                 try:
-                    _af_max = int(_af_max_raw or _FLOOD_DEFAULT_MESSAGES)
+                    _af_max = int(
+                        _af_max_raw or _FLOOD_DEFAULT_MESSAGES)
                 except (TypeError, ValueError):
                     _af_max = _FLOOD_DEFAULT_MESSAGES
                 try:
-                    _af_win = float(_af_win_raw or _FLOOD_DEFAULT_WINDOW)
+                    _af_win = float(
+                        _af_win_raw or _FLOOD_DEFAULT_WINDOW)
                 except (TypeError, ValueError):
                     _af_win = float(_FLOOD_DEFAULT_WINDOW)
-
                 _is_flood = await _check_flood(
-                    chat_id, user_id, _af_max, _af_win,
-                )
+                    chat_id, user_id, _af_max, _af_win)
                 if _is_flood:
                     if _DEBUG_DIAG:
                         logger.warning(
-                            "🌊 FLOOD | chat=%s user=%s max=%d win=%.1fs",
-                            chat_id, user_id, _af_max, _af_win,
-                        )
+                            "🌊 FLOOD | chat=%s user=%s max=%d "
+                            "win=%.1fs",
+                            chat_id, user_id, _af_max, _af_win)
                     await MessageHandlers._delete_and_warn(
                         update, context, chat_id, user_id,
-                        "antiflood", settings, is_anonymous=False,
-                    )
+                        "antiflood", settings, is_anonymous=False)
                     return
             except Exception as e:
                 logger.debug("flood check: %s", e)
 
         try:
             await MessageHandlers._apply_slow_mode(
-                context, chat_id, settings,
-            )
+                context, chat_id, settings)
         except Exception as e:
             logger.debug("slow_mode apply: %s", e)
 
         det = get_forward_detection_reason(message)
         _det_fwd = _as_bool(det.get('is_forwarded', False), False)
-        _det_protected = _as_bool(det.get('is_protected', False), False)
-        _det_auto = _as_bool(det.get('has_automatic_forward', False), False)
+        _det_protected = _as_bool(
+            det.get('is_protected', False), False)
+        _det_auto = _as_bool(
+            det.get('has_automatic_forward', False), False)
         forward_hint = _as_bool(det.get('has_hint', False), False)
-
         if _det_fwd and not ctx.is_forwarded:
             ctx.is_forwarded = True
         if _det_protected and not ctx.is_protected:
             ctx.is_protected = True
         if _det_auto and not ctx.is_auto_fwd:
             ctx.is_auto_fwd = True
-
         is_protected_forward = (
             _protected_fb and ctx.is_protected and forward_hint
-            and not ctx.is_forwarded
-        )
+            and not ctx.is_forwarded)
         is_protected_any_fwd = (
             _protected_any and ctx.is_protected and not ctx.is_forwarded
-            and not is_protected_forward
-        )
+            and not is_protected_forward)
 
         _spam_score = 0
         _spam_reasons: List[str] = []
@@ -3404,68 +3213,62 @@ class MessageHandlers:
         _analysis_mode = "text-only"
 
         if _spam_enabled:
-            # 🔴 v7.18.16 FIX-DET-1: استخدام _HAS_ASYNC_DETECTORS
             if _MULTILAYER_ENABLED and _HAS_ASYNC_DETECTORS:
                 try:
                     _verdict = await analyze_message_full_async(
-                        message, bot=context.bot,
-                    )
+                        message, bot=context.bot)
                     if _verdict is not None:
                         _spam_score = int(
-                            getattr(_verdict, "total_score", 0) or 0
-                        )
+                            getattr(_verdict, "total_score", 0) or 0)
                         _spam_layer_scores = dict(
-                            getattr(_verdict, "layer_scores", {}) or {}
-                        )
+                            getattr(
+                                _verdict, "layer_scores", {}) or {})
                         try:
                             for _layer, _reasons in (
-                                getattr(_verdict, "layer_reasons", {}) or {}
+                                getattr(
+                                    _verdict, "layer_reasons", {}) or {}
                             ).items():
                                 for _r in (_reasons or []):
-                                    _spam_reasons.append(f"{_layer}:{_r}")
+                                    _spam_reasons.append(
+                                        f"{_layer}:{_r}")
                         except Exception:
                             pass
                         _analysis_mode = "multilayer-async"
                 except Exception as e:
                     logger.debug("multilayer async error: %s", e)
                     _verdict = None
-
             elif _MULTILAYER_ENABLED and analyze_message_full is not None:
                 try:
                     _verdict = await _run_sync_in_pool(
-                        analyze_message_full,
-                        message,
-                        context.bot,
-                        timeout=30.0,
-                    )
+                        analyze_message_full, message, context.bot,
+                        timeout=30.0)
                     if _verdict is not None:
                         _spam_score = int(
-                            getattr(_verdict, "total_score", 0) or 0
-                        )
+                            getattr(_verdict, "total_score", 0) or 0)
                         _spam_layer_scores = dict(
-                            getattr(_verdict, "layer_scores", {}) or {}
-                        )
+                            getattr(
+                                _verdict, "layer_scores", {}) or {})
                         try:
                             for _layer, _reasons in (
-                                getattr(_verdict, "layer_reasons", {}) or {}
+                                getattr(
+                                    _verdict, "layer_reasons", {}) or {}
                             ).items():
                                 for _r in (_reasons or []):
-                                    _spam_reasons.append(f"{_layer}:{_r}")
+                                    _spam_reasons.append(
+                                        f"{_layer}:{_r}")
                         except Exception:
                             pass
-                        # 🆕 v7.18.17 REC-2: تمييز الوضع المُخفَّض
-                        _analysis_mode = "multilayer-sync-pool-DEGRADED"
+                        _analysis_mode = (
+                            "multilayer-sync-pool-DEGRADED")
                 except asyncio.TimeoutError:
                     logger.warning(
                         "⚠️ multilayer sync pool: TIMEOUT (30s) | "
                         "chat=%s user=%s — fallback to text-only",
-                        chat_id, user_id,
-                    )
+                        chat_id, user_id)
                     _verdict = None
                 except Exception as e:
                     logger.debug("multilayer sync-pool error: %s", e)
                     _verdict = None
-
             if _verdict is None:
                 try:
                     _spam_score, _spam_reasons = _compute_spam_score(ctx)
@@ -3473,23 +3276,20 @@ class MessageHandlers:
                 except Exception as e:
                     logger.debug("spam_score: %s", e)
 
-        _is_spam = _spam_enabled and _spam_score >= SPAM_SCORE_THRESHOLD
+        _is_spam = (
+            _spam_enabled and _spam_score >= SPAM_SCORE_THRESHOLD)
 
         _postbot_hard_conf = 0
         try:
             _postbot_hard_conf = _postbot_pattern_confidence(
                 ctx.analysis_text,
                 button_count=ctx.button_count,
-                button_urls=ctx.button_urls,
-            )
+                button_urls=ctx.button_urls)
         except Exception as e:
             logger.debug("postbot confidence: %s", e)
             _postbot_hard_conf = 0
-
         _postbot_hard_block = (
-            _postbot_hard_conf >= POSTBOT_AUTO_BLOCK_CONFIDENCE
-        )
-
+            _postbot_hard_conf >= POSTBOT_AUTO_BLOCK_CONFIDENCE)
         _postbot_match = False
         if _postbot_enabled:
             if _postbot_hard_block:
@@ -3499,8 +3299,7 @@ class MessageHandlers:
                     _postbot_match = _is_postbot_pattern(
                         ctx.analysis_text,
                         button_count=ctx.button_count,
-                        button_urls=ctx.button_urls,
-                    )
+                        button_urls=ctx.button_urls)
                 except Exception:
                     _postbot_match = False
 
@@ -3513,34 +3312,28 @@ class MessageHandlers:
                 _postbot_hard_conf, POSTBOT_AUTO_BLOCK_CONFIDENCE,
                 ctx.button_count, ctx.strong_word_count,
                 ctx.promo_word_count, ctx.cta_count,
-                ctx.spam_emoji_count, _analysis_mode,
-            )
+                ctx.spam_emoji_count, _analysis_mode)
 
         if _analysis_mode.startswith("multilayer"):
             _shield_log_fn = (
-                logger.info if _spam_score > 0 else logger.debug
-            )
+                logger.info if _spam_score > 0 else logger.debug)
             _shield_log_fn(
                 "🛡️ SHIELD | chat=%s user=%s msg=%s | "
                 "total=%.1f | mode=%s | layers=%s",
                 chat_id, user_id, message.message_id,
-                float(_spam_score),
-                _analysis_mode,
+                float(_spam_score), _analysis_mode,
                 {k: round(v, 1)
-                 for k, v in _spam_layer_scores.items() if v > 0},
-            )
+                 for k, v in _spam_layer_scores.items() if v > 0})
 
         if _DEBUG_DIAG:
             will_delete_fwd = _df_bool and (
                 ctx.is_forwarded or ctx.is_auto_fwd
-                or is_protected_forward or is_protected_any_fwd
-            )
+                or is_protected_forward or is_protected_any_fwd)
             _log_level = (
                 logging.WARNING
                 if (will_delete_fwd or _is_spam or _postbot_match
                     or _postbot_hard_block)
-                else logging.INFO
-            )
+                else logging.INFO)
             logger.log(
                 _log_level,
                 "🚨 DIAG | chat=%s user=%s msg=%s%s | "
@@ -3567,28 +3360,20 @@ class MessageHandlers:
                 _postbot_enabled, _postbot_match,
                 _postbot_hard_conf, _postbot_hard_block,
                 ctx.has_any_link,
-                len(ctx.button_link_urls),
-                len(ctx.entity_urls),
-                len(ctx.vcard_urls),
-                bool(ctx.venue_url),
-                len(ctx.poll_urls),
-                ctx.hidden_char_count,
-                ctx.bidi_count,
-                ctx.mixed_scripts,
-                ctx.url_count,
-                ctx.telegram_link_count,
-                ctx.strong_word_count,
-                ctx.medium_word_count,
-                ctx.arabic_spam_count,
-                ctx.cta_count,
-                _antiflood_enabled,
-            )
+                len(ctx.button_link_urls), len(ctx.entity_urls),
+                len(ctx.vcard_urls), bool(ctx.venue_url),
+                len(ctx.poll_urls), ctx.hidden_char_count,
+                ctx.bidi_count, ctx.mixed_scripts,
+                ctx.url_count, ctx.telegram_link_count,
+                ctx.strong_word_count, ctx.medium_word_count,
+                ctx.arabic_spam_count, ctx.cta_count,
+                _antiflood_enabled)
 
         if _as_bool(settings.get('delete_service'), False):
             if message.new_chat_members or message.left_chat_member:
                 await _safe_delete_message(
-                    context.bot, chat_id, message.message_id, context=context,
-                )
+                    context.bot, chat_id, message.message_id,
+                    context=context)
                 return
 
         if _HAS_AUTO_BLOCK:
@@ -3597,21 +3382,18 @@ class MessageHandlers:
                 _source_id = (
                     _fwd_ab.get("original_chat_id")
                     or _fwd_ab.get("original_user_id")
-                    or _fwd_ab.get("sender_chat_id")
-                )
+                    or _fwd_ab.get("sender_chat_id"))
                 if _source_id is not None:
                     if await _is_source_blocked(_source_id):
                         logger.warning(
                             "🚫 AUTO-BLOCKED-SOURCE | chat=%s msg=%s | "
                             "source_id=%s name=%r",
                             chat_id, message.message_id,
-                            _source_id, _fwd_ab.get("original_name"),
-                        )
+                            _source_id, _fwd_ab.get("original_name"))
                         await MessageHandlers._delete_and_warn(
                             update, context, chat_id, user_id,
                             "postbot_forward", settings,
-                            is_anonymous=is_anonymous,
-                        )
+                            is_anonymous=is_anonymous)
                         return
             except Exception as e:
                 logger.debug("auto-block check: %s", e)
@@ -3621,14 +3403,13 @@ class MessageHandlers:
                 _is_pb, _pb_info = _is_postbot_forward(message)
                 if _is_pb:
                     logger.warning(
-                        "📰 POSTBOT-FORWARD-DELETE | chat=%s user=%s msg=%s",
-                        chat_id, user_id, message.message_id,
-                    )
+                        "📰 POSTBOT-FORWARD-DELETE | chat=%s user=%s "
+                        "msg=%s",
+                        chat_id, user_id, message.message_id)
                     await MessageHandlers._delete_and_warn(
                         update, context, chat_id, user_id,
                         "postbot_forward", settings,
-                        is_anonymous=is_anonymous,
-                    )
+                        is_anonymous=is_anonymous)
                     return
             except Exception as e:
                 logger.debug("postbot forward check: %s", e)
@@ -3638,139 +3419,124 @@ class MessageHandlers:
                 "🔘 BUTTON-LINK-DELETE | chat=%s user=%s msg=%s | "
                 "buttons=%d | urls=%s",
                 chat_id, user_id, message.message_id,
-                ctx.button_count,
-                ctx.button_link_urls[:3],
-            )
+                ctx.button_count, ctx.button_link_urls[:3])
             await MessageHandlers._delete_and_warn(
                 update, context, chat_id, user_id,
-                "button_link", settings, is_anonymous=is_anonymous,
-            )
+                "button_link", settings, is_anonymous=is_anonymous)
             return
 
         if _postbot_hard_block:
             await MessageHandlers._delete_and_warn(
                 update, context, chat_id, user_id,
-                "postbot_pattern", settings, is_anonymous=is_anonymous,
-            )
+                "postbot_pattern", settings, is_anonymous=is_anonymous)
             return
 
         if _df_bool:
             effective_forwarded = (
                 ctx.is_forwarded or ctx.is_auto_fwd
-                or is_protected_forward or is_protected_any_fwd
-            )
+                or is_protected_forward or is_protected_any_fwd)
             if effective_forwarded:
                 await MessageHandlers._delete_and_warn(
                     update, context, chat_id, user_id,
-                    "forwarded", settings, is_anonymous=is_anonymous,
-                )
+                    "forwarded", settings, is_anonymous=is_anonymous)
                 return
 
         if _is_spam:
             await MessageHandlers._delete_and_warn(
                 update, context, chat_id, user_id,
-                "spam_score", settings, is_anonymous=is_anonymous,
-            )
+                "spam_score", settings, is_anonymous=is_anonymous)
             return
 
         if _postbot_enabled and _postbot_match:
             await MessageHandlers._delete_and_warn(
                 update, context, chat_id, user_id,
-                "postbot_pattern", settings, is_anonymous=is_anonymous,
-            )
+                "postbot_pattern", settings, is_anonymous=is_anonymous)
             return
 
         if _polls_enabled and ctx.poll_urls:
             await MessageHandlers._delete_and_warn(
                 update, context, chat_id, user_id,
-                "poll_link", settings, is_anonymous=is_anonymous,
-            )
+                "poll_link", settings, is_anonymous=is_anonymous)
             return
 
         if _as_bool(settings.get('delete_links'), False):
             if ctx.has_any_link:
                 await MessageHandlers._delete_and_warn(
                     update, context, chat_id, user_id,
-                    "link", settings, is_anonymous=is_anonymous,
-                )
+                    "link", settings, is_anonymous=is_anonymous)
                 return
 
         if _at_channel_enabled and _contains_at_channel(ctx.normalized_text):
             await MessageHandlers._delete_and_warn(
                 update, context, chat_id, user_id,
-                "at_channel", settings, is_anonymous=is_anonymous,
-            )
+                "at_channel", settings, is_anonymous=is_anonymous)
             return
 
         if _tg_scheme_enabled and _contains_tg_scheme(ctx.normalized_text):
             await MessageHandlers._delete_and_warn(
                 update, context, chat_id, user_id,
-                "tg_scheme", settings, is_anonymous=is_anonymous,
-            )
+                "tg_scheme", settings, is_anonymous=is_anonymous)
             return
 
         if _emails_enabled and _contains_email(ctx.normalized_text):
             await MessageHandlers._delete_and_warn(
                 update, context, chat_id, user_id,
-                "email", settings, is_anonymous=is_anonymous,
-            )
+                "email", settings, is_anonymous=is_anonymous)
             return
 
         if _as_bool(settings.get('mentions'), False):
             try:
-                has_mention = TextUtils.contains_mention(ctx.normalized_text)
+                has_mention = TextUtils.contains_mention(
+                    ctx.normalized_text)
             except Exception:
                 has_mention = False
             if has_mention:
                 await MessageHandlers._delete_and_warn(
                     update, context, chat_id, user_id,
-                    "mention", settings, is_anonymous=is_anonymous,
-                )
+                    "mention", settings, is_anonymous=is_anonymous)
                 return
 
-        # ═══════════════════════════════════════════════════════════
-        # 🔴 v7.18.16 FIX-BWM-3: fallback محسَّن عند فشل BWM
-        # ═══════════════════════════════════════════════════════════
+        # ═══════════════════════════════════════════════════════════════
+        # 🔴 v7.18.19 FIX-BWM-3: fallback صحيح عند فشل BWM
+        # ═══════════════════════════════════════════════════════════════
         if _banned_words_enabled:
             matched = None
+            bwm_handled = False
 
             if _HAS_BWM and BannedWordsManager is not None:
                 try:
                     matched = await BannedWordsManager.check_message(
-                        text=ctx.analysis_text,
-                        chat_id=chat_id,
-                    )
+                        text=ctx.analysis_text, chat_id=chat_id)
+                    bwm_handled = True   # ← مفتاح الإصلاح
                 except Exception as _e_bwm:
                     logger.warning(
                         "⚠️ BannedWordsManager.check_message فشل — "
-                        "fallback للنظام القديم: %s",
-                        _e_bwm,
-                    )
+                        "fallback للنظام القديم: %s", _e_bwm)
                     matched = None
+                    bwm_handled = False  # ← مهم: يسمح بالـ fallback
 
-            if matched is None and not (
-                _HAS_BWM and BannedWordsManager is not None
-            ):
+            # الـ fallback يعمل الآن حتى لو BWM متاح لكن فشل
+            if matched is None and not bwm_handled:
                 try:
                     banned_words = await get_banned_words_cached(chat_id)
                 except Exception:
                     banned_words = None
                 if banned_words:
                     for bw in banned_words:
-                        if _contains_banned_word(ctx.analysis_text, bw):
+                        if _contains_banned_word(
+                                ctx.analysis_text, bw):
                             matched = bw
                             break
 
             if matched:
                 logger.warning(
-                    "🚫 BANNED-MATCH | chat=%s user=%s word=%r text=%r",
+                    "🚫 BANNED-MATCH | chat=%s user=%s word=%r "
+                    "text=%r",
                     chat_id, user_id, matched,
-                    ctx.analysis_text[:80],
-                )
+                    ctx.analysis_text[:80])
                 await MessageHandlers._delete_and_warn(
                     update, context, chat_id, user_id,
-                    "banned_word", settings, is_anonymous=is_anonymous,
-                )
+                    "banned_word", settings, is_anonymous=is_anonymous)
                 return
 
         try:
@@ -3780,8 +3546,7 @@ class MessageHandlers:
         if max_len > 0 and len(ctx.normalized_text) > max_len:
             await MessageHandlers._delete_and_warn(
                 update, context, chat_id, user_id,
-                "max_len", settings, is_anonymous=is_anonymous,
-            )
+                "max_len", settings, is_anonymous=is_anonymous)
             return
 
         for attr, setting_key, vtype in _MEDIA_SETTINGS_MAP:
@@ -3792,44 +3557,41 @@ class MessageHandlers:
                 continue
             await MessageHandlers._delete_and_warn(
                 update, context, chat_id, user_id,
-                vtype, settings, is_anonymous=is_anonymous,
-            )
+                vtype, settings, is_anonymous=is_anonymous)
             return
 
         translate_source = ctx.text or ctx.caption
         if translate_source and not is_anonymous:
             try:
                 translated = await _detect_and_translate(
-                    update, context, chat_id, user_id, translate_source,
-                )
+                    update, context, chat_id, user_id, translate_source)
                 if translated:
                     lang = await _ensure_lang(update, context)
                     await _send_translation_reply(
                         context.bot, chat_id,
                         message.message_id, translated, lang,
-                        context=context,
-                    )
+                        context=context)
             except Exception:
                 pass
 
-        # 🔴 v7.18.15 FIX-RPL-3: دعم caption في الردود
         _reply_source = ctx.text or ctx.caption
         if _reply_source and not is_anonymous:
             await MessageHandlers._process_auto_reply(
-                update, context, chat_id, _reply_source, user_id,
-            )
+                update, context, chat_id, _reply_source, user_id)
 
     @staticmethod
     def _get_penalty_duration(settings, violation_type):
         try:
             if violation_type in ('flood', 'antiflood'):
                 raw = settings.get(
-                    'antiflood_penalty_duration', _FLOOD_DEFAULT_DURATION,
-                )
-                return max(_FLOOD_MIN_DURATION_SEC,
-                           int(raw or _FLOOD_DEFAULT_DURATION))
+                    'antiflood_penalty_duration',
+                    _FLOOD_DEFAULT_DURATION)
+                return max(
+                    _FLOOD_MIN_DURATION_SEC,
+                    int(raw or _FLOOD_DEFAULT_DURATION))
             if violation_type in ('night', 'night_mode'):
-                raw = settings.get('night_mode_action_duration', 3600)
+                raw = settings.get(
+                    'night_mode_action_duration', 3600)
                 return max(_FLOOD_MIN_DURATION_SEC, int(raw or 3600))
             raw = settings.get('auto_mute_duration', 3600)
             return max(_FLOOD_MIN_DURATION_SEC, int(raw or 3600))
@@ -3840,55 +3602,52 @@ class MessageHandlers:
     async def _get_violation_message(violation_type, lang):
         trans_key = f"violation_{violation_type}"
         default = _DEFAULT_VIOLATION_MESSAGES.get(
-            violation_type, f"🚫 {violation_type}",
-        )
+            violation_type, f"🚫 {violation_type}")
         return await _trans(trans_key, lang, default)
 
     @staticmethod
-    async def _send_anonymous_warning(context, chat_id, violation_type, lang):
+    async def _send_anonymous_warning(
+        context, chat_id, violation_type, lang,
+    ):
         try:
             vm = await MessageHandlers._get_violation_message(
-                violation_type, lang,
-            )
-            warn_title = await _trans('violation_warning_title', lang, "⚠️")
+                violation_type, lang)
+            warn_title = await _trans(
+                'violation_warning_title', lang, "⚠️")
             sent_msg = await safe_send(
                 context.bot, chat_id,
                 f"{warn_title}\n{vm}\n👻 <b>مشرف مجهول</b>",
-                parse_mode='HTML',
-            )
+                parse_mode='HTML')
             if sent_msg and getattr(sent_msg, 'message_id', None):
                 _spawn_delete_after_delay(
                     context.bot, chat_id, sent_msg.message_id,
-                    PENALTY_MESSAGE_DELETE_DELAY, context=context,
-                )
+                    PENALTY_MESSAGE_DELETE_DELAY, context=context)
         except Exception:
             pass
 
     @staticmethod
     async def _send_user_warning(
-        context, chat_id, user_name,
-        violation_type, lang, violation_count,
+        context, chat_id, user_name, violation_type, lang,
+        violation_count,
     ):
         try:
             vm = await MessageHandlers._get_violation_message(
-                violation_type, lang,
-            )
-            warn_title = await _trans('violation_warning_title', lang, "⚠️")
-            count_label = await _trans('violation_count_label', lang, "📊")
+                violation_type, lang)
+            warn_title = await _trans(
+                'violation_warning_title', lang, "⚠️")
+            count_label = await _trans(
+                'violation_count_label', lang, "📊")
             delete_notice = await _trans(
-                'violation_delete_notice', lang, "⏳",
-            )
+                'violation_delete_notice', lang, "⏳")
             sent_msg = await safe_send(
                 context.bot, chat_id,
                 f"{warn_title}\n{vm}\n👤 {user_name}\n"
                 f"{count_label}: {violation_count}\n{delete_notice}",
-                parse_mode='HTML',
-            )
+                parse_mode='HTML')
             if sent_msg and getattr(sent_msg, 'message_id', None):
                 _spawn_delete_after_delay(
                     context.bot, chat_id, sent_msg.message_id,
-                    PENALTY_MESSAGE_DELETE_DELAY, context=context,
-                )
+                    PENALTY_MESSAGE_DELETE_DELAY, context=context)
         except Exception:
             pass
 
@@ -3897,35 +3656,30 @@ class MessageHandlers:
         penalty_rule = None
         try:
             penalty_rule = await DB.get_violation_penalty(
-                chat_id, violation_type,
-            )
+                chat_id, violation_type)
         except Exception:
             pass
-
         penalty_rule = _row_to_dict_local(penalty_rule)
-
         if penalty_rule:
             ptype = penalty_rule.get('penalty_type')
             if ptype == 'none':
                 return None, 0
             if ptype in ('mute', 'ban', 'restrict', 'kick', 'warn'):
                 try:
-                    dur = int(penalty_rule.get('duration_seconds') or 0)
+                    dur = int(
+                        penalty_rule.get('duration_seconds') or 0)
                 except (TypeError, ValueError):
                     dur = 0
                 return ptype, dur
-
         if violation_type in ('flood', 'antiflood'):
             ptype = settings.get(
-                'antiflood_penalty', _FLOOD_DEFAULT_PENALTY,
-            )
+                'antiflood_penalty', _FLOOD_DEFAULT_PENALTY)
         elif violation_type in ('night', 'night_mode'):
             ptype = settings.get('night_mode_action', 'mute')
         elif violation_type in ('violation', 'violation_penalty'):
             ptype = settings.get(
                 'violation_penalty',
-                settings.get('auto_penalty', 'none'),
-            )
+                settings.get('auto_penalty', 'none'))
         elif violation_type == 'delete_penalty':
             ptype = settings.get('delete_penalty', 'none')
         elif violation_type == 'warn_penalty':
@@ -3933,18 +3687,15 @@ class MessageHandlers:
         elif violation_type == 'postbot_pattern':
             ptype = settings.get(
                 'postbot_pattern_penalty',
-                settings.get('auto_penalty', 'none'),
-            )
+                settings.get('auto_penalty', 'none'))
         else:
             ptype = settings.get('auto_penalty', 'none')
-
         if ptype == 'none' or ptype is None:
             return None, 0
         if ptype not in ('mute', 'ban', 'restrict', 'kick', 'warn'):
             ptype = 'mute'
         duration = MessageHandlers._get_penalty_duration(
-            settings, violation_type,
-        )
+            settings, violation_type)
         return ptype, duration
 
     @staticmethod
@@ -3959,8 +3710,8 @@ class MessageHandlers:
         message_preview = None
         try:
             message_preview = (
-                (message.text or message.caption or "").strip() or None
-            )
+                (message.text or message.caption or "").strip()
+                or None)
         except Exception:
             pass
         forward_info = None
@@ -3969,46 +3720,40 @@ class MessageHandlers:
                 forward_info = extract_forward_info(message)
             except Exception:
                 pass
-
         delete_ok = False
         try:
             if message.message_id:
                 delete_ok = await _safe_delete_message(
                     context.bot, chat_id, message.message_id,
-                    context=context, notify_owner=True,
-                )
+                    context=context, notify_owner=True)
         except Exception as e:
             logger.error("delete exception: %s", e)
             delete_ok = False
-
         if not delete_ok:
             logger.error("⏭️ توقف — الحذف فشل (%s)", violation_type)
             try:
                 should_notify = await _record_delete_failure(chat_id)
                 if should_notify:
                     _spawn_tracked_task(
-                        _notify_delete_permission_failure(context, chat_id),
-                        label="delete-perm-notify",
-                    )
+                        _notify_delete_permission_failure(
+                            context, chat_id),
+                        label="delete-perm-notify")
             except Exception:
                 pass
             return
-
         if _HAS_AUTO_BLOCK and violation_type in (
             'postbot_forward', 'forwarded', 'spam_score',
         ):
             try:
                 _fwd = get_forward_info(message)
                 _origin_type = (_fwd.get("origin_type") or "").lower()
-
                 if _origin_type in ("user", "hidden_user"):
                     pass
                 else:
                     _source_id = (
                         _fwd.get("original_chat_id")
                         or _fwd.get("sender_chat_id")
-                        or _fwd.get("original_user_id")
-                    )
+                        or _fwd.get("original_user_id"))
                     if _source_id is not None:
                         try:
                             _source_int = int(_source_id)
@@ -4018,12 +3763,11 @@ class MessageHandlers:
                             await _add_blocked_source(
                                 source_id=_source_id,
                                 source_type=_origin_type or "channel",
-                                source_name=_fwd.get("original_name") or "",
-                                reason=f"auto:{violation_type}",
-                            )
+                                source_name=(
+                                    _fwd.get("original_name") or ""),
+                                reason=f"auto:{violation_type}")
             except Exception as e:
                 logger.debug("auto-add blacklist: %s", e)
-
         if FEATURE_LOG_DELETIONS:
             try:
                 if await _can_send_log(chat_id):
@@ -4032,12 +3776,12 @@ class MessageHandlers:
                         user_username = None
                     elif update.effective_user:
                         user_first = (
-                            getattr(update.effective_user, 'first_name', None)
-                            or "User"
-                        )
+                            getattr(
+                                update.effective_user,
+                                'first_name', None)
+                            or "User")
                         user_username = getattr(
-                            update.effective_user, 'username', None,
-                        )
+                            update.effective_user, 'username', None)
                     else:
                         user_first = "Unknown"
                         user_username = None
@@ -4048,93 +3792,66 @@ class MessageHandlers:
                         violation_type=violation_type,
                         forward_info=forward_info,
                         message_preview=message_preview,
-                        is_anonymous=is_anonymous,
-                    )
+                        is_anonymous=is_anonymous)
                     await _dispatch_log(
                         partial(
-                            notify_group_log, context, chat_id, log_text,
-                        ),
-                        label=f"delete-{violation_type}",
-                    )
+                            notify_group_log, context, chat_id, log_text),
+                        label=f"delete-{violation_type}")
             except Exception as e:
                 logger.warning("group_log spawn: %s", e)
-
-        if (
-            forward_info
-            and not is_anonymous
-            and _should_notify_forward(context, chat_id)
-        ):
+        if (forward_info and not is_anonymous
+                and _should_notify_forward(context, chat_id)):
             try:
                 owner_id = int(
-                    getattr(CONFIG, 'PRIMARY_OWNER_ID', 0) or 0,
-                )
+                    getattr(CONFIG, 'PRIMARY_OWNER_ID', 0) or 0)
                 if owner_id:
                     _spawn_tracked_task(
                         _notify_admin_about_forward(
-                            context, owner_id, forward_info,
-                        ),
-                        label="forward-notify",
-                    )
+                            context, owner_id, forward_info),
+                        label="forward-notify")
             except Exception as e:
                 logger.debug("forward notify spawn: %s", e)
-
         if is_anonymous:
             await MessageHandlers._send_anonymous_warning(
-                context, chat_id, violation_type, lang,
-            )
+                context, chat_id, violation_type, lang)
             return
-
         try:
             violation_count = await DB.increment_violation_count(
-                user_id, chat_id,
-            )
+                user_id, chat_id)
         except Exception:
             violation_count = 1
-
-        penalty_type, duration_seconds = await MessageHandlers._resolve_penalty(
-            chat_id, violation_type, settings,
-        )
-
+        penalty_type, duration_seconds = (
+            await MessageHandlers._resolve_penalty(
+                chat_id, violation_type, settings))
         try:
             await DB.add_admin_log(
                 chat_id, context.bot.id,
-                f"violation_{violation_type}", user_id,
-            )
+                f"violation_{violation_type}", user_id)
         except Exception:
             pass
-
         eff_user = update.effective_user
-        first_name = getattr(eff_user, 'first_name', None) if eff_user else None
+        first_name = (
+            getattr(eff_user, 'first_name', None) if eff_user else None)
         user_name = escape(first_name or "User")
-
         await MessageHandlers._send_user_warning(
-            context, chat_id, user_name,
-            violation_type, lang, violation_count,
-        )
-
+            context, chat_id, user_name, violation_type, lang,
+            violation_count)
         if not penalty_type:
             return
-
         try:
             max_strikes = int(
                 settings.get('violation_strikes')
-                or settings.get('max_warnings')
-                or 3,
-            )
+                or settings.get('max_warnings') or 3)
         except (TypeError, ValueError):
             max_strikes = 3
         max_strikes = max(1, max_strikes)
-
         if violation_count < max_strikes:
             return
-
         success, msg = await apply_violation_penalty(
             update, context, chat_id, user_id,
-            violation_type, penalty_type, duration_seconds, lang=lang,
-        )
+            violation_type, penalty_type, duration_seconds, lang=lang)
         if not success:
             return
-
         try:
             target_first = ""
             target_username = None
@@ -4142,44 +3859,37 @@ class MessageHandlers:
                 target_first = update.effective_user.first_name or ""
                 target_username = update.effective_user.username
             await _notify_group_log_penalty(
-                context,
-                chat_id=chat_id, target_user_id=user_id,
+                context, chat_id=chat_id, target_user_id=user_id,
                 target_first_name=target_first,
                 target_username=target_username,
                 penalty_type=penalty_type,
                 duration_seconds=duration_seconds,
-                source="auto", violation_type=violation_type,
-            )
+                source="auto", violation_type=violation_type)
         except Exception:
             pass
-
         try:
             msg_prefix = await _trans(
-                'violation_penalty_applied', lang, "🚨 {msg}",
-            )
+                'violation_penalty_applied', lang, "🚨 {msg}")
             sent_penalty = await safe_send(
                 context.bot, chat_id, _fmt(msg_prefix, msg=msg),
-                parse_mode='HTML',
-            )
+                parse_mode='HTML')
             if (sent_penalty is not None
                     and getattr(sent_penalty, 'message_id', None)):
                 _spawn_delete_after_delay(
                     context.bot, chat_id, sent_penalty.message_id,
-                    PENALTY_MESSAGE_DELETE_DELAY, context=context,
-                )
+                    PENALTY_MESSAGE_DELETE_DELAY, context=context)
             await DB.reset_violation_count(user_id, chat_id)
         except Exception:
             pass
 
-    # 🔴 v7.18.16 FIX-RPL-3: caption + logging + usage tracking
     @staticmethod
-    async def _process_auto_reply(update, context, chat_id, text, user_id=None):
+    async def _process_auto_reply(
+        update, context, chat_id, text, user_id=None,
+    ):
         try:
             ars = await get_auto_reply_settings_cached(chat_id)
             if not _as_bool(ars.get('enabled', False), False):
-                logger.debug(
-                    "auto_reply disabled for chat=%s", chat_id,
-                )
+                logger.debug("auto_reply disabled for chat=%s", chat_id)
                 return False
             if _as_bool(ars.get('ignore_bots', True), True):
                 eff_user = getattr(update, 'effective_user', None)
@@ -4187,8 +3897,7 @@ class MessageHandlers:
                     return False
             if _as_bool(ars.get('only_admins', False), False):
                 if not await is_authorized_in_group(
-                    context.bot, chat_id, user_id or 0,
-                ):
+                        context.bot, chat_id, user_id or 0):
                     return False
             reply = await DB.get_auto_reply(text, chat_id)
             if reply:
@@ -4197,8 +3906,7 @@ class MessageHandlers:
                     await safe_send(context.bot, chat_id, reply_text)
                     logger.info(
                         "💬 AUTO-REPLY sent | chat=%s trigger=%r",
-                        chat_id, text[:40],
-                    )
+                        chat_id, text[:40])
                 await _increment_usage_async(chat_id, text)
                 return True
             file_reply = get_reply_from_file(text)
@@ -4206,9 +3914,7 @@ class MessageHandlers:
                 await safe_send(context.bot, chat_id, file_reply)
                 logger.info(
                     "💬 FILE-REPLY sent | chat=%s trigger=%r",
-                    chat_id, text[:40],
-                )
-                # 🔴 v7.18.16 FIX-RPL-3: تتبع الاستخدام للردود من الملف
+                    chat_id, text[:40])
                 try:
                     await _increment_usage_async(chat_id, text)
                 except Exception:
@@ -4219,8 +3925,21 @@ class MessageHandlers:
             logger.error("❌ auto_reply: %s", e)
             return False
 
+    # ═══════════════════════════════════════════════════════════════════
+    # 🆕 v7.18.19 FIX-ROUTE-1: handle_private مع fallback إلى
+    #                          CommandHandlers.handle_text
+    # ═══════════════════════════════════════════════════════════════════
     @staticmethod
     async def handle_private(update, context):
+        """
+        معالج الرسائل الخاصة — يوجّه حسب الحالة.
+
+        🆕 v7.18.19 FIX-ROUTE-1: عند وجود حالة غير مُدرَجة في
+        _PRIVATE_HANDLERS_MAP، يتم تمريرها تلقائياً إلى
+        CommandHandlers.handle_text بدل الصمت التام.
+
+        هذا يحل مشكلة "البوت صامت عند إرسال معرف القناة" وغيرها.
+        """
         try:
             if not update.effective_user:
                 return
@@ -4228,12 +3947,24 @@ class MessageHandlers:
             try:
                 state = StateManager.get(user_id)
             except Exception as _se:
-                logger.warning("StateManager.get(%s): %s", user_id, _se)
+                logger.warning(
+                    "StateManager.get(%s): %s", user_id, _se)
                 return
             if state is None:
                 return
 
-            handler_name = MessageHandlers._PRIVATE_HANDLERS_MAP.get(state)
+            # ─── تجاهل NONE (لا عملية جارية) ───
+            try:
+                if state == UserState.NONE:
+                    return
+            except Exception:
+                if state is None or str(state) in (
+                        "UserState.NONE", "NONE"):
+                    return
+
+            # ─── ابحث في الخريطة المحلية ───
+            handler_name = MessageHandlers._PRIVATE_HANDLERS_MAP.get(
+                state)
             if not handler_name:
                 for candidate in (
                     getattr(state, 'name', None),
@@ -4242,26 +3973,69 @@ class MessageHandlers:
                 ):
                     if candidate is None:
                         continue
-                    handler_name = MessageHandlers._PRIVATE_HANDLERS_MAP.get(
-                        candidate,
-                    )
+                    handler_name = (
+                        MessageHandlers._PRIVATE_HANDLERS_MAP.get(
+                            candidate))
                     if handler_name:
                         break
-            if not handler_name:
-                return
 
-            handler = getattr(MessageHandlers, handler_name, None)
-            if handler is None:
+            # ─── معالج محلي ───
+            if handler_name:
+                handler = getattr(
+                    MessageHandlers, handler_name, None)
+                if handler is None:
+                    logger.warning(
+                        "⚠️ _PRIVATE_HANDLERS_MAP يشير إلى %s غير موجود",
+                        handler_name)
+                else:
+                    if _accepts_state_arg(handler, handler_name):
+                        await handler(update, context, state)
+                    else:
+                        await handler(update, context)
+                    return
+
+            # ═══════════════════════════════════════════════════════════
+            # 🆕 FIX-ROUTE-1: fallback إلى CommandHandlers.handle_text
+            # (بدل الصمت التام)
+            # ═══════════════════════════════════════════════════════════
+            try:
+                from handlers_command import CommandHandlers
+                fallback = getattr(
+                    CommandHandlers, "handle_text", None)
+                if callable(fallback):
+                    logger.debug(
+                        "↪️ handle_private: تمرير state=%r إلى "
+                        "CommandHandlers.handle_text", state)
+                    await fallback(update, context)
+                    return
+                else:
+                    logger.warning(
+                        "⚠️ CommandHandlers.handle_text غير موجود — "
+                        "state=%r", state)
+            except ImportError as _ie:
                 logger.warning(
-                    "⚠️ _PRIVATE_HANDLERS_MAP يشير إلى %s غير موجود",
-                    handler_name,
-                )
-                return
+                    "⚠️ handlers_command غير متاح للـ fallback: %s",
+                    _ie)
+            except Exception as _ce:
+                logger.error(
+                    "❌ fallback CommandHandlers.handle_text: %s",
+                    _ce, exc_info=True)
 
-            if _accepts_state_arg(handler, handler_name):
-                await handler(update, context, state)
-            else:
-                await handler(update, context)
+            # ─── ملاذ أخير — أبلغ المستخدم ───
+            logger.warning(
+                "🚨 UNHANDLED PRIVATE STATE | user=%s state=%r | "
+                "أضف الحالة إلى _PRIVATE_HANDLERS_MAP أو أضف "
+                "CommandHandlers.handle_text",
+                user_id, state)
+            try:
+                lang = await _ensure_lang(update, context)
+                msg = await _trans(
+                    "state_not_handled", lang,
+                    "❌ لم أتعرف على العملية.\n"
+                    "استخدم /cancel ثم أعد المحاولة من القائمة.")
+                await safe_send(context.bot, user_id, msg)
+            except Exception:
+                pass
         except Exception:
             logger.exception("handle_private error")
 
@@ -4278,8 +4052,7 @@ class MessageHandlers:
             clear_lang_cache(context)
             lang = await _ensure_lang(update, context)
             msg = await _trans(
-                'action_cancelled', lang, "✅ تم إلغاء العملية.",
-            )
+                'action_cancelled', lang, "✅ تم إلغاء العملية.")
             await safe_send(context.bot, user_id, msg)
         except Exception as e:
             logger.debug("handle_cancel: %s", e)
@@ -4292,15 +4065,14 @@ class MessageHandlers:
         word = (message.text or "").strip()
         if not word:
             return None, True
-        if len(word) < _BAN_WORD_MIN_LEN or len(word) > _BAN_WORD_MAX_LEN:
+        if (len(word) < _BAN_WORD_MIN_LEN
+                or len(word) > _BAN_WORD_MAX_LEN):
             user_id = update.effective_user.id
             try:
                 err = await _trans(
-                    'ban_word_invalid_length',
-                    lang,
-                    f"❌ يجب أن تكون الكلمة بين {_BAN_WORD_MIN_LEN} "
-                    f"و {_BAN_WORD_MAX_LEN} حرف.",
-                )
+                    'ban_word_invalid_length', lang,
+                    f"❌ يجب أن تكون الكلمة بين "
+                    f"{_BAN_WORD_MIN_LEN} و {_BAN_WORD_MAX_LEN} حرف.")
                 await safe_send(context.bot, user_id, err)
             except Exception:
                 pass
@@ -4316,10 +4088,8 @@ class MessageHandlers:
             exceeded = await _check_ban_add_rate(user_id)
             if exceeded:
                 msg = await _trans(
-                    'ban_word_rate_limited',
-                    lang,
-                    "⏱️ تمهّل قليلاً — تجاوزت الحد المسموح.",
-                )
+                    'ban_word_rate_limited', lang,
+                    "⏱️ تمهّل قليلاً — تجاوزت الحد المسموح.")
                 try:
                     await safe_send(context.bot, user_id, msg)
                 except Exception:
@@ -4346,72 +4116,54 @@ class MessageHandlers:
 
     @staticmethod
     async def handle_add_banned_word(update, context):
-        """
-        🔴 v7.18.16 FIX-PERM-1: أُزيل فحص الصلاحيات المكرر
-        (BannedWordsManager يفحص داخلياً).
-        """
-        user_id = update.effective_user.id if update.effective_user else None
+        user_id = (
+            update.effective_user.id if update.effective_user else None)
         if not user_id:
             return
         message = update.effective_message
         if not message or not message.text:
             return
         lang = await _ensure_lang(update, context)
-
         chat_id = context.user_data.get('ban_chat')
         if chat_id is None:
             StateManager.clear(user_id)
             return
-
         if chat_id == -1:
             return await MessageHandlers.handle_add_global_banned_word(
-                update, context,
-            )
-
+                update, context)
         if await MessageHandlers._apply_ban_add_rate_limit(
-            update, context, lang,
-        ):
+                update, context, lang):
             return
-
         word, err = await MessageHandlers._validate_and_get_word(
-            update, context, lang,
-        )
+            update, context, lang)
         if err:
             return
-
         success = False
         try:
             if _HAS_BWM and BannedWordsManager is not None:
                 ok, reason = await BannedWordsManager.add(
-                    word=word,
-                    user_id=user_id,
+                    word=word, user_id=user_id,
                     scope=BannedScope.GROUP,
-                    chat_id=chat_id,
-                    bot=context.bot,
-                )
+                    chat_id=chat_id, bot=context.bot)
                 if ok:
                     tmpl = await _trans(
                         'ban_word_added', lang,
-                        "✅ تمت إضافة الكلمة: <code>{word}</code>",
-                    )
+                        "✅ تمت إضافة الكلمة: <code>{word}</code>")
                     await safe_send(
                         context.bot, user_id,
                         _fmt(tmpl, word=escape(word)),
-                        parse_mode='HTML',
-                    )
+                        parse_mode='HTML')
                     success = True
                 elif reason == 'duplicate':
                     msg = await _trans(
                         'ban_word_duplicate', lang,
-                        "❌ الكلمة موجودة مسبقاً.",
-                    )
+                        "❌ الكلمة موجودة مسبقاً.")
                     await safe_send(context.bot, user_id, msg)
                     success = True
                 elif reason == 'no_perms':
                     msg = await _trans(
                         'ban_add_no_perms', lang,
-                        "❌ لم تعد مشرفاً في هذه المجموعة.",
-                    )
+                        "❌ لم تعد مشرفاً في هذه المجموعة.")
                     await safe_send(context.bot, user_id, msg)
                     StateManager.clear(user_id)
                     context.user_data.pop('ban_chat', None)
@@ -4419,88 +4171,77 @@ class MessageHandlers:
                 elif reason == 'invalid':
                     msg = await _trans(
                         'ban_word_invalid_length', lang,
-                        "❌ كلمة غير صالحة.",
-                    )
+                        "❌ كلمة غير صالحة.")
                     await safe_send(context.bot, user_id, msg)
                 else:
                     msg = await _trans(
                         'ban_word_add_failed', lang,
-                        "❌ فشل الحفظ — حاول مجدداً.",
-                    )
+                        "❌ فشل الحفظ — حاول مجدداً.")
                     await safe_send(context.bot, user_id, msg)
             else:
-                # fallback: النظام القديم (فحص صلاحيات مرة واحدة)
                 try:
                     is_admin = await _check_admin_in_chat(
-                        context, chat_id, user_id,
-                    )
+                        context, chat_id, user_id)
                 except Exception:
                     is_admin = False
                 if not is_admin:
                     try:
                         msg = await _trans(
                             'ban_add_no_perms', lang,
-                            "❌ لم تعد مشرفاً في هذه المجموعة.",
-                        )
+                            "❌ لم تعد مشرفاً في هذه المجموعة.")
                         await safe_send(context.bot, user_id, msg)
                     except Exception:
                         pass
                     StateManager.clear(user_id)
                     context.user_data.pop('ban_chat', None)
                     return
-
-                result = await DB.add_banned_word(chat_id, word, user_id)
+                result = await DB.add_banned_word(
+                    chat_id, word, user_id)
                 added_ok, is_duplicate = (
-                    result if isinstance(result, tuple) and len(result) == 2
-                    else (bool(result), False)
-                )
+                    result if isinstance(result, tuple)
+                    and len(result) == 2
+                    else (bool(result), False))
                 if added_ok:
                     await _invalidate_banned_words_cache(chat_id)
                     tmpl = await _trans(
                         'ban_word_added', lang,
-                        "✅ تمت إضافة الكلمة: <code>{word}</code>",
-                    )
+                        "✅ تمت إضافة الكلمة: <code>{word}</code>")
                     await safe_send(
                         context.bot, user_id,
                         _fmt(tmpl, word=escape(word)),
-                        parse_mode='HTML',
-                    )
+                        parse_mode='HTML')
                     success = True
                 elif is_duplicate:
                     msg = await _trans(
                         'ban_word_duplicate', lang,
-                        "❌ الكلمة موجودة مسبقاً.",
-                    )
+                        "❌ الكلمة موجودة مسبقاً.")
                     await safe_send(context.bot, user_id, msg)
                     success = True
                 else:
                     msg = await _trans(
                         'ban_word_add_failed', lang,
-                        "❌ فشل الحفظ — حاول مجدداً.",
-                    )
+                        "❌ فشل الحفظ — حاول مجدداً.")
                     await safe_send(context.bot, user_id, msg)
         except Exception as e:
             logger.error("add_banned_word(%s): %s", chat_id, e)
             try:
                 msg = await _trans(
                     'ban_word_add_failed', lang,
-                    "❌ فشل الحفظ — حاول مجدداً.",
-                )
+                    "❌ فشل الحفظ — حاول مجدداً.")
                 await safe_send(context.bot, user_id, msg)
             except Exception:
                 pass
         finally:
             await MessageHandlers._finalize_ban_add(
-                context, user_id, success,
-            )
+                context, user_id, success)
 
     @staticmethod
     async def handle_add_global_banned_word(update, context):
-        user_id = update.effective_user.id if update.effective_user else None
+        user_id = (
+            update.effective_user.id if update.effective_user else None)
         if not user_id:
             return
         lang = await _ensure_lang(update, context)
-
         try:
             is_dev = False
             for attr in ('is_developer', 'is_dev', 'is_owner'):
@@ -4508,181 +4249,149 @@ class MessageHandlers:
                 if callable(fn) and fn(user_id):
                     is_dev = True
                     break
-            if not is_dev and user_id == getattr(CONFIG, 'PRIMARY_OWNER_ID', -1):
+            if (not is_dev
+                    and user_id == getattr(
+                        CONFIG, 'PRIMARY_OWNER_ID', -1)):
                 is_dev = True
         except Exception:
             is_dev = False
-
         if not is_dev:
             try:
                 msg = await _trans(
-                    'ban_add_no_perms', lang, "❌ صلاحيات غير كافية.",
-                )
+                    'ban_add_no_perms', lang,
+                    "❌ صلاحيات غير كافية.")
                 await safe_send(context.bot, user_id, msg)
             except Exception:
                 pass
             StateManager.clear(user_id)
             context.user_data.pop('ban_chat', None)
             return
-
         if await MessageHandlers._apply_ban_add_rate_limit(
-            update, context, lang,
-        ):
+                update, context, lang):
             return
-
         word, err = await MessageHandlers._validate_and_get_word(
-            update, context, lang,
-        )
+            update, context, lang)
         if err:
             return
-
         success = False
         try:
             if _HAS_BWM and BannedWordsManager is not None:
                 ok, reason = await BannedWordsManager.add(
-                    word=word,
-                    user_id=user_id,
-                    scope=BannedScope.GLOBAL,
-                    bot=context.bot,  # 🔴 v7.18.16: تمرير bot للاتساق
-                )
+                    word=word, user_id=user_id,
+                    scope=BannedScope.GLOBAL, bot=context.bot)
                 if ok:
                     tmpl = await _trans(
                         'ban_word_added_global', lang,
-                        "✅ تمت إضافة الكلمة العالمية: <code>{word}</code>",
-                    )
+                        "✅ تمت إضافة الكلمة العالمية: "
+                        "<code>{word}</code>")
                     await safe_send(
                         context.bot, user_id,
                         _fmt(tmpl, word=escape(word)),
-                        parse_mode='HTML',
-                    )
+                        parse_mode='HTML')
                     success = True
                 elif reason == 'duplicate':
                     msg = await _trans(
                         'ban_word_duplicate', lang,
-                        "❌ الكلمة موجودة مسبقاً.",
-                    )
+                        "❌ الكلمة موجودة مسبقاً.")
                     await safe_send(context.bot, user_id, msg)
                     success = True
                 else:
                     msg = await _trans(
                         'ban_word_add_failed', lang,
-                        "❌ فشل الحفظ — حاول مجدداً.",
-                    )
+                        "❌ فشل الحفظ — حاول مجدداً.")
                     await safe_send(context.bot, user_id, msg)
             else:
                 result = await DB.add_banned_word(-1, word, user_id)
                 added_ok, is_duplicate = (
-                    result if isinstance(result, tuple) and len(result) == 2
-                    else (bool(result), False)
-                )
+                    result if isinstance(result, tuple)
+                    and len(result) == 2
+                    else (bool(result), False))
                 if added_ok:
                     await _invalidate_banned_words_cache(None)
                     tmpl = await _trans(
                         'ban_word_added_global', lang,
-                        "✅ تمت إضافة الكلمة العالمية: <code>{word}</code>",
-                    )
+                        "✅ تمت إضافة الكلمة العالمية: "
+                        "<code>{word}</code>")
                     await safe_send(
                         context.bot, user_id,
                         _fmt(tmpl, word=escape(word)),
-                        parse_mode='HTML',
-                    )
+                        parse_mode='HTML')
                     success = True
                 elif is_duplicate:
                     msg = await _trans(
                         'ban_word_duplicate', lang,
-                        "❌ الكلمة موجودة مسبقاً.",
-                    )
+                        "❌ الكلمة موجودة مسبقاً.")
                     await safe_send(context.bot, user_id, msg)
                     success = True
                 else:
                     msg = await _trans(
                         'ban_word_add_failed', lang,
-                        "❌ فشل الحفظ — حاول مجدداً.",
-                    )
+                        "❌ فشل الحفظ — حاول مجدداً.")
                     await safe_send(context.bot, user_id, msg)
         except Exception as e:
             logger.error("add_global_banned_word: %s", e)
             try:
                 msg = await _trans(
                     'ban_word_add_failed', lang,
-                    "❌ فشل الحفظ — حاول مجدداً.",
-                )
+                    "❌ فشل الحفظ — حاول مجدداً.")
                 await safe_send(context.bot, user_id, msg)
             except Exception:
                 pass
         finally:
             await MessageHandlers._finalize_ban_add(
-                context, user_id, success,
-            )
+                context, user_id, success)
 
     @staticmethod
     async def handle_remove_banned_word(update, context):
-        """
-        🔴 v7.18.16 FIX-PERM-1: أُزيل فحص الصلاحيات المكرر.
-        """
-        user_id = update.effective_user.id if update.effective_user else None
+        user_id = (
+            update.effective_user.id if update.effective_user else None)
         if not user_id:
             return
         message = update.effective_message
         if not message or not message.text:
             return
         lang = await _ensure_lang(update, context)
-
         chat_id = context.user_data.get('ban_chat')
         if chat_id is None:
             StateManager.clear(user_id)
             return
-
         if chat_id == -1:
             return await MessageHandlers.handle_remove_global_banned_word(
-                update, context,
-            )
-
+                update, context)
         if await MessageHandlers._apply_ban_add_rate_limit(
-            update, context, lang,
-        ):
+                update, context, lang):
             return
-
         word, err = await MessageHandlers._validate_and_get_word(
-            update, context, lang,
-        )
+            update, context, lang)
         if err:
             return
-
         success = False
         try:
             removed = False
             reason = None
-
             if _HAS_BWM and BannedWordsManager is not None:
                 ok, reason = await BannedWordsManager.remove(
-                    word=word,
-                    user_id=user_id,
+                    word=word, user_id=user_id,
                     scope=BannedScope.GROUP,
-                    chat_id=chat_id,
-                    bot=context.bot,
-                )
+                    chat_id=chat_id, bot=context.bot)
                 removed = bool(ok)
             else:
                 try:
                     is_admin = await _check_admin_in_chat(
-                        context, chat_id, user_id,
-                    )
+                        context, chat_id, user_id)
                 except Exception:
                     is_admin = False
                 if not is_admin:
                     try:
                         msg = await _trans(
                             'ban_add_no_perms', lang,
-                            "❌ لم تعد مشرفاً في هذه المجموعة.",
-                        )
+                            "❌ لم تعد مشرفاً في هذه المجموعة.")
                         await safe_send(context.bot, user_id, msg)
                     except Exception:
                         pass
                     StateManager.clear(user_id)
                     context.user_data.pop('ban_chat', None)
                     return
-
                 for method_name in (
                     'remove_banned_word', 'delete_banned_word',
                     'remove_banned_word_by_text',
@@ -4697,27 +4406,24 @@ class MessageHandlers:
                         removed = bool(result)
                         break
                     except Exception as e:
-                        logger.debug("DB.%s failed: %s", method_name, e)
+                        logger.debug(
+                            "DB.%s failed: %s", method_name, e)
                         continue
-
             if removed:
                 if not (_HAS_BWM and BannedWordsManager is not None):
                     await _invalidate_banned_words_cache(chat_id)
                 tmpl = await _trans(
                     'ban_word_removed', lang,
-                    "✅ تمت إزالة الكلمة: <code>{word}</code>",
-                )
+                    "✅ تمت إزالة الكلمة: <code>{word}</code>")
                 await safe_send(
                     context.bot, user_id,
                     _fmt(tmpl, word=escape(word)),
-                    parse_mode='HTML',
-                )
+                    parse_mode='HTML')
                 success = True
             elif reason == 'no_perms':
                 msg = await _trans(
                     'ban_add_no_perms', lang,
-                    "❌ لم تعد مشرفاً في هذه المجموعة.",
-                )
+                    "❌ لم تعد مشرفاً في هذه المجموعة.")
                 await safe_send(context.bot, user_id, msg)
                 StateManager.clear(user_id)
                 context.user_data.pop('ban_chat', None)
@@ -4725,8 +4431,7 @@ class MessageHandlers:
             else:
                 msg = await _trans(
                     'ban_word_not_found', lang,
-                    "❌ الكلمة غير موجودة في القائمة.",
-                )
+                    "❌ الكلمة غير موجودة في القائمة.")
                 await safe_send(context.bot, user_id, msg)
                 success = True
         except Exception as e:
@@ -4734,23 +4439,21 @@ class MessageHandlers:
             try:
                 msg = await _trans(
                     'ban_word_remove_failed', lang,
-                    "❌ فشلت الإزالة — حاول مجدداً.",
-                )
+                    "❌ فشلت الإزالة — حاول مجدداً.")
                 await safe_send(context.bot, user_id, msg)
             except Exception:
                 pass
         finally:
             await MessageHandlers._finalize_ban_add(
-                context, user_id, success,
-            )
+                context, user_id, success)
 
     @staticmethod
     async def handle_remove_global_banned_word(update, context):
-        user_id = update.effective_user.id if update.effective_user else None
+        user_id = (
+            update.effective_user.id if update.effective_user else None)
         if not user_id:
             return
         lang = await _ensure_lang(update, context)
-
         try:
             is_dev = False
             for attr in ('is_developer', 'is_dev', 'is_owner'):
@@ -4758,45 +4461,37 @@ class MessageHandlers:
                 if callable(fn) and fn(user_id):
                     is_dev = True
                     break
-            if not is_dev and user_id == getattr(CONFIG, 'PRIMARY_OWNER_ID', -1):
+            if (not is_dev
+                    and user_id == getattr(
+                        CONFIG, 'PRIMARY_OWNER_ID', -1)):
                 is_dev = True
         except Exception:
             is_dev = False
-
         if not is_dev:
             try:
                 msg = await _trans(
                     'ban_add_no_perms', lang,
-                    "❌ صلاحيات غير كافية.",
-                )
+                    "❌ صلاحيات غير كافية.")
                 await safe_send(context.bot, user_id, msg)
             except Exception:
                 pass
             StateManager.clear(user_id)
             context.user_data.pop('ban_chat', None)
             return
-
         if await MessageHandlers._apply_ban_add_rate_limit(
-            update, context, lang,
-        ):
+                update, context, lang):
             return
-
         word, err = await MessageHandlers._validate_and_get_word(
-            update, context, lang,
-        )
+            update, context, lang)
         if err:
             return
-
         success = False
         try:
             removed = False
-
             if _HAS_BWM and BannedWordsManager is not None:
                 ok, reason = await BannedWordsManager.remove(
-                    word=word,
-                    user_id=user_id,
-                    scope=BannedScope.GLOBAL,
-                )
+                    word=word, user_id=user_id,
+                    scope=BannedScope.GLOBAL)
                 removed = bool(ok)
             else:
                 for method_name in (
@@ -4814,25 +4509,22 @@ class MessageHandlers:
                         break
                     except Exception:
                         continue
-
             if removed:
                 if not (_HAS_BWM and BannedWordsManager is not None):
                     await _invalidate_banned_words_cache(None)
                 tmpl = await _trans(
                     'ban_word_removed_global', lang,
-                    "✅ تمت إزالة الكلمة العالمية: <code>{word}</code>",
-                )
+                    "✅ تمت إزالة الكلمة العالمية: "
+                    "<code>{word}</code>")
                 await safe_send(
                     context.bot, user_id,
                     _fmt(tmpl, word=escape(word)),
-                    parse_mode='HTML',
-                )
+                    parse_mode='HTML')
                 success = True
             else:
                 msg = await _trans(
                     'ban_word_not_found', lang,
-                    "❌ الكلمة غير موجودة في القائمة.",
-                )
+                    "❌ الكلمة غير موجودة في القائمة.")
                 await safe_send(context.bot, user_id, msg)
                 success = True
         except Exception as e:
@@ -4840,73 +4532,56 @@ class MessageHandlers:
             try:
                 msg = await _trans(
                     'ban_word_remove_failed', lang,
-                    "❌ فشلت الإزالة — حاول مجدداً.",
-                )
+                    "❌ فشلت الإزالة — حاول مجدداً.")
                 await safe_send(context.bot, user_id, msg)
             except Exception:
                 pass
         finally:
             await MessageHandlers._finalize_ban_add(
-                context, user_id, success,
-            )
+                context, user_id, success)
 
-    # ═════════════════════════════════════════════════════════════
-    # 🔴 v7.18.16 FIX-RPL-1: handle_add_reply يدير 3 حالات
-    # ═════════════════════════════════════════════════════════════
     @staticmethod
     async def _save_reply_and_finish(
         update, context, chat_id, trigger, response, lang, user_id,
     ):
-        """
-        🆕 v7.18.16: دالة مساعدة لحفظ الرد وإغلاق الجلسة.
-        تُستدعى من handle_add_reply بعد تجميع trigger + response.
-        """
         success = False
         try:
             add_fn = None
-            for name in ('add_auto_reply', 'add_reply', 'save_reply'):
+            for name in (
+                'add_auto_reply', 'add_reply', 'save_reply'):
                 fn = getattr(DB, name, None)
                 if callable(fn):
                     add_fn = fn
                     break
-
             if add_fn is None:
                 logger.error("❌ لا توجد دالة add_auto_reply في DB")
                 return
-
             result = add_fn(chat_id, trigger, response)
             if asyncio.iscoroutine(result):
                 result = await result
-
             added_ok = (
-                bool(result) if not isinstance(result, tuple) else result[0]
-            )
-
+                bool(result) if not isinstance(result, tuple)
+                else result[0])
             if added_ok:
-                # 🔴 v7.18.15 FIX-RPL-4: إبطال كاش الردود
                 try:
                     await invalidate_auto_reply_cache(chat_id)
                 except Exception:
                     pass
                 tmpl = await _trans(
                     'reply_added', lang,
-                    "✅ تمت إضافة الرد:\n<b>{trigger}</b> → {response}",
-                )
+                    "✅ تمت إضافة الرد:\n<b>{trigger}</b> → {response}")
                 await safe_send(
                     context.bot, user_id,
                     _fmt(
                         tmpl,
                         trigger=escape(trigger),
-                        response=escape(response[:100]),
-                    ),
-                    parse_mode='HTML',
-                )
+                        response=escape(response[:100])),
+                    parse_mode='HTML')
                 success = True
             else:
                 msg = await _trans(
                     'reply_duplicate', lang,
-                    "❌ الرد موجود مسبقاً.",
-                )
+                    "❌ الرد موجود مسبقاً.")
                 await safe_send(context.bot, user_id, msg)
                 success = True
         except Exception as e:
@@ -4914,8 +4589,7 @@ class MessageHandlers:
             try:
                 msg = await _trans(
                     'reply_add_failed', lang,
-                    "❌ فشل حفظ الرد.",
-                )
+                    "❌ فشل حفظ الرد.")
                 await safe_send(context.bot, user_id, msg)
             except Exception:
                 pass
@@ -4925,31 +4599,22 @@ class MessageHandlers:
             except Exception:
                 pass
             await MessageHandlers._finalize_ban_add(
-                context, user_id, success,
-            )
+                context, user_id, success)
 
     @staticmethod
     async def handle_add_reply(update, context, state=None):
-        """
-        🆕 v7.18.16 FIX-RPL-1: يُدير 3 حالات:
-          - WAIT_REPLY_ADD:      خطوة واحدة "trigger | response"
-          - WAIT_REPLY_TRIGGER:  الخطوة 1 → استقبال المشغّل
-          - WAIT_REPLY_RESPONSE: الخطوة 2 → استقبال الرد
-        """
-        user_id = update.effective_user.id if update.effective_user else None
+        user_id = (
+            update.effective_user.id if update.effective_user else None)
         if not user_id:
             return
         message = update.effective_message
         if not message or not message.text:
             return
         lang = await _ensure_lang(update, context)
-
         chat_id = context.user_data.get('reply_chat')
         if chat_id is None:
             StateManager.clear(user_id)
             return
-
-        # استخراج اسم الحالة
         state_name = None
         for candidate in (
             getattr(state, 'name', None),
@@ -4959,22 +4624,17 @@ class MessageHandlers:
             if candidate:
                 state_name = str(candidate)
                 break
-
         raw = message.text.strip()
         if not raw:
             return
-
-        # ─── الحالة 1: خطوة واحدة "trigger | response" ───
         if state_name in (None, "WAIT_REPLY_ADD") or " | " in raw:
             if " | " not in raw:
                 try:
                     msg = await _trans(
                         'reply_invalid_format', lang,
-                        "❌ الصيغة: <code>النص المُشغِّل | الرد</code>",
-                    )
+                        "❌ الصيغة: <code>النص المُشغِّل | الرد</code>")
                     await safe_send(
-                        context.bot, user_id, msg, parse_mode='HTML',
-                    )
+                        context.bot, user_id, msg, parse_mode='HTML')
                 except Exception:
                     pass
                 return
@@ -4984,37 +4644,33 @@ class MessageHandlers:
             if not trigger or not response:
                 return
             await MessageHandlers._save_reply_and_finish(
-                update, context, chat_id, trigger, response, lang, user_id,
-            )
+                update, context, chat_id, trigger, response,
+                lang, user_id)
             return
-
-        # ─── الحالة 2: الخطوة الأولى — استقبال المشغّل ───
         if state_name == "WAIT_REPLY_TRIGGER":
             trigger = raw
             context.user_data['reply_trigger_pending'] = trigger
             try:
-                StateManager.set(user_id, "WAIT_REPLY_RESPONSE")
+                StateManager.set(
+                    user_id, UserState.WAIT_REPLY_RESPONSE)
             except Exception as _se:
                 logger.debug("StateManager.set: %s", _se)
             try:
                 msg = await _trans(
                     'reply_enter_response', lang,
-                    "📝 أرسل الآن نص الرد:",
-                )
+                    "📝 أرسل الآن نص الرد:")
                 await safe_send(context.bot, user_id, msg)
             except Exception:
                 pass
             return
-
-        # ─── الحالة 3: الخطوة الثانية — استقبال الرد ───
         if state_name == "WAIT_REPLY_RESPONSE":
-            trigger = context.user_data.pop('reply_trigger_pending', None)
+            trigger = context.user_data.pop(
+                'reply_trigger_pending', None)
             if not trigger:
                 try:
                     msg = await _trans(
                         'reply_session_lost', lang,
-                        "❌ فُقدت الجلسة — ابدأ من جديد.",
-                    )
+                        "❌ فُقدت الجلسة — ابدأ من جديد.")
                     await safe_send(context.bot, user_id, msg)
                 except Exception:
                     pass
@@ -5023,48 +4679,43 @@ class MessageHandlers:
                 return
             response = raw
             await MessageHandlers._save_reply_and_finish(
-                update, context, chat_id, trigger, response, lang, user_id,
-            )
+                update, context, chat_id, trigger, response,
+                lang, user_id)
             return
-
-        # حالة غير معروفة — سلوك احتياطي
         logger.debug(
-            "handle_add_reply: state_name=%r غير متوقّع", state_name,
-        )
+            "handle_add_reply: state_name=%r غير متوقّع", state_name)
 
     @staticmethod
     async def handle_remove_reply(update, context, state=None):
-        """🆕 v7.18.15: إزالة رد تلقائي."""
-        user_id = update.effective_user.id if update.effective_user else None
+        user_id = (
+            update.effective_user.id if update.effective_user else None)
         if not user_id:
             return
         message = update.effective_message
         if not message or not message.text:
             return
         lang = await _ensure_lang(update, context)
-
         chat_id = context.user_data.get('reply_chat')
         if chat_id is None:
             StateManager.clear(user_id)
             return
-
         try:
-            is_admin = await _check_admin_in_chat(context, chat_id, user_id)
+            is_admin = await _check_admin_in_chat(
+                context, chat_id, user_id)
         except Exception:
             is_admin = False
         if not is_admin:
             StateManager.clear(user_id)
             context.user_data.pop('reply_chat', None)
             return
-
         trigger = message.text.strip()
         if not trigger:
             return
-
         success = False
         try:
             removed = False
-            for name in ('remove_auto_reply', 'delete_reply', 'remove_reply'):
+            for name in (
+                'remove_auto_reply', 'delete_reply', 'remove_reply'):
                 fn = getattr(DB, name, None)
                 if not callable(fn):
                     continue
@@ -5076,7 +4727,6 @@ class MessageHandlers:
                     break
                 except Exception:
                     continue
-
             if removed:
                 try:
                     await invalidate_auto_reply_cache(chat_id)
@@ -5084,27 +4734,23 @@ class MessageHandlers:
                     pass
                 msg = await _trans(
                     'reply_removed', lang,
-                    "✅ تمت إزالة الرد: <code>{trigger}</code>",
-                )
+                    "✅ تمت إزالة الرد: <code>{trigger}</code>")
                 await safe_send(
                     context.bot, user_id,
                     _fmt(msg, trigger=escape(trigger)),
-                    parse_mode='HTML',
-                )
+                    parse_mode='HTML')
                 success = True
             else:
                 msg = await _trans(
                     'reply_not_found', lang,
-                    "❌ الرد غير موجود.",
-                )
+                    "❌ الرد غير موجود.")
                 await safe_send(context.bot, user_id, msg)
                 success = True
         except Exception as e:
             logger.error("handle_remove_reply: %s", e)
         finally:
             await MessageHandlers._finalize_ban_add(
-                context, user_id, success,
-            )
+                context, user_id, success)
 
     @staticmethod
     async def handle_service(update, context):
@@ -5135,8 +4781,8 @@ class MessageHandlers:
             settings = await get_security_settings_cached(chat_id)
             if _as_bool(settings.get('delete_service'), False):
                 await _safe_delete_message(
-                    context.bot, chat_id, message.message_id, context=context,
-                )
+                    context.bot, chat_id, message.message_id,
+                    context=context)
         except Exception:
             pass
 
@@ -5149,16 +4795,17 @@ class MessageHandlers:
         settings = await get_security_settings_cached(chat_id)
         if _as_bool(settings.get('auto_reject_join'), False):
             try:
-                await context.bot.decline_chat_join_request(chat_id, user_id)
+                await context.bot.decline_chat_join_request(
+                    chat_id, user_id)
                 return
             except Exception as e:
                 logger.warning("decline join: %s", e)
         if _as_bool(settings.get('auto_approve_join'), False):
             try:
-                await context.bot.approve_chat_join_request(chat_id, user_id)
+                await context.bot.approve_chat_join_request(
+                    chat_id, user_id)
             except Exception as e:
                 logger.warning("approve join: %s", e)
-
 
 # ═══════════════════════════════════════════════════════════════════
 # /autoblocked command
@@ -5171,18 +4818,15 @@ async def handle_autoblocked_command(update, context):
     owner_id = int(getattr(CONFIG, 'PRIMARY_OWNER_ID', 0) or 0)
     if user_id != owner_id:
         return
-
     if not _HAS_AUTO_BLOCK:
         await safe_send(
             context.bot, update.effective_chat.id,
-            "❌ نظام auto-block غير مفعّل",
-        )
+            "❌ نظام auto-block غير مفعّل")
         return
-
     args = list(context.args or [])
     chat_id = update.effective_chat.id
-
-    if args and args[0].lower() in ("remove", "del", "delete") and len(args) > 1:
+    if args and args[0].lower() in (
+            "remove", "del", "delete") and len(args) > 1:
         try:
             src_id = int(args[1])
             ok = await _remove_blocked_source(src_id)
@@ -5190,22 +4834,18 @@ async def handle_autoblocked_command(update, context):
                 await safe_send(
                     context.bot, chat_id,
                     f"✅ أُزيل المصدر: <code>{src_id}</code>",
-                    parse_mode='HTML',
-                )
+                    parse_mode='HTML')
             else:
                 await safe_send(
                     context.bot, chat_id,
                     f"⚠️ لم يُوجَد: <code>{src_id}</code>",
-                    parse_mode='HTML',
-                )
+                    parse_mode='HTML')
         except (ValueError, TypeError):
             await safe_send(
                 context.bot, chat_id,
                 "❌ استخدام: <code>/autoblocked remove ID</code>",
-                parse_mode='HTML',
-            )
+                parse_mode='HTML')
         return
-
     page = 1
     if args:
         try:
@@ -5214,22 +4854,19 @@ async def handle_autoblocked_command(update, context):
             page = 1
     page_size = 20
     offset = (page - 1) * page_size
-
-    sources = await _list_blocked_sources(limit=page_size + 1 + offset)
+    sources = await _list_blocked_sources(
+        limit=page_size + 1 + offset)
     try:
         sources_slice = list(sources)[offset:offset + page_size]
         has_more = len(sources) > offset + page_size
     except Exception:
         sources_slice = list(sources)[:page_size]
         has_more = False
-
     if not sources_slice and page == 1:
         await safe_send(
             context.bot, chat_id,
-            "✨ القائمة السوداء التلقائية فارغة",
-        )
+            "✨ القائمة السوداء التلقائية فارغة")
         return
-
     lines = [
         "🚫 <b>المصادر المحجوبة تلقائياً</b>",
         f"📄 صفحة {page}",
@@ -5245,19 +4882,18 @@ async def handle_autoblocked_command(update, context):
             lines.append(
                 f"• <code>{sid}</code> "
                 f"<b>{escape(name)}</b> "
-                f"({hits}×, {stype}, {reason})"
-            )
+                f"({hits}×, {stype}, {reason})")
         except Exception:
             continue
     lines.append("")
     if has_more:
-        lines.append(f"▶️ للمزيد: <code>/autoblocked {page + 1}</code>")
+        lines.append(
+            f"▶️ للمزيد: <code>/autoblocked {page + 1}</code>")
     lines.append("🗑️ للحذف: <code>/autoblocked remove ID</code>")
     await safe_send(
         context.bot, chat_id,
         "\n".join(lines),
-        parse_mode='HTML',
-    )
+        parse_mode='HTML')
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -5269,7 +4905,7 @@ async def handle_cache_stats_command(update, context):
     🆕 v7.18.18: أمر /cache_stats — يعرض إحصائيات كل الـ caches.
 
     الأقسام المعروضة:
-      1. Banned Words (من banned_words_manager v1.1.1)
+      1. Banned Words (من banned_words_manager v1.2.0)
       2. handlers_message caches (group_log, sec_settings, admin_check)
       3. dev_log cache
       4. Flood tracker
@@ -5285,10 +4921,7 @@ async def handle_cache_stats_command(update, context):
     """
     if not update.effective_user or not update.effective_message:
         return
-
     user_id = update.effective_user.id
-
-    # ─── فحص الصلاحيات ───
     try:
         is_dev = False
         for attr in ('is_developer', 'is_dev', 'is_owner'):
@@ -5297,54 +4930,50 @@ async def handle_cache_stats_command(update, context):
                 is_dev = True
                 break
         if not is_dev and user_id == int(
-            getattr(CONFIG, 'PRIMARY_OWNER_ID', 0) or 0
-        ):
+                getattr(CONFIG, 'PRIMARY_OWNER_ID', 0) or 0):
             is_dev = True
     except Exception:
         is_dev = False
-
     if not is_dev:
         return
-
     chat_id = update.effective_chat.id
     now = time.monotonic()
-
     lines: List[str] = [
         "📊 <b>Cache Statistics</b>",
         "━━━━━━━━━━━━━━━━━━━━",
     ]
 
-    # ─── 1. Banned Words (from banned_words_manager v1.1.1) ───
+    # ─── 1. Banned Words ───
     lines.append("")
     lines.append("<b>📚 Banned Words</b>")
     try:
         from handlers.messages import (
-            _merged_words_cache,
-            _MERGED_CACHE_TTL,
-            _MERGED_CACHE_MAX,
+            get_merged_cache_size,
+            get_merged_cache_snapshot,
+            MERGED_CACHE_TTL,
+            MERGED_CACHE_MAX,
         )
-        size = len(_merged_words_cache)
-        status = "✅" if size < _MERGED_CACHE_MAX * 0.8 else "⚠️"
+        size = get_merged_cache_size()
+        status = "✅" if size < MERGED_CACHE_MAX * 0.8 else "⚠️"
         lines.append(
-            f"  • {status} merged_words: <b>{size}</b> / {_MERGED_CACHE_MAX}"
-        )
+            f"  • {status} merged_words: "
+            f"<b>{size}</b> / {MERGED_CACHE_MAX}")
         lines.append(
-            f"  • TTL: <code>{_MERGED_CACHE_TTL:.0f}s</code>"
-        )
-        if _merged_words_cache:
+            f"  • TTL: <code>{MERGED_CACHE_TTL:.0f}s</code>")
+        snapshot = get_merged_cache_snapshot()
+        if snapshot:
             try:
                 first_cid, (first_words, first_ts) = next(
-                    iter(_merged_words_cache.items())
-                )
+                    iter(snapshot.items()))
                 age = now - first_ts
                 lines.append(
                     f"  • أقدم إدخال: <code>{first_cid}</code> "
-                    f"({len(first_words)} كلمة، {age:.0f}s)"
-                )
+                    f"({len(first_words)} كلمة، {age:.0f}s)")
             except Exception:
                 pass
     except ImportError:
-        lines.append("  ⚠️ <code>banned_words_manager غير متاح</code>")
+        lines.append(
+            "  ⚠️ <code>banned_words_manager غير متاح</code>")
     except Exception as _e:
         lines.append(f"  ❌ <code>{escape(str(_e)[:60])}</code>")
 
@@ -5378,19 +5007,15 @@ async def handle_cache_stats_command(update, context):
             lines.append(
                 f"  • {status} <code>{name}</code>: "
                 f"<b>{size}</b> / {max_size} "
-                f"<i>(ttl={ttl:.0f}s)</i>"
-            )
+                f"<i>(ttl={ttl:.0f}s)</i>")
         except Exception:
             lines.append(f"  • ❌ <code>{name}</code>: error")
-
-    # dev_log cache
     try:
         if _dev_log_cache is not None:
             age = now - _dev_log_cache_ts
             lines.append(
                 f"  • ✅ <code>dev_log</code>: نشط "
-                f"<i>(age={age:.0f}s)</i>"
-            )
+                f"<i>(age={age:.0f}s)</i>")
         else:
             lines.append("  • ⬜ <code>dev_log</code>: فارغ")
     except Exception:
@@ -5405,14 +5030,12 @@ async def handle_cache_stats_command(update, context):
         max_keys = stats.get("max_keys", 0)
         status = "✅" if keys < max_keys * 0.8 else "⚠️"
         lines.append(
-            f"  • {status} active: <b>{keys}</b> / {max_keys}"
-        )
+            f"  • {status} active: <b>{keys}</b> / {max_keys}")
         lines.append(
-            f"  • ban_add: <b>{stats.get('ban_add_keys', 0)}</b>"
-        )
+            f"  • ban_add: <b>{stats.get('ban_add_keys', 0)}</b>")
         lines.append(
-            f"  • stale_sec: <code>{stats.get('stale_sec', '?')}s</code>"
-        )
+            f"  • stale_sec: "
+            f"<code>{stats.get('stale_sec', '?')}s</code>")
     except Exception as _e:
         lines.append(f"  ❌ <code>{escape(str(_e)[:60])}</code>")
 
@@ -5421,11 +5044,10 @@ async def handle_cache_stats_command(update, context):
     lines.append("<b>🗑️ Delete Failures</b>")
     try:
         lines.append(
-            f"  • counter: <b>{len(_delete_failure_counter)}</b>"
-        )
+            f"  • counter: <b>{len(_delete_failure_counter)}</b>")
         lines.append(
-            f"  • notified_chats: <b>{len(_delete_failure_notified)}</b>"
-        )
+            f"  • notified_chats: "
+            f"<b>{len(_delete_failure_notified)}</b>")
     except Exception:
         pass
 
@@ -5437,8 +5059,7 @@ async def handle_cache_stats_command(update, context):
             size = len(_private_handler_signature_cache)
         lines.append(
             f"  • signature_cache: <b>{size}</b> / "
-            f"{_PRIVATE_SIG_CACHE_MAX}"
-        )
+            f"{_PRIVATE_SIG_CACHE_MAX}")
     except Exception:
         pass
 
@@ -5449,13 +5070,11 @@ async def handle_cache_stats_command(update, context):
         lines.append(
             f"  • banned_patterns: "
             f"<b>{len(_compiled_banned_patterns)}</b> / "
-            f"{MAX_COMPILED_BANNED_PATTERNS}"
-        )
+            f"{MAX_COMPILED_BANNED_PATTERNS}")
         lines.append(
             f"  • spaced_patterns: "
             f"<b>{len(_compiled_spaced_patterns)}</b> / "
-            f"{MAX_COMPILED_BANNED_PATTERNS}"
-        )
+            f"{MAX_COMPILED_BANNED_PATTERNS}")
     except Exception:
         pass
 
@@ -5467,8 +5086,7 @@ async def handle_cache_stats_command(update, context):
         status = "✅" if size < MAX_GROUP_LIMITERS_CACHE * 0.8 else "⚠️"
         lines.append(
             f"  • {status} limiters: <b>{size}</b> / "
-            f"{MAX_GROUP_LIMITERS_CACHE}"
-        )
+            f"{MAX_GROUP_LIMITERS_CACHE}")
     except Exception:
         pass
 
@@ -5477,11 +5095,9 @@ async def handle_cache_stats_command(update, context):
     lines.append("<b>📝 Log Rate Trackers</b>")
     try:
         lines.append(
-            f"  • log_rate: <b>{len(_log_rate_tracker)}</b>"
-        )
+            f"  • log_rate: <b>{len(_log_rate_tracker)}</b>")
         lines.append(
-            f"  • dev_log_rate: <b>{len(_dev_log_rate_tracker)}</b>"
-        )
+            f"  • dev_log_rate: <b>{len(_dev_log_rate_tracker)}</b>")
     except Exception:
         pass
 
@@ -5490,17 +5106,14 @@ async def handle_cache_stats_command(update, context):
     lines.append("<b>🔄 Background Tasks</b>")
     try:
         lines.append(
-            f"  • log: <b>{len(_running_log_tasks)}</b>"
-        )
+            f"  • log: <b>{len(_running_log_tasks)}</b>")
         lines.append(
-            f"  • bg: <b>{len(_running_bg_tasks)}</b>"
-        )
+            f"  • bg: <b>{len(_running_bg_tasks)}</b>")
         lines.append(
-            f"  • delete: <b>{len(_running_delete_tasks)}</b>"
-        )
+            f"  • delete: <b>{len(_running_delete_tasks)}</b>")
         lines.append(
-            f"  • log_dispatch_failures: <b>{_log_dispatch_failures}</b>"
-        )
+            f"  • log_dispatch_failures: "
+            f"<b>{_log_dispatch_failures}</b>")
     except Exception:
         pass
 
@@ -5509,18 +5122,17 @@ async def handle_cache_stats_command(update, context):
         lines.append("")
         lines.append("<b>🛡️ Detectors Pool</b>")
         try:
-            _get_pool = getattr(_detectors_module, "_get_shared_pool", None)
+            _get_pool = getattr(
+                _detectors_module, "_get_shared_pool", None)
             if callable(_get_pool):
                 pool = _get_pool()
                 max_workers = getattr(pool, "_max_workers", "?")
                 lines.append(
-                    f"  • max_workers: <b>{max_workers}</b>"
-                )
-                lines.append(
-                    f"  • status: ✅ نشط"
-                )
+                    f"  • max_workers: <b>{max_workers}</b>")
+                lines.append("  • status: ✅ نشط")
             else:
-                lines.append("  • ⚠️ <code>_get_shared_pool غير متاح</code>")
+                lines.append(
+                    "  • ⚠️ <code>_get_shared_pool غير متاح</code>")
         except Exception:
             pass
 
@@ -5532,11 +5144,9 @@ async def handle_cache_stats_command(update, context):
     except Exception:
         now_str = datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
     lines.append(f"🕐 {now_str}")
-
     text = "\n".join(lines)
     if len(text) > 4000:
         text = text[:3990] + "\n…"
-
     try:
         await safe_send(context.bot, chat_id, text, parse_mode='HTML')
     except Exception as e:
@@ -5550,9 +5160,7 @@ async def handle_cache_stats_command(update, context):
 async def handle_db_idle_command(update, context):
     if not update.effective_user or not update.effective_message:
         return
-
     user_id = update.effective_user.id
-
     try:
         is_dev = False
         for attr in ('is_developer', 'is_dev', 'is_owner'):
@@ -5561,27 +5169,21 @@ async def handle_db_idle_command(update, context):
                 is_dev = True
                 break
         if not is_dev and user_id == int(
-            getattr(CONFIG, 'PRIMARY_OWNER_ID', 0) or 0
-        ):
+                getattr(CONFIG, 'PRIMARY_OWNER_ID', 0) or 0):
             is_dev = True
     except Exception:
         is_dev = False
-
     if not is_dev:
         return
-
     chat_id = update.effective_chat.id
-
     audit_fn = getattr(DB, 'audit_idle_in_transactions', None)
     if not callable(audit_fn):
         await safe_send(
             context.bot, chat_id,
             "⚠️ <b>غير متاح</b>\n"
             "يتطلب <code>database.py v7.7.62+</code>",
-            parse_mode='HTML',
-        )
+            parse_mode='HTML')
         return
-
     try:
         report = await audit_fn()
     except Exception as e:
@@ -5590,51 +5192,41 @@ async def handle_db_idle_command(update, context):
             context.bot, chat_id,
             f"❌ <b>فشل الاستعلام</b>\n"
             f"<code>{escape(str(e)[:120])}</code>",
-            parse_mode='HTML',
-        )
+            parse_mode='HTML')
         return
-
     if not isinstance(report, dict):
         await safe_send(context.bot, chat_id, "❌ رد غير متوقع من DB")
         return
-
     count = int(report.get('count') or 0)
-
     if count == 0:
         await safe_send(
             context.bot, chat_id,
             "✅ <b>لا idle-in-transaction</b>\n"
             "<i>قاعدة البيانات نظيفة — لا اتصالات عالقة.</i>",
-            parse_mode='HTML',
-        )
+            parse_mode='HTML')
         return
-
     app_matches = int(report.get('app_matches') or 0)
     total = int(report.get('total_idle_tx') or 0)
     min_secs = report.get('min_seconds_used')
     app_filter = report.get('app_filter')
-
     lines = [
         f"🔴 <b>Idle-in-Transaction: {count}</b>",
         "━━━━━━━━━━━━━━━━━━━━",
     ]
-
     if app_matches:
         lines.append(
             f"🚨 <b>{app_matches}</b> من تطبيقنا "
-            f"(<code>{escape(str(app_filter or 'relax_bot'))}</code>)"
-        )
+            f"(<code>{escape(str(app_filter or 'relax_bot'))}</code>)")
     if total != count and total > 0:
-        lines.append(f"📈 إجمالي كل التطبيقات: <b>{total}</b>")
+        lines.append(
+            f"📈 إجمالي كل التطبيقات: <b>{total}</b>")
     if min_secs is not None:
         lines.append(
-            f"⏱️ الحد الأدنى للخمول: <code>{min_secs}s</code>"
-        )
-
+            f"⏱️ الحد الأدنى للخمول: "
+            f"<code>{min_secs}s</code>")
     lines.append("")
     lines.append("<b>التفاصيل:</b>")
     lines.append("")
-
     items = report.get('items') or []
     for item in items[:10]:
         try:
@@ -5646,43 +5238,34 @@ async def handle_db_idle_command(update, context):
             user_name = item.get('user') or '?'
             client = item.get('client') or 'local'
             q = (item.get('query') or '').strip()[:120]
-
             lines.append(
                 f"🔴 <b>pid</b>=<code>{pid}</code> "
-                f"[<code>{escape(str(app))}</code>]"
-            )
+                f"[<code>{escape(str(app))}</code>]")
             lines.append(
                 f"   👤 user=<code>{escape(str(user_name))}</code> "
-                f"| client=<code>{escape(str(client))}</code>"
-            )
+                f"| client=<code>{escape(str(client))}</code>")
             lines.append(
                 f"   ⏱️ idle=<b>{idle}s</b> "
-                f"| tx_age=<b>{tx_age}s</b>"
-            )
+                f"| tx_age=<b>{tx_age}s</b>")
             lines.append(
-                f"   🔒 xmin=<code>{escape(str(xmin))}</code>"
-            )
+                f"   🔒 xmin=<code>{escape(str(xmin))}</code>")
             if q:
                 lines.append(f"   <i>{escape(q)}</i>")
             lines.append("")
         except Exception:
             continue
-
     if count > 10:
-        lines.append(f"<i>… و{count - 10} اتصال آخر (غير معروض)</i>")
+        lines.append(
+            f"<i>… و{count - 10} اتصال آخر (غير معروض)</i>")
         lines.append("")
-
     lines.append("━━━━━━━━━━━━━━━━━━━━")
     lines.append("💡 <b>الحل:</b>")
     lines.append(
-        "• راجع <code>database.py v7.7.61</code> (TX-1..4)"
-    )
+        "• راجع <code>database.py v7.7.61</code> (TX-1..4)")
     lines.append("• تأكد من عدم وجود معاملات طويلة في الكود")
-
     text = "\n".join(lines)
     if len(text) > 4000:
         text = text[:3990] + "\n…"
-
     try:
         await safe_send(context.bot, chat_id, text, parse_mode='HTML')
     except Exception as e:
@@ -5698,10 +5281,11 @@ __all__ = [
     "clear_lang_cache", "get_security_settings_cached",
     "get_auto_reply_settings_cached", "invalidate_security_cache",
     "invalidate_auto_reply_cache", "apply_violation_penalty",
-    "is_forwarded", "extract_forward_info", "get_forward_detection_reason",
-    "get_forward_info",
-    "notify_group_log", "shutdown_log_dispatcher", "shutdown_delete_tasks",
-    "shutdown_bg_tasks", "register_shutdown_handlers",
+    "is_forwarded", "extract_forward_info",
+    "get_forward_detection_reason", "get_forward_info",
+    "notify_group_log", "shutdown_log_dispatcher",
+    "shutdown_delete_tasks", "shutdown_bg_tasks",
+    "register_shutdown_handlers",
     "_lazy_init_columns", "_reset_shutdown_for_tests",
     "FEATURE_LOG_DELETIONS", "FEATURE_LOG_PENALTIES",
     "FEATURE_LOG_GIFTS", "FEATURE_LOG_ADMIN_CHANGES",
@@ -5710,22 +5294,28 @@ __all__ = [
     "DEBUG_DIAG", "DEBUG_SPAM", "ANTIEVASION_COMPACT_WORDS",
     "_MessageContext", "_normalize_text",
     "_strip_combining_marks", "_deleet", "_apply_homoglyphs_safe",
-    "_strip_emoji_for_domain", "_has_hidden_chars", "_merge_split_urls",
-    "_extract_entity_urls", "_has_link_entity", "_extract_url_from_button",
+    "_strip_emoji_for_domain", "_has_hidden_chars",
+    "_merge_split_urls",
+    "_extract_entity_urls", "_has_link_entity",
+    "_extract_url_from_button",
     "_button_is_external", "_extract_button_context",
-    "_extract_vcard_urls", "_extract_venue_url", "_extract_poll_text",
+    "_extract_vcard_urls", "_extract_venue_url",
+    "_extract_poll_text",
     "_get_message_button_data", "_get_message_button_texts",
     "_get_message_analysis_text",
-    "_has_domain_pattern", "_contains_link_enhanced", "_contains_email",
-    "_contains_at_channel", "_contains_tg_scheme",
+    "_has_domain_pattern", "_contains_link_enhanced",
+    "_contains_email", "_contains_at_channel",
+    "_contains_tg_scheme",
     "_has_button_link", "_extract_button_link_urls",
-    "_extract_spam_words", "_count_unique_matches", "_count_text_urls",
+    "_extract_spam_words", "_count_unique_matches",
+    "_count_text_urls",
     "_compute_spam_score", "_is_postbot_pattern",
     "_postbot_pattern_confidence",
     "analyze_message", "get_spam_diagnostics", "is_spam",
     "is_high_confidence_spam", "is_critical_spam",
     "should_ignore_as_low_signal",
-    "_as_bool", "_env_flag", "_check_flood", "_cleanup_flood_tracker",
+    "_as_bool", "_env_flag", "_check_flood",
+    "_cleanup_flood_tracker",
     "_flood_tracker_stats", "_flood_tracker", "_flood_lock",
     "_invalidate_banned_words_cache", "_check_admin_in_chat",
     "_private_handler_signature_cache", "_accepts_state_arg",
@@ -5735,7 +5325,8 @@ __all__ = [
     "_FLOOD_DEFAULT_MESSAGES", "_FLOOD_DEFAULT_WINDOW",
     "_FLOOD_DEFAULT_PENALTY", "_FLOOD_DEFAULT_DURATION",
     "_BAN_WORD_MIN_LEN", "_BAN_WORD_MAX_LEN",
-    "_BAN_ADD_RATE_LIMIT", "_BAN_ADD_RATE_MAX", "_BAN_ADD_RATE_WINDOW",
+    "_BAN_ADD_RATE_LIMIT", "_BAN_ADD_RATE_MAX",
+    "_BAN_ADD_RATE_WINDOW",
     "_DEFAULT_VIOLATION_MESSAGES",
     "_notify_delete_permission_failure", "analyze_sentiment",
     "_MULTILAYER_ENABLED", "_HAS_MULTILAYER",
@@ -5754,7 +5345,6 @@ __all__ = [
     "_normalize_tg_id",
     "_HAS_AUTO_BLOCK",
     "handle_autoblocked_command",
-
     "_GROUP_LOG_CHANNEL_CACHE_TTL",
     "_GROUP_LOG_CHANNEL_CACHE_MAX",
     "_GROUP_LOG_CHANNEL_CACHE_MAX_STALE",
@@ -5771,28 +5361,23 @@ __all__ = [
     "_invalidate_admin_check_cache",
     "_row_to_dict_local",
     "_prune_perf_caches",
-
     "_PRIVATE_SIG_CACHE_MAX",
     "_private_sig_cache_lock",
-
     "_ban_add_tracker", "_ban_add_lock",
     "_check_ban_add_rate",
     "_FLOOD_DEQUE_MAXLEN",
-
     "_run_sync_in_pool",
     "_run_sync_in_pool_available",
     "_HAS_DET_RUN_IN_POOL",
     "_HAS_DET_SHUTDOWN_EXECUTOR",
-
-    # 🆕 v7.18.18
+    # v7.18.18
     "handle_cache_stats_command",
     "handle_db_idle_command",
     "_notify_dev_about_idle_tx",
     "_IDLE_TX_NOTIFY_COOLDOWN",
     "_idle_tx_last_notify",
     "_idle_tx_notify_lock",
-
-    # 🆕 v7.18.15/16
+    # v7.18.15/16/19
     "_HAS_BWM",
     "BannedWordsManager",
     "BannedScope",
@@ -5807,12 +5392,13 @@ __all__ = [
 
 try:
     logger.info(
-        "✅ handlers_message v7.18.18 loaded | "
+        "✅ handlers_message v7.18.19 loaded | "
         "BWM=%s | PRIVATE_HANDLERS=%d | "
-        "replies=state-aware | "
+        "routing-fallback=CommandHandlers | "
         "detectors-compat=v4.1.0 | "
         "sync-fallback=degraded | "
-        "commands=(cache_stats, db_idle, autoblocked)",
+        "commands=(cache_stats, db_idle, autoblocked) | "
+        "fixes=(ROUTE-1, BWM-3, COL-1, EDIT-1, STATE-1)",
         "yes" if _HAS_BWM else "no",
         len(MessageHandlers._PRIVATE_HANDLERS_MAP),
     )
