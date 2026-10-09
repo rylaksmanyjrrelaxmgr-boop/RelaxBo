@@ -5,37 +5,17 @@
 handlers_message_detectors.py
 ===============================================================================
 🛡️ Relax Manager — Advanced Spam / Anti-Evasion Detection Engine
-Version: 4.0.9 (ARABIC-SHORT-WHITELIST)
+Version: 4.1.0 (CRITICAL-FIXES-2026)
 
-🆕 v4.0.9 — إصلاح الرسائل العربية القصيرة (CRITICAL):
-    🔴 FIX-AR-1: _ARABIC_GREETINGS whitelist — تحيات عربية (لن تُحذف)
-    🔴 FIX-AR-2: _looks_like_normal_conversation — تحسين كشف العربية
-    🔴 FIX-AR-3: analyze_context_window — استثناء النصوص العربية القصيرة
-    🟡 FIX-AR-4: _compute_spam_score — early-exit للنصوص العربية القصيرة
-    🟡 FIX-AR-5: FINAL_THRESHOLD قابل للضبط عبر ENV
-    🟢 FIX-AR-6: _is_arabic_dominant() helper جديدة
-    🟢 FIX-AR-7: توثيق التغييرات
-
-🆕 v4.0.8.1 — إصلاح توثيقي:
-    🟡 FIX-DOC-1: Load Beacon — "14 Layers" → "15 Layers"
-
-🆕 v4.0.8 — إصلاحات v4.0.7:
-    🔴 FIX-A: _run_in_pool يقبل **kwargs
-    🟠 FIX-B: install_default_executor — إصلاح API deprecated
-    🟠 FIX-C: NSFW lazy load — تقليل احتجاز pool workers
-    🟠 FIX-D: _URL_SIGNATURES — TLD-aware regex
-    🟠 FIX-E: _EMOJI_STRIP_RE — ZWJ sequences + modifiers
-    🟡 FIX-G: _analyze_message_full_async — تعليق دقيق
-    🟡 FIX-I: type annotations لـ_se_last_failure_ts
-    🟡 FIX-J: Lock بدل RLock لـ_BEHAVIOR_LOCK
-    🟡 FIX-K: _context_buffers معرّف قبل cleanup_old_data
-    🟡 FIX-N: shutdown_default_executor() helper
-    🟡 FIX-O: _domain_rep_cache_get يعيد نسخة
-    🟡 FIX-R: _run_in_pool timeout اختياري
-
-🆕 v4.0.7: FIX-AA..II (FULL-AUDIT-V3)
-🆕 v4.0.5/4.0.6: FIX-R,S,T,U,V,W,X (SHUTDOWN + ASYNC hardening)
-🆕 v4.0.4: FIX-A..Q
+🆕 v4.1.0 — إصلاحات حرجة:
+    🔴 FIX-AR-8: _ARABIC_GREETINGS — إضافة كلمات مستقلة شائعة
+    🔴 FIX-AR-9: _is_arabic_short_whitelisted — منطق محسَّن + محايدات
+    🔴 FIX-AR-10: _normalize_arabic_for_compare — حماية "الله"
+    🔴 FIX-DL-1: _download_telegram_file (sync) — تعطيل آمن
+    🔴 FIX-BEHAV-1: _run_behavioral_layer — استخدام text_result["text"]
+    🟡 FIX-POOL-1: _POOL_MAX_WORKERS 8 → 16
+    🟡 FIX-EMOJI-1: _count_emojis — regex لـ ZWJ sequences
+    🟡 FIX-VENUE-1: _extract_venue_url — استخراج URL بدلاً من السلسلة
 ===============================================================================
 """
 
@@ -76,8 +56,8 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
-_DETECTORS_VERSION = "4.0.9 ARABIC-SHORT-WHITELIST"
-_DETECTORS_VERSION_CLEAN = "4.0.9"
+_DETECTORS_VERSION = "4.1.0 CRITICAL-FIXES-2026"
+_DETECTORS_VERSION_CLEAN = "4.1.0"
 
 
 def _version_semver(version: str) -> str:
@@ -203,7 +183,7 @@ POOL_TASK_TIMEOUT = _env_float("POOL_TASK_TIMEOUT", 60.0)
 
 _THREAD_POOL_EXECUTOR: Optional[concurrent.futures.ThreadPoolExecutor] = None
 _THREAD_POOL_LOCK = threading.Lock()
-_POOL_MAX_WORKERS = _env_int("DETECTOR_POOL_WORKERS", 8)
+_POOL_MAX_WORKERS = _env_int("DETECTOR_POOL_WORKERS", 16)
 
 
 def _get_shared_pool() -> concurrent.futures.ThreadPoolExecutor:
@@ -223,7 +203,6 @@ def _get_shared_pool() -> concurrent.futures.ThreadPoolExecutor:
 
 
 def _shutdown_shared_pool() -> None:
-    """إغلاق thread pool. idempotent — آمن للاستدعاء المتكرر."""
     global _THREAD_POOL_EXECUTOR
     with _THREAD_POOL_LOCK:
         if _THREAD_POOL_EXECUTOR is None:
@@ -246,10 +225,6 @@ async def _run_in_pool(
     timeout: Optional[float] = None,
     **kwargs: Any,
 ) -> Any:
-    """
-    ✅ v4.0.8 FIX-A: يدعم keyword arguments عبر functools.partial.
-    ✅ v4.0.8 FIX-R: timeout اختياري (افتراضي POOL_TASK_TIMEOUT).
-    """
     if kwargs:
         fn = functools.partial(fn, **kwargs)
 
@@ -273,9 +248,6 @@ async def _run_in_pool(
 
 
 def install_default_executor(loop: Optional[asyncio.AbstractEventLoop] = None) -> None:
-    """
-    ✅ v4.0.8 FIX-B: إصلاح asyncio.get_event_loop() deprecated.
-    """
     try:
         if loop is None:
             try:
@@ -306,9 +278,6 @@ async def shutdown_default_executor(
     loop: Optional[asyncio.AbstractEventLoop] = None,
     timeout: float = 3.0,
 ) -> None:
-    """
-    ✅ v4.0.8 FIX-N: يُغلق default executor الخاص بالحلقة ثم pool الداخلي.
-    """
     try:
         if loop is None:
             try:
@@ -428,7 +397,6 @@ _nsfw_load_attempted = False
 
 
 def _load_nsfw_classifier() -> Any:
-    """✅ v4.0.8 FIX-C: تحميل كسول محسّن مع cache فشل."""
     global _nsfw_classifier, _NSFW_MODEL_AVAILABLE, _nsfw_load_attempted
 
     if _nsfw_classifier is not None:
@@ -642,44 +610,83 @@ _LEET_TARGETS = frozenset({
 
 
 # =============================================================================
-# 🆕 v4.0.9 FIX-AR-1: Arabic Short Whitelist
+# 🆕 v4.1.0: Arabic Short Whitelist (موسّعة)
 # =============================================================================
 
 _ARABIC_GREETINGS = frozenset({
     "صباح", "صباحا", "صباحاً", "صباحو", "صباحي", "صبحك",
     "مساء", "مساءا", "مساءاً", "مساءو", "مسائي", "مساك",
     "صبح", "مسا",
+    "الصباح", "المساء", "صبيحة",
+    "خير", "الخير", "خيراً", "خيرا",
+    "نور", "النور", "نوراً", "نورا",
+
     "اهلا", "أهلا", "اهلاوسهلا", "أهلاوسهلا", "اهلاً", "أهلاً",
     "مرحبا", "مرحباً", "مرحبتين", "هلا", "هلاوالله", "هلاوسهلا",
+    "مرحب", "ترحيب", "ترحيبات",
+    "وسهلا", "وسهل", "يا",
+    "ياهلا", "يامرحبا", "يامرحبتين",
+
     "السلام", "سلام", "سلامو", "سلاما", "سلاماً", "سلامي",
     "عليكم", "عليكمالسلام", "عليكمورحمة", "عليكمورحمةالله",
+    "سلامعليكم", "وعليكم", "وعليكمالسلام",
+
     "شكرا", "شكراً", "شكرالك", "شكراكتير",
     "مشكور", "مشكورة", "مشكورين", "مشكوره",
+    "الشكر", "شكري", "شكرنا",
     "عفوا", "عفواً", "العفو",
     "تسلم", "تسلمي", "تسلملي", "تسلموا",
     "جزاك", "جزاكالله", "جزاكم", "جزاكمالله",
     "بارك", "باركالله", "باركك",
+
     "تحياتي", "تحيات", "تحية", "تحياتنا",
-    "خير", "بخير", "الحمدلله", "الحمد",
+    "تحيتي", "تحيتنا",
+
+    "الحمدلله", "الحمد", "الحمدالله",
+    "الله", "بالله", "تالله", "والله",
+
     "كيف", "كيفك", "كيفكم", "كيفحالك", "كيفحالكم", "شلونك",
     "شلونكم", "شخبارك", "شخباركم",
+    "حالك", "حالكم", "حالها", "حالهم", "حالهن",
+    "حال", "الحال",
+    "شحال", "شحالك", "شحالكم",
+    "اخبارك", "أخبارك", "اخباركم", "أخباركم",
+    "اخبار", "أخبار",
+
     "نورت", "نورتي", "نورتوا",
+
     "الود", "الورد", "ورد", "زهر", "زهور",
-    "الخير", "الخيرات", "الخيروالبركة",
+    "الخيرات", "الخيروالبركة",
     "التوفيق", "بالنجاح", "بالتوفيق",
     "الرحمة", "الرحمن", "الرحيم", "المغفرة",
     "الجميل", "الجميلة", "الحلو", "الحلوة",
     "الطيب", "الطيبة", "الكريم", "الكريمة",
     "الحبيب", "الحبيبة", "الغالي", "الغالية",
-    "الله", "سبحان", "لاالهالاالله",
+    "سبحان", "لاالهالاالله",
     "انشاءالله", "إنشاءالله", "مافيه", "ماشاءالله",
     "يعطيك", "يعطيكالعافية", "يعطيكم", "يعطيكمالعافية",
     "اللهيعطيك", "اللهيعافيك",
+    "العافية", "عافاك", "عافاكم",
+
     "تمام", "تم", "طيب", "اوك", "اوكي", "اوكيه",
     "حسناً", "حسنا", "زين", "طيبين",
     "نعم", "لا", "اكيد", "بالتاكيد", "بالتأكيد",
     "احسنت", "احسنتي", "برافو", "ممتاز", "رائع", "رائعة",
     "جميل", "جميلة", "حلو", "حلوة",
+    "ماشي", "ماشية", "تفضل", "تفضلي", "تفضلوا",
+    "طيباً", "طيبا", "زينة", "زينين",
+})
+
+_ARABIC_NEUTRAL_WORDS = frozenset({
+    "ورحمة", "وبركاته", "وبركة", "بركاته", "بركة",
+    "ورحمةالله", "و", "أو", "يا",
+    "من", "على", "إلى", "الى", "في", "عن", "مع",
+    "هذا", "هذه", "ذلك", "تلك",
+    "والله", "بالله", "تالله",
+    "أخي", "أختي", "اخي", "اختي",
+    "أخواني", "أخواتي", "اخواني", "اخواتي",
+    "جميعاً", "جميعا", "جمعياً",
+    "كل", "جميع", "عامة", "خاصة",
 })
 
 _ARABIC_SPAM_OVERRIDE = frozenset({
@@ -701,9 +708,13 @@ _ARABIC_SPAM_OVERRIDE = frozenset({
     "مليونير", "ثري", "مضاعفة", "مضاعف",
 })
 
+_ARABIC_KEEP_AL_WORDS = frozenset({
+    "الله", "بالله", "تالله", "والله", "اللهم",
+    "الذي", "التي", "الذين", "اللاتي", "اللواتي",
+})
+
 
 def _arabic_char_ratio(text: str) -> float:
-    """🆕 v4.0.9: نسبة الحروف العربية من إجمالي الحروف."""
     if not text:
         return 0.0
     arabic = 0
@@ -719,16 +730,12 @@ def _arabic_char_ratio(text: str) -> float:
 
 
 def _is_arabic_dominant(text: str) -> bool:
-    """
-    🆕 v4.0.9 FIX-AR-6: هل النص عربي غالباً؟
-    """
     if not text:
         return False
     return _arabic_char_ratio(text) >= ARABIC_DOMINANCE_RATIO
 
 
 def _strip_arabic_diacritics(text: str) -> str:
-    """🆕 v4.0.9: إزالة التشكيل العربي للمقارنة."""
     if not text:
         return ""
     diacritics = re.compile(
@@ -739,14 +746,25 @@ def _strip_arabic_diacritics(text: str) -> str:
 
 
 def _normalize_arabic_for_compare(text: str) -> str:
-    """🆕 v4.0.9: تطبيع للعربية للمقارنة (للـwhitelist)."""
+    """🆕 v4.1.0 FIX-AR-10: حماية "الله" من إزالة "ال"."""
     if not text:
         return ""
     s = _strip_arabic_diacritics(text)
-    s = re.sub(r"(?<!\S)ال", "", s)
     s = re.sub(r"[^\u0600-\u06FF\s]", "", s)
     s = s.replace("أ", "ا").replace("إ", "ا").replace("آ", "ا")
     s = s.replace("ى", "ي").replace("ة", "ه")
+
+    words = s.split()
+    result_words = []
+    for w in words:
+        if w in _ARABIC_KEEP_AL_WORDS:
+            result_words.append(w)
+            continue
+        if w.startswith("ال") and len(w) > 3:
+            result_words.append(w[2:])
+        else:
+            result_words.append(w)
+    s = "".join(result_words)
     s = re.sub(r"\s+", "", s)
     return s.strip()
 
@@ -754,21 +772,20 @@ def _normalize_arabic_for_compare(text: str) -> str:
 _NORMALIZED_GREETINGS = tuple(
     _normalize_arabic_for_compare(g) for g in _ARABIC_GREETINGS
 )
-_NORMALIZED_GREETINGS = tuple(
-    g for g in _NORMALIZED_GREETINGS if g
-)
+_NORMALIZED_GREETINGS = tuple(g for g in _NORMALIZED_GREETINGS if g)
+_NORMALIZED_GREETINGS_SET = frozenset(_NORMALIZED_GREETINGS)
+
+_NORMALIZED_NEUTRAL = frozenset(
+    _normalize_arabic_for_compare(n) for n in _ARABIC_NEUTRAL_WORDS
+) - {""}
+
 _NORMALIZED_SPAM_OVERRIDE = frozenset(
     _normalize_arabic_for_compare(s) for s in _ARABIC_SPAM_OVERRIDE
 ) - {""}
 
 
 def _is_arabic_short_whitelisted(text: str) -> bool:
-    """
-    🆕 v4.0.9 FIX-AR-1: هل النص رسالة عربية قصيرة طبيعية (تحية/ردود)؟
-
-    ✅ v4.0.9-PERF: استخدام _NORMALIZED_GREETINGS المُحسَّبة مُسبقًا
-    لتجنّب O(n*m) في كل رسالة.
-    """
+    """🆕 v4.1.0 FIX-AR-9: منطق محسَّن + كلمات محايدة."""
     if not ARABIC_SHORT_WHITELIST_ENABLED:
         return False
     if not text:
@@ -782,6 +799,8 @@ def _is_arabic_short_whitelisted(text: str) -> bool:
         return False
 
     words = re.findall(r"[^\s]+", text)
+    if not words:
+        return False
     if len(words) > ARABIC_SHORT_MAX_WORDS:
         return False
 
@@ -795,22 +814,35 @@ def _is_arabic_short_whitelisted(text: str) -> bool:
     if not normalized_full:
         return False
 
+    for spam_norm in _NORMALIZED_SPAM_OVERRIDE:
+        if spam_norm and spam_norm in normalized_full:
+            return False
+
     for word in words:
         word_norm = _normalize_arabic_for_compare(word)
         if not word_norm:
             continue
-        if word_norm in _NORMALIZED_SPAM_OVERRIDE:
-            return False
-        found_greeting = False
-        for greeting_norm in _NORMALIZED_GREETINGS:
-            if greeting_norm and greeting_norm in word_norm:
-                found_greeting = True
-                break
-        if not found_greeting:
-            return False
 
-    for spam_norm in _NORMALIZED_SPAM_OVERRIDE:
-        if spam_norm and spam_norm in normalized_full:
+        if word_norm in _NORMALIZED_GREETINGS_SET:
+            continue
+
+        if word_norm in _NORMALIZED_NEUTRAL:
+            continue
+
+        found = False
+        for greeting_norm in _NORMALIZED_GREETINGS:
+            if not greeting_norm:
+                continue
+            if len(greeting_norm) < 3:
+                continue
+            if greeting_norm in word_norm:
+                found = True
+                break
+            if len(word_norm) >= 3 and word_norm in greeting_norm:
+                found = True
+                break
+
+        if not found:
             return False
 
     return True
@@ -837,6 +869,17 @@ _UNICODE_DOT_TABLE = str.maketrans({
 
 
 _EMOJI_STRIP_RE = re.compile(
+    r"(?:"
+    r"(?:[\U0001F000-\U0001FAFF\u2600-\u27BF\u2B00-\u2BFF]"
+    r"[\U0001F3FB-\U0001F3FF]?"
+    r"(?:\u200d[\U0001F000-\U0001FAFF]"
+    r"[\U0001F3FB-\U0001F3FF]?)*)"
+    r"|[\U0001F1E6-\U0001F1FF]{2}"
+    r"|[0-9#*]\uFE0F?\u20E3"
+    r")"
+)
+
+_EMOJI_COUNT_RE = re.compile(
     r"(?:"
     r"(?:[\U0001F000-\U0001FAFF\u2600-\u27BF\u2B00-\u2BFF]"
     r"[\U0001F3FB-\U0001F3FF]?"
@@ -1306,12 +1349,13 @@ def _count_word_matches(
 
 
 def _count_emojis(text: str) -> int:
+    """🟡 FIX-EMOJI-1: regex يحسب ZWJ sequences كوحدة واحدة."""
     if not text:
         return 0
-    return sum(
-        1 for ch in text
-        if 0x1F000 <= ord(ch) <= 0x1FAFF or 0x2600 <= ord(ch) <= 0x27BF
-    )
+    try:
+        return len(_EMOJI_COUNT_RE.findall(text))
+    except Exception:
+        return 0
 
 
 def _count_spam_emojis(text: str) -> int:
@@ -1469,7 +1513,6 @@ def _normalize_unicode_dots(text: str) -> str:
 
 
 def _do_normalize(text: str) -> str:
-    """التنفيذ الفعلي للـnormalization — بدون cache."""
     value = html.unescape(str(text))
     value = unicodedata.normalize("NFKC", value).casefold()
     if ANTIEVASION_COMBINING or ANTIEVASION_EXTENDED_COMBINING:
@@ -1937,6 +1980,7 @@ def _extract_vcard_urls(message: Any) -> List[str]:
 
 
 def _extract_venue_url(message: Any) -> Optional[str]:
+    """🟡 FIX-VENUE-1: استخراج URL الفعلي فقط."""
     if message is None or not ANTIEVASION_VENUE_VCARD:
         return None
     try:
@@ -1955,10 +1999,12 @@ def _extract_venue_url(message: Any) -> Optional[str]:
             m = _DOMAIN_RE.search(normalized)
             if m and not _is_random_domain(m.group(0)):
                 return m.group(0)
-            if _TG_URL_RE.search(s):
-                return s
-            if _TG_USERNAME_RE.search(s):
-                return s
+            m = _TG_URL_RE.search(s)
+            if m:
+                return m.group(0)
+            m = _TG_USERNAME_RE.search(s)
+            if m:
+                return m.group(0)
         return None
     except Exception:
         return None
@@ -2848,13 +2894,10 @@ def _detect_structural_evasion(
 
 
 # =============================================================================
-# NORMAL CONVERSATION DETECTION — Enhanced for Arabic
+# NORMAL CONVERSATION DETECTION
 # =============================================================================
 
 def _looks_like_normal_conversation(text: str) -> bool:
-    """
-    🆕 v4.0.9 FIX-AR-2: تحسين كشف المحادثات الطبيعية، خاصة العربية القصيرة.
-    """
     if not text:
         return True
 
@@ -3617,7 +3660,6 @@ def extract_qr_codes(image_bytes: bytes) -> List[str]:
 async def _do_download_telegram_file(
     file_id: str, bot: Any
 ) -> Optional[bytes]:
-    """التنفيذ الفعلي للتنزيل — يُستدعى من sync و async."""
     try:
         file_obj = await asyncio.wait_for(
             bot.get_file(file_id), timeout=30.0
@@ -3655,32 +3697,15 @@ async def _download_telegram_file_async(
 
 
 def _download_telegram_file(file_id: str, bot: Any = None) -> Optional[bytes]:
+    """🔴 FIX-DL-1: sync download مُعطَّل بأمان."""
     if not file_id:
         return None
-    if bot is None:
-        try:
-            from telegram_bot_singleton import get_bot  # type: ignore
-            bot = get_bot()
-        except Exception:
-            return None
-    if bot is None:
-        return None
-
-    try:
-        asyncio.get_running_loop()
-        logger.warning(
-            "_download_telegram_file: running loop detected — "
-            "استخدم النسخة async"
-        )
-        return None
-    except RuntimeError:
-        pass
-
-    try:
-        return asyncio.run(_do_download_telegram_file(file_id, bot))
-    except Exception as exc:
-        logger.debug("download error: %r", exc)
-        return None
+    logger.debug(
+        "_download_telegram_file: sync download مُعطَّل بأمان "
+        "(استخدم _download_telegram_file_async). file_id=%s",
+        str(file_id)[:30],
+    )
+    return None
 
 
 async def extract_image_content_async(
@@ -4628,7 +4653,7 @@ def extract_video_content(
 
 
 # =============================================================================
-# NSFW Detection — 3 Providers + Circuit Breaker
+# NSFW Detection
 # =============================================================================
 
 def _detect_image_mime(image_bytes: bytes) -> str:
@@ -5015,7 +5040,7 @@ def analyze_reactions(message: Any) -> Tuple[int, List[str]]:
 
 
 # =============================================================================
-# LAYER 11: CONTEXT (cross-message)
+# LAYER 11: CONTEXT
 # =============================================================================
 
 def record_context_message(user_id: int, text: str, has_url: bool) -> None:
@@ -5548,6 +5573,7 @@ def _run_behavioral_layer(
     text_result: Dict[str, Any],
     verdict: SpamVerdict,
 ) -> None:
+    """🔴 FIX-BEHAV-1: استخدام text_result["text"]."""
     if not BEHAVIORAL_LAYER_ENABLED:
         return
     try:
@@ -5557,7 +5583,15 @@ def _run_behavioral_layer(
             user_id = getattr(user, "id", 0) if user else 0
         if not user_id:
             return
-        text = getattr(message, "text", None) or ""
+
+        text = str(text_result.get("text", "") or "")
+        if not text:
+            text = (
+                getattr(message, "text", None)
+                or getattr(message, "caption", None)
+                or ""
+            )
+
         has_url = bool(text_result.get("has_link", False))
         record_message(user_id, text, has_url)
         behav_score = 0
@@ -6063,15 +6097,6 @@ def analyze_message_full(message: Any, bot: Any = None) -> SpamVerdict:
 async def analyze_message_full_async(
     message: Any, bot: Any = None
 ) -> SpamVerdict:
-    """
-    ✅ v4.0.8 FIX-G: تعليق دقيق حول الترتيب.
-
-    الترتيب:
-      1) text layer (sync سريعة) — تُنتج text_result.
-      2) sync سريعة (behavioral, context, reactions, ...) — تسجّل سلوك
-         المستخدم بأسرع وقت قبل أي I/O.
-      3) async I/O layers — بالتوازي عبر asyncio.gather مع Semaphore(6).
-    """
     verdict = SpamVerdict(
         is_spam=False, total_score=0.0, confidence="none"
     )
@@ -6321,11 +6346,12 @@ __all__ = [
 
     "ARABIC_SHORT_WHITELIST_ENABLED", "ARABIC_SHORT_MAX_CHARS",
     "ARABIC_SHORT_MAX_WORDS", "ARABIC_DOMINANCE_RATIO",
-    "_ARABIC_GREETINGS", "_ARABIC_SPAM_OVERRIDE",
-    "_NORMALIZED_GREETINGS", "_NORMALIZED_SPAM_OVERRIDE",
+    "_ARABIC_GREETINGS", "_ARABIC_NEUTRAL_WORDS", "_ARABIC_SPAM_OVERRIDE",
+    "_NORMALIZED_GREETINGS", "_NORMALIZED_GREETINGS_SET",
+    "_NORMALIZED_NEUTRAL", "_NORMALIZED_SPAM_OVERRIDE",
     "_is_arabic_dominant", "_is_arabic_short_whitelisted",
     "_arabic_char_ratio", "_normalize_arabic_for_compare",
-    "_strip_arabic_diacritics",
+    "_strip_arabic_diacritics", "_ARABIC_KEEP_AL_WORDS",
 
     "ANTIEVASION_ENTITY_LINK", "ANTIEVASION_BUTTON_LINK",
     "ANTIEVASION_SCHEMELESS_URL", "ANTIEVASION_HOMOGLYPH",
@@ -6439,7 +6465,8 @@ try:
         "SPAM_THRESHOLD=%d HARD=%d CRITICAL=%d | "
         "TLDs=%d RANDOM_DOMAIN=%s ASYNC_NET=%s POOL=%d "
         "SE_CIRCUIT=%d/%ds TIMEOUT=%.1fs | "
-        "AR_SHORT_WHITELIST=%s (max=%d chars/%d words, ratio=%.2f)",
+        "AR_SHORT_WHITELIST=%s (max=%d chars/%d words, ratio=%.2f) | "
+        "AR_GREETINGS=%d NEUTRAL=%d",
         _DETECTORS_VERSION,
         TEXT_LAYER_ENABLED,
         OCR_LAYER_ENABLED, _PIL_AVAILABLE,
@@ -6470,6 +6497,8 @@ try:
         ARABIC_SHORT_MAX_CHARS,
         ARABIC_SHORT_MAX_WORDS,
         ARABIC_DOMINANCE_RATIO,
+        len(_ARABIC_GREETINGS),
+        len(_ARABIC_NEUTRAL_WORDS),
     )
 except Exception:
     pass
