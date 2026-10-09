@@ -2,11 +2,19 @@
 # -*- coding: utf-8 -*-
 
 """
-🌿 Relax Manager – البوت الرئيسي (bot.py v5.6.14-DB-IDLE-CMD)
+🌿 Relax Manager – البوت الرئيسي (bot.py v5.6.15-CACHE-STATS-CANCEL)
 ================================================================================
 📌 نقطة الدخول الرسمية للتطبيق (entrypoint).
 
 ================================================================================
+🆕 v5.6.15 (CACHE-STATS + CANCEL-COMMAND):
+    🟢 PATCH-1: استيراد آمن لـ handle_cache_stats_command من handlers_message
+    🟢 PATCH-2: تسجيل /cache_stats (للمطور فقط — إحصائيات الكاش الحية)
+    🟢 PATCH-3: إضافة "cache_stats" إلى ADMIN_COMMANDS
+    🟢 PATCH-4: إشعار حالة /cache_stats في diagnostics
+    🟢 PATCH-5: تسجيل /cancel (إلغاء العمليات المنتظرة)
+    🟢 PATCH-6: تحديث Load Beacon إلى v5.6.15
+
 🆕 v5.6.14 (DB-IDLE-COMMAND):
     🟢 PATCH-1: استيراد آمن لـ handle_db_idle_command من handlers_message
     🟢 PATCH-2: تسجيل /db_idle (للمطور فقط — تدقيق idle-in-transaction)
@@ -313,6 +321,30 @@ except ImportError as _e_dbidle1:
         _handle_db_idle_command = None
         _HAS_DB_IDLE_CMD = False
         _DB_IDLE_IMPORT_ERROR = f"{_e_dbidle1} | {_e_dbidle2}"
+
+# ═════════════════════════════════════════════════════════════════════
+# 🆕 v5.6.15 PATCH-1: /cache_stats — استيراد آمن
+# ═════════════════════════════════════════════════════════════════════
+_HAS_CACHE_STATS_CMD = False
+_handle_cache_stats_command = None
+
+try:
+    from handlers.handlers_message import (
+        handle_cache_stats_command as _handle_cache_stats_command_imported,
+    )
+    _handle_cache_stats_command = _handle_cache_stats_command_imported
+    _HAS_CACHE_STATS_CMD = True
+except ImportError as _e_cs1:
+    try:
+        from handlers_message import (  # type: ignore
+            handle_cache_stats_command as _handle_cache_stats_command_imported,
+        )
+        _handle_cache_stats_command = _handle_cache_stats_command_imported
+        _HAS_CACHE_STATS_CMD = True
+    except ImportError as _e_cs2:
+        _handle_cache_stats_command = None
+        _HAS_CACHE_STATS_CMD = False
+        _CACHE_STATS_IMPORT_ERROR = f"{_e_cs1} | {_e_cs2}"
 
 # ═════════════════════════════════════════════════════════════════════
 # db_maintenance_commands
@@ -824,6 +856,17 @@ else:
         "يتطلب handlers_message.py v7.18.14+"
     )
 
+# 🆕 v5.6.15: إشعار حالة /cache_stats
+if _HAS_CACHE_STATS_CMD:
+    logger.info(
+        "✅ /cache_stats متاح — إحصائيات الكاش الحية (للمطور فقط)"
+    )
+else:
+    logger.debug(
+        "ℹ️ /cache_stats غير متاح — "
+        "يتطلب handlers_message.py v7.18.18+"
+    )
+
 _log_spam_detector_status()
 _log_security_bridge_status()
 
@@ -887,7 +930,8 @@ ADMIN_COMMANDS = [
     ("db_maintenance", "🧹 صيانة قاعدة البيانات"),
     ("db_weekly", "📅 التقرير الأسبوعي"),
     ("autoblocked", "🚫 المصادر المحجوبة تلقائياً"),
-    ("db_idle", "🔍 تدقيق idle-in-transaction"),  # 🆕 v5.6.14
+    ("db_idle", "🔍 تدقيق idle-in-transaction"),      # v5.6.14
+    ("cache_stats", "📊 إحصائيات الكاش الحية"),        # 🆕 v5.6.15
 ]
 
 GROUP_COMMANDS = [
@@ -2345,8 +2389,9 @@ async def main():
     logger.info("👨‍💼 المالك: %s", CONFIG.PRIMARY_OWNER_ID)
 
     logger.info(
-        "📦 bot.py: v5.6.14 | "
-        "detectors=%s | layers=%d | helpers=%s | db_idle=%s",
+        "📦 bot.py: v5.6.15 | "
+        "detectors=%s | layers=%d | helpers=%s | "
+        "db_idle=%s | cache_stats=%s",
         _SPAM_DETECTOR_VERSION or "N/A",
         _SPAM_DETECTOR_LAYERS_COUNT,
         (
@@ -2358,6 +2403,7 @@ async def main():
             ]) or "none"
         ),
         "yes" if _HAS_DB_IDLE_CMD else "no",
+        "yes" if _HAS_CACHE_STATS_CMD else "no",
     )
 
     try:
@@ -2668,6 +2714,41 @@ async def main():
         logger.debug(
             "ℹ️ /db_idle غير مُسجَّل — "
             "يتطلب handlers_message v7.18.14+"
+        )
+
+    # 🆕 v5.6.15 PATCH-2: /cache_stats — إحصائيات الكاش الحية
+    if _HAS_CACHE_STATS_CMD and _handle_cache_stats_command is not None:
+        try:
+            app.add_handler(CommandHandler(
+                "cache_stats", _handle_cache_stats_command
+            ))
+            logger.info(
+                "✅ /cache_stats مُسجَّل — إحصائيات الكاش (للمطور فقط)"
+            )
+        except Exception as _e:
+            logger.warning("⚠️ فشل تسجيل /cache_stats: %s", _e)
+    else:
+        logger.debug(
+            "ℹ️ /cache_stats غير مُسجَّل — "
+            "يتطلب handlers_message v7.18.18+"
+        )
+
+    # 🆕 v5.6.15 PATCH-5: /cancel — إلغاء موحّد للعمليات المنتظرة
+    if hasattr(MessageHandlers, "handle_cancel"):
+        try:
+            app.add_handler(
+                CommandHandler("cancel", MessageHandlers.handle_cancel),
+                group=1,
+            )
+            logger.info(
+                "✅ /cancel مُسجَّل — إلغاء العمليات المنتظرة"
+            )
+        except Exception as _e:
+            logger.warning("⚠️ فشل تسجيل /cancel: %s", _e)
+    else:
+        logger.debug(
+            "ℹ️ MessageHandlers.handle_cancel غير متاح — "
+            "/cancel لن يعمل"
         )
 
     if _MAINT_CMDS_AVAILABLE and callable(register_maintenance_commands):
