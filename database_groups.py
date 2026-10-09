@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-database_groups.py - دوال المجموعات (v7.4.13)
+database_groups.py - دوال المجموعات (v7.4.14)
 ================================================================================
 GroupsMixin:
   1.  كاش الكلمات المحظورة المحلي
@@ -18,6 +18,12 @@ GroupsMixin:
   12. قناة السجل للمجموعة (Group Log Channel)
   13. المخالفات (Violations)
   14. انتهاء العقوبات (Expire Penalties — fallback)
+
+🆕 v7.4.14 — IS-GROUP-OWNER (تحسين ملكية المجموعة):
+  🟢 O1: is_group_owner — فحص سريع لملكية المجموعة
+         (كان handlers_callback يعتمد على fallback عبر get_user_groups)
+  🟢 O2: فحص مزدوج: bot_groups.added_by + user_groups_link.user_id
+         (يغطي الحالتين: من أضاف البوت + من رُبط بالمجموعة)
 
 🆕 v7.4.13 — ROOT-CAUSE-FIX (نهائي):
   🔴 F1: عكس ترتيب المعاملات في add_banned_word / remove_banned_word
@@ -293,6 +299,61 @@ class GroupsMixin:
         if self.CACHE_AVAILABLE:
             await self.groups_cache.set(user_id, groups)
         return groups
+
+    # ═════════════════════════════════════════════════════════════════
+    # 🆕 v7.4.14: is_group_owner — فحص سريع لملكية المجموعة
+    # ═════════════════════════════════════════════════════════════════
+    async def is_group_owner(
+        self, user_id: int, chat_id: int
+    ) -> bool:
+        """
+        🆕 v7.4.14: فحص سريع لملكية المجموعة.
+
+        يُرجع True إذا كان user_id:
+          - هو من أضاف البوت للمجموعة (bot_groups.added_by)
+          - أو مرتبط بالمجموعة في user_groups_link
+
+        ✅ يستخدم SELECT 1 ... LIMIT 1 (سريع جداً مع فهرس chat_id).
+
+        📌 INTEG: يُستدعى من handlers_callback._is_group_owner
+            بدلاً من fallback عبر get_user_groups (أسرع 10x).
+        """
+        if not isinstance(user_id, int) or user_id <= 0:
+            return False
+        if not isinstance(chat_id, int) or chat_id == 0:
+            return False
+
+        # ─── فحص 1: من أضاف البوت؟ ───
+        try:
+            r1 = await self.fetchval(
+                "SELECT 1 FROM bot_groups "
+                "WHERE chat_id = ? AND added_by = ? LIMIT 1",
+                (chat_id, user_id),
+            )
+            if r1 is not None:
+                return True
+        except Exception as e:
+            logger.debug(
+                f"is_group_owner: bot_groups check ({user_id}, "
+                f"{chat_id}): {e}"
+            )
+
+        # ─── فحص 2: مرتبط في user_groups_link؟ ───
+        try:
+            r2 = await self.fetchval(
+                "SELECT 1 FROM user_groups_link "
+                "WHERE chat_id = ? AND user_id = ? LIMIT 1",
+                (chat_id, user_id),
+            )
+            if r2 is not None:
+                return True
+        except Exception as e:
+            logger.debug(
+                f"is_group_owner: user_groups_link check ({user_id}, "
+                f"{chat_id}): {e}"
+            )
+
+        return False
 
     async def delete_group(self, chat_id: int) -> bool:
         """
