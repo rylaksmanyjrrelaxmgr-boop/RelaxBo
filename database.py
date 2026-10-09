@@ -1,8 +1,17 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-database.py - قاعدة البيانات المتكاملة (v7.7.61 — IDLE-TX-ROLLBACK-FINAL)
+database.py - قاعدة البيانات المتكاملة (v7.7.62 — IDLE-TX-AUTO-AUDIT)
 ================================================================================
+🆕 v7.7.62 (IDLE-TX-AUTO-AUDIT):
+  🔍 AUDIT-1: مهمة دورية _auto_audit_idle_tx (كل 60s افتراضياً)
+  🔍 AUDIT-2: طريقة audit_idle_in_transactions() داخل Database
+  🔍 AUDIT-3: تسجيل تلقائي عند تجاوز العتبة
+  🔍 AUDIT-4: إيقاف نظيف في close()
+  🆕 ثوابت: IDLE_TX_AUDIT_ENABLED/INTERVAL_SEC/MIN_SECONDS/
+                ALERT_THRESHOLD/APP_FILTER/MAX_ITEMS/LOG_EVERY
+  🆕 get_idle_tx_audit_status() للرصد من الخارج
+
 🆕 v7.7.61 (IDLE-TX-ROLLBACK-FINAL):
   🔴 TX-1: ping-before-use يفحص is_in_transaction أولاً
   🔴 TX-2: _return_connection — rollback وقائي قبل release
@@ -56,6 +65,7 @@ database.py - قاعدة البيانات المتكاملة (v7.7.61 — IDLE-T
 # [18] v7.7.59: TCP keepalive + كاش schedule
 # [19] v7.7.60: pool lifecycle 15s + ping-before-use
 # [20] v7.7.61: idle-in-transaction → rollback/destroy
+# [21] v7.7.62: idle-tx audit دوري + auto-log + cleanup
 # =====================================================================
 
 import os
@@ -554,6 +564,35 @@ PG_COMMAND_TIMEOUT = float(os.getenv("PG_COMMAND_TIMEOUT", "10.0"))
 # 🆕 v7.7.61: مهلة rollback وقائي قبل إعادة الاتصال للـ pool
 PG_ROLLBACK_ON_RETURN_TIMEOUT = float(
     os.getenv("PG_ROLLBACK_ON_RETURN_TIMEOUT", "2.0")
+)
+
+# =====================================================================
+# 🆕 v7.7.62: IDLE-TX AUTO-AUDIT CONFIGURATION
+# =====================================================================
+
+IDLE_TX_AUDIT_ENABLED = (
+    os.getenv("IDLE_TX_AUDIT_ENABLED", "true").lower() == "true"
+)
+IDLE_TX_AUDIT_INTERVAL_SEC = float(
+    os.getenv("IDLE_TX_AUDIT_INTERVAL_SEC", "60.0")
+)
+IDLE_TX_AUDIT_MIN_SECONDS = float(
+    os.getenv("IDLE_TX_AUDIT_MIN_SECONDS", "0.0")
+)
+IDLE_TX_AUDIT_ALERT_THRESHOLD = int(
+    os.getenv("IDLE_TX_AUDIT_ALERT_THRESHOLD", "1")
+)
+IDLE_TX_AUDIT_APP_FILTER = (
+    os.getenv("IDLE_TX_AUDIT_APP_FILTER", "relax_bot").strip()
+)
+IDLE_TX_AUDIT_MAX_ITEMS = int(
+    os.getenv("IDLE_TX_AUDIT_MAX_ITEMS", "50")
+)
+IDLE_TX_AUDIT_LOG_EVERY = int(
+    os.getenv("IDLE_TX_AUDIT_LOG_EVERY", "5")
+)
+IDLE_TX_AUDIT_QUERY_TRUNCATE = int(
+    os.getenv("IDLE_TX_AUDIT_QUERY_TRUNCATE", "200")
 )
 
 if REFACTOR_MIXIN_AVAILABLE and _R_DEFAULT_PUBLISH_INTERVAL_MINUTES is not None:
@@ -2002,6 +2041,15 @@ class Database(
             self._secondary_index_task = None
             self._cache_cleanup_task = None
 
+            # 🆕 v7.7.62: idle-tx audit
+            self._idle_tx_audit_task = None
+            self._idle_tx_audit_lock = asyncio.Lock()
+            self._idle_tx_audit_iteration = 0
+            self._idle_tx_audit_last_count = 0
+            self._idle_tx_audit_alert_count = 0
+            self._idle_tx_audit_last_report: Dict[str, Any] = {}
+            self._idle_tx_audit_started_mono: float = 0.0
+
             self._bg_tasks: Set[asyncio.Task] = set()
 
             self._sqlite_creation_lock = asyncio.Lock()
@@ -2182,6 +2230,308 @@ class Database(
         except Exception as e:
             logger.warning(f"⚠️ clear_slow_queries_log: {e}")
             return 0
+
+    # =================================================================
+    # 🆕 v7.7.62: IDLE-TX AUDIT (periodic + on-demand)
+    # =================================================================
+
+    async def audit_idle_in_transactions(
+        self,
+        min_seconds: Optional[float] = None,
+        app_filter: Optional[str] = None,
+        limit: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """
+        🔍 v7.7.62: تدقيق فوري لاتصالات idle-in-transaction.
+
+        يكتشف **كل** اتصال idle-in-tx (بلا حد أدنى افتراضي) مع:
+          - PID + application_name
+          - مدة الخمول وعمر المعاملة
+          - backend_xmin / backend_xid
+          - آخر query منفّذ (مقطوع)
+
+        Args:
+            min_seconds: الحد الأدنى لعمر الخمول (None → env).
+            app_filter: تصفية application_name (None → env).
+            limit: حد أقصى للصفوف (None → env).
+
+        Returns:
+            dict:
+                count: عدد الاتصالات المكتشفة
+                items: قائمة تفصيلية
+                by_app: تجميع حسب application_name
+                warning: رسالة تحذير مقترحة (None إن لا يوجد)
+                min_seconds_used: القيمة المستخدمة
+                app_filter: التصفية المستخدمة
+                app_matches: عدد اتصالات تطبيقنا
+                total_idle_tx: إجمالي كل التطبيقات (حتى المُصفّاة)
+        """
+        if not USE_POSTGRES:
+            return {
+                "count": 0,
+                "items": [],
+                "warning": None,
+                "by_app": {},
+                "min_seconds_used": 0.0,
+                "app_filter": app_filter,
+                "app_matches": 0,
+                "total_idle_tx": 0,
+            }
+
+        if min_seconds is None:
+            min_seconds = IDLE_TX_AUDIT_MIN_SECONDS
+        if app_filter is None:
+            app_filter = IDLE_TX_AUDIT_APP_FILTER or None
+        if limit is None:
+            limit = IDLE_TX_AUDIT_MAX_ITEMS
+
+        min_seconds = max(0.0, float(min_seconds))
+        limit = max(1, min(int(limit), 500))
+
+        where_clauses = [
+            "state = 'idle in transaction'",
+            "pid <> pg_backend_pid()",
+            "EXTRACT(EPOCH FROM (now() - state_change)) >= $1",
+        ]
+        params: List[Any] = [min_seconds]
+
+        if app_filter:
+            where_clauses.append("application_name = $2")
+            params.append(app_filter)
+
+        query = f"""
+            SELECT pid,
+                   usename,
+                   application_name,
+                   COALESCE(client_addr::text, 'local') AS client,
+                   EXTRACT(EPOCH FROM (now() - state_change))::bigint
+                       AS idle_sec,
+                   EXTRACT(EPOCH FROM (now() - xact_start))::bigint
+                       AS tx_age_sec,
+                   backend_xmin::text AS backend_xmin,
+                   backend_xid::text  AS backend_xid,
+                   substring(query, 1, {IDLE_TX_AUDIT_QUERY_TRUNCATE})
+                       AS query
+            FROM pg_stat_activity
+            WHERE {" AND ".join(where_clauses)}
+            ORDER BY state_change ASC
+            LIMIT {limit}
+        """
+
+        items: List[Dict[str, Any]] = []
+        by_app: Dict[str, int] = {}
+        try:
+            rows = await self.fetchall(query, tuple(params))
+            for r in rows or []:
+                app = (r.get("application_name") or "?")[:40]
+                by_app[app] = by_app.get(app, 0) + 1
+                items.append({
+                    "pid": int(r.get("pid") or 0),
+                    "user": r.get("usename"),
+                    "app": app,
+                    "client": r.get("client"),
+                    "idle_sec": int(r.get("idle_sec") or 0),
+                    "tx_age_sec": int(r.get("tx_age_sec") or 0),
+                    "backend_xmin": r.get("backend_xmin"),
+                    "backend_xid": r.get("backend_xid"),
+                    "query": (r.get("query") or "").strip(),
+                })
+        except Exception as exc:
+            logger.warning(f"audit_idle_in_transactions query: {exc}")
+            return {
+                "count": 0,
+                "items": [],
+                "warning": f"query_failed: {exc}",
+                "by_app": {},
+                "min_seconds_used": min_seconds,
+                "app_filter": app_filter,
+                "app_matches": 0,
+                "total_idle_tx": 0,
+            }
+
+        # إجمالي كل idle-tx (بلا تصفية app) للسياق
+        total_idle_tx = len(items)
+        if app_filter:
+            try:
+                total_row = await self.fetchval(
+                    "SELECT COUNT(*)::int FROM pg_stat_activity "
+                    "WHERE state = 'idle in transaction' "
+                    "  AND pid <> pg_backend_pid() "
+                    "  AND EXTRACT(EPOCH FROM (now() - state_change)) >= $1",
+                    (min_seconds,),
+                    default=0,
+                )
+                total_idle_tx = int(total_row or 0)
+            except Exception as _te:
+                logger.debug(f"total idle-tx count: {_te}")
+
+        app_matches = by_app.get(app_filter, 0) if app_filter else 0
+
+        warning: Optional[str] = None
+        if items:
+            if app_matches:
+                warning = (
+                    f"🔴 {app_matches} اتصال idle-in-tx من "
+                    f"'{app_filter}' — راجع database.py v7.7.61 "
+                    f"(TX-1..TX-4)"
+                )
+            else:
+                warning = (
+                    f"🟡 {len(items)} اتصال idle-in-tx من تطبيقات أخرى"
+                )
+
+        return {
+            "count": len(items),
+            "items": items,
+            "warning": warning,
+            "by_app": by_app,
+            "min_seconds_used": min_seconds,
+            "app_filter": app_filter,
+            "app_matches": app_matches,
+            "total_idle_tx": total_idle_tx,
+        }
+
+    async def _auto_audit_idle_tx(self) -> None:
+        """
+        🆕 v7.7.62: مهمة دورية لرصد idle-in-transaction.
+
+        - كل IDLE_TX_AUDIT_INTERVAL_SEC ثانية → audit_idle_in_transactions
+        - إن count >= IDLE_TX_AUDIT_ALERT_THRESHOLD → log warning
+        - يسجّل التفاصيل الكاملة كل IDLE_TX_AUDIT_LOG_EVERY دورات
+        """
+        if not USE_POSTGRES or not IDLE_TX_AUDIT_ENABLED:
+            return
+
+        self._idle_tx_audit_started_mono = time.monotonic()
+        interval = max(5.0, float(IDLE_TX_AUDIT_INTERVAL_SEC))
+
+        logger.info(
+            f"🔍 v7.7.62: idle-tx audit task started "
+            f"(interval={interval:.0f}s, "
+            f"alert_threshold={IDLE_TX_AUDIT_ALERT_THRESHOLD}, "
+            f"app_filter={IDLE_TX_AUDIT_APP_FILTER!r})"
+        )
+
+        while True:
+            try:
+                await asyncio.sleep(interval)
+
+                if self._closing or self._closed:
+                    break
+
+                async with self._idle_tx_audit_lock:
+                    self._idle_tx_audit_iteration += 1
+                    iteration = self._idle_tx_audit_iteration
+
+                    try:
+                        report = await self.audit_idle_in_transactions()
+                    except Exception as qe:
+                        logger.warning(
+                            f"⚠️ idle-tx audit query (#{iteration}): {qe}"
+                        )
+                        continue
+
+                    count = int(report.get("count") or 0)
+                    app_matches = int(report.get("app_matches") or 0)
+                    self._idle_tx_audit_last_count = count
+                    self._idle_tx_audit_last_report = report
+
+                    # سجّل عند التجاوز
+                    if count >= IDLE_TX_AUDIT_ALERT_THRESHOLD:
+                        self._idle_tx_audit_alert_count += 1
+
+                        # رسالة مختصرة دائماً
+                        by_app_str = ", ".join(
+                            f"{k}={v}"
+                            for k, v in sorted(
+                                report.get("by_app", {}).items(),
+                                key=lambda x: -x[1],
+                            )
+                        )
+                        logger.warning(
+                            f"🔴 v7.7.62 idle-tx ALERT #{iteration}: "
+                            f"count={count} "
+                            f"(ours={app_matches}, "
+                            f"total_idle_tx={report.get('total_idle_tx', 0)}) "
+                            f"by_app=[{by_app_str}]"
+                        )
+
+                        # تفاصيل كاملة كل LOG_EVERY دورات
+                        log_every = max(1, int(IDLE_TX_AUDIT_LOG_EVERY))
+                        if self._idle_tx_audit_alert_count % log_every == 1:
+                            items = report.get("items") or []
+                            for it in items[:5]:
+                                logger.warning(
+                                    f"   • pid={it.get('pid')} "
+                                    f"app={it.get('app')!r} "
+                                    f"idle={it.get('idle_sec')}s "
+                                    f"tx_age={it.get('tx_age_sec')}s "
+                                    f"xmin={it.get('backend_xmin')} "
+                                    f"query={_truncate_sql(it.get('query'), 120)!r}"
+                                )
+
+                        if app_matches:
+                            logger.error(
+                                f"🚨 v7.7.62: {app_matches} اتصال من "
+                                f"'{IDLE_TX_AUDIT_APP_FILTER}' "
+                                f"— راجع database.py v7.7.61"
+                            )
+                    else:
+                        # DEBUG كل ~10 دورات حتى لو نظيف
+                        if iteration % 10 == 0:
+                            logger.debug(
+                                f"✅ v7.7.62 idle-tx audit "
+                                f"#{iteration}: clean (count=0)"
+                            )
+            except asyncio.CancelledError:
+                logger.info("🛑 idle-tx audit task cancelled")
+                break
+            except Exception as e:
+                logger.error(
+                    f"❌ _auto_audit_idle_tx loop: {e}",
+                    exc_info=True,
+                )
+                # استمر — لا تُسقط المهمة بسبب خطأ عابر
+                try:
+                    await asyncio.sleep(min(30.0, interval))
+                except asyncio.CancelledError:
+                    break
+
+    async def get_idle_tx_audit_status(self) -> Dict[str, Any]:
+        """
+        🆕 v7.7.62: حالة نظام تدقيق idle-in-transaction.
+
+        Returns:
+            dict يشمل:
+                enabled, running, interval_sec, threshold
+                last_count, last_report, iterations
+                alert_count, uptime_sec
+        """
+        running = (
+            self._idle_tx_audit_task is not None
+            and not self._idle_tx_audit_task.done()
+        )
+        uptime = 0.0
+        if self._idle_tx_audit_started_mono > 0:
+            uptime = max(
+                0.0,
+                time.monotonic() - self._idle_tx_audit_started_mono,
+            )
+        return {
+            "enabled": bool(IDLE_TX_AUDIT_ENABLED and USE_POSTGRES),
+            "running": running,
+            "interval_sec": IDLE_TX_AUDIT_INTERVAL_SEC,
+            "min_seconds": IDLE_TX_AUDIT_MIN_SECONDS,
+            "alert_threshold": IDLE_TX_AUDIT_ALERT_THRESHOLD,
+            "app_filter": IDLE_TX_AUDIT_APP_FILTER,
+            "max_items": IDLE_TX_AUDIT_MAX_ITEMS,
+            "log_every": IDLE_TX_AUDIT_LOG_EVERY,
+            "iterations": self._idle_tx_audit_iteration,
+            "alert_count": self._idle_tx_audit_alert_count,
+            "last_count": self._idle_tx_audit_last_count,
+            "last_report": dict(self._idle_tx_audit_last_report),
+            "uptime_sec": round(uptime, 1),
+        }
 
     async def get_dev_log_channel(self) -> str:
         try:
@@ -2799,6 +3149,23 @@ class Database(
                 self._cleanup_task = asyncio.create_task(
                     self._auto_cleanup_locks()
                 )
+
+            # 🆕 v7.7.62: بدء idle-tx audit task (PG only)
+            if (USE_POSTGRES
+                    and IDLE_TX_AUDIT_ENABLED
+                    and (self._idle_tx_audit_task is None
+                         or self._idle_tx_audit_task.done())):
+                try:
+                    self._idle_tx_audit_task = asyncio.create_task(
+                        self._auto_audit_idle_tx(),
+                        name="db_idle_tx_audit",
+                    )
+                except Exception as _ita_e:
+                    logger.warning(
+                        f"⚠️ v7.7.62: فشل بدء idle-tx audit: {_ita_e}"
+                    )
+                    self._idle_tx_audit_task = None
+
             self._initialized = True
         except Exception as e:
             if self._pool is not None:
@@ -3020,6 +3387,10 @@ class Database(
                 if getattr(self, "_cache_cleanup_task", None):
                     self._cache_cleanup_task.cancel()
                     tasks.append(self._cache_cleanup_task)
+                # 🆕 v7.7.62: إيقاف idle-tx audit task
+                if getattr(self, "_idle_tx_audit_task", None):
+                    self._idle_tx_audit_task.cancel()
+                    tasks.append(self._idle_tx_audit_task)
                 for bg in list(self._bg_tasks):
                     if not bg.done():
                         bg.cancel()
@@ -3112,6 +3483,8 @@ class Database(
                 self._cleanup_task = None
                 self._secondary_index_task = None
                 self._cache_cleanup_task = None
+                # 🆕 v7.7.62
+                self._idle_tx_audit_task = None
                 self._closed = True
             except BaseException as be:
                 cleanup_error = be
@@ -7643,6 +8016,16 @@ class Database(
 # 3.1) Fallback queries
 # =====================================================================
 
+def _truncate_sql(sql: Optional[str], max_len: int = 200) -> str:
+    """🆕 v7.7.62: قطعة آمنة للعرض في اللوجات."""
+    if not sql:
+        return ""
+    text = str(sql).replace("\n", " ").strip()
+    if len(text) <= max_len:
+        return text
+    return text[: max_len - 3] + "..."
+
+
 def _get_pg_query_fallback() -> str:
     return f"""
         SELECT uc.id, uc.channel_id, uc.user_id,
@@ -7934,6 +8317,15 @@ __all__ = [
     "PG_STATEMENT_TIMEOUT_MS", "PG_IDLE_TX_TIMEOUT_MS",
     "PG_COMMAND_TIMEOUT",
     "PG_ROLLBACK_ON_RETURN_TIMEOUT",
+    # 🆕 v7.7.62: Idle-TX audit config
+    "IDLE_TX_AUDIT_ENABLED",
+    "IDLE_TX_AUDIT_INTERVAL_SEC",
+    "IDLE_TX_AUDIT_MIN_SECONDS",
+    "IDLE_TX_AUDIT_ALERT_THRESHOLD",
+    "IDLE_TX_AUDIT_APP_FILTER",
+    "IDLE_TX_AUDIT_MAX_ITEMS",
+    "IDLE_TX_AUDIT_LOG_EVERY",
+    "IDLE_TX_AUDIT_QUERY_TRUNCATE",
     "internal_cache", "InternalQueryCache", "SimpleCache",
     "SettingsCache",
     "user_cache", "banned_words_cache", "settings_cache",
@@ -7952,6 +8344,7 @@ __all__ = [
     "_convert_placeholders", "_convert_insert_or_ignore",
     "_convert_insert_or_replace", "_convert_upsert",
     "_adapt_params", "_table_exists",
+    "_truncate_sql",
     "_get_pg_query_fallback", "_get_pg_query_no_mv_fallback",
     "_get_mysql_query_fallback", "_get_sqlite_query_fallback",
     "REFACTOR_MIXIN_AVAILABLE",
