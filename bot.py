@@ -2,11 +2,20 @@
 # -*- coding: utf-8 -*-
 
 """
-🌿 Relax Manager – البوت الرئيسي (bot.py v5.6.15-CACHE-STATS-CANCEL)
+🌿 Relax Manager – البوت الرئيسي (bot.py v5.6.16-ANALYTICS-HANDLERS-FIX)
 ================================================================================
 📌 نقطة الدخول الرسمية للتطبيق (entrypoint).
 
 ================================================================================
+🆕 v5.6.16 (ANALYTICS-HANDLERS-FIX):
+    🟢 PATCH-1: استيراد آمن لـ handle_analytics_callback + show_analytics_menu
+                من handlers.handlers_analytics
+    🟢 PATCH-2: تسجيل 2 CallbackQueryHandler BEFORE العام:
+                - admin_analytics → show_analytics_menu
+                - 9 أزرار التقارير → handle_analytics_callback
+    🟢 PATCH-3: إشعار حالة handlers_analytics في diagnostics
+    🟢 PATCH-4: تحديث Load Beacon إلى v5.6.16
+
 🆕 v5.6.15 (CACHE-STATS + CANCEL-COMMAND):
     🟢 PATCH-1: استيراد آمن لـ handle_cache_stats_command من handlers_message
     🟢 PATCH-2: تسجيل /cache_stats (للمطور فقط — إحصائيات الكاش الحية)
@@ -29,12 +38,6 @@
     🟢 PATCH-2: install_default_executor قبل main() + cleanup شامل للحلقة
     🟢 PATCH-3: _shutdown_detector_tasks — 3-tier fallback مع v4.0.8 أولاً
     🟢 PATCH-4: تقرير status يُظهر helpers availability
-
-🆕 v5.6.11 (CORRECTED — INTEGRATION + LIFECYCLE HARDENING):
-    🔴 FIX-1..25: تحسينات شاملة
-
-🆕 v5.6.10-FIX (SECURITY-BRIDGE-IMPORT-FIX):
-    🔴 FIX: إزالة استيراد _SECURITY_BRIDGE_AVAILABLE من utils.py
 ================================================================================
 """
 
@@ -129,6 +132,33 @@ except ImportError as _e1:
                     f"standalone: {_e1} / {_e2} | "
                     f"embedded: {_e3} / {_e4}"
                 )
+
+# ═════════════════════════════════════════════════════════════════════
+# 🆕 v5.6.16 PATCH-1: handlers_analytics — استيراد آمن
+# ═════════════════════════════════════════════════════════════════════
+_ANALYTICS_HANDLERS_AVAILABLE = False
+_ANALYTICS_HANDLERS_IMPORT_ERROR = None
+_handle_analytics_callback = None
+_show_analytics_menu = None
+
+try:
+    from handlers.handlers_analytics import (
+        handle_analytics_callback as _handle_analytics_callback,
+        show_analytics_menu as _show_analytics_menu,
+    )
+    _ANALYTICS_HANDLERS_AVAILABLE = True
+except ImportError as _e_an1:
+    try:
+        from handlers_analytics import (  # type: ignore
+            handle_analytics_callback as _handle_analytics_callback,
+            show_analytics_menu as _show_analytics_menu,
+        )
+        _ANALYTICS_HANDLERS_AVAILABLE = True
+    except ImportError as _e_an2:
+        _handle_analytics_callback = None
+        _show_analytics_menu = None
+        _ANALYTICS_HANDLERS_AVAILABLE = False
+        _ANALYTICS_HANDLERS_IMPORT_ERROR = f"{_e_an1} | {_e_an2}"
 
 # ═════════════════════════════════════════════════════════════════════
 # فحص محرك كشف السبام
@@ -867,6 +897,19 @@ else:
         "يتطلب handlers_message.py v7.18.18+"
     )
 
+# 🆕 v5.6.16: إشعار حالة handlers_analytics
+if _ANALYTICS_HANDLERS_AVAILABLE:
+    logger.info(
+        "✅ handlers_analytics متاح — "
+        "أزرار التحليلات المتقدمة (10 معالجات) جاهزة"
+    )
+else:
+    logger.warning(
+        "⚠️ handlers_analytics غير متاح — "
+        "أزرار التحليلات لن تعمل: %s",
+        _ANALYTICS_HANDLERS_IMPORT_ERROR or "unknown",
+    )
+
 _log_spam_detector_status()
 _log_security_bridge_status()
 
@@ -930,8 +973,8 @@ ADMIN_COMMANDS = [
     ("db_maintenance", "🧹 صيانة قاعدة البيانات"),
     ("db_weekly", "📅 التقرير الأسبوعي"),
     ("autoblocked", "🚫 المصادر المحجوبة تلقائياً"),
-    ("db_idle", "🔍 تدقيق idle-in-transaction"),      # v5.6.14
-    ("cache_stats", "📊 إحصائيات الكاش الحية"),        # 🆕 v5.6.15
+    ("db_idle", "🔍 تدقيق idle-in-transaction"),
+    ("cache_stats", "📊 إحصائيات الكاش الحية"),
 ]
 
 GROUP_COMMANDS = [
@@ -2389,9 +2432,9 @@ async def main():
     logger.info("👨‍💼 المالك: %s", CONFIG.PRIMARY_OWNER_ID)
 
     logger.info(
-        "📦 bot.py: v5.6.15 | "
+        "📦 bot.py: v5.6.16 | "
         "detectors=%s | layers=%d | helpers=%s | "
-        "db_idle=%s | cache_stats=%s",
+        "db_idle=%s | cache_stats=%s | analytics=%s",
         _SPAM_DETECTOR_VERSION or "N/A",
         _SPAM_DETECTOR_LAYERS_COUNT,
         (
@@ -2404,6 +2447,7 @@ async def main():
         ),
         "yes" if _HAS_DB_IDLE_CMD else "no",
         "yes" if _HAS_CACHE_STATS_CMD else "no",
+        "yes" if _ANALYTICS_HANDLERS_AVAILABLE else "no",
     )
 
     try:
@@ -2699,7 +2743,6 @@ async def main():
     except Exception as _e:
         logger.warning("⚠️ فشل تسجيل /autoblocked: %s", _e)
 
-    # 🆕 v5.6.14 PATCH-2: /db_idle — تدقيق idle-in-transaction
     if _HAS_DB_IDLE_CMD and _handle_db_idle_command is not None:
         try:
             app.add_handler(CommandHandler(
@@ -2716,7 +2759,6 @@ async def main():
             "يتطلب handlers_message v7.18.14+"
         )
 
-    # 🆕 v5.6.15 PATCH-2: /cache_stats — إحصائيات الكاش الحية
     if _HAS_CACHE_STATS_CMD and _handle_cache_stats_command is not None:
         try:
             app.add_handler(CommandHandler(
@@ -2733,7 +2775,6 @@ async def main():
             "يتطلب handlers_message v7.18.18+"
         )
 
-    # 🆕 v5.6.15 PATCH-5: /cancel — إلغاء موحّد للعمليات المنتظرة
     if hasattr(MessageHandlers, "handle_cancel"):
         try:
             app.add_handler(
@@ -2820,6 +2861,44 @@ async def main():
     else:
         logger.warning("⚠️ group_log غير متاح — زر قناة السجل لن يعمل")
 
+    # ═══════════════════════════════════════════════════════════════════
+    # 🆕 v5.6.16 PATCH-2: handlers_analytics BEFORE العام
+    # ═══════════════════════════════════════════════════════════════════
+    if _ANALYTICS_HANDLERS_AVAILABLE and \
+       _show_analytics_menu is not None and \
+       _handle_analytics_callback is not None:
+        try:
+            # 1) زر admin_analytics → قائمة التحليلات
+            app.add_handler(CallbackQueryHandler(
+                _show_analytics_menu,
+                pattern=r"^admin_analytics$",
+            ))
+            # 2) كل أزرار التحليلات (9 أزرار) → router موحّد
+            app.add_handler(CallbackQueryHandler(
+                _handle_analytics_callback,
+                pattern=(
+                    r"^(growth_30d_btn|top_channels_btn|publish_stats_btn|"
+                    r"channels_rate_btn|subscriptions_btn|pool_live_btn|"
+                    r"slow_queries_btn|export_excel_btn|refresh_btn)$"
+                ),
+            ))
+            logger.info(
+                "✅ handlers_analytics: 10 معالج مسجّل "
+                "(admin_analytics + 9 أزرار التقرير)"
+            )
+        except Exception as _e:
+            logger.error(
+                "❌ فشل تسجيل handlers_analytics: %s", _e,
+                exc_info=True,
+            )
+    else:
+        logger.warning(
+            "⚠️ handlers_analytics غير متاح — "
+            "أزرار التحليلات لن تعمل: %s",
+            _ANALYTICS_HANDLERS_IMPORT_ERROR or "unknown",
+        )
+
+    # ⚠️ الـ handler العام يأتي أخيراً — يجب أن يكون AFTER التحليلات
     app.add_handler(CallbackQueryHandler(CallbackHandlers.handle))
 
     app.add_handler(MessageHandler(
