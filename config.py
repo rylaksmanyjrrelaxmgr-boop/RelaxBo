@@ -2,8 +2,15 @@
 # -*- coding: utf-8 -*-
 
 """
-config.py - إعدادات البوت الأساسية (v7.0.3 — FULL-ENV-COVERAGE)
+config.py - إعدادات البوت الأساسية (v7.0.4 — PG-IDLE-TX-INTEGRATION)
 ================================================================================
+🆕 v7.0.4:
+    ✅ إضافة PG_ROLLBACK_ON_RETURN_TIMEOUT (v7.7.61)
+    ✅ إضافة قسم 13.12: IDLE_TX_AUDIT_* (8 متغيرات — v7.7.62)
+    ✅ تحديث get_pg_pool_env() بالمتغيرات الجديدة
+    ✅ تحققات validate() لـ rollback + idle-tx audit
+    ✅ سجل الإقلاع يعرض حالة idle-tx audit
+
 🆕 v7.0.3:
     ✅ إضافة DIAG_INCOMING — مُتغيّر تشخيصي جديد
     ✅ التحقق من تغطية كاملة لكل متغيرات .env
@@ -614,7 +621,7 @@ class AppConfig:
     )
     SLOW_MODE_AUTO: bool = safe_bool(os.getenv("SLOW_MODE_AUTO", "true"))
 
-    # ─── 13.9: Arabic Short Whitelist (v4.0.9) 🆕 ───
+    # ─── 13.9: Arabic Short Whitelist (v4.0.9) ───
     ARABIC_SHORT_WHITELIST_ENABLED: bool = safe_bool(
         os.getenv("ARABIC_SHORT_WHITELIST_ENABLED", "true")
     )
@@ -628,10 +635,10 @@ class AppConfig:
         os.getenv("ARABIC_DOMINANCE_RATIO", "0.6")
     )
 
-    # ─── 13.10: FINAL_THRESHOLD (v4.0.9) 🆕 ───
+    # ─── 13.10: FINAL_THRESHOLD (v4.0.9) ───
     FINAL_THRESHOLD: int = safe_int(os.getenv("FINAL_THRESHOLD", "5"))
 
-    # ─── 13.11: PostgreSQL Pool Tuning (v7.7.60) 🆕 ───
+    # ─── 13.11: PostgreSQL Pool Tuning (v7.7.60+) ───
     PG_MAX_INACTIVE_LIFETIME: float = safe_float(
         os.getenv("PG_MAX_INACTIVE_LIFETIME", "15.0")
     )
@@ -652,6 +659,41 @@ class AppConfig:
     )
     PG_COMMAND_TIMEOUT: float = safe_float(
         os.getenv("PG_COMMAND_TIMEOUT", "10.0")
+    )
+
+    # 🆕 v7.7.61: مهلة rollback وقائي (idle-tx)
+    PG_ROLLBACK_ON_RETURN_TIMEOUT: float = safe_float(
+        os.getenv("PG_ROLLBACK_ON_RETURN_TIMEOUT", "2.0")
+    )
+
+    # ═══════════════════════════════════════════════════════════════
+    # 🆕 13.12: Idle-TX Audit (v7.7.62)
+    # ═══════════════════════════════════════════════════════════════
+
+    IDLE_TX_AUDIT_ENABLED: bool = safe_bool(
+        os.getenv("IDLE_TX_AUDIT_ENABLED", "true")
+    )
+    IDLE_TX_AUDIT_INTERVAL_SEC: float = safe_float(
+        os.getenv("IDLE_TX_AUDIT_INTERVAL_SEC", "60.0")
+    )
+    IDLE_TX_AUDIT_MIN_SECONDS: float = safe_float(
+        os.getenv("IDLE_TX_AUDIT_MIN_SECONDS", "0.0")
+    )
+    IDLE_TX_AUDIT_ALERT_THRESHOLD: int = safe_int(
+        os.getenv("IDLE_TX_AUDIT_ALERT_THRESHOLD", "1")
+    )
+    IDLE_TX_AUDIT_APP_FILTER: str = safe_str(
+        os.getenv("IDLE_TX_AUDIT_APP_FILTER", "relax_bot"),
+        single_line=True,
+    )
+    IDLE_TX_AUDIT_MAX_ITEMS: int = safe_int(
+        os.getenv("IDLE_TX_AUDIT_MAX_ITEMS", "50")
+    )
+    IDLE_TX_AUDIT_LOG_EVERY: int = safe_int(
+        os.getenv("IDLE_TX_AUDIT_LOG_EVERY", "5")
+    )
+    IDLE_TX_AUDIT_QUERY_TRUNCATE: int = safe_int(
+        os.getenv("IDLE_TX_AUDIT_QUERY_TRUNCATE", "200")
     )
 
     # ═══════════════════════════════════════════════════════════════
@@ -858,7 +900,7 @@ class AppConfig:
             "DEBUG_DIAG": _b(self.DEBUG_DIAG),
             "DEBUG_SPAM": _b(self.DEBUG_SPAM),
 
-            # ─── Arabic Short Whitelist (v4.0.9) 🆕 ───
+            # ─── Arabic Short Whitelist (v4.0.9) ───
             "ARABIC_SHORT_WHITELIST_ENABLED": _b(self.ARABIC_SHORT_WHITELIST_ENABLED),
             "ARABIC_SHORT_MAX_CHARS": str(self.ARABIC_SHORT_MAX_CHARS),
             "ARABIC_SHORT_MAX_WORDS": str(self.ARABIC_SHORT_MAX_WORDS),
@@ -886,10 +928,11 @@ class AppConfig:
 
     def get_pg_pool_env(self) -> Dict[str, Any]:
         """
-        🆕 v7.0.3: إعدادات PostgreSQL pool lifecycle.
-        helper لـ database.py v7.7.60+.
+        🆕 v7.0.4: إعدادات PostgreSQL pool lifecycle.
+        helper لـ database.py v7.7.60+ (يشمل v7.7.61 + v7.7.62).
         """
         return {
+            # v7.7.60
             "max_inactive_lifetime": self.PG_MAX_INACTIVE_LIFETIME,
             "ping_idle_threshold": self.PG_CONN_PING_IDLE_THRESHOLD,
             "ping_timeout": self.PG_CONN_PING_TIMEOUT,
@@ -899,6 +942,17 @@ class AppConfig:
             "statement_timeout_ms": self.PG_STATEMENT_TIMEOUT_MS,
             "idle_tx_timeout_ms": self.PG_IDLE_TX_TIMEOUT_MS,
             "command_timeout": self.PG_COMMAND_TIMEOUT,
+            # 🆕 v7.7.61
+            "rollback_on_return_timeout": self.PG_ROLLBACK_ON_RETURN_TIMEOUT,
+            # 🆕 v7.7.62
+            "idle_tx_audit_enabled": self.IDLE_TX_AUDIT_ENABLED,
+            "idle_tx_audit_interval_sec": self.IDLE_TX_AUDIT_INTERVAL_SEC,
+            "idle_tx_audit_min_seconds": self.IDLE_TX_AUDIT_MIN_SECONDS,
+            "idle_tx_audit_alert_threshold": self.IDLE_TX_AUDIT_ALERT_THRESHOLD,
+            "idle_tx_audit_app_filter": self.IDLE_TX_AUDIT_APP_FILTER,
+            "idle_tx_audit_max_items": self.IDLE_TX_AUDIT_MAX_ITEMS,
+            "idle_tx_audit_log_every": self.IDLE_TX_AUDIT_LOG_EVERY,
+            "idle_tx_audit_query_truncate": self.IDLE_TX_AUDIT_QUERY_TRUNCATE,
         }
 
     def apply_detector_env(self, *, override: bool = False) -> int:
@@ -1014,6 +1068,66 @@ class AppConfig:
                 f"PG_MAX_INACTIVE_LIFETIME ({self.PG_MAX_INACTIVE_LIFETIME}s) "
                 f"مرتفع جداً — قد يسبب استعلامات بطيئة على اتصالات ميتة."
             )
+
+        # 🆕 v7.0.4: rollback timeout validation
+        if self.PG_ROLLBACK_ON_RETURN_TIMEOUT < 0.5:
+            warnings.append(
+                f"PG_ROLLBACK_ON_RETURN_TIMEOUT "
+                f"({self.PG_ROLLBACK_ON_RETURN_TIMEOUT}s) منخفض جداً — "
+                f"قد يفشل rollback الوقائي على اتصالات بطيئة."
+            )
+        elif self.PG_ROLLBACK_ON_RETURN_TIMEOUT > 30.0:
+            warnings.append(
+                f"PG_ROLLBACK_ON_RETURN_TIMEOUT "
+                f"({self.PG_ROLLBACK_ON_RETURN_TIMEOUT}s) مرتفع جداً — "
+                f"سيؤخر إعادة الاتصال للـ pool."
+            )
+
+        # 🆕 v7.0.4: idle-tx audit validation
+        if self.IDLE_TX_AUDIT_ENABLED:
+            if self.IDLE_TX_AUDIT_INTERVAL_SEC < 5.0:
+                errors.append(
+                    f"IDLE_TX_AUDIT_INTERVAL_SEC "
+                    f"({self.IDLE_TX_AUDIT_INTERVAL_SEC}s) < 5s — "
+                    f"سيضغط على pg_stat_activity."
+                )
+            elif self.IDLE_TX_AUDIT_INTERVAL_SEC > 3600.0:
+                warnings.append(
+                    f"IDLE_TX_AUDIT_INTERVAL_SEC "
+                    f"({self.IDLE_TX_AUDIT_INTERVAL_SEC}s) > 1h — "
+                    f"قد يفوت اتصالات idle-tx قصيرة العمر."
+                )
+
+            if self.IDLE_TX_AUDIT_ALERT_THRESHOLD < 1:
+                errors.append(
+                    "IDLE_TX_AUDIT_ALERT_THRESHOLD يجب أن يكون >= 1"
+                )
+
+            if (self.IDLE_TX_AUDIT_MAX_ITEMS < 1
+                    or self.IDLE_TX_AUDIT_MAX_ITEMS > 500):
+                warnings.append(
+                    f"IDLE_TX_AUDIT_MAX_ITEMS "
+                    f"({self.IDLE_TX_AUDIT_MAX_ITEMS}) خارج [1-500] — "
+                    f"سيُقيَّد تلقائياً."
+                )
+
+            if self.IDLE_TX_AUDIT_LOG_EVERY < 1:
+                errors.append(
+                    "IDLE_TX_AUDIT_LOG_EVERY يجب أن يكون >= 1"
+                )
+
+            if self.IDLE_TX_AUDIT_QUERY_TRUNCATE < 40:
+                warnings.append(
+                    f"IDLE_TX_AUDIT_QUERY_TRUNCATE "
+                    f"({self.IDLE_TX_AUDIT_QUERY_TRUNCATE}) قصير جداً — "
+                    f"لن ترى الاستعلام المسبب."
+                )
+            elif self.IDLE_TX_AUDIT_QUERY_TRUNCATE > 2000:
+                warnings.append(
+                    f"IDLE_TX_AUDIT_QUERY_TRUNCATE "
+                    f"({self.IDLE_TX_AUDIT_QUERY_TRUNCATE}) طويل جداً — "
+                    f"سيُثقل اللوجات."
+                )
 
         # ─── 4. الميزات الاختيارية ───
         if self.ENABLE_2FA and not self.ADMIN_2FA_SECRET:
@@ -1304,7 +1418,8 @@ logger.info(
     f"🐘 PG Pool Tuning: "
     f"max_inactive={CONFIG.PG_MAX_INACTIVE_LIFETIME:.0f}s "
     f"ping_idle={CONFIG.PG_CONN_PING_IDLE_THRESHOLD:.0f}s "
-    f"stmt_timeout={CONFIG.PG_STATEMENT_TIMEOUT_MS}ms"
+    f"stmt_timeout={CONFIG.PG_STATEMENT_TIMEOUT_MS}ms "
+    f"rollback_timeout={CONFIG.PG_ROLLBACK_ON_RETURN_TIMEOUT:.1f}s"
 )
 logger.info(
     f"🔒 Webhook secret: "
@@ -1314,6 +1429,20 @@ logger.info(
     f"🛡️ Safe Browsing API: "
     f"{'مُهيَّأ ✅' if CONFIG.HAS_SAFE_BROWSING else 'غير مُهيَّأ ⚠️'}"
 )
+
+# 🆕 v7.0.4: idle-tx audit status
+if CONFIG.IDLE_TX_AUDIT_ENABLED:
+    logger.info(
+        f"🔍 Idle-TX Audit: ✅ مُفعَّل "
+        f"(كل {CONFIG.IDLE_TX_AUDIT_INTERVAL_SEC:.0f}s، "
+        f"alert عند ≥{CONFIG.IDLE_TX_AUDIT_ALERT_THRESHOLD}، "
+        f"app_filter={CONFIG.IDLE_TX_AUDIT_APP_FILTER!r})"
+    )
+else:
+    logger.warning(
+        "🔍 Idle-TX Audit: ❌ معطّل — لن تُكتشف اتصالات "
+        "idle-in-transaction تلقائياً."
+    )
 
 # 👑 v7.0.2: سجل المطورين (DEV-PERMANENT)
 _all_dev_ids = tuple(sorted(set(
