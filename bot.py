@@ -2,11 +2,17 @@
 # -*- coding: utf-8 -*-
 
 """
-🌿 Relax Manager – البوت الرئيسي (bot.py v5.6.13-DETECTORS-4.0.8-BRIDGE)
+🌿 Relax Manager – البوت الرئيسي (bot.py v5.6.14-DB-IDLE-CMD)
 ================================================================================
 📌 نقطة الدخول الرسمية للتطبيق (entrypoint).
 
 ================================================================================
+🆕 v5.6.14 (DB-IDLE-COMMAND):
+    🟢 PATCH-1: استيراد آمن لـ handle_db_idle_command من handlers_message
+    🟢 PATCH-2: تسجيل /db_idle (للمطور فقط — تدقيق idle-in-transaction)
+    🟢 PATCH-3: إضافة "db_idle" إلى ADMIN_COMMANDS
+    🟢 PATCH-4: تحديث Load Beacon إلى v5.6.14
+
 🆕 v5.6.13:
     🟡 Minor: تحذير "التبعيات المفقودة" أصبح debug-level (لا يزعج في الإنتاج)
 
@@ -285,6 +291,30 @@ from handlers.handlers_message import (
 )
 
 # ═════════════════════════════════════════════════════════════════════
+# 🆕 v5.6.14 PATCH-1: /db_idle — استيراد آمن
+# ═════════════════════════════════════════════════════════════════════
+_HAS_DB_IDLE_CMD = False
+_handle_db_idle_command = None
+
+try:
+    from handlers.handlers_message import (
+        handle_db_idle_command as _handle_db_idle_command_imported,
+    )
+    _handle_db_idle_command = _handle_db_idle_command_imported
+    _HAS_DB_IDLE_CMD = True
+except ImportError as _e_dbidle1:
+    try:
+        from handlers_message import (  # type: ignore
+            handle_db_idle_command as _handle_db_idle_command_imported,
+        )
+        _handle_db_idle_command = _handle_db_idle_command_imported
+        _HAS_DB_IDLE_CMD = True
+    except ImportError as _e_dbidle2:
+        _handle_db_idle_command = None
+        _HAS_DB_IDLE_CMD = False
+        _DB_IDLE_IMPORT_ERROR = f"{_e_dbidle1} | {_e_dbidle2}"
+
+# ═════════════════════════════════════════════════════════════════════
 # db_maintenance_commands
 # ═════════════════════════════════════════════════════════════════════
 register_maintenance_commands = None
@@ -482,7 +512,6 @@ def _log_spam_detector_status() -> None:
         )
         return
 
-    # ── CONFIG.DETECTION_SUMMARY ──
     try:
         _summary = CONFIG.DETECTION_SUMMARY  # type: ignore
         _enabled = [k for k, v in _summary.items() if v]
@@ -502,7 +531,6 @@ def _log_spam_detector_status() -> None:
             "(config.py قديم؟)"
         )
 
-    # ── التبعيات ──
     _deps: Dict[str, bool] = {}
 
     try:
@@ -594,13 +622,11 @@ def _log_spam_detector_status() -> None:
             len(_loaded_deps), ", ".join(_loaded_deps),
         )
     if _missing_deps:
-        # ✅ v5.6.13: debug بدل info — لا يزعج في الإنتاج
         logger.debug(
             "   ⚠️ التبعيات المفقودة (%d): %s",
             len(_missing_deps), ", ".join(_missing_deps),
         )
 
-    # ── ffmpeg ──
     try:
         import subprocess as _sp
         _r = _sp.run(
@@ -619,7 +645,6 @@ def _log_spam_detector_status() -> None:
             "   🎬 ffmpeg: ⚠️ غير متوفر — فيديو كبير لن يُعالَج"
         )
 
-    # ── Safe Browsing ──
     try:
         _sb_key = getattr(CONFIG, "SAFE_BROWSING_API_KEY", "")
         if _sb_key:
@@ -788,6 +813,17 @@ else:
         _MAINT_CMDS_IMPORT_ERROR or "unknown",
     )
 
+# 🆕 v5.6.14: إشعار حالة /db_idle
+if _HAS_DB_IDLE_CMD:
+    logger.info(
+        "✅ /db_idle متاح — تدقيق idle-in-transaction (للمطور فقط)"
+    )
+else:
+    logger.debug(
+        "ℹ️ /db_idle غير متاح — "
+        "يتطلب handlers_message.py v7.18.14+"
+    )
+
 _log_spam_detector_status()
 _log_security_bridge_status()
 
@@ -851,6 +887,7 @@ ADMIN_COMMANDS = [
     ("db_maintenance", "🧹 صيانة قاعدة البيانات"),
     ("db_weekly", "📅 التقرير الأسبوعي"),
     ("autoblocked", "🚫 المصادر المحجوبة تلقائياً"),
+    ("db_idle", "🔍 تدقيق idle-in-transaction"),  # 🆕 v5.6.14
 ]
 
 GROUP_COMMANDS = [
@@ -2308,8 +2345,8 @@ async def main():
     logger.info("👨‍💼 المالك: %s", CONFIG.PRIMARY_OWNER_ID)
 
     logger.info(
-        "📦 bot.py: v5.6.13 | "
-        "detectors=%s | layers=%d | helpers=%s",
+        "📦 bot.py: v5.6.14 | "
+        "detectors=%s | layers=%d | helpers=%s | db_idle=%s",
         _SPAM_DETECTOR_VERSION or "N/A",
         _SPAM_DETECTOR_LAYERS_COUNT,
         (
@@ -2320,6 +2357,7 @@ async def main():
                 ) if ok
             ]) or "none"
         ),
+        "yes" if _HAS_DB_IDLE_CMD else "no",
     )
 
     try:
@@ -2614,6 +2652,23 @@ async def main():
         )
     except Exception as _e:
         logger.warning("⚠️ فشل تسجيل /autoblocked: %s", _e)
+
+    # 🆕 v5.6.14 PATCH-2: /db_idle — تدقيق idle-in-transaction
+    if _HAS_DB_IDLE_CMD and _handle_db_idle_command is not None:
+        try:
+            app.add_handler(CommandHandler(
+                "db_idle", _handle_db_idle_command
+            ))
+            logger.info(
+                "✅ /db_idle مُسجَّل — تدقيق idle-in-transaction"
+            )
+        except Exception as _e:
+            logger.warning("⚠️ فشل تسجيل /db_idle: %s", _e)
+    else:
+        logger.debug(
+            "ℹ️ /db_idle غير مُسجَّل — "
+            "يتطلب handlers_message v7.18.14+"
+        )
 
     if _MAINT_CMDS_AVAILABLE and callable(register_maintenance_commands):
         try:
