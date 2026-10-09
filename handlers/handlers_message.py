@@ -1,9 +1,19 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-handlers_message.py - v7.18.17 DETECTORS-v4.1.0-COMPAT
-(متوافق مع detectors v4.1.0 — CRITICAL-FIXES-2026)
+handlers_message.py - v7.18.18 CACHE-STATS-INTEGRATION
+(متوافق مع detectors v4.1.0 + banned_words_manager v1.1.1)
 =============================================================================
+🆕 v7.18.18 (CACHE-STATS-INTEGRATION):
+    ✨ handle_cache_stats_command — أمر /cache_stats للمطور:
+       • يعرض 10 أقسام من الـ caches الحية
+       • Banned Words (من banned_words_manager v1.1.1)
+       • handlers_message caches (group_log, sec_settings, admin_check)
+       • dev_log, flood tracker, delete failures
+       • private handlers, compiled patterns, group limiters
+       • log rate trackers, background tasks, detectors pool
+    ✅ لا تغييرات وظيفية — إضافة فقط.
+
 🆕 v7.18.17 (DETECTORS-v4.1.0-COMPAT):
     ✅ متوافق مع detectors v4.1.0 — لا تغييرات وظيفية مطلوبة.
     📌 ملاحظة (REC-1): sync fallback (analyze_message_full) يعمل بشكل
@@ -11,16 +21,14 @@ handlers_message.py - v7.18.17 DETECTORS-v4.1.0-COMPAT
        بسبب تعطيل _download_telegram_file (FIX-DL-1 في detectors).
        المسار المُعتمد: analyze_message_full_async.
     📌 ملاحظة (REC-2): _analysis_mode يميّز الآن الوضع المُخفَّض:
-       "multilayer-sync-pool-DEGRADED" بدلاً من "multilayer-sync-pool"
-       ليظهر في السجلات بوضوح.
+       "multilayer-sync-pool-DEGRADED" بدلاً من "multilayer-sync-pool".
 
 🆕 v7.18.16 (FULL-REWRITE-FIXES):
-    🔴 FIX-RPL-1: handle_add_reply يُدير 3 حالات (WAIT_REPLY_TRIGGER,
-                  WAIT_REPLY_RESPONSE, WAIT_REPLY_ADD)
-    🔴 FIX-RPL-2: إضافة _save_reply_and_finish (helper)
+    🔴 FIX-RPL-1: handle_add_reply يُدير 3 حالات
+    🔴 FIX-RPL-2: _save_reply_and_finish (helper)
     🔴 FIX-RPL-3: _process_auto_reply — _increment_usage_async لـ file_reply
-    🔴 FIX-PERM-1: إزالة فحص الصلاحيات المكرر (BWM يفحص داخلياً)
-    🔴 FIX-EDIT-1: handle_edited يتجاوز فحص الفيضان (skip_flood=True)
+    🔴 FIX-PERM-1: إزالة فحص الصلاحيات المكرر
+    🔴 FIX-EDIT-1: handle_edited يتجاوز فحص الفيضان
     🔴 FIX-DET-1: _HAS_ASYNC_DETECTORS يُستخدم فعلاً
     🔴 FIX-BWM-3: fallback محسَّن عند فشل BannedWordsManager
 
@@ -993,7 +1001,7 @@ async def _lazy_init_columns(bot=None):
         _columns_last_attempt_ts = now
 
         db_type = getattr(DB, "DB_TYPE", "sqlite")
-        logger.info("🔧 v7.18.17: Auto-migration (DB_TYPE=%s)", db_type)
+        logger.info("🔧 v7.18.18: Auto-migration (DB_TYPE=%s)", db_type)
 
         cols = [
             ("delete_protected_any", "INTEGER DEFAULT 0", "TINYINT(1) DEFAULT 0"),
@@ -2988,7 +2996,7 @@ def _get_spaced_banned_pattern(banned_word: str) -> Optional[re.Pattern]:
 
 def _contains_banned_word(text, banned_word) -> bool:
     """
-    ⚠️ v7.18.17: للتوافق القديم فقط.
+    ⚠️ v7.18.18: للتوافق القديم فقط.
     المسار الحديث يستخدم BannedWordsManager.check_message.
     """
     if not text or not banned_word:
@@ -3446,7 +3454,6 @@ class MessageHandlers:
                         except Exception:
                             pass
                         # 🆕 v7.18.17 REC-2: تمييز الوضع المُخفَّض
-                        # (sync download معطّل في detectors v4.1.0)
                         _analysis_mode = "multilayer-sync-pool-DEGRADED"
                 except asyncio.TimeoutError:
                     logger.warning(
@@ -5254,6 +5261,289 @@ async def handle_autoblocked_command(update, context):
 
 
 # ═══════════════════════════════════════════════════════════════════
+# /cache_stats command (developer-only)
+# ═══════════════════════════════════════════════════════════════════
+
+async def handle_cache_stats_command(update, context):
+    """
+    🆕 v7.18.18: أمر /cache_stats — يعرض إحصائيات كل الـ caches.
+
+    الأقسام المعروضة:
+      1. Banned Words (من banned_words_manager v1.1.1)
+      2. handlers_message caches (group_log, sec_settings, admin_check)
+      3. dev_log cache
+      4. Flood tracker
+      5. Delete failure counter
+      6. Private handlers signature cache
+      7. Compiled banned patterns
+      8. Group rate limiters
+      9. Log rate trackers
+     10. Background tasks
+     11. Detectors pool (إن توفّر)
+
+    للمطور فقط (PRIMARY_OWNER_ID أو is_developer).
+    """
+    if not update.effective_user or not update.effective_message:
+        return
+
+    user_id = update.effective_user.id
+
+    # ─── فحص الصلاحيات ───
+    try:
+        is_dev = False
+        for attr in ('is_developer', 'is_dev', 'is_owner'):
+            fn = getattr(CONFIG, attr, None)
+            if callable(fn) and fn(user_id):
+                is_dev = True
+                break
+        if not is_dev and user_id == int(
+            getattr(CONFIG, 'PRIMARY_OWNER_ID', 0) or 0
+        ):
+            is_dev = True
+    except Exception:
+        is_dev = False
+
+    if not is_dev:
+        return
+
+    chat_id = update.effective_chat.id
+    now = time.monotonic()
+
+    lines: List[str] = [
+        "📊 <b>Cache Statistics</b>",
+        "━━━━━━━━━━━━━━━━━━━━",
+    ]
+
+    # ─── 1. Banned Words (from banned_words_manager v1.1.1) ───
+    lines.append("")
+    lines.append("<b>📚 Banned Words</b>")
+    try:
+        from handlers.messages import (
+            _merged_words_cache,
+            _MERGED_CACHE_TTL,
+            _MERGED_CACHE_MAX,
+        )
+        size = len(_merged_words_cache)
+        status = "✅" if size < _MERGED_CACHE_MAX * 0.8 else "⚠️"
+        lines.append(
+            f"  • {status} merged_words: <b>{size}</b> / {_MERGED_CACHE_MAX}"
+        )
+        lines.append(
+            f"  • TTL: <code>{_MERGED_CACHE_TTL:.0f}s</code>"
+        )
+        if _merged_words_cache:
+            try:
+                first_cid, (first_words, first_ts) = next(
+                    iter(_merged_words_cache.items())
+                )
+                age = now - first_ts
+                lines.append(
+                    f"  • أقدم إدخال: <code>{first_cid}</code> "
+                    f"({len(first_words)} كلمة، {age:.0f}s)"
+                )
+            except Exception:
+                pass
+    except ImportError:
+        lines.append("  ⚠️ <code>banned_words_manager غير متاح</code>")
+    except Exception as _e:
+        lines.append(f"  ❌ <code>{escape(str(_e)[:60])}</code>")
+
+    # ─── 2. handlers_message local caches ───
+    lines.append("")
+    lines.append("<b>💾 handlers_message caches</b>")
+    _cache_specs = [
+        (
+            "group_log_channel",
+            _group_log_channel_cache,
+            _GROUP_LOG_CHANNEL_CACHE_MAX,
+            _GROUP_LOG_CHANNEL_CACHE_TTL,
+        ),
+        (
+            "sec_settings_local",
+            _sec_settings_local_cache,
+            _SEC_SETTINGS_LOCAL_MAX,
+            _SEC_SETTINGS_LOCAL_TTL,
+        ),
+        (
+            "admin_check",
+            _admin_check_cache,
+            _ADMIN_CHECK_CACHE_MAX,
+            _ADMIN_CHECK_CACHE_TTL,
+        ),
+    ]
+    for name, cache, max_size, ttl in _cache_specs:
+        try:
+            size = len(cache)
+            status = "✅" if size < max_size * 0.8 else "⚠️"
+            lines.append(
+                f"  • {status} <code>{name}</code>: "
+                f"<b>{size}</b> / {max_size} "
+                f"<i>(ttl={ttl:.0f}s)</i>"
+            )
+        except Exception:
+            lines.append(f"  • ❌ <code>{name}</code>: error")
+
+    # dev_log cache
+    try:
+        if _dev_log_cache is not None:
+            age = now - _dev_log_cache_ts
+            lines.append(
+                f"  • ✅ <code>dev_log</code>: نشط "
+                f"<i>(age={age:.0f}s)</i>"
+            )
+        else:
+            lines.append("  • ⬜ <code>dev_log</code>: فارغ")
+    except Exception:
+        pass
+
+    # ─── 3. Flood tracker ───
+    lines.append("")
+    lines.append("<b>🌊 Flood Tracker</b>")
+    try:
+        stats = _flood_tracker_stats()
+        keys = stats.get("keys", 0)
+        max_keys = stats.get("max_keys", 0)
+        status = "✅" if keys < max_keys * 0.8 else "⚠️"
+        lines.append(
+            f"  • {status} active: <b>{keys}</b> / {max_keys}"
+        )
+        lines.append(
+            f"  • ban_add: <b>{stats.get('ban_add_keys', 0)}</b>"
+        )
+        lines.append(
+            f"  • stale_sec: <code>{stats.get('stale_sec', '?')}s</code>"
+        )
+    except Exception as _e:
+        lines.append(f"  ❌ <code>{escape(str(_e)[:60])}</code>")
+
+    # ─── 4. Delete failure counter ───
+    lines.append("")
+    lines.append("<b>🗑️ Delete Failures</b>")
+    try:
+        lines.append(
+            f"  • counter: <b>{len(_delete_failure_counter)}</b>"
+        )
+        lines.append(
+            f"  • notified_chats: <b>{len(_delete_failure_notified)}</b>"
+        )
+    except Exception:
+        pass
+
+    # ─── 5. Private handlers signature cache ───
+    lines.append("")
+    lines.append("<b>🔐 Private Handlers</b>")
+    try:
+        with _private_sig_cache_lock:
+            size = len(_private_handler_signature_cache)
+        lines.append(
+            f"  • signature_cache: <b>{size}</b> / "
+            f"{_PRIVATE_SIG_CACHE_MAX}"
+        )
+    except Exception:
+        pass
+
+    # ─── 6. Compiled banned patterns ───
+    lines.append("")
+    lines.append("<b>🚫 Compiled Patterns</b>")
+    try:
+        lines.append(
+            f"  • banned_patterns: "
+            f"<b>{len(_compiled_banned_patterns)}</b> / "
+            f"{MAX_COMPILED_BANNED_PATTERNS}"
+        )
+        lines.append(
+            f"  • spaced_patterns: "
+            f"<b>{len(_compiled_spaced_patterns)}</b> / "
+            f"{MAX_COMPILED_BANNED_PATTERNS}"
+        )
+    except Exception:
+        pass
+
+    # ─── 7. Group rate limiters ───
+    lines.append("")
+    lines.append("<b>⚙️ Group Rate Limiters</b>")
+    try:
+        size = len(GroupRateLimiterManager._limiters)
+        status = "✅" if size < MAX_GROUP_LIMITERS_CACHE * 0.8 else "⚠️"
+        lines.append(
+            f"  • {status} limiters: <b>{size}</b> / "
+            f"{MAX_GROUP_LIMITERS_CACHE}"
+        )
+    except Exception:
+        pass
+
+    # ─── 8. Log rate trackers ───
+    lines.append("")
+    lines.append("<b>📝 Log Rate Trackers</b>")
+    try:
+        lines.append(
+            f"  • log_rate: <b>{len(_log_rate_tracker)}</b>"
+        )
+        lines.append(
+            f"  • dev_log_rate: <b>{len(_dev_log_rate_tracker)}</b>"
+        )
+    except Exception:
+        pass
+
+    # ─── 9. Background tasks ───
+    lines.append("")
+    lines.append("<b>🔄 Background Tasks</b>")
+    try:
+        lines.append(
+            f"  • log: <b>{len(_running_log_tasks)}</b>"
+        )
+        lines.append(
+            f"  • bg: <b>{len(_running_bg_tasks)}</b>"
+        )
+        lines.append(
+            f"  • delete: <b>{len(_running_delete_tasks)}</b>"
+        )
+        lines.append(
+            f"  • log_dispatch_failures: <b>{_log_dispatch_failures}</b>"
+        )
+    except Exception:
+        pass
+
+    # ─── 10. Detectors pool (optional) ───
+    if _HAS_DET_RUN_IN_POOL and _detectors_module is not None:
+        lines.append("")
+        lines.append("<b>🛡️ Detectors Pool</b>")
+        try:
+            _get_pool = getattr(_detectors_module, "_get_shared_pool", None)
+            if callable(_get_pool):
+                pool = _get_pool()
+                max_workers = getattr(pool, "_max_workers", "?")
+                lines.append(
+                    f"  • max_workers: <b>{max_workers}</b>"
+                )
+                lines.append(
+                    f"  • status: ✅ نشط"
+                )
+            else:
+                lines.append("  • ⚠️ <code>_get_shared_pool غير متاح</code>")
+        except Exception:
+            pass
+
+    # ─── Footer ───
+    lines.append("")
+    lines.append("━━━━━━━━━━━━━━━━━━━━")
+    try:
+        now_str = TimeUtils.mecca_now().strftime('%Y-%m-%d %H:%M:%S')
+    except Exception:
+        now_str = datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
+    lines.append(f"🕐 {now_str}")
+
+    text = "\n".join(lines)
+    if len(text) > 4000:
+        text = text[:3990] + "\n…"
+
+    try:
+        await safe_send(context.bot, chat_id, text, parse_mode='HTML')
+    except Exception as e:
+        logger.warning("handle_cache_stats_command send: %s", e)
+
+
+# ═══════════════════════════════════════════════════════════════════
 # /db_idle command (developer-only)
 # ═══════════════════════════════════════════════════════════════════
 
@@ -5494,6 +5784,8 @@ __all__ = [
     "_HAS_DET_RUN_IN_POOL",
     "_HAS_DET_SHUTDOWN_EXECUTOR",
 
+    # 🆕 v7.18.18
+    "handle_cache_stats_command",
     "handle_db_idle_command",
     "_notify_dev_about_idle_tx",
     "_IDLE_TX_NOTIFY_COOLDOWN",
@@ -5515,11 +5807,12 @@ __all__ = [
 
 try:
     logger.info(
-        "✅ handlers_message v7.18.17 loaded | "
+        "✅ handlers_message v7.18.18 loaded | "
         "BWM=%s | PRIVATE_HANDLERS=%d | "
         "replies=state-aware | "
         "detectors-compat=v4.1.0 | "
-        "sync-fallback=degraded",
+        "sync-fallback=degraded | "
+        "commands=(cache_stats, db_idle, autoblocked)",
         "yes" if _HAS_BWM else "no",
         len(MessageHandlers._PRIVATE_HANDLERS_MAP),
     )
