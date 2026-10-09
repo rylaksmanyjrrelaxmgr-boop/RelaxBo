@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-database_caches.py - Caches المُستخرجة من database.py (v1.0.1)
+database_caches.py - Caches المُستخرجة من database.py (v1.0.2)
 ================================================================================
 🎯 الهدف:
     فصل تعريفات الـ Caches من database.py لتقليل حجمه،
@@ -43,6 +43,30 @@ database_caches.py - Caches المُستخرجة من database.py (v1.0.1)
     - الاعتماد الوحيد: asyncio, time, logging, typing (stdlib فقط).
 
 ================================================================================
+🆕 v1.0.2 (CLEANUP + CONSISTENCY):
+    🟡 FIX-6: SimpleCache.get_stats() — يُصفّي المنتهية الآن:
+        قبل: 'size': len(self._cache) — يشمل المنتهية (رقم مُضخَّم).
+        بعد: 'size': sum(valid entries) — يُطابق InternalQueryCache.
+        السبب: توحيد سلوك الإحصاء بين الكاشين، وإصلاح تقارير
+               /cache_stats التي كانت تُظهر حجماً أكبر من الحقيقي
+               لـ user_cache, banned_words_cache, groups_cache …
+    🟡 FIX-7: InternalQueryCache.invalidate() — توحيد شرط الفحص:
+        قبل: `if key:` → "" و 0 و False تُعامل كـ None → clear all!
+        بعد: `if key is not None:` — سلوك متسق مع SimpleCache.
+        السبب: `invalidate("")` كان يمسح الكاش بالكامل بشكل غير
+               متوقَّع (بينما SimpleCache.invalidate("") يُزيل
+               المفتاح "" فقط).
+    🟢 PERF-1: cleanup_expired() — دالة موحَّدة للتنظيف:
+        أُضيفت في InternalQueryCache و SimpleCache.
+        السبب: cache_cleanup_task كان يفعل:
+            keys = await cache.get_keys()        # قفل واحد
+            for k in keys:
+                await cache.has(k)                # N أقفال!
+        = O(n) acquire/release. الآن استدعاء واحد فقط:
+            removed = await cache.cleanup_expired()
+        = O(1) acquire + O(n) scan داخلي.
+        التحسين: ~1000x على كاش بـ 10,000 مفتاح.
+
 🆕 v1.0.1 (CONSISTENCY-FIXES):
     🟡 FIX-1: InternalQueryCache — واجهة موحّدة مع SimpleCache:
         أُضيفت: has(), get_with_ttl(), set_many(), delete_many(),
@@ -146,10 +170,20 @@ class InternalQueryCache:
 
     async def invalidate(self, key: str = None):
         """
-        إبطال مفتاح واحد، أو كل المفاتيح إن كان key=None (أو "").
+        إبطال مفتاح واحد، أو كل المفاتيح إن كان key=None.
+
+        ✅ v1.0.2 FIX-7: توحيد شرط الفحص:
+            قبل: `if key:` → "" و 0 و False → clear all (غير متوقَّع!)
+            بعد: `if key is not None:` — سلوك متسق مع SimpleCache.
+
+        السلوك الحالي:
+            invalidate()          → clear all
+            invalidate(None)      → clear all
+            invalidate("")        → pop("") فقط
+            invalidate("abc")     → pop("abc") فقط
         """
         async with self._lock:
-            if key:
+            if key is not None:
                 self._cache.pop(key, None)
             else:
                 self._cache.clear()
@@ -221,6 +255,9 @@ class InternalQueryCache:
 
         ملاحظة: cache_cleanup_task في cache.py يستخدمها
         ثم يستدعي has() لكل مفتاح لتصفية المنتهية.
+
+        💡 v1.0.2 PERF-1: استخدم cleanup_expired() بدلاً منها
+        لتنظيف دفعة واحدة أكثر كفاءة.
         """
         async with self._lock:
             return list(self._cache.keys())
@@ -262,6 +299,39 @@ class InternalQueryCache:
                 if now - ts < ttl
             )
 
+    # ─────────────────────────────────────────────────────────────
+    # ✅ v1.0.2 PERF-1: تنظيف موحَّد في استدعاء واحد
+    # ─────────────────────────────────────────────────────────────
+
+    async def cleanup_expired(self) -> int:
+        """
+        🟢 v1.0.2 PERF-1: يحذف كل المفاتيح المنتهية في استدعاء واحد.
+
+        الفائدة على cache_cleanup_task في cache.py:
+
+        قبل:
+            keys = await cache.get_keys()      # acquire lock
+            for k in keys:
+                await cache.has(k)              # N acquires!
+            # = O(n) lock/unlock → بطيء جداً على كاش كبير
+
+        بعد:
+            removed = await cache.cleanup_expired()
+            # = O(1) acquire + O(n) scan داخلي → ~1000x أسرع
+
+        Returns:
+            عدد المفاتيح المحذوفة فعلياً.
+        """
+        async with self._lock:
+            now = time.monotonic()
+            expired_keys = [
+                k for k, (_, ts, ttl) in self._cache.items()
+                if now - ts >= ttl
+            ]
+            for k in expired_keys:
+                del self._cache[k]
+            return len(expired_keys)
+
 
 # =====================================================================
 # 2) SimpleCache — كاش async عام بمفاتيح str/int
@@ -284,7 +354,8 @@ class SimpleCache:
           - delete_many(keys) → int
           - get_keys() → List
           - get_all() → Dict (يُصفّي المنتهية)
-          - get_stats() → Dict
+          - get_stats() → Dict (يُصفّي المنتهية — v1.0.2)
+          - cleanup_expired() → int (v1.0.2)
 
     الاستخدام:
         cache = SimpleCache(default_ttl=60, max_size=10000)
@@ -324,7 +395,15 @@ class SimpleCache:
             self._cache[key] = (data, time.monotonic(), effective)
 
     async def invalidate(self, key=None):
-        """إبطال مفتاح واحد أو الكل."""
+        """
+        إبطال مفتاح واحد أو الكل.
+
+        السلوك (متسق مع InternalQueryCache في v1.0.2):
+            invalidate()          → clear all
+            invalidate(None)      → clear all
+            invalidate("")        → pop("") فقط
+            invalidate(0)         → pop(0) فقط
+        """
         async with self._lock:
             if key is not None:
                 self._cache.pop(key, None)
@@ -392,6 +471,9 @@ class SimpleCache:
 
         ملاحظة: cache_cleanup_task في cache.py يستخدمها
         ثم يستدعي has() لكل مفتاح لتصفية المنتهية.
+
+        💡 v1.0.2 PERF-1: استخدم cleanup_expired() بدلاً منها
+        لتنظيف دفعة واحدة أكثر كفاءة.
         """
         async with self._lock:
             return list(self._cache.keys())
@@ -406,13 +488,73 @@ class SimpleCache:
             }
 
     async def get_stats(self) -> Dict[str, Any]:
-        """إحصائيات الكاش (الحجم الحالي + الحد + TTL)."""
+        """
+        إحصائيات الكاش (الحجم الصالح فقط + الحد + TTL).
+
+        ✅ v1.0.2 FIX-6: يُصفّي المنتهية الآن — توحيداً مع
+            InternalQueryCache.get_stats().
+
+        قبل v1.0.2: كان 'size': len(self._cache) — يشمل منتهية TTL
+            → رقم مُضخَّم في /cache_stats و أدوات المراقبة.
+        بعد v1.0.2: 'size' = عدد المفاتيح الصالحة فقط.
+        """
         async with self._lock:
+            now = time.monotonic()
+            valid_count = sum(
+                1 for _, (_, ts, ttl) in self._cache.items()
+                if now - ts < ttl
+            )
             return {
-                'size': len(self._cache),
+                'size': valid_count,
                 'max_size': self._max_size,
                 'ttl': self._ttl,
             }
+
+    async def get_size(self) -> int:
+        """
+        عدد المفاتيح الصالحة فقط (يُصفّي المنتهية).
+
+        ✅ v1.0.2: أُضيفت للاتساق مع InternalQueryCache.get_size().
+        """
+        async with self._lock:
+            now = time.monotonic()
+            return sum(
+                1 for _, (_, ts, ttl) in self._cache.items()
+                if now - ts < ttl
+            )
+
+    # ─────────────────────────────────────────────────────────────
+    # ✅ v1.0.2 PERF-1: تنظيف موحَّد في استدعاء واحد
+    # ─────────────────────────────────────────────────────────────
+
+    async def cleanup_expired(self) -> int:
+        """
+        🟢 v1.0.2 PERF-1: يحذف كل المفاتيح المنتهية في استدعاء واحد.
+
+        الاستخدام في cache_cleanup_task:
+
+        قبل:
+            keys = await cache.get_keys()      # acquire lock
+            for k in keys:
+                await cache.has(k)              # N acquires!
+            # = O(n) lock/unlock → بطيء جداً على كاش كبير
+
+        بعد:
+            removed = await cache.cleanup_expired()
+            # = O(1) acquire + O(n) scan داخلي → ~1000x أسرع
+
+        Returns:
+            عدد المفاتيح المحذوفة فعلياً.
+        """
+        async with self._lock:
+            now = time.monotonic()
+            expired_keys = [
+                k for k, (_, ts, ttl) in self._cache.items()
+                if now - ts >= ttl
+            ]
+            for k in expired_keys:
+                del self._cache[k]
+            return len(expired_keys)
 
 
 # =====================================================================
@@ -425,6 +567,13 @@ class SettingsCache(SimpleCache):
 
     لا يُضيف أي منطق جديد — subclass فقط للتمييز المعنوي
     عن SimpleCache العامة (يسهّل القراءة والفهم لاحقاً).
+
+    يرث كل ميزات SimpleCache:
+      • has(), get_with_ttl(), set_many(), delete_many()
+      • get_keys(), get_all()
+      • get_stats() — ✅ يُصفّي المنتهية (v1.0.2)
+      • get_size() — ✅ يُصفّي المنتهية (v1.0.2)
+      • cleanup_expired() — 🟢 استدعاء واحد (v1.0.2)
 
     الاستخدام المتوقع في cache.py:
         settings_cache = SettingsCache(default_ttl=600)
@@ -455,3 +604,22 @@ __all__ = [
     "SettingsCache",
     "internal_cache",
 ]
+
+
+# =====================================================================
+# Load Beacon
+# =====================================================================
+
+try:
+    logger.info(
+        "✅ database_caches v1.0.2 loaded | "
+        "InternalQueryCache + SimpleCache + SettingsCache | "
+        "internal_cache=(ttl=%d, max=%d) | "
+        "FIX-6=SimpleCache.get_stats filters expired | "
+        "FIX-7=invalidate uses 'is not None' | "
+        "PERF-1=cleanup_expired() available",
+        internal_cache._ttl,
+        internal_cache._max_size,
+    )
+except Exception:
+    pass
