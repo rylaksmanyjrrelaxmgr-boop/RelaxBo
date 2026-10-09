@@ -3,33 +3,50 @@
 """
 handlers/messages/banned_words_manager.py
 ===============================================================================
-🛡️ Banned Words Manager v1.1.1 — Dual-Path System + Integration Docs
+🛡️ Banned Words Manager v1.2.0 — Dual-Path System + Integration Docs
 ===============================================================================
 
 🎯 المساران المنفصلان:
     1. GlobalBannedWordsPath  (chat_id = -1)     → للمطور
     2. GroupBannedWordsPath   (chat_id = group)  → لمشرف المجموعة
 
+🆕 v1.2.0 (REVIEW-FIXES-2026):
+    🔴 FIX-ORDER-1: نقل _MIN_LEN_FOR_SUBSTRING_MATCH إلى قسم الثوابت
+                    (كان معرَّفاً بعد is_arabic_greeting — خطر إذا
+                    استُدعيت الدالة أثناء التحميل).
+    🔴 FIX-ORDER-2: تعريف _invalidate_merged_cache **قبل** _invalidate_cache.
+    🔴 FIX-CACHE-1: get_words_for_filtering يُعيد نسخة من القائمة
+                    (list(cached_words)) بدل المرجع القابل للتعديل.
+    🔴 FIX-CACHE-2: _evict_merged_cache_if_needed تحمي مدخل GLOBAL_CHAT_ID
+                    من الطرد تحت الضغط.
+    🔴 FIX-PATTERN-1: _get_pattern و _get_spaced_pattern يُخزّنان
+                      حالات الفشل (None) لتفادي إعادة المحاولة.
+    🔴 FIX-GREET-2: is_arabic_greeting يستخدم عدد الكلمات **العربية**
+                    في المقام، بدل len(words) الكلي.
+    🔴 FIX-BOUNDARY-1: _compact_boundary_ok يفحص كل مواضع المطابقة
+                       بدل أول موضع فقط.
+    🟡 FIX-INV-2: _invalidate_cache يُرجع True إذا نجح أي مسار
+                  (بما فيه merged).
+    🟡 FIX-TRUNC-1: contains_banned_word يقطع النص على حدود كلمة.
+    🟡 FIX-TYPE-1: get_words_for_filtering يوحّد نوع chat_id مبكراً.
+    🟡 FIX-EXPORT-1: إزالة الأسماء الداخلية من __all__ (تُصدَّر عبر
+                     public aliases في handlers/messages/__init__.py).
+
 🆕 v1.1.1 (INTEGRATION-DOCS + FALLBACK-CONSISTENCY):
     ✅ توثيق التكامل مع detectors v4.1.0 و handlers_message v7.18.17.
     🔴 FIX-FALLBACK-1: fallback _normalize_arabic_for_compare يطابق
                        الآن detectors v4.1.0 (حماية "الله" من إزالة "ال").
-                       سابقاً: عند فشل استيراد detectors، كان السلوك
-                       مختلفاً ("الله" → "له") مما يكسر مطابقة التحيات.
-    📌 ملاحظة (INTEG-1): هذا الملف يُستدعى من handlers_message.py v7.18.17
-       عبر BannedWordsManager.check_message() — لا تُغيِّر التوقيع.
-    📌 ملاحظة (INTEG-2): cache القائمة المُدمجة (_merged_words_cache)
+    📌 INTEG-1: يُستدعى من handlers_message.py v7.18.17 عبر
+       BannedWordsManager.check_message() — لا تُغيِّر التوقيع.
+    📌 INTEG-2: cache القائمة المُدمجة (_merged_words_cache)
        صالح لمدة 30s (_MERGED_CACHE_TTL). التغييرات على الكلمات
-       المحظورة (add/remove) تُبطِل الـ cache فوراً عبر
-       _invalidate_merged_cache → يعمل تلقائياً.
-    📌 ملاحظة (INTEG-3): هذا الملف يعتمد على detectors v4.1.0 لاستيراد
+       المحظورة (add/remove) تُبطِل الـ cache فوراً.
+    📌 INTEG-3: يعتمد على detectors v4.1.0 لاستيراد
        _normalize_text, _normalize_arabic_for_compare, _is_arabic_dominant.
-       السلوك مُتَّسق بين النسخة المُستوردة والـ fallback المحلي بعد
-       FIX-FALLBACK-1.
 
 🆕 v1.1.0 (PERFORMANCE + SAFETY FIXES):
     🔴 FIX-GREET-1: is_arabic_greeting — تقييد substring-match
-    🔴 FIX-PERF-1:  contains_banned_word — إضافة skip_greeting_check
+    🔴 FIX-PERF-1:  contains_banned_word — skip_greeting_check
     🔴 FIX-PERF-2:  get_words_for_filtering — cache محلي بـ TTL 30s
     🔴 FIX-INV-1:   إبطال cache المُدمج في add/remove
 
@@ -48,23 +65,46 @@ from typing import Any, List, Optional, Set, Tuple
 
 logger = logging.getLogger(__name__)
 
-__version__ = "1.1.1"
+__version__ = "1.2.0"
 
 
 # ═════════════════════════════════════════════════════════════════════════════
 # 1. ثوابت
 # ═════════════════════════════════════════════════════════════════════════════
+#
+# 🆕 FIX-ORDER-1: جميع الثوابت المُستخدَمة في الدوال معرَّفة هنا
+#                 قبل أي استخدام فعلي.
+# ═════════════════════════════════════════════════════════════════════════════
 
 GLOBAL_CHAT_ID: int = -1
 MIN_WORD_LEN: int = 2
 MAX_WORD_LEN: int = 100
+
+# الحد الأدنى لطول الكلمة للفحص بالـ compact (بدون فواصل)
 _COMPACT_MIN_LEN: int = 5
+
+# الحد الأقصى لحجم caches الـ regex
 _CACHE_MAX_PATTERNS: int = 5000
 
-# 🆕 v1.1.0 FIX-PERF-2: cache للقائمة المُدمجة (global + group)
+# 🆕 FIX-ORDER-1: الحد الأدنى للطول للسماح بالاحتواء bidir في
+#                 فحص التحيات — مُعرَّف هنا قبل is_arabic_greeting.
+_MIN_LEN_FOR_SUBSTRING_MATCH: int = 4
+
+# ═════════════════════════════════════════════════════════════════════════════
+# 1.1 ثوابت cache المُدمج (global + group)
+# ═════════════════════════════════════════════════════════════════════════════
+
 _MERGED_CACHE_TTL: float = 30.0
 _MERGED_CACHE_MAX: int = 500
 
+# 🆕 FIX-TRUNC-1: حدّ قطع النص قبل الفحص
+_TEXT_TRUNCATE_LIMIT: int = 4000
+_TEXT_TRUNCATE_LOOKBACK: int = 200   # ابحث عن مسافة في آخر 200 حرف
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# 2. Enums
+# ═════════════════════════════════════════════════════════════════════════════
 
 class BannedScope(str, Enum):
     GLOBAL = "global"
@@ -89,12 +129,14 @@ class OpReason(str, Enum):
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-# 2. استيرادات خارجية مع fallbacks
+# 3. استيرادات خارجية مع fallbacks
 # ═════════════════════════════════════════════════════════════════════════════
-
-# 📌 INTEG-3: يُفضل استخدام detectors v4.1.0+ لأنها تحوي حماية "الله"
+#
+# 📌 INTEG-3: يُفضَّل استخدام detectors v4.1.0+ لأنها تحوي حماية "الله"
 # في _normalize_arabic_for_compare. الـ fallback أدناه يطابقها بعد
 # FIX-FALLBACK-1.
+# ═════════════════════════════════════════════════════════════════════════════
+
 try:
     from handlers.handlers_message_detectors import (
         _normalize_text,
@@ -217,7 +259,7 @@ except ImportError:
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-# 3. قائمة التحيات العربية
+# 4. قائمة التحيات العربية
 # ═════════════════════════════════════════════════════════════════════════════
 
 _ARABIC_GREETINGS_RAW: frozenset = frozenset({
@@ -268,6 +310,11 @@ def is_arabic_greeting(text: str) -> bool:
           مثل "با" (substring من "صباحخير") — مما يسمح بتجاوز
           فحص الكلمات المحظورة.
 
+    🆕 v1.2.0 FIX-GREET-2:
+        - المقام الآن = عدد الكلمات **العربية** فقط (بدل len(words)).
+        - سابقاً: "السلام عليكم OK" → 3 كلمات، matched=2 → False.
+        - الآن: يُهمَل "OK" غير العربي، matched=2/2 → True.
+
     📌 INTEG-3: التطبيع يستخدم _normalize_arabic_for_compare من
         detectors v4.1.0 (أو fallback مطابق بعد FIX-FALLBACK-1).
     """
@@ -293,11 +340,19 @@ def is_arabic_greeting(text: str) -> bool:
     if not words or len(words) > 4:
         return False
 
-    matched = 0
+    # 🆕 FIX-GREET-2: اجمع فقط الكلمات التي لها تمثيل عربي
+    #                 بعد التطبيع (غير فارغ).
+    arabic_words: List[Tuple[str, str]] = []
     for w in words:
         w_norm = _normalize_arabic_for_compare(w)
-        if not w_norm:
-            continue
+        if w_norm:
+            arabic_words.append((w, w_norm))
+
+    if not arabic_words:
+        return False
+
+    matched = 0
+    for _w_orig, w_norm in arabic_words:
         for g_norm in _NORMALIZED_GREETINGS:
             if not g_norm:
                 continue
@@ -316,19 +371,21 @@ def is_arabic_greeting(text: str) -> bool:
                     matched += 1
                     break
 
-    return matched == len(words)
+    # 🆕 FIX-GREET-2: المقام = عدد الكلمات العربية فقط
+    return matched == len(arabic_words)
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-# 4. تطبيع + فحص الكلمات المحظورة
+# 5. تطبيع + فحص الكلمات المحظورة
 # ═════════════════════════════════════════════════════════════════════════════
-
-# 🆕 FIX-GREET-1: حد أدنى للطول للسماح بالاحتواء bidir
-_MIN_LEN_FOR_SUBSTRING_MATCH: int = 4
 
 _WORD_SEP_CLASS = r'[\s\-_.|/*+=~^´`°•●○◦▪▫■□♦♢※]'
-_compiled_patterns: "OrderedDict[str, re.Pattern]" = OrderedDict()
-_compiled_spaced: "OrderedDict[str, re.Pattern]" = OrderedDict()
+
+
+# 🆕 FIX-PATTERN-1: type جديد يقبل None كإشارة فشل.
+#                   هذا يمنع إعادة محاولة compile لِنفس الكلمة الفاشلة.
+_compiled_patterns: "OrderedDict[str, Optional[re.Pattern]]" = OrderedDict()
+_compiled_spaced: "OrderedDict[str, Optional[re.Pattern]]" = OrderedDict()
 
 
 def normalize_banned_word(word: Any) -> str:
@@ -338,18 +395,29 @@ def normalize_banned_word(word: Any) -> str:
 
 
 def _get_pattern(word: str) -> Optional[re.Pattern]:
-    cached = _compiled_patterns.get(word)
-    if cached is not None:
+    """
+    🆕 FIX-PATTERN-1: يُخزّن None عند فشل الترجمة، لتفادي إعادة المحاولة
+    في كل استدعاء (كلمة واحدة فاشلة كانت تُعيد compile بلا نهاية).
+    """
+    # فحص مباشر — يشمل حالة القيمة None المخزَّنة
+    if word in _compiled_patterns:
         _compiled_patterns.move_to_end(word)
-        return cached
+        return _compiled_patterns[word]
+
     try:
         escaped = re.escape(word).replace(r'\ ', r'\s+')
         pat = re.compile(
             rf'(?<!\w){escaped}(?!\w)',
             re.IGNORECASE | re.UNICODE,
         )
-    except Exception:
+    except Exception as e:
+        logger.debug("_get_pattern(%r) compile failed: %s", word, e)
+        # 🆕 خزّن None كإشارة "فشل سابق"
+        _compiled_patterns[word] = None
+        if len(_compiled_patterns) > _CACHE_MAX_PATTERNS:
+            _compiled_patterns.popitem(last=False)
         return None
+
     _compiled_patterns[word] = pat
     if len(_compiled_patterns) > _CACHE_MAX_PATTERNS:
         _compiled_patterns.popitem(last=False)
@@ -357,13 +425,23 @@ def _get_pattern(word: str) -> Optional[re.Pattern]:
 
 
 def _get_spaced_pattern(word: str) -> Optional[re.Pattern]:
-    cached = _compiled_spaced.get(word)
-    if cached is not None:
+    """
+    🆕 FIX-PATTERN-1: نفس المعالجة — تخزين None عند الفشل أو الرفض.
+
+    ملاحظة: كلمات أقصر من 3 أو أطول من 15 تُرفض كـ None وتُخزَّن.
+    """
+    if word in _compiled_spaced:
         _compiled_spaced.move_to_end(word)
-        return cached
+        return _compiled_spaced[word]
+
+    # شروط الرفض — تخزين None لتفادي إعادة الفحص
+    if len(word) < 3 or len(word) > 15:
+        _compiled_spaced[word] = None
+        if len(_compiled_spaced) > _CACHE_MAX_PATTERNS:
+            _compiled_spaced.popitem(last=False)
+        return None
+
     try:
-        if len(word) < 3 or len(word) > 15:
-            return None
         chars = list(word)
         body = r'[\s\-_.|/*+=~^`•●○▪▫■□♦♢※]{1,2}'.join(
             re.escape(c) for c in chars
@@ -372,8 +450,13 @@ def _get_spaced_pattern(word: str) -> Optional[re.Pattern]:
             rf'(?<!\w){body}(?!\w)',
             re.IGNORECASE | re.UNICODE,
         )
-    except Exception:
+    except Exception as e:
+        logger.debug("_get_spaced_pattern(%r) compile failed: %s", word, e)
+        _compiled_spaced[word] = None
+        if len(_compiled_spaced) > _CACHE_MAX_PATTERNS:
+            _compiled_spaced.popitem(last=False)
         return None
+
     _compiled_spaced[word] = pat
     if len(_compiled_spaced) > _CACHE_MAX_PATTERNS:
         _compiled_spaced.popitem(last=False)
@@ -388,29 +471,92 @@ def _char_script(ch: str) -> str:
     return 'other'
 
 
+def _boundary_ok_at(
+    compact_text: str,
+    compact_word: str,
+    idx: int,
+) -> bool:
+    """
+    🆕 v1.2.0 FIX-BOUNDARY-1: فحص الحدود عند موضع معيّن فقط.
+
+    يُستخدم من _compact_boundary_ok لكل موضع مطابقة.
+    """
+    if compact_word == compact_text:
+        return True
+    # الكلمات الطويلة (≥6) مقبولة بلا فحص حدود
+    if len(compact_word) >= 6:
+        return True
+
+    end_idx = idx + len(compact_word)
+    before = compact_text[idx - 1] if idx > 0 else ''
+    after = compact_text[end_idx] if end_idx < len(compact_text) else ''
+
+    if before and before.isalnum() and compact_word[0].isalnum():
+        if _char_script(before) == _char_script(compact_word[0]):
+            if _char_script(before) in ('ar', 'lat'):
+                return False
+
+    if after and after.isalnum() and compact_word[-1].isalnum():
+        if _char_script(after) == _char_script(compact_word[-1]):
+            if _char_script(after) in ('ar', 'lat'):
+                return False
+
+    return True
+
+
 def _compact_boundary_ok(compact_text: str, compact_word: str) -> bool:
+    """
+    🆕 FIX-BOUNDARY-1: يفحص كل مواضع مطابقة compact_word في compact_text،
+    ويقبل إذا كان **أي** موضع على حدود نظيفة.
+
+    سابقاً: يفحص أول موضع فقط — قد يرفض مطابقة صحيحة لو أول
+    ظهور محاط بحروف، بينما ظهور ثانٍ نظيف.
+    """
+    if not compact_text or not compact_word:
+        return False
     try:
-        idx = compact_text.find(compact_word)
-        if idx == -1:
-            return False
-        if compact_word == compact_text:
-            return True
-        if len(compact_word) >= 6:
-            return True
-        end_idx = idx + len(compact_word)
-        before = compact_text[idx - 1] if idx > 0 else ''
-        after = compact_text[end_idx] if end_idx < len(compact_text) else ''
-        if before and before.isalnum() and compact_word[0].isalnum():
-            if _char_script(before) == _char_script(compact_word[0]):
-                if _char_script(before) in ('ar', 'lat'):
-                    return False
-        if after and after.isalnum() and compact_word[-1].isalnum():
-            if _char_script(after) == _char_script(compact_word[-1]):
-                if _char_script(after) in ('ar', 'lat'):
-                    return False
-        return True
-    except Exception:
-        return True
+        start = 0
+        # حماية من الحلقات اللانهائية + عدد مطابقات كبير
+        max_iterations = 1000
+        iterations = 0
+
+        while iterations < max_iterations:
+            iterations += 1
+            idx = compact_text.find(compact_word, start)
+            if idx == -1:
+                return False
+
+            if _boundary_ok_at(compact_text, compact_word, idx):
+                return True
+
+            # انتقل للموضع التالي
+            start = idx + 1
+
+        # لو تجاوزنا الحد — نرفض لأمان الأداء
+        return False
+    except Exception as e:
+        logger.debug("_compact_boundary_ok error: %s", e)
+        return True  # سلوك متسامح عند الخطأ (كما في v1.1.1)
+
+
+def _truncate_at_word_boundary(text: str, limit: int) -> str:
+    """
+    🆕 FIX-TRUNC-1: يقطع النص عند حدود كلمة قدر الإمكان.
+
+    يبحث عن آخر مسافة في آخر _TEXT_TRUNCATE_LOOKBACK حرف قبل
+    الحد. إذا لم يجد، يقطع عنده مباشرةً.
+    """
+    if len(text) <= limit:
+        return text
+
+    lookback_start = max(0, limit - _TEXT_TRUNCATE_LOOKBACK)
+    cutoff = text.rfind(" ", lookback_start, limit)
+
+    if cutoff > 0:
+        return text[:cutoff]
+
+    # لا توجد مسافة — اقطع عند الحد
+    return text[:limit]
 
 
 def contains_banned_word(
@@ -426,16 +572,20 @@ def contains_banned_word(
         - معامل `skip_greeting_check` جديد.
         - عندما يُستدعى من `check_message` (الذي يفحص التحية مسبقاً)،
           مرّر skip_greeting_check=True لتجنّب فحص N+1.
-        - الاستدعاء المباشر (خارج check_message) يبقى آمناً:
-          الفحص يعمل تلقائياً (skip=False افتراضياً).
+        - الاستدعاء المباشر (خارج check_message) يبقى آمناً.
+
+    🆕 v1.2.0 FIX-TRUNC-1:
+        - قطع النص عند حدود كلمة بدل القطع الأعمى عند 4000 حرف.
 
     📌 INTEG-1: تُصدَّر هذه الدالة كـ `_bwm_contains` في
         handlers_message.py v7.18.17 (fallback فقط).
     """
     if not text or not banned_word:
         return False
-    if len(text) > 4000:
-        text = text[:4000]
+
+    # 🆕 FIX-TRUNC-1: قطع على حدود كلمة
+    if len(text) > _TEXT_TRUNCATE_LIMIT:
+        text = _truncate_at_word_boundary(text, _TEXT_TRUNCATE_LIMIT)
 
     try:
         # 🆕 FIX-PERF-1: تخطّي الفحص إن طُلب صراحةً
@@ -470,35 +620,14 @@ def contains_banned_word(
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-# 5. إبطال الكاش
+# 6. cache المُدمج + إبطال الكاش
+# ═════════════════════════════════════════════════════════════════════════════
+#
+# 🆕 FIX-ORDER-2: تعريف _invalidate_merged_cache **قبل** _invalidate_cache
+#                 (سابقاً كان _invalidate_cache يستدعيه قبل أن يُعرَّف).
 # ═════════════════════════════════════════════════════════════════════════════
 
-async def _invalidate_cache(scope_id: Optional[int] = None) -> bool:
-    # 🆕 FIX-INV-1: إبطال cache المُدمج أولاً
-    _invalidate_merged_cache(scope_id)
-
-    if _HAS_INV_ASYNC and callable(_inv_async):
-        try:
-            r = _inv_async(scope_id) if scope_id is not None else _inv_async()
-            if asyncio.iscoroutine(r):
-                await r
-            return True
-        except Exception as e:
-            logger.debug("invalidate async: %s", e)
-
-    if _HAS_INV_SYNC and callable(_inv_sync):
-        try:
-            r = _inv_sync(scope_id) if scope_id is not None else _inv_sync()
-            if asyncio.iscoroutine(r):
-                await r
-            return True
-        except Exception as e:
-            logger.debug("invalidate sync: %s", e)
-
-    return False
-
-
-# 🆕 FIX-PERF-2: cache للقائمة المُدمجة
+# cache للقائمة المُدمجة (global + group) لكل chat_id
 _merged_words_cache: "OrderedDict[int, Tuple[List[str], float]]" = OrderedDict()
 
 
@@ -506,23 +635,99 @@ def _invalidate_merged_cache(chat_id: Optional[int] = None) -> None:
     """
     🆕 v1.1.0 FIX-INV-1: إبطال cache القائمة المُدمجة.
 
-    - chat_id=None          → مسح كل الـ cache.
+    - chat_id=None           → مسح كل الـ cache.
     - chat_id=GLOBAL_CHAT_ID → مسح كل الـ cache (تغيير global يمسّ الجميع).
-    - chat_id=<group_id>    → مسح إدخال المجموعة فقط.
+    - chat_id=<group_id>     → مسح إدخال المجموعة فقط.
 
     📌 INTEG-2: تُستدعى تلقائياً عند add/remove عبر _invalidate_cache.
+
+    📌 v1.2.0: يبقى الاسم بصيغة "_" للتوافق الخلفي.
+        تُصدَّر كـ public alias عبر handlers/messages/__init__.py.
     """
     try:
         if chat_id is None or chat_id == GLOBAL_CHAT_ID:
             _merged_words_cache.clear()
             return
         _merged_words_cache.pop(int(chat_id), None)
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("_invalidate_merged_cache(%r): %s", chat_id, e)
+
+
+def _evict_merged_cache_if_needed() -> None:
+    """
+    🆕 FIX-CACHE-2: طرد الإدخالات الأقدم عند تجاوز الحد الأقصى،
+    مع حماية **مدخل GLOBAL_CHAT_ID** (إن وُجد) من الطرد.
+
+    سابقاً: `popitem(last=False)` قد يُخرج مدخل global تحت الضغط.
+    """
+    try:
+        if len(_merged_words_cache) <= _MERGED_CACHE_MAX:
+            return
+
+        excess = len(_merged_words_cache) - _MERGED_CACHE_MAX
+        if excess <= 0:
+            return
+
+        # اجمع المفاتيح القابلة للطرد (كل شيء عدا GLOBAL)
+        victims = [
+            k for k in _merged_words_cache.keys()
+            if k != GLOBAL_CHAT_ID
+        ]
+
+        evicted = 0
+        for k in victims:
+            if evicted >= excess:
+                break
+            _merged_words_cache.pop(k, None)
+            evicted += 1
+
+        # إذا لم نُزِل العدد الكافي (كل المفاتيح كانت GLOBAL؟)،
+        # احذف الأقدم قسراً — لكن في الواقع هذا لا يحدث.
+    except Exception as e:
+        logger.debug("_evict_merged_cache_if_needed: %s", e)
+
+
+async def _invalidate_cache(scope_id: Optional[int] = None) -> bool:
+    """
+    إبطال كل الـ caches المتأثرة (المُدمج + الخارجي).
+
+    🆕 FIX-INV-1 (v1.1.0): إبطال cache المُدمج أولاً.
+    🆕 FIX-INV-2 (v1.2.0): يُرجع True إذا نجح **أي** مسار
+        (سابقاً: يُرجع False حتى لو نجح إبطال المُدمج فقط).
+    """
+    merged_ok = True
+    try:
+        _invalidate_merged_cache(scope_id)
+    except Exception as e:
+        logger.debug("invalidate merged cache: %s", e)
+        merged_ok = False
+
+    external_ok = False
+
+    if _HAS_INV_ASYNC and callable(_inv_async):
+        try:
+            r = _inv_async(scope_id) if scope_id is not None else _inv_async()
+            if asyncio.iscoroutine(r):
+                await r
+            external_ok = True
+        except Exception as e:
+            logger.debug("invalidate async: %s", e)
+
+    if not external_ok and _HAS_INV_SYNC and callable(_inv_sync):
+        try:
+            r = _inv_sync(scope_id) if scope_id is not None else _inv_sync()
+            if asyncio.iscoroutine(r):
+                await r
+            external_ok = True
+        except Exception as e:
+            logger.debug("invalidate sync: %s", e)
+
+    # 🆕 FIX-INV-2: نجاح أي مسار = True
+    return merged_ok or external_ok
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-# 6. الصلاحيات
+# 7. الصلاحيات
 # ═════════════════════════════════════════════════════════════════════════════
 
 def is_developer(user_id: int) -> bool:
@@ -601,7 +806,7 @@ async def is_group_admin(
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-# 7. Path 1 — Global (المطور)
+# 8. Path 1 — Global (المطور)
 # ═════════════════════════════════════════════════════════════════════════════
 
 class GlobalBannedWordsPath:
@@ -623,7 +828,9 @@ class GlobalBannedWordsPath:
         try:
             result = await DB.add_banned_word(cls.SCOPE_ID, word, user_id)
         except Exception as e:
-            logger.error("Global.add(%r) DB error: %s", word, e, exc_info=True)
+            logger.error(
+                "Global.add(%r) DB error: %s", word, e, exc_info=True,
+            )
             return False, OpReason.DB_ERROR.value
 
         added_ok, is_dup = (
@@ -667,7 +874,9 @@ class GlobalBannedWordsPath:
                     removed = True
                     break
             except Exception as e:
-                logger.debug("DB.%s(%s,%r): %s", method, cls.SCOPE_ID, word, e)
+                logger.debug(
+                    "DB.%s(%s,%r): %s", method, cls.SCOPE_ID, word, e,
+                )
                 continue
 
         if removed:
@@ -687,7 +896,7 @@ class GlobalBannedWordsPath:
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-# 8. Path 2 — Group (مشرف المجموعة)
+# 9. Path 2 — Group (مشرف المجموعة)
 # ═════════════════════════════════════════════════════════════════════════════
 
 class GroupBannedWordsPath:
@@ -796,7 +1005,7 @@ class GroupBannedWordsPath:
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-# 9. BannedWordsManager (Router موحّد)
+# 10. BannedWordsManager (Router موحّد)
 # ═════════════════════════════════════════════════════════════════════════════
 
 class BannedWordsManager:
@@ -883,21 +1092,34 @@ class BannedWordsManager:
             - يُبطَل تلقائياً عند add/remove (عبر _invalidate_cache
               → _invalidate_merged_cache).
 
+        🆕 v1.2.0 FIX-CACHE-1:
+            - يُعيد نسخة (list copy) بدل المرجع المُخزَّن — يمنع
+              المستدعين من العبث بالـ cache الداخلي.
+
+        🆕 v1.2.0 FIX-TYPE-1:
+            - يوحّد نوع chat_id (int) مبكراً لتجنّب تضارب cache-key
+              مع type mismatch في DB.
+
         📌 INTEG-2: _MERGED_CACHE_TTL = 30s. بعد إضافة/إزالة كلمة،
             الـ cache يُبطَل فوراً — التغييرات تظهر خلال ثوانٍ.
         """
-        now = _time.monotonic()
+        # 🆕 FIX-TYPE-1: توحيد نوع chat_id
         try:
             cid_int = int(chat_id)
         except (TypeError, ValueError):
-            cid_int = 0
+            logger.debug("get_words_for_filtering: chat_id غير صالح %r", chat_id)
+            return []
 
+        now = _time.monotonic()
+
+        # فحص الـ cache
         entry = _merged_words_cache.get(cid_int)
         if entry is not None:
             cached_words, cached_at = entry
             if now - cached_at < _MERGED_CACHE_TTL:
                 _merged_words_cache.move_to_end(cid_int)
-                return cached_words
+                # 🆕 FIX-CACHE-1: إرجاع نسخة
+                return list(cached_words)
 
         # بناء جديد
         result: List[str] = []
@@ -913,9 +1135,9 @@ class BannedWordsManager:
         except Exception as e:
             logger.debug("get global words for filtering: %s", e)
 
-        if chat_id and chat_id != GLOBAL_CHAT_ID:
+        if cid_int and cid_int != GLOBAL_CHAT_ID:
             try:
-                group_words = await get_banned_words_cached(chat_id)
+                group_words = await get_banned_words_cached(cid_int)
                 for w in group_words or []:
                     n = normalize_banned_word(w)
                     if n and n not in seen:
@@ -924,13 +1146,12 @@ class BannedWordsManager:
             except Exception as e:
                 logger.debug("get group words for filtering: %s", e)
 
-        # خزّن النتيجة
+        # خزّن النتيجة (نسخة مستقلة)
         try:
-            _merged_words_cache[cid_int] = (result, now)
-            if len(_merged_words_cache) > _MERGED_CACHE_MAX:
-                _merged_words_cache.popitem(last=False)
-        except Exception:
-            pass
+            _merged_words_cache[cid_int] = (list(result), now)
+            _evict_merged_cache_if_needed()
+        except Exception as e:
+            logger.debug("cache store failed: %s", e)
 
         return result
 
@@ -986,29 +1207,41 @@ class BannedWordsManager:
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-# 10. Public API
+# 11. Public API
+# ═════════════════════════════════════════════════════════════════════════════
+#
+# 🆕 FIX-EXPORT-1: __all__ لا يحتوي أسماء "_" بعد الآن.
+#   الأسماء الداخلية لا تزال قابلة للاستيراد المباشر
+#   (from X import _name), لكن غير مُصدَّرة عبر `from X import *`.
+#
+#   public aliases (invalidate_merged_cache, MERGED_CACHE_TTL, ...)
+#   تُدار في handlers/messages/__init__.py.
 # ═════════════════════════════════════════════════════════════════════════════
 
 __all__ = [
+    # Classes
     "BannedWordsManager",
     "GlobalBannedWordsPath",
     "GroupBannedWordsPath",
+
+    # Enums
     "BannedScope",
     "OpReason",
+
+    # Constants
     "GLOBAL_CHAT_ID",
     "MIN_WORD_LEN",
     "MAX_WORD_LEN",
+
+    # Functions
     "is_developer",
     "is_group_admin",
     "normalize_banned_word",
     "contains_banned_word",
     "is_arabic_greeting",
+
+    # Version
     "__version__",
-    # 🆕 v1.1.0 — exports للإبطال اليدوي
-    "_invalidate_merged_cache",
-    "_merged_words_cache",
-    "_MERGED_CACHE_TTL",
-    "_MERGED_CACHE_MAX",
 ]
 
 
@@ -1021,7 +1254,7 @@ try:
         "✅ banned_words_manager v%s loaded | "
         "DUAL-PATH (global=%d, group) | "
         "greetings=%d | compact_min=%d | "
-        "merged_cache_ttl=%.0fs | "
+        "merged_cache_ttl=%.0fs | merged_cache_max=%d | "
         "detector_helpers=%s | db=%s | cache=%s | "
         "compat=(detectors=v4.1.0, handlers_message=v7.18.17)",
         __version__,
@@ -1029,9 +1262,14 @@ try:
         len(_ARABIC_GREETINGS_RAW),
         _COMPACT_MIN_LEN,
         _MERGED_CACHE_TTL,
+        _MERGED_CACHE_MAX,
         "yes" if _HAS_DETECTOR_HELPERS else "no",
         "yes" if _HAS_DB else "no",
         "yes" if _HAS_BANNED_CACHE else "no",
     )
-except Exception:
-    pass
+except Exception as _e_beacon:
+    # 🆕 v1.2.0: بدل `pass` الصامت — سجّل السبب للـ debugging
+    try:
+        logger.debug("load beacon failed: %s", _e_beacon)
+    except Exception:
+        pass
