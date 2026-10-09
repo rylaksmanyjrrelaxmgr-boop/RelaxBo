@@ -1,23 +1,41 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-handlers_message.py - v7.18.19 ROUTING-FIX-2026
+handlers_message.py - v7.18.21 ROUTING-FIX-2026-R3
 (متوافق مع detectors v4.1.0 + banned_words_manager v1.2.0)
 =============================================================================
+🆕 v7.18.21 (ROUTING-FIX-2026-R3):
+    🔴 FIX-ROUTE-2 CRITICAL: حل جذري لمشكلة "لم أتعرف على العملية"
+       عند إدخال معرف القناة:
+       • إضافة _handle_wait_channel_text كمعالج مباشر لـ WAIT_CHANNEL
+         (وأسمائه البديلة WAIT_ADD_CHANNEL, WAIT_UPDATE_CH, ...).
+       • توسيع fallback في handle_private إلى 7 مسارات متعددة
+         (handlers_command, handlers.command, command, ...).
+       • إضافة _parse_channel_ref للتحقق من صيغة المعرف
+         (@username | -100xxx | t.me/xxx | https://t.me/xxx).
+       • إشعار المطور تلقائياً عند حالة غير مُعالَجة.
+
+🆕 v7.18.20 (ROUTING-FIX-2026-R2):
+    🔴 FIX-BUG-1 CRITICAL: _get_dev_log_channel_cached كان يستدعي
+       DB.get_log_channel() (غير موجود) بدل DB.get_dev_log_channel().
+    🔴 FIX-BUG-2 CRITICAL: handle_private — UserState.NONE آمن الآن.
+    🟡 FIX-BUG-3: handle_edited — إعادة ترتيب الفحوص.
+    🟡 FIX-BUG-4: _check_flood — cooldown بدل تصفير الـ tracker.
+    🟡 FIX-BUG-5: _notify_dev_about_idle_tx — bot check قبل cooldown.
+    🟡 FIX-BUG-6: _apply_slow_mode — إزالة كود ميت.
+    🟡 FIX-BUG-7: _notify_dev_log — دعم روابط t.me/c/xxx.
+    🟡 FIX-BUG-8: GroupRateLimiterManager — time.monotonic().
+    🟡 FIX-BUG-9: _check_admin_in_chat — ? في كل المزودين.
+    🟡 FIX-BUG-10: _notify_delete_permission_failure — تقليم دوري.
+    🟡 FIX-BUG-11: _spawn_tracked_task — label عبر set_name.
+    🟡 FIX-BUG-12: _lazy_init_columns — تعامل مع SQLite lock.
+
 🆕 v7.18.19 (ROUTING-FIX-2026):
-    🔴 FIX-ROUTE-1 CRITICAL: handle_private كان يصمت عند استقبال حالة
-       غير مدرجة في _PRIVATE_HANDLERS_MAP (مثل WAIT_CHANNEL عند
-       إرسال معرف قناة). الإصلاح:
-       • إضافة fallback إلى CommandHandlers.handle_text.
-       • إضافة "ملاذ أخير" — إبلاغ المستخدم بدل الصمت.
-       • تسجيل warning واضح للـ states غير المُعالَجة.
-    🔴 FIX-BWM-3 CRITICAL: فحص الكلمات المحظورة — fallback معطوب
-       (كان لا يُستدعى عند فشل BannedWordsManager لأن الشرط كان
-       يستخدم _HAS_BWM بدل تتبّع فشل الاستدعاء الفعلي).
-    🟡 FIX-COL-1: delete_protected_forward مفقود من _lazy_init_columns.
-    🟡 FIX-EDIT-1: handle_edited — فحص effective_message قبل acquire
-       بدل بعده.
-    🟡 FIX-STATE-1: توثيق أن StateManager TTL = 900s الآن (كان 300).
+    🔴 FIX-ROUTE-1: fallback إلى CommandHandlers.handle_text.
+    🔴 FIX-BWM-3: fallback صحيح عند فشل BannedWordsManager.
+    🟡 FIX-COL-1: delete_protected_forward مُضاف.
+    🟡 FIX-EDIT-1: فحص effective_message قبل acquire.
+    🟡 FIX-STATE-1: StateManager TTL = 900s.
 
 🆕 v7.18.18 (CACHE-STATS-INTEGRATION):
     ✨ handle_cache_stats_command — أمر /cache_stats للمطور
@@ -527,6 +545,10 @@ _FLOOD_DEFAULT_DURATION = 3600
 _FLOOD_DEQUE_BUFFER = 5
 _FLOOD_DEQUE_MAXLEN = _FLOOD_MAX_MESSAGES_LIMIT + _FLOOD_DEQUE_BUFFER
 
+# 🆕 v7.18.20 FIX-BUG-4: cooldown منفصل للفيضان
+_FLOOD_COOLDOWN_SEC = 10.0
+_FLOOD_COOLDOWN_MAX_KEYS = 5000
+
 _BAN_WORD_MIN_LEN = 2
 _BAN_WORD_MAX_LEN = 100
 
@@ -647,6 +669,9 @@ _flood_tracker: DefaultDict[Tuple[int, int], deque] = defaultdict(
 _flood_lock = asyncio.Lock()
 _flood_last_cleanup = 0.0
 
+# 🆕 v7.18.20 FIX-BUG-4: cooldown tracker للفيضان
+_flood_cooldown_until: Dict[Tuple[int, int], float] = {}
+
 _ban_add_tracker: DefaultDict[int, deque] = defaultdict(
     lambda: deque(maxlen=_BAN_ADD_RATE_MAX + 5))
 _ban_add_lock = asyncio.Lock()
@@ -656,6 +681,10 @@ _ban_add_last_cleanup = 0.0
 async def _check_flood(
     chat_id: int, user_id: int, max_messages: int, window_sec: float,
 ) -> bool:
+    """
+    🆕 v7.18.20 FIX-BUG-4: عند اكتشاف الفيضان، نضع cooldown بدل
+    تصفير الـ tracker (كان يسمح بفيضان مضاعف فوري).
+    """
     try:
         max_messages = max(1, min(int(max_messages), _FLOOD_MAX_MESSAGES_LIMIT))
     except (TypeError, ValueError):
@@ -669,15 +698,18 @@ async def _check_flood(
     now = time.monotonic()
     key = (chat_id, user_id)
     async with _flood_lock:
+        # 🆕 FIX-BUG-4: فحص cooldown أولاً
+        cooldown_until = _flood_cooldown_until.get(key, 0.0)
+        if now < cooldown_until:
+            return True
         tracker = _flood_tracker[key]
         while tracker and now - tracker[0] > window_sec:
             tracker.popleft()
         tracker.append(now)
         exceeded = len(tracker) > max_messages
         if exceeded:
-            newest = tracker[-1] if tracker else now
-            tracker.clear()
-            tracker.append(newest)
+            # 🆕 FIX-BUG-4: نضع cooldown بدل تصفير الـ tracker
+            _flood_cooldown_until[key] = now + _FLOOD_COOLDOWN_SEC
             return True
         return False
 
@@ -712,6 +744,22 @@ async def _cleanup_flood_tracker(force: bool = False) -> int:
         for k in stale_keys:
             _flood_tracker.pop(k, None)
             removed += 1
+        # 🆕 v7.18.20 FIX-BUG-4: تقليم cooldowns أيضاً
+        stale_cd = [
+            k for k, until in _flood_cooldown_until.items()
+            if until < now
+        ]
+        for k in stale_cd:
+            _flood_cooldown_until.pop(k, None)
+            removed += 1
+        if len(_flood_cooldown_until) > _FLOOD_COOLDOWN_MAX_KEYS:
+            oldest_cd = sorted(
+                _flood_cooldown_until.items(),
+                key=lambda kv: kv[1])[: max(
+                    1, len(_flood_cooldown_until) // 4)]
+            for k, _ in oldest_cd:
+                _flood_cooldown_until.pop(k, None)
+                removed += 1
         if len(_flood_tracker) > _FLOOD_TRACKER_MAX_KEYS:
             overflow_snapshot = list(_flood_tracker.items())
     if overflow_snapshot:
@@ -750,6 +798,7 @@ def _flood_tracker_stats() -> Dict[str, int]:
             "max_keys": _FLOOD_TRACKER_MAX_KEYS,
             "stale_sec": int(_FLOOD_TRACKER_STALE_SEC),
             "ban_add_keys": len(_ban_add_tracker),
+            "cooldown_keys": len(_flood_cooldown_until),
         }
     except Exception:
         return {}
@@ -787,6 +836,9 @@ _columns_last_error_log_ts = 0.0
 async def _notify_dev_about_idle_tx(
     bot, reason: str = "", *, force: bool = False,
 ) -> Optional[Dict[str, Any]]:
+    """
+    🆕 v7.18.20 FIX-BUG-5: فحص bot=None قبل استهلاك cooldown.
+    """
     try:
         audit_fn = getattr(DB, 'audit_idle_in_transactions', None)
         if not callable(audit_fn):
@@ -808,6 +860,19 @@ async def _notify_dev_about_idle_tx(
             logger.debug(
                 "_notify_dev_about_idle_tx: نظيف (reason=%s)", reason)
             return report
+
+        # 🆕 FIX-BUG-5: فحص bot و owner BEFORE استهلاك cooldown
+        if bot is None:
+            logger.warning(
+                "_notify_dev_about_idle_tx: bot=None — "
+                "لا يمكن إرسال الإشعار (count=%d)", count)
+            return report
+        owner_id = int(getattr(CONFIG, 'PRIMARY_OWNER_ID', 0) or 0)
+        if not owner_id:
+            logger.warning(
+                "_notify_dev_about_idle_tx: PRIMARY_OWNER_ID غير محدّد")
+            return report
+
         if not force:
             now = time.monotonic()
             last = _idle_tx_last_notify.get(0, 0.0)
@@ -822,16 +887,7 @@ async def _notify_dev_about_idle_tx(
                 if now - last < _IDLE_TX_NOTIFY_COOLDOWN:
                     return report
                 _idle_tx_last_notify[0] = now
-        if bot is None:
-            logger.warning(
-                "_notify_dev_about_idle_tx: bot=None — "
-                "لا يمكن إرسال الإشعار (count=%d)", count)
-            return report
-        owner_id = int(getattr(CONFIG, 'PRIMARY_OWNER_ID', 0) or 0)
-        if not owner_id:
-            logger.warning(
-                "_notify_dev_about_idle_tx: PRIMARY_OWNER_ID غير محدّد")
-            return report
+
         app_matches = int(report.get('app_matches') or 0)
         total = int(report.get('total_idle_tx') or 0)
         lines = [
@@ -897,9 +953,7 @@ async def _notify_dev_about_idle_tx(
 async def _lazy_init_columns(bot=None):
     """
     🆕 v7.18.19 FIX-COL-1: أُضيف delete_protected_forward.
-
-    ملاحظة: الجدول قد يحتوي أعمدة إضافية، لكن القائمة هنا
-    هي الحد الأدنى الذي يحتاجه handlers_message.
+    🆕 v7.18.20 FIX-BUG-12: تعامل مع SQLite lock (transient).
     """
     global _columns_initialized, _columns_last_attempt_ts
     global _columns_last_error_log_ts
@@ -920,9 +974,8 @@ async def _lazy_init_columns(bot=None):
         _columns_last_attempt_ts = now
 
         db_type = getattr(DB, "DB_TYPE", "sqlite")
-        logger.info("🔧 v7.18.19: Auto-migration (DB_TYPE=%s)", db_type)
+        logger.info("🔧 v7.18.21: Auto-migration (DB_TYPE=%s)", db_type)
 
-        # 🆕 FIX-COL-1: أُضيف delete_protected_forward
         cols = [
             ("delete_protected_any", "INTEGER DEFAULT 0",
              "TINYINT(1) DEFAULT 0"),
@@ -940,7 +993,6 @@ async def _lazy_init_columns(bot=None):
              "TINYINT(1) DEFAULT 0"),
             ("delete_polls", "INTEGER DEFAULT 0",
              "TINYINT(1) DEFAULT 0"),
-            # 🆕 FIX-COL-1
             ("delete_protected_forward", "INTEGER DEFAULT 0",
              "TINYINT(1) DEFAULT 0"),
         ]
@@ -996,7 +1048,17 @@ async def _lazy_init_columns(bot=None):
                                 f"ADD COLUMN {col_name} {sqlite_def}")
                         except Exception as e:
                             m = str(e).lower()
-                            if ("duplicate" not in m
+                            # 🆕 FIX-BUG-12: تعامل مع SQLite lock
+                            if "database is locked" in m or \
+                               "database table is locked" in m:
+                                logger.warning(
+                                    "⚠️ SQLite lock أثناء ALTER %s "
+                                    "— سيُعاد في الدورة التالية",
+                                    col_name)
+                                migration_ok = False
+                                unexpected_failures.append(
+                                    f"{col_name}: locked")
+                            elif ("duplicate" not in m
                                     and "already exists" not in m):
                                 migration_ok = False
                                 unexpected_failures.append(
@@ -1057,6 +1119,10 @@ _dev_log_cache_lock = asyncio.Lock()
 
 
 async def _get_dev_log_channel_cached():
+    """
+    🆕 v7.18.20 FIX-BUG-1 CRITICAL: كان يستدعي DB.get_log_channel()
+    (غير موجود) بدل DB.get_dev_log_channel(). الآن مع fallback.
+    """
     global _dev_log_cache, _dev_log_cache_ts
     now = time.monotonic()
     if _dev_log_cache is not None and now - _dev_log_cache_ts < DEV_LOG_CACHE_TTL:
@@ -1065,8 +1131,17 @@ async def _get_dev_log_channel_cached():
         now = time.monotonic()
         if _dev_log_cache is not None and now - _dev_log_cache_ts < DEV_LOG_CACHE_TTL:
             return _dev_log_cache
+        # 🆕 FIX-BUG-1: الاسم الصحيح مع fallback للتوافق
+        getter = getattr(DB, 'get_dev_log_channel', None)
+        if not callable(getter):
+            getter = getattr(DB, 'get_log_channel', None)
+        if not callable(getter):
+            logger.debug(
+                "_get_dev_log_channel_cached: DB لا يوفّر "
+                "get_dev_log_channel — تخطّي")
+            return _dev_log_cache
         try:
-            ch = await DB.get_log_channel()
+            ch = await getter()
             _dev_log_cache = ch
             _dev_log_cache_ts = now
             return ch
@@ -1135,6 +1210,10 @@ async def _cleanup_log_rate_tracker():
 
 
 async def _notify_dev_log(context, text):
+    """
+    🆕 v7.18.20 FIX-BUG-7: دعم روابط القنوات الخاصة
+    (https://t.me/c/123456 → -100123456).
+    """
     try:
         if not await _can_send_dev_log():
             return
@@ -1152,13 +1231,25 @@ async def _notify_dev_log(context, text):
         elif ch_str.startswith('@'):
             target = ch_str
         elif ch_str.startswith(('https://', 'http://')):
-            tail = ch_str.rstrip('/').split('/')[-1]
-            if tail.startswith('@'):
-                tail = tail[1:]
-            target = (
-                f"@{tail}"
-                if not tail.lstrip('-').isdigit()
-                else int(tail))
+            # 🆕 FIX-BUG-7: دعم روابط القنوات الخاصة
+            parsed = urlparse(ch_str)
+            path_parts = [p for p in parsed.path.split('/') if p]
+            if not path_parts:
+                return
+            if path_parts[0] == 'c' and len(path_parts) >= 2:
+                try:
+                    raw_id = int(path_parts[1])
+                    target = int(f"-100{raw_id}")
+                except (ValueError, TypeError):
+                    return
+            else:
+                tail = path_parts[-1]
+                if tail.startswith('@'):
+                    tail = tail[1:]
+                if tail.lstrip('-').isdigit():
+                    target = int(tail)
+                else:
+                    target = f"@{tail}"
         else:
             target = f"@{ch_str}"
         await context.bot.send_message(
@@ -1249,6 +1340,9 @@ _running_bg_tasks: set = set()
 
 
 def _spawn_tracked_task(coro, *, label: str = "bg-task"):
+    """
+    🆕 v7.18.20 FIX-BUG-11: استخدام label عبر set_name.
+    """
     if _is_shutting_down():
         try:
             if inspect.iscoroutine(coro):
@@ -1260,6 +1354,10 @@ def _spawn_tracked_task(coro, *, label: str = "bg-task"):
         task = asyncio.create_task(coro)
     except Exception:
         return None
+    try:
+        task.set_name(label)
+    except Exception:
+        pass
     _running_bg_tasks.add(task)
 
     def _cleanup(t):
@@ -1738,6 +1836,9 @@ async def _record_delete_failure(chat_id) -> bool:
 
 
 async def _notify_delete_permission_failure(context, chat_id):
+    """
+    🆕 v7.18.20 FIX-BUG-10: تقليم دوري لـ _delete_failure_notified.
+    """
     try:
         async with _delete_failure_notify_lock:
             now = time.monotonic()
@@ -1745,6 +1846,14 @@ async def _notify_delete_permission_failure(context, chat_id):
             if now - last < _DELETE_FAILURE_NOTIFY_COOLDOWN:
                 return
             _delete_failure_notified[chat_id] = now
+            # 🆕 FIX-BUG-10: تقليم إذا تجاوز الحد
+            if len(_delete_failure_notified) > 5000:
+                stale = [
+                    k for k, ts in _delete_failure_notified.items()
+                    if now - ts > _DELETE_FAILURE_NOTIFY_COOLDOWN * 2
+                ]
+                for k in stale:
+                    _delete_failure_notified.pop(k, None)
         owner_id = int(getattr(CONFIG, 'PRIMARY_OWNER_ID', 0) or 0)
         if not owner_id:
             return
@@ -2257,6 +2366,9 @@ async def _invalidate_after_channel_change(
 
 
 class GroupRateLimiterManager:
+    """
+    🆕 v7.18.20 FIX-BUG-8: time.monotonic() بدل time.time().
+    """
     _limiters: Dict[int, Any] = {}
     _last_access: Dict[int, float] = {}
     _lock = asyncio.Lock()
@@ -2265,7 +2377,7 @@ class GroupRateLimiterManager:
     @classmethod
     async def get(cls, chat_id):
         async with cls._lock:
-            now = time.time()
+            now = time.monotonic()  # ← FIX-BUG-8
             if len(cls._limiters) >= cls.MAX_SIZE and chat_id not in cls._limiters:
                 sorted_items = sorted(
                     cls._last_access.items(), key=lambda item: item[1])
@@ -2284,7 +2396,7 @@ class GroupRateLimiterManager:
         while True:
             try:
                 await asyncio.sleep(CACHE_CLEANUP_INTERVAL)
-                now = time.time()
+                now = time.monotonic()  # ← FIX-BUG-8
                 async with cls._lock:
                     to_remove = [
                         cid for cid, ts in cls._last_access.items()
@@ -2357,6 +2469,18 @@ async def _cleanup_delete_failure_counter():
             ]
             for k in stale:
                 _delete_failure_counter.pop(k, None)
+    except Exception:
+        pass
+    # 🆕 FIX-BUG-10: تنظيف _delete_failure_notified أيضاً
+    try:
+        async with _delete_failure_notify_lock:
+            now = time.monotonic()
+            stale = [
+                k for k, ts in _delete_failure_notified.items()
+                if now - ts > _DELETE_FAILURE_NOTIFY_COOLDOWN * 2
+            ]
+            for k in stale:
+                _delete_failure_notified.pop(k, None)
     except Exception:
         pass
 
@@ -2660,7 +2784,68 @@ def _parse_contest_date(date_str):
     return None
 
 
+# ═════════════════════════════════════════════════════════════════════
+# 🆕 v7.18.21 FIX-ROUTE-2: تحقق من صيغة معرف القناة
+# ═════════════════════════════════════════════════════════════════════
+
+def _parse_channel_ref(raw: str) -> Tuple[bool, str]:
+    """
+    🆕 v7.18.21 FIX-ROUTE-2: التحقق من صيغة معرف قناة.
+
+    يقبل:
+      • @username  (4-32 حرفاً، يبدأ بحرف)
+      • -100xxxxxxxxx  (channel ID)
+      • https://t.me/username  أو  https://t.me/c/123456
+      • t.me/username
+      • username (بدون @)
+
+    يعيد: (True, "") عند النجاح، أو (False, reason).
+    """
+    if not raw:
+        return False, "empty"
+    s = raw.strip()
+    if not s:
+        return False, "empty"
+    # @username
+    if s.startswith('@'):
+        username = s[1:]
+        if re.match(r'^[a-zA-Z][a-zA-Z0-9_]{3,31}$', username):
+            return True, ""
+        return False, "invalid_username"
+    # رقمي (channel ID)
+    if s.lstrip('-').isdigit():
+        try:
+            cid = int(s)
+            if cid != 0:
+                return True, ""
+        except (ValueError, TypeError):
+            pass
+        return False, "invalid_id"
+    # رابط t.me
+    try:
+        parsed = urlparse(s)
+        if (parsed.scheme in ('http', 'https')
+                and parsed.netloc in (
+                    't.me', 'telegram.me', 'telegram.dog')):
+            path = parsed.path.lstrip('/')
+            if path:
+                return True, ""
+            return False, "empty_path"
+    except Exception:
+        pass
+    if s.startswith(('t.me/', 'telegram.me/')):
+        return True, ""
+    # username بدون @
+    if re.match(r'^[a-zA-Z][a-zA-Z0-9_]{3,31}$', s):
+        return True, ""
+    return False, "unknown_format"
+
+
 async def _check_admin_in_chat(context, chat_id, user_id) -> bool:
+    """
+    🆕 v7.18.20 FIX-BUG-9: استخدام ? في كل المزودين
+    (database.py v7.7.64 يحوّلها تلقائياً).
+    """
     if user_id == CONFIG.PRIMARY_OWNER_ID:
         return True
     try:
@@ -2682,14 +2867,11 @@ async def _check_admin_in_chat(context, chat_id, user_id) -> bool:
         pass
     if not result:
         try:
-            db_type = getattr(DB, "DB_TYPE", "sqlite")
-            if db_type == "postgres":
-                sql = ("SELECT 1 FROM group_admins "
-                       "WHERE chat_id = $1 AND user_id = $2 LIMIT 1")
-            else:
-                sql = ("SELECT 1 FROM group_admins "
-                       "WHERE chat_id = ? AND user_id = ? LIMIT 1")
-            row = await DB.fetchval(sql, (chat_id, user_id))
+            # 🆕 FIX-BUG-9: ? دائماً — database.py يحوّلها حسب المزود
+            row = await DB.fetchval(
+                "SELECT 1 FROM group_admins "
+                "WHERE chat_id = ? AND user_id = ? LIMIT 1",
+                (chat_id, user_id))
             result = row is not None
         except Exception:
             result = False
@@ -2896,15 +3078,7 @@ def _accepts_state_arg(handler, handler_name: str) -> bool:
 class MessageHandlers:
 
     # ═══════════════════════════════════════════════════════════════════
-    # 🆕 v7.18.19 FIX-ROUTE-1: _PRIVATE_HANDLERS_MAP مُوسَّعة + fallback
-    # ═══════════════════════════════════════════════════════════════════
-    # المبدأ:
-    #   - الحالات المُعالَجة محلياً في MessageHandlers → اسم الدالة
-    #   - أي حالة أخرى → handle_private يحوّلها إلى CommandHandlers
-    #     عبر fallback (FIX-ROUTE-1).
-    #
-    # هذا يحل مشكلة "الصمت عند إرسال معرف القناة" لأن
-    # WAIT_CHANNEL (وأي حالة أخرى) ستُمرَّر إلى CommandHandlers.
+    # 🆕 v7.18.19 FIX-ROUTE-1 + v7.18.20 FIX-BUG-2 + v7.18.21 FIX-ROUTE-2
     # ═══════════════════════════════════════════════════════════════════
     _PRIVATE_HANDLERS_MAP: Dict[Any, str] = {
         # ─── معالجات محلية ───
@@ -2916,12 +3090,12 @@ class MessageHandlers:
         "WAIT_REPLY_RESPONSE": "handle_add_reply",
         "WAIT_REPLY_ADD": "handle_add_reply",
         "WAIT_REPLY_REMOVE": "handle_remove_reply",
-        # ─── حالات أخرى تُمرَّر إلى CommandHandlers.handle_text ───
-        # WAIT_CHANNEL, WAIT_MIN, WAIT_HOUR, WAIT_DAY, WAIT_PUB_TIME,
-        # WAIT_ADMIN_ADD, WAIT_ADMIN_REM, WAIT_BROADCAST, WAIT_UPDATE,
-        # WAIT_UPDATE_CH, WAIT_FORCE, WAIT_BAN, WAIT_MUTE, WAIT_WARN,
-        # WAIT_KICK, WAIT_RESTRICT, WAIT_UNBAN, WAIT_PIN, WAIT_KEYWORD,
-        # WAIT_REPLY, WAIT_LOG_CH, WAIT_CONTEST_*, WAIT_MAX_LEN, ...
+        # 🆕 v7.18.21 FIX-ROUTE-2: حالات إدخال القناة
+        "WAIT_CHANNEL": "_handle_wait_channel_text",
+        "WAIT_ADD_CHANNEL": "_handle_wait_channel_text",
+        "WAIT_UPDATE_CH": "_handle_wait_channel_text",
+        "WAIT_UPDATE_CHANNEL": "_handle_wait_channel_text",
+        "WAIT_LOG_CH": "_handle_wait_channel_text",
     }
 
     @staticmethod
@@ -2945,13 +3119,12 @@ class MessageHandlers:
     @staticmethod
     async def handle_edited(update, context):
         """
-        🆕 v7.18.19 FIX-EDIT-1: فحص effective_message **قبل** acquire
-        limiter (كان بعده → قد يستهلك limit دون داعٍ).
+        🆕 v7.18.20 FIX-BUG-3: إعادة ترتيب الفحوص.
         """
-        if (not update or not update.effective_chat
-                or not update.edited_message):
+        if update is None or not update.effective_chat:
             return
-        # 🆕 FIX-EDIT-1: الفحص قبل acquire
+        if not update.edited_message:
+            return
         if update.effective_message is None:
             return
         chat_id = update.effective_chat.id
@@ -2970,6 +3143,9 @@ class MessageHandlers:
 
     @staticmethod
     async def _apply_slow_mode(context, chat_id, settings):
+        """
+        🆕 v7.18.20 FIX-BUG-6: إزالة كود ميت.
+        """
         global _SLOW_MODE_UNSUPPORTED
         if not _SLOW_MODE_AUTO:
             return
@@ -3016,16 +3192,13 @@ class MessageHandlers:
                 return
             if target == 0 and last_applied in (0, -1):
                 return
-            _SLOW_ALLOWED = (0, 10, 30, 60, 300, 900, 3600)
+            # 🆕 FIX-BUG-6: قيم slow mode المسموحة من Telegram API
+            _SLOW_ALLOWED = (10, 30, 60, 300, 900, 3600)
             if target <= 0:
                 _target_tg = 0
             else:
                 _target_tg = min(
-                    _SLOW_ALLOWED,
-                    key=lambda x: abs(x - target)
-                    if x >= 10 else 10**9)
-                if _target_tg < 10:
-                    _target_tg = 10
+                    _SLOW_ALLOWED, key=lambda x: abs(x - target))
             _api_success = False
             _api_error = None
             _fn = getattr(
@@ -3091,10 +3264,6 @@ class MessageHandlers:
 
     @staticmethod
     async def _handle_group_impl(update, context, skip_flood=False):
-        """
-        🔴 v7.18.16: skip_flood=True عند التعديل.
-        🆕 v7.18.19 FIX-BWM-3: fallback صحيح عند فشل BWM.
-        """
         if not update.effective_chat or not update.effective_message:
             return
         chat_id = update.effective_chat.id
@@ -3496,9 +3665,6 @@ class MessageHandlers:
                     "mention", settings, is_anonymous=is_anonymous)
                 return
 
-        # ═══════════════════════════════════════════════════════════════
-        # 🔴 v7.18.19 FIX-BWM-3: fallback صحيح عند فشل BWM
-        # ═══════════════════════════════════════════════════════════════
         if _banned_words_enabled:
             matched = None
             bwm_handled = False
@@ -3507,15 +3673,14 @@ class MessageHandlers:
                 try:
                     matched = await BannedWordsManager.check_message(
                         text=ctx.analysis_text, chat_id=chat_id)
-                    bwm_handled = True   # ← مفتاح الإصلاح
+                    bwm_handled = True
                 except Exception as _e_bwm:
                     logger.warning(
                         "⚠️ BannedWordsManager.check_message فشل — "
                         "fallback للنظام القديم: %s", _e_bwm)
                     matched = None
-                    bwm_handled = False  # ← مهم: يسمح بالـ fallback
+                    bwm_handled = False
 
-            # الـ fallback يعمل الآن حتى لو BWM متاح لكن فشل
             if matched is None and not bwm_handled:
                 try:
                     banned_words = await get_banned_words_cached(chat_id)
@@ -3926,19 +4091,149 @@ class MessageHandlers:
             return False
 
     # ═══════════════════════════════════════════════════════════════════
-    # 🆕 v7.18.19 FIX-ROUTE-1: handle_private مع fallback إلى
-    #                          CommandHandlers.handle_text
+    # 🆕 v7.18.21 FIX-ROUTE-2: معالج مباشر لإدخال معرف القناة
     # ═══════════════════════════════════════════════════════════════════
+    @staticmethod
+    async def _handle_wait_channel_text(update, context, state=None):
+        """
+        🆕 v7.18.21 FIX-ROUTE-2: معالجة إدخال معرف القناة.
+
+        يدعم: @username | -100xxx | https://t.me/xxx | t.me/xxx
+
+        المسار:
+          1. تحقق من الصيغة عبر _parse_channel_ref.
+          2. حاول استدعاء معالج مخصص من CommandHandlers
+             (handle_channel_input / process_channel_ref / ...).
+          3. إن لم يوجد، استدعِ CommandHandlers.handle_text (fallback).
+          4. إن فشل كل ذلك، أبلغ المستخدم برسالة واضحة.
+        """
+        user_id = (
+            update.effective_user.id if update.effective_user else None)
+        if not user_id:
+            return
+        message = update.effective_message
+        if not message or not message.text:
+            return
+        lang = await _ensure_lang(update, context)
+        raw = message.text.strip()
+
+        # ─── تحقق من الصيغة ───
+        valid, err_reason = _parse_channel_ref(raw)
+        if not valid:
+            msg = await _trans(
+                'channel_invalid_ref', lang,
+                "❌ صيغة معرف القناة غير صحيحة.\n"
+                "استخدم: <code>@username</code> أو "
+                "<code>-100xxxxxxxxx</code>\n"
+                "أو رابطاً: <code>https://t.me/username</code>")
+            try:
+                await safe_send(
+                    context.bot, user_id, msg, parse_mode='HTML')
+            except Exception:
+                pass
+            logger.warning(
+                "⚠️ WAIT_CHANNEL: صيغة خاطئة | user=%s raw=%r reason=%s",
+                user_id, raw[:40], err_reason)
+            return
+
+        # ─── حاول استدعاء معالج مخصص من CommandHandlers ───
+        processed = False
+        from importlib import import_module
+        for mod_name in (
+            "handlers.handlers_command", "handlers_command",
+            "handlers.command", "command",
+            ".handlers_command", ".command",
+            "commands", "handlers.commands",
+        ):
+            try:
+                if mod_name.startswith("."):
+                    mod = import_module(
+                        mod_name, package=__package__ or None)
+                else:
+                    mod = import_module(mod_name)
+            except ImportError:
+                continue
+            cls = getattr(mod, "CommandHandlers", None)
+            if cls is None:
+                continue
+            for method_name in (
+                "handle_channel_input",
+                "process_channel_ref",
+                "handle_wait_channel",
+                "handle_add_channel",
+            ):
+                method = getattr(cls, method_name, None)
+                if not callable(method):
+                    continue
+                try:
+                    await method(update, context, raw)
+                    logger.info(
+                        "✅ WAIT_CHANNEL: %s.%s نجح (user=%s)",
+                        mod_name, method_name, user_id)
+                    processed = True
+                    break
+                except Exception as _me:
+                    logger.debug(
+                        "WAIT_CHANNEL %s.%s: %s",
+                        mod_name, method_name, _me)
+            if processed:
+                break
+
+        # ─── Fallback: handle_text العامة ───
+        if not processed:
+            for mod_name in (
+                "handlers.handlers_command", "handlers_command",
+                "handlers.command", "command",
+                ".handlers_command", ".command",
+            ):
+                try:
+                    if mod_name.startswith("."):
+                        mod = import_module(
+                            mod_name, package=__package__ or None)
+                    else:
+                        mod = import_module(mod_name)
+                except ImportError:
+                    continue
+                cls = getattr(mod, "CommandHandlers", None)
+                if cls is None:
+                    continue
+                fb = getattr(cls, "handle_text", None)
+                if not callable(fb):
+                    continue
+                try:
+                    await fb(update, context)
+                    processed = True
+                    logger.info(
+                        "✅ WAIT_CHANNEL: fallback handle_text نجح "
+                        "(mod=%s, user=%s)", mod_name, user_id)
+                    break
+                except Exception as _fe:
+                    logger.warning(
+                        "⚠️ WAIT_CHANNEL fallback %s.handle_text: %s",
+                        mod_name, _fe)
+
+        # ─── ملاذ أخير ───
+        if not processed:
+            logger.error(
+                "🚨 WAIT_CHANNEL: لا يوجد معالج متاح | "
+                "user=%s raw=%r", user_id, raw[:40])
+            try:
+                msg = await _trans(
+                    "channel_processing_failed", lang,
+                    "❌ تعذّر معالجة معرف القناة.\n"
+                    "استخدم /cancel ثم أعد المحاولة.")
+                await safe_send(context.bot, user_id, msg)
+            except Exception:
+                pass
+
     @staticmethod
     async def handle_private(update, context):
         """
-        معالج الرسائل الخاصة — يوجّه حسب الحالة.
-
-        🆕 v7.18.19 FIX-ROUTE-1: عند وجود حالة غير مُدرَجة في
-        _PRIVATE_HANDLERS_MAP، يتم تمريرها تلقائياً إلى
-        CommandHandlers.handle_text بدل الصمت التام.
-
-        هذا يحل مشكلة "البوت صامت عند إرسال معرف القناة" وغيرها.
+        معالج الرسائل الخاصة.
+        🆕 v7.18.20 FIX-BUG-2 + v7.18.21 FIX-ROUTE-2:
+          • فحص UserState.NONE ثلاثي آمن.
+          • fallback بـ 7 مسارات متعددة.
+          • إشعار المطور عند حالة غير مُعالَجة.
         """
         try:
             if not update.effective_user:
@@ -3953,23 +4248,29 @@ class MessageHandlers:
             if state is None:
                 return
 
-            # ─── تجاهل NONE (لا عملية جارية) ───
+            # ─── تجاهل NONE ───
             try:
-                if state == UserState.NONE:
-                    return
+                _none_member = getattr(UserState, 'NONE', None)
             except Exception:
-                if state is None or str(state) in (
-                        "UserState.NONE", "NONE"):
-                    return
+                _none_member = None
+            if _none_member is not None and (
+                    state is _none_member or state == _none_member):
+                return
+            try:
+                state_str = str(state)
+            except Exception:
+                state_str = ""
+            if state_str in ("UserState.NONE", "NONE"):
+                return
 
-            # ─── ابحث في الخريطة المحلية ───
+            # ─── الخريطة المحلية ───
             handler_name = MessageHandlers._PRIVATE_HANDLERS_MAP.get(
                 state)
             if not handler_name:
                 for candidate in (
                     getattr(state, 'name', None),
                     getattr(state, 'value', None),
-                    str(state),
+                    state_str,
                 ):
                     if candidate is None:
                         continue
@@ -3979,54 +4280,82 @@ class MessageHandlers:
                     if handler_name:
                         break
 
-            # ─── معالج محلي ───
             if handler_name:
                 handler = getattr(
                     MessageHandlers, handler_name, None)
                 if handler is None:
                     logger.warning(
-                        "⚠️ _PRIVATE_HANDLERS_MAP يشير إلى %s غير موجود",
+                        "⚠️ _PRIVATE_HANDLERS_MAP → %s غير موجود",
                         handler_name)
                 else:
+                    logger.debug(
+                        "↪️ handle_private: محلي %s (state=%r)",
+                        handler_name, state)
                     if _accepts_state_arg(handler, handler_name):
                         await handler(update, context, state)
                     else:
                         await handler(update, context)
                     return
 
-            # ═══════════════════════════════════════════════════════════
-            # 🆕 FIX-ROUTE-1: fallback إلى CommandHandlers.handle_text
-            # (بدل الصمت التام)
-            # ═══════════════════════════════════════════════════════════
-            try:
-                from handlers_command import CommandHandlers
-                fallback = getattr(
-                    CommandHandlers, "handle_text", None)
-                if callable(fallback):
-                    logger.debug(
-                        "↪️ handle_private: تمرير state=%r إلى "
-                        "CommandHandlers.handle_text", state)
-                    await fallback(update, context)
-                    return
-                else:
+            # ═══════════════════════════════════════════════════════
+            # 🆕 FIX-ROUTE-2: مسارات متعددة
+            # ═══════════════════════════════════════════════════════
+            from importlib import import_module
+            _fallback_paths = (
+                ("handlers.handlers_command", "CommandHandlers",
+                 "handle_text"),
+                ("handlers_command", "CommandHandlers", "handle_text"),
+                ("handlers.command", "CommandHandlers", "handle_text"),
+                ("command", "CommandHandlers", "handle_text"),
+                ("commands", "CommandHandlers", "handle_text"),
+                ("handlers.commands", "CommandHandlers", "handle_text"),
+                (".handlers_command", "CommandHandlers", "handle_text"),
+                (".command", "CommandHandlers", "handle_text"),
+            )
+            _tried: List[str] = []
+            _succeeded = False
+            for mod_name, cls_name, method_name in _fallback_paths:
+                try:
+                    if mod_name.startswith("."):
+                        mod = import_module(
+                            mod_name, package=__package__ or None)
+                    else:
+                        mod = import_module(mod_name)
+                except ImportError:
+                    _tried.append(f"{mod_name}:no_module")
+                    continue
+                cls = getattr(mod, cls_name, None)
+                if cls is None:
+                    _tried.append(f"{mod_name}:no_{cls_name}")
+                    continue
+                method = getattr(cls, method_name, None)
+                if not callable(method):
+                    _tried.append(f"{mod_name}:no_{method_name}")
+                    continue
+                try:
+                    await method(update, context)
+                    logger.info(
+                        "✅ FIX-ROUTE-2: fallback نجح عبر "
+                        "%s.%s.%s (state=%r)",
+                        mod_name, cls_name, method_name, state)
+                    _succeeded = True
+                    break
+                except Exception as _me:
+                    _tried.append(
+                        f"{mod_name}:{type(_me).__name__}")
                     logger.warning(
-                        "⚠️ CommandHandlers.handle_text غير موجود — "
-                        "state=%r", state)
-            except ImportError as _ie:
-                logger.warning(
-                    "⚠️ handlers_command غير متاح للـ fallback: %s",
-                    _ie)
-            except Exception as _ce:
-                logger.error(
-                    "❌ fallback CommandHandlers.handle_text: %s",
-                    _ce, exc_info=True)
+                        "⚠️ FIX-ROUTE-2: %s.%s.%s فشل: %s",
+                        mod_name, cls_name, method_name, _me)
+            if _succeeded:
+                return
 
-            # ─── ملاذ أخير — أبلغ المستخدم ───
-            logger.warning(
+            # ─── ملاذ أخير ───
+            logger.error(
                 "🚨 UNHANDLED PRIVATE STATE | user=%s state=%r | "
-                "أضف الحالة إلى _PRIVATE_HANDLERS_MAP أو أضف "
+                "tried=%s | "
+                "أضف الحالة إلى _PRIVATE_HANDLERS_MAP أو أصلح "
                 "CommandHandlers.handle_text",
-                user_id, state)
+                user_id, state, _tried)
             try:
                 lang = await _ensure_lang(update, context)
                 msg = await _trans(
@@ -4034,6 +4363,20 @@ class MessageHandlers:
                     "❌ لم أتعرف على العملية.\n"
                     "استخدم /cancel ثم أعد المحاولة من القائمة.")
                 await safe_send(context.bot, user_id, msg)
+                # إشعار المطور
+                try:
+                    owner_id = int(getattr(
+                        CONFIG, 'PRIMARY_OWNER_ID', 0) or 0)
+                    if owner_id and owner_id != user_id:
+                        await safe_send(
+                            context.bot, owner_id,
+                            f"🚨 <b>UNHANDLED STATE</b>\n"
+                            f"👤 user=<code>{user_id}</code>\n"
+                            f"📊 state=<code>{escape(str(state))}</code>\n"
+                            f"🔎 tried=<code>{escape(','.join(_tried))}</code>",
+                            parse_mode='HTML')
+                except Exception:
+                    pass
             except Exception:
                 pass
         except Exception:
@@ -4901,24 +5244,6 @@ async def handle_autoblocked_command(update, context):
 # ═══════════════════════════════════════════════════════════════════
 
 async def handle_cache_stats_command(update, context):
-    """
-    🆕 v7.18.18: أمر /cache_stats — يعرض إحصائيات كل الـ caches.
-
-    الأقسام المعروضة:
-      1. Banned Words (من banned_words_manager v1.2.0)
-      2. handlers_message caches (group_log, sec_settings, admin_check)
-      3. dev_log cache
-      4. Flood tracker
-      5. Delete failure counter
-      6. Private handlers signature cache
-      7. Compiled banned patterns
-      8. Group rate limiters
-      9. Log rate trackers
-     10. Background tasks
-     11. Detectors pool (إن توفّر)
-
-    للمطور فقط (PRIMARY_OWNER_ID أو is_developer).
-    """
     if not update.effective_user or not update.effective_message:
         return
     user_id = update.effective_user.id
@@ -4943,7 +5268,6 @@ async def handle_cache_stats_command(update, context):
         "━━━━━━━━━━━━━━━━━━━━",
     ]
 
-    # ─── 1. Banned Words ───
     lines.append("")
     lines.append("<b>📚 Banned Words</b>")
     try:
@@ -4977,7 +5301,6 @@ async def handle_cache_stats_command(update, context):
     except Exception as _e:
         lines.append(f"  ❌ <code>{escape(str(_e)[:60])}</code>")
 
-    # ─── 2. handlers_message local caches ───
     lines.append("")
     lines.append("<b>💾 handlers_message caches</b>")
     _cache_specs = [
@@ -5021,7 +5344,6 @@ async def handle_cache_stats_command(update, context):
     except Exception:
         pass
 
-    # ─── 3. Flood tracker ───
     lines.append("")
     lines.append("<b>🌊 Flood Tracker</b>")
     try:
@@ -5034,12 +5356,14 @@ async def handle_cache_stats_command(update, context):
         lines.append(
             f"  • ban_add: <b>{stats.get('ban_add_keys', 0)}</b>")
         lines.append(
+            f"  • cooldown: "
+            f"<b>{stats.get('cooldown_keys', 0)}</b>")
+        lines.append(
             f"  • stale_sec: "
             f"<code>{stats.get('stale_sec', '?')}s</code>")
     except Exception as _e:
         lines.append(f"  ❌ <code>{escape(str(_e)[:60])}</code>")
 
-    # ─── 4. Delete failure counter ───
     lines.append("")
     lines.append("<b>🗑️ Delete Failures</b>")
     try:
@@ -5051,7 +5375,6 @@ async def handle_cache_stats_command(update, context):
     except Exception:
         pass
 
-    # ─── 5. Private handlers signature cache ───
     lines.append("")
     lines.append("<b>🔐 Private Handlers</b>")
     try:
@@ -5063,7 +5386,6 @@ async def handle_cache_stats_command(update, context):
     except Exception:
         pass
 
-    # ─── 6. Compiled banned patterns ───
     lines.append("")
     lines.append("<b>🚫 Compiled Patterns</b>")
     try:
@@ -5078,7 +5400,6 @@ async def handle_cache_stats_command(update, context):
     except Exception:
         pass
 
-    # ─── 7. Group rate limiters ───
     lines.append("")
     lines.append("<b>⚙️ Group Rate Limiters</b>")
     try:
@@ -5090,7 +5411,6 @@ async def handle_cache_stats_command(update, context):
     except Exception:
         pass
 
-    # ─── 8. Log rate trackers ───
     lines.append("")
     lines.append("<b>📝 Log Rate Trackers</b>")
     try:
@@ -5101,7 +5421,6 @@ async def handle_cache_stats_command(update, context):
     except Exception:
         pass
 
-    # ─── 9. Background tasks ───
     lines.append("")
     lines.append("<b>🔄 Background Tasks</b>")
     try:
@@ -5117,7 +5436,6 @@ async def handle_cache_stats_command(update, context):
     except Exception:
         pass
 
-    # ─── 10. Detectors pool (optional) ───
     if _HAS_DET_RUN_IN_POOL and _detectors_module is not None:
         lines.append("")
         lines.append("<b>🛡️ Detectors Pool</b>")
@@ -5136,7 +5454,6 @@ async def handle_cache_stats_command(update, context):
         except Exception:
             pass
 
-    # ─── Footer ───
     lines.append("")
     lines.append("━━━━━━━━━━━━━━━━━━━━")
     try:
@@ -5317,6 +5634,8 @@ __all__ = [
     "_as_bool", "_env_flag", "_check_flood",
     "_cleanup_flood_tracker",
     "_flood_tracker_stats", "_flood_tracker", "_flood_lock",
+    "_flood_cooldown_until",
+    "_FLOOD_COOLDOWN_SEC", "_FLOOD_COOLDOWN_MAX_KEYS",
     "_invalidate_banned_words_cache", "_check_admin_in_chat",
     "_private_handler_signature_cache", "_accepts_state_arg",
     "_notify_dev_log", "_safe_delete_message",
@@ -5377,12 +5696,13 @@ __all__ = [
     "_IDLE_TX_NOTIFY_COOLDOWN",
     "_idle_tx_last_notify",
     "_idle_tx_notify_lock",
-    # v7.18.15/16/19
+    # v7.18.15/16/19/20/21
     "_HAS_BWM",
     "BannedWordsManager",
     "BannedScope",
     "_bwm_contains",
     "_bwm_is_greeting",
+    "_parse_channel_ref",
 ]
 
 
@@ -5392,13 +5712,14 @@ __all__ = [
 
 try:
     logger.info(
-        "✅ handlers_message v7.18.19 loaded | "
+        "✅ handlers_message v7.18.21 loaded | "
         "BWM=%s | PRIVATE_HANDLERS=%d | "
-        "routing-fallback=CommandHandlers | "
+        "routing-fallback=7-paths | "
+        "WAIT_CHANNEL=direct-handler | "
         "detectors-compat=v4.1.0 | "
-        "sync-fallback=degraded | "
         "commands=(cache_stats, db_idle, autoblocked) | "
-        "fixes=(ROUTE-1, BWM-3, COL-1, EDIT-1, STATE-1)",
+        "fixes=(ROUTE-1, ROUTE-2, BWM-3, COL-1, EDIT-1, STATE-1, "
+        "BUG-1..BUG-12)",
         "yes" if _HAS_BWM else "no",
         len(MessageHandlers._PRIVATE_HANDLERS_MAP),
     )
