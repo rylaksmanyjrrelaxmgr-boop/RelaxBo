@@ -3,12 +3,21 @@
 """
 handlers/messages/banned_words_manager.py
 ===============================================================================
-🛡️ Banned Words Manager v1.0.0 — Dual-Path System
+🛡️ Banned Words Manager v1.1.0 — Dual-Path System + Performance Fixes
 ===============================================================================
 
 🎯 المساران المنفصلان:
     1. GlobalBannedWordsPath  (chat_id = -1)     → للمطور
     2. GroupBannedWordsPath   (chat_id = group)  → لمشرف المجموعة
+
+🆕 v1.1.0 (PERFORMANCE + SAFETY FIXES):
+    🔴 FIX-GREET-1: is_arabic_greeting — تقييد substring-match
+                     (كان "با" يطابق "صباحخير" → تجاوز الفلترة!)
+    🔴 FIX-PERF-1:  contains_banned_word — إضافة skip_greeting_check
+                     (كانت is_arabic_greeting تُستدعى N+1 مرة)
+    🔴 FIX-PERF-2:  get_words_for_filtering — cache محلي بـ TTL 30s
+                     (كانت تُعاد البناء + التطبيع لكل رسالة)
+    🔴 FIX-INV-1:   إبطال cache المُدمج في add/remove
 ===============================================================================
 """
 
@@ -17,13 +26,14 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import time as _time
 from collections import OrderedDict
 from enum import Enum
 from typing import Any, List, Optional, Set, Tuple
 
 logger = logging.getLogger(__name__)
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -35,6 +45,10 @@ MIN_WORD_LEN: int = 2
 MAX_WORD_LEN: int = 100
 _COMPACT_MIN_LEN: int = 5
 _CACHE_MAX_PATTERNS: int = 5000
+
+# 🆕 FIX-PERF-2: cache للقائمة المُدمجة (global + group)
+_MERGED_CACHE_TTL: float = 30.0
+_MERGED_CACHE_MAX: int = 500
 
 
 class BannedScope(str, Enum):
@@ -197,9 +211,23 @@ _NORMALIZED_GREETINGS: frozenset = frozenset(
     for g in _ARABIC_GREETINGS_RAW
 ) - {""}
 
+# 🆕 FIX-GREET-1: حد أدنى للطول للسماح بالاحتواء bidir
+# (يمنع "با" من مطابقة "صباحخير")
+_MIN_LEN_FOR_SUBSTRING_MATCH: int = 4
+
 
 def is_arabic_greeting(text: str) -> bool:
-    """هل النص تحية عربية طبيعية قصيرة؟"""
+    """
+    هل النص تحية عربية طبيعية قصيرة؟
+
+    🆕 v1.1.0 FIX-GREET-1:
+        - تم تقييد الفحص بـ:
+            • مساواة دقيقة كاملة (دائماً مسموحة)
+            • احتواء bidir فقط إذا كان طول كل من الطرفين ≥ 4
+        - سابقاً كان `w_norm in g_norm` يقبل كلمات قصيرة جداً
+          مثل "با" (substring من "صباحخير") — مما يسمح بتجاوز
+          فحص الكلمات المحظورة.
+    """
     if not text:
         return False
     text = str(text).strip()
@@ -210,12 +238,14 @@ def is_arabic_greeting(text: str) -> bool:
     if re.search(r"(?:https?://|www\.|t\.me/|@\w+)", text):
         return False
 
+    # 1. مساواة دقيقة كاملة (بعد التطبيع)
     normalized = _normalize_arabic_for_compare(text)
     if not normalized:
         return False
     if normalized in _NORMALIZED_GREETINGS:
         return True
 
+    # 2. فحص كلمة-بكلمة (لنصوص متعددة الكلمات)
     words = re.findall(r"[^\s]+", text)
     if not words or len(words) > 4:
         return False
@@ -226,13 +256,23 @@ def is_arabic_greeting(text: str) -> bool:
         if not w_norm:
             continue
         for g_norm in _NORMALIZED_GREETINGS:
-            if g_norm and (
-                g_norm == w_norm
-                or g_norm in w_norm
-                or w_norm in g_norm
-            ):
+            if not g_norm:
+                continue
+
+            # مساواة دقيقة — دائماً مقبولة
+            if g_norm == w_norm:
                 matched += 1
                 break
+
+            # 🆕 FIX-GREET-1: احتواء bidir مشروط بالطول
+            if (
+                len(w_norm) >= _MIN_LEN_FOR_SUBSTRING_MATCH
+                and len(g_norm) >= _MIN_LEN_FOR_SUBSTRING_MATCH
+            ):
+                if g_norm in w_norm or w_norm in g_norm:
+                    matched += 1
+                    break
+
     return matched == len(words)
 
 
@@ -327,15 +367,30 @@ def _compact_boundary_ok(compact_text: str, compact_word: str) -> bool:
         return True
 
 
-def contains_banned_word(text: str, banned_word: str) -> bool:
-    """هل النص يحتوي الكلمة؟ — يتخطى التحيات، يمنع substring القصير."""
+def contains_banned_word(
+    text: str,
+    banned_word: str,
+    *,
+    skip_greeting_check: bool = False,
+) -> bool:
+    """
+    هل النص يحتوي الكلمة؟ — يتخطى التحيات، يمنع substring القصير.
+
+    🆕 v1.1.0 FIX-PERF-1:
+        - معامل `skip_greeting_check` جديد.
+        - عندما يُستدعى من `check_message` (الذي يفحص التحية مسبقاً)،
+          مرّر skip_greeting_check=True لتجنّب فحص N+1.
+        - الاستدعاء المباشر (خارج check_message) يبقى آمناً:
+          الفحص يعمل تلقائياً (skip=False افتراضياً).
+    """
     if not text or not banned_word:
         return False
     if len(text) > 4000:
         text = text[:4000]
 
     try:
-        if is_arabic_greeting(text):
+        # 🆕 FIX-PERF-1: تخطّي الفحص إن طُلب صراحةً
+        if not skip_greeting_check and is_arabic_greeting(text):
             return False
 
         norm_text = _normalize_text(text).lower()
@@ -370,6 +425,9 @@ def contains_banned_word(text: str, banned_word: str) -> bool:
 # ═════════════════════════════════════════════════════════════════════════════
 
 async def _invalidate_cache(scope_id: Optional[int] = None) -> bool:
+    # 🆕 FIX-INV-1: إبطال cache المُدمج أولاً
+    _invalidate_merged_cache(scope_id)
+
     if _HAS_INV_ASYNC and callable(_inv_async):
         try:
             r = _inv_async(scope_id) if scope_id is not None else _inv_async()
@@ -389,6 +447,27 @@ async def _invalidate_cache(scope_id: Optional[int] = None) -> bool:
             logger.debug("invalidate sync: %s", e)
 
     return False
+
+
+# 🆕 FIX-PERF-2: cache للقائمة المُدمجة
+_merged_words_cache: "OrderedDict[int, Tuple[List[str], float]]" = OrderedDict()
+
+
+def _invalidate_merged_cache(chat_id: Optional[int] = None) -> None:
+    """
+    🆕 v1.1.0 FIX-INV-1: إبطال cache القائمة المُدمجة.
+
+    - chat_id=None          → مسح كل الـ cache.
+    - chat_id=GLOBAL_CHAT_ID → مسح كل الـ cache (تغيير global يمسّ الجميع).
+    - chat_id=<group_id>    → مسح إدخال المجموعة فقط.
+    """
+    try:
+        if chat_id is None or chat_id == GLOBAL_CHAT_ID:
+            _merged_words_cache.clear()
+            return
+        _merged_words_cache.pop(int(chat_id), None)
+    except Exception:
+        pass
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -737,7 +816,30 @@ class BannedWordsManager:
 
     @staticmethod
     async def get_words_for_filtering(chat_id: int) -> List[str]:
-        """القائمة المُدمجة (global + group) للفلترة."""
+        """
+        القائمة المُدمجة (global + group) للفلترة.
+
+        🆕 v1.1.0 FIX-PERF-2:
+            - cache محلي بـ TTL 30s لكل chat_id.
+            - يُبطَل تلقائياً عند add/remove (عبر _invalidate_cache
+              → _invalidate_merged_cache).
+            - سابقاً: بناء + تطبيع لكل رسالة (N عمليات regex).
+            - الآن: بناء مرة واحدة كل 30s (أو عند التغيير).
+        """
+        now = _time.monotonic()
+        try:
+            cid_int = int(chat_id)
+        except (TypeError, ValueError):
+            cid_int = 0
+
+        entry = _merged_words_cache.get(cid_int)
+        if entry is not None:
+            cached_words, cached_at = entry
+            if now - cached_at < _MERGED_CACHE_TTL:
+                _merged_words_cache.move_to_end(cid_int)
+                return cached_words
+
+        # بناء جديد
         result: List[str] = []
         seen: Set[str] = set()
 
@@ -762,11 +864,27 @@ class BannedWordsManager:
             except Exception as e:
                 logger.debug("get group words for filtering: %s", e)
 
+        # خزّن النتيجة
+        try:
+            _merged_words_cache[cid_int] = (result, now)
+            if len(_merged_words_cache) > _MERGED_CACHE_MAX:
+                _merged_words_cache.popitem(last=False)
+        except Exception:
+            pass
+
         return result
 
     @staticmethod
     async def check_message(text: str, chat_id: int) -> Optional[str]:
-        """فحص رسالة — يُرجع الكلمة المطابقة أو None."""
+        """
+        فحص رسالة — يُرجع الكلمة المطابقة أو None.
+
+        🆕 v1.1.0 FIX-PERF-1:
+            - is_arabic_greeting تُستدعى مرة واحدة هنا.
+            - contains_banned_word يُستدعى بـ skip_greeting_check=True
+              (لأننا فحصنا مسبقاً).
+            - سابقاً: N+1 استدعاء لـ is_arabic_greeting (N = عدد الكلمات).
+        """
         if not text:
             return None
         if is_arabic_greeting(text):
@@ -781,7 +899,8 @@ class BannedWordsManager:
             return None
 
         for bw in words:
-            if contains_banned_word(text, bw):
+            # 🆕 FIX-PERF-1: تخطّي فحص التحية (تمّ مسبقاً)
+            if contains_banned_word(text, bw, skip_greeting_check=True):
                 return bw
         return None
 
@@ -821,6 +940,11 @@ __all__ = [
     "contains_banned_word",
     "is_arabic_greeting",
     "__version__",
+    # 🆕 v1.1.0 — exports للإبطال اليدوي
+    "_invalidate_merged_cache",
+    "_merged_words_cache",
+    "_MERGED_CACHE_TTL",
+    "_MERGED_CACHE_MAX",
 ]
 
 
@@ -833,11 +957,13 @@ try:
         "✅ banned_words_manager v%s loaded | "
         "DUAL-PATH (global=%d, group) | "
         "greetings=%d | compact_min=%d | "
+        "merged_cache_ttl=%.0fs | "
         "detector_helpers=%s | db=%s | cache=%s",
         __version__,
         GLOBAL_CHAT_ID,
         len(_ARABIC_GREETINGS_RAW),
         _COMPACT_MIN_LEN,
+        _MERGED_CACHE_TTL,
         "yes" if _HAS_DETECTOR_HELPERS else "no",
         "yes" if _HAS_DB else "no",
         "yes" if _HAS_BANNED_CACHE else "no",
