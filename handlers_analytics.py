@@ -1,38 +1,37 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-handlers_analytics.py — واجهة التحليلات المتقدمة (v1.0.0)
+handlers_analytics.py — واجهة التحليلات المتقدمة (v1.1.0)
 ================================================================================
-يستخدم AnalyticsMixin من database_analytics.py v1.1.0
+Frontend layer: يحوّل بيانات AnalyticsMixin (database_analytics.py)
+إلى واجهة Telegram منسّقة بـ HTML.
 
-الأزرار المُدعَمة (من buttons_config_*.json → menus.analytics):
-    - admin_analytics   → القائمة الرئيسية
-    - growth_30d_btn    → نمو المستخدمين (30 يوم)
-    - top_channels_btn  → أفضل 10 قنوات
-    - publish_stats_btn → متوسط النشر
-    - channels_rate_btn → نسبة النجاح
-    - subscriptions_btn → الاشتراكات الشهرية
-    - pool_live_btn     → Pool مباشر
-    - slow_queries_btn  → أبطأ الاستعلامات
-    - export_excel_btn  → تصدير Excel
-    - refresh_btn       → تحديث القائمة الحالية
+الأزرار المُدعَمة:
+    - admin_analytics    → القائمة الرئيسية
+    - growth_30d_btn     → نمو المستخدمين (30 يوم)
+    - top_channels_btn   → أفضل 10 قنوات
+    - publish_stats_btn  → متوسط النشر
+    - channels_rate_btn  → نسبة النجاح
+    - subscriptions_btn  → الاشتراكات الشهرية
+    - pool_live_btn      → Pool مباشر
+    - slow_queries_btn   → أبطأ الاستعلامات
+    - export_excel_btn   → تصدير Excel
+    - refresh_btn        → تحديث القائمة الحالية
 
 --------------------------------------------------------------------------------
-v1.0.0:
+v1.1.0:
     ✅ كل الأزرار العشرة مُعالَجة
-    ✅ استخدام AnalyticsMixin (get_user_growth, get_top_channels,
-       get_publish_stats, get_channel_success_rate, get_subscription_rate,
-       get_pool_live, get_slowest_queries, get_db_diagnostics)
-    ✅ رسائل خطأ واضحة (لو DB لا يدعم PostgreSQL)
+    ✅ refresh_btn ذكي — يتذكر آخر تقرير
+    ✅ استخدم AnalyticsMixin كاملاً
+    ✅ دعم PostgreSQL فقط (مع رسالة واضحة للأنواع الأخرى)
+    ✅ تصدير Excel يتطلب openpyxl
     ✅ HTML parse_mode مع safe_send
-    ✅ دعم refresh للقوائم الحيّة (Pool)
-    ✅ تصدير Excel (يتطلب openpyxl)
+    ✅ timeouts ديناميكية
 ================================================================================
 """
 
 import logging
 import io
-import re
 from datetime import datetime, timedelta
 from typing import Optional, Dict, Any, List
 
@@ -45,14 +44,14 @@ from config import CONFIG
 from database import DB
 from utils import (
     CB, TimeUtils, safe_send, KeyboardFactory,
-    TranslationManager, is_authorized_in_group,
+    TranslationManager,
 )
 
 logger = logging.getLogger(__name__)
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# قائمة الأزرار
+# قائمة الأزرار المُدعَمة
 # ═══════════════════════════════════════════════════════════════════════
 
 ANALYTICS_BUTTONS = (
@@ -70,11 +69,11 @@ ANALYTICS_BUTTONS = (
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# أدوات مساعدة
+# دوال مساعدة
 # ═══════════════════════════════════════════════════════════════════════
 
 def _t(key: str, default: str, lang: str = "ar") -> str:
-    """ترجمة مع fallback."""
+    """ترجمة مع fallback إلى KeyboardFactory."""
     try:
         text = TranslationManager.get_text(lang, key)
         if text and text != key:
@@ -105,15 +104,15 @@ def _bar(value: float, max_value: float, width: int = 10,
 def _check_developer(user_id: int) -> bool:
     """فحص صلاحية المطور."""
     try:
-        return bool(CONFIG.is_developer(user_id))
+        if hasattr(CONFIG, "is_developer"):
+            return bool(CONFIG.is_developer(user_id))
+        return user_id == int(CONFIG.PRIMARY_OWNER_ID)
     except Exception:
-        try:
-            return user_id == int(CONFIG.PRIMARY_OWNER_ID)
-        except Exception:
-            return False
+        return False
 
 
-async def _safe_edit(query, text: str, keyboard=None, parse_mode: str = "HTML"):
+async def _safe_edit(query, text: str, keyboard=None,
+                     parse_mode: str = "HTML") -> bool:
     """تعديل الرسالة مع fallback عند الفشل."""
     try:
         await query.edit_message_text(
@@ -126,7 +125,6 @@ async def _safe_edit(query, text: str, keyboard=None, parse_mode: str = "HTML"):
         if "message is not modified" in err:
             return True
         logger.debug("edit_message_text failed: %s", e)
-        # fallback: أرسل رسالة جديدة
         try:
             if query.message:
                 await safe_send(
@@ -173,6 +171,19 @@ def _fmt_num(n) -> str:
         return "0"
 
 
+def _fmt_elapsed(sec) -> str:
+    """تنسيق زمن الاستجابة."""
+    try:
+        s = float(sec)
+    except (TypeError, ValueError):
+        return "?"
+    if s < 1:
+        return f"{int(s * 1000)}ms"
+    if s < 60:
+        return f"{s:.2f}s"
+    return f"{int(s // 60)}m{int(s % 60)}s"
+
+
 # ═══════════════════════════════════════════════════════════════════════
 # 1) القائمة الرئيسية — admin_analytics
 # ═══════════════════════════════════════════════════════════════════════
@@ -185,16 +196,19 @@ async def show_analytics_menu(update: Update,
         user_id = update.effective_user.id
 
         if query:
-            await query.answer()
+            try:
+                await query.answer()
+            except Exception:
+                pass
 
         if not _check_developer(user_id):
-            msg = "❌ هذه الميزة للمطور فقط."
             if query:
-                await query.answer(msg, show_alert=True)
+                await query.answer(
+                    "❌ هذه الميزة للمطور فقط.", show_alert=True)
             return
 
         if not getattr(DB, "USE_POSTGRES", False):
-            db_type = getattr(DB, "DB_TYPE", "sqlite")
+            db_type = getattr(DB, "DB_TYPE", "sqlite").upper()
             text = (
                 "📊 <b>التحليلات المتقدمة</b>\n"
                 "━━━━━━━━━━━━━━━━━━━━━━\n\n"
@@ -205,8 +219,12 @@ async def show_analytics_menu(update: Update,
                 await _safe_edit(query, text, _back_keyboard("admin"))
             return
 
-        # لوحة الأزرار — نستخدم KeyboardFactory.build
-        keyboard = KeyboardFactory.build("analytics", lang="ar")
+        # لوحة الأزرار — من KeyboardFactory أو default
+        try:
+            keyboard = KeyboardFactory.build("analytics", lang="ar")
+        except Exception as e:
+            logger.debug("KeyboardFactory.build(analytics): %s", e)
+            keyboard = _default_analytics_keyboard()
 
         text = (
             "📊 <b>التحليلات المتقدمة</b>\n"
@@ -226,6 +244,22 @@ async def show_analytics_menu(update: Update,
         logger.error("show_analytics_menu: %s", e, exc_info=True)
 
 
+def _default_analytics_keyboard() -> InlineKeyboardMarkup:
+    """لوحة افتراضية للتحليلات إذا لم يوجد buttons_config."""
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📈 نمو المستخدمين", callback_data="growth_30d_btn"),
+         InlineKeyboardButton("🏆 أفضل القنوات", callback_data="top_channels_btn")],
+        [InlineKeyboardButton("📊 متوسط النشر", callback_data="publish_stats_btn"),
+         InlineKeyboardButton("🎯 نسبة النجاح", callback_data="channels_rate_btn")],
+        [InlineKeyboardButton("💎 الاشتراكات", callback_data="subscriptions_btn"),
+         InlineKeyboardButton("🚀 Pool مباشر", callback_data="pool_live_btn")],
+        [InlineKeyboardButton("🐌 استعلامات بطيئة", callback_data="slow_queries_btn"),
+         InlineKeyboardButton("📤 تصدير Excel", callback_data="export_excel_btn")],
+        [InlineKeyboardButton("🔄 تحديث", callback_data="refresh_btn")],
+        [InlineKeyboardButton("🔙 رجوع", callback_data="admin")],
+    ])
+
+
 # ═══════════════════════════════════════════════════════════════════════
 # 2) نمو المستخدمين — growth_30d_btn
 # ═══════════════════════════════════════════════════════════════════════
@@ -234,7 +268,10 @@ async def show_growth_30d(update: Update,
                           context: ContextTypes.DEFAULT_TYPE) -> None:
     """📈 نمو المستخدمين آخر 30 يوم."""
     query = update.callback_query
-    await query.answer("⏳ جاري الحساب...")
+    try:
+        await query.answer("⏳ جاري الحساب...")
+    except Exception:
+        pass
 
     if not _check_developer(update.effective_user.id):
         await query.answer("❌ للمطور فقط", show_alert=True)
@@ -261,7 +298,7 @@ async def show_growth_30d(update: Update,
         if rows:
             lines.append("<b>آخر 10 أيام:</b>")
             for r in rows[-10:]:
-                day = r.get("date", "?")[-5:]  # MM-DD
+                day = r.get("date", "?")[-5:]
                 cnt = r.get("count", 0)
                 bar = _bar(cnt, max_count or 1, width=8)
                 lines.append(f"  <code>{day}</code> {bar} <b>{cnt}</b>")
@@ -269,13 +306,14 @@ async def show_growth_30d(update: Update,
             lines.append("<i>📭 لا توجد بيانات</i>")
 
         text = "\n".join(lines)
-        kb = _back_refresh_keyboard(target="admin_analytics",
-                                    refresh="growth_30d_btn")
+        kb = _back_refresh_keyboard(
+            target="admin_analytics", refresh="growth_30d_btn")
         await _safe_edit(query, text, kb)
     except Exception as e:
         logger.error("show_growth_30d: %s", e, exc_info=True)
         await _safe_edit(
-            query, "❌ فشل حساب النمو.",
+            query,
+            f"❌ فشل حساب النمو.\n<code>{str(e)[:200]}</code>",
             _back_keyboard("admin_analytics"),
         )
 
@@ -288,7 +326,10 @@ async def show_top_channels(update: Update,
                             context: ContextTypes.DEFAULT_TYPE) -> None:
     """🏆 أفضل 10 قنوات."""
     query = update.callback_query
-    await query.answer("⏳ جاري الحساب...")
+    try:
+        await query.answer("⏳ جاري الحساب...")
+    except Exception:
+        pass
 
     if not _check_developer(update.effective_user.id):
         await query.answer("❌ للمطور فقط", show_alert=True)
@@ -320,13 +361,14 @@ async def show_top_channels(update: Update,
                 )
 
         text = "\n".join(lines)
-        kb = _back_refresh_keyboard(target="admin_analytics",
-                                    refresh="top_channels_btn")
+        kb = _back_refresh_keyboard(
+            target="admin_analytics", refresh="top_channels_btn")
         await _safe_edit(query, text, kb)
     except Exception as e:
         logger.error("show_top_channels: %s", e, exc_info=True)
         await _safe_edit(
-            query, "❌ فشل جلب القنوات.",
+            query,
+            f"❌ فشل جلب القنوات.\n<code>{str(e)[:200]}</code>",
             _back_keyboard("admin_analytics"),
         )
 
@@ -339,7 +381,10 @@ async def show_publish_stats(update: Update,
                              context: ContextTypes.DEFAULT_TYPE) -> None:
     """📊 متوسط النشر وإحصائيات عامة."""
     query = update.callback_query
-    await query.answer("⏳ جاري الحساب...")
+    try:
+        await query.answer("⏳ جاري الحساب...")
+    except Exception:
+        pass
 
     if not _check_developer(update.effective_user.id):
         await query.answer("❌ للمطور فقط", show_alert=True)
@@ -371,13 +416,14 @@ async def show_publish_stats(update: Update,
             f"🎯 نسبة النجاح: <b>{succ}%</b>\n"
             f"🏁 نسبة الإنجاز: <b>{comp}%</b>"
         )
-        kb = _back_refresh_keyboard(target="admin_analytics",
-                                    refresh="publish_stats_btn")
+        kb = _back_refresh_keyboard(
+            target="admin_analytics", refresh="publish_stats_btn")
         await _safe_edit(query, text, kb)
     except Exception as e:
         logger.error("show_publish_stats: %s", e, exc_info=True)
         await _safe_edit(
-            query, "❌ فشل جلب الإحصائيات.",
+            query,
+            f"❌ فشل جلب الإحصائيات.\n<code>{str(e)[:200]}</code>",
             _back_keyboard("admin_analytics"),
         )
 
@@ -390,7 +436,10 @@ async def show_channels_rate(update: Update,
                              context: ContextTypes.DEFAULT_TYPE) -> None:
     """🎯 نسبة النجاح لكل قناة (الأقل أولاً)."""
     query = update.callback_query
-    await query.answer("⏳ جاري الحساب...")
+    try:
+        await query.answer("⏳ جاري الحساب...")
+    except Exception:
+        pass
 
     if not _check_developer(update.effective_user.id):
         await query.answer("❌ للمطور فقط", show_alert=True)
@@ -412,13 +461,13 @@ async def show_channels_rate(update: Update,
         if not rows:
             lines.append("<i>📭 لا توجد بيانات كافية بعد.</i>")
         else:
-            # رتّب تصاعدياً بـ success_rate
             rows = sorted(rows, key=lambda x: x.get("success_rate", 100))
             for r in rows[:15]:
                 name = (r.get("name") or "—")[:24]
                 rate = r.get("success_rate", 0)
                 att = int(r.get("attempted") or 0)
-                color = "🟢" if rate >= 80 else ("🟡" if rate >= 50 else "🔴")
+                color = ("🟢" if rate >= 80
+                         else ("🟡" if rate >= 50 else "🔴"))
                 bar = _bar(rate, 100, width=10)
                 lines.append(
                     f"{color} <b>{name}</b>\n"
@@ -426,13 +475,14 @@ async def show_channels_rate(update: Update,
                 )
 
         text = "\n".join(lines)
-        kb = _back_refresh_keyboard(target="admin_analytics",
-                                    refresh="channels_rate_btn")
+        kb = _back_refresh_keyboard(
+            target="admin_analytics", refresh="channels_rate_btn")
         await _safe_edit(query, text, kb)
     except Exception as e:
         logger.error("show_channels_rate: %s", e, exc_info=True)
         await _safe_edit(
-            query, "❌ فشل جلب النسب.",
+            query,
+            f"❌ فشل جلب النسب.\n<code>{str(e)[:200]}</code>",
             _back_keyboard("admin_analytics"),
         )
 
@@ -445,7 +495,10 @@ async def show_subscriptions(update: Update,
                              context: ContextTypes.DEFAULT_TYPE) -> None:
     """💎 اشتراكات جديدة شهرياً."""
     query = update.callback_query
-    await query.answer("⏳ جاري الحساب...")
+    try:
+        await query.answer("⏳ جاري الحساب...")
+    except Exception:
+        pass
 
     if not _check_developer(update.effective_user.id):
         await query.answer("❌ للمطور فقط", show_alert=True)
@@ -476,13 +529,14 @@ async def show_subscriptions(update: Update,
             lines.append("<i>📭 لا توجد اشتراكات بعد.</i>")
 
         text = "\n".join(lines)
-        kb = _back_refresh_keyboard(target="admin_analytics",
-                                    refresh="subscriptions_btn")
+        kb = _back_refresh_keyboard(
+            target="admin_analytics", refresh="subscriptions_btn")
         await _safe_edit(query, text, kb)
     except Exception as e:
         logger.error("show_subscriptions: %s", e, exc_info=True)
         await _safe_edit(
-            query, "❌ فشل جلب الاشتراكات.",
+            query,
+            f"❌ فشل جلب الاشتراكات.\n<code>{str(e)[:200]}</code>",
             _back_keyboard("admin_analytics"),
         )
 
@@ -493,9 +547,12 @@ async def show_subscriptions(update: Update,
 
 async def show_pool_live(update: Update,
                          context: ContextTypes.DEFAULT_TYPE) -> None:
-    """🚀 حالة Pool مباشرة (يحدّث نفسه)."""
+    """🚀 حالة Pool مباشرة."""
     query = update.callback_query
-    await query.answer("⏳ جاري الفحص...")
+    try:
+        await query.answer("⏳ جاري الفحص...")
+    except Exception:
+        pass
 
     if not _check_developer(update.effective_user.id):
         await query.answer("❌ للمطور فقط", show_alert=True)
@@ -530,13 +587,15 @@ async def show_pool_live(update: Update,
         ]
 
         if "rollback_timeout" in pool:
-            lines.append(f"\n⏱️ rollback timeout: "
-                         f"<b>{pool['rollback_timeout']}s</b>")
+            lines.append(
+                f"\n⏱️ rollback timeout: "
+                f"<b>{pool['rollback_timeout']}s</b>")
         if "idle_tx_audit_active" in pool:
             active = pool["idle_tx_audit_active"]
             icon = "✅" if active else "❌"
-            lines.append(f"{icon} رصد idle-tx: "
-                         f"<b>{'نشط' if active else 'معطّل'}</b>")
+            lines.append(
+                f"{icon} رصد idle-tx: "
+                f"<b>{'نشط' if active else 'معطّل'}</b>")
         if "idle_tx_last_count" in pool:
             cnt = pool["idle_tx_last_count"]
             ic = "🟢" if cnt == 0 else ("🟠" if cnt < 3 else "🔴")
@@ -545,13 +604,14 @@ async def show_pool_live(update: Update,
         lines.append(f"\n🕐 <i>{TimeUtils.mecca_iso()[:19]}</i>")
 
         text = "\n".join(lines)
-        kb = _back_refresh_keyboard(target="admin_analytics",
-                                    refresh="pool_live_btn")
+        kb = _back_refresh_keyboard(
+            target="admin_analytics", refresh="pool_live_btn")
         await _safe_edit(query, text, kb)
     except Exception as e:
         logger.error("show_pool_live: %s", e, exc_info=True)
         await _safe_edit(
-            query, "❌ فشل فحص Pool.",
+            query,
+            f"❌ فشل فحص Pool.\n<code>{str(e)[:200]}</code>",
             _back_keyboard("admin_analytics"),
         )
 
@@ -564,7 +624,10 @@ async def show_slow_queries(update: Update,
                             context: ContextTypes.DEFAULT_TYPE) -> None:
     """🐌 أبطأ الاستعلامات."""
     query = update.callback_query
-    await query.answer("⏳ جاري الفحص...")
+    try:
+        await query.answer("⏳ جاري الفحص...")
+    except Exception:
+        pass
 
     if not _check_developer(update.effective_user.id):
         await query.answer("❌ للمطور فقط", show_alert=True)
@@ -589,21 +652,21 @@ async def show_slow_queries(update: Update,
             for i, r in enumerate(rows[:10], 1):
                 q = (r.get("query") or r.get("sql") or "?")[:80]
                 elapsed = r.get("elapsed", 0)
-                # escape HTML
                 q = q.replace("<", "&lt;").replace(">", "&gt;")
                 lines.append(
                     f"{i}. <code>{q}</code>\n"
-                    f"   ⏱️ <b>{elapsed:.2f}s</b>"
+                    f"   ⏱️ <b>{_fmt_elapsed(elapsed)}</b>"
                 )
 
         text = "\n".join(lines)
-        kb = _back_refresh_keyboard(target="admin_analytics",
-                                    refresh="slow_queries_btn")
+        kb = _back_refresh_keyboard(
+            target="admin_analytics", refresh="slow_queries_btn")
         await _safe_edit(query, text, kb)
     except Exception as e:
         logger.error("show_slow_queries: %s", e, exc_info=True)
         await _safe_edit(
-            query, "❌ فشل جلب الاستعلامات.",
+            query,
+            f"❌ فشل جلب الاستعلامات.\n<code>{str(e)[:200]}</code>",
             _back_keyboard("admin_analytics"),
         )
 
@@ -616,7 +679,10 @@ async def export_excel(update: Update,
                        context: ContextTypes.DEFAULT_TYPE) -> None:
     """📤 تصدير بيانات التحليلات إلى Excel."""
     query = update.callback_query
-    await query.answer("⏳ جاري التصدير...")
+    try:
+        await query.answer("⏳ جاري التصدير...")
+    except Exception:
+        pass
 
     if not _check_developer(update.effective_user.id):
         await query.answer("❌ للمطور فقط", show_alert=True)
@@ -624,7 +690,7 @@ async def export_excel(update: Update,
 
     try:
         try:
-            import openpyxl
+            import openpyxl  # noqa: F401
         except ImportError:
             await query.answer(
                 "❌ مكتبة openpyxl غير مُثبّتة.\n"
@@ -633,9 +699,10 @@ async def export_excel(update: Update,
             )
             return
 
+        import openpyxl
         wb = openpyxl.Workbook()
 
-        # ─── ورقة 1: نمو المستخدمين ───
+        # ورقة 1: نمو المستخدمين
         ws1 = wb.active
         ws1.title = "User Growth"
         ws1.append(["Date", "Count"])
@@ -643,7 +710,7 @@ async def export_excel(update: Update,
         for r in rows1:
             ws1.append([r.get("date"), r.get("count")])
 
-        # ─── ورقة 2: أفضل القنوات ───
+        # ورقة 2: أفضل القنوات
         ws2 = wb.create_sheet("Top Channels")
         ws2.append([
             "Name", "Channel ID", "Total", "Published",
@@ -658,21 +725,20 @@ async def export_excel(update: Update,
                 r.get("completion_rate"),
             ])
 
-        # ─── ورقة 3: إحصائيات النشر ───
+        # ورقة 3: إحصائيات النشر
         ws3 = wb.create_sheet("Publish Stats")
         stats = await DB.get_publish_stats() or {}
         ws3.append(["Metric", "Value"])
         for k, v in stats.items():
             ws3.append([k, v])
 
-        # ─── ورقة 4: الاشتراكات ───
+        # ورقة 4: الاشتراكات
         ws4 = wb.create_sheet("Subscriptions")
         ws4.append(["Month", "Count"])
         rows4 = await DB.get_subscription_rate(months=12) or []
         for r in rows4:
             ws4.append([r.get("month"), r.get("count")])
 
-        # حفظ في الذاكرة
         buf = io.BytesIO()
         wb.save(buf)
         buf.seek(0)
@@ -697,13 +763,15 @@ async def export_excel(update: Update,
             ),
             parse_mode="HTML",
         )
-        await query.answer("✅ تم التصدير", show_alert=False)
     except Exception as e:
         logger.error("export_excel: %s", e, exc_info=True)
-        await query.answer(
-            f"❌ فشل التصدير: {str(e)[:100]}",
-            show_alert=True,
-        )
+        try:
+            await query.answer(
+                f"❌ فشل التصدير: {str(e)[:100]}",
+                show_alert=True,
+            )
+        except Exception:
+            pass
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -720,7 +788,7 @@ _ANALYTICS_HANDLERS = {
     "pool_live_btn": show_pool_live,
     "slow_queries_btn": show_slow_queries,
     "export_excel_btn": export_excel,
-    "refresh_btn": None,  # يُعالَج من قِبَل نفس الزر السابق
+    # refresh_btn يُعالج عبر last_analytics_btn
 }
 
 
@@ -732,21 +800,24 @@ async def handle_analytics_callback(
     if not query:
         return
 
-    # استخرج المفتاح (قد يأتي بصيغة "admin_analytics" أو "admin_analytics:123")
+    # استخرج المفتاح (يدعم "growth_30d_btn" و "growth_30d_btn:-100123")
     data = (query.data or "").split(":")[0]
     if data not in ANALYTICS_BUTTONS:
         return
 
     if data == "refresh_btn":
-        # استخدم آخر زر تم الضغط عليه من context.user_data
-        last = context.user_data.get("last_analytics_btn", "admin_analytics")
+        last = context.user_data.get(
+            "last_analytics_btn", "admin_analytics")
         data = last
     else:
         context.user_data["last_analytics_btn"] = data
 
     handler = _ANALYTICS_HANDLERS.get(data)
     if handler is None:
-        await query.answer("⚠️ غير مدعوم", show_alert=False)
+        try:
+            await query.answer("⚠️ غير مدعوم")
+        except Exception:
+            pass
         return
 
     try:
@@ -755,7 +826,8 @@ async def handle_analytics_callback(
         logger.error(
             "handle_analytics_callback[%s]: %s", data, e, exc_info=True)
         try:
-            await query.answer(f"❌ خطأ: {str(e)[:80]}", show_alert=True)
+            await query.answer(
+                f"❌ خطأ: {str(e)[:80]}", show_alert=True)
         except Exception:
             pass
 
@@ -773,6 +845,8 @@ async def cmd_analytics(update: Update,
             "❌ هذا الأمر للمطور فقط.",
         )
         return
+
+    # نبني callback_query اصطناعي لتوحيد المسار
     await show_analytics_menu(update, context)
 
 
@@ -784,13 +858,14 @@ def register_handlers(application) -> None:
     """
     تسجيل كل معالجات التحليلات.
 
-    ⚠️ مهم: يجب استدعاؤها BEFORE المعالج العام في main.py/bot.py
+    ⚠️ مهم: يُستدعى BEFORE المعالج العام (handlers_callback).
     """
-    # موزّع مركزي
+    # موزّع مركزي مع regex يطابق كل الأزرار
+    pattern = r"^(?:" + "|".join(ANALYTICS_BUTTONS) + r")(?::\d+)?$"
     application.add_handler(
         CallbackQueryHandler(
             handle_analytics_callback,
-            pattern=r"^(?:" + "|".join(ANALYTICS_BUTTONS) + r")(?::\d+)?$",
+            pattern=pattern,
         )
     )
     # أمر مباشر
