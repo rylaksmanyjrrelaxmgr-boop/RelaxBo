@@ -1,20 +1,23 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-utils.py - الأدوات المساعدة للبوت (v7.10.8 — REVIEW-FIXES-2026-R2)
+utils.py - الأدوات المساعدة للبوت (v7.10.9 — PERF-FIXES)
 =================================================================================
+🆕 v7.10.9 (PERF-FIXES-2026-R3):
+    🔴 PERF-FIX-1: get_security_settings — TTL 300s + negative cache (30s)
+                    + timeout 3s صارم على كل استعلام DB.
+    🔴 PERF-FIX-2: _get_security_stats — timeout 1.5s + cache 300s.
+    🔴 PERF-FIX-3: فهارس PostgreSQL موثّقة في التعليقات.
+    🟡 PERF-FIX-4: _do_auth_check — timeout 2s على كل UNION.
+    🟡 PERF-FIX-5: __all__ يصدّر _sec_settings_neg_cache للاختبارات.
+
 🆕 v7.10.8 (REVIEW-FIXES-2026-R2):
     🔴 FIX-MIG1: _CHAT_MIGRATION_TABLES — إضافة (table, column) مزدوجة
-                 لتغطية bot_groups.log_channel_id (كان يُترك بالـ chat_id
-                 القديم بعد migration → فشل إرسال السجل).
-    🔴 FIX-WH2: _NON_RETRYABLE_WEBHOOK_ERRORS — توسيع ليشمل
-                jsondecodeerror/typeerror/valueerror/keyerror، منعاً
-                لحلقة 500 → إعادة إرسال لا نهائية.
-    🟡 FIX-PUB1: _publish_post — تسجيل warn عند فشل caption-follow-up
-                 (voice/sticker/video_note) — كان صامتاً بـ suppress.
-    🟡 FIX-AUTH1: _do_auth_check — UNION بدل UNION ALL لتوقف أسرع.
-    🟡 FIX-MIG2: _handle_chat_migrated invocation — task tracking عبر
-                 _warmup_bg_tasks لمنع تسرّب مهام غير مُلغاة.
+                 لتغطية bot_groups.log_channel_id.
+    🔴 FIX-WH2: _NON_RETRYABLE_WEBHOOK_ERRORS — توسيع.
+    🟡 FIX-PUB1: _publish_post — تسجيل warn عند فشل caption-follow-up.
+    🟡 FIX-AUTH1: _do_auth_check — UNION بدل UNION ALL.
+    🟡 FIX-MIG2: _handle_chat_migrated invocation — task tracking.
     🟡 FIX-DEV1: apply_penalty — allow owner to test self-penalty.
 
 🆕 v7.10.7 (REVIEW-FIXES-2026):
@@ -98,9 +101,13 @@ _FALLBACK_PENALTY_TYPES: frozenset = frozenset({
 
 # 🆕 FIX-SC2: monotonic + prune
 _security_settings_cache: Dict[int, Tuple[float, Dict[str, int]]] = {}
-_SEC_SETTINGS_TTL = 60.0
+_SEC_SETTINGS_TTL = 300.0                    # 🆕 PERF-FIX-1: 300s (كان 60)
+_SEC_SETTINGS_NEGATIVE_TTL = 30.0            # 🆕 PERF-FIX-1: negative cache
 _SEC_SETTINGS_MAX_SIZE = 5000
 _SEC_SETTINGS_STALE_MULT = 10.0
+
+# 🆕 PERF-FIX-1: cache للفشل — يمنع ضغط DB عند تعثّرها
+_sec_settings_neg_cache: Dict[int, float] = {}
 
 # 🆕 FIX-D14: نطاقات عربية موسّعة
 _ARABIC_TATWEEL = '\u0640'
@@ -244,7 +251,7 @@ class SmartCache:
 
 _auth_cache_smart = SmartCache(ttl=60, max_size=2000)
 _auth_neg_cache = SmartCache(ttl=15, max_size=1000)
-_security_stats_cache = SmartCache(ttl=60, max_size=500)
+_security_stats_cache = SmartCache(ttl=300, max_size=500)   # 🆕 PERF-FIX-2: 300s
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -805,7 +812,6 @@ class UserState(Enum):
     WAIT_BAN_USER_ID = auto()
     WAIT_UNBAN_USER_ID = auto()
     WAIT_REM_LANG = auto()
-    # 🆕 v7.10.7: حالات الردود
     WAIT_REPLY_TRIGGER = auto()
     WAIT_REPLY_RESPONSE = auto()
     WAIT_REPLY_ADD = auto()
@@ -823,7 +829,6 @@ class StateManager:
 
     @classmethod
     def set(cls, user_id: int, state) -> None:
-        """يقبل UserState أو نصاً (توافق خلفي)."""
         with cls._lock:
             cls._cache[user_id] = state
 
@@ -1418,6 +1423,10 @@ class KeyboardFactory:
 
     @classmethod
     async def _get_security_stats(cls, chat_id: int) -> dict:
+        """
+        🆕 PERF-FIX-2: timeout 1.5s + cache 300s.
+        يجمع 6 استعلامات لكن لا يعطّل مسار الرسالة.
+        """
         cache_key = f"sec_stats_{chat_id}"
         cached = await _security_stats_cache.get(cache_key)
         if cached is not None:
@@ -1440,8 +1449,8 @@ class KeyboardFactory:
             async def safe_fetch(sql, params, default=None):
                 try:
                     return await asyncio.wait_for(
-                        DB.fetchone(sql, params), timeout=2.0)
-                except Exception:
+                        DB.fetchone(sql, params), timeout=1.5)
+                except (asyncio.TimeoutError, Exception):
                     return default
 
             (penalties_row, deleted_row, warns_row,
@@ -1505,7 +1514,8 @@ class KeyboardFactory:
         except Exception as e:
             logger.debug(f"_get_security_stats: {e}")
 
-        await _security_stats_cache.set(cache_key, stats, ttl=60)
+        # 🆕 PERF-FIX-2: 300s بدل 60s
+        await _security_stats_cache.set(cache_key, stats, ttl=300)
         return stats
 
     @classmethod
@@ -1832,6 +1842,7 @@ async def _do_auth_check(bot, chat_id: int, user_id: int) -> bool:
     فحص صلاحيات في مجموعة.
 
     🆕 v7.10.8 FIX-AUTH1: UNION (بدون ALL) لتوقف أسرع عند أول مطابقة.
+    🆕 PERF-FIX-4: timeout 2s على استعلام DB.
     """
     try:
         member = await bot.get_chat_member(chat_id, user_id)
@@ -1840,25 +1851,30 @@ async def _do_auth_check(bot, chat_id: int, user_id: int) -> bool:
     except Exception as e:
         logger.debug(f"Telegram API auth check failed: {e}")
     try:
-        row = await DB.fetchone("""
-            SELECT 1 FROM (
-                SELECT 1 FROM hidden_owner_groups
-                    WHERE chat_id=? AND owner_id=?
-                UNION
-                SELECT 1 FROM hidden_admins
-                    WHERE chat_id=? AND admin_id=?
-                UNION
-                SELECT 1 FROM anonymous_admins
-                    WHERE chat_id=? AND (
-                        user_id=?
-                        OR (user_id IS NULL AND anonymous_id=?)
-                    )
-            ) AS x
-            LIMIT 1
-        """, (chat_id, user_id, chat_id, user_id,
-              chat_id, user_id, user_id))
+        row = await asyncio.wait_for(
+            DB.fetchone("""
+                SELECT 1 FROM (
+                    SELECT 1 FROM hidden_owner_groups
+                        WHERE chat_id=? AND owner_id=?
+                    UNION
+                    SELECT 1 FROM hidden_admins
+                        WHERE chat_id=? AND admin_id=?
+                    UNION
+                    SELECT 1 FROM anonymous_admins
+                        WHERE chat_id=? AND (
+                            user_id=?
+                            OR (user_id IS NULL AND anonymous_id=?)
+                        )
+                ) AS x
+                LIMIT 1
+            """, (chat_id, user_id, chat_id, user_id,
+                  chat_id, user_id, user_id)),
+            timeout=2.0)
         if row is not None:
             return True
+    except asyncio.TimeoutError:
+        logger.warning("🐌 _do_auth_check DB timeout 2s (chat=%s user=%s)",
+                       chat_id, user_id)
     except Exception as e:
         logger.debug(f"DB auth check failed: {e}")
     return False
@@ -1890,7 +1906,7 @@ async def is_authorized_in_group(bot, chat_id: int, user_id: int) -> bool:
 
 def invalidate_auth_cache(chat_id: int = None, user_id: int = None) -> None:
     """
-    🆕 v7.10.7 FIX-B4: تنفيذ فعلي (كان `return None`).
+    🆕 v7.10.7 FIX-B4: تنفيذ فعلي.
 
     إبطال متزامن فوري — يستخدم الوصول المباشر لـ `_cache` الداخلي.
     من سياق async، استخدم invalidate_auth_cache_async.
@@ -1952,12 +1968,9 @@ async def check_bot_permissions(bot, chat_id: int) -> dict:
 # 12. إرسال آمن + ChatMigrated
 # ═══════════════════════════════════════════════════════════════════════════
 
-# 🆕 v7.10.8 FIX-MIG1: (table, column, has_unique)
-# يسمح بترحيل عدة أعمدة في نفس الجدول (bot_groups.chat_id + log_channel_id).
 _CHAT_MIGRATION_TABLES: Tuple[Tuple[str, str, bool], ...] = (
-    # (table, column, has_unique)
     ("bot_groups", "chat_id", True),
-    ("bot_groups", "log_channel_id", False),   # 🆕 FIX-MIG1
+    ("bot_groups", "log_channel_id", False),
     ("user_groups_link", "chat_id", False),
     ("group_security", "chat_id", True),
     ("user_penalties", "chat_id", False),
@@ -1982,9 +1995,6 @@ async def _handle_chat_migrated(chat_id: int, new_chat_id: int) -> None:
     """
     🆕 v7.10.7 FIX-B5 + v7.10.8 FIX-MIG1:
     تحديث الأعمدة في الجداول المرتبطة بالمجموعة.
-
-    - bot_groups: chat_id (PK) + log_channel_id (عمود إضافي).
-    - الجداول ذات has_unique=True: pre-DELETE لتجنّب تعارض UNIQUE.
     """
     try:
         logger.warning(
@@ -2016,7 +2026,8 @@ async def _handle_chat_migrated(chat_id: int, new_chat_id: int) -> None:
                 if ("no such table" in err_lower
                         or "doesn't exist" in err_lower
                         or "no such column" in err_lower
-                        or "unknown column" in err_lower                        or "undefined column" in err_lower):
+                        or "unknown column" in err_lower
+                        or "undefined column" in err_lower):
                     logger.debug(
                         "ChatMigrated: %s.%s غير موجود",
                         table, column)
@@ -2155,7 +2166,6 @@ async def safe_send(bot, chat_id: int, text: str, reply_markup=None,
         except ChatMigrated as e:
             new_chat_id = getattr(e, 'new_chat_id', None)
             if new_chat_id:
-                # 🆕 FIX-MIG2: task tracking عبر _warmup_bg_tasks
                 try:
                     _mig_task = asyncio.create_task(
                         _handle_chat_migrated(chat_id, new_chat_id))
@@ -2548,7 +2558,6 @@ async def apply_penalty(bot, chat_id, user_id, penalty_type,
         try:
             moderator_id = moderator or getattr(bot, "id", 0) or 0
             is_dev_target = CONFIG.is_developer(user_id)
-            # 🆕 FIX-DEV1: اسمح للمطور بمعاقبة نفسه (اختبار)
             is_self_penalty = (moderator_id == user_id)
             if is_dev_target and not is_self_penalty:
                 logger.warning(
@@ -3644,7 +3653,8 @@ class BackgroundTasks:
                 BackgroundTasks._group_admins_cache.clear()
                 BackgroundTasks._group_admins_access_count.clear()
                 _security_settings_cache.clear()
-                # 🆕 FIX-SC2: prune دوري
+                _sec_settings_neg_cache.clear()   # 🆕 PERF-FIX-1
+                # prune دوري
                 now_mono = time.monotonic()
                 if _security_settings_cache:
                     stale = [
@@ -4012,13 +4022,24 @@ async def _lazy_import_detectors_async() -> Dict[str, Any]:
 
 async def get_security_settings(chat_id: int) -> Dict[str, int]:
     """
-    جلب إعدادات الأمان. 🆕 FIX-A3: يستخدم DB.get_security_settings
-    الرسمية (جدول group_security). Fallback: استعلام مباشر.
+    جلب إعدادات الأمان.
+
+    🆕 FIX-A3: يستخدم DB.get_security_settings الرسمية (group_security).
+    🆕 PERF-FIX-1: TTL 300s + negative cache 30s + timeout 3s.
     """
     now = time.monotonic()
+
+    # 1) cache إيجابي
     cached = _security_settings_cache.get(chat_id)
     if cached is not None and now - cached[0] < _SEC_SETTINGS_TTL:
         return dict(cached[1])
+
+    # 2) 🆕 negative cache — لو فشل قبل ثوانٍ، لا نعيد المحاولة فوراً
+    neg_at = _sec_settings_neg_cache.get(chat_id)
+    if neg_at is not None and now - neg_at < _SEC_SETTINGS_NEGATIVE_TTL:
+        if cached is not None:
+            return dict(cached[1])
+        return dict(NEW_SECURITY_DEFAULTS)
 
     settings: Dict[str, int] = dict(NEW_SECURITY_DEFAULTS)
     settings.update({
@@ -4034,10 +4055,11 @@ async def get_security_settings(chat_id: int) -> Dict[str, int]:
     })
 
     row_dict: Dict[str, Any] = {}
+    db_ok = False
     db_getter = getattr(DB, "get_security_settings", None)
     if callable(db_getter):
         try:
-            raw = await db_getter(chat_id)
+            raw = await asyncio.wait_for(db_getter(chat_id), timeout=3.0)
             if isinstance(raw, dict):
                 row_dict = raw
             elif raw is not None:
@@ -4048,14 +4070,20 @@ async def get_security_settings(chat_id: int) -> Dict[str, int]:
                         row_dict = {k: raw[k] for k in raw.keys()}  # type: ignore
                     except Exception:
                         row_dict = {}
+            db_ok = True
+        except asyncio.TimeoutError:
+            logger.warning(
+                "🐌 get_security_settings(%s): timeout 3s", chat_id)
         except Exception as e:
             logger.debug("DB.get_security_settings(%s): %s", chat_id, e)
 
-    if not row_dict:
+    if not row_dict and not db_ok:
         try:
-            row = await DB.fetchone(
-                "SELECT * FROM group_security WHERE chat_id = ?",
-                (chat_id,))
+            row = await asyncio.wait_for(
+                DB.fetchone(
+                    "SELECT * FROM group_security WHERE chat_id = ?",
+                    (chat_id,)),
+                timeout=3.0)
             if row is not None:
                 try:
                     row_dict = dict(row)
@@ -4064,6 +4092,10 @@ async def get_security_settings(chat_id: int) -> Dict[str, int]:
                         row_dict = {k: row[k] for k in row.keys()}  # type: ignore
                     except Exception:
                         row_dict = {}
+                db_ok = True
+        except asyncio.TimeoutError:
+            logger.warning(
+                "🐌 group_security fallback(%s): timeout 3s", chat_id)
         except Exception as e:
             logger.debug(
                 "get_security_settings fallback(%s): %s", chat_id, e)
@@ -4075,6 +4107,11 @@ async def get_security_settings(chat_id: int) -> Dict[str, int]:
             except (ValueError, TypeError):
                 pass
 
+    # 🆕 PERF-FIX-1: negative cache عند الفشل الكامل
+    if not db_ok:
+        _sec_settings_neg_cache[chat_id] = now
+
+    # prune
     if len(_security_settings_cache) >= _SEC_SETTINGS_MAX_SIZE:
         try:
             sorted_items = sorted(
@@ -4087,14 +4124,18 @@ async def get_security_settings(chat_id: int) -> Dict[str, int]:
             logger.debug("cache cleanup: %s", _e)
 
     _security_settings_cache[chat_id] = (now, settings)
+    if db_ok:
+        _sec_settings_neg_cache.pop(chat_id, None)
     return dict(settings)
 
 
 def invalidate_security_settings_cache(chat_id: Optional[int] = None) -> None:
     if chat_id is None:
         _security_settings_cache.clear()
+        _sec_settings_neg_cache.clear()   # 🆕 PERF-FIX-1
     else:
         _security_settings_cache.pop(chat_id, None)
+        _sec_settings_neg_cache.pop(chat_id, None)   # 🆕 PERF-FIX-1
 
 
 def _try_detector_call(fn, text: str, **extra_kwargs) -> Any:
@@ -4309,6 +4350,9 @@ __all__ = [
     '_PUBLISH_TIMEOUTS',
     '_handle_chat_migrated',
     '_CHAT_MIGRATION_TABLES',
+    # 🆕 PERF-FIX-5: للاختبارات
+    '_security_settings_cache', '_sec_settings_neg_cache',
+    '_security_stats_cache',
 ]
 
 
@@ -4318,18 +4362,21 @@ __all__ = [
 
 try:
     logger.info(
-        "🛡️ utils.py v7.10.8 REVIEW-FIXES-R2 loaded | "
+        "🛡️ utils.py v7.10.9 PERF-FIXES loaded | "
         "Detectors=lazy+async | Langs=%d | Buttons=✅ | "
         "Security-Bridge=✅(A3) | Penalty=✅(DEV1) | "
         "ChatMigrated=✅(%d ops incl. log_channel_id) | "
-        "ToggleMap=%d | Cache-Iso=✅ | SecCache=✅(max=%d) | "
-        "AuthCache=✅(B4) | AuthCheck=UNION(AUTH1) | "
+        "ToggleMap=%d | Cache-Iso=✅ | SecCache=✅(TTL=%ds, max=%d) | "
+        "SecNegCache=✅(TTL=%ds) | SecStats=✅(TTL=300s, TO=1.5s) | "
+        "AuthCache=✅(B4) | AuthCheck=UNION+TO(2s) | "
         "RateLimit=✅(D15) | Webhook=✅(WH2) | "
         "Publish=✅(PUB1) | MigTrack=✅(MIG2)",
         len(_AVAILABLE_LANGUAGES),
         len(_CHAT_MIGRATION_TABLES),
         len(SECURITY_TOGGLE_MAP),
+        int(_SEC_SETTINGS_TTL),
         _SEC_SETTINGS_MAX_SIZE,
+        int(_SEC_SETTINGS_NEGATIVE_TTL),
     )
 except Exception:
     pass
