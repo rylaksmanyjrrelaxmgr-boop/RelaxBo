@@ -1,8 +1,19 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-handlers_callback.py - معالج الأزرار (v9.7.14)
+handlers_callback.py - معالج الأزرار (v9.7.15)
 =====================================================================
+🆕 v9.7.15 (SECURITY-TOGGLE-MAP-BYPASS-FIX):
+    🔴 FIX-CB-BW-1: _SEC_ACTIONS_WITH_SPECIFIC_HANDLERS — ضمان أن
+       أزرار الأمان ذات المعالجات الخاصة (banned_words, warn) لا تُمرَّر
+       عبر SECURITY_TOGGLE_MAP قبل معالجاتها الخاصة.
+       كان "banned_words" يُطابق SECURITY_TOGGLE_MAP["banned_words"]
+       = "delete_banned_words" فيُقلب الإعداد بدل فتح القائمة.
+    🔴 FIX-CB-BW-2: نقل معالج banned_words قبل التوجل العام
+       (دفاع مزدوج مع FIX-CB-BW-1).
+    🟡 FIX-CB-BW-3: توثيق voice في SECURITY_TOGGLE_MAP
+       (كود ميت — لا زر له)
+
 🆕 v9.7.14 (UPDATES-CHANNEL-HEALTH-CHECK):
     🔴 UPD-HEALTH-1: _check_updates_channel_health — فحص شامل للقناة
     🔴 UPD-HEALTH-2: إشعار تلقائي للمطور عند مشاكل الصلاحيات
@@ -210,6 +221,25 @@ _ANTIFLOOD_MESSAGES_OPTIONS: List[int] = [3, 5, 7, 10, 15, 20, 30]
 _ANTIFLOOD_SECONDS_OPTIONS: List[int] = [3, 5, 10, 15, 30, 60, 120]
 _ANTIFLOOD_MESSAGES_MAX = 100
 _ANTIFLOOD_SECONDS_MAX = 3600
+
+# ═══════════════════════════════════════════════════════════════════
+# 🆕 v9.7.15 FIX-CB-BW-1: أزرار أمان لها معالجات خاصة
+# ═══════════════════════════════════════════════════════════════════
+# ⚠️ هذه الأزرار تُوجَّه إلى معالجات خاصة داخل _handle_security
+#    ولا يجب أن تمرّ عبر SECURITY_TOGGLE_MAP العام.
+#
+# الحالة التي دفعت لهذا الإصلاح:
+#   • "banned_words" → يفتح قائمة الكلمات المحظورة (له معالج خاص)
+#     لكنه موجود في SECURITY_TOGGLE_MAP["banned_words"] = "delete_banned_words"
+#     → كان يُلتقط كـ toggle قبل معالجه الخاص.
+#   • "warn" → يفتح قائمة التحذيرات (له معالج خاص)
+#     موجود في SECURITY_TOGGLE_MAP["warn"] = "warn_enabled"
+#     → يعمل حالياً بالحظ (الفحص الخاص مكتوب قبله)، لكن يجب تحصينه.
+# ═══════════════════════════════════════════════════════════════════
+_SEC_ACTIONS_WITH_SPECIFIC_HANDLERS: frozenset = frozenset({
+    "warn",           # → يفتح قائمة إدارة التحذيرات
+    "banned_words",   # → يفتح قائمة الكلمات المحظورة
+})
 
 ACTIVE_TASKS: Set[asyncio.Task] = set()
 _publish_semaphore = asyncio.Semaphore(MAX_CONCURRENT_PUBLISH)
@@ -3720,6 +3750,9 @@ class CallbackHandlers:
         await safe_edit(query, display_text,
             reply_markup=InlineKeyboardMarkup(kb), bot=context.bot)
 
+    # ═══════════════════════════════════════════════════════════════
+    # 🆕 v9.7.15: _handle_security مع FIX-CB-BW-1 (bypass frozenset)
+    # ═══════════════════════════════════════════════════════════════
     @staticmethod
     async def _handle_security(update, context, query, user_id, lang=None):
         if not lang: lang = await DB.get_user_language(user_id) or 'ar'
@@ -3868,6 +3901,12 @@ class CallbackHandlers:
                 task.add_done_callback(ACTIVE_TASKS.discard)
                 return
 
+            # ═══════════════════════════════════════════════════════════
+            # 🆕 v9.7.15 FIX-CB-BW-2: معالجات خاصة قبل التوجل العام
+            # ═══════════════════════════════════════════════════════════
+            # هذه الأزرار لها معالجات خاصة (تُفتح قوائم فرعية).
+            # يجب فحصها **قبل** SECURITY_TOGGLE_MAP لتجنّب التقاطها.
+            # ═══════════════════════════════════════════════════════════
             if action == "warn":
                 kb = InlineKeyboardMarkup([
                     [InlineKeyboardButton(await _trans('warn_toggle_btn',
@@ -3886,7 +3925,28 @@ class CallbackHandlers:
                     await _trans('warnings_management', lang, "⚠️"),
                     reply_markup=kb, bot=context.bot); return
 
-            if action in SECURITY_TOGGLE_MAP:
+            if action == "banned_words":
+                await CallbackHandlers._show_banned_words_menu(
+                    update, context, query, chat_id, lang); return
+
+            if action == "toggle_banned_words":
+                settings = (await CallbackHandlers.
+                            _get_security_settings_cached(chat_id))
+                new_val = 1 - _coerce_int(
+                    settings.get('delete_banned_words', 0))
+                await DB.update_security_settings(chat_id,
+                    delete_banned_words=new_val)
+                await CallbackHandlers.\
+                    _invalidate_security_settings_cache(chat_id)
+                await CallbackHandlers._show_banned_words_menu(
+                    update, context, query, chat_id, lang); return
+
+            # ═══════════════════════════════════════════════════════════
+            # 🆕 v9.7.15 FIX-CB-BW-1: التوجل العام — مع استثناء
+            #    الأزرار ذات المعالجات الخاصة (frozenset)
+            # ═══════════════════════════════════════════════════════════
+            if (action in SECURITY_TOGGLE_MAP
+                    and action not in _SEC_ACTIONS_WITH_SPECIFIC_HANDLERS):
                 col = SECURITY_TOGGLE_MAP[action]
                 settings = (await CallbackHandlers.
                             _get_security_settings_cached(chat_id))
@@ -3943,20 +4003,6 @@ class CallbackHandlers:
                 await safe_edit(query,
                     await _trans('choose_delete_penalty', lang, "🚫"),
                     reply_markup=kb, bot=context.bot); return
-            if action == "banned_words":
-                await CallbackHandlers._show_banned_words_menu(
-                    update, context, query, chat_id, lang); return
-            if action == "toggle_banned_words":
-                settings = (await CallbackHandlers.
-                            _get_security_settings_cached(chat_id))
-                new_val = 1 - _coerce_int(
-                    settings.get('delete_banned_words', 0))
-                await DB.update_security_settings(chat_id,
-                    delete_banned_words=new_val)
-                await CallbackHandlers.\
-                    _invalidate_security_settings_cache(chat_id)
-                await CallbackHandlers._show_banned_words_menu(
-                    update, context, query, chat_id, lang); return
             if action in ("close", "back"):
                 StateManager.clear(user_id); _clear_context_keys(context)
                 await CallbackHandlers._show_groups_list(
@@ -6620,18 +6666,22 @@ __all__ = [
     "_build_updates_channel_health_warning",
     "_UPDATES_CHANNEL_HEALTH_CACHE",
     "_UPDATES_CHANNEL_HEALTH_TTL",
+
+    # 🆕 v9.7.15 — SECURITY-TOGGLE-MAP-BYPASS-FIX
+    "_SEC_ACTIONS_WITH_SPECIFIC_HANDLERS",
 ]
 
 try:
     _bridge_icon = "✅" if _SECURITY_BRIDGE_AVAILABLE else "⚠️"
     logger.info(
-        "🛡️ handlers_callback.py v9.7.14 UPDATES-CHANNEL-HEALTH-CHECK "
+        "🛡️ handlers_callback.py v9.7.15 SECURITY-TOGGLE-MAP-BYPASS-FIX "
         "loaded | Bridge=%s | Antiflood-Msgs=%d | Antiflood-Secs=%d | "
         "Message-Cache-Invalidation=ON | Updates-Link=ON | "
-        "Updates-Health-Check=ON",
+        "Updates-Health-Check=ON | Sec-Toggle-Bypass=%d-actions",
         _bridge_icon,
         len(_ANTIFLOOD_MESSAGES_OPTIONS),
         len(_ANTIFLOOD_SECONDS_OPTIONS),
+        len(_SEC_ACTIONS_WITH_SPECIFIC_HANDLERS),
     )
 except Exception:
     pass
