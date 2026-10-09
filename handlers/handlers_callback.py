@@ -1,31 +1,31 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-handlers_callback.py - معالج الأزرار (v9.7.15)
+handlers_callback.py - معالج الأزرار (v9.7.16)
 =====================================================================
+🆕 v9.7.16 (ANALYTICS-BUTTONS-FIX + DECLARE-WINNER-SEL-FIX):
+    🔴 FIX-ANALYTICS-BUTTONS: دمج خريطة صريحة لأزرار التحليلات الثمانية
+       (growth_30d_btn, top_channels_btn, publish_stats_btn,
+        channels_rate_btn, subscriptions_btn, pool_live_btn,
+        slow_queries_btn, export_excel_btn) مع _ANALYTICS_ALIASES.
+       كانت تسقط على fallback "غير متوفر".
+    🔴 FIX-DECLARE-WINNER-SEL: admin_declare_winner_sel يعمل بنفس
+       معالج admin_declare_winner.
+    🟡 FIX-ANALYTICS-MENU: دمج admin_analytics + refresh_btn في فحص واحد.
+    🟡 توثيق حذف SEC_ACTIONS_WITH_SPECIFIC_HANDLERS (v9.7.15).
+
 🆕 v9.7.15 (SECURITY-TOGGLE-MAP-BYPASS-FIX):
     🔴 FIX-CB-BW-1: _SEC_ACTIONS_WITH_SPECIFIC_HANDLERS — ضمان أن
        أزرار الأمان ذات المعالجات الخاصة (banned_words, warn) لا تُمرَّر
        عبر SECURITY_TOGGLE_MAP قبل معالجاتها الخاصة.
-       كان "banned_words" يُطابق SECURITY_TOGGLE_MAP["banned_words"]
-       = "delete_banned_words" فيُقلب الإعداد بدل فتح القائمة.
     🔴 FIX-CB-BW-2: نقل معالج banned_words قبل التوجل العام
-       (دفاع مزدوج مع FIX-CB-BW-1).
     🟡 FIX-CB-BW-3: توثيق voice في SECURITY_TOGGLE_MAP
-       (كود ميت — لا زر له)
 
 🆕 v9.7.14 (UPDATES-CHANNEL-HEALTH-CHECK):
-    🔴 UPD-HEALTH-1: _check_updates_channel_health — فحص شامل للقناة
-    🔴 UPD-HEALTH-2: إشعار تلقائي للمطور عند مشاكل الصلاحيات
-    🔴 UPD-HEALTH-3: زر "إعادة الفحص" + كاش 5 دقائق
-    🔴 UPD-HEALTH-4: إشعار خفيف للعضو عند مشاكل القناة
-    🟡 UPD-HEALTH-5: _build_updates_channel_health_warning helper
-    🟡 UPD-HEALTH-6: إبطال الكاش عند تغيير/حذف القناة
+    🔴 UPD-HEALTH-1..6: فحص شامل لقناة التحديثات
 
 🆕 v9.7.13 (UPDATES-CHANNEL-LINK-FIX):
-    🔴 UPD-1: _show_updates_channel — زر رابط قابل للنقر
-    🔴 UPD-2: _show_admin_update_channel_menu — نفس التحسين
-    🟡 UPD-3: _extract_updates_channel_link — helper مشترك
+    🔴 UPD-1..3: زر رابط قابل للنقر
 
 🆕 v9.7.12 (SYNTAX-FIX):
     🔴 SYNTAX-1: إصلاح SyntaxError في _handle_auto_reply
@@ -217,6 +217,48 @@ except ImportError:
         _coerce_float, _safe_str, _md_to_html, _log_channel_cache_key,
         _is_valid_url, _mask_id, _make_user_cache_keys)
 
+# ═══════════════════════════════════════════════════════════════════
+# 🆕 v9.7.16 FIX-ANALYTICS-BUTTONS: خريطة صريحة لأزرار التحليلات
+# ═══════════════════════════════════════════════════════════════════
+# المشكلة:
+#   أزرار analytics الرئيسية (growth_30d_btn, top_channels_btn, ...)
+#   لا تُطابق _ANALYTICS_ALIASES المُستوردة من handlers_callback_base
+#   → تسقط على fallback "غير متوفر" في نهاية handle().
+#
+# الحل:
+#   دمج خريطة صريحة مع _ANALYTICS_ALIASES قبل استخدامها في handle().
+#   الأولوية لمفاتيح handlers_callback_base (لا نطغى عليها).
+# ═══════════════════════════════════════════════════════════════════
+
+_ANALYTICS_BUTTONS_DIRECT_MAP: Dict[str, str] = {
+    "growth_30d_btn":     "user_growth",
+    "top_channels_btn":   "top_channels",
+    "publish_stats_btn":  "publish_stats",
+    "channels_rate_btn":  "channels_rate",
+    "subscriptions_btn":  "subscriptions",
+    "pool_live_btn":      "pool",
+    "slow_queries_btn":   "slow",
+    "export_excel_btn":   "export",
+}
+
+try:
+    if isinstance(_ANALYTICS_ALIASES, dict):
+        _ANALYTICS_ALIASES = {
+            **_ANALYTICS_BUTTONS_DIRECT_MAP,
+            **_ANALYTICS_ALIASES,
+        }
+    else:
+        _ANALYTICS_ALIASES = dict(_ANALYTICS_BUTTONS_DIRECT_MAP)
+    logger.info(
+        "✅ ANALYTICS-ALIASES-MERGE: %d مفتاح (منها %d جديد)",
+        len(_ANALYTICS_ALIASES),
+        len(_ANALYTICS_BUTTONS_DIRECT_MAP),
+    )
+except Exception as _e:
+    _ANALYTICS_ALIASES = dict(_ANALYTICS_BUTTONS_DIRECT_MAP)
+    logger.warning("⚠️ ANALYTICS-ALIASES-MERGE: %s", _e)
+
+
 _ANTIFLOOD_MESSAGES_OPTIONS: List[int] = [3, 5, 7, 10, 15, 20, 30]
 _ANTIFLOOD_SECONDS_OPTIONS: List[int] = [3, 5, 10, 15, 30, 60, 120]
 _ANTIFLOOD_MESSAGES_MAX = 100
@@ -227,14 +269,6 @@ _ANTIFLOOD_SECONDS_MAX = 3600
 # ═══════════════════════════════════════════════════════════════════
 # ⚠️ هذه الأزرار تُوجَّه إلى معالجات خاصة داخل _handle_security
 #    ولا يجب أن تمرّ عبر SECURITY_TOGGLE_MAP العام.
-#
-# الحالة التي دفعت لهذا الإصلاح:
-#   • "banned_words" → يفتح قائمة الكلمات المحظورة (له معالج خاص)
-#     لكنه موجود في SECURITY_TOGGLE_MAP["banned_words"] = "delete_banned_words"
-#     → كان يُلتقط كـ toggle قبل معالجه الخاص.
-#   • "warn" → يفتح قائمة التحذيرات (له معالج خاص)
-#     موجود في SECURITY_TOGGLE_MAP["warn"] = "warn_enabled"
-#     → يعمل حالياً بالحظ (الفحص الخاص مكتوب قبله)، لكن يجب تحصينه.
 # ═══════════════════════════════════════════════════════════════════
 _SEC_ACTIONS_WITH_SPECIFIC_HANDLERS: frozenset = frozenset({
     "warn",           # → يفتح قائمة إدارة التحذيرات
@@ -1736,20 +1770,22 @@ class CallbackHandlers:
             if data.startswith("sec_"):
                 await CallbackHandlers._handle_security(
                     update, context, query, user_id, lang); return
-            if data == "admin_analytics":
+
+            # ═══════════════════════════════════════════════════════════
+            # 🆕 v9.7.16 FIX-ANALYTICS-MENU: دمج admin_analytics + refresh_btn
+            # ═══════════════════════════════════════════════════════════
+            if data in ("admin_analytics", "refresh_btn"):
                 if not CONFIG.is_developer(user_id):
                     await safe_edit(query,
                         await _trans('unauthorized', lang, "❌"),
                         bot=context.bot); return
                 await CallbackHandlers._show_analytics_menu(
                     query, context, user_id, lang); return
-            if data == "refresh_btn":
-                if not CONFIG.is_developer(user_id):
-                    await safe_edit(query,
-                        await _trans('unauthorized', lang, "❌"),
-                        bot=context.bot); return
-                await CallbackHandlers._show_analytics_menu(
-                    query, context, user_id, lang); return
+
+            # ═══════════════════════════════════════════════════════════
+            # 🆕 v9.7.16 FIX-ANALYTICS-BUTTONS: أزرار التحليلات الثمانية
+            # تعمل الآن بفضل دمج _ANALYTICS_BUTTONS_DIRECT_MAP في الأعلى.
+            # ═══════════════════════════════════════════════════════════
             if (data.startswith("analytics_")
                     or data in _ANALYTICS_ALIASES):
                 if not CONFIG.is_developer(user_id):
@@ -3751,7 +3787,7 @@ class CallbackHandlers:
             reply_markup=InlineKeyboardMarkup(kb), bot=context.bot)
 
     # ═══════════════════════════════════════════════════════════════
-    # 🆕 v9.7.15: _handle_security مع FIX-CB-BW-1 (bypass frozenset)
+    # v9.7.15/v9.7.16: _handle_security مع FIX-CB-BW-1
     # ═══════════════════════════════════════════════════════════════
     @staticmethod
     async def _handle_security(update, context, query, user_id, lang=None):
@@ -3902,10 +3938,7 @@ class CallbackHandlers:
                 return
 
             # ═══════════════════════════════════════════════════════════
-            # 🆕 v9.7.15 FIX-CB-BW-2: معالجات خاصة قبل التوجل العام
-            # ═══════════════════════════════════════════════════════════
-            # هذه الأزرار لها معالجات خاصة (تُفتح قوائم فرعية).
-            # يجب فحصها **قبل** SECURITY_TOGGLE_MAP لتجنّب التقاطها.
+            # v9.7.15 FIX-CB-BW-2: معالجات خاصة قبل التوجل العام
             # ═══════════════════════════════════════════════════════════
             if action == "warn":
                 kb = InlineKeyboardMarkup([
@@ -3942,8 +3975,7 @@ class CallbackHandlers:
                     update, context, query, chat_id, lang); return
 
             # ═══════════════════════════════════════════════════════════
-            # 🆕 v9.7.15 FIX-CB-BW-1: التوجل العام — مع استثناء
-            #    الأزرار ذات المعالجات الخاصة (frozenset)
+            # v9.7.15 FIX-CB-BW-1: التوجل العام — مع استثناء
             # ═══════════════════════════════════════════════════════════
             if (action in SECURITY_TOGGLE_MAP
                     and action not in _SEC_ACTIONS_WITH_SPECIFIC_HANDLERS):
@@ -4515,7 +4547,6 @@ class CallbackHandlers:
                           "admin_update_ch_btn"):
                 await CallbackHandlers._show_admin_update_channel_menu(
                     query, context, user_id, lang); return
-            # 🆕 v9.7.14: إعادة فحص قناة التحديثات
             if data == "admin_recheck_update_ch":
                 _invalidate_updates_channel_health_cache()
                 await safe_edit(query,
@@ -4537,7 +4568,6 @@ class CallbackHandlers:
                           "admin_remove_update_ch"):
                 try: ok = await DB.set_setting('updates_channel', '')
                 except Exception: ok = False
-                # 🆕 v9.7.14: إبطال كاش الفحص
                 _invalidate_updates_channel_health_cache()
                 await safe_edit(query,
                     await _trans('update_channel_removed' if ok else
@@ -5197,12 +5227,12 @@ class CallbackHandlers:
                     callback_data=CB.ADMIN_BANNED_WORDS)]])
                 await safe_edit(query, text, reply_markup=kb,
                     bot=context.bot); return
-            if data == CB.ADMIN_CREATE_CONTEST:
-                StateManager.set(user_id, UserState.WAIT_CONTEST_TITLE)
-                await safe_edit(query,
-                    await _trans('contest_title_prompt', lang, "🏆"),
-                    bot=context.bot); return
-            if data == CB.ADMIN_DECLARE_WINNER:
+
+            # ═══════════════════════════════════════════════════════════
+            # 🆕 v9.7.16 FIX-DECLARE-WINNER-SEL:
+            # يعالج كلا الاسمين admin_declare_winner + admin_declare_winner_sel
+            # ═══════════════════════════════════════════════════════════
+            if data in (CB.ADMIN_DECLARE_WINNER, CB.ADMIN_DECLARE_WINNER_SEL):
                 contests = await DB.get_active_contests(5)
                 if not contests:
                     await safe_edit(query,
@@ -5220,6 +5250,12 @@ class CallbackHandlers:
                 await safe_edit(query,
                     await _trans('choose_contest', lang, "🏆"),
                     reply_markup=InlineKeyboardMarkup(kb),
+                    bot=context.bot); return
+
+            if data == CB.ADMIN_CREATE_CONTEST:
+                StateManager.set(user_id, UserState.WAIT_CONTEST_TITLE)
+                await safe_edit(query,
+                    await _trans('contest_title_prompt', lang, "🏆"),
                     bot=context.bot); return
             if data == CB.ADMIN_DEL_CONTEST:
                 contests = await DB.fetchall(
@@ -6273,9 +6309,6 @@ class CallbackHandlers:
             await safe_edit(query, await _trans('error_occurred', lang, "❌"),
                 bot=context.bot)
 
-    # ═══════════════════════════════════════════════════════════════
-    # 🆕 v9.7.14: _show_updates_channel — مع فحص الصلاحيات + إشعارات
-    # ═══════════════════════════════════════════════════════════════
     @staticmethod
     async def _show_updates_channel(query, context, user_id, lang='ar'):
         """
@@ -6457,15 +6490,11 @@ class CallbackHandlers:
             except Exception:
                 pass
 
-    # ═══════════════════════════════════════════════════════════════
-    # 🆕 v9.7.14: _show_admin_update_channel_menu مع فحص + إشعار
-    # ═══════════════════════════════════════════════════════════════
     @staticmethod
     async def _show_admin_update_channel_menu(query, context, user_id,
                                                 lang='ar'):
         """
         🆕 v9.7.14: قائمة إدارة قناة التحديثات (للمطور)
-        مع فحص صحة القناة وإشعارات الصلاحيات.
         """
         try:
             ch = None
@@ -6651,37 +6680,42 @@ __all__ = [
     "SECURITY_TOGGLE_MAP", "NEW_SECURITY_DEFAULTS",
     "bridge_get_security_settings", "bridge_invalidate_sec_cache",
 
-    # 🆕 v9.7.11 — PERF integration
+    # v9.7.11 — PERF integration
     "_invalidate_message_caches",
     "_get_message_handlers_module",
     "_message_handlers_module",
     "_message_handlers_import_attempted",
 
-    # 🆕 v9.7.13 — Updates-channel link helper
+    # v9.7.13 — Updates-channel link helper
     "_extract_updates_channel_link",
 
-    # 🆕 v9.7.14 — Updates-channel health check
+    # v9.7.14 — Updates-channel health check
     "_check_updates_channel_health",
     "_invalidate_updates_channel_health_cache",
     "_build_updates_channel_health_warning",
     "_UPDATES_CHANNEL_HEALTH_CACHE",
     "_UPDATES_CHANNEL_HEALTH_TTL",
 
-    # 🆕 v9.7.15 — SECURITY-TOGGLE-MAP-BYPASS-FIX
+    # v9.7.15 — SECURITY-TOGGLE-MAP-BYPASS-FIX
     "_SEC_ACTIONS_WITH_SPECIFIC_HANDLERS",
+
+    # 🆕 v9.7.16 — ANALYTICS-BUTTONS-FIX
+    "_ANALYTICS_BUTTONS_DIRECT_MAP",
 ]
 
 try:
     _bridge_icon = "✅" if _SECURITY_BRIDGE_AVAILABLE else "⚠️"
     logger.info(
-        "🛡️ handlers_callback.py v9.7.15 SECURITY-TOGGLE-MAP-BYPASS-FIX "
+        "🛡️ handlers_callback.py v9.7.16 ANALYTICS-BUTTONS-FIX "
         "loaded | Bridge=%s | Antiflood-Msgs=%d | Antiflood-Secs=%d | "
         "Message-Cache-Invalidation=ON | Updates-Link=ON | "
-        "Updates-Health-Check=ON | Sec-Toggle-Bypass=%d-actions",
+        "Updates-Health-Check=ON | Sec-Toggle-Bypass=%d-actions | "
+        "Analytics-Direct-Map=%d-buttons | Declare-Winner-Sel=FIXED",
         _bridge_icon,
         len(_ANTIFLOOD_MESSAGES_OPTIONS),
         len(_ANTIFLOOD_SECONDS_OPTIONS),
         len(_SEC_ACTIONS_WITH_SPECIFIC_HANDLERS),
+        len(_ANALYTICS_BUTTONS_DIRECT_MAP),
     )
 except Exception:
     pass
