@@ -1,8 +1,15 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-database.py - قاعدة البيانات المتكاملة (v7.7.60 — POOL-KEEPALIVE-FINAL)
+database.py - قاعدة البيانات المتكاملة (v7.7.61 — IDLE-TX-ROLLBACK-FINAL)
 ================================================================================
+🆕 v7.7.61 (IDLE-TX-ROLLBACK-FINAL):
+  🔴 TX-1: ping-before-use يفحص is_in_transaction أولاً
+  🔴 TX-2: _return_connection — rollback وقائي قبل release
+  🔴 TX-3: connection() CM — فرع PG صريح في except/finally
+  🔴 TX-4: transaction() — فحص tx داخلية بعد commit
+  🆕 PG_ROLLBACK_ON_RETURN_TIMEOUT (env, default 2.0s)
+
 🆕 v7.7.60 (POOL-KEEPALIVE-FINAL):
   🐌 SQ-1: _pg_pool_factory — max_inactive_connection_lifetime 60→15s
   🐌 SQ-2: _pg_init_connection — TCP keepalive صريح
@@ -48,6 +55,7 @@ database.py - قاعدة البيانات المتكاملة (v7.7.60 — POOL-K
 # [17] v7.7.57: import من ملف → added_by=0
 # [18] v7.7.59: TCP keepalive + كاش schedule
 # [19] v7.7.60: pool lifecycle 15s + ping-before-use
+# [20] v7.7.61: idle-in-transaction → rollback/destroy
 # =====================================================================
 
 import os
@@ -542,6 +550,11 @@ PG_TCP_KEEPCNT = int(os.getenv("PG_TCP_KEEPCNT", "3"))
 PG_STATEMENT_TIMEOUT_MS = int(os.getenv("PG_STATEMENT_TIMEOUT_MS", "8000"))
 PG_IDLE_TX_TIMEOUT_MS = int(os.getenv("PG_IDLE_TX_TIMEOUT_MS", "30000"))
 PG_COMMAND_TIMEOUT = float(os.getenv("PG_COMMAND_TIMEOUT", "10.0"))
+
+# 🆕 v7.7.61: مهلة rollback وقائي قبل إعادة الاتصال للـ pool
+PG_ROLLBACK_ON_RETURN_TIMEOUT = float(
+    os.getenv("PG_ROLLBACK_ON_RETURN_TIMEOUT", "2.0")
+)
 
 if REFACTOR_MIXIN_AVAILABLE and _R_DEFAULT_PUBLISH_INTERVAL_MINUTES is not None:
     DEFAULT_PUBLISH_INTERVAL_MINUTES = _R_DEFAULT_PUBLISH_INTERVAL_MINUTES
@@ -2749,7 +2762,8 @@ class Database(
                     f"max={self._max_connections}) "
                     f"[synchronous_commit=off, "
                     f"max_inactive_lifetime={PG_MAX_INACTIVE_LIFETIME:.0f}s, "
-                    f"TCP-keepalive={PG_TCP_KEEPIDLE}s]"
+                    f"TCP-keepalive={PG_TCP_KEEPIDLE}s, "
+                    f"rollback-on-return={PG_ROLLBACK_ON_RETURN_TIMEOUT:.1f}s]"
                 )
             elif USE_MYSQL:
                 self._pool = await _create_pool_with_retry(
@@ -3158,7 +3172,9 @@ class Database(
 
     async def _get_connection(self):
         """
-        🆕 v7.7.60 SQ-3: ping-before-use للاتصالات التي كانت idle >5s.
+        v7.7.60 SQ-3: ping-before-use للاتصالات التي كانت idle >5s.
+        v7.7.61 TX-1: فحص is_in_transaction أولاً — الاتصال الملوّث
+        بـ idle-in-transaction يُدمَّر ويُستبدل بدلاً من مجرد ping.
         """
         if self._closing:
             raise RuntimeError("Database is closing")
@@ -3185,17 +3201,23 @@ class Database(
                         conn_id = id(conn)
                         now = time.monotonic()
                         last_used = self._conn_last_used.get(conn_id, 0.0)
+
+                        # 🆕 v7.7.61 TX-1: فحص TX المفتوحة أولاً
                         if now - last_used > PG_CONN_PING_IDLE_THRESHOLD:
+                            poisoned = False
                             try:
-                                await asyncio.wait_for(
-                                    conn.fetchval("SELECT 1"),
-                                    timeout=PG_CONN_PING_TIMEOUT,
-                                )
-                            except (asyncio.TimeoutError, Exception) as _pe:
+                                poisoned = _pg_in_transaction(conn)
+                            except Exception as tx_e:
                                 logger.debug(
-                                    f"🔌 stale PG conn detected "
-                                    f"(idle={now - last_used:.1f}s) — "
-                                    f"recycling: {_pe}"
+                                    f"is_in_transaction check: {tx_e}"
+                                )
+
+                            if poisoned:
+                                logger.warning(
+                                    f"🔌 PG conn مُلوّث بـ "
+                                    f"idle-in-transaction "
+                                    f"(idle={now - last_used:.1f}s) "
+                                    f"— destroy+re-acquire"
                                 )
                                 try:
                                     await self._destroy_connection(conn)
@@ -3209,6 +3231,33 @@ class Database(
                                     self._pool.acquire(),
                                     timeout=self._connection_timeout,
                                 )
+                                conn_id = id(conn)
+                            else:
+                                try:
+                                    await asyncio.wait_for(
+                                        conn.fetchval("SELECT 1"),
+                                        timeout=PG_CONN_PING_TIMEOUT,
+                                    )
+                                except (asyncio.TimeoutError, Exception) as _pe:
+                                    logger.debug(
+                                        f"🔌 stale PG conn detected "
+                                        f"(idle={now - last_used:.1f}s) — "
+                                        f"recycling: {_pe}"
+                                    )
+                                    try:
+                                        await self._destroy_connection(conn)
+                                    except Exception:
+                                        pass
+                                    try:
+                                        await self._pool.release(conn)
+                                    except Exception:
+                                        pass
+                                    conn = await asyncio.wait_for(
+                                        self._pool.acquire(),
+                                        timeout=self._connection_timeout,
+                                    )
+                                    conn_id = id(conn)
+
                         self._conn_last_used[conn_id] = now
                     except Exception as _pbe:
                         logger.debug(
@@ -3292,6 +3341,45 @@ class Database(
                     )
                     self._pool_none_warned = True
                 return
+
+            # 🆕 v7.7.61 TX-2: rollback وقائي قبل release
+            must_destroy = False
+            if USE_POSTGRES:
+                try:
+                    if _pg_in_transaction(conn):
+                        logger.warning(
+                            "⚠️ v7.7.61: PG conn في tx عند الإرجاع "
+                            "— rollback وقائي"
+                        )
+                        try:
+                            await asyncio.wait_for(
+                                conn.rollback(),
+                                timeout=PG_ROLLBACK_ON_RETURN_TIMEOUT,
+                            )
+                        except Exception as rbe:
+                            logger.error(
+                                f"❌ rollback وقائي فشل: {rbe} "
+                                f"— الاتصال سيُدمَّر"
+                            )
+                            must_destroy = True
+                except Exception as ce:
+                    logger.debug(f"tx check on return: {ce}")
+
+            if must_destroy:
+                try:
+                    await self._destroy_connection(conn)
+                except Exception as de:
+                    logger.debug(
+                        f"_destroy_connection (post-rollback fail): {de}"
+                    )
+                try:
+                    await self._pool.release(conn)
+                except Exception as re_e:
+                    logger.debug(
+                        f"pool.release (destroyed conn): {re_e}"
+                    )
+                return
+
             try:
                 await self._pool.release(conn)
             except Exception as e:
@@ -3414,6 +3502,8 @@ class Database(
                     destroy = True
                     logger.warning(f"⚠️ MySQL commit: {e}")
                     raise
+            # 🆕 v7.7.61 TX-3: PG — لا commit تلقائي (autocommit)؛
+            # حماية TX المتروكة في finally
         except BaseException:
             if DB_TYPE == "sqlite":
                 try:
@@ -3425,6 +3515,20 @@ class Database(
                 try:
                     await conn.rollback()
                 except Exception:
+                    destroy = True
+            elif USE_POSTGRES:
+                # 🆕 v7.7.61 TX-3
+                try:
+                    if _pg_in_transaction(conn):
+                        await asyncio.wait_for(
+                            conn.rollback(),
+                            timeout=PG_ROLLBACK_ON_RETURN_TIMEOUT,
+                        )
+                except Exception as rbe:
+                    logger.warning(
+                        f"⚠️ PG rollback in connection(): {rbe} "
+                        f"— destroy"
+                    )
                     destroy = True
             raise
         finally:
@@ -3460,6 +3564,23 @@ class Database(
                     await asyncio.wait_for(
                         tx.commit(), timeout=self._commit_timeout
                     )
+                    # 🆕 v7.7.61 TX-4: فحص tx داخلية متروكة بعد commit
+                    try:
+                        if _pg_in_transaction(conn):
+                            logger.warning(
+                                "⚠️ v7.7.61: PG tx داخلية مفتوحة "
+                                "بعد commit — rollback وقائي"
+                            )
+                            await asyncio.wait_for(
+                                conn.rollback(),
+                                timeout=PG_ROLLBACK_ON_RETURN_TIMEOUT,
+                            )
+                    except Exception as inner_tx_e:
+                        logger.error(
+                            f"❌ rollback tx داخلية فشل: {inner_tx_e} "
+                            f"— destroy"
+                        )
+                        destroy = True
                 else:
                     await asyncio.wait_for(
                         conn.execute("COMMIT"),
@@ -7812,6 +7933,7 @@ __all__ = [
     "PG_TCP_KEEPIDLE", "PG_TCP_KEEPINTVL", "PG_TCP_KEEPCNT",
     "PG_STATEMENT_TIMEOUT_MS", "PG_IDLE_TX_TIMEOUT_MS",
     "PG_COMMAND_TIMEOUT",
+    "PG_ROLLBACK_ON_RETURN_TIMEOUT",
     "internal_cache", "InternalQueryCache", "SimpleCache",
     "SettingsCache",
     "user_cache", "banned_words_cache", "settings_cache",
