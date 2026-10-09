@@ -1,9 +1,16 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-handlers_message.py - v7.18.13 POOL-BRIDGE + SHIELD-LOG-LEVEL
+handlers_message.py - v7.18.14 POOL-BRIDGE + IDLE-TX-AUDIT
 (متوافق مع detectors v4.0.8 — CRITICAL-FIXES)
 =============================================================================
+🆕 v7.18.14 (IDLE-TX-AUDIT-INTEGRATION):
+    🔍 IDLE-1: handle_db_idle_command — أمر /db_idle للمطور
+    🔍 IDLE-2: _notify_dev_about_idle_tx — إشعار تلقائي عند idle-in-tx
+    🔍 IDLE-3: _lazy_init_columns يقبل bot= اختيارياً
+    🔍 IDLE-4: عند فشل DB حرج (migration_ok=False) → فحص idle-tx + إشعار
+    🆕 ثوابت: _IDLE_TX_NOTIFY_COOLDOWN، _idle_tx_last_notify
+
 🆕 v7.18.13 (SHIELD-LOG-LEVEL-OPTIMIZATION):
     🟢 FIX-1: SHIELD log level يتبع _spam_score
         - _spam_score > 0  → logger.info (سبام/مشبوه)
@@ -528,6 +535,11 @@ _BAN_WORD_MAX_LEN = 100
 
 _PRIVATE_SIG_CACHE_MAX = 128
 
+# 🆕 v7.18.14: Idle-TX audit notification
+_IDLE_TX_NOTIFY_COOLDOWN = 3600.0
+_idle_tx_last_notify: Dict[int, float] = {}
+_idle_tx_notify_lock = asyncio.Lock()
+
 FEATURE_LOG_DELETIONS = _env_flag("LOG_DELETIONS", True)
 FEATURE_LOG_PENALTIES = _env_flag("LOG_PENALTIES", True)
 FEATURE_LOG_GIFTS = _env_flag("LOG_GIFTS", True)
@@ -794,7 +806,172 @@ _columns_last_attempt_ts = 0.0
 _columns_last_error_log_ts = 0.0
 
 
-async def _lazy_init_columns():
+# ═══════════════════════════════════════════════════════════════════
+# 🆕 v7.18.14: Idle-TX audit notification helper
+# ═══════════════════════════════════════════════════════════════════
+
+async def _notify_dev_about_idle_tx(
+    bot,
+    reason: str = "",
+    *,
+    force: bool = False,
+) -> Optional[Dict[str, Any]]:
+    """
+    🆕 v7.18.14: يفحص idle-in-transaction ويرسل تقريراً للمطور.
+
+    - يُحترم cooldown (افتراضي 3600s) — إلا إذا force=True.
+    - يتحقق أولاً من توفر DB.audit_idle_in_transactions.
+    - عند عدم وجود أي idle-tx → لا إشعار (log.debug فقط).
+
+    Args:
+        bot: telegram.Bot
+        reason: سبب الاستدعاء (يُسجَّل في التقرير)
+        force: تجاوز cooldown (للاستخدام اليدوي عبر /db_idle)
+
+    Returns:
+        dict التقرير عند النجاح، None عند الفشل أو التعطيل.
+    """
+    try:
+        audit_fn = getattr(DB, 'audit_idle_in_transactions', None)
+        if not callable(audit_fn):
+            logger.debug(
+                "_notify_dev_about_idle_tx: "
+                "DB.audit_idle_in_transactions غير متاح "
+                "(يتطلب database.py v7.7.62+)"
+            )
+            return None
+
+        try:
+            report = await audit_fn()
+        except Exception as e:
+            logger.warning(
+                "_notify_dev_about_idle_tx: audit query failed: %s", e,
+            )
+            return None
+
+        if not isinstance(report, dict):
+            return None
+
+        count = int(report.get('count') or 0)
+        if count == 0:
+            logger.debug(
+                "_notify_dev_about_idle_tx: نظيف (reason=%s)", reason,
+            )
+            return report
+
+        # cooldown
+        if not force:
+            now = time.monotonic()
+            last = _idle_tx_last_notify.get(0, 0.0)
+            if now - last < _IDLE_TX_NOTIFY_COOLDOWN:
+                logger.debug(
+                    "_notify_dev_about_idle_tx: cooldown نشط "
+                    "(count=%d، سيُبلغ لاحقاً)",
+                    count,
+                )
+                return report
+
+            async with _idle_tx_notify_lock:
+                now = time.monotonic()
+                last = _idle_tx_last_notify.get(0, 0.0)
+                if now - last < _IDLE_TX_NOTIFY_COOLDOWN:
+                    return report
+                _idle_tx_last_notify[0] = now
+
+        if bot is None:
+            logger.warning(
+                "_notify_dev_about_idle_tx: bot=None — "
+                "لا يمكن إرسال الإشعار (count=%d)",
+                count,
+            )
+            return report
+
+        owner_id = int(getattr(CONFIG, 'PRIMARY_OWNER_ID', 0) or 0)
+        if not owner_id:
+            logger.warning(
+                "_notify_dev_about_idle_tx: PRIMARY_OWNER_ID غير محدّد",
+            )
+            return report
+
+        app_matches = int(report.get('app_matches') or 0)
+        total = int(report.get('total_idle_tx') or 0)
+
+        lines = [
+            "🔴 <b>idle-in-transaction detected</b>",
+            "━━━━━━━━━━━━━━━━━━━━",
+            f"📊 العدد: <b>{count}</b>",
+        ]
+        if app_matches:
+            lines.append(
+                f"🚨 من <code>relax_bot</code>: <b>{app_matches}</b>"
+            )
+        if total != count:
+            lines.append(
+                f"📈 إجمالي كل التطبيقات: <b>{total}</b>"
+            )
+        if reason:
+            lines.append(f"📌 السبب: <code>{escape(reason)}</code>")
+        lines.append("")
+
+        items = report.get('items') or []
+        for item in items[:5]:
+            try:
+                pid = item.get('pid')
+                app = item.get('app') or '?'
+                idle = item.get('idle_sec', 0)
+                tx_age = item.get('tx_age_sec', 0)
+                xmin = item.get('backend_xmin') or '—'
+                q = (item.get('query') or '')[:120]
+
+                lines.append(
+                    f"🔴 pid=<code>{pid}</code> "
+                    f"[<code>{escape(str(app))}</code>]"
+                )
+                lines.append(
+                    f"   idle=<b>{idle}s</b> "
+                    f"tx_age=<b>{tx_age}s</b> "
+                    f"xmin=<code>{escape(str(xmin))}</code>"
+                )
+                if q:
+                    lines.append(f"   <i>{escape(q)}</i>")
+                lines.append("")
+            except Exception:
+                continue
+
+        if count > 5:
+            lines.append(f"<i>… و{count - 5} اتصال آخر</i>")
+            lines.append("")
+
+        lines.append("━━━━━━━━━━━━━━━━━━━━")
+        lines.append("💡 راجع database.py v7.7.61 (TX-1..4)")
+        lines.append(
+            "🔧 استخدم <code>/db_idle</code> للتفاصيل الكاملة."
+        )
+
+        text = "\n".join(lines)
+        if len(text) > 4000:
+            text = text[:4000] + "\n…"
+
+        try:
+            await safe_send(bot, owner_id, text, parse_mode='HTML')
+            logger.warning(
+                "🔔 idle-tx notification sent (count=%d، ours=%d، reason=%s)",
+                count, app_matches, reason or "n/a",
+            )
+        except Exception as e:
+            logger.warning(
+                "_notify_dev_about_idle_tx: safe_send failed: %s", e,
+            )
+
+        return report
+    except Exception as e:
+        logger.warning(
+            "_notify_dev_about_idle_tx: unexpected: %s", e, exc_info=True,
+        )
+        return None
+
+
+async def _lazy_init_columns(bot=None):
     global _columns_initialized, _columns_last_attempt_ts
     global _columns_last_error_log_ts
 
@@ -814,7 +991,7 @@ async def _lazy_init_columns():
         _columns_last_attempt_ts = now
 
         db_type = getattr(DB, "DB_TYPE", "sqlite")
-        logger.info("🔧 v7.18.13: Auto-migration (DB_TYPE=%s)", db_type)
+        logger.info("🔧 v7.18.14: Auto-migration (DB_TYPE=%s)", db_type)
 
         cols = [
             ("delete_protected_any", "INTEGER DEFAULT 0", "TINYINT(1) DEFAULT 0"),
@@ -938,6 +1115,25 @@ async def _lazy_init_columns():
                     "migration failed (%d cols) — log throttled",
                     len(unexpected_failures),
                 )
+
+            # 🆕 v7.18.14: عند فشل حرج → فحص idle-tx (احتمال أن السبب
+            # هو اتصالات ملوّثة تحجب DDL) + إشعار المطور.
+            if bot is not None:
+                try:
+                    _spawn_tracked_task(
+                        _notify_dev_about_idle_tx(
+                            bot,
+                            reason=(
+                                f"migration_failed:"
+                                f"{len(unexpected_failures)}_cols"
+                            ),
+                        ),
+                        label="idle-tx-notify-migration",
+                    )
+                except Exception as _e_it:
+                    logger.debug(
+                        "idle-tx spawn after migration fail: %s", _e_it,
+                    )
 
 
 _dev_log_cache = None
@@ -3100,7 +3296,8 @@ class MessageHandlers:
         if not update.effective_chat or not update.effective_message:
             return
         chat_id = update.effective_chat.id
-        await _lazy_init_columns()
+        # 🆕 v7.18.14: تمرير bot للسماح بإشعار idle-tx عند فشل DB
+        await _lazy_init_columns(bot=context.bot)
 
         message = update.effective_message
 
@@ -4712,6 +4909,177 @@ async def handle_autoblocked_command(update, context):
 
 
 # ═══════════════════════════════════════════════════════════════════
+# 🆕 v7.18.14: /db_idle command (developer-only)
+# ═══════════════════════════════════════════════════════════════════
+
+async def handle_db_idle_command(update, context):
+    """
+    🔍 v7.18.14: /db_idle — تدقيق idle-in-transaction (للمطور فقط).
+
+    الاستخدام:
+        /db_idle         — فحص كامل بالتفاصيل
+        /db_idle force   — تجاهل cooldown (غير مطلوب هنا، الأمر يدوي)
+
+    يكتشف اتصالات idle-in-tx في PostgreSQL فقط، ويعرض:
+      - PID + application_name
+      - مدة الخمول وعمر المعاملة
+      - backend_xmin
+      - آخر query (مقطوع)
+    """
+    if not update.effective_user or not update.effective_message:
+        return
+
+    user_id = update.effective_user.id
+
+    # التحقق من صلاحيات المطور
+    try:
+        is_dev = False
+        for attr in ('is_developer', 'is_dev', 'is_owner'):
+            fn = getattr(CONFIG, attr, None)
+            if callable(fn) and fn(user_id):
+                is_dev = True
+                break
+        if not is_dev and user_id == int(
+            getattr(CONFIG, 'PRIMARY_OWNER_ID', 0) or 0
+        ):
+            is_dev = True
+    except Exception:
+        is_dev = False
+
+    if not is_dev:
+        return
+
+    chat_id = update.effective_chat.id
+
+    # التحقق من توفر DB.audit_idle_in_transactions
+    audit_fn = getattr(DB, 'audit_idle_in_transactions', None)
+    if not callable(audit_fn):
+        await safe_send(
+            context.bot, chat_id,
+            "⚠️ <b>غير متاح</b>\n"
+            "يتطلب <code>database.py v7.7.62+</code>",
+            parse_mode='HTML',
+        )
+        return
+
+    # الاستعلام
+    try:
+        report = await audit_fn()
+    except Exception as e:
+        logger.warning("handle_db_idle_command query: %s", e)
+        await safe_send(
+            context.bot, chat_id,
+            f"❌ <b>فشل الاستعلام</b>\n"
+            f"<code>{escape(str(e)[:120])}</code>",
+            parse_mode='HTML',
+        )
+        return
+
+    if not isinstance(report, dict):
+        await safe_send(context.bot, chat_id, "❌ رد غير متوقع من DB")
+        return
+
+    count = int(report.get('count') or 0)
+
+    # حالة نظيفة
+    if count == 0:
+        await safe_send(
+            context.bot, chat_id,
+            "✅ <b>لا idle-in-transaction</b>\n"
+            "<i>قاعدة البيانات نظيفة — لا اتصالات عالقة.</i>",
+            parse_mode='HTML',
+        )
+        return
+
+    # حالة فيها اتصالات عالقة
+    app_matches = int(report.get('app_matches') or 0)
+    total = int(report.get('total_idle_tx') or 0)
+    min_secs = report.get('min_seconds_used')
+    app_filter = report.get('app_filter')
+
+    lines = [
+        f"🔴 <b>Idle-in-Transaction: {count}</b>",
+        "━━━━━━━━━━━━━━━━━━━━",
+    ]
+
+    if app_matches:
+        lines.append(
+            f"🚨 <b>{app_matches}</b> من تطبيقنا "
+            f"(<code>{escape(str(app_filter or 'relax_bot'))}</code>)"
+        )
+    if total != count and total > 0:
+        lines.append(f"📈 إجمالي كل التطبيقات: <b>{total}</b>")
+    if min_secs is not None:
+        lines.append(
+            f"⏱️ الحد الأدنى للخمول: <code>{min_secs}s</code>"
+        )
+
+    lines.append("")
+    lines.append("<b>التفاصيل:</b>")
+    lines.append("")
+
+    items = report.get('items') or []
+    for item in items[:10]:
+        try:
+            pid = item.get('pid')
+            app = item.get('app') or '?'
+            idle = item.get('idle_sec', 0)
+            tx_age = item.get('tx_age_sec', 0)
+            xmin = item.get('backend_xmin') or '—'
+            user_name = item.get('user') or '?'
+            client = item.get('client') or 'local'
+            q = (item.get('query') or '').strip()[:120]
+
+            lines.append(
+                f"🔴 <b>pid</b>=<code>{pid}</code> "
+                f"[<code>{escape(str(app))}</code>]"
+            )
+            lines.append(
+                f"   👤 user=<code>{escape(str(user_name))}</code> "
+                f"| client=<code>{escape(str(client))}</code>"
+            )
+            lines.append(
+                f"   ⏱️ idle=<b>{idle}s</b> "
+                f"| tx_age=<b>{tx_age}s</b>"
+            )
+            lines.append(
+                f"   🔒 xmin=<code>{escape(str(xmin))}</code>"
+            )
+            if q:
+                lines.append(f"   <i>{escape(q)}</i>")
+            lines.append("")
+        except Exception:
+            continue
+
+    if count > 10:
+        lines.append(f"<i>… و{count - 10} اتصال آخر (غير معروض)</i>")
+        lines.append("")
+
+    lines.append("━━━━━━━━━━━━━━━━━━━━")
+    lines.append("💡 <b>الحل:</b>")
+    lines.append(
+        "• راجع <code>database.py v7.7.61</code> (TX-1..4) "
+        "— rollback وقائي"
+    )
+    lines.append(
+        "• تأكد من عدم وجود معاملات طويلة في الكود"
+    )
+    lines.append(
+        "• استخدم <code>analytics_idle_tx</code> من لوحة "
+        "التحليلات للتحديث"
+    )
+
+    text = "\n".join(lines)
+    if len(text) > 4000:
+        text = text[:3990] + "\n…"
+
+    try:
+        await safe_send(context.bot, chat_id, text, parse_mode='HTML')
+    except Exception as e:
+        logger.warning("handle_db_idle_command send: %s", e)
+
+
+# ═══════════════════════════════════════════════════════════════════
 # Public API
 # ═══════════════════════════════════════════════════════════════════
 
@@ -4805,4 +5173,11 @@ __all__ = [
     "_run_sync_in_pool_available",
     "_HAS_DET_RUN_IN_POOL",
     "_HAS_DET_SHUTDOWN_EXECUTOR",
+
+    # 🆕 v7.18.14: Idle-TX audit
+    "handle_db_idle_command",
+    "_notify_dev_about_idle_tx",
+    "_IDLE_TX_NOTIFY_COOLDOWN",
+    "_idle_tx_last_notify",
+    "_idle_tx_notify_lock",
 ]
