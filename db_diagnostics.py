@@ -4,7 +4,15 @@
 """
 db_diagnostics.py — PostgreSQL/MySQL/SQLite Database Diagnostics
 ================================================================================
-v6.9.0 — FULL-TABLES-VACUUM + AUTO-DISCOVERY
+v6.9.1 — IDLE-TX-AUDIT + SAFE-INTERVAL + MYSQL-INT-FIX
+
+🆕 v6.9.1 (IDLE-TX-AUDIT):
+    🔴 FIX: _count_all_user_tables MySQL — ::int → CAST AS SIGNED
+    🔴 FIX: preview/run_maintenance — _safe_days() لحماية INTERVAL
+    🔴 FIX: start_auto_cleanup — get_running_loop بدل get_event_loop
+    🟢 NEW: audit_idle_in_transactions() — تدقيق فوري بلا عتبة
+    🟢 NEW: format_idle_tx_audit() — تنسيق لـ Telegram
+    🟢 NEW: IDLE_TX_AUDIT_MIN_SECONDS / APP_FILTER / LIMIT
 
 🆕 v6.9.0 (FULL-TABLES-VACUUM):
     🔴 FIX: DB_VACUUM_MODE="all" — وضع جديد يكتشف كل الجداول تلقائياً
@@ -52,6 +60,7 @@ v6.9.0 — FULL-TABLES-VACUUM + AUTO-DISCOVERY
         vacuum_analyze_tables,
         start_auto_cleanup, stop_auto_cleanup,
         auto_cleanup_check_and_run, get_auto_cleanup_status,
+        audit_idle_in_transactions, format_idle_tx_audit,
     )
 ================================================================================
 """
@@ -74,7 +83,7 @@ logger = logging.getLogger(__name__)
 # VERSION
 # =============================================================================
 
-VERSION = "6.9.0"
+VERSION = "6.9.1"
 
 
 # =============================================================================
@@ -140,6 +149,10 @@ MAINTENANCE_MAX_DELETE_PER_TABLE = 100_000
 MAINTENANCE_DEFAULT_ADMIN_LOGS_DAYS = 30
 MAINTENANCE_DEFAULT_PENALTY_ARCHIVE_DAYS = 90
 MAINTENANCE_DEFAULT_USER_VIOLATIONS_DAYS = 90
+
+# 🆕 v6.9.1: سقوف آمنة لأيام INTERVAL
+MAINTENANCE_MIN_DAYS = 1
+MAINTENANCE_MAX_DAYS = 3650
 
 
 # =============================================================================
@@ -224,6 +237,17 @@ DB_DIAG_MAX_CLEAN_TABLES = _env_int("DB_DIAG_MAX_CLEAN_TABLES", 15)
 DB_DIAG_MAX_SIZES = _env_int("DB_DIAG_MAX_SIZES", 15)
 DB_DIAG_SHOW_ALL_TABLES = _env_bool("DB_DIAG_SHOW_ALL_TABLES", True)
 DB_DIAG_SHOW_INDEX_HEALTH = _env_bool("DB_DIAG_SHOW_INDEX_HEALTH", True)
+
+
+# =============================================================================
+# 🆕 v6.9.1: IDLE-IN-TX AUDIT CONFIGURATION
+# =============================================================================
+
+IDLE_TX_AUDIT_MIN_SECONDS = _env_int("IDLE_TX_AUDIT_MIN_SECONDS", 0)
+IDLE_TX_AUDIT_APP_FILTER = _env_str(
+    "IDLE_TX_AUDIT_APP_FILTER", "relax_bot"
+)
+IDLE_TX_AUDIT_LIMIT = _env_int("IDLE_TX_AUDIT_LIMIT", 50)
 
 
 # =============================================================================
@@ -337,6 +361,50 @@ def _safe_float(value: Any, default: float = 0.0) -> float:
         return float(value)
     except (TypeError, ValueError, OverflowError):
         return default
+
+
+def _safe_days(
+    value: Any,
+    default: int,
+    min_days: int = MAINTENANCE_MIN_DAYS,
+    max_days: int = MAINTENANCE_MAX_DAYS,
+) -> int:
+    """
+    🆕 v6.9.1: تحقق من عدد الأيام قبل تضمينه في INTERVAL.
+
+    يمنع SQL injection من تمرير قيمة غير رقمية، ويحدد النطاق
+    المسموح به لمنع استعلامات بلا داعٍ (مثل 999999 يوم).
+
+    Args:
+        value: القيمة المُمرَّرة (قد تكون str).
+        default: القيمة الاحتياطية عند الفشل.
+        min_days: الحد الأدنى (افتراضي 1).
+        max_days: الحد الأقصى (افتراضي 3650 يوم ≈ 10 سنوات).
+
+    Returns:
+        عدد صحيح آمن في النطاق [min_days, max_days].
+    """
+    try:
+        n = int(value)
+    except (TypeError, ValueError, OverflowError):
+        logger.warning(
+            "⚠️ _safe_days: قيمة غير صالحة %r — استخدام %d",
+            value, default,
+        )
+        return max(min_days, min(default, max_days))
+    if n < min_days:
+        logger.warning(
+            "⚠️ _safe_days: %d < الحد الأدنى %d — استخدام %d",
+            n, min_days, min_days,
+        )
+        return min_days
+    if n > max_days:
+        logger.warning(
+            "⚠️ _safe_days: %d > الحد الأقصى %d — استخدام %d",
+            n, max_days, max_days,
+        )
+        return max_days
+    return n
 
 
 def _escape_html(value: Any) -> str:
@@ -1454,14 +1522,16 @@ async def _count_all_user_tables() -> int:
             return 0
 
     if _is_mysql():
+        # 🆕 v6.9.1 FIX: MySQL لا يدعم ::int — استخدام CAST AS SIGNED
         try:
             return _safe_int(await DB.fetchval("""
-                SELECT COUNT(*)::int
+                SELECT CAST(COUNT(*) AS SIGNED)
                 FROM information_schema.TABLES
                 WHERE TABLE_SCHEMA = DATABASE()
                   AND TABLE_TYPE = 'BASE TABLE'
             """, default=0))
-        except Exception:
+        except Exception as exc:
+            logger.debug("_count_all_user_tables mysql: %s", exc)
             return 0
 
     try:
@@ -1595,6 +1665,206 @@ async def _get_autovacuum_blockers() -> List[Dict[str, Any]]:
         logger.debug("blockers(running vacuum): %s", exc)
 
     return blockers
+
+
+# =============================================================================
+# 🆕 v6.9.1: IDLE-IN-TX AUDIT (zero-threshold)
+# =============================================================================
+
+async def audit_idle_in_transactions(
+    min_seconds: Optional[int] = None,
+    app_filter: Optional[str] = None,
+    limit: Optional[int] = None,
+) -> Dict[str, Any]:
+    """
+    🆕 v6.9.1: تدقيق جميع اتصالات idle-in-transaction.
+
+    يكتشف **كل** اتصال (بلا حد أدنى افتراضي — min_seconds=0) مع:
+    - مصدره (application_name)
+    - مدة الخمول
+    - عمر المعاملة
+    - backend_xmin / backend_xid
+    - آخر query منفّذ
+
+    Args:
+        min_seconds: الحد الأدنى لعمر الخمول (افتراضي من env).
+        app_filter: تصفية application_name (None = كل التطبيقات).
+        limit: حد أقصى للصفوف.
+
+    Returns:
+        dict مع:
+            - count: عدد الاتصالات المكتشفة
+            - items: قائمة تفصيلية
+            - by_app: تجميع حسب application_name
+            - warning: رسالة تحذير مقترحة
+            - min_seconds_used / app_filter
+    """
+    from database import DB, USE_POSTGRES
+
+    if not USE_POSTGRES:
+        return {
+            "count": 0,
+            "items": [],
+            "warning": None,
+            "by_app": {},
+            "min_seconds_used": 0,
+            "app_filter": app_filter,
+        }
+
+    # معالجة القيم الافتراضية من env
+    if min_seconds is None:
+        min_seconds = IDLE_TX_AUDIT_MIN_SECONDS
+    if app_filter is None:
+        app_filter = IDLE_TX_AUDIT_APP_FILTER or None
+    if limit is None:
+        limit = IDLE_TX_AUDIT_LIMIT
+
+    min_seconds = max(0, _safe_int(min_seconds, 0))
+    limit = max(1, min(_safe_int(limit, 50), 500))
+
+    where_clauses = [
+        "state = 'idle in transaction'",
+        "pid <> pg_backend_pid()",
+        "EXTRACT(EPOCH FROM (now() - state_change)) >= $1",
+    ]
+    params: List[Any] = [min_seconds]
+
+    if app_filter:
+        where_clauses.append("application_name = $2")
+        params.append(app_filter)
+
+    query = f"""
+        SELECT pid,
+               usename,
+               application_name,
+               COALESCE(client_addr::text, 'local') AS client,
+               EXTRACT(EPOCH FROM (now() - state_change))::bigint
+                   AS idle_sec,
+               EXTRACT(EPOCH FROM (now() - xact_start))::bigint
+                   AS tx_age_sec,
+               backend_xmin::text AS backend_xmin,
+               backend_xid::text  AS backend_xid,
+               substring(query, 1, 400) AS query
+        FROM pg_stat_activity
+        WHERE {" AND ".join(where_clauses)}
+        ORDER BY state_change ASC
+        LIMIT {limit}
+    """
+
+    items: List[Dict[str, Any]] = []
+    by_app: Dict[str, int] = {}
+    try:
+        rows = await DB.fetchall(query, tuple(params))
+        for r in rows or []:
+            app = (r.get("application_name") or "?")[:40]
+            by_app[app] = by_app.get(app, 0) + 1
+            items.append({
+                "pid": _safe_int(r.get("pid")),
+                "user": r.get("usename"),
+                "app": app,
+                "client": r.get("client"),
+                "idle_sec": _safe_int(r.get("idle_sec")),
+                "tx_age_sec": _safe_int(r.get("tx_age_sec")),
+                "backend_xmin": r.get("backend_xmin"),
+                "backend_xid": r.get("backend_xid"),
+                "query": (r.get("query") or "").strip()[:400],
+            })
+    except Exception as exc:
+        logger.warning("audit_idle_in_transactions: %s", exc)
+        return {
+            "count": 0,
+            "items": [],
+            "warning": f"query_failed: {exc}",
+            "by_app": {},
+            "min_seconds_used": min_seconds,
+            "app_filter": app_filter,
+        }
+
+    warning: Optional[str] = None
+    if items:
+        our_conns = by_app.get(app_filter, 0) if app_filter else 0
+        if our_conns:
+            warning = (
+                f"🔴 {our_conns} اتصال idle-in-tx من '{app_filter}' "
+                f"— راجع database.py v7.7.61 (TX-1..TX-4)"
+            )
+        else:
+            warning = (
+                f"🟡 {len(items)} اتصال idle-in-tx من تطبيقات أخرى"
+            )
+
+    return {
+        "count": len(items),
+        "items": items,
+        "warning": warning,
+        "by_app": by_app,
+        "min_seconds_used": min_seconds,
+        "app_filter": app_filter,
+    }
+
+
+def format_idle_tx_audit(report: Dict[str, Any]) -> str:
+    """🎨 تنسيق نتيجة التدقيق لـ Telegram."""
+    count = report.get("count", 0)
+    lines: List[str] = []
+
+    if count == 0:
+        lines.append(
+            f"✅ <b>لا توجد idle-in-tx</b> "
+            f"(min={report.get('min_seconds_used', 0)}s)"
+        )
+        if report.get("app_filter"):
+            lines.append(
+                f"📌 التطبيق المُراقَب: "
+                f"<code>{_escape_html(report['app_filter'])}</code>"
+            )
+        return "\n".join(lines)
+
+    lines.append(
+        f"🔴 <b>Idle-in-Transaction:</b> <b>{count}</b>"
+    )
+    if report.get("warning"):
+        lines.append(f"⚠️ {_escape_html(report['warning'])}")
+    lines.append("")
+
+    by_app = report.get("by_app") or {}
+    if by_app:
+        lines.append("📊 <b>حسب التطبيق:</b>")
+        for app, cnt in sorted(
+            by_app.items(), key=lambda x: -x[1]
+        ):
+            lines.append(
+                f"  • <code>{_escape_html(app)}</code>: "
+                f"<b>{cnt}</b>"
+            )
+        lines.append("")
+
+    lines.append("📋 <b>التفاصيل:</b>")
+    for item in (report.get("items") or [])[:20]:
+        idle = _fmt_duration_seconds(item.get("idle_sec"))
+        tx_age = _fmt_duration_seconds(item.get("tx_age_sec"))
+        query_snippet = _escape_html(
+            (item.get("query") or "—")[:120]
+        )
+        lines.append(
+            f"  🔴 pid=<code>{item.get('pid')}</code> "
+            f"[<code>{_escape_html(item.get('app'))}</code>]"
+        )
+        lines.append(
+            f"     idle={idle} | tx_age={tx_age} | "
+            f"xmin=<code>{_escape_html(item.get('backend_xmin') or '—')}</code>"
+        )
+        lines.append(f"     query: <i>{query_snippet}</i>")
+        lines.append("")
+
+    total_items = len(report.get("items") or [])
+    if total_items > 20:
+        lines.append(
+            f"<i>… و{total_items - 20} اتصال آخر (ارفع "
+            f"IDLE_TX_AUDIT_LIMIT لعرض المزيد)</i>"
+        )
+
+    return "\n".join(lines)
 
 
 # =============================================================================
@@ -1826,6 +2096,8 @@ async def _get_pg_settings() -> Dict[str, Any]:
         "work_mem",
         "effective_cache_size",
         "synchronous_commit",
+        "idle_in_transaction_session_timeout",
+        "statement_timeout",
         "server_version",
     ]
     settings: Dict[str, Any] = {}
@@ -3175,6 +3447,8 @@ async def _build_diagnose_lines() -> List[str]:
             "shared_buffers",
             "work_mem",
             "synchronous_commit",
+            "idle_in_transaction_session_timeout",
+            "statement_timeout",
             "server_version",
         )
         for key in keys:
@@ -3386,6 +3660,17 @@ async def preview_maintenance(
 
     result['available'] = True
 
+    # 🆕 v6.9.1: التحقق من الأيام قبل استخدامها في INTERVAL
+    admin_logs_days = _safe_days(
+        admin_logs_days, MAINTENANCE_DEFAULT_ADMIN_LOGS_DAYS
+    )
+    penalty_archive_days = _safe_days(
+        penalty_archive_days, MAINTENANCE_DEFAULT_PENALTY_ARCHIVE_DAYS
+    )
+    user_violations_days = _safe_days(
+        user_violations_days, MAINTENANCE_DEFAULT_USER_VIOLATIONS_DAYS
+    )
+
     try:
         blockers = await _get_autovacuum_blockers()
         running = [
@@ -3483,6 +3768,7 @@ async def run_maintenance(
     ✅ v6.5.1: user_violations يستخدم last_violation_time.
     ✅ v6.8.0: VACUUM يشمل MAINTENANCE_TABLES بدلاً من HEAVY فقط.
     ✅ v6.9.0: VACUUM يعمل على كل جداول المستخدم (DB_VACUUM_MODE="all").
+    🆕 v6.9.1: _safe_days() يتحقق من الأيام قبل INTERVAL.
     """
     from database import (
         DB, USE_POSTGRES,
@@ -3503,6 +3789,20 @@ async def run_maintenance(
             "الصيانة مدعومة فقط على PostgreSQL حالياً"
         )
         return result
+
+    # 🆕 v6.9.1: التحقق من الأيام (يمنع SQL injection)
+    admin_logs_days = _safe_days(
+        admin_logs_days, MAINTENANCE_DEFAULT_ADMIN_LOGS_DAYS
+    )
+    penalty_archive_days = _safe_days(
+        penalty_archive_days, MAINTENANCE_DEFAULT_PENALTY_ARCHIVE_DAYS
+    )
+    user_violations_days = _safe_days(
+        user_violations_days, MAINTENANCE_DEFAULT_USER_VIOLATIONS_DAYS
+    )
+    max_delete_per_table = max(
+        1, _safe_int(max_delete_per_table, MAINTENANCE_MAX_DELETE_PER_TABLE)
+    )
 
     if not skip_delete:
         delete_plan = [
@@ -4100,8 +4400,17 @@ def start_auto_cleanup() -> bool:
         return True
 
     _auto_cleanup_shutdown = False
+    # 🆕 v6.9.1 FIX: get_running_loop بدل get_event_loop المهجور
     try:
-        loop = asyncio.get_event_loop()
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            logger.warning(
+                "⚠️ start_auto_cleanup: لا توجد حلقة asyncio قيد "
+                "التشغيل — استدعِ الدالة من داخل coroutine"
+            )
+            return False
+
         _auto_cleanup_task = loop.create_task(
             _auto_cleanup_loop(),
             name="db_auto_cleanup",
@@ -4196,6 +4505,9 @@ __all__ = [
     "stop_auto_cleanup",
     "auto_cleanup_check_and_run",
     "get_auto_cleanup_status",
+    # 🆕 v6.9.1: Idle-TX audit
+    "audit_idle_in_transactions",
+    "format_idle_tx_audit",
     # Auto-cleanup constants
     "AUTO_CLEANUP_ENABLED",
     "AUTO_CLEANUP_MAX_SIZE_MB",
@@ -4213,6 +4525,10 @@ __all__ = [
     "DB_DIAG_MAX_SIZES",
     "DB_DIAG_SHOW_ALL_TABLES",
     "DB_DIAG_SHOW_INDEX_HEALTH",
+    # 🆕 v6.9.1: Idle-TX audit config
+    "IDLE_TX_AUDIT_MIN_SECONDS",
+    "IDLE_TX_AUDIT_APP_FILTER",
+    "IDLE_TX_AUDIT_LIMIT",
     # 🆕 v6.9.0: Vacuum mode + exclude
     "DB_VACUUM_MODE",
     "DB_VACUUM_EXCLUDE_TABLES",
@@ -4254,6 +4570,7 @@ __all__ = [
     "_split_for_telegram",
     "_get_open_html_tags",
     "_safe_params",
+    "_safe_days",
     "_is_tuned_reloptions",
     "_ReportBuilder",
     "_is_significant_table",
@@ -4281,5 +4598,7 @@ __all__ = [
     "MAINTENANCE_DEFAULT_ADMIN_LOGS_DAYS",
     "MAINTENANCE_DEFAULT_PENALTY_ARCHIVE_DAYS",
     "MAINTENANCE_DEFAULT_USER_VIOLATIONS_DAYS",
+    "MAINTENANCE_MIN_DAYS",
+    "MAINTENANCE_MAX_DAYS",
     "_ALWAYS_EXCLUDE_TABLES",
 ]
