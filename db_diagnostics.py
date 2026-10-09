@@ -1,4604 +1,1084 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-
 """
-db_diagnostics.py — PostgreSQL/MySQL/SQLite Database Diagnostics
+database_analytics.py - دوال التحليلات المتقدمة (v1.1.0)
 ================================================================================
-v6.9.1 — IDLE-TX-AUDIT + SAFE-INTERVAL + MYSQL-INT-FIX
-
-🆕 v6.9.1 (IDLE-TX-AUDIT):
-    🔴 FIX: _count_all_user_tables MySQL — ::int → CAST AS SIGNED
-    🔴 FIX: preview/run_maintenance — _safe_days() لحماية INTERVAL
-    🔴 FIX: start_auto_cleanup — get_running_loop بدل get_event_loop
-    🟢 NEW: audit_idle_in_transactions() — تدقيق فوري بلا عتبة
-    🟢 NEW: format_idle_tx_audit() — تنسيق لـ Telegram
-    🟢 NEW: IDLE_TX_AUDIT_MIN_SECONDS / APP_FILTER / LIMIT
-
-🆕 v6.9.0 (FULL-TABLES-VACUUM):
-    🔴 FIX: DB_VACUUM_MODE="all" — وضع جديد يكتشف كل الجداول تلقائياً
-    🔴 FIX: الافتراضي الآن "all" بدلاً من "maintenance"
-             → VACUUM يعمل على **كل** جداول المستخدم
-    🟢 NEW: _discover_all_tables_postgres() — من pg_class/pg_namespace
-    🟢 NEW: _discover_all_tables_mysql() — من information_schema
-    🟢 NEW: _discover_all_tables_sqlite() — من sqlite_master
-    🟢 NEW: تخطي جداول النظام تلقائياً (pg_*, sqlite_*, etc)
-    🟢 NEW: DB_VACUUM_EXCLUDE_TABLES env — استثناء جداول محددة
-    🟢 NEW: VACUUM (ANALYZE) بدلاً من VACUUM فقط (تحديث الإحصائيات)
-    🟢 NEW: عرض عدد الجداول المكتشفة قبل البدء
-
-🆕 v6.8.0 (VACUUM-COVERAGE-FIX):
-    🔴 FIX-HIGH: vacuum_analyze_tables() و run_maintenance() كانا يعملان
-                 على HEAVY_TABLES_FOR_AUTOVACUUM فقط (4 جداول)
-                 → الآن يعملان على MAINTENANCE_TABLES (10 جداول)
-    🟢 NEW: _get_vacuum_target_tables() — دمج ذكي مع إزالة التكرار
-    🟢 NEW: DB_VACUUM_MODE env — التحكم بمصدر القائمة
-
-🆕 v6.7.0 (FULL-COVERAGE):
-    • FIX-HIGH: إزالة الحد الثابت (12 جدولاً) في قسم Dead Tuples
-    • NEW: قسم "1b. جداول نظيفة (dead=0)"
-    • NEW: قسم "2b. تغطية autovacuum لكل الجداول"
-    • NEW: قسم "5b. صحة الفهارس العامة"
-    • NEW: توسيع AUTO_CLEANUP_WATCH_TABLES
-
-✅ v6.6.0 (AUTO-CLEANUP):
-    • auto_cleanup_check_and_run() — فحص الحجم + تشغيل صيانة تلقائية
-    • _auto_cleanup_loop()          — مهمة دورية
-    • start_auto_cleanup()          — بدء المهمة
-    • stop_auto_cleanup()           — إيقاف نظيف
-    • get_auto_cleanup_status()     — حالة النظام
-    • _get_table_size_mb()          — حجم جدول بالميغابايت
-    • _check_admin_logs_size()      — حالة auto-cleanup
-
-🔴 FIX-CRITICAL (v6.5.1):
-    تصحيح العمود في user_violations من created_at → last_violation_time
-
-الاستخدام:
-    from db_diagnostics import (
-        diagnose_db, diagnose_db_split, diagnose_db_quick,
-        preview_maintenance, run_maintenance,
-        format_maintenance_preview, format_maintenance_result,
-        vacuum_analyze_tables,
-        start_auto_cleanup, stop_auto_cleanup,
-        auto_cleanup_check_and_run, get_auto_cleanup_status,
-        audit_idle_in_transactions, format_idle_tx_audit,
-    )
+AnalyticsMixin:
+  - get_user_growth               : نمو المستخدمين آخر N يوم
+  - get_top_channels              : أفضل N قناة (نجاح + إنجاز)
+  - get_channel_success_rate      : نسبة نجاح القنوات (alias + فلترة)
+  - get_publish_stats             : متوسط + نسبة النجاح + نسبة الإنجاز
+  - get_subscription_rate         : اشتراكات شهرية
+  - get_slow_queries              : أبطأ الاستعلامات (الأبطأ أولاً)
+  - get_slowest_queries           : alias موثّق للأبطأ أولاً
+  - get_pool_live                 : حالة Pool مباشرة
+  🆕 Diagnostics:
+  - get_db_diagnostics            : 🔬 تقرير تشخيص DB شامل
+  - get_dead_tuples               : Dead Tuples لكل جدول
+  - get_table_sizes               : أحجام الجداول
+  - get_indexes_info              : الفهارس
+  - get_autovacuum_settings       : إعدادات Autovacuum
+  - get_maintenance_recommendations : توصيات SQL عملية
+  🆕 Idle-TX Integration (v1.1.0):
+  - get_idle_tx_info              : 🔍 idle-in-transaction فوري
+  - get_idle_tx_status_info       : 📊 حالة نظام الرصد الدوري
 ================================================================================
 """
 
-from __future__ import annotations
-
-import asyncio
 import logging
-import os
-import re
-import time as _time
-from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Set, Tuple
-
+from datetime import datetime, timedelta
+from typing import Dict, List, Any, Optional
 
 logger = logging.getLogger(__name__)
 
 
-# =============================================================================
-# VERSION
-# =============================================================================
+# =====================================================================
+# 🎯 ثوابت
+# =====================================================================
 
-VERSION = "6.9.1"
-
-
-# =============================================================================
-# THRESHOLDS
-# =============================================================================
-
-DEAD_TUPLE_WARN_PCT = 10.0
-DEAD_TUPLE_CRIT_PCT = 20.0
-
-DEAD_TUPLE_WARN_ABS = 1_000
-DEAD_TUPLE_CRIT_ABS = 10_000
-
-MIN_TABLE_SIZE_FOR_ALERT = 200
-
-SMALL_TABLE_THRESHOLD = 500
-SMALL_TABLE_MIN_DEAD_CRIT = 100
-SMALL_TABLE_MIN_DEAD_WARN = 50
-
-ADMIN_LOGS_WARN_ROWS = 10_000
-ADMIN_LOGS_CRIT_ROWS = 50_000
-
-LONG_TX_WARN_SECONDS = 300
-VERY_LONG_TX_SECONDS = 1800
-
-IDLE_TX_WARN_SECONDS = 120
-IDLE_TX_CRIT_SECONDS = 1800
-
-AV_NOT_RUNNING_HOURS = 24
-NAPTIME_WARN_SECONDS = 300
-
-ANALYZE_MOD_WARN_PCT = 10.0
-ANALYZE_MOD_CRIT_PCT = 20.0
-
-ACCEPTED_VACUUM_SCALE_FACTORS: Set[str] = {
-    "0.02",
-    "0.05",
-    "0",
-}
-
-ACCEPTED_ANALYZE_SCALE_FACTORS: Set[str] = {
-    "0.01",
-    "0.02",
-    "0",
-}
-
-EXPECTED_VACUUM_SCALE_FACTOR = "0.02"
-EXPECTED_ANALYZE_SCALE_FACTOR = "0.01"
-
-EXPECTED_VACUUM_SCALE_FACTORS = ACCEPTED_VACUUM_SCALE_FACTORS
-EXPECTED_ANALYZE_SCALE_FACTORS = ACCEPTED_ANALYZE_SCALE_FACTORS
-
-DEFAULT_VACUUM_THRESHOLD = 50
-DEFAULT_ANALYZE_THRESHOLD = 50
-
-AVG_ROW_BYTES_ESTIMATE = 200
-
-REPORT_MAX_CHARS = 3800
-TELEGRAM_MESSAGE_LIMIT = 4096
-
-REQUIRED_HEAVY_TABLE_USERS = "users"
-
-MAINTENANCE_MAX_DELETE_PER_TABLE = 100_000
-MAINTENANCE_DEFAULT_ADMIN_LOGS_DAYS = 30
-MAINTENANCE_DEFAULT_PENALTY_ARCHIVE_DAYS = 90
-MAINTENANCE_DEFAULT_USER_VIOLATIONS_DAYS = 90
-
-# 🆕 v6.9.1: سقوف آمنة لأيام INTERVAL
-MAINTENANCE_MIN_DAYS = 1
-MAINTENANCE_MAX_DAYS = 3650
+DEFAULT_SUCCESS_RATE = 100.0
+FAIL_COUNT_THRESHOLD = 3
+DEAD_TUPLE_THRESHOLDS = (0.05, 0.10, 0.20)
+DEAD_TUPLE_MIN_LIVE = 1000
+TABLE_SIZE_WARN_KB = 5 * 1024
+TABLE_SIZE_CRITICAL_KB = 50 * 1024
+ADMIN_LOGS_WARN_COUNT = 5000
+BANNED_WORDS_WARN_COUNT = 500
+IDLE_TX_WARN_COUNT = 1
+IDLE_TX_CRIT_COUNT = 3
 
 
-# =============================================================================
-# ENV HELPERS
-# =============================================================================
+# =====================================================================
+# 🎨 دوال مساعدة
+# =====================================================================
 
-_TRUE_STRS = frozenset({"1", "true", "yes", "y", "on", "enabled", "enable"})
-_FALSE_STRS = frozenset({"0", "false", "no", "n", "off", "disabled", "disable"})
-
-
-def _env_bool(name: str, default: bool) -> bool:
-    val = os.getenv(name)
-    if val is None:
-        return default
-    v = val.strip().lower()
-    if v in _TRUE_STRS:
-        return True
-    if v in _FALSE_STRS:
-        return False
-    return default
-
-
-def _env_int(name: str, default: int) -> int:
+def color_emoji(value: float, thresholds=(0.3, 0.7), inverse=False) -> str:
     try:
-        return int(os.getenv(name, str(default)))
+        v = float(value)
     except (TypeError, ValueError):
-        return default
-
-
-def _env_str(name: str, default: str) -> str:
-    val = os.getenv(name)
-    if val is None:
-        return default
-    return val.strip()
-
-
-def _env_list(name: str, default: Tuple[str, ...] = ()) -> Tuple[str, ...]:
-    val = os.getenv(name)
-    if val is None:
-        return default
-    items = [item.strip() for item in val.split(",") if item.strip()]
-    return tuple(items) if items else default
-
-
-# =============================================================================
-# AUTO-CLEANUP CONFIGURATION
-# =============================================================================
-
-AUTO_CLEANUP_ENABLED = _env_bool("DB_AUTO_CLEANUP_ENABLED", True)
-AUTO_CLEANUP_MAX_SIZE_MB = _env_int("DB_AUTO_CLEANUP_MAX_SIZE_MB", 20)
-AUTO_CLEANUP_INTERVAL_HOURS = _env_int("DB_AUTO_CLEANUP_INTERVAL_HOURS", 6)
-AUTO_CLEANUP_INITIAL_DELAY_SEC = _env_int("DB_AUTO_CLEANUP_INITIAL_DELAY_SEC", 60)
-AUTO_CLEANUP_MAX_DELETE_PER_TABLE = _env_int(
-    "DB_AUTO_CLEANUP_MAX_DELETE_PER_TABLE", 50_000
-)
-AUTO_CLEANUP_ADMIN_LOGS_DAYS = _env_int("DB_AUTO_CLEANUP_ADMIN_LOGS_DAYS", 30)
-AUTO_CLEANUP_PENALTY_ARCHIVE_DAYS = _env_int(
-    "DB_AUTO_CLEANUP_PENALTY_ARCHIVE_DAYS", 90
-)
-AUTO_CLEANUP_USER_VIOLATIONS_DAYS = _env_int(
-    "DB_AUTO_CLEANUP_USER_VIOLATIONS_DAYS", 90
-)
-AUTO_CLEANUP_VACUUM = _env_bool("DB_AUTO_CLEANUP_VACUUM", True)
-
-AUTO_CLEANUP_WATCH_TABLES: Tuple[str, ...] = (
-    "admin_logs",
-    "payment_logs",
-    "sentiment_history",
-    "user_messages",
-    "bot_addition_log",
-    "penalty_archive",
-    "user_violations",
-)
-
-
-# =============================================================================
-# DIAGNOSTIC DISPLAY CONFIGURATION
-# =============================================================================
-
-DB_DIAG_MAX_DEAD_TABLES = _env_int("DB_DIAG_MAX_DEAD_TABLES", 30)
-DB_DIAG_MAX_CLEAN_TABLES = _env_int("DB_DIAG_MAX_CLEAN_TABLES", 15)
-DB_DIAG_MAX_SIZES = _env_int("DB_DIAG_MAX_SIZES", 15)
-DB_DIAG_SHOW_ALL_TABLES = _env_bool("DB_DIAG_SHOW_ALL_TABLES", True)
-DB_DIAG_SHOW_INDEX_HEALTH = _env_bool("DB_DIAG_SHOW_INDEX_HEALTH", True)
-
-
-# =============================================================================
-# 🆕 v6.9.1: IDLE-IN-TX AUDIT CONFIGURATION
-# =============================================================================
-
-IDLE_TX_AUDIT_MIN_SECONDS = _env_int("IDLE_TX_AUDIT_MIN_SECONDS", 0)
-IDLE_TX_AUDIT_APP_FILTER = _env_str(
-    "IDLE_TX_AUDIT_APP_FILTER", "relax_bot"
-)
-IDLE_TX_AUDIT_LIMIT = _env_int("IDLE_TX_AUDIT_LIMIT", 50)
-
-
-# =============================================================================
-# 🆕 v6.9.0: VACUUM TARGET CONFIGURATION
-# =============================================================================
-# "all"         (افتراضي جديد — كل جداول المستخدم المكتشفة تلقائياً)
-# "maintenance" (MAINTENANCE_TABLES — 10 جداول)
-# "heavy"       (السلوك القديم — HEAVY_TABLES_FOR_AUTOVACUUM — 4 جداول)
-# "both"        (اتحاد maintenance + heavy)
-DB_VACUUM_MODE = _env_str("DB_VACUUM_MODE", "all").lower()
-
-_VALID_VACUUM_MODES = frozenset({"all", "maintenance", "heavy", "both"})
-if DB_VACUUM_MODE not in _VALID_VACUUM_MODES:
-    logger.warning(
-        "⚠️ DB_VACUUM_MODE='%s' غير معروف — استخدام 'all'",
-        DB_VACUUM_MODE,
-    )
-    DB_VACUUM_MODE = "all"
-
-# 🆕 v6.9.0: استثناء جداول محددة من VACUUM (مفصولة بفواصل)
-DB_VACUUM_EXCLUDE_TABLES: Tuple[str, ...] = _env_list(
-    "DB_VACUUM_EXCLUDE_TABLES", ()
-)
-
-# 🆕 v6.9.0: جداول النظام التي يجب استثناؤها دائماً
-_ALWAYS_EXCLUDE_TABLES: frozenset = frozenset({
-    "spatial_ref_sys",         # PostGIS
-    "geography_columns",
-    "geometry_columns",
-    "raster_columns",
-    "raster_overviews",
-    "pg_stat_statements",      # PG extension
-})
-
-
-# =============================================================================
-# CRITICAL INDEXES
-# =============================================================================
-
-_CRITICAL_INDEXES: Dict[str, List[str]] = {
-    "posts": [
-        "posts_pkey",
-        "idx_posts_unique",
-        "idx_posts_text_hash",
-        "idx_posts_channel_pub_at",
-        "idx_posts_channel_pub_fail_created",
-        "idx_posts_channel_unpub_fresh_created",
-    ],
-    "banned_words": [
-        "banned_words_pkey",
-        "banned_words_word_chat_id_key",
-        "idx_banned_words_chat",
-        "idx_banned_words_chat_word",
-    ],
-    "bot_groups": [
-        "bot_groups_pkey",
-        "idx_bot_groups_added_by",
-        "idx_bot_groups_banned_cover",
-        "idx_bot_groups_log_channel",
-        "idx_groups_banned",
-    ],
-    "users": [
-        "users_pkey",
-    ],
-    "user_channels": [
-        "user_channels_pkey",
-    ],
-    "subscriptions": [
-        "subscriptions_pkey",
-    ],
-}
-
-
-# =============================================================================
-# DATA CLASSES
-# =============================================================================
-
-@dataclass
-class CauseItem:
-    text: str
-    confidence: str = "medium"
-    evidence: List[str] = field(default_factory=list)
-
-
-@dataclass
-class RootCause:
-    table: str
-    causes: List[CauseItem] = field(default_factory=list)
-    severity: str = "🟢"
-    solutions: List[Tuple[int, str, str]] = field(default_factory=list)
-    expected: List[str] = field(default_factory=list)
-
-
-# =============================================================================
-# GENERIC HELPERS
-# =============================================================================
-
-def _safe_int(value: Any, default: int = 0) -> int:
-    try:
-        if value is None:
-            return default
-        return int(value)
-    except (TypeError, ValueError, OverflowError):
-        return default
-
-
-def _safe_float(value: Any, default: float = 0.0) -> float:
-    try:
-        if value is None:
-            return default
-        return float(value)
-    except (TypeError, ValueError, OverflowError):
-        return default
-
-
-def _safe_days(
-    value: Any,
-    default: int,
-    min_days: int = MAINTENANCE_MIN_DAYS,
-    max_days: int = MAINTENANCE_MAX_DAYS,
-) -> int:
-    """
-    🆕 v6.9.1: تحقق من عدد الأيام قبل تضمينه في INTERVAL.
-
-    يمنع SQL injection من تمرير قيمة غير رقمية، ويحدد النطاق
-    المسموح به لمنع استعلامات بلا داعٍ (مثل 999999 يوم).
-
-    Args:
-        value: القيمة المُمرَّرة (قد تكون str).
-        default: القيمة الاحتياطية عند الفشل.
-        min_days: الحد الأدنى (افتراضي 1).
-        max_days: الحد الأقصى (افتراضي 3650 يوم ≈ 10 سنوات).
-
-    Returns:
-        عدد صحيح آمن في النطاق [min_days, max_days].
-    """
-    try:
-        n = int(value)
-    except (TypeError, ValueError, OverflowError):
-        logger.warning(
-            "⚠️ _safe_days: قيمة غير صالحة %r — استخدام %d",
-            value, default,
-        )
-        return max(min_days, min(default, max_days))
-    if n < min_days:
-        logger.warning(
-            "⚠️ _safe_days: %d < الحد الأدنى %d — استخدام %d",
-            n, min_days, min_days,
-        )
-        return min_days
-    if n > max_days:
-        logger.warning(
-            "⚠️ _safe_days: %d > الحد الأقصى %d — استخدام %d",
-            n, max_days, max_days,
-        )
-        return max_days
-    return n
-
-
-def _escape_html(value: Any) -> str:
-    if value is None:
-        return ""
-    return (
-        str(value)
-        .replace("&", "&amp;")
-        .replace("<", "&lt;")
-        .replace(">", "&gt;")
-        .replace('"', "&quot;")
-    )
-
-
-def _fmt_size_kb(kb: Any) -> str:
-    try:
-        value = float(kb)
-    except (TypeError, ValueError, OverflowError):
-        return "?"
-    if value < 0:
-        return "?"
-    if value >= 1024 * 1024:
-        return f"{value / (1024 * 1024):.2f} GB"
-    if value >= 1024:
-        return f"{value / 1024:.2f} MB"
-    return f"{value:.1f} KB"
-
-
-def _fmt_size_bytes(value: Any) -> str:
-    try:
-        return _fmt_size_kb(float(value) / 1024.0)
-    except (TypeError, ValueError, OverflowError):
-        return "?"
-
-
-def _fmt_duration_seconds(value: Any) -> str:
-    seconds = _safe_int(value, -1)
-    if seconds < 0:
-        return "?"
-    if seconds < 60:
-        return f"{seconds}s"
-    if seconds < 3600:
-        minutes = seconds // 60
-        remaining = seconds % 60
-        if remaining:
-            return f"{minutes}m{remaining}s"
-        return f"{minutes}m"
-    if seconds < 86400:
-        hours = seconds // 3600
-        minutes = (seconds % 3600) // 60
-        if minutes:
-            return f"{hours}h{minutes}m"
-        return f"{hours}h"
-    days = seconds // 86400
-    hours = (seconds % 86400) // 3600
-    if hours:
-        return f"{days}d{hours}h"
-    return f"{days}d"
-
-
-def _fmt_dt(value: Any) -> str:
-    if value is None:
-        return "—"
-    try:
-        if hasattr(value, "strftime"):
-            return value.strftime("%Y-%m-%d %H:%M:%S")
-        text = str(value)
-        return text[:19] if len(text) > 19 else text
-    except Exception:
-        return "?"
-
-
-def _dead_pct(dead: int, live: int) -> float:
-    dead = max(dead, 0)
-    live = max(live, 0)
-    total = dead + live
-    if total <= 0:
-        return 0.0
-    return (dead / total) * 100.0
-
-
-def _is_significant_table(dead: int, live: int) -> bool:
-    total = max(dead, 0) + max(live, 0)
-    return total >= MIN_TABLE_SIZE_FOR_ALERT
-
-
-def _dead_severity(dead: int, live: int) -> str:
-    total = max(dead, 0) + max(live, 0)
-    if total < MIN_TABLE_SIZE_FOR_ALERT:
-        return "ok"
-
-    pct = _dead_pct(dead, live)
-
-    if total < SMALL_TABLE_THRESHOLD:
-        if dead >= DEAD_TUPLE_CRIT_ABS:
-            return "critical"
-        if dead >= SMALL_TABLE_MIN_DEAD_CRIT and pct >= DEAD_TUPLE_CRIT_PCT:
-            return "critical"
-        if dead >= SMALL_TABLE_MIN_DEAD_WARN and pct >= DEAD_TUPLE_WARN_PCT:
-            return "warning"
-        return "ok"
-
-    if dead >= DEAD_TUPLE_CRIT_ABS or pct >= DEAD_TUPLE_CRIT_PCT:
-        return "critical"
-    if dead >= DEAD_TUPLE_WARN_ABS or pct >= DEAD_TUPLE_WARN_PCT:
-        return "warning"
-    return "ok"
-
-
-def _dead_emoji(dead: int, live: int) -> str:
-    severity = _dead_severity(dead, live)
-    if severity == "critical":
-        return "🔴"
-    if severity == "warning":
-        return "🟡"
-    return "✅"
-
-
-def _parse_interval_seconds(value: Any) -> Optional[int]:
-    if value is None:
-        return None
-    text = str(value).strip().lower()
-    if not text:
-        return None
-    if ":" in text:
-        try:
-            parts = text.split(":")
-            if len(parts) == 3:
-                return int(
-                    float(parts[0]) * 3600
-                    + float(parts[1]) * 60
-                    + float(parts[2])
-                )
-        except Exception:
-            pass
-    match = re.fullmatch(
-        r"\s*([0-9]+(?:\.[0-9]+)?)\s*"
-        r"(ms|s|sec|secs|second|seconds|"
-        r"min|mins|minute|minutes|"
-        r"h|hr|hrs|hour|hours|"
-        r"d|day|days)?\s*",
-        text,
-    )
-    if not match:
-        return None
-    number = float(match.group(1))
-    unit = match.group(2) or "s"
-    multipliers = {
-        "ms": 0.001,
-        "s": 1, "sec": 1, "secs": 1, "second": 1, "seconds": 1,
-        "min": 60, "mins": 60, "minute": 60, "minutes": 60,
-        "h": 3600, "hr": 3600, "hrs": 3600, "hour": 3600, "hours": 3600,
-        "d": 86400, "day": 86400, "days": 86400,
-    }
-    return int(number * multipliers.get(unit, 1))
-
-
-# =============================================================================
-# PARAMETER SAFETY
-# =============================================================================
-
-def _safe_params(*args: Any) -> tuple:
-    if not args:
-        return ()
-    if len(args) == 1:
-        single = args[0]
-        if single is None:
-            return ()
-        if isinstance(single, tuple):
-            return single
-        if isinstance(single, (list, set, frozenset)):
-            return tuple(single)
-        return (single,)
-    return tuple(args)
-
-
-def _build_pg_in_clause(
-    items: List[str], start_index: int = 1
-) -> Tuple[str, List[str]]:
-    if not items:
-        return ("NULL", [])
-    placeholders = []
-    for i, _ in enumerate(items):
-        placeholders.append(f"${start_index + i}")
-    return (", ".join(placeholders), list(items))
-
-
-# =============================================================================
-# SQL SAFETY
-# =============================================================================
-
-def _quote_pg_identifier(identifier: str) -> str:
-    return '"' + str(identifier).replace('"', '""') + '"'
-
-
-def _quote_pg_literal(value: Any) -> str:
-    text = "" if value is None else str(value)
-    return "'" + text.replace("'", "''") + "'"
-
-
-def _safe_sqlite_identifier(identifier: str) -> str:
-    return '"' + str(identifier).replace('"', '""') + '"'
-
-
-# =============================================================================
-# DATABASE TYPE
-# =============================================================================
-
-def _is_postgres() -> bool:
-    try:
-        from database import USE_POSTGRES
-        return bool(USE_POSTGRES)
-    except Exception:
-        return False
-
-
-def _is_mysql() -> bool:
-    try:
-        from database import USE_MYSQL
-        return bool(USE_MYSQL)
-    except Exception:
-        return False
-
-
-def _db_type() -> str:
-    if _is_postgres():
-        return "PostgreSQL"
-    if _is_mysql():
-        return "MySQL"
-    return "SQLite"
-
-
-# =============================================================================
-# TIME HELPERS
-# =============================================================================
-
-def _hours_since(value: Any) -> Optional[float]:
-    if value is None:
-        return None
-    try:
-        from database import TimeUtils
-        now = TimeUtils.utc_now()
-        dt = value
-        if hasattr(dt, "tzinfo") and dt.tzinfo is not None:
-            dt = dt.replace(tzinfo=None)
-        return (now - dt).total_seconds() / 3600.0
-    except Exception as exc:
-        logger.debug("_hours_since: %s", exc)
-        return None
-
-
-# =============================================================================
-# RELOPTIONS
-# =============================================================================
-
-def _parse_reloptions(value: Any) -> Dict[str, str]:
-    result: Dict[str, str] = {}
-    if value is None:
-        return result
-    try:
-        if isinstance(value, (list, tuple)):
-            items = value
+        return "⚪"
+    low, high = thresholds
+    if inverse:
+        if v <= low:
+            return "🟢"
+        elif v <= high:
+            return "🟡"
         else:
-            text = str(value).strip()
-            if text.startswith("{") and text.endswith("}"):
-                text = text[1:-1]
-            if not text:
-                return result
-            items = text.split(",")
-        for item in items:
-            item = str(item).strip()
-            if "=" not in item:
-                continue
-            key, val = item.split("=", 1)
-            result[key.strip()] = val.strip()
-    except Exception as exc:
-        logger.debug("_parse_reloptions: %s", exc)
-    return result
+            return "🔴"
+    else:
+        if v >= high:
+            return "🟢"
+        elif v >= low:
+            return "🟡"
+        else:
+            return "🔴"
 
 
-def _normalize_factor(value: Any) -> Optional[str]:
-    if value is None:
-        return None
+def _dead_tuple_color(dead: int, live: int) -> str:
+    total = live + dead
+    if total == 0:
+        return "⚪"
+    ratio = dead / total
+    if live < DEAD_TUPLE_MIN_LIVE and ratio < 0.20:
+        return "🟢"
+    low, mid, high = DEAD_TUPLE_THRESHOLDS
+    if ratio < low:
+        return "🟢"
+    if ratio < mid:
+        return "🟡"
+    if ratio < high:
+        return "🟠"
+    return "🔴"
+
+
+def _dead_tuple_advice(dead: int, live: int, table: str) -> str:
+    total = live + dead
+    if total == 0:
+        return ""
+    ratio = dead / total
+    if live < DEAD_TUPLE_MIN_LIVE and ratio < 0.20:
+        return ""
+    if ratio < 0.05:
+        return ""
+    if ratio < 0.10:
+        return f"💡 راقب {table}"
+    if ratio < 0.20:
+        return f"⚠️ VACUUM ANALYZE {table}"
+    return f"🔴 VACUUM FULL {table} عاجل"
+
+
+def _idle_tx_color(count: int) -> str:
+    if count >= IDLE_TX_CRIT_COUNT:
+        return "🔴"
+    if count >= IDLE_TX_WARN_COUNT:
+        return "🟠"
+    return "🟢"
+
+
+def _format_bytes(num_bytes) -> str:
     try:
-        number = float(str(value).strip())
-        if number == 0:
-            return "0"
-        return f"{number:.6f}".rstrip("0").rstrip(".")
-    except Exception:
-        return str(value).strip()
+        b = float(num_bytes or 0)
+    except (TypeError, ValueError):
+        return "0 B"
+    if b < 1024:
+        return f"{int(b)} B"
+    if b < 1024 * 1024:
+        return f"{b / 1024:.1f} KB"
+    if b < 1024 * 1024 * 1024:
+        return f"{b / (1024 * 1024):.2f} MB"
+    return f"{b / (1024 * 1024 * 1024):.2f} GB"
 
 
-# =============================================================================
-# 🆕 v6.9.0: TABLE DISCOVERY (Full coverage)
-# =============================================================================
-
-def _is_excluded_table(name: str) -> bool:
-    """فحص: هل الجدول مستثنى من VACUUM؟"""
-    if not name or not isinstance(name, str):
-        return True
-
-    name_lower = name.lower().strip()
-
-    # جداول النظام دائماً مستثناة
-    if name_lower in _ALWAYS_EXCLUDE_TABLES:
-        return True
-
-    # pg_* / sqlite_* / information_schema
-    if name_lower.startswith("pg_"):
-        return True
-    if name_lower.startswith("sqlite_"):
-        return True
-    if name_lower.startswith("information_schema"):
-        return True
-    if name_lower.startswith("mysql_"):
-        return True
-    if name_lower.startswith("performance_schema"):
-        return True
-    if name_lower.startswith("sys_"):
-        return True
-
-    # استثناءات المستخدم
-    if DB_VACUUM_EXCLUDE_TABLES:
-        for exclude in DB_VACUUM_EXCLUDE_TABLES:
-            if name_lower == exclude.lower().strip():
-                return True
-
-    return False
-
-
-async def _discover_all_tables_postgres() -> List[str]:
-    """🆕 v6.9.0: اكتشاف كل جداول المستخدم في PostgreSQL."""
-    from database import DB
-
+def _format_duration_seconds(seconds: Any) -> str:
     try:
-        rows = await DB.fetchall("""
-            SELECT c.relname AS table_name
-            FROM pg_class c
-            JOIN pg_namespace n ON n.oid = c.relnamespace
-            WHERE c.relkind = 'r'
-              AND n.nspname = ANY(current_schemas(false))
-              AND n.nspname NOT IN (
-                  'pg_catalog', 'information_schema'
-              )
-            ORDER BY c.relname
-        """)
-        result: List[str] = []
-        seen: Set[str] = set()
-        for r in (rows or []):
-            name = r.get("table_name")
-            if not name:
-                continue
-            if name in seen:
-                continue
-            if _is_excluded_table(name):
-                continue
-            seen.add(name)
-            result.append(name)
-        return result
-    except Exception as exc:
-        logger.warning("_discover_all_tables_postgres: %s", exc)
-        return []
+        s = int(seconds)
+    except (TypeError, ValueError):
+        return "?"
+    if s < 0:
+        return "?"
+    if s < 60:
+        return f"{s}s"
+    if s < 3600:
+        return f"{s // 60}m{s % 60}s"
+    if s < 86400:
+        return f"{s // 3600}h{(s % 3600) // 60}m"
+    return f"{s // 86400}d{(s % 86400) // 3600}h"
 
 
-async def _discover_all_tables_mysql() -> List[str]:
-    """🆕 v6.9.0: اكتشاف كل جداول المستخدم في MySQL."""
-    from database import DB
-
-    try:
-        rows = await DB.fetchall("""
-            SELECT TABLE_NAME AS table_name
-            FROM information_schema.TABLES
-            WHERE TABLE_SCHEMA = DATABASE()
-              AND TABLE_TYPE = 'BASE TABLE'
-            ORDER BY TABLE_NAME
-        """)
-        result: List[str] = []
-        seen: Set[str] = set()
-        for r in (rows or []):
-            name = r.get("table_name")
-            if not name:
-                continue
-            if name in seen:
-                continue
-            if _is_excluded_table(name):
-                continue
-            seen.add(name)
-            result.append(name)
-        return result
-    except Exception as exc:
-        logger.warning("_discover_all_tables_mysql: %s", exc)
-        return []
+def _compute_channel_rates(
+    total: int, published: int, failed: int
+) -> Dict[str, Any]:
+    attempted = published + failed
+    pending = max(0, total - attempted)
+    success_rate = (
+        round(published / attempted * 100, 1)
+        if attempted > 0 else DEFAULT_SUCCESS_RATE
+    )
+    completion_rate = (
+        round(published / total * 100, 1)
+        if total > 0 else 0.0
+    )
+    return {
+        'attempted': attempted,
+        'pending': pending,
+        'success_rate': success_rate,
+        'completion_rate': completion_rate,
+    }
 
 
-async def _discover_all_tables_sqlite() -> List[str]:
-    """🆕 v6.9.0: اكتشاف كل جداول المستخدم في SQLite."""
-    from database import DB
+class AnalyticsMixin:
+    """Mixin للتحليلات المتقدمة"""
 
-    try:
-        rows = await DB.fetchall("""
-            SELECT name AS table_name
-            FROM sqlite_master
-            WHERE type = 'table'
-              AND name NOT LIKE 'sqlite_%'
-            ORDER BY name
-        """)
-        result: List[str] = []
-        seen: Set[str] = set()
-        for r in (rows or []):
-            name = r.get("table_name")
-            if not name:
-                continue
-            if name in seen:
-                continue
-            if _is_excluded_table(name):
-                continue
-            seen.add(name)
-            result.append(name)
-        return result
-    except Exception as exc:
-        logger.warning("_discover_all_tables_sqlite: %s", exc)
-        return []
+    # =================================================================
+    # 1) نمو المستخدمين
+    # =================================================================
 
-
-async def _discover_all_tables() -> List[str]:
-    """🆕 v6.9.0: اكتشاف كل الجداول حسب نوع DB."""
-    if _is_postgres():
-        return await _discover_all_tables_postgres()
-    if _is_mysql():
-        return await _discover_all_tables_mysql()
-    return await _discover_all_tables_sqlite()
-
-
-# =============================================================================
-# 🆕 v6.9.0: VACUUM TARGET TABLES (UPGRADED)
-# =============================================================================
-
-async def _get_vacuum_target_tables_async() -> List[str]:
-    """
-    🆕 v6.9.0: قائمة الجداول المستهدفة لـ VACUUM (async).
-
-    يدعم 4 أوضاع:
-        - "all" (افتراضي): كل جداول المستخدم (اكتشاف تلقائي)
-        - "maintenance": MAINTENANCE_TABLES (10 جداول)
-        - "heavy": HEAVY_TABLES_FOR_AUTOVACUUM (4 جداول)
-        - "both": اتحاد maintenance + heavy
-
-    Returns:
-        قائمة أسماء جداول بدون تكرار، مع احترام الاستثناءات.
-    """
-    result: List[str] = []
-    seen: Set[str] = set()
-
-    def _add_all(tables) -> None:
-        for t in (tables or ()):
-            if not t:
-                continue
-            if not isinstance(t, str):
-                continue
-            if t in seen:
-                continue
-            if _is_excluded_table(t):
-                continue
-            seen.add(t)
-            result.append(t)
-
-    # "all": اكتشاف تلقائي
-    if DB_VACUUM_MODE == "all":
-        discovered = await _discover_all_tables()
-        _add_all(discovered)
-        return result
-
-    # "maintenance"
-    if DB_VACUUM_MODE in ("maintenance", "both"):
+    async def get_user_growth(self, days: int = 30) -> List[Dict[str, Any]]:
+        """📈 نمو المستخدمين آخر N يوم."""
         try:
-            from database_tables import MAINTENANCE_TABLES
-            _add_all(MAINTENANCE_TABLES)
-        except Exception as exc:
-            logger.debug("_get_vacuum_target_tables (maint): %s", exc)
+            days = max(1, min(int(days), 365))
+            since = self.TimeUtils.utc_now() - timedelta(days=days)
 
-    # "heavy"
-    if DB_VACUUM_MODE in ("heavy", "both"):
+            if getattr(self, "USE_POSTGRES", False):
+                query = """
+                    SELECT created_at::date AS day, COUNT(*) AS cnt
+                    FROM users
+                    WHERE created_at >= $1
+                    GROUP BY created_at::date
+                    ORDER BY day ASC
+                """
+            else:
+                query = """
+                    SELECT DATE(created_at) AS day, COUNT(*) AS cnt
+                    FROM users
+                    WHERE created_at >= ?
+                    GROUP BY DATE(created_at)
+                    ORDER BY day ASC
+                """
+            rows = await self.fetchall(query, (since,))
+
+            result = []
+            for r in (rows or []):
+                rd = r if isinstance(r, dict) else dict(r)
+                day = rd.get('day')
+                cnt = rd.get('cnt', 0)
+                if day is None:
+                    continue
+                result.append({
+                    'date': str(day)[:10],
+                    'count': int(cnt or 0),
+                })
+            return result
+        except Exception as e:
+            logger.error(f"❌ get_user_growth: {e}", exc_info=True)
+            return []
+
+    # =================================================================
+    # 2) أفضل N قناة
+    # =================================================================
+
+    async def get_top_channels(self, limit: int = 10) -> List[Dict[str, Any]]:
+        """🏆 أفضل N قناة (نجاح + إنجاز منفصلين)."""
         try:
-            from database import HEAVY_TABLES_FOR_AUTOVACUUM
-            _add_all(HEAVY_TABLES_FOR_AUTOVACUUM)
-        except Exception as exc:
-            logger.debug("_get_vacuum_target_tables (heavy): %s", exc)
+            limit = max(1, min(int(limit), 50))
+            query = f"""
+                SELECT uc.id, uc.channel_name, uc.channel_id,
+                       uc.user_id,
+                       COUNT(p.id) AS total_posts,
+                       SUM(CASE WHEN p.published = 1 THEN 1 ELSE 0 END)
+                           AS published,
+                       SUM(CASE WHEN p.published = 0
+                                AND p.fail_count >= {FAIL_COUNT_THRESHOLD}
+                                THEN 1 ELSE 0 END) AS failed
+                FROM user_channels uc
+                LEFT JOIN posts p ON p.channel_db_id = uc.id
+                WHERE uc.banned = 0
+                GROUP BY uc.id, uc.channel_name, uc.channel_id, uc.user_id
+                ORDER BY published DESC, total_posts DESC
+                LIMIT ?
+            """
+            rows = await self.fetchall(query, (limit,))
 
-    return result
+            result = []
+            for r in (rows or []):
+                rd = r if isinstance(r, dict) else dict(r)
+                total = int(rd.get('total_posts', 0) or 0)
+                published = int(rd.get('published', 0) or 0)
+                failed = int(rd.get('failed', 0) or 0)
 
+                rates = _compute_channel_rates(total, published, failed)
 
-def _get_vacuum_target_tables() -> List[str]:
-    """
-    ⚠️ نسخة متزامنة (legacy) — تستخدم فقط في preview_maintenance.
-    للحصول على القائمة الكاملة، استخدم
-    `_get_vacuum_target_tables_async()`.
-    """
-    result: List[str] = []
-    seen: Set[str] = set()
+                result.append({
+                    'name': rd.get('channel_name') or f"قناة {rd.get('id')}",
+                    'channel_id': rd.get('channel_id'),
+                    'user_id': rd.get('user_id'),
+                    'total': total,
+                    'published': published,
+                    'failed': failed,
+                    'attempted': rates['attempted'],
+                    'pending': rates['pending'],
+                    'success_rate': rates['success_rate'],
+                    'completion_rate': rates['completion_rate'],
+                })
+            return result
+        except Exception as e:
+            logger.error(f"❌ get_top_channels: {e}", exc_info=True)
+            return []
 
-    def _add_all(tables) -> None:
-        for t in (tables or ()):
-            if not t:
-                continue
-            if not isinstance(t, str):
-                continue
-            if t in seen:
-                continue
-            if _is_excluded_table(t):
-                continue
-            seen.add(t)
-            result.append(t)
+    # =================================================================
+    # 2.b) نسبة نجاح القنوات
+    # =================================================================
 
-    # "all" (sync) — استخدم MAINTENANCE + HEAVY كتقدير
-    # (لا يمكن discovery تلقائي بدون await)
-    if DB_VACUUM_MODE == "all":
+    async def get_channel_success_rate(
+        self,
+        limit: int = 20,
+        filter_min_attempts: int = 0,
+    ) -> List[Dict[str, Any]]:
+        """🎯 نسبة نجاح كل قناة."""
+        channels = await self.get_top_channels(limit)
+        if filter_min_attempts > 0:
+            min_att = max(0, int(filter_min_attempts))
+            channels = [
+                c for c in channels
+                if c.get('attempted', 0) >= min_att
+            ]
+        return channels
+
+    # =================================================================
+    # 3) متوسط النشر + نسبة النجاح العامة
+    # =================================================================
+
+    async def get_publish_stats(self) -> Dict[str, Any]:
+        """📊 متوسط النشر + نسبة النجاح + نسبة الإنجاز."""
         try:
-            from database_tables import MAINTENANCE_TABLES
-            _add_all(MAINTENANCE_TABLES)
-        except Exception:
-            pass
+            row = await self.fetchone(f"""
+                SELECT
+                    COUNT(DISTINCT uc.id) AS total_channels,
+                    COUNT(p.id) AS total_posts,
+                    SUM(CASE WHEN p.published = 1 THEN 1 ELSE 0 END)
+                        AS published,
+                    SUM(CASE WHEN p.published = 0
+                             AND p.fail_count >= {FAIL_COUNT_THRESHOLD}
+                             THEN 1 ELSE 0 END) AS failed
+                FROM user_channels uc
+                LEFT JOIN posts p ON p.channel_db_id = uc.id
+                WHERE uc.banned = 0
+            """) or {}
+
+            rd = row if isinstance(row, dict) else dict(row)
+            total_channels = int(rd.get('total_channels', 0) or 0)
+            total_posts = int(rd.get('total_posts', 0) or 0)
+            published = int(rd.get('published', 0) or 0)
+            failed = int(rd.get('failed', 0) or 0)
+
+            avg_posts = (
+                round(total_posts / total_channels, 1)
+                if total_channels > 0 else 0
+            )
+            avg_published = (
+                round(published / total_channels, 1)
+                if total_channels > 0 else 0
+            )
+
+            rates = _compute_channel_rates(total_posts, published, failed)
+
+            return {
+                'total_channels': total_channels,
+                'total_posts': total_posts,
+                'published': published,
+                'failed': failed,
+                'attempted': rates['attempted'],
+                'pending': rates['pending'],
+                'avg_posts_per_channel': avg_posts,
+                'avg_published_per_channel': avg_published,
+                'success_rate': rates['success_rate'],
+                'completion_rate': rates['completion_rate'],
+            }
+        except Exception as e:
+            logger.error(f"❌ get_publish_stats: {e}", exc_info=True)
+            return {
+                'total_channels': 0, 'total_posts': 0,
+                'published': 0, 'failed': 0,
+                'attempted': 0, 'pending': 0,
+                'avg_posts_per_channel': 0,
+                'avg_published_per_channel': 0,
+                'success_rate': DEFAULT_SUCCESS_RATE,
+                'completion_rate': 0.0,
+            }
+
+    # =================================================================
+    # 5) معدل الاشتراكات
+    # =================================================================
+
+    async def get_subscription_rate(self, months: int = 6) -> List[Dict[str, Any]]:
+        """💎 اشتراكات جديدة شهرياً."""
         try:
-            from database import HEAVY_TABLES_FOR_AUTOVACUUM
-            _add_all(HEAVY_TABLES_FOR_AUTOVACUUM)
-        except Exception:
-            pass
-        return result
+            months = max(1, min(int(months), 24))
+            since = self.TimeUtils.utc_now() - timedelta(days=months * 31)
 
-    if DB_VACUUM_MODE in ("maintenance", "both"):
+            if getattr(self, "USE_POSTGRES", False):
+                query = """
+                    SELECT
+                        TO_CHAR(created_at, 'YYYY-MM') AS month,
+                        COUNT(*) AS cnt
+                    FROM subscriptions
+                    WHERE created_at >= $1
+                    GROUP BY TO_CHAR(created_at, 'YYYY-MM')
+                    ORDER BY month ASC
+                """
+            elif getattr(self, "USE_MYSQL", False):
+                query = """
+                    SELECT
+                        DATE_FORMAT(created_at, '%%Y-%%m') AS month,
+                        COUNT(*) AS cnt
+                    FROM subscriptions
+                    WHERE created_at >= %s
+                    GROUP BY DATE_FORMAT(created_at, '%%Y-%%m')
+                    ORDER BY month ASC
+                """
+            else:
+                query = """
+                    SELECT
+                        strftime('%Y-%m', created_at) AS month,
+                        COUNT(*) AS cnt
+                    FROM subscriptions
+                    WHERE created_at >= ?
+                    GROUP BY strftime('%Y-%m', created_at)
+                    ORDER BY month ASC
+                """
+            rows = await self.fetchall(query, (since,))
+
+            result = []
+            for r in (rows or []):
+                rd = r if isinstance(r, dict) else dict(r)
+                month = rd.get('month')
+                cnt = rd.get('cnt', 0)
+                if month is None:
+                    continue
+                result.append({
+                    'month': str(month),
+                    'count': int(cnt or 0),
+                })
+            return result
+        except Exception as e:
+            logger.error(f"❌ get_subscription_rate: {e}", exc_info=True)
+            return []
+
+    # =================================================================
+    # 6) Pool مباشر
+    # =================================================================
+
+    async def get_pool_live(self) -> Dict[str, Any]:
+        """🚀 حالة Pool مباشرة."""
+        if not (getattr(self, "USE_POSTGRES", False)
+                or getattr(self, "USE_MYSQL", False)):
+            return {"available": False, "type": "sqlite"}
+
+        pool = getattr(self, "_pool", None)
+        if pool is None:
+            return {"available": False, "type": "none"}
+
         try:
-            from database_tables import MAINTENANCE_TABLES
-            _add_all(MAINTENANCE_TABLES)
-        except Exception as exc:
-            logger.debug("_get_vacuum_target_tables (maint): %s", exc)
+            max_size = pool.get_max_size() if hasattr(pool, 'get_max_size') else None
+            current_size = pool.get_size() if hasattr(pool, 'get_size') else None
+            idle_size = pool.get_idle_size() if hasattr(pool, 'get_idle_size') else None
 
-    if DB_VACUUM_MODE in ("heavy", "both"):
-        try:
-            from database import HEAVY_TABLES_FOR_AUTOVACUUM
-            _add_all(HEAVY_TABLES_FOR_AUTOVACUUM)
-        except Exception as exc:
-            logger.debug("_get_vacuum_target_tables (heavy): %s", exc)
+            if max_size is None:
+                max_size = getattr(pool, 'maxsize', None)
+            if current_size is None:
+                current_size = getattr(pool, 'size', None)
+            if idle_size is None:
+                idle_size = getattr(pool, 'freesize', None)
 
-    return result
+            if max_size is None or current_size is None:
+                return {"available": False, "type": "unknown"}
+            if idle_size is None:
+                idle_size = 0
 
+            in_use = max(0, current_size - idle_size)
+            util = (in_use / max_size * 100) if max_size > 0 else 0.0
 
-# =============================================================================
-# 1. DEAD TUPLES
-# =============================================================================
+            result: Dict[str, Any] = {
+                "available": True,
+                "type": "postgres" if getattr(self, "USE_POSTGRES", False) else "mysql",
+                "max_size": max_size,
+                "current_size": current_size,
+                "idle_size": idle_size,
+                "in_use": in_use,
+                "utilization_pct": round(util, 1),
+            }
 
-async def _get_dead_tuples_postgres() -> List[Dict[str, Any]]:
-    from database import DB
-    try:
-        rows = await DB.fetchall("""
-            SELECT relname AS table_name,
-                   n_live_tup AS live_tup,
-                   n_dead_tup AS dead_tup,
-                   n_tup_ins AS inserts,
-                   n_tup_upd AS updates,
-                   n_tup_del AS deletes,
-                   n_mod_since_analyze AS mod_since_analyze,
-                   last_vacuum,
-                   last_autovacuum,
-                   last_analyze,
-                   last_autoanalyze,
-                   vacuum_count,
-                   autovacuum_count,
-                   analyze_count,
-                   autoanalyze_count
-            FROM pg_stat_user_tables
-            WHERE n_live_tup > 0 OR n_dead_tup > 0
-            ORDER BY n_dead_tup DESC, n_live_tup DESC
-            LIMIT 100
-        """)
-        return rows or []
-    except Exception as exc:
-        logger.warning("_get_dead_tuples_postgres: %s", exc)
-        return []
+            if getattr(self, "USE_POSTGRES", False):
+                try:
+                    from database import PG_ROLLBACK_ON_RETURN_TIMEOUT
+                    result["rollback_timeout"] = PG_ROLLBACK_ON_RETURN_TIMEOUT
+                except Exception:
+                    pass
 
-
-async def _get_dead_tuples_mysql() -> List[Dict[str, Any]]:
-    from database import DB
-    try:
-        rows = await DB.fetchall("""
-            SELECT TABLE_NAME AS table_name,
-                   TABLE_ROWS AS live_tup,
-                   DATA_FREE AS data_free_bytes,
-                   DATA_LENGTH AS data_bytes,
-                   INDEX_LENGTH AS index_bytes
-            FROM information_schema.TABLES
-            WHERE TABLE_SCHEMA = DATABASE()
-            ORDER BY DATA_FREE DESC, TABLE_ROWS DESC
-            LIMIT 100
-        """)
-        result = []
-        for row in rows or []:
-            result.append({
-                "table_name": row.get("table_name"),
-                "live_tup": _safe_int(row.get("live_tup")),
-                "dead_tup": 0,
-                "data_free_bytes": _safe_int(row.get("data_free_bytes")),
-                "data_bytes": _safe_int(row.get("data_bytes")),
-                "index_bytes": _safe_int(row.get("index_bytes")),
-                "inserts": 0,
-                "updates": 0,
-                "deletes": 0,
-                "mod_since_analyze": 0,
-                "last_vacuum": None,
-                "last_autovacuum": None,
-                "last_analyze": None,
-                "last_autoanalyze": None,
-                "vacuum_count": 0,
-                "autovacuum_count": 0,
-                "analyze_count": 0,
-                "autoanalyze_count": 0,
-            })
-        return result
-    except Exception as exc:
-        logger.warning("_get_dead_tuples_mysql: %s", exc)
-        return []
-
-
-async def _get_dead_tuples_sqlite() -> List[Dict[str, Any]]:
-    from database import DB
-    try:
-        rows = await DB.fetchall("""
-            SELECT name AS table_name
-            FROM sqlite_master
-            WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
-            ORDER BY name
-        """)
-        result = []
-        for row in rows or []:
-            name = row.get("table_name")
-            if not name:
-                continue
-            safe_name = _safe_sqlite_identifier(name)
-            try:
-                count = _safe_int(
-                    await DB.fetchval(
-                        f"SELECT COUNT(*) FROM {safe_name}",
-                        default=0,
-                    )
+                audit_task = getattr(self, "_idle_tx_audit_task", None)
+                result["idle_tx_audit_active"] = (
+                    audit_task is not None and not audit_task.done()
                 )
-            except Exception:
-                count = 0
-            result.append({
-                "table_name": name,
-                "live_tup": count,
-                "dead_tup": 0,
-                "inserts": 0,
-                "updates": 0,
-                "deletes": 0,
-                "mod_since_analyze": 0,
-                "last_vacuum": None,
-                "last_autovacuum": None,
-                "last_analyze": None,
-                "last_autoanalyze": None,
-                "vacuum_count": 0,
-                "autovacuum_count": 0,
-                "analyze_count": 0,
-                "autoanalyze_count": 0,
-            })
-        return result
-    except Exception as exc:
-        logger.warning("_get_dead_tuples_sqlite: %s", exc)
-        return []
 
+                last_count = getattr(self, "_idle_tx_audit_last_count", None)
+                if last_count is not None:
+                    result["idle_tx_last_count"] = int(last_count)
 
-async def _get_dead_tuples() -> List[Dict[str, Any]]:
-    if _is_postgres():
-        return await _get_dead_tuples_postgres()
-    if _is_mysql():
-        return await _get_dead_tuples_mysql()
-    return await _get_dead_tuples_sqlite()
+            return result
+        except Exception as e:
+            logger.warning(f"⚠️ get_pool_live: {e}")
+            return {"available": False, "type": "error", "error": str(e)}
 
+    # =================================================================
+    # 7) الاستعلامات البطيئة
+    # =================================================================
 
-# =============================================================================
-# 2. TABLE SIZES
-# =============================================================================
+    async def get_slow_queries(self, limit: int = 20) -> List[Dict[str, Any]]:
+        """🐌 قائمة أبطأ الاستعلامات (من الذاكرة) — الأبطأ أولاً."""
+        return await self.get_slowest_queries(limit)
 
-async def _get_table_sizes() -> List[Dict[str, Any]]:
-    from database import DB
-
-    if _is_postgres():
+    async def get_slowest_queries(self, limit: int = 20) -> List[Dict[str, Any]]:
+        """🐌 قائمة أبطأ الاستعلامات (الأبطأ أولاً)."""
         try:
-            return await DB.fetchall("""
-                SELECT relname AS table_name,
-                       pg_total_relation_size(relid) AS total_bytes,
-                       pg_relation_size(relid) AS table_bytes,
-                       pg_indexes_size(relid) AS index_bytes
+            limit = max(1, min(int(limit), 100))
+            log = getattr(self, "_slow_queries_log", None)
+            if not log:
+                return []
+
+            lock = getattr(self, "_slow_queries_lock", None)
+            if lock is not None:
+                async with lock:
+                    snapshot = list(log)
+            else:
+                snapshot = list(log)
+
+            snapshot.sort(
+                key=lambda x: x.get('elapsed', 0),
+                reverse=True,
+            )
+            return snapshot[:limit]
+        except Exception as e:
+            logger.warning(f"⚠️ get_slowest_queries: {e}")
+            return []
+
+    # =================================================================
+    # 7.b) Idle-in-transaction info
+    # =================================================================
+
+    async def get_idle_tx_info(
+        self,
+        min_seconds: Optional[float] = None,
+        app_filter: Optional[str] = None,
+        limit: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """🔍 idle-in-transaction فوري."""
+        if not getattr(self, "USE_POSTGRES", False):
+            return {"available": False, "reason": "not_postgres"}
+
+        audit_fn = getattr(self, "audit_idle_in_transactions", None)
+        if audit_fn is None:
+            return {
+                "available": False,
+                "reason": "requires_database_v7.7.62+",
+            }
+
+        try:
+            kwargs: Dict[str, Any] = {}
+            if min_seconds is not None:
+                kwargs["min_seconds"] = min_seconds
+            if app_filter is not None:
+                kwargs["app_filter"] = app_filter
+            if limit is not None:
+                kwargs["limit"] = limit
+
+            report = await audit_fn(**kwargs)
+            if not isinstance(report, dict):
+                return {
+                    "available": False,
+                    "reason": "invalid_report_type",
+                }
+            return {"available": True, **report}
+        except Exception as e:
+            logger.warning(f"⚠️ get_idle_tx_info: {e}")
+            return {
+                "available": False,
+                "reason": "call_failed",
+                "error": str(e),
+            }
+
+    async def get_idle_tx_status_info(self) -> Dict[str, Any]:
+        """📊 حالة نظام الرصد الدوري لـ idle-in-tx."""
+        if not getattr(self, "USE_POSTGRES", False):
+            return {"available": False, "reason": "not_postgres"}
+
+        status_fn = getattr(self, "get_idle_tx_audit_status", None)
+        if status_fn is None:
+            return {
+                "available": False,
+                "reason": "requires_database_v7.7.62+",
+            }
+
+        try:
+            status = await status_fn()
+            if not isinstance(status, dict):
+                return {
+                    "available": False,
+                    "reason": "invalid_status_type",
+                }
+            return {"available": True, **status}
+        except Exception as e:
+            logger.warning(f"⚠️ get_idle_tx_status_info: {e}")
+            return {
+                "available": False,
+                "reason": "call_failed",
+                "error": str(e),
+            }
+
+    # =================================================================
+    # 8) Dead Tuples
+    # =================================================================
+
+    async def get_dead_tuples(self, limit: int = 20) -> List[Dict[str, Any]]:
+        """🔬 Dead Tuples لكل جدول (PostgreSQL فقط)."""
+        if not getattr(self, "USE_POSTGRES", False):
+            return []
+
+        try:
+            limit = max(1, min(int(limit), 100))
+            rows = await self.fetchall("""
+                SELECT
+                    relname           AS table_name,
+                    n_live_tup        AS live_tuples,
+                    n_dead_tup        AS dead_tuples,
+                    n_mod_since_analyze,
+                    last_vacuum,
+                    last_autovacuum,
+                    last_analyze,
+                    last_autoanalyze
+                FROM pg_stat_user_tables
+                ORDER BY n_dead_tup DESC
+                LIMIT $1
+            """, (limit,))
+
+            result = []
+            for r in (rows or []):
+                rd = r if isinstance(r, dict) else dict(r)
+                name = rd.get('table_name') or '?'
+                live = int(rd.get('live_tuples', 0) or 0)
+                dead = int(rd.get('dead_tuples', 0) or 0)
+                total = live + dead
+                ratio = (dead / total) if total > 0 else 0.0
+
+                try:
+                    n_mod = int(rd.get('n_mod_since_analyze', 0) or 0)
+                except (TypeError, ValueError):
+                    n_mod = 0
+
+                result.append({
+                    'name': name,
+                    'live': live,
+                    'dead': dead,
+                    'total': total,
+                    'dead_ratio': round(ratio, 4),
+                    'color': _dead_tuple_color(dead, live),
+                    'advice': _dead_tuple_advice(dead, live, name),
+                    'n_mod_since_analyze': n_mod,
+                    'last_vacuum': rd.get('last_vacuum'),
+                    'last_autovacuum': rd.get('last_autovacuum'),
+                    'last_analyze': rd.get('last_analyze'),
+                    'last_autoanalyze': rd.get('last_autoanalyze'),
+                })
+            return result
+        except Exception as e:
+            logger.error(f"❌ get_dead_tuples: {e}", exc_info=True)
+            return []
+
+    # =================================================================
+    # 9) أحجام الجداول
+    # =================================================================
+
+    async def get_table_sizes(self, limit: int = 20) -> List[Dict[str, Any]]:
+        """📦 أحجام الجداول (PostgreSQL فقط)."""
+        if not getattr(self, "USE_POSTGRES", False):
+            return []
+
+        try:
+            limit = max(1, min(int(limit), 100))
+            rows = await self.fetchall("""
+                SELECT
+                    relname                             AS table_name,
+                    pg_total_relation_size(relid)       AS total_bytes,
+                    pg_relation_size(relid)             AS table_bytes,
+                    pg_indexes_size(relid)              AS index_bytes
                 FROM pg_stat_user_tables
                 ORDER BY pg_total_relation_size(relid) DESC
-                LIMIT 30
-            """) or []
-        except Exception as exc:
-            logger.warning("_get_table_sizes postgres: %s", exc)
-            return []
-
-    if _is_mysql():
-        try:
-            return await DB.fetchall("""
-                SELECT TABLE_NAME AS table_name,
-                       COALESCE(DATA_LENGTH, 0)
-                       + COALESCE(INDEX_LENGTH, 0) AS total_bytes,
-                       COALESCE(DATA_LENGTH, 0) AS table_bytes,
-                       COALESCE(INDEX_LENGTH, 0) AS index_bytes
-                FROM information_schema.TABLES
-                WHERE TABLE_SCHEMA = DATABASE()
-                ORDER BY (
-                    COALESCE(DATA_LENGTH, 0)
-                    + COALESCE(INDEX_LENGTH, 0)
-                ) DESC
-                LIMIT 30
-            """) or []
-        except Exception as exc:
-            logger.warning("_get_table_sizes mysql: %s", exc)
-            return []
-
-    try:
-        rows = await DB.fetchall("""
-            SELECT name AS table_name
-            FROM sqlite_master
-            WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
-        """)
-        result = []
-        for row in rows or []:
-            name = row.get("table_name")
-            if not name:
-                continue
-            safe_name = _safe_sqlite_identifier(name)
-            try:
-                count = _safe_int(
-                    await DB.fetchval(
-                        f"SELECT COUNT(*) FROM {safe_name}",
-                        default=0,
-                    )
-                )
-            except Exception:
-                count = 0
-            approx = count * AVG_ROW_BYTES_ESTIMATE
-            result.append({
-                "table_name": name,
-                "total_bytes": approx,
-                "table_bytes": approx,
-                "index_bytes": 0,
-                "row_count": count,
-            })
-        result.sort(
-            key=lambda item: _safe_int(item.get("total_bytes")),
-            reverse=True,
-        )
-        return result[:30]
-    except Exception as exc:
-        logger.warning("_get_table_sizes sqlite: %s", exc)
-        return []
-
-
-# =============================================================================
-# SIZE HELPERS
-# =============================================================================
-
-async def _get_table_size_mb(table_name: str) -> float:
-    """يرجع حجم جدول + فهارسه بالميغابايت."""
-    if not table_name:
-        return 0.0
-
-    from database import DB
-
-    if _is_postgres():
-        try:
-            row = await DB.fetchone(
-                """
-                SELECT pg_total_relation_size($1::regclass) AS total_bytes
-                """,
-                _safe_params(table_name),
-            )
-            if not row:
-                return 0.0
-            total = row.get("total_bytes") if isinstance(row, dict) else None
-            if total is None:
-                return 0.0
-            return round(int(total) / (1024.0 * 1024.0), 2)
-        except Exception as exc:
-            logger.debug("_get_table_size_mb(%s): %s", table_name, exc)
-            return 0.0
-
-    if _is_mysql():
-        try:
-            val = await DB.fetchval(
-                """
-                SELECT (
-                    COALESCE(DATA_LENGTH, 0)
-                    + COALESCE(INDEX_LENGTH, 0)
-                )
-                FROM information_schema.TABLES
-                WHERE TABLE_SCHEMA = DATABASE()
-                  AND TABLE_NAME = %s
-                """,
-                _safe_params(table_name),
-                default=0,
-            )
-            return round(_safe_int(val) / (1024.0 * 1024.0), 2)
-        except Exception as exc:
-            logger.debug("_get_table_size_mb(%s): %s", table_name, exc)
-            return 0.0
-
-    return 0.0
-
-
-async def _get_all_watched_table_sizes() -> Dict[str, float]:
-    """يقرأ أحجام كل الجداول المراقَبة بالميغابايت."""
-    sizes: Dict[str, float] = {}
-    for table in AUTO_CLEANUP_WATCH_TABLES:
-        sizes[table] = await _get_table_size_mb(table)
-    return sizes
-
-
-# =============================================================================
-# SCHEMA INFO
-# =============================================================================
-
-async def _get_schema_info() -> Dict[str, Any]:
-    from database import DB, USE_POSTGRES
-
-    info = {
-        "current_schema": None,
-        "current_schemas": None,
-        "search_path": None,
-        "database": None,
-        "user": None,
-        "version": None,
-    }
-
-    if not USE_POSTGRES:
-        return info
-
-    try:
-        info["current_schema"] = await DB.fetchval(
-            "SELECT current_schema()"
-        )
-    except Exception:
-        pass
-
-    try:
-        schemas_str = await DB.fetchval(
-            "SELECT array_to_string(current_schemas(false), ',')"
-        )
-        if schemas_str:
-            info["current_schemas"] = [
-                s.strip() for s in str(schemas_str).split(",")
-                if s.strip()
-            ]
-    except Exception:
-        pass
-
-    try:
-        info["search_path"] = await DB.fetchval("SHOW search_path")
-    except Exception:
-        pass
-
-    try:
-        info["database"] = await DB.fetchval(
-            "SELECT current_database()"
-        )
-    except Exception:
-        pass
-
-    try:
-        info["user"] = await DB.fetchval("SELECT current_user")
-    except Exception:
-        pass
-
-    try:
-        info["version"] = await DB.fetchval("SHOW server_version")
-    except Exception:
-        pass
-
-    return info
-
-
-# =============================================================================
-# PER-TABLE AUTOVACUUM
-# =============================================================================
-
-def _is_tuned_reloptions(reloptions: Dict[str, str]) -> bool:
-    vacuum_raw = reloptions.get("autovacuum_vacuum_scale_factor")
-    analyze_raw = reloptions.get("autovacuum_analyze_scale_factor")
-
-    if vacuum_raw is None or analyze_raw is None:
-        return False
-
-    vacuum_norm = _normalize_factor(vacuum_raw)
-    analyze_norm = _normalize_factor(analyze_raw)
-
-    if vacuum_norm is None or analyze_norm is None:
-        return False
-
-    return (
-        vacuum_norm in ACCEPTED_VACUUM_SCALE_FACTORS
-        and analyze_norm in ACCEPTED_ANALYZE_SCALE_FACTORS
-    )
-
-
-async def _get_per_table_autovacuum() -> Dict[str, Dict[str, Any]]:
-    from database import DB, USE_POSTGRES, HEAVY_TABLES_FOR_AUTOVACUUM
-
-    result: Dict[str, Dict[str, Any]] = {}
-    heavy = list(HEAVY_TABLES_FOR_AUTOVACUUM or [])
-    for table in heavy:
-        result[table] = {
-            "reloptions": {},
-            "is_tuned": False,
-            "exists": False,
-            "reason": "not_found",
-        }
-
-    if not USE_POSTGRES or not heavy:
-        return result
-
-    in_clause, params = _build_pg_in_clause(heavy, 1)
-
-    query = f"""
-        SELECT c.relname AS table_name,
-               c.reloptions,
-               n.nspname AS schema_name
-        FROM pg_class c
-        JOIN pg_namespace n ON n.oid = c.relnamespace
-        WHERE c.relname IN ({in_clause})
-          AND c.relkind IN ('r', 'p')
-          AND n.nspname = ANY(current_schemas(false))
-    """
-
-    rows: List[Dict[str, Any]] = []
-    primary_failed = False
-    try:
-        rows = await DB.fetchall(query, tuple(params)) or []
-    except Exception as exc:
-        primary_failed = True
-        logger.warning("_get_per_table_autovacuum primary: %s", exc)
-
-    if not rows:
-        try:
-            fallback_query = f"""
-                SELECT c.relname AS table_name,
-                       c.reloptions,
-                       n.nspname AS schema_name
-                FROM pg_class c
-                JOIN pg_namespace n ON n.oid = c.relnamespace
-                WHERE c.relname IN ({in_clause})
-                  AND c.relkind IN ('r', 'p')
-                  AND n.nspname NOT IN (
-                      'pg_catalog', 'information_schema'
-                  )
-            """
-            fallback_rows = await DB.fetchall(
-                fallback_query, tuple(params)
-            ) or []
-            if fallback_rows:
-                rows = fallback_rows
-        except Exception as exc2:
-            logger.warning(
-                "_get_per_table_autovacuum fallback: %s", exc2
-            )
-            if primary_failed:
-                for table in heavy:
-                    result[table]["reason"] = "query_failed"
-                return result
-
-    found_names = set()
-    for row in rows or []:
-        name = row.get("table_name")
-        if not name:
-            continue
-        found_names.add(name)
-        options = _parse_reloptions(row.get("reloptions"))
-        tuned = _is_tuned_reloptions(options)
-        result[name] = {
-            "reloptions": options,
-            "is_tuned": tuned,
-            "exists": True,
-            "reason": "ok",
-            "schema": row.get("schema_name"),
-        }
-
-    missing = [t for t in heavy if t not in found_names]
-    if missing:
-        try:
-            miss_clause, miss_params = _build_pg_in_clause(missing, 1)
-            exist_rows = await DB.fetchall(
-                f"""
-                    SELECT c.relname, n.nspname
-                    FROM pg_class c
-                    JOIN pg_namespace n ON n.oid = c.relnamespace
-                    WHERE c.relname IN ({miss_clause})
-                      AND c.relkind IN ('r', 'p')
-                """,
-                tuple(miss_params),
-            ) or []
-            for r in exist_rows:
-                nm = r.get("relname")
-                if nm in result and not result[nm]["exists"]:
-                    result[nm]["reason"] = "not_in_schema"
-        except Exception as exc:
-            logger.debug("missing-tables probe: %s", exc)
-
-    return result
-
-
-# =============================================================================
-# ALL TABLES AUTOVACUUM STATUS
-# =============================================================================
-
-async def _get_all_tables_autovacuum_status() -> List[Dict[str, Any]]:
-    """فحص حالة autovacuum لكل الجداول."""
-    from database import DB, USE_POSTGRES
-
-    if not USE_POSTGRES:
-        return []
-
-    try:
-        rows = await DB.fetchall("""
-            SELECT c.relname AS table_name,
-                   c.reloptions,
-                   n.nspname AS schema_name,
-                   COALESCE(s.n_live_tup, 0) AS live_tup,
-                   COALESCE(s.n_dead_tup, 0) AS dead_tup
-            FROM pg_class c
-            JOIN pg_namespace n ON n.oid = c.relnamespace
-            LEFT JOIN pg_stat_user_tables s ON s.relid = c.oid
-            WHERE c.relkind IN ('r', 'p')
-              AND n.nspname = ANY(current_schemas(false))
-            ORDER BY COALESCE(s.n_dead_tup, 0) DESC,
-                     COALESCE(s.n_live_tup, 0) DESC
-        """)
-        result = []
-        for row in rows or []:
-            name = row.get("table_name")
-            if not name:
-                continue
-            options = _parse_reloptions(row.get("reloptions"))
-            result.append({
-                "table_name": name,
-                "reloptions": options,
-                "is_tuned": _is_tuned_reloptions(options),
-                "live_tup": _safe_int(row.get("live_tup")),
-                "dead_tup": _safe_int(row.get("dead_tup")),
-                "schema": row.get("schema_name"),
-            })
-        return result
-    except Exception as exc:
-        logger.warning("_get_all_tables_autovacuum_status: %s", exc)
-        return []
-
-
-# =============================================================================
-# ALL TABLES INDEX HEALTH
-# =============================================================================
-
-async def _get_all_tables_index_health() -> List[Dict[str, Any]]:
-    """كشف الجداول التي تفتقد PK أو بدون أي فهرس."""
-    from database import DB, USE_POSTGRES
-
-    if not USE_POSTGRES:
-        return []
-
-    try:
-        rows = await DB.fetchall("""
-            SELECT c.relname AS table_name,
-                   COUNT(i.indexrelid)::int AS index_count,
-                   COALESCE(bool_or(i.indisprimary), false) AS has_pk,
-                   COALESCE(s.n_live_tup, 0)::int AS live_tup
-            FROM pg_class c
-            JOIN pg_namespace n ON n.oid = c.relnamespace
-            LEFT JOIN pg_index i ON i.indrelid = c.oid
-            LEFT JOIN pg_stat_user_tables s ON s.relid = c.oid
-            WHERE c.relkind = 'r'
-              AND n.nspname = ANY(current_schemas(false))
-            GROUP BY c.relname, s.n_live_tup
-            HAVING COUNT(i.indexrelid) = 0
-                OR NOT bool_or(i.indisprimary)
-            ORDER BY COALESCE(s.n_live_tup, 0) DESC
-        """)
-        return [
-            {
-                "table_name": r.get("table_name"),
-                "index_count": _safe_int(r.get("index_count")),
-                "has_pk": bool(r.get("has_pk")),
-                "live_tup": _safe_int(r.get("live_tup")),
-            }
-            for r in (rows or [])
-        ]
-    except Exception as exc:
-        logger.warning("_get_all_tables_index_health: %s", exc)
-        return []
-
-
-# =============================================================================
-# COUNT USER TABLES
-# =============================================================================
-
-async def _count_all_user_tables() -> int:
-    """عدد جداول المستخدم الإجمالي."""
-    from database import DB
-
-    if _is_postgres():
-        try:
-            return _safe_int(await DB.fetchval("""
-                SELECT COUNT(*)::int
-                FROM pg_class c
-                JOIN pg_namespace n ON n.oid = c.relnamespace
-                WHERE c.relkind = 'r'
-                  AND n.nspname = ANY(current_schemas(false))
-            """, default=0))
-        except Exception:
-            return 0
-
-    if _is_mysql():
-        # 🆕 v6.9.1 FIX: MySQL لا يدعم ::int — استخدام CAST AS SIGNED
-        try:
-            return _safe_int(await DB.fetchval("""
-                SELECT CAST(COUNT(*) AS SIGNED)
-                FROM information_schema.TABLES
-                WHERE TABLE_SCHEMA = DATABASE()
-                  AND TABLE_TYPE = 'BASE TABLE'
-            """, default=0))
-        except Exception as exc:
-            logger.debug("_count_all_user_tables mysql: %s", exc)
-            return 0
-
-    try:
-        return _safe_int(await DB.fetchval("""
-            SELECT COUNT(*) FROM sqlite_master
-            WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
-        """, default=0))
-    except Exception:
-        return 0
-
-
-# =============================================================================
-# 4. BLOCKERS
-# =============================================================================
-
-async def _get_autovacuum_blockers() -> List[Dict[str, Any]]:
-    from database import DB, USE_POSTGRES
-
-    if not USE_POSTGRES:
-        return []
-
-    blockers: List[Dict[str, Any]] = []
-
-    try:
-        rows = await DB.fetchall("""
-            SELECT pid, state, usename, application_name,
-                   client_addr::text AS client_addr,
-                   EXTRACT(EPOCH FROM (now() - xact_start))::bigint
-                       AS tx_age_sec,
-                   EXTRACT(EPOCH FROM (now() - query_start))::bigint
-                       AS query_age_sec,
-                   backend_xmin::text AS backend_xmin,
-                   backend_xid::text AS backend_xid,
-                   substring(query, 1, 300) AS query
-            FROM pg_stat_activity
-            WHERE xact_start IS NOT NULL
-              AND state <> 'idle'
-              AND pid <> pg_backend_pid()
-              AND EXTRACT(EPOCH FROM (now() - xact_start)) > $1
-            ORDER BY tx_age_sec DESC
-            LIMIT 20
-        """, _safe_params(LONG_TX_WARN_SECONDS))
-        for row in rows or []:
-            blockers.append({
-                "type": "long_transaction",
-                "pid": row.get("pid"),
-                "state": row.get("state"),
-                "usename": row.get("usename"),
-                "app": row.get("application_name"),
-                "client": row.get("client_addr"),
-                "tx_age_sec": _safe_int(row.get("tx_age_sec")),
-                "query_age_sec": _safe_int(row.get("query_age_sec")),
-                "backend_xmin": row.get("backend_xmin"),
-                "backend_xid": row.get("backend_xid"),
-                "query": (row.get("query") or "")[:300],
-            })
-    except Exception as exc:
-        logger.warning("blockers(long transaction): %s", exc)
-
-    try:
-        rows = await DB.fetchall("""
-            SELECT pid, usename, application_name,
-                   client_addr::text AS client_addr,
-                   EXTRACT(EPOCH FROM (now() - state_change))::bigint
-                       AS idle_sec,
-                   backend_xmin::text AS backend_xmin,
-                   backend_xid::text AS backend_xid,
-                   substring(query, 1, 300) AS query
-            FROM pg_stat_activity
-            WHERE state = 'idle in transaction'
-              AND pid <> pg_backend_pid()
-              AND EXTRACT(EPOCH FROM (now() - state_change)) > $1
-            ORDER BY idle_sec DESC
-            LIMIT 20
-        """, _safe_params(IDLE_TX_WARN_SECONDS))
-        for row in rows or []:
-            blockers.append({
-                "type": "idle_in_transaction",
-                "pid": row.get("pid"),
-                "usename": row.get("usename"),
-                "app": row.get("application_name"),
-                "client": row.get("client_addr"),
-                "idle_sec": _safe_int(row.get("idle_sec")),
-                "backend_xmin": row.get("backend_xmin"),
-                "backend_xid": row.get("backend_xid"),
-                "query": (row.get("query") or "")[:300],
-            })
-    except Exception as exc:
-        logger.warning("blockers(idle transaction): %s", exc)
-
-    try:
-        rows = await DB.fetchall("""
-            SELECT pid, datname,
-                   relid::regclass::text AS table_name,
-                   phase,
-                   heap_blks_total,
-                   heap_blks_scanned,
-                   heap_blks_vacuumed,
-                   CASE
-                       WHEN heap_blks_total > 0
-                       THEN ROUND(
-                           heap_blks_vacuumed::numeric
-                           / heap_blks_total::numeric * 100, 1)
-                       ELSE 0
-                   END AS progress_pct
-            FROM pg_stat_progress_vacuum
-            LIMIT 20
-        """)
-        for row in rows or []:
-            total = _safe_int(row.get("heap_blks_total"))
-            scanned = _safe_int(row.get("heap_blks_scanned"))
-            vacuumed = _safe_int(row.get("heap_blks_vacuumed"))
-            pct = _safe_float(row.get("progress_pct"))
-            if total > 0:
-                progress = (
-                    f"scanned={scanned:,}; "
-                    f"vacuumed={vacuumed:,}/{total:,}; "
-                    f"{pct:.1f}%"
-                )
-            else:
-                progress = "?"
-            blockers.append({
-                "type": "running_vacuum",
-                "pid": row.get("pid"),
-                "datname": row.get("datname"),
-                "table": row.get("table_name"),
-                "phase": row.get("phase"),
-                "progress": progress,
-            })
-    except Exception as exc:
-        logger.debug("blockers(running vacuum): %s", exc)
-
-    return blockers
-
-
-# =============================================================================
-# 🆕 v6.9.1: IDLE-IN-TX AUDIT (zero-threshold)
-# =============================================================================
-
-async def audit_idle_in_transactions(
-    min_seconds: Optional[int] = None,
-    app_filter: Optional[str] = None,
-    limit: Optional[int] = None,
-) -> Dict[str, Any]:
-    """
-    🆕 v6.9.1: تدقيق جميع اتصالات idle-in-transaction.
-
-    يكتشف **كل** اتصال (بلا حد أدنى افتراضي — min_seconds=0) مع:
-    - مصدره (application_name)
-    - مدة الخمول
-    - عمر المعاملة
-    - backend_xmin / backend_xid
-    - آخر query منفّذ
-
-    Args:
-        min_seconds: الحد الأدنى لعمر الخمول (افتراضي من env).
-        app_filter: تصفية application_name (None = كل التطبيقات).
-        limit: حد أقصى للصفوف.
-
-    Returns:
-        dict مع:
-            - count: عدد الاتصالات المكتشفة
-            - items: قائمة تفصيلية
-            - by_app: تجميع حسب application_name
-            - warning: رسالة تحذير مقترحة
-            - min_seconds_used / app_filter
-    """
-    from database import DB, USE_POSTGRES
-
-    if not USE_POSTGRES:
-        return {
-            "count": 0,
-            "items": [],
-            "warning": None,
-            "by_app": {},
-            "min_seconds_used": 0,
-            "app_filter": app_filter,
-        }
-
-    # معالجة القيم الافتراضية من env
-    if min_seconds is None:
-        min_seconds = IDLE_TX_AUDIT_MIN_SECONDS
-    if app_filter is None:
-        app_filter = IDLE_TX_AUDIT_APP_FILTER or None
-    if limit is None:
-        limit = IDLE_TX_AUDIT_LIMIT
-
-    min_seconds = max(0, _safe_int(min_seconds, 0))
-    limit = max(1, min(_safe_int(limit, 50), 500))
-
-    where_clauses = [
-        "state = 'idle in transaction'",
-        "pid <> pg_backend_pid()",
-        "EXTRACT(EPOCH FROM (now() - state_change)) >= $1",
-    ]
-    params: List[Any] = [min_seconds]
-
-    if app_filter:
-        where_clauses.append("application_name = $2")
-        params.append(app_filter)
-
-    query = f"""
-        SELECT pid,
-               usename,
-               application_name,
-               COALESCE(client_addr::text, 'local') AS client,
-               EXTRACT(EPOCH FROM (now() - state_change))::bigint
-                   AS idle_sec,
-               EXTRACT(EPOCH FROM (now() - xact_start))::bigint
-                   AS tx_age_sec,
-               backend_xmin::text AS backend_xmin,
-               backend_xid::text  AS backend_xid,
-               substring(query, 1, 400) AS query
-        FROM pg_stat_activity
-        WHERE {" AND ".join(where_clauses)}
-        ORDER BY state_change ASC
-        LIMIT {limit}
-    """
-
-    items: List[Dict[str, Any]] = []
-    by_app: Dict[str, int] = {}
-    try:
-        rows = await DB.fetchall(query, tuple(params))
-        for r in rows or []:
-            app = (r.get("application_name") or "?")[:40]
-            by_app[app] = by_app.get(app, 0) + 1
-            items.append({
-                "pid": _safe_int(r.get("pid")),
-                "user": r.get("usename"),
-                "app": app,
-                "client": r.get("client"),
-                "idle_sec": _safe_int(r.get("idle_sec")),
-                "tx_age_sec": _safe_int(r.get("tx_age_sec")),
-                "backend_xmin": r.get("backend_xmin"),
-                "backend_xid": r.get("backend_xid"),
-                "query": (r.get("query") or "").strip()[:400],
-            })
-    except Exception as exc:
-        logger.warning("audit_idle_in_transactions: %s", exc)
-        return {
-            "count": 0,
-            "items": [],
-            "warning": f"query_failed: {exc}",
-            "by_app": {},
-            "min_seconds_used": min_seconds,
-            "app_filter": app_filter,
-        }
-
-    warning: Optional[str] = None
-    if items:
-        our_conns = by_app.get(app_filter, 0) if app_filter else 0
-        if our_conns:
-            warning = (
-                f"🔴 {our_conns} اتصال idle-in-tx من '{app_filter}' "
-                f"— راجع database.py v7.7.61 (TX-1..TX-4)"
-            )
-        else:
-            warning = (
-                f"🟡 {len(items)} اتصال idle-in-tx من تطبيقات أخرى"
-            )
-
-    return {
-        "count": len(items),
-        "items": items,
-        "warning": warning,
-        "by_app": by_app,
-        "min_seconds_used": min_seconds,
-        "app_filter": app_filter,
-    }
-
-
-def format_idle_tx_audit(report: Dict[str, Any]) -> str:
-    """🎨 تنسيق نتيجة التدقيق لـ Telegram."""
-    count = report.get("count", 0)
-    lines: List[str] = []
-
-    if count == 0:
-        lines.append(
-            f"✅ <b>لا توجد idle-in-tx</b> "
-            f"(min={report.get('min_seconds_used', 0)}s)"
-        )
-        if report.get("app_filter"):
-            lines.append(
-                f"📌 التطبيق المُراقَب: "
-                f"<code>{_escape_html(report['app_filter'])}</code>"
-            )
-        return "\n".join(lines)
-
-    lines.append(
-        f"🔴 <b>Idle-in-Transaction:</b> <b>{count}</b>"
-    )
-    if report.get("warning"):
-        lines.append(f"⚠️ {_escape_html(report['warning'])}")
-    lines.append("")
-
-    by_app = report.get("by_app") or {}
-    if by_app:
-        lines.append("📊 <b>حسب التطبيق:</b>")
-        for app, cnt in sorted(
-            by_app.items(), key=lambda x: -x[1]
-        ):
-            lines.append(
-                f"  • <code>{_escape_html(app)}</code>: "
-                f"<b>{cnt}</b>"
-            )
-        lines.append("")
-
-    lines.append("📋 <b>التفاصيل:</b>")
-    for item in (report.get("items") or [])[:20]:
-        idle = _fmt_duration_seconds(item.get("idle_sec"))
-        tx_age = _fmt_duration_seconds(item.get("tx_age_sec"))
-        query_snippet = _escape_html(
-            (item.get("query") or "—")[:120]
-        )
-        lines.append(
-            f"  🔴 pid=<code>{item.get('pid')}</code> "
-            f"[<code>{_escape_html(item.get('app'))}</code>]"
-        )
-        lines.append(
-            f"     idle={idle} | tx_age={tx_age} | "
-            f"xmin=<code>{_escape_html(item.get('backend_xmin') or '—')}</code>"
-        )
-        lines.append(f"     query: <i>{query_snippet}</i>")
-        lines.append("")
-
-    total_items = len(report.get("items") or [])
-    if total_items > 20:
-        lines.append(
-            f"<i>… و{total_items - 20} اتصال آخر (ارفع "
-            f"IDLE_TX_AUDIT_LIMIT لعرض المزيد)</i>"
-        )
-
-    return "\n".join(lines)
-
-
-# =============================================================================
-# XMIN
-# =============================================================================
-
-async def _get_current_xmin_horizon() -> Optional[int]:
-    from database import DB
-    try:
-        row = await DB.fetchone(
-            "SELECT pg_snapshot_xmin(pg_current_snapshot())::text "
-            "AS xmin"
-        )
-        if not row:
-            return None
-        xmin_str = row.get("xmin")
-        if not xmin_str:
-            return None
-        return int(xmin_str)
-    except Exception as exc:
-        logger.debug("_get_current_xmin_horizon: %s", exc)
-        return None
-
-
-def _parse_xmin(value: Any) -> Optional[int]:
-    if value is None:
-        return None
-    try:
-        text = str(value).strip()
-        if not text:
-            return None
-        return int(text)
-    except (TypeError, ValueError):
-        return None
-
-
-def _detect_xmin_blockers(
-    blockers: List[Dict[str, Any]],
-    current_xmin: Optional[int] = None,
-) -> List[Dict[str, Any]]:
-    candidates: List[Dict[str, Any]] = []
-
-    for item in blockers:
-        if item.get("type") != "long_transaction":
-            continue
-
-        age = _safe_int(item.get("tx_age_sec"))
-        xmin_raw = item.get("backend_xmin")
-        xmin_int = _parse_xmin(xmin_raw)
-
-        if age < VERY_LONG_TX_SECONDS:
-            continue
-        if xmin_int is None:
-            continue
-
-        blocks_vacuum: Optional[bool] = None
-        if current_xmin is not None:
-            blocks_vacuum = xmin_int < current_xmin
-
-        if blocks_vacuum is True:
-            confidence = "high"
-            note = "يحجب VACUUM فعلاً (xmin < horizon)"
-        elif blocks_vacuum is False:
-            confidence = "medium"
-            note = "لا يحجب حالياً (xmin >= horizon)"
-        else:
-            confidence = "medium"
-            note = "غير مؤكد (لا يمكن قراءة horizon)"
-
-        candidates.append({
-            "pid": item.get("pid"),
-            "age": age,
-            "xmin": xmin_int,
-            "backend_xid": item.get("backend_xid"),
-            "state": item.get("state"),
-            "query": item.get("query") or "",
-            "blocks_vacuum": blocks_vacuum,
-            "confidence": confidence,
-            "note": note,
-        })
-
-    candidates.sort(
-        key=lambda c: (
-            c.get("blocks_vacuum") is not True,
-            -_safe_int(c.get("age")),
-        )
-    )
-
-    return candidates
-
-
-def _detect_xmin_blocker(
-    long_tx: List[Dict[str, Any]],
-    current_xmin: Optional[int] = None,
-) -> Optional[Dict[str, Any]]:
-    candidates = _detect_xmin_blockers(long_tx, current_xmin)
-    return candidates[0] if candidates else None
-
-
-# =============================================================================
-# 5. INDEXES
-# =============================================================================
-
-async def _get_indexes(
-    tables: List[str],
-) -> Dict[str, List[str]]:
-    from database import DB
-
-    result: Dict[str, List[str]] = {table: [] for table in tables}
-    if not tables:
-        return result
-
-    if _is_postgres():
-        in_clause, params = _build_pg_in_clause(tables, 1)
-
-        try:
-            query = f"""
-                SELECT tablename AS table_name,
-                       indexname AS index_name
-                FROM pg_indexes
-                WHERE tablename IN ({in_clause})
-                  AND schemaname NOT IN (
-                      'pg_catalog', 'information_schema'
-                  )
-                ORDER BY tablename, indexname
-            """
-            rows = await DB.fetchall(query, tuple(params))
-            for row in rows or []:
-                table = row.get("table_name")
-                index = row.get("index_name")
-                if (table in result and index
-                        and index not in result[table]):
-                    result[table].append(index)
-            if any(result.values()):
-                return result
-        except Exception as exc:
-            logger.warning("_get_indexes (pg_indexes): %s", exc)
-
-        try:
-            query = f"""
-                SELECT c.relname AS table_name,
-                       ic.relname AS index_name
-                FROM pg_index i
-                JOIN pg_class c ON c.oid = i.indrelid
-                JOIN pg_class ic ON ic.oid = i.indexrelid
-                JOIN pg_namespace n ON n.oid = c.relnamespace
-                WHERE c.relname IN ({in_clause})
-                  AND n.nspname = ANY(current_schemas(false))
-                ORDER BY c.relname, ic.relname
-            """
-            rows = await DB.fetchall(query, tuple(params))
-            for row in rows or []:
-                table = row.get("table_name")
-                index = row.get("index_name")
-                if (table in result and index
-                        and index not in result[table]):
-                    result[table].append(index)
-            if any(result.values()):
-                logger.info(
-                    "ℹ️ _get_indexes: استُخدم fallback "
-                    "(pg_class + pg_index)"
-                )
-                return result
-        except Exception as exc:
-            logger.warning("_get_indexes (pg_class fallback): %s", exc)
-
-        return result
-
-    if _is_mysql():
-        try:
-            rows = await DB.fetchall("""
-                SELECT TABLE_NAME AS table_name,
-                       INDEX_NAME AS index_name
-                FROM information_schema.STATISTICS
-                WHERE TABLE_SCHEMA = DATABASE()
-                ORDER BY TABLE_NAME, INDEX_NAME
-            """)
-            for row in rows or []:
-                table = row.get("table_name")
-                index = row.get("index_name")
-                if (table in result and index
-                        and index not in result[table]):
-                    result[table].append(index)
-        except Exception as exc:
-            logger.warning("_get_indexes mysql: %s", exc)
-        return result
-
-    try:
-        rows = await DB.fetchall("""
-            SELECT name AS index_name,
-                   tbl_name AS table_name
-            FROM sqlite_master
-            WHERE type = 'index'
-        """)
-        for row in rows or []:
-            table = row.get("table_name")
-            index = row.get("index_name")
-            if (table in result and index
-                    and index not in result[table]):
-                result[table].append(index)
-    except Exception as exc:
-        logger.warning("_get_indexes sqlite: %s", exc)
-
-    return result
-
-
-# =============================================================================
-# 6. POSTGRES SETTINGS
-# =============================================================================
-
-async def _get_pg_settings() -> Dict[str, Any]:
-    from database import DB, USE_POSTGRES
-
-    if not USE_POSTGRES:
-        return {}
-
-    keys = [
-        "autovacuum",
-        "autovacuum_naptime",
-        "autovacuum_vacuum_scale_factor",
-        "autovacuum_analyze_scale_factor",
-        "autovacuum_vacuum_threshold",
-        "autovacuum_analyze_threshold",
-        "autovacuum_max_workers",
-        "autovacuum_vacuum_cost_delay",
-        "autovacuum_vacuum_cost_limit",
-        "max_connections",
-        "shared_buffers",
-        "work_mem",
-        "effective_cache_size",
-        "synchronous_commit",
-        "idle_in_transaction_session_timeout",
-        "statement_timeout",
-        "server_version",
-    ]
-    settings: Dict[str, Any] = {}
-    for key in keys:
-        try:
-            value = await DB.fetchval(f"SHOW {key}")
-            if value is not None and str(value).strip():
-                settings[key] = value
-        except Exception as exc:
-            logger.debug("SHOW %s failed: %s", key, exc)
-    return settings
-
-
-def _autovacuum_enabled(settings: Dict[str, Any]) -> bool:
-    value = str(settings.get("autovacuum", "on")).strip().lower()
-    return value in {"on", "true", "1", "yes"}
-
-
-# =============================================================================
-# THRESHOLD CALCULATION
-# =============================================================================
-
-def _autovacuum_vacuum_trigger(
-    live_rows: int,
-    settings: Dict[str, Any],
-    table_options: Optional[Dict[str, str]] = None,
-) -> int:
-    options = table_options or {}
-    threshold_raw = options.get("autovacuum_vacuum_threshold")
-    scale_raw = options.get("autovacuum_vacuum_scale_factor")
-    if threshold_raw is None:
-        threshold_raw = settings.get("autovacuum_vacuum_threshold")
-    if scale_raw is None:
-        scale_raw = settings.get("autovacuum_vacuum_scale_factor")
-    threshold = _safe_int(threshold_raw, DEFAULT_VACUUM_THRESHOLD)
-    scale = _safe_float(scale_raw, 0.2)
-    trigger = threshold + int(max(live_rows, 0) * max(scale, 0.0))
-    return max(trigger, 0)
-
-
-def _autovacuum_analyze_trigger(
-    live_rows: int,
-    settings: Dict[str, Any],
-    table_options: Optional[Dict[str, str]] = None,
-) -> int:
-    options = table_options or {}
-    threshold_raw = options.get("autovacuum_analyze_threshold")
-    scale_raw = options.get("autovacuum_analyze_scale_factor")
-    if threshold_raw is None:
-        threshold_raw = settings.get("autovacuum_analyze_threshold")
-    if scale_raw is None:
-        scale_raw = settings.get("autovacuum_analyze_scale_factor")
-    threshold = _safe_int(threshold_raw, DEFAULT_ANALYZE_THRESHOLD)
-    scale = _safe_float(scale_raw, 0.1)
-    trigger = threshold + int(max(live_rows, 0) * max(scale, 0.0))
-    return max(trigger, 0)
-
-
-# =============================================================================
-# PROJECT CHECK
-# =============================================================================
-
-def _check_project_heavy_tables() -> Optional[str]:
-    try:
-        from database import HEAVY_TABLES_FOR_AUTOVACUUM
-    except Exception as exc:
-        logger.debug("_check_project_heavy_tables: %s", exc)
-        return None
-
-    heavy = set(HEAVY_TABLES_FOR_AUTOVACUUM or [])
-
-    if REQUIRED_HEAVY_TABLE_USERS not in heavy:
-        return (
-            "🔴 <b>v7.7.37 لم يُطبَّق</b> — "
-            f'"{REQUIRED_HEAVY_TABLE_USERS}" مفقود من '
-            "HEAVY_TABLES_FOR_AUTOVACUUM. "
-            "أعد النشر + restart البوت."
-        )
-    return None
-
-
-def _check_maintenance_consistency() -> Optional[str]:
-    try:
-        from database_tables import MAINTENANCE_TABLES
-        from database import HEAVY_TABLES_FOR_AUTOVACUUM
-    except Exception as exc:
-        logger.debug("_check_maintenance_consistency: %s", exc)
-        return None
-
-    maint = set(MAINTENANCE_TABLES or ())
-    heavy = set(HEAVY_TABLES_FOR_AUTOVACUUM or ())
-
-    missing = heavy - maint
-    if not missing:
-        return None
-
-    missing_str = ", ".join(sorted(missing))
-    return (
-        "🟡 <b>VACUUM الدوري لا يشمل جداول حرجة:</b> "
-        f"<code>{_escape_html(missing_str)}</code>\n"
-        "💡 <b>السبب:</b> مفقودة من "
-        "<code>MAINTENANCE_TABLES</code> في database_tables.py\n"
-        "💡 <b>الأثر:</b> VACUUM (ANALYZE, SKIP_LOCKED) الدوري "
-        "لن يعمل عليها — autovacuum وحده يعمل."
-    )
-
-
-async def _check_admin_logs_size() -> Optional[str]:
-    """يفحص حجم admin_logs — يعرض حالة auto-cleanup."""
-    from database import DB
-
-    try:
-        row_count = _safe_int(
-            await DB.fetchval("SELECT COUNT(*) FROM admin_logs",
-                              default=0)
-        )
-    except Exception as exc:
-        logger.debug("_check_admin_logs_size: %s", exc)
-        return None
-
-    try:
-        size_mb = await _get_table_size_mb("admin_logs")
-    except Exception:
-        size_mb = 0.0
-
-    ac_status_line = ""
-    if AUTO_CLEANUP_ENABLED:
-        ac_status_line = (
-            f"\n🤖 <b>Auto-cleanup:</b> مُفعَّل "
-            f"(كل {AUTO_CLEANUP_INTERVAL_HOURS}h، "
-            f"عند ≥ {AUTO_CLEANUP_MAX_SIZE_MB}MB)"
-        )
-    else:
-        ac_status_line = "\n🤖 <b>Auto-cleanup:</b> معطَّل"
-
-    size_line = (
-        f"\n💾 <b>الحجم الحالي:</b> {size_mb:.2f} MB"
-        if size_mb > 0 else ""
-    )
-
-    if AUTO_CLEANUP_MAX_SIZE_MB > 0 and size_mb >= AUTO_CLEANUP_MAX_SIZE_MB:
-        return (
-            f"🔴 <b>admin_logs تجاوز الحد المسموح:</b> "
-            f"{size_mb:.2f} MB ≥ {AUTO_CLEANUP_MAX_SIZE_MB} MB\n"
-            f"📊 عدد الصفوف: {row_count:,}"
-            f"{ac_status_line}\n"
-            f"💡 سيُنظَّف تلقائياً في الدورة القادمة."
-        )
-
-    if row_count >= ADMIN_LOGS_CRIT_ROWS:
-        return (
-            f"🔴 <b>admin_logs كبير جداً:</b> "
-            f"{row_count:,} صف"
-            f"{size_line}{ac_status_line}\n"
-            f"💡 نظّف القديم الآن: "
-            f"<code>DELETE FROM admin_logs "
-            f"WHERE created_at < NOW() - INTERVAL '30 days';</code>"
-        )
-
-    if row_count >= ADMIN_LOGS_WARN_ROWS:
-        return (
-            f"🟡 <b>admin_logs يحتاج تقليماً:</b> "
-            f"{row_count:,} صف"
-            f"{size_line}{ac_status_line}\n"
-            f"💡 نظّف القديم: "
-            f"<code>DELETE FROM admin_logs "
-            f"WHERE created_at < NOW() - INTERVAL '60 days';</code>"
-        )
-
-    return None
-
-
-# =============================================================================
-# ANALYSIS ENGINE
-# =============================================================================
-
-async def _analyze_root_causes(
-    dead_rows: List[Dict[str, Any]],
-    per_table: Dict[str, Dict[str, Any]],
-    blockers: List[Dict[str, Any]],
-    pg_settings: Dict[str, Any],
-) -> Tuple[List[RootCause], List[str]]:
-    if not _is_postgres():
-        return [], []
-
-    from database import HEAVY_TABLES_FOR_AUTOVACUUM
-
-    causes_out: List[RootCause] = []
-    general_notes: List[str] = []
-
-    heavy_tables = set(HEAVY_TABLES_FOR_AUTOVACUUM or [])
-
-    long_tx = [b for b in blockers
-               if b.get("type") == "long_transaction"]
-    idle_tx = [b for b in blockers
-               if b.get("type") == "idle_in_transaction"]
-    running_vacuum = [b for b in blockers
-                      if b.get("type") == "running_vacuum"]
-
-    av_enabled = _autovacuum_enabled(pg_settings)
-    naptime = _parse_interval_seconds(
-        pg_settings.get("autovacuum_naptime")
-    )
-
-    if not av_enabled:
-        general_notes.append(
-            "🔴 <b>autovacuum = OFF</b> — "
-            "التنظيف التلقائي معطّل عالمياً."
-        )
-    else:
-        general_notes.append("🟢 <b>autovacuum = ON</b>.")
-
-    sc = str(pg_settings.get("synchronous_commit", "")).strip().lower()
-    if sc == "off":
-        general_notes.append(
-            "ℹ️ <b>synchronous_commit=off</b> — "
-            "مقصود من v7.7.36 لتحسين الأداء. لا تعتبره خطأً."
-        )
-    elif sc == "on":
-        general_notes.append(
-            "⚠️ <b>synchronous_commit=on</b> — "
-            "v7.7.36 يضبطه على off تلقائياً عبر server_settings."
-        )
-
-    project_warning = _check_project_heavy_tables()
-    if project_warning:
-        general_notes.append(project_warning)
-
-    maint_warning = _check_maintenance_consistency()
-    if maint_warning:
-        general_notes.append(maint_warning)
-
-    admin_logs_warning = await _check_admin_logs_size()
-    if admin_logs_warning:
-        general_notes.append(admin_logs_warning)
-
-    if naptime is not None and naptime > NAPTIME_WARN_SECONDS:
-        general_notes.append(
-            "🟡 <b>autovacuum_naptime</b> = "
-            f"<code>{_escape_html(pg_settings.get('autovacuum_naptime'))}</code> "
-            "وهو أعلى من 5 دقائق."
-        )
-
-    if running_vacuum:
-        for item in running_vacuum:
-            general_notes.append(
-                "🟢 VACUUM يعمل الآن على "
-                f"<code>{_escape_html(item.get('table'))}</code> "
-                f"— {_escape_html(item.get('phase'))} "
-                f"({_escape_html(item.get('progress'))})"
-            )
-
-    current_xmin = await _get_current_xmin_horizon()
-    xmin_candidates = _detect_xmin_blockers(long_tx, current_xmin)
-
-    if xmin_candidates:
-        real_blockers = [
-            c for c in xmin_candidates
-            if c.get("blocks_vacuum") is True
-        ]
-        if real_blockers:
-            candidate = real_blockers[0]
-            general_notes.append(
-                "🔴 <b>معاملة تحجب VACUUM فعلاً:</b> "
-                f"pid=<code>{candidate.get('pid')}</code> "
-                f"العمر={_fmt_duration_seconds(candidate.get('age'))} "
-                f"xmin=<code>{candidate.get('xmin')}</code> "
-                f"< horizon=<code>{current_xmin}</code>"
-            )
-        else:
-            candidate = xmin_candidates[0]
-            general_notes.append(
-                "🟡 <b>مرشح للتحقيق (غير مؤكد):</b> "
-                f"pid=<code>{candidate.get('pid')}</code> "
-                f"العمر={_fmt_duration_seconds(candidate.get('age'))} "
-                f"xmin=<code>{candidate.get('xmin')}</code>"
-            )
-    elif long_tx:
-        general_notes.append(
-            f"🟡 توجد <b>{len(long_tx)}</b> معاملة طويلة؛ "
-            "لم يظهر دليل كافٍ لإثبات أنها تحجز VACUUM."
-        )
-
-    if idle_tx:
-        severe_idle = [
-            item for item in idle_tx
-            if _safe_int(item.get("idle_sec")) >= IDLE_TX_CRIT_SECONDS
-        ]
-        if severe_idle:
-            general_notes.append(
-                "🔴 توجد معاملات <b>idle in transaction</b> "
-                f"لفترة طويلة ({len(severe_idle)})."
-            )
-        else:
-            general_notes.append(
-                f"🟠 توجد <b>{len(idle_tx)}</b> "
-                "idle-in-transaction؛ قد تحتفظ بـ snapshot."
-            )
-
-    for row in dead_rows:
-        table = row.get("table_name")
-        if not table:
-            continue
-
-        live = _safe_int(row.get("live_tup"))
-        dead = _safe_int(row.get("dead_tup"))
-
-        if not _is_significant_table(dead, live):
-            continue
-
-        severity = _dead_severity(dead, live)
-        if severity == "ok":
-            continue
-
-        pct = _dead_pct(dead, live)
-        info = per_table.get(table, {})
-        reloptions = info.get("reloptions") or {}
-        is_heavy = table in heavy_tables
-        is_tuned = bool(info.get("is_tuned"))
-
-        last_av = row.get("last_autovacuum")
-        av_hours = _hours_since(last_av)
-        analyze_mod = _safe_int(row.get("mod_since_analyze"))
-        analyze_mod_pct = (
-            analyze_mod / live * 100.0 if live > 0 else 0.0
-        )
-
-        vacuum_trigger = _autovacuum_vacuum_trigger(
-            live, pg_settings, reloptions
-        )
-        analyze_trigger = _autovacuum_analyze_trigger(
-            live, pg_settings, reloptions
-        )
-
-        active_vacuum = any(
-            item.get("type") == "running_vacuum"
-            and item.get("table") == table
-            for item in blockers
-        )
-
-        causes_list: List[CauseItem] = []
-
-        if active_vacuum:
-            causes_list.append(CauseItem(
-                text=(
-                    "VACUUM يعمل حالياً على الجدول؛ "
-                    "قد تكون الإحصاءات الحالية مؤقتة."
-                ),
-                confidence="high",
-                evidence=["pg_stat_progress_vacuum"],
-            ))
-
-        if not av_enabled:
-            causes_list.append(CauseItem(
-                text=(
-                    "autovacuum معطّل عالمياً؛ "
-                    "لن يحدث تنظيف تلقائي."
-                ),
-                confidence="high",
-                evidence=["autovacuum=off"],
-            ))
-
-        if dead >= vacuum_trigger:
-            causes_list.append(CauseItem(
-                text=(
-                    "عدد dead tuples تجاوز threshold "
-                    "المحسوب تقريبياً لـ autovacuum."
-                ),
-                confidence="high",
-                evidence=[
-                    f"dead={dead:,}",
-                    f"trigger≈{vacuum_trigger:,}",
-                ],
-            ))
-
-        if is_heavy and not is_tuned:
-            causes_list.append(CauseItem(
-                text=(
-                    "<b>إعدادات الجدول الخاصة بـ autovacuum "
-                    "ليست على القيم المستهدفة.</b>"
-                ),
-                confidence="high",
-                evidence=[
-                    "reloptions="
-                    + (
-                        ", ".join(
-                            f"{k}={v}"
-                            for k, v in list(reloptions.items())[:5]
-                        )
-                        if reloptions
-                        else "default"
-                    )
-                ],
-            ))
-
-        if xmin_candidates:
-            candidate = next(
-                (c for c in xmin_candidates
-                 if c.get("blocks_vacuum") is True),
-                xmin_candidates[0],
-            )
-            is_real_blocker = candidate.get("blocks_vacuum") is True
-            causes_list.append(CauseItem(
-                text=(
-                    "معاملة طويلة تحجز snapshot قديم "
-                    + ("(مثبت)." if is_real_blocker
-                       else "(مرشح، غير مثبت).")
-                ),
-                confidence=(
-                    "high" if is_real_blocker else "medium"
-                ),
-                evidence=[
-                    f"pid={candidate.get('pid')}",
-                    "age=" + _fmt_duration_seconds(
-                        candidate.get("age")
-                    ),
-                    f"backend_xmin={candidate.get('xmin')}",
-                    f"note={candidate.get('note', '')}",
-                ],
-            ))
-        elif long_tx:
-            causes_list.append(CauseItem(
-                text=(
-                    f"توجد {len(long_tx)} معاملة طويلة، "
-                    "لكن الحجب غير مثبت."
-                ),
-                confidence="low",
-                evidence=[
-                    (
-                        f"pid={item.get('pid')} "
-                        f"age={_fmt_duration_seconds(item.get('tx_age_sec'))}"
-                    )
-                    for item in long_tx[:3]
-                ],
-            ))
-
-        if idle_tx:
-            causes_list.append(CauseItem(
-                text=(
-                    f"توجد {len(idle_tx)} "
-                    "idle-in-transaction؛ قد تحتفظ "
-                    "بـ snapshot مفتوح."
-                ),
-                confidence="medium",
-                evidence=[
-                    (
-                        f"pid={item.get('pid')} "
-                        f"idle={_fmt_duration_seconds(item.get('idle_sec'))}"
-                    )
-                    for item in idle_tx[:3]
-                ],
-            ))
-
-        if av_hours is not None and av_hours > AV_NOT_RUNNING_HOURS:
-            causes_list.append(CauseItem(
-                text="آخر autovacuum أقدم من 24 ساعة.",
-                confidence="medium",
-                evidence=[f"last_autovacuum={_fmt_dt(last_av)}"],
-            ))
-
-        if av_hours is None and dead > DEAD_TUPLE_WARN_ABS:
-            causes_list.append(CauseItem(
-                text=(
-                    "لا توجد قيمة last_autovacuum؛ "
-                    "قد يعني ذلك أن autovacuum لم يُسجّل "
-                    "على هذا الجدول بعد."
-                ),
-                confidence="medium",
-                evidence=["last_autovacuum=NULL"],
-            ))
-
-        if analyze_mod_pct >= ANALYZE_MOD_WARN_PCT:
-            causes_list.append(CauseItem(
-                text=(
-                    "إحصاءات الجدول قديمة بسبب عدد كبير "
-                    "من التعديلات منذ آخر ANALYZE."
-                ),
-                confidence=(
-                    "high"
-                    if analyze_mod_pct >= ANALYZE_MOD_CRIT_PCT
-                    else "medium"
-                ),
-                evidence=[
-                    f"mod_since_analyze={analyze_mod:,}",
-                    f"ratio={analyze_mod_pct:.1f}%",
-                    f"trigger≈{analyze_trigger:,}",
-                ],
-            ))
-
-        if not causes_list:
-            causes_list.append(CauseItem(
-                text="لم يظهر سبب جذري واضح من البيانات الحالية.",
-                confidence="low",
-                evidence=[f"dead/live={pct:.1f}%"],
-            ))
-
-        solutions: List[Tuple[int, str, str]] = []
-        priority = 1
-        safe_table = _quote_pg_identifier(table)
-        safe_table_html = _escape_html(safe_table)
-
-        if active_vacuum:
-            solutions.append((
-                priority,
-                "⏳ انتظر VACUUM الجاري ثم أعد التشخيص.",
-                (
-                    "SELECT relname, n_live_tup, n_dead_tup "
-                    "FROM pg_stat_user_tables "
-                    f"WHERE relname = {_quote_pg_literal(table)};"
-                ),
-            ))
-        else:
-            solutions.append((
-                priority,
-                (
-                    "🧹 <b>تنظيف فوري:</b> "
-                    f"<code>VACUUM (ANALYZE) "
-                    f"{safe_table_html};</code>"
-                ),
-                f"VACUUM (ANALYZE) {safe_table};",
-            ))
-        priority += 1
-
-        if is_heavy and not is_tuned:
-            solutions.append((
-                priority,
-                "⚙️ اضبط autovacuum للجدول على القيم المستهدفة:",
-                (
-                    f"ALTER TABLE {safe_table} SET ("
-                    "autovacuum_vacuum_scale_factor = "
-                    f"{EXPECTED_VACUUM_SCALE_FACTOR}, "
-                    "autovacuum_analyze_scale_factor = "
-                    f"{EXPECTED_ANALYZE_SCALE_FACTOR}"
-                    ");"
-                ),
-            ))
-            priority += 1
-
-        if not av_enabled:
-            solutions.append((
-                priority,
-                "🔴 فعّل autovacuum عالمياً.",
-                (
-                    "ALTER SYSTEM SET autovacuum = on; "
-                    "SELECT pg_reload_conf();"
-                ),
-            ))
-            priority += 1
-
-        if xmin_candidates:
-            candidate = next(
-                (c for c in xmin_candidates
-                 if c.get("blocks_vacuum") is True),
-                xmin_candidates[0],
-            )
-            pid = _safe_int(candidate.get("pid"))
-            solutions.append((
-                priority,
-                (
-                    "🔎 افحص المعاملة المرشحة "
-                    f"(pid={pid}) قبل أي إجراء."
-                ),
-                (
-                    "SELECT pid, usename, application_name, "
-                    "state, xact_start, backend_xmin, "
-                    "backend_xid, query "
-                    "FROM pg_stat_activity "
-                    f"WHERE pid = {pid};"
-                ),
-            ))
-            priority += 1
-
-            solutions.append((
-                priority,
-                (
-                    "⚠️ لا تنهِ المعاملة إلا بعد "
-                    "التأكد من أنها عالقة وآمنة للإلغاء."
-                ),
-                "",
-            ))
-            priority += 1
-
-        if idle_tx:
-            solutions.append((
-                priority,
-                "🟠 افحص idle-in-transaction:",
-                (
-                    "SELECT pid, usename, application_name, "
-                    "state, state_change, backend_xmin, query "
-                    "FROM pg_stat_activity "
-                    "WHERE state = 'idle in transaction' "
-                    "ORDER BY state_change;"
-                ),
-            ))
-            priority += 1
-
-        if analyze_mod_pct >= ANALYZE_MOD_WARN_PCT:
-            solutions.append((
-                priority,
-                (
-                    "📊 حدّث إحصاءات الجدول: "
-                    f"<code>ANALYZE {safe_table_html};</code>"
-                ),
-                f"ANALYZE {safe_table};",
-            ))
-            priority += 1
-
-        if naptime is not None and naptime > NAPTIME_WARN_SECONDS:
-            solutions.append((
-                priority,
-                (
-                    "⚙️ يمكن تقليل autovacuum_naptime إذا كان "
-                    "تأخر بدء autovacuum مشكلة فعلية."
-                ),
-                (
-                    "ALTER SYSTEM SET "
-                    "autovacuum_naptime = '60s'; "
-                    "SELECT pg_reload_conf();"
-                ),
-            ))
-            priority += 1
-
-        solutions.append((
-            priority,
-            "📈 أعد القياس بعد انتهاء العملية.",
-            (
-                "SELECT relname, n_live_tup, n_dead_tup, "
-                "last_autovacuum, last_autoanalyze "
-                "FROM pg_stat_user_tables "
-                f"WHERE relname = {_quote_pg_literal(table)};"
-            ),
-        ))
-
-        expected: List[str] = []
-
-        if active_vacuum:
-            expected.append(
-                "⏳ لا نحكم على النتيجة قبل انتهاء VACUUM الجاري."
-            )
-        else:
-            expected.append(
-                "🧹 المتوقع: انخفاض dead tuples القابلة للتنظيف "
-                "بعد VACUUM."
-            )
-            expected.append(
-                "ℹ️ n_dead_tup قد لا يصبح صفراً فوراً؛ "
-                "الإحصاءات والعمليات المتزامنة قد تؤثر على الرقم."
-            )
-            expected.append(
-                "💾 VACUUM العادي لا يعني بالضرورة عودة المساحة "
-                "لنظام الملفات؛ المساحة قد تصبح متاحة لإعادة "
-                "الاستخدام داخل الجدول."
-            )
-
-        if is_heavy and not is_tuned:
-            expected.append(
-                "⚙️ بعد ضبط reloptions: سيبدأ autovacuum عند "
-                "threshold أقل من الإعداد الافتراضي."
-            )
-
-        if analyze_mod_pct >= ANALYZE_MOD_WARN_PCT:
-            expected.append(
-                "📊 ANALYZE سيحدّث إحصاءات المخطط ويحسن "
-                "قرارات الـ planner عند الحاجة."
-            )
-
-        severity_emoji = (
-            "🔴" if severity == "critical" else "🟡"
-        )
-
-        causes_out.append(RootCause(
-            table=table,
-            causes=causes_list,
-            severity=severity_emoji,
-            solutions=solutions,
-            expected=expected,
-        ))
-
-    causes_out.sort(
-        key=lambda item: (
-            item.severity != "🔴",
-            item.severity != "🟡",
-            item.table,
-        )
-    )
-
-    return causes_out, general_notes
-
-
-# =============================================================================
-# HEALTH SCORE
-# =============================================================================
-
-def _calculate_pg_health(
-    dead_rows: List[Dict[str, Any]],
-    blockers: List[Dict[str, Any]],
-    pg_settings: Dict[str, Any],
-) -> Dict[str, Any]:
-    critical = 0
-    warning = 0
-    total_dead = 0
-    significant_tables = 0
-
-    for row in dead_rows:
-        dead = _safe_int(row.get("dead_tup"))
-        live = _safe_int(row.get("live_tup"))
-
-        total_dead += dead
-
-        if not _is_significant_table(dead, live):
-            continue
-
-        significant_tables += 1
-
-        severity = _dead_severity(dead, live)
-        if severity == "critical":
-            critical += 1
-        elif severity == "warning":
-            warning += 1
-
-    long_tx_count = sum(
-        1 for item in blockers
-        if item.get("type") == "long_transaction"
-    )
-    idle_count = sum(
-        1 for item in blockers
-        if item.get("type") == "idle_in_transaction"
-    )
-
-    score = 100
-
-    if total_dead >= 50_000:
-        score -= 40
-    elif total_dead >= 10_000:
-        score -= 25
-    elif total_dead >= 5_000:
-        score -= 15
-    elif total_dead >= 1_000:
-        score -= 8
-    elif total_dead >= 500:
-        score -= 3
-
-    score -= critical * 8
-    score -= warning * 3
-
-    score -= long_tx_count * 4
-    score -= idle_count * 3
-
-    if not _autovacuum_enabled(pg_settings):
-        score -= 30
-
-    score = max(0, min(100, score))
-
-    return {
-        "score": score,
-        "critical": critical,
-        "warning": warning,
-        "long_tx": long_tx_count,
-        "idle_tx": idle_count,
-        "total_dead": total_dead,
-        "significant_tables": significant_tables,
-    }
-
-
-# =============================================================================
-# REPORT BUILDER
-# =============================================================================
-
-class _ReportBuilder:
-    def __init__(self, max_chars: int = REPORT_MAX_CHARS):
-        self._lines: List[str] = []
-        self._total_chars = 0
-        self._max_chars = max(1, int(max_chars))
-
-    def add(self, value: str) -> bool:
-        if value is None:
-            return False
-        text = str(value)
-        extra = len(text) + (1 if self._lines else 0)
-        if self._total_chars + extra > self._max_chars:
-            return False
-        self._lines.append(text)
-        self._total_chars += extra
-        return True
-
-    def build(self) -> str:
-        return "\n".join(self._lines)
-
-    @property
-    def char_count(self) -> int:
-        return self._total_chars
-
-    @property
-    def line_count(self) -> int:
-        return len(self._lines)
-
-
-# =============================================================================
-# HTML-SAFE SPLIT
-# =============================================================================
-
-_HTML_TAG_RE = re.compile(
-    r'<(/?)(\w+)((?:\s+[^>]*?)?)(/?)>',
-    re.DOTALL,
-)
-
-_VOID_HTML_TAGS = frozenset({
-    "br", "hr", "img", "input", "meta", "link", "area",
-    "base", "col", "embed", "source", "track", "wbr",
-})
-
-
-def _html_tag_name(full_open_tag: str) -> str:
-    m = re.match(r'<(\w+)', full_open_tag)
-    return m.group(1) if m else ""
-
-
-def _get_open_html_tags(text: str) -> List[str]:
-    stack: List[str] = []
-    for m in _HTML_TAG_RE.finditer(text):
-        is_closing = bool(m.group(1))
-        tag_name_raw = m.group(2)
-        tag_name = tag_name_raw.lower()
-        attrs = m.group(3) or ""
-        self_closing = bool(m.group(4))
-
-        if tag_name in _VOID_HTML_TAGS:
-            continue
-        if self_closing:
-            continue
-
-        full_open = f"<{tag_name_raw}{attrs}>"
-
-        if is_closing:
-            for i in range(len(stack) - 1, -1, -1):
-                if _html_tag_name(stack[i]).lower() == tag_name:
-                    del stack[i:]
-                    break
-        else:
-            stack.append(full_open)
-    return stack
-
-
-def _split_for_telegram(
-    text: str,
-    limit: int = TELEGRAM_MESSAGE_LIMIT,
-) -> List[str]:
-    if not text:
-        return [""]
-    if len(text) <= limit:
-        return [text]
-
-    parts: List[str] = []
-    remaining = text
-    base_margin = 300
-
-    while len(remaining) > limit:
-        open_tags_count = len(_get_open_html_tags(remaining[:1000]))
-        dynamic_margin = base_margin + (open_tags_count * 30)
-        safe_limit = max(1, limit - dynamic_margin)
-        if safe_limit >= len(remaining):
-            parts.append(remaining)
-            break
-
-        cut = remaining.rfind("\n", 0, safe_limit)
-        if cut < safe_limit // 2:
-            cut = safe_limit
-
-        chunk = remaining[:cut]
-        open_tags = _get_open_html_tags(chunk)
-
-        closing = "".join(
-            f"</{_html_tag_name(t)}>"
-            for t in reversed(open_tags)
-        )
-        reopening = "".join(open_tags)
-
-        parts.append(chunk.rstrip() + closing)
-        remaining = reopening + remaining[cut:].lstrip("\n")
-
-    if remaining:
-        parts.append(remaining)
-
-    return parts
-
-
-# =============================================================================
-# MAIN DIAGNOSTIC
-# =============================================================================
-
-async def _build_diagnose_lines() -> List[str]:
-    from database import (
-        DB, USE_POSTGRES, USE_MYSQL,
-        HEAVY_TABLES_FOR_AUTOVACUUM,
-    )
-
-    lines: List[str] = []
-
-    db_type = _db_type()
-
-    lines.append(f"🔬 <b>تشخيص قاعدة البيانات v{VERSION}</b>")
-    lines.append("━━━━━━━━━━━━━━━━━━━━━━")
-    lines.append(f"🗄️ <b>النوع:</b> <code>{_escape_html(db_type)}</code>")
-
-    try:
-        size_kb = await DB.get_db_size_kb()
-        lines.append(f"💾 <b>الحجم:</b> {_fmt_size_kb(size_kb)}")
-    except Exception as exc:
-        logger.debug("get_db_size_kb failed: %s", exc)
-
-    if USE_POSTGRES:
-        schema_info = await _get_schema_info()
-        if schema_info.get("current_schema"):
-            lines.append(
-                f"📋 <b>Schema:</b> "
-                f"<code>{_escape_html(schema_info['current_schema'])}</code>"
-            )
-        if schema_info.get("current_schemas"):
-            schemas_list = ", ".join(
-                _escape_html(s) for s in schema_info["current_schemas"]
-            )
-            lines.append(
-                f"📋 <b>Schemas المتاحة:</b> "
-                f"<code>{schemas_list}</code>"
-            )
-        if schema_info.get("database"):
-            lines.append(
-                f"🗃️ <b>Database:</b> "
-                f"<code>{_escape_html(schema_info['database'])}</code>"
-            )
-
-    dead_rows = await _get_dead_tuples()
-    per_table = (
-        await _get_per_table_autovacuum() if USE_POSTGRES else {}
-    )
-    blockers = (
-        await _get_autovacuum_blockers() if USE_POSTGRES else []
-    )
-    pg_settings = (
-        await _get_pg_settings() if USE_POSTGRES else {}
-    )
-    sizes = await _get_table_sizes()
-    indexes = await _get_indexes(list(_CRITICAL_INDEXES.keys()))
-
-    total_tables_count = 0
-    all_tables_av: List[Dict[str, Any]] = []
-    index_health: List[Dict[str, Any]] = []
-
-    if USE_POSTGRES:
-        try:
-            total_tables_count = await _count_all_user_tables()
-        except Exception as exc:
-            logger.debug("_count_all_user_tables: %s", exc)
-
-        if DB_DIAG_SHOW_ALL_TABLES:
-            try:
-                all_tables_av = await _get_all_tables_autovacuum_status()
-            except Exception as exc:
-                logger.debug("_get_all_tables_autovacuum_status: %s", exc)
-
-        if DB_DIAG_SHOW_INDEX_HEALTH:
-            try:
-                index_health = await _get_all_tables_index_health()
-            except Exception as exc:
-                logger.debug("_get_all_tables_index_health: %s", exc)
-
-    if USE_POSTGRES:
-        health = _calculate_pg_health(dead_rows, blockers, pg_settings)
-        lines.append("")
-        lines.append("📌 <b>الخلاصة التقنية</b>")
-        lines.append(f"  🔴 جداول حرجة: <b>{health['critical']}</b>")
-        lines.append(
-            f"  🟡 جداول تحتاج انتباه: <b>{health['warning']}</b>"
-        )
-        lines.append(
-            f"  ⚠️ Long transactions: <b>{health['long_tx']}</b>"
-        )
-        lines.append(
-            f"  🟠 Idle transactions: <b>{health['idle_tx']}</b>"
-        )
-        lines.append(
-            f"  💀 إجمالي dead tuples: "
-            f"<b>{health['total_dead']:,}</b>"
-        )
-        lines.append(
-            f"  📊 جداول مهمة: "
-            f"<b>{health['significant_tables']}</b>"
-        )
-        if total_tables_count > 0:
-            lines.append(
-                f"  🗂️ إجمالي الجداول: <b>{total_tables_count}</b>"
-            )
-        if index_health:
-            no_pk = sum(1 for r in index_health if not r.get("has_pk"))
-            no_idx = sum(
-                1 for r in index_health
-                if _safe_int(r.get("index_count")) == 0
-            )
-            if no_pk or no_idx:
-                lines.append(
-                    f"  🔑 جداول بلا PK: <b>{no_pk}</b> | "
-                    f"بلا فهارس: <b>{no_idx}</b>"
-                )
-        av_state = (
-            "🟢 ON"
-            if _autovacuum_enabled(pg_settings)
-            else "🔴 OFF"
-        )
-        lines.append(f"  autovacuum: <b>{av_state}</b>")
-        lines.append(
-            f"  مؤشر الحالة التقني: "
-            f"<b>{health['score']}/100</b>"
-        )
-
-    causes: List[RootCause] = []
-    general_notes: List[str] = []
-
-    if USE_POSTGRES:
-        causes, general_notes = await _analyze_root_causes(
-            dead_rows, per_table, blockers, pg_settings
-        )
-
-    if causes or general_notes:
-        lines.append("")
-        lines.append("╔══════════════════════════════════╗")
-        lines.append("║  🎯 <b>التحليل المنطقي</b>          ║")
-        lines.append("╚══════════════════════════════════╝")
-        lines.append("")
-
-        for note in general_notes:
-            lines.append(note)
-            lines.append("")
-
-        confidence_label = {
-            "high": "🟢 ثقة عالية",
-            "medium": "🟡 ثقة متوسطة",
-            "low": "🟠 ثقة منخفضة",
-        }
-
-        for cause_group in causes:
-            lines.append(
-                f"{cause_group.severity} "
-                f"<b>جدول: "
-                f"<code>{_escape_html(cause_group.table)}</code>"
-                f"</b>"
-            )
-
-            if cause_group.causes:
-                sorted_causes = sorted(
-                    cause_group.causes,
-                    key=lambda item: (
-                        {"high": 0, "medium": 1, "low": 2}
-                        .get(item.confidence, 3)
-                    ),
-                )
-                lines.append(
-                    f"├─ <b>الأسباب المرشحة "
-                    f"({len(cause_group.causes)}):</b>"
-                )
-                for cause in sorted_causes:
-                    label = confidence_label.get(
-                        cause.confidence, "?"
-                    )
-                    lines.append(f"│   {label} — {cause.text}")
-                    for evidence in cause.evidence[:3]:
-                        lines.append(
-                            f"│       • "
-                            f"<i>{_escape_html(evidence)}</i>"
-                        )
-
-            if cause_group.solutions:
-                lines.append("├─ <b>الإجراءات:</b>")
-                for priority, title, _sql in cause_group.solutions:
-                    icon = (
-                        "🟥" if priority == 1
-                        else ("🟧" if priority == 2 else "🟨")
-                    )
-                    lines.append(f"│   {icon} {title}")
-
-            if cause_group.expected:
-                lines.append("├─ <b>التوقع بعد الإصلاح:</b>")
-                for expected in cause_group.expected:
-                    lines.append(f"│   {expected}")
-
-            lines.append("")
-
-    lines.append("━━━━━━━━━━━━━━━━━━━━━━")
-    lines.append("📊 <b>التفاصيل الكاملة</b>")
-    lines.append("━━━━━━━━━━━━━━━━━━━━━━")
-
-    if USE_POSTGRES:
-        lines.append("")
-        lines.append("<b>1. Dead Tuples + نشاط التنظيف</b>")
-        lines.append("")
-
-        shown = 0
-        clean_tables: List[Dict[str, Any]] = []
-        for row in dead_rows:
-            name = row.get("table_name") or "?"
-            live = _safe_int(row.get("live_tup"))
-            dead = _safe_int(row.get("dead_tup"))
-            if live == 0 and dead == 0:
-                continue
-            if dead == 0 and live > 0:
-                clean_tables.append(row)
-                continue
-            pct = _dead_pct(dead, live)
-            emoji = _dead_emoji(dead, live)
-            last_av = _fmt_dt(row.get("last_autovacuum"))
-            last_an = _fmt_dt(row.get("last_autoanalyze"))
-            mod_since = _safe_int(row.get("mod_since_analyze"))
-            lines.append(
-                f"{emoji} <code>{_escape_html(name):<18}</code> "
-                f"live={live:>7,} dead={dead:>7,} ({pct:.1f}%)"
-            )
-            lines.append(
-                f"     🧹 AV: <code>{last_av}</code> | "
-                f"📊 AN: <code>{last_an}</code> | "
-                f"🔄 mod={mod_since:,}"
-            )
-            shown += 1
-            if shown >= DB_DIAG_MAX_DEAD_TABLES:
-                remaining = sum(
-                    1 for r in dead_rows
-                    if _safe_int(r.get("dead_tup")) > 0
-                ) - shown
-                if remaining > 0:
-                    lines.append(
-                        f"<i>… و{remaining} جدول آخر فيه dead tuples "
-                        f"(ارفع DB_DIAG_MAX_DEAD_TABLES لعرضها)</i>"
-                    )
-                break
-
-        if shown == 0:
-            lines.append("✅ لا توجد بيانات dead tuples.")
-
-        if clean_tables and DB_DIAG_MAX_CLEAN_TABLES > 0:
-            lines.append("")
-            lines.append("<b>1b. جداول نظيفة (dead=0)</b>")
-            lines.append("")
-            clean_shown = 0
-            for row in clean_tables[:DB_DIAG_MAX_CLEAN_TABLES]:
-                name = row.get("table_name") or "?"
-                live = _safe_int(row.get("live_tup"))
-                last_an = _fmt_dt(row.get("last_autoanalyze"))
-                lines.append(
-                    f"✅ <code>{_escape_html(name):<18}</code> "
-                    f"live={live:>7,} | 📊 AN: <code>{last_an}</code>"
-                )
-                clean_shown += 1
-            remaining_clean = len(clean_tables) - clean_shown
-            if remaining_clean > 0:
-                lines.append(
-                    f"<i>… و{remaining_clean} جدول نظيف آخر</i>"
-                )
-
-    if USE_POSTGRES and per_table:
-        lines.append("")
-        lines.append("<b>2. Autovacuum للجداول الحرجة (HEAVY)</b>")
-        lines.append("")
-        for table in HEAVY_TABLES_FOR_AUTOVACUUM:
-            info = per_table.get(table, {})
-            reason = info.get("reason", "not_found")
-            if not info.get("exists"):
-                if reason == "query_failed":
-                    lines.append(
-                        f"🔴 <code>{_escape_html(table)}</code> — "
-                        f"<b>فشل الاستعلام</b> (تحقق من الصلاحيات)"
-                    )
-                elif reason == "not_in_schema":
-                    lines.append(
-                        f"🟠 <code>{_escape_html(table)}</code> — "
-                        f"موجود لكن خارج <code>search_path</code>"
-                    )
+                LIMIT $1
+            """, (limit,))
+
+            result = []
+            for r in (rows or []):
+                rd = r if isinstance(r, dict) else dict(r)
+                total_bytes = int(rd.get('total_bytes', 0) or 0)
+                total_kb = total_bytes / 1024
+                if total_kb >= TABLE_SIZE_CRITICAL_KB:
+                    size_color = "🔴"
+                elif total_kb >= TABLE_SIZE_WARN_KB:
+                    size_color = "🟡"
                 else:
-                    lines.append(
-                        f"❓ <code>{_escape_html(table)}</code> — "
-                        f"غير موجود في pg_class"
-                    )
-                continue
-            if info.get("is_tuned"):
-                lines.append(
-                    f"✅ <code>{_escape_html(table)}</code> — مضبوط "
-                    f"({EXPECTED_VACUUM_SCALE_FACTOR}/"
-                    f"{EXPECTED_ANALYZE_SCALE_FACTOR})"
-                )
-            elif info.get("reloptions"):
-                summary = ", ".join(
-                    f"{key}={value}"
-                    for key, value in list(
-                        info["reloptions"].items()
-                    )[:4]
-                )
-                lines.append(
-                    f"🟡 <code>{_escape_html(table)}</code> — "
-                    f"{_escape_html(summary)}"
-                )
-            else:
-                lines.append(
-                    f"⚠️ <code>{_escape_html(table)}</code> — "
-                    f"القيم الافتراضية"
-                )
-
-    if USE_POSTGRES and all_tables_av:
-        heavy_set = set(HEAVY_TABLES_FOR_AUTOVACUUM or [])
-        not_tuned = [
-            r for r in all_tables_av
-            if not r.get("is_tuned")
-            and r.get("table_name") not in heavy_set
-        ]
-        if not_tuned:
-            lines.append("")
-            lines.append(
-                f"<b>2b. جداول ليست مضبوطة autovacuum "
-                f"({len(not_tuned)} من {len(all_tables_av)})</b>"
-            )
-            lines.append("")
-            shown_2b = 0
-            for row in not_tuned[:10]:
-                name = row.get("table_name")
-                live = _safe_int(row.get("live_tup"))
-                dead = _safe_int(row.get("dead_tup"))
-                lines.append(
-                    f"⚙️ <code>{_escape_html(name):<22}</code> "
-                    f"live={live:>6,} dead={dead:>6,}"
-                )
-                shown_2b += 1
-            remaining = len(not_tuned) - shown_2b
-            if remaining > 0:
-                lines.append(
-                    f"<i>… و{remaining} جدول آخر</i>"
-                )
-
-    if USE_POSTGRES and blockers:
-        lines.append("")
-        lines.append("<b>3. نشاط PostgreSQL / Blockers</b>")
-        lines.append("")
-        for item in blockers:
-            kind = item.get("type")
-            if kind == "long_transaction":
-                xmin = item.get("backend_xmin") or "—"
-                lines.append(
-                    f"🟡 <b>Long tx</b> "
-                    f"pid=<code>{item.get('pid')}</code> "
-                    f"عمر={_fmt_duration_seconds(item.get('tx_age_sec'))} "
-                    f"xmin=<code>{_escape_html(xmin)}</code>"
-                )
-            elif kind == "idle_in_transaction":
-                lines.append(
-                    f"🟠 <b>Idle-in-tx</b> "
-                    f"pid=<code>{item.get('pid')}</code> "
-                    f"خامل={_fmt_duration_seconds(item.get('idle_sec'))}"
-                )
-            elif kind == "running_vacuum":
-                lines.append(
-                    f"🟢 <b>VACUUM</b> على "
-                    f"<code>{_escape_html(item.get('table'))}</code> — "
-                    f"{_escape_html(item.get('phase'))} "
-                    f"({_escape_html(item.get('progress'))})"
-                )
-    elif USE_POSTGRES:
-        lines.append("")
-        lines.append("<b>3. نشاط PostgreSQL / Blockers</b>")
-        lines.append("")
-        lines.append("✅ لا توجد معاملات طويلة / idle-in-tx / VACUUM جارٍ.")
-
-    if sizes:
-        lines.append("")
-        lines.append(
-            f"<b>4. أحجام الجداول — Top {DB_DIAG_MAX_SIZES}</b>"
-        )
-        lines.append("")
-        for row in sizes[:DB_DIAG_MAX_SIZES]:
-            name = row.get("table_name") or "?"
-            total = _safe_int(row.get("total_bytes"))
-            lines.append(
-                f"  <code>{_escape_html(name):<20}</code> "
-                f"{_fmt_size_bytes(total)}"
-            )
-
-    lines.append("")
-    lines.append("<b>5. الفهارس الحرجة (يدوياً)</b>")
-    for table, expected_indexes in _CRITICAL_INDEXES.items():
-        actual = set(indexes.get(table, []))
-        missing = [
-            index for index in expected_indexes
-            if index not in actual
-        ]
-        if missing:
-            lines.append(
-                f"⚠️ <b>{_escape_html(table)}</b> "
-                f"({len(actual)}) — مفقود {len(missing)}"
-            )
-            for missing_index in missing:
-                lines.append(
-                    f"   ❌ <code>{_escape_html(missing_index)}</code>"
-                )
-        else:
-            lines.append(
-                f"✅ <b>{_escape_html(table)}</b> ({len(actual)})"
-            )
-
-    if USE_POSTGRES and index_health and DB_DIAG_SHOW_INDEX_HEALTH:
-        lines.append("")
-        lines.append(
-            f"<b>5b. صحة الفهارس العامة "
-            f"({len(index_health)} جدولاً)</b>"
-        )
-        lines.append("")
-        for row in index_health[:15]:
-            name = row.get("table_name")
-            cnt = _safe_int(row.get("index_count"))
-            pk = row.get("has_pk")
-            live = _safe_int(row.get("live_tup"))
-            if cnt == 0:
-                icon = "🔴"
-                note = "بلا أي فهرس!"
-            elif not pk:
-                icon = "🟡"
-                note = f"{cnt} فهرس، بلا PK"
-            else:
-                icon = "✅"
-                note = f"{cnt} فهرس"
-            lines.append(
-                f"{icon} <code>{_escape_html(name):<22}</code> "
-                f"live={live:>6,} — {note}"
-            )
-        remaining = len(index_health) - 15
-        if remaining > 0:
-            lines.append(
-                f"<i>… و{remaining} جدول آخر يحتاج فحص</i>"
-            )
-
-    if USE_POSTGRES and pg_settings:
-        lines.append("")
-        lines.append("<b>6. إعدادات PostgreSQL</b>")
-        lines.append("")
-        keys = (
-            "autovacuum",
-            "autovacuum_naptime",
-            "autovacuum_vacuum_scale_factor",
-            "autovacuum_analyze_scale_factor",
-            "autovacuum_vacuum_threshold",
-            "autovacuum_analyze_threshold",
-            "autovacuum_max_workers",
-            "max_connections",
-            "shared_buffers",
-            "work_mem",
-            "synchronous_commit",
-            "idle_in_transaction_session_timeout",
-            "statement_timeout",
-            "server_version",
-        )
-        for key in keys:
-            value = pg_settings.get(key)
-            if value is None:
-                continue
-            lines.append(
-                f"  <code>{_escape_html(key)} = "
-                f"{_escape_html(value)}</code>"
-            )
-
-    if USE_MYSQL:
-        lines.append("")
-        lines.append("<b>7. ملاحظة MySQL</b>")
-        lines.append(
-            "ℹ️ MySQL لا يستخدم dead tuples بنفس نموذج PostgreSQL؛ "
-            "يتم عرض DATA_FREE كإشارة تقريبية للمساحة الحرة/المجزأة."
-        )
-        lines.append(
-            "⚠️ <b>لا تعتمد على هذا التقرير للحكم على صحة MySQL</b> "
-            "— DATA_FREE يعني مساحة قابلة لإعادة الاستخدام، وليس "
-            "بالضرورة dead tuples."
-        )
-
-    if not USE_POSTGRES and not USE_MYSQL:
-        lines.append("")
-        lines.append("<b>7. ملاحظة SQLite</b>")
-        lines.append(
-            "ℹ️ SQLite لا يملك autovacuum بنفس نموذج PostgreSQL؛ "
-            "VACUUM يعيد بناء قاعدة البيانات."
-        )
-
-    if AUTO_CLEANUP_ENABLED and USE_POSTGRES:
-        lines.append("")
-        lines.append("<b>8. Auto-Cleanup</b>")
-        lines.append("")
-        watched = AUTO_CLEANUP_WATCH_TABLES
-        for table in watched:
-            try:
-                size_mb = await _get_table_size_mb(table)
-            except Exception:
-                size_mb = 0.0
-            if size_mb >= AUTO_CLEANUP_MAX_SIZE_MB:
-                icon = "🔴"
-                status = "يتجاوز الحد — سيُنظَّف"
-            elif size_mb > 0:
-                icon = "🟢"
-                status = "ضمن الحد"
-            else:
-                icon = "❔"
-                status = "غير موجود أو غير مدعوم"
-            lines.append(
-                f"  {icon} <code>{_escape_html(table)}</code> — "
-                f"<b>{size_mb:.2f}MB</b> "
-                f"(الحد: {AUTO_CLEANUP_MAX_SIZE_MB}MB) — "
-                f"{status}"
-            )
-        lines.append(
-            f"  ⚙️ يُشغَّل كل <b>{AUTO_CLEANUP_INTERVAL_HOURS}h</b> | "
-            f"VACUUM: "
-            f"{'ON 🟢' if AUTO_CLEANUP_VACUUM else 'OFF ⚪'} | "
-            f"Mode: <b>{DB_VACUUM_MODE}</b>"
-        )
-
-    lines.append("")
-    lines.append("━━━━━━━━━━━━━━━━━━━━━━")
-    lines.append("✅ <b>اكتمل التشخيص</b>")
-
-    return lines
-
-
-async def diagnose_db() -> str:
-    lines = await _build_diagnose_lines()
-
-    builder = _ReportBuilder(max_chars=REPORT_MAX_CHARS)
-    for line in lines:
-        if not builder.add(line):
-            builder.add("")
-            builder.add("… <i>(تم اقتصار التقرير للحدّ الأقصى)</i>")
-            builder.add(
-                "💡 استخدم /db_diag_split للتقرير الكامل."
-            )
-            break
-
-    return builder.build()
-
-
-async def diagnose_db_split(
-    max_chars_per_part: int = TELEGRAM_MESSAGE_LIMIT,
-) -> List[str]:
-    lines = await _build_diagnose_lines()
-    full_text = "\n".join(lines)
-    return _split_for_telegram(full_text, limit=max_chars_per_part)
-
-
-# =============================================================================
-# QUICK DIAGNOSTIC
-# =============================================================================
-
-async def diagnose_db_quick() -> str:
-    """🔬 تقرير صحي مختصر — 4 أسطر فقط."""
-    from database import DB, USE_POSTGRES
-
-    lines: List[str] = []
-
-    try:
-        size_kb = await DB.get_db_size_kb()
-        size_display = _fmt_size_kb(size_kb)
-    except Exception:
-        size_display = "?"
-
-    if not USE_POSTGRES:
-        return (
-            f"🔬 <b>DB Quick</b> | {_escape_html(_db_type())}\n"
-            f"📏 الحجم: <b>{size_display}</b>"
-        )
-
-    try:
-        dead_rows = await _get_dead_tuples()
-        blockers = await _get_autovacuum_blockers()
-        pg_settings = await _get_pg_settings()
-        health = _calculate_pg_health(dead_rows, blockers, pg_settings)
-    except Exception as exc:
-        logger.warning(f"diagnose_db_quick: {exc}")
-        return (
-            f"🔬 <b>DB Quick</b> | {_escape_html(_db_type())}\n"
-            f"📏 الحجم: <b>{size_display}</b>\n"
-            f"⚠️ تعذر جلب الإحصائيات"
-        )
-
-    score = health['score']
-    if score >= 90:
-        score_emoji = "🟢"
-    elif score >= 70:
-        score_emoji = "🟡"
-    else:
-        score_emoji = "🔴"
-
-    dead = health['total_dead']
-    if dead < 500:
-        dead_emoji = "🟢"
-    elif dead < 5000:
-        dead_emoji = "🟡"
-    else:
-        dead_emoji = "🔴"
-
-    av_on = _autovacuum_enabled(pg_settings)
-    av_emoji = "🟢" if av_on else "🔴"
-
-    blockers_count = (
-        health['long_tx'] + health['idle_tx']
-    )
-    if blockers_count == 0:
-        blockers_emoji = "🟢"
-    else:
-        blockers_emoji = "🟠"
-
-    lines.append(
-        f"🔬 <b>DB Health:</b> {score_emoji} "
-        f"<b>{score}/100</b>"
-    )
-    lines.append(
-        f"💀 Dead: {dead_emoji} <b>{dead:,}</b> | "
-        f"📏 <b>{size_display}</b>"
-    )
-    lines.append(
-        f"🧹 AV: {av_emoji} | "
-        f"⚠️ Blockers: {blockers_emoji} <b>{blockers_count}</b>"
-    )
-
-    if score >= 90:
-        lines.append("✅ لا مشاكل — كل شيء يعمل")
-    elif score >= 70:
-        lines.append("⚠️ انتباه: راجع /db_diag")
-    else:
-        lines.append("🔴 يحتاج تدخلاً — شغّل /db_diag")
-
-    return "\n".join(lines)
-
-
-# =============================================================================
-# PREVIEW MAINTENANCE
-# =============================================================================
-
-async def preview_maintenance(
-    admin_logs_days: int = MAINTENANCE_DEFAULT_ADMIN_LOGS_DAYS,
-    penalty_archive_days: int = MAINTENANCE_DEFAULT_PENALTY_ARCHIVE_DAYS,
-    user_violations_days: int = MAINTENANCE_DEFAULT_USER_VIOLATIONS_DAYS,
-) -> Dict[str, Any]:
-    """🔍 معاينة عملية الصيانة — بدون أي تعديل."""
-    from database import (
-        DB, USE_POSTGRES, HEAVY_TABLES_FOR_AUTOVACUUM,
-    )
-
-    result: Dict[str, Any] = {
-        'available': False,
-        'db_type': _db_type(),
-        'plan': [],
-        'vacuum_tables': [],
-        'warnings': [],
-        'error': None,
-    }
-
-    if not USE_POSTGRES:
-        result['error'] = (
-            "الصيانة التلقائية مدعومة فقط على PostgreSQL حالياً"
-        )
-        return result
-
-    result['available'] = True
-
-    # 🆕 v6.9.1: التحقق من الأيام قبل استخدامها في INTERVAL
-    admin_logs_days = _safe_days(
-        admin_logs_days, MAINTENANCE_DEFAULT_ADMIN_LOGS_DAYS
-    )
-    penalty_archive_days = _safe_days(
-        penalty_archive_days, MAINTENANCE_DEFAULT_PENALTY_ARCHIVE_DAYS
-    )
-    user_violations_days = _safe_days(
-        user_violations_days, MAINTENANCE_DEFAULT_USER_VIOLATIONS_DAYS
-    )
-
-    try:
-        blockers = await _get_autovacuum_blockers()
-        running = [
-            item for item in blockers
-            if item.get("type") == "running_vacuum"
-        ]
-        if running:
-            result['warnings'].append(
-                f"⚠️ يوجد VACUUM جارٍ على "
-                f"{running[0].get('table')} — سيتم تخطيه"
-            )
-    except Exception as exc:
-        logger.debug(f"preview_maintenance(blockers): {exc}")
-
-    tables_exist: Set[str] = set()
-    try:
-        rows = await DB.fetchall("""
-            SELECT tablename
-            FROM pg_tables
-            WHERE schemaname = ANY(current_schemas(false))
-        """)
-        for r in rows or []:
-            name = r.get('tablename')
-            if name:
-                tables_exist.add(name)
-    except Exception as exc:
-        logger.warning(f"preview_maintenance(tables): {exc}")
-        result['error'] = f"تعذّر جلب قائمة الجداول: {exc}"
-        return result
-
-    delete_plan = [
-        ('admin_logs', 'created_at', admin_logs_days),
-        ('penalty_archive', 'created_at', penalty_archive_days),
-        ('user_violations', 'last_violation_time', user_violations_days),
-    ]
-
-    for table, ts_col, days in delete_plan:
-        if table not in tables_exist:
-            continue
-
-        safe_table = _quote_pg_identifier(table)
-        safe_col = _quote_pg_identifier(ts_col)
-
-        try:
-            count = await DB.fetchval(
-                f"SELECT COUNT(*) FROM {safe_table} "
-                f"WHERE {safe_col} IS NOT NULL "
-                f"  AND {safe_col} < "
-                f"NOW() - INTERVAL '{days} days'",
-                default=0,
-            )
-            count = _safe_int(count)
-        except Exception as exc:
-            logger.debug(f"count {table}: {exc}")
-            count = -1
-
-        result['plan'].append({
-            'table': table,
-            'action': 'DELETE',
-            'column': ts_col,
-            'days': days,
-            'criteria': (
-                f"{ts_col} IS NOT NULL "
-                f"AND {ts_col} < NOW() - INTERVAL '{days} days'"
-            ),
-            'count': count,
-        })
-
-    # 🆕 v6.9.0: استخدام النسخة async (تدعم "all")
-    vacuum_targets = await _get_vacuum_target_tables_async()
-    result['vacuum_tables'] = [
-        t for t in vacuum_targets
-        if t and t in tables_exist
-    ]
-
-    return result
-
-
-# =============================================================================
-# RUN MAINTENANCE
-# =============================================================================
-
-async def run_maintenance(
-    *,
-    admin_logs_days: int = MAINTENANCE_DEFAULT_ADMIN_LOGS_DAYS,
-    penalty_archive_days: int = MAINTENANCE_DEFAULT_PENALTY_ARCHIVE_DAYS,
-    user_violations_days: int = MAINTENANCE_DEFAULT_USER_VIOLATIONS_DAYS,
-    max_delete_per_table: int = MAINTENANCE_MAX_DELETE_PER_TABLE,
-    skip_delete: bool = False,
-    skip_vacuum: bool = False,
-) -> Dict[str, Any]:
-    """
-    🧹 تنفيذ الصيانة الكاملة (DELETE + VACUUM) بأمان.
-
-    ✅ v6.5.1: user_violations يستخدم last_violation_time.
-    ✅ v6.8.0: VACUUM يشمل MAINTENANCE_TABLES بدلاً من HEAVY فقط.
-    ✅ v6.9.0: VACUUM يعمل على كل جداول المستخدم (DB_VACUUM_MODE="all").
-    🆕 v6.9.1: _safe_days() يتحقق من الأيام قبل INTERVAL.
-    """
-    from database import (
-        DB, USE_POSTGRES,
-    )
-
-    t_start = _time.monotonic()
-
-    result: Dict[str, Any] = {
-        'success': False,
-        'duration_sec': 0.0,
-        'deletes': [],
-        'vacuum': [],
-        'errors': [],
-    }
-
-    if not USE_POSTGRES:
-        result['errors'].append(
-            "الصيانة مدعومة فقط على PostgreSQL حالياً"
-        )
-        return result
-
-    # 🆕 v6.9.1: التحقق من الأيام (يمنع SQL injection)
-    admin_logs_days = _safe_days(
-        admin_logs_days, MAINTENANCE_DEFAULT_ADMIN_LOGS_DAYS
-    )
-    penalty_archive_days = _safe_days(
-        penalty_archive_days, MAINTENANCE_DEFAULT_PENALTY_ARCHIVE_DAYS
-    )
-    user_violations_days = _safe_days(
-        user_violations_days, MAINTENANCE_DEFAULT_USER_VIOLATIONS_DAYS
-    )
-    max_delete_per_table = max(
-        1, _safe_int(max_delete_per_table, MAINTENANCE_MAX_DELETE_PER_TABLE)
-    )
-
-    if not skip_delete:
-        delete_plan = [
-            ('admin_logs', 'created_at', admin_logs_days),
-            ('penalty_archive', 'created_at', penalty_archive_days),
-            ('user_violations', 'last_violation_time', user_violations_days),
-        ]
-
-        for table, ts_col, days in delete_plan:
-            entry = {
-                'table': table,
-                'deleted': 0,
-                'skipped': False,
-                'error': None,
-            }
-
-            try:
-                count = _safe_int(await DB.fetchval(
-                    f"SELECT COUNT(*) FROM "
-                    f"{_quote_pg_identifier(table)} "
-                    f"WHERE {_quote_pg_identifier(ts_col)} IS NOT NULL "
-                    f"  AND {_quote_pg_identifier(ts_col)} < "
-                    f"NOW() - INTERVAL '{days} days'",
-                    default=0,
-                ))
-            except Exception as exc:
-                entry['error'] = f"count failed: {exc}"
-                result['deletes'].append(entry)
-                continue
-
-            if count > max_delete_per_table:
-                entry['skipped'] = True
-                entry['error'] = (
-                    f"تخطي: {count:,} > {max_delete_per_table:,} "
-                    f"(سقف أمان)"
-                )
-                result['deletes'].append(entry)
-                continue
-
-            if count == 0:
-                result['deletes'].append(entry)
-                continue
-
-            try:
-                async with DB.transaction() as conn:
-                    deleted = await DB._execute_with_conn(
-                        conn,
-                        f"DELETE FROM {_quote_pg_identifier(table)} "
-                        f"WHERE {_quote_pg_identifier(ts_col)} IS NOT NULL "
-                        f"  AND {_quote_pg_identifier(ts_col)} < "
-                        f"NOW() - INTERVAL '{days} days'",
-                    )
-                entry['deleted'] = _safe_int(deleted, count)
-            except Exception as exc:
-                entry['error'] = str(exc)[:200]
-                logger.warning(f"delete {table}: {exc}")
-
-            result['deletes'].append(entry)
-
-    if not skip_vacuum:
-        running_tables: Set[str] = set()
-        try:
-            blockers = await _get_autovacuum_blockers()
-            for item in blockers:
-                if item.get("type") == "running_vacuum":
-                    t = item.get("table")
-                    if t:
-                        running_tables.add(t)
-        except Exception:
-            pass
-
-        # 🆕 v6.9.0: استخدام النسخة async — تدعم "all"
-        vacuum_targets = await _get_vacuum_target_tables_async()
-
-        for table in vacuum_targets:
-            if not table:
-                continue
-
-            entry = {
-                'table': table,
-                'success': False,
-                'error': None,
-            }
-
-            if table in running_tables:
-                entry['error'] = "VACUUM جارٍ — تم تخطيه"
-                result['vacuum'].append(entry)
-                continue
-
-            try:
-                await DB.vacuum(table)
-                entry['success'] = True
-            except Exception as exc:
-                entry['error'] = str(exc)[:200]
-                logger.warning(f"vacuum {table}: {exc}")
-
-            result['vacuum'].append(entry)
-
-    result['duration_sec'] = round(_time.monotonic() - t_start, 2)
-
-    deletes_ok = all(
-        e['error'] is None or e.get('skipped')
-        for e in result['deletes']
-    )
-    vacuum_ok = all(
-        e['success'] for e in result['vacuum']
-    )
-    result['success'] = deletes_ok and vacuum_ok
-
-    return result
-
-
-# =============================================================================
-# MAINTENANCE FORMATTERS
-# =============================================================================
-
-def format_maintenance_preview(preview: Dict[str, Any]) -> str:
-    """🎨 تنسيق معاينة الصيانة."""
-    if not preview.get('available'):
-        return (
-            "⚠️ <b>الصيانة غير متاحة</b>\n"
-            f"<i>{_escape_html(preview.get('error') or '')}</i>"
-        )
-
-    lines: List[str] = []
-    lines.append("🧹 <b>معاينة الصيانة</b>")
-    lines.append("━━━━━━━━━━━━━━━━━━━━━━")
-    lines.append("")
-
-    plan = preview.get('plan', [])
-    if plan:
-        lines.append("🗑️ <b>الحذف المخطط:</b>")
-        total_to_delete = 0
-        for item in plan:
-            table = item['table']
-            count = item['count']
-            days = item['days']
-
-            if count < 0:
-                icon = "⚠️"
-                display = "فشل العدّ"
-            elif count == 0:
-                icon = "✅"
-                display = "لا شيء"
-            elif count < 1000:
-                icon = "🟢"
-                display = f"<b>{count:,}</b> صف"
-                total_to_delete += count
-            elif count < 10000:
-                icon = "🟡"
-                display = f"<b>{count:,}</b> صف"
-                total_to_delete += count
-            else:
-                icon = "🟠"
-                display = f"<b>{count:,}</b> صف"
-                total_to_delete += count
-
-            lines.append(
-                f"  {icon} <code>{_escape_html(table):<18}</code> "
-                f"(&gt;{days}d): {display}"
-            )
-        lines.append("")
-        lines.append(
-            f"📊 <b>الإجمالي:</b> "
-            f"<b>{total_to_delete:,}</b> صف سيُحذف"
-        )
-    else:
-        lines.append("ℹ️ لا شيء للحذف.")
-
-    vacuum_tables = preview.get('vacuum_tables', [])
-    if vacuum_tables:
-        lines.append("")
-        lines.append(
-            f"🧹 <b>VACUUM سيعمل على "
-            f"({len(vacuum_tables)} جدول):</b>"
-        )
-        for t in vacuum_tables:
-            lines.append(f"  • <code>{_escape_html(t)}</code>")
-
-    warnings = preview.get('warnings', [])
-    if warnings:
-        lines.append("")
-        for w in warnings:
-            lines.append(w)
-
-    lines.append("")
-    lines.append("━━━━━━━━━━━━━━━━━━━━━━")
-    lines.append(
-        "لتنفيذ الصيانة، أرسل:\n"
-        "<code>/db_maintenance confirm</code>"
-    )
-
-    return "\n".join(lines)
-
-
-def format_maintenance_result(result: Dict[str, Any]) -> str:
-    """🎨 تنسيق نتيجة الصيانة."""
-    lines: List[str] = []
-
-    if result.get('success'):
-        lines.append("✅ <b>اكتملت الصيانة بنجاح</b>")
-    else:
-        lines.append("⚠️ <b>اكتملت الصيانة (مع تحذيرات)</b>")
-
-    lines.append("━━━━━━━━━━━━━━━━━━━━━━")
-    lines.append("")
-    lines.append(
-        f"⏱️ <b>المدة:</b> {result.get('duration_sec', 0):.2f}s"
-    )
-
-    deletes = result.get('deletes', [])
-    if deletes:
-        lines.append("")
-        lines.append("🗑️ <b>الحذف:</b>")
-        total_deleted = 0
-        for entry in deletes:
-            table = entry['table']
-            deleted = entry['deleted']
-            error = entry.get('error')
-            skipped = entry.get('skipped')
-
-            if skipped:
-                icon = "⏭️"
-                display = f"<i>{_escape_html(error or 'تم تخطيه')}</i>"
-            elif error:
-                icon = "❌"
-                display = f"<i>{_escape_html(error)}</i>"
-            elif deleted == 0:
-                icon = "✅"
-                display = "لا شيء"
-            else:
-                icon = "🟢"
-                display = f"<b>{deleted:,}</b> صف"
-                total_deleted += deleted
-
-            lines.append(
-                f"  {icon} <code>{_escape_html(table):<18}</code> "
-                f"{display}"
-            )
-
-        if total_deleted > 0:
-            lines.append("")
-            lines.append(
-                f"📊 <b>إجمالي المحذوف:</b> "
-                f"<b>{total_deleted:,}</b> صف"
-            )
-
-    vacuum = result.get('vacuum', [])
-    if vacuum:
-        lines.append("")
-        lines.append("🧹 <b>VACUUM:</b>")
-        ok_count = 0
-        fail_count = 0
-        for entry in vacuum:
-            table = entry['table']
-            if entry['success']:
-                icon = "✅"
-                ok_count += 1
-            else:
-                icon = "❌"
-                fail_count += 1
-            err = entry.get('error') or ""
-            suffix = f" — <i>{_escape_html(err)}</i>" if err else ""
-            lines.append(
-                f"  {icon} <code>{_escape_html(table)}</code>{suffix}"
-            )
-        lines.append("")
-        lines.append(
-            f"📊 نجح: <b>{ok_count}</b> | فشل: <b>{fail_count}</b>"
-        )
-
-    errors = result.get('errors', [])
-    if errors:
-        lines.append("")
-        lines.append("🚨 <b>أخطاء عامة:</b>")
-        for err in errors[:5]:
-            lines.append(f"  • {_escape_html(err)}")
-
-    return "\n".join(lines)
-
-
-# =============================================================================
-# VACUUM / OPTIMIZE (v6.9.0 — FULL TABLES)
-# =============================================================================
-
-async def vacuum_analyze_tables() -> str:
-    """
-    🧹 تنظيف قاعدة البيانات — **كل الجداول**.
-
-    🆕 v6.9.0: يعمل على **كل** جداول المستخدم في الوضع الافتراضي
-    (DB_VACUUM_MODE="all"). يمكن ضبطه على 4 أوضاع:
-        - "all" (افتراضي): كل جداول المستخدم
-        - "maintenance": MAINTENANCE_TABLES (10 جداول)
-        - "heavy": HEAVY_TABLES_FOR_AUTOVACUUM (4 جداول)
-        - "both": اتحاد maintenance + heavy
-    """
-    from database import DB, USE_POSTGRES, USE_MYSQL
-
-    lines: List[str] = []
-    lines.append(f"🧹 <b>تنظيف قاعدة البيانات v{VERSION}</b>")
-    lines.append("━━━━━━━━━━━━━━━━━━━━━━")
-    lines.append("")
-
-    if USE_POSTGRES:
-        lines.append("🗄️ PostgreSQL — VACUUM (ANALYZE)")
-    elif USE_MYSQL:
-        lines.append("🗄️ MySQL — OPTIMIZE/maintenance")
-    else:
-        lines.append("🗄️ SQLite — VACUUM")
-    lines.append("")
-
-    if USE_POSTGRES:
-        try:
-            blockers = await _get_autovacuum_blockers()
-            running = [
-                item for item in blockers
-                if item.get("type") == "running_vacuum"
-            ]
-        except Exception as exc:
-            logger.debug("vacuum running check failed: %s", exc)
-            running = []
-
-        if running:
-            lines.append("⚠️ <b>يوجد VACUUM جارٍ:</b>")
-            for item in running:
-                lines.append(
-                    f"  • <code>"
-                    f"{_escape_html(item.get('table'))}"
-                    f"</code> — "
-                    f"{_escape_html(item.get('phase'))} "
-                    f"({_escape_html(item.get('progress'))})"
-                )
-            lines.append("")
-            lines.append("💡 لن نوقف العملية الجارية.")
-            lines.append("")
-
-    # 🆕 v6.9.0: استخدام القائمة الكاملة (تدعم "all")
-    tables = await _get_vacuum_target_tables_async()
-    if not tables:
-        lines.append(
-            "ℹ️ لا توجد جداول مستهدفة "
-            "(تحقق من DB_VACUUM_MODE و MAINTENANCE_TABLES)."
-        )
-        return "\n".join(lines)
-
-    lines.append(
-        f"🎯 <b>الوضع:</b> <code>{_escape_html(DB_VACUUM_MODE)}</code> | "
-        f"<b>الجداول المستهدفة:</b> <b>{len(tables)}</b>"
-    )
-    if DB_VACUUM_EXCLUDE_TABLES:
-        lines.append(
-            f"⚪ <b>مستثنى:</b> "
-            f"<code>{_escape_html(', '.join(DB_VACUUM_EXCLUDE_TABLES))}</code>"
-        )
-    lines.append("")
-
-    results: List[Tuple[str, bool, str]] = []
-    for table in tables:
-        if not table:
-            continue
-        try:
-            await DB.vacuum(table)
-            results.append((table, True, ""))
-        except Exception as exc:
-            logger.exception("VACUUM failed for %s", table)
-            results.append((table, False, str(exc)[:300]))
-
-    success = 0
-    failed = 0
-    for table, ok, error in results:
-        if ok:
-            lines.append(f"✅ <code>{_escape_html(table)}</code>")
-            success += 1
-        else:
-            lines.append(
-                f"❌ <code>{_escape_html(table)}</code> — "
-                f"{_escape_html(error)}"
-            )
-            failed += 1
-
-    lines.append("")
-    lines.append("━━━━━━━━━━━━━━━━━━━━━━")
-    lines.append(f"✅ نجح: <b>{success}</b> | ❌ فشل: <b>{failed}</b>")
-
-    if USE_POSTGRES and success:
-        lines.append("")
-        lines.append("💡 <b>التحقق:</b>")
-        lines.append(
-            "شغّل <code>/db_diag</code> بعد انتهاء VACUUM "
-            "ثم قارن:"
-        )
-        lines.append("• <code>n_dead_tup</code>")
-        lines.append("• <code>last_autovacuum</code>")
-        lines.append("• <code>last_autoanalyze</code>")
-        lines.append("• حجم الجدول")
-        lines.append("")
-        lines.append(
-            "ℹ️ لا تتوقع بالضرورة أن يصبح "
-            "<code>n_dead_tup</code> صفراً، "
-            "ولا تعتبر انخفاضه دليلاً على "
-            "انكماش حجم الملف على القرص."
-        )
-
-    return "\n".join(lines)
-
-
-# =============================================================================
-# AUTO-CLEANUP ENGINE
-# =============================================================================
-
-_auto_cleanup_task: Optional[asyncio.Task] = None
-_auto_cleanup_shutdown: bool = False
-_auto_cleanup_last_run: float = 0.0
-_auto_cleanup_last_result: Dict[str, Any] = {}
-
-
-async def auto_cleanup_check_and_run() -> Dict[str, Any]:
-    """الفحص الرئيسي — يقارن أحجام الجداول المراقَبة بالعتبة."""
-    global _auto_cleanup_last_run, _auto_cleanup_last_result
-
-    _auto_cleanup_last_run = _time.time()
-
-    report: Dict[str, Any] = {
-        "ran": False,
-        "reason": "",
-        "sizes": {},
-        "triggers": [],
-        "maintenance_result": None,
-    }
-
-    if not AUTO_CLEANUP_ENABLED:
-        report["reason"] = "disabled"
-        _auto_cleanup_last_result = report
-        return report
-
-    if not _is_postgres():
-        report["reason"] = "not_postgres"
-        _auto_cleanup_last_result = report
-        return report
-
-    try:
-        sizes = await _get_all_watched_table_sizes()
-    except Exception as exc:
-        logger.error(
-            "❌ auto_cleanup: فشل قراءة الأحجام: %s", exc,
-            exc_info=True,
-        )
-        report["reason"] = f"size_read_failed:{exc}"
-        _auto_cleanup_last_result = report
-        return report
-
-    report["sizes"] = sizes
-
-    triggers: List[Dict[str, Any]] = []
-    if AUTO_CLEANUP_MAX_SIZE_MB > 0:
-        for table, size_mb in sizes.items():
-            if size_mb >= AUTO_CLEANUP_MAX_SIZE_MB:
-                triggers.append({
-                    "table": table,
-                    "size_mb": size_mb,
-                    "threshold_mb": AUTO_CLEANUP_MAX_SIZE_MB,
+                    size_color = "🟢"
+
+                result.append({
+                    'name': rd.get('table_name') or '?',
+                    'total_bytes': total_bytes,
+                    'table_bytes': int(rd.get('table_bytes', 0) or 0),
+                    'index_bytes': int(rd.get('index_bytes', 0) or 0),
+                    'total_display': _format_bytes(total_bytes),
+                    'size_color': size_color,
                 })
+            return result
+        except Exception as e:
+            logger.error(f"❌ get_table_sizes: {e}", exc_info=True)
+            return []
 
-    report["triggers"] = triggers
+    # =================================================================
+    # 10) معلومات الفهارس
+    # =================================================================
 
-    if not triggers:
-        report["reason"] = "no_action"
-        _auto_cleanup_last_result = report
-        logger.debug(
-            "🧹 auto_cleanup: no action needed | sizes=%s",
-            {k: f"{v:.2f}MB" for k, v in sizes.items()},
-        )
-        return report
-
-    report["ran"] = True
-    report["reason"] = (
-        "size_threshold:" + ",".join(
-            f"{t['table']}={t['size_mb']:.2f}MB" for t in triggers
-        )
-    )
-
-    logger.warning(
-        "🧹 auto_cleanup TRIGGERED | %s",
-        report["reason"],
-    )
-
-    try:
-        maintenance = await run_maintenance(
-            admin_logs_days=AUTO_CLEANUP_ADMIN_LOGS_DAYS,
-            penalty_archive_days=AUTO_CLEANUP_PENALTY_ARCHIVE_DAYS,
-            user_violations_days=AUTO_CLEANUP_USER_VIOLATIONS_DAYS,
-            max_delete_per_table=AUTO_CLEANUP_MAX_DELETE_PER_TABLE,
-            skip_vacuum=not AUTO_CLEANUP_VACUUM,
-        )
-        report["maintenance_result"] = maintenance
-
-        total_deleted = sum(
-            int(e.get("deleted", 0) or 0)
-            for e in (maintenance.get("deletes") or [])
-        )
-
-        logger.info(
-            "✅ auto_cleanup DONE | deleted=%d rows | "
-            "duration=%.2fs | success=%s",
-            total_deleted,
-            maintenance.get("duration_sec", 0.0),
-            maintenance.get("success", False),
-        )
+    async def get_indexes_info(
+        self, tables: Optional[List[str]] = None
+    ) -> Dict[str, List[Dict[str, Any]]]:
+        """🗂️ معلومات الفهارس (PostgreSQL فقط)."""
+        if not getattr(self, "USE_POSTGRES", False):
+            return {}
 
         try:
-            new_sizes = await _get_all_watched_table_sizes()
-            report["sizes_after"] = new_sizes
-            for table in sizes:
-                before = sizes.get(table, 0.0)
-                after = new_sizes.get(table, 0.0)
-                if before > 0 or after > 0:
-                    logger.info(
-                        "🧹 %s: %.2fMB → %.2fMB",
-                        table, before, after,
+            if tables:
+                placeholders = ",".join(
+                    f"${i+1}" for i in range(len(tables))
+                )
+                query = f"""
+                    SELECT
+                        t.relname                      AS table_name,
+                        i.relname                      AS index_name,
+                        pg_relation_size(i.oid)        AS index_bytes,
+                        idx.indisunique                AS is_unique,
+                        idx.indisprimary               AS is_primary
+                    FROM pg_index idx
+                    JOIN pg_class i ON i.oid = idx.indexrelid
+                    JOIN pg_class t ON t.oid = idx.indrelid
+                    JOIN pg_namespace n ON n.oid = t.relnamespace
+                    WHERE n.nspname = 'public'
+                      AND t.relname IN ({placeholders})
+                    ORDER BY t.relname, i.relname
+                """
+                rows = await self.fetchall(query, tuple(tables))
+            else:
+                rows = await self.fetchall("""
+                    SELECT
+                        t.relname                      AS table_name,
+                        i.relname                      AS index_name,
+                        pg_relation_size(i.oid)        AS index_bytes,
+                        idx.indisunique                AS is_unique,
+                        idx.indisprimary               AS is_primary
+                    FROM pg_index idx
+                    JOIN pg_class i ON i.oid = idx.indexrelid
+                    JOIN pg_class t ON t.oid = idx.indrelid
+                    JOIN pg_namespace n ON n.oid = t.relnamespace
+                    WHERE n.nspname = 'public'
+                      AND t.relname IN (
+                          SELECT relname FROM pg_stat_user_tables
+                          ORDER BY n_live_tup DESC LIMIT 15
+                      )
+                    ORDER BY t.relname, i.relname
+                """)
+
+            result: Dict[str, List[Dict[str, Any]]] = {}
+            for r in (rows or []):
+                rd = r if isinstance(r, dict) else dict(r)
+                tname = rd.get('table_name') or '?'
+                ibytes = int(rd.get('index_bytes', 0) or 0)
+                result.setdefault(tname, []).append({
+                    'index_name': rd.get('index_name') or '?',
+                    'is_unique': bool(rd.get('is_unique')),
+                    'is_primary': bool(rd.get('is_primary')),
+                    'size_bytes': ibytes,
+                    'size_display': _format_bytes(ibytes),
+                })
+            return result
+        except Exception as e:
+            logger.error(f"❌ get_indexes_info: {e}", exc_info=True)
+            return {}
+
+    # =================================================================
+    # 11) إعدادات Autovacuum
+    # =================================================================
+
+    async def get_autovacuum_settings(self) -> Dict[str, Any]:
+        """⚙️ إعدادات Autovacuum (PostgreSQL فقط)."""
+        if not getattr(self, "USE_POSTGRES", False):
+            return {}
+
+        try:
+            rows = await self.fetchall("""
+                SELECT name, setting, unit
+                FROM pg_settings
+                WHERE name IN (
+                    'autovacuum',
+                    'autovacuum_naptime',
+                    'autovacuum_vacuum_scale_factor',
+                    'autovacuum_analyze_scale_factor',
+                    'autovacuum_vacuum_threshold',
+                    'autovacuum_analyze_threshold',
+                    'autovacuum_max_workers'
+                )
+            """)
+
+            result = {}
+            for r in (rows or []):
+                rd = r if isinstance(r, dict) else dict(r)
+                name = rd.get('name')
+                setting = rd.get('setting')
+                unit = rd.get('unit') or ''
+                if name:
+                    result[name] = (
+                        f"{setting}{unit}" if unit else str(setting)
                     )
-        except Exception as exc:
-            logger.debug("post-cleanup size read failed: %s", exc)
+            return result
+        except Exception as e:
+            logger.error(f"❌ get_autovacuum_settings: {e}", exc_info=True)
+            return {}
 
-    except Exception as exc:
-        logger.error(
-            "❌ auto_cleanup run_maintenance failed: %s", exc,
-            exc_info=True,
-        )
-        report["reason"] += f"|error:{exc}"
+    # =================================================================
+    # 12) توصيات الصيانة
+    # =================================================================
 
-    _auto_cleanup_last_result = report
-    return report
+    async def get_maintenance_recommendations(
+        self,
+        dead_tables: Optional[List[Dict[str, Any]]] = None,
+        table_sizes: Optional[List[Dict[str, Any]]] = None,
+        idle_tx_info: Optional[Dict[str, Any]] = None,
+    ) -> List[str]:
+        """🧹 توصيات صيانة عملية."""
+        recs: List[str] = []
 
+        if not getattr(self, "USE_POSTGRES", False):
+            return recs
 
-async def _auto_cleanup_loop() -> None:
-    """الحلقة الدورية للتنظيف التلقائي."""
-    interval_sec = max(600, AUTO_CLEANUP_INTERVAL_HOURS * 3600)
-    initial_delay = max(0, AUTO_CLEANUP_INITIAL_DELAY_SEC)
-
-    logger.info(
-        "🧹 auto-cleanup loop started | every=%dh | "
-        "max_size=%dMB | admin_days=%d | "
-        "max_delete=%d | vacuum=%s | vacuum_mode=%s",
-        AUTO_CLEANUP_INTERVAL_HOURS,
-        AUTO_CLEANUP_MAX_SIZE_MB,
-        AUTO_CLEANUP_ADMIN_LOGS_DAYS,
-        AUTO_CLEANUP_MAX_DELETE_PER_TABLE,
-        AUTO_CLEANUP_VACUUM,
-        DB_VACUUM_MODE,
-    )
-
-    if initial_delay > 0:
+        # idle-in-transaction
         try:
-            await asyncio.sleep(initial_delay)
-        except asyncio.CancelledError:
-            return
+            if idle_tx_info is None:
+                idle_tx_info = await self.get_idle_tx_info()
+            if idle_tx_info.get("available"):
+                count = int(idle_tx_info.get("count") or 0)
+                if count >= IDLE_TX_WARN_COUNT:
+                    app_matches = int(
+                        idle_tx_info.get("app_matches") or 0
+                    )
+                    color = _idle_tx_color(count)
+                    detail = ""
+                    if app_matches > 0:
+                        detail = (
+                            f"\n🚨 <b>{app_matches}</b> من تطبيقنا "
+                            f"(<code>relax_bot</code>) — "
+                            f"راجع database.py v7.7.61 (TX-1..4)"
+                        )
+                    recs.append(
+                        f"{color} <b>idle-in-transaction:</b> "
+                        f"<b>{count}</b> اتصال{detail}"
+                    )
+        except Exception as e:
+            logger.debug(f"idle_tx recs: {e}")
 
-    while not _auto_cleanup_shutdown:
+        # admin_logs
         try:
-            await auto_cleanup_check_and_run()
-        except asyncio.CancelledError:
-            break
-        except Exception as exc:
-            logger.error(
-                "❌ auto-cleanup loop error: %s", exc, exc_info=True,
+            admin_count = await self.fetchval(
+                "SELECT COUNT(*) FROM admin_logs", default=0
+            ) or 0
+            admin_count = int(admin_count)
+            if admin_count > ADMIN_LOGS_WARN_COUNT:
+                recs.append(
+                    f"🟠 <b>admin_logs</b> = {admin_count} سجل\n"
+                    f"<code>DELETE FROM admin_logs "
+                    f"WHERE created_at &lt; NOW() - INTERVAL '30 days';</code>"
+                )
+        except Exception as e:
+            logger.debug(f"admin_logs check: {e}")
+
+        # banned_words
+        try:
+            bw_count = await self.fetchval(
+                "SELECT COUNT(*) FROM banned_words", default=0
+            ) or 0
+            bw_count = int(bw_count)
+            if bw_count > BANNED_WORDS_WARN_COUNT:
+                recs.append(
+                    f"🟡 <b>banned_words</b> = {bw_count} كلمة\n"
+                    f"<code>SELECT chat_id, COUNT(*) FROM banned_words\n"
+                    f"GROUP BY chat_id ORDER BY 2 DESC LIMIT 10;</code>"
+                )
+        except Exception as e:
+            logger.debug(f"banned_words check: {e}")
+
+        # penalty_archive
+        try:
+            pa_count = await self.fetchval(
+                "SELECT COUNT(*) FROM penalty_archive "
+                "WHERE created_at < NOW() - INTERVAL '90 days'",
+                default=0
+            ) or 0
+            pa_count = int(pa_count)
+            if pa_count > 0:
+                recs.append(
+                    f"🗑️ <b>penalty_archive</b> = {pa_count} سجل قديم "
+                    f"(&gt; 90 يوم)\n"
+                    f"<code>DELETE FROM penalty_archive "
+                    f"WHERE created_at &lt; NOW() - INTERVAL '90 days';</code>"
+                )
+        except Exception as e:
+            logger.debug(f"penalty_archive check: {e}")
+
+        # VACUUM
+        try:
+            if dead_tables is None:
+                dead_tables = await self.get_dead_tuples(20)
+            for t in dead_tables:
+                if t.get('dead_ratio', 0) >= 0.10:
+                    ratio_pct = t['dead_ratio'] * 100
+                    recs.append(
+                        f"🟠 <b>{t['name']}</b> — dead={t['dead']} "
+                        f"({ratio_pct:.1f}%)\n"
+                        f"<code>VACUUM (ANALYZE, VERBOSE) "
+                        f"{t['name']};</code>"
+                    )
+        except Exception as e:
+            logger.debug(f"vacuum recs: {e}")
+
+        # فهارس مكررة
+        try:
+            dupes = await self.fetchall("""
+                SELECT
+                    t.relname   AS table_name,
+                    array_agg(i.relname ORDER BY i.relname) AS indexes,
+                    COUNT(*) AS cnt
+                FROM pg_index idx
+                JOIN pg_class i ON i.oid = idx.indexrelid
+                JOIN pg_class t ON t.oid = idx.indrelid
+                JOIN pg_namespace n ON n.oid = t.relnamespace
+                WHERE n.nspname = 'public'
+                  AND idx.indisprimary = false
+                GROUP BY t.relname,
+                         idx.indkey::text,
+                         idx.indpred::text,
+                         idx.indexprs::text
+                HAVING COUNT(*) > 1
+            """)
+            for r in (dupes or []):
+                rd = r if isinstance(r, dict) else dict(r)
+                tname = rd.get('table_name')
+                idxs = rd.get('indexes')
+                if idxs and len(idxs) > 1:
+                    idx_list = ", ".join(str(x) for x in idxs)
+                    recs.append(
+                        f"⚠️ <b>{tname}</b> — فهارس مكررة محتملة:\n"
+                        f"<code>{idx_list}</code>"
+                    )
+        except Exception as e:
+            logger.debug(f"dup indexes check: {e}")
+
+        # جداول كبيرة
+        try:
+            if table_sizes is None:
+                table_sizes = await self.get_table_sizes(10)
+            for s in table_sizes:
+                if s.get('total_bytes', 0) >= TABLE_SIZE_CRITICAL_KB * 1024:
+                    recs.append(
+                        f"🔴 <b>{s['name']}</b> حجم كبير: "
+                        f"{s['total_display']}\n"
+                        f"💡 راقب النمو أو فكّر في archiving"
+                    )
+        except Exception as e:
+            logger.debug(f"big tables check: {e}")
+
+        if not recs:
+            recs.append(
+                "✅ لا توجد توصيات — قاعدة البيانات في حالة ممتازة"
             )
+        return recs
+
+    # =================================================================
+    # 13) تقرير التشخيص الشامل
+    # =================================================================
+
+    async def get_db_diagnostics(self, top_n: int = 10) -> Dict[str, Any]:
+        """🔬 تقرير تشخيص شامل لقاعدة البيانات."""
+        result = {
+            'available': False,
+            'db_type': 'sqlite',
+            'dead_tuples': [],
+            'table_sizes': [],
+            'indexes': {},
+            'autovacuum': {},
+            'idle_tx': {},
+            'idle_tx_status': {},
+            'recommendations': [],
+            'summary': {},
+        }
+
+        if not getattr(self, "USE_POSTGRES", False):
+            return result
+
+        result['available'] = True
+        result['db_type'] = 'postgres'
 
         try:
-            await asyncio.sleep(interval_sec)
-        except asyncio.CancelledError:
-            break
+            result['dead_tuples'] = await self.get_dead_tuples(top_n)
+        except Exception as e:
+            logger.warning(f"get_dead_tuples in diagnostics: {e}")
 
-
-def start_auto_cleanup() -> bool:
-    """يبدأ المهمة الدورية للتنظيف."""
-    global _auto_cleanup_task, _auto_cleanup_shutdown
-
-    if not AUTO_CLEANUP_ENABLED:
-        logger.info(
-            "ℹ️ auto-cleanup معطّل (DB_AUTO_CLEANUP_ENABLED=false)"
-        )
-        return False
-
-    if not _is_postgres():
-        logger.info(
-            "ℹ️ auto-cleanup مُتخطّى (لا يعمل إلا على PostgreSQL)"
-        )
-        return False
-
-    if (
-        _auto_cleanup_task is not None
-        and not _auto_cleanup_task.done()
-    ):
-        logger.debug("auto-cleanup task already running")
-        return True
-
-    _auto_cleanup_shutdown = False
-    # 🆕 v6.9.1 FIX: get_running_loop بدل get_event_loop المهجور
-    try:
         try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
+            result['table_sizes'] = await self.get_table_sizes(top_n)
+        except Exception as e:
+            logger.warning(f"get_table_sizes in diagnostics: {e}")
+
+        try:
+            active_tables = [
+                t['name'] for t in result['table_sizes'][:8]
+            ]
+            result['indexes'] = await self.get_indexes_info(active_tables)
+        except Exception as e:
+            logger.warning(f"get_indexes_info in diagnostics: {e}")
+
+        try:
+            result['autovacuum'] = await self.get_autovacuum_settings()
+        except Exception as e:
             logger.warning(
-                "⚠️ start_auto_cleanup: لا توجد حلقة asyncio قيد "
-                "التشغيل — استدعِ الدالة من داخل coroutine"
+                f"get_autovacuum_settings in diagnostics: {e}"
             )
-            return False
 
-        _auto_cleanup_task = loop.create_task(
-            _auto_cleanup_loop(),
-            name="db_auto_cleanup",
-        )
-        logger.info(
-            "✅ auto-cleanup task scheduled (v%s)", VERSION,
-        )
-        return True
-    except Exception as exc:
-        logger.error(
-            "❌ فشل بدء auto-cleanup: %s", exc, exc_info=True,
-        )
-        return False
+        try:
+            result['idle_tx'] = await self.get_idle_tx_info()
+        except Exception as e:
+            logger.warning(f"get_idle_tx_info in diagnostics: {e}")
+            result['idle_tx'] = {"available": False}
 
+        try:
+            result['idle_tx_status'] = await self.get_idle_tx_status_info()
+        except Exception as e:
+            logger.warning(
+                f"get_idle_tx_status_info in diagnostics: {e}"
+            )
+            result['idle_tx_status'] = {"available": False}
 
-async def stop_auto_cleanup(timeout: float = 5.0) -> None:
-    """إيقاف نظيف للمهمة الدورية."""
-    global _auto_cleanup_task, _auto_cleanup_shutdown
+        try:
+            result['recommendations'] = (
+                await self.get_maintenance_recommendations(
+                    dead_tables=result['dead_tuples'],
+                    table_sizes=result['table_sizes'],
+                    idle_tx_info=result['idle_tx'],
+                )
+            )
+        except Exception as e:
+            logger.warning(
+                f"get_maintenance_recommendations in diagnostics: {e}"
+            )
 
-    _auto_cleanup_shutdown = True
+        try:
+            dead_total = sum(
+                t.get('dead', 0) for t in result['dead_tuples']
+            )
+            live_total = sum(
+                t.get('live', 0) for t in result['dead_tuples']
+            )
+            worst = None
+            worst_ratio = 0.0
+            for t in result['dead_tuples']:
+                if t.get('dead_ratio', 0) > worst_ratio:
+                    worst_ratio = t['dead_ratio']
+                    worst = t['name']
 
-    task = _auto_cleanup_task
-    _auto_cleanup_task = None
+            overall_color = "🟢"
+            if live_total > 0:
+                global_ratio = dead_total / (live_total + dead_total)
+                if global_ratio >= 0.20:
+                    overall_color = "🔴"
+                elif global_ratio >= 0.10:
+                    overall_color = "🟠"
+                elif global_ratio >= 0.05:
+                    overall_color = "🟡"
 
-    if task is None or task.done():
-        return
+            idle_count = 0
+            idle_color = "🟢"
+            if result['idle_tx'].get("available"):
+                idle_count = int(result['idle_tx'].get("count") or 0)
+                idle_color = _idle_tx_color(idle_count)
 
-    task.cancel()
-    try:
-        await asyncio.wait_for(
-            asyncio.shield(task), timeout=timeout,
-        )
-    except (asyncio.CancelledError, asyncio.TimeoutError):
-        pass
-    except Exception as exc:
-        logger.debug("stop_auto_cleanup: %s", exc)
+            result['summary'] = {
+                'dead_total': dead_total,
+                'live_total': live_total,
+                'worst_table': worst,
+                'worst_ratio': round(worst_ratio * 100, 1),
+                'overall_color': overall_color,
+                'tables_count': len(result['dead_tuples']),
+                'idle_tx_count': idle_count,
+                'idle_tx_color': idle_color,
+            }
+        except Exception as e:
+            logger.warning(f"summary build: {e}")
 
-    logger.info("🛑 auto-cleanup task stopped")
+        return result
 
-
-async def get_auto_cleanup_status() -> Dict[str, Any]:
-    """معلومات حالة النظام للعرض أو للاختبارات."""
-    sizes: Dict[str, float] = {}
-    try:
-        sizes = await _get_all_watched_table_sizes()
-    except Exception:
-        pass
-
-    return {
-        "enabled": AUTO_CLEANUP_ENABLED,
-        "running": (
-            _auto_cleanup_task is not None
-            and not _auto_cleanup_task.done()
-        ),
-        "max_size_mb": AUTO_CLEANUP_MAX_SIZE_MB,
-        "interval_hours": AUTO_CLEANUP_INTERVAL_HOURS,
-        "initial_delay_sec": AUTO_CLEANUP_INITIAL_DELAY_SEC,
-        "max_delete_per_table": AUTO_CLEANUP_MAX_DELETE_PER_TABLE,
-        "admin_logs_days": AUTO_CLEANUP_ADMIN_LOGS_DAYS,
-        "penalty_archive_days": AUTO_CLEANUP_PENALTY_ARCHIVE_DAYS,
-        "user_violations_days": AUTO_CLEANUP_USER_VIOLATIONS_DAYS,
-        "vacuum": AUTO_CLEANUP_VACUUM,
-        "vacuum_mode": DB_VACUUM_MODE,
-        "vacuum_exclude": list(DB_VACUUM_EXCLUDE_TABLES),
-        "vacuum_target_tables": _get_vacuum_target_tables(),
-        "watched_tables": list(AUTO_CLEANUP_WATCH_TABLES),
-        "current_sizes_mb": sizes,
-        "last_run_ts": _auto_cleanup_last_run,
-        "last_result": dict(_auto_cleanup_last_result),
-    }
-
-
-# =============================================================================
-# PUBLIC API
-# =============================================================================
 
 __all__ = [
-    "VERSION",
-    # Main diagnostics
-    "diagnose_db",
-    "diagnose_db_split",
-    "diagnose_db_quick",
-    # Maintenance
-    "preview_maintenance",
-    "run_maintenance",
-    "format_maintenance_preview",
-    "format_maintenance_result",
-    # Vacuum
-    "vacuum_analyze_tables",
-    # Auto-cleanup
-    "start_auto_cleanup",
-    "stop_auto_cleanup",
-    "auto_cleanup_check_and_run",
-    "get_auto_cleanup_status",
-    # 🆕 v6.9.1: Idle-TX audit
-    "audit_idle_in_transactions",
-    "format_idle_tx_audit",
-    # Auto-cleanup constants
-    "AUTO_CLEANUP_ENABLED",
-    "AUTO_CLEANUP_MAX_SIZE_MB",
-    "AUTO_CLEANUP_INTERVAL_HOURS",
-    "AUTO_CLEANUP_INITIAL_DELAY_SEC",
-    "AUTO_CLEANUP_MAX_DELETE_PER_TABLE",
-    "AUTO_CLEANUP_ADMIN_LOGS_DAYS",
-    "AUTO_CLEANUP_PENALTY_ARCHIVE_DAYS",
-    "AUTO_CLEANUP_USER_VIOLATIONS_DAYS",
-    "AUTO_CLEANUP_VACUUM",
-    "AUTO_CLEANUP_WATCH_TABLES",
-    # Diagnostic display config
-    "DB_DIAG_MAX_DEAD_TABLES",
-    "DB_DIAG_MAX_CLEAN_TABLES",
-    "DB_DIAG_MAX_SIZES",
-    "DB_DIAG_SHOW_ALL_TABLES",
-    "DB_DIAG_SHOW_INDEX_HEALTH",
-    # 🆕 v6.9.1: Idle-TX audit config
-    "IDLE_TX_AUDIT_MIN_SECONDS",
-    "IDLE_TX_AUDIT_APP_FILTER",
-    "IDLE_TX_AUDIT_LIMIT",
-    # 🆕 v6.9.0: Vacuum mode + exclude
-    "DB_VACUUM_MODE",
-    "DB_VACUUM_EXCLUDE_TABLES",
-    # Size helpers
-    "_get_table_size_mb",
-    "_get_all_watched_table_sizes",
-    # Coverage helpers
-    "_get_all_tables_autovacuum_status",
-    "_get_all_tables_index_health",
-    "_count_all_user_tables",
-    # 🆕 v6.9.0: Table discovery
-    "_discover_all_tables",
-    "_discover_all_tables_postgres",
-    "_discover_all_tables_mysql",
-    "_discover_all_tables_sqlite",
-    "_is_excluded_table",
-    # 🆕 v6.9.0: Vacuum target (async)
-    "_get_vacuum_target_tables",
-    "_get_vacuum_target_tables_async",
-    # Dataclasses
-    "RootCause",
-    "CauseItem",
-    # Internal helpers (للاختبار)
-    "_analyze_root_causes",
-    "_detect_xmin_blocker",
-    "_detect_xmin_blockers",
-    "_get_current_xmin_horizon",
-    "_get_per_table_autovacuum",
-    "_get_autovacuum_blockers",
-    "_get_dead_tuples",
-    "_get_table_sizes",
-    "_get_indexes",
-    "_autovacuum_vacuum_trigger",
-    "_autovacuum_analyze_trigger",
-    "_check_project_heavy_tables",
-    "_check_maintenance_consistency",
-    "_check_admin_logs_size",
-    "_get_schema_info",
-    "_split_for_telegram",
-    "_get_open_html_tags",
-    "_safe_params",
-    "_safe_days",
-    "_is_tuned_reloptions",
-    "_ReportBuilder",
-    "_is_significant_table",
-    "_build_pg_in_clause",
-    "_env_bool",
-    "_env_int",
-    "_env_str",
-    "_env_list",
-    # Constants
-    "REPORT_MAX_CHARS",
-    "TELEGRAM_MESSAGE_LIMIT",
-    "MIN_TABLE_SIZE_FOR_ALERT",
-    "SMALL_TABLE_THRESHOLD",
-    "SMALL_TABLE_MIN_DEAD_CRIT",
-    "SMALL_TABLE_MIN_DEAD_WARN",
-    "ADMIN_LOGS_WARN_ROWS",
-    "ADMIN_LOGS_CRIT_ROWS",
-    "ACCEPTED_VACUUM_SCALE_FACTORS",
-    "ACCEPTED_ANALYZE_SCALE_FACTORS",
-    "EXPECTED_VACUUM_SCALE_FACTOR",
-    "EXPECTED_ANALYZE_SCALE_FACTOR",
-    "EXPECTED_VACUUM_SCALE_FACTORS",
-    "EXPECTED_ANALYZE_SCALE_FACTORS",
-    "MAINTENANCE_MAX_DELETE_PER_TABLE",
-    "MAINTENANCE_DEFAULT_ADMIN_LOGS_DAYS",
-    "MAINTENANCE_DEFAULT_PENALTY_ARCHIVE_DAYS",
-    "MAINTENANCE_DEFAULT_USER_VIOLATIONS_DAYS",
-    "MAINTENANCE_MIN_DAYS",
-    "MAINTENANCE_MAX_DAYS",
-    "_ALWAYS_EXCLUDE_TABLES",
+    "AnalyticsMixin",
+    "color_emoji",
+    "DEFAULT_SUCCESS_RATE",
+    "FAIL_COUNT_THRESHOLD",
+    "DEAD_TUPLE_THRESHOLDS",
+    "DEAD_TUPLE_MIN_LIVE",
+    "TABLE_SIZE_WARN_KB",
+    "TABLE_SIZE_CRITICAL_KB",
+    "ADMIN_LOGS_WARN_COUNT",
+    "BANNED_WORDS_WARN_COUNT",
+    "IDLE_TX_WARN_COUNT",
+    "IDLE_TX_CRIT_COUNT",
 ]
