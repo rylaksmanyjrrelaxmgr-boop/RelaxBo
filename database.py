@@ -1,8 +1,18 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-database.py - قاعدة البيانات المتكاملة (v7.7.64 — REVIEW-FIXES-2026-R2)
+database.py - قاعدة البيانات المتكاملة (v7.7.65 — ANALYTICS-MIXIN-FIX)
 ================================================================================
+🆕 v7.7.65 (ANALYTICS-MIXIN-FIX):
+  🔴 FIX-MIXIN-1: _load_mixin — التقاط كل الاستثناءات (كان ImportError فقط).
+                   الآن: أي خطأ (SyntaxError/NameError/KeyError/...) يُسجَّل
+                   مع traceback كامل، والفallback يُفعَّل بدل انهيار الاستيراد.
+  🔴 FIX-MIXIN-2: _verify_analytics_methods() — فحص شامل بعد DB = Database()
+                   يتحقق من 16 دالة تحليلات + محاولة ربط طارئ يدوي عند الفشل.
+  🟡 FIX-MIXIN-3: _load_mixin — فحص مسبق لـ AnalyticsMixin.get_user_growth
+                   (يرفض Fallback صامت إذا كان الكلاس فارغاً).
+  🟢 تحديث LOAD BEACON ليعكس ANALYTICS-MIXIN-FIX.
+
 🆕 v7.7.64 (REVIEW-FIXES-2026-R2):
   🔴 FIX-E1: _refresh_user_subscription_end — استُخدم ? في كل الفروع
              بدل $1/%s (كان يُسبب فشل صامت على MySQL).
@@ -88,6 +98,7 @@ database.py - قاعدة البيانات المتكاملة (v7.7.64 — REVIEW
 # [22] v7.7.63: PG conn مع tx مفتوحة → log warning
 # [23] v7.7.64: placeholders موحّدة (?) في كل الفروع
 # [24] v7.7.64: IN (...) chunking لـ SQLite/MySQL
+# [25] v7.7.65: _load_mixin يلتقط BaseException + verify methods
 # =====================================================================
 
 import os
@@ -319,13 +330,54 @@ except ImportError as _re:
 # =====================================================================
 
 def _load_mixin(module_name: str, class_name: str):
+    """
+    🆕 v7.7.65 FIX-MIXIN-1: التقاط كل الاستثناءات + تشخيص واضح.
+
+    سابقاً: كان يلتقط ImportError فقط. إذا فشل التحميل بأي خطأ آخر
+    (SyntaxError/NameError/AttributeError/KeyError/...) → الاستثناء
+    ينتشر ويوقف استيراد database.py بالكامل.
+
+    الآن: يلتقط كل الاستثناءات، يطبع traceback كامل، ويستخدم Fallback.
+    """
     try:
         module = __import__(module_name, fromlist=[class_name])
         cls = getattr(module, class_name)
+
+        # 🆕 v7.7.65 FIX-MIXIN-3: فحص مسبق لـ AnalyticsMixin
+        if class_name == "AnalyticsMixin":
+            if not hasattr(cls, "get_user_growth"):
+                logger.error(
+                    f"❌ {module_name}.{class_name} محمّل لكن "
+                    f"get_user_growth مفقود من الكلاس — "
+                    f"الملف موجود لكنه لا يحتوي الدالة المتوقعة"
+                )
+                fallback = type(
+                    f"_Fallback_{module_name}_{class_name}",
+                    (object,),
+                    {"__module__": __name__},
+                )
+                return fallback, False
+
         logger.info(f"✅ تم تحميل {module_name}.py")
         return cls, True
     except ImportError as e:
         logger.warning(f"⚠️ {module_name}.py غير موجود: {e}")
+        fallback = type(
+            f"_Fallback_{module_name}_{class_name}",
+            (object,),
+            {"__module__": __name__},
+        )
+        return fallback, False
+    except BaseException as e:
+        # 🆕 v7.7.65 FIX-MIXIN-1: أي خطأ آخر — نطبع كامل التتبع
+        import traceback as _tb
+        logger.error(
+            f"❌ فشل تحميل {module_name}.{class_name}: "
+            f"{type(e).__name__}: {e}"
+        )
+        logger.error(
+            f"📋 Traceback:\n{_tb.format_exc()}"
+        )
         fallback = type(
             f"_Fallback_{module_name}_{class_name}",
             (object,),
@@ -1827,7 +1879,7 @@ class TimeUtils:
 
 
 # =====================================================================
-# 3) فئة Database — الجزء الأول
+# 3) فئة Database
 # =====================================================================
 
 class Database(
@@ -2883,7 +2935,6 @@ class Database(
                             "ℹ️ mv_active_user_limits أُنشئ من "
                             "instance آخر")
                     else:
-                        # 🆕 FIX-E3: لا نرفع — نُعيد False
                         logger.warning(
                             f"⚠️ فشل إنشاء mv_active_user_limits: "
                             f"{create_e} — تعطيل MV، fallback "
@@ -3390,10 +3441,6 @@ class Database(
     async def _recover_pool(self):
         """
         🆕 v7.7.63 FIX-C14: تمييز pool-dead من connection-dead.
-
-        سابقاً: كان يُعاد إنشاء الـ pool عند أي PostgresConnectionError
-        حتى لو كانت المشكلة في اتصال واحد فقط. الآن: نفحص حالة pool
-        أولاً قبل إعادة الإنشاء الكامل.
         """
         if self._recovering_pool:
             return
@@ -3402,7 +3449,6 @@ class Database(
                 return
             self._recovering_pool = True
         try:
-            # 🆕 FIX-C14: فحص سريع — هل pool ما زال يعمل؟
             pool_healthy = False
             if self._pool is not None:
                 try:
@@ -3588,12 +3634,10 @@ class Database(
                         "سيتم تجاهل هذه الرسالة لاحقاً")
                     self._pool_none_warned = True
                 return
-            # v7.7.61 TX-2: rollback وقائي قبل release
             must_destroy = False
             if USE_POSTGRES:
                 try:
                     if _pg_in_transaction(conn):
-                        # 🆕 v7.7.63 FIX-B2: log warn أيضاً
                         logger.warning(
                             "⚠️ v7.7.61/63: PG conn في tx عند الإرجاع "
                             "— rollback وقائي (استخدم transaction() "
@@ -3747,7 +3791,6 @@ class Database(
                     destroy = True
                     logger.warning(f"⚠️ MySQL commit: {e}")
                     raise
-            # 🆕 v7.7.61 TX-3: PG — لا commit تلقائي
         except BaseException:
             if DB_TYPE == "sqlite":
                 try:
@@ -3982,7 +4025,6 @@ class Database(
                 elif USE_POSTGRES and isinstance(
                         e, asyncpg.exceptions.PostgresConnectionError):
                     retryable = True
-                    # 🆕 FIX-C14: _recover_pool الآن تفحص صحة pool
                     self._spawn_bg_task(self._recover_pool())
                 elif (USE_POSTGRES and isinstance(e, RuntimeError)
                       and "pool unavailable" in str(e).lower()):
@@ -5056,7 +5098,6 @@ class Database(
             to_delete = existing_file_words - normalized_words
             to_insert = normalized_words - existing_file_words
             if to_delete:
-                # 🆕 v7.7.64 FIX-E7: رسالة أوضح
                 logger.info(
                     f"🔍 BW-FIX-1: كلمات من الملف ستُحذف من DB "
                     f"(المصدر): {len(to_delete)} — "
@@ -5251,7 +5292,6 @@ class Database(
                     "ℹ️ auto_replies.py لم يتغيّر — تخطي "
                     "(ردود البوت محفوظة)")
                 return
-            # 🆕 FIX-E2: أُضيف chat_id = ? للاستعلام
             existing_rows = await self._fetchall_with_conn(
                 conn,
                 "SELECT chat_id, keyword FROM auto_replies "
@@ -5309,10 +5349,6 @@ class Database(
                             IMPORT_MARKER_ADDED_BY,
                         ))
                     try:
-                        # 🆕 FIX-C13: أزلنا WHERE auto_replies.added_by = 0
-                        # (كانت تُسبب ValueError على MySQL). الحماية عبر
-                        # pre-check: نحن نحفظ added_by=0 فقط للصفوف
-                        # التي نستوردها، ولا نلمس صفوف المستخدمين.
                         rc = await self._executemany_with_conn(
                             conn,
                             """INSERT INTO auto_replies
@@ -5679,7 +5715,6 @@ class Database(
                 "WHERE user_id = ? AND status = 'active' "
                 "AND end_date > datetime('now')",
                 user_id)
-        # 🆕 FIX-E1: UPDATE بـ ? في كل الفروع
         if USE_POSTGRES:
             await self._execute_with_conn(
                 conn,
@@ -6854,7 +6889,6 @@ class Database(
                 by_channel[ch_id].append(post_id)
             for ch_id, post_ids in by_channel.items():
                 found_ids: Set[int] = set()
-                # 🆕 FIX-E4: تقسيم post_ids إلى chunks
                 for i in range(0, len(post_ids), MAX_SQL_IN_PARAMS):
                     chunk = post_ids[i: i + MAX_SQL_IN_PARAMS]
                     placeholders = ",".join(["?"] * len(chunk))
@@ -6924,7 +6958,6 @@ class Database(
                     return False
                 ch_ids = [ch_id for ch_id, _ in valid_updates]
                 post_ids = [post_id for _, post_id in valid_updates]
-                # 🆕 FIX-E4: UPDATE على chunks
                 total_updated = 0
                 for i in range(0, len(post_ids), MAX_SQL_IN_PARAMS):
                     chunk = post_ids[i: i + MAX_SQL_IN_PARAMS]
@@ -6952,7 +6985,6 @@ class Database(
                     last_publish_params)
                 schedule_map: Dict[int, Dict] = {}
                 try:
-                    # 🆕 FIX-E4: fetch schedules على chunks
                     unique_ch_ids = list(set(ch_ids))
                     for i in range(0, len(unique_ch_ids),
                                    MAX_SQL_IN_PARAMS):
@@ -7636,6 +7668,127 @@ def _get_sqlite_query_fallback() -> str:
 DB = Database()
 
 
+# ═════════════════════════════════════════════════════════════════════
+# 🆕 v7.7.65 FIX-MIXIN-2: فحص شامل أن كل دوال التحليلات موجودة
+# ═════════════════════════════════════════════════════════════════════
+
+def _verify_analytics_methods() -> bool:
+    """
+    🆕 v7.7.65 FIX-MIXIN-2: يتحقق من وجود كل دوال التحليلات في
+    Database. إذا ناقصة → يسجّل تشخيصاً واضحاً + محاولة ربط يدوي.
+
+    Returns:
+        True إذا كل الدوال موجودة (أو رُبطت بنجاح)، False غير ذلك.
+    """
+    required = [
+        # نمو المستخدمين
+        "get_user_growth",
+        # القنوات
+        "get_top_channels",
+        "get_channel_success_rate",
+        # إحصائيات النشر
+        "get_publish_stats",
+        "get_subscription_rate",
+        # Pool
+        "get_pool_live",
+        # الاستعلامات البطيئة
+        "get_slowest_queries",
+        "get_slow_queries",  # alias
+        # التشخيص
+        "get_dead_tuples",
+        "get_table_sizes",
+        "get_indexes_info",
+        "get_autovacuum_settings",
+        "get_maintenance_recommendations",
+        "get_db_diagnostics",
+        # idle-tx
+        "get_idle_tx_info",
+        "get_idle_tx_status_info",
+    ]
+    missing = [m for m in required if not hasattr(Database, m)]
+
+    if not missing:
+        logger.info(
+            f"✅ v7.7.65: كل دوال التحليلات ({len(required)}) "
+            f"متاحة في Database"
+        )
+        return True
+
+    # ═══ في حالة النقص ═══
+    logger.error(
+        "╔══════════════════════════════════════════════════════╗\n"
+        "║  🚨 AnalyticsMixin لم يُحمَّل بشكل صحيح!              ║\n"
+        "╚══════════════════════════════════════════════════════╝"
+    )
+    logger.error(
+        f"❌ v7.7.65: ينقص Database {len(missing)} دالة تحليلات"
+    )
+    logger.error(f"📋 الدوال المفقودة: {missing}")
+    logger.error(
+        f"⚠️ ANALYTICS_MIXIN_AVAILABLE="
+        f"{ANALYTICS_MIXIN_AVAILABLE}"
+    )
+
+    # 🆕 محاولة ربط طارئ يدوي
+    logger.warning(
+        "🔧 v7.7.65: محاولة ربط طارئ يدوي لكل دوال AnalyticsMixin..."
+    )
+    try:
+        import database_analytics as _da
+        bound = 0
+        for _name in dir(_da.AnalyticsMixin):
+            if _name.startswith("__"):
+                continue
+            try:
+                _fn = getattr(_da.AnalyticsMixin, _name)
+            except Exception:
+                continue
+            if callable(_fn) and not hasattr(Database, _name):
+                try:
+                    setattr(Database, _name, _fn)
+                    bound += 1
+                except Exception as _be:
+                    logger.debug(
+                        f"فشل ربط {_name}: {_be}"
+                    )
+        if bound:
+            logger.warning(
+                f"🔧 v7.7.65: رُبطت {bound} دالة تحليلات يدوياً"
+            )
+            still_missing = [
+                m for m in required if not hasattr(Database, m)
+            ]
+            if not still_missing:
+                logger.info(
+                    f"✅ v7.7.65: كل دوال التحليلات "
+                    f"({len(required)}) أصبحت متاحة بعد الربط اليدوي"
+                )
+                return True
+            else:
+                logger.error(
+                    f"❌ v7.7.65: رغم الربط، ما زال ينقص: "
+                    f"{still_missing}"
+                )
+    except Exception as _be:
+        logger.error(
+            f"❌ v7.7.65: الربط اليدوي فشل تماماً: {_be}",
+            exc_info=True,
+        )
+
+    logger.error(
+        "🔍 تشخيص إضافي — تحقق من:\n"
+        "   1. هل database_analytics.py موجود في نفس المجلد؟\n"
+        "   2. هل يُستورد بنجاح؟ جرّب:\n"
+        "      python3 -c 'from database_analytics import AnalyticsMixin'\n"
+        "   3. راجع أي أخطاء سابقة من _load_mixin في السجل"
+    )
+    return False
+
+
+# تنفيذ الفحص فور التحميل
+_verify_analytics_methods()
+
+
 async def get_db() -> Database:
     return DB
 
@@ -7707,24 +7860,33 @@ __all__ = [
     "_ALLOWED_COL_KEYWORDS",
     "_ASYNC_MYSQL_ERROR",
     "_FROZENSET_WARN_SITES",
+    # 🆕 v7.7.65
+    "_verify_analytics_methods",
+    "_load_mixin",
+    "ANALYTICS_MIXIN_AVAILABLE",
 ]
 
 
 # =====================================================================
-# LOAD BEACON — v7.7.64
+# LOAD BEACON — v7.7.65
 # =====================================================================
 
 try:
+    _analytics_status = (
+        "✅" if hasattr(Database, "get_user_growth") else "❌")
     logger.info(
-        "🛡️ database.py v7.7.64 REVIEW-FIXES-R2 loaded | "
-        "DB=%s | Migrations=%s | Refactor=%s | Caches=%s | "
+        "🛡️ database.py v7.7.65 ANALYTICS-MIXIN-FIX loaded | "
+        "DB=%s | Analytics=%s (available=%s) | "
+        "Migrations=%s | Refactor=%s | Caches=%s | "
         "Idle-TX-Audit=%s (interval=%.0fs, threshold=%d) | "
         "PG-rollback-on-return=%.1fs | "
-        "Fixes: E1 (refresh_sub_end ?), E2 (auto_replies chat_id), "
-        "E3 (MV no-raise), E4 (IN chunking, max=%d), "
-        "E5 (_sqlite_is_alive cursor), E6 (pg_in_tx log), "
-        "E7 (banned_words log), E8 (_destroy_connection PG)",
+        "Fixes: MIXIN-1 (_load_mixin BaseException), "
+        "MIXIN-2 (_verify_analytics_methods), "
+        "MIXIN-3 (get_user_growth pre-check), "
+        "E1..E8 (v7.7.64) | IN chunking max=%d",
         DB_TYPE.upper(),
+        _analytics_status,
+        "yes" if ANALYTICS_MIXIN_AVAILABLE else "no",
         "yes" if MIGRATIONS_MIXIN_AVAILABLE else "no",
         "yes" if REFACTOR_MIXIN_AVAILABLE else "no",
         "yes" if CACHES_MODULE_AVAILABLE else "no",
