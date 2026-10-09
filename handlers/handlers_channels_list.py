@@ -2,8 +2,23 @@
 # -*- coding: utf-8 -*-
 
 """
-handlers_channels_list.py - واجهة قائمة القنوات مع حالتها (v2.0.2)
+handlers_channels_list.py - واجهة قائمة القنوات مع حالتها (v2.0.3)
 ================================================================================
+🆕 v2.0.3 (POLISH-FIXES):
+    🔴 FIX-A: _USERNAME_RE / _URL_RE — تطبيق قواعد Telegram الفعلية
+              (يجب أن يبدأ بحرف، 5..32 حرف) لمنع قبول "@1234" ونحوه.
+              كان النمط `{4,}` يقبل أرقاماً بادئة (غير صالحة على TG).
+    🟠 FIX-B: _user_has_pending_state — معالجة حالة StateManager.get
+              تُعيد None + UserState.NONE قد تكون غير موجودة.
+              الآن: أي حالة غير None تُعتبر "معلقة".
+    🟠 FIX-C: show_channels_list — حماية update.callback_query.message
+              من None قبل استدعاء reply_text (fallback).
+    🟡 FIX-D: _row_to_dict helper موحّد — يضمن dict على كل DBs
+              (SQLite + PG + MySQL) بغض النظر عن row_factory.
+    🟡 FIX-E: _edit_or_send — فحص processing_msg.message_id (قد يكون
+              محذوفاً) قبل edit_text.
+    🟡 FIX-F: تسجيل version في سجل التسجيل النهائي موحّد.
+
 🆕 v2.0.2 (إصلاح اعتراض الرسائل):
     ✅ add_channel_from_message: لا يعترض إذا كان المستخدم في حالة معلقة
        (WAIT_UPDATE_CH, WAIT_CHANNEL, WAIT_LOG_CH, ...)
@@ -85,9 +100,36 @@ def _db_ready() -> bool:
     return True
 
 
+def _row_to_dict(row) -> dict:
+    """
+    ✅ v2.0.3 FIX-D: تحويل موحّد لأي صف إلى dict.
+
+    SQLite: sqlite3.Row يدعم dict(row) لكن ليس .get().
+    PG/MySQL: dict مباشرة أو None.
+    """
+    if row is None:
+        return {}
+    if isinstance(row, dict):
+        return row
+    try:
+        if hasattr(row, 'keys'):
+            return {k: row[k] for k in row.keys()}
+    except Exception:
+        pass
+    try:
+        return dict(row)
+    except (TypeError, ValueError):
+        return {}
+
+
 def _user_has_pending_state(user_id: int) -> bool:
     """
     ✅ v2.0.2: هل المستخدم في حالة معلقة (غير NONE)؟
+
+    ✅ v2.0.3 FIX-B: معالجة حالتين:
+       - StateManager.get قد تُعيد None
+       - UserState.NONE قد لا تكون موجودة (enum قديم)
+       → أي حالة غير None تُعتبر "معلقة"
 
     تستخدم لمنع اعتراض الرسائل عندما يكون المستخدم في:
     - WAIT_UPDATE_CH (تعيين قناة التحديثات)
@@ -100,9 +142,14 @@ def _user_has_pending_state(user_id: int) -> bool:
         return False
     try:
         state = StateManager.get(user_id)
+        if state is None:
+            return False
         if UserState is not None:
-            return state != UserState.NONE
-        return state is not None
+            none_state = getattr(UserState, "NONE", None)
+            if none_state is not None:
+                return state != none_state
+        # أي حالة غير None → معلقة
+        return True
     except Exception as e:
         logger.debug(f"_user_has_pending_state({user_id}): {e}")
         return False
@@ -184,17 +231,25 @@ async def show_channels_list(update: Update, context: ContextTypes.DEFAULT_TYPE)
             )
         except Exception as e:
             logger.warning(f"edit_message_text: {e}")
+            # ✅ v2.0.3 FIX-C: حماية .message من None
             try:
-                await update.callback_query.message.reply_text(
-                    text, reply_markup=keyboard, parse_mode="HTML",
-                )
+                if update.callback_query.message is not None:
+                    await update.callback_query.message.reply_text(
+                        text, reply_markup=keyboard, parse_mode="HTML",
+                    )
+                else:
+                    logger.debug(
+                        "show_channels_list: callback_query.message is None "
+                        "— skip fallback reply"
+                    )
             except Exception as e2:
                 logger.error(f"reply_text fallback: {e2}")
     else:
         try:
-            await update.message.reply_text(
-                text, reply_markup=keyboard, parse_mode="HTML",
-            )
+            if update.message is not None:
+                await update.message.reply_text(
+                    text, reply_markup=keyboard, parse_mode="HTML",
+                )
         except Exception as e:
             logger.error(f"reply_text: {e}")
 
@@ -222,7 +277,9 @@ async def _get_channels_with_stats(user_id: int):
         ORDER BY uc.created_at DESC
     """
     try:
-        return await DB.fetchall(query, (user_id,))
+        rows = await DB.fetchall(query, (user_id,))
+        # ✅ v2.0.3 FIX-D: ضمان dict
+        return [_row_to_dict(r) for r in (rows or [])]
     except Exception as e:
         logger.error(f"❌ _get_channels_with_stats: {e}", exc_info=True)
         return []
@@ -240,7 +297,7 @@ def _build_channels_text(channels, active_channel_id) -> str:
     lines.append("─" * 30 + "\n")
 
     for i, ch in enumerate(channels, 1):
-        ch_db_id = ch["channel_db_id"]
+        ch_db_id = ch.get("channel_db_id")
         name = ch.get("channel_name") or "قناة بدون اسم"
         unpublished = ch.get("unpublished", 0) or 0
         published = ch.get("published", 0) or 0
@@ -272,7 +329,7 @@ def _build_channels_keyboard(channels, active_channel_id):
     keyboard = []
 
     for ch in channels:
-        ch_db_id = ch["channel_db_id"]
+        ch_db_id = ch.get("channel_db_id")
         name = ch.get("channel_name") or "قناة"
 
         if len(name) > 20:
@@ -357,24 +414,27 @@ async def _render_channel_info(query, user_id: int, ch_db_id: int) -> None:
     يفترض أن query.answer() تم استدعاؤه بالفعل (لا يُعيد الاستدعاء).
     """
     try:
-        ch = await DB.get_channel_by_id(user_id, ch_db_id)
+        ch_raw = await DB.get_channel_by_id(user_id, ch_db_id)
+        ch = _row_to_dict(ch_raw)
         if not ch:
             await _safe_answer(query, "⚠️ القناة غير موجودة", show_alert=True)
             return
 
-        stats = await DB.get_channel_stats(user_id, ch_db_id) or {}
+        stats_raw = await DB.get_channel_stats(user_id, ch_db_id) or {}
+        stats = _row_to_dict(stats_raw)
         active_channel_id = await _get_active_channel_id(user_id)
 
         try:
-            schedule = await DB.get_schedule(ch_db_id)
-            interval_min = schedule.get("interval_minutes", 12) if schedule else 12
-            next_publish = schedule.get("next_publish_date") if schedule else None
+            schedule_raw = await DB.get_schedule(ch_db_id)
+            schedule = _row_to_dict(schedule_raw)
+            interval_min = schedule.get("interval_minutes", 12) or 12
+            next_publish = schedule.get("next_publish_date")
         except Exception:
             interval_min = 12
             next_publish = None
 
-        name = ch.get("channel_name", "قناة بدون اسم")
-        ch_telegram_id = ch.get("channel_id", "غير معروف")
+        name = ch.get("channel_name") or "قناة بدون اسم"
+        ch_telegram_id = ch.get("channel_id") or "غير معروف"
         banned = ch.get("banned", 0)
 
         status_icon = "🚫 محظورة" if banned else (
@@ -437,10 +497,11 @@ async def _render_channel_info(query, user_id: int, ch_db_id: int) -> None:
     except Exception as e:
         logger.error(f"❌ _render_channel_info: {e}", exc_info=True)
         try:
-            await query.message.reply_text(
-                "⚠️ فشل عرض تفاصيل القناة. حاول لاحقاً.",
-                parse_mode="HTML",
-            )
+            if query.message is not None:
+                await query.message.reply_text(
+                    "⚠️ فشل عرض تفاصيل القناة. حاول لاحقاً.",
+                    parse_mode="HTML",
+                )
         except Exception:
             pass
 
@@ -498,7 +559,7 @@ async def channel_delete_menu_callback(
 
     buttons = []
     for ch in channels:
-        ch_db_id = ch["channel_db_id"]
+        ch_db_id = ch.get("channel_db_id")
         name = ch.get("channel_name") or "قناة"
         if len(name) > 25:
             name = name[:22] + "..."
@@ -545,15 +606,17 @@ async def channel_delete_confirm_callback(
         return
 
     try:
-        ch = await DB.get_channel_by_id(user_id, ch_db_id)
+        ch_raw = await DB.get_channel_by_id(user_id, ch_db_id)
+        ch = _row_to_dict(ch_raw)
         if not ch:
             await _safe_answer(query, "⚠️ القناة غير موجودة", show_alert=True)
             return
 
         await _safe_answer(query)
 
-        name = ch.get("channel_name", "قناة")
-        stats = await DB.get_channel_stats(user_id, ch_db_id) or {}
+        name = ch.get("channel_name") or "قناة"
+        stats_raw = await DB.get_channel_stats(user_id, ch_db_id) or {}
+        stats = _row_to_dict(stats_raw)
 
         text = (
             f"⚠️ <b>تأكيد الحذف</b>\n\n"
@@ -703,8 +766,9 @@ async def channel_schedule_callback(
         await _safe_answer(query)
 
         try:
-            schedule = await DB.get_schedule(ch_db_id)
-            current = schedule.get("interval_minutes", 12) if schedule else 12
+            schedule_raw = await DB.get_schedule(ch_db_id)
+            schedule = _row_to_dict(schedule_raw)
+            current = schedule.get("interval_minutes", 12) or 12
         except Exception:
             current = 12
 
@@ -818,7 +882,8 @@ async def back_to_main_menu_callback(
     await _safe_answer(query)
 
     try:
-        await query.message.delete()
+        if query.message is not None:
+            await query.message.delete()
     except Exception as e:
         logger.debug(f"حذف الرسالة: {e}")
 
@@ -922,10 +987,18 @@ async def add_channel_redirect_callback(
 # =====================================================================
 
 # ✅ v2.0.0: regex مُضيَّق — يطابق فقط @channel أو t.me/channel منفردين
-_USERNAME_RE = re.compile(r"^@([a-zA-Z0-9_]{4,})$")
+# ✅ v2.0.3 FIX-A: تطبيق قواعد Telegram الفعلية
+#    (يبدأ بحرف، 5..32 حرف)
+_USERNAME_RE = re.compile(r"^@([a-zA-Z][a-zA-Z0-9_]{3,31})$")
 _URL_RE = re.compile(
-    r"^(?:https?://)?(?:www\.)?t\.me/([a-zA-Z0-9_]{4,})/?$",
+    r"^(?:https?://)?(?:www\.)?t\.me/([a-zA-Z][a-zA-Z0-9_]{3,31})/?$",
     re.IGNORECASE,
+)
+
+# ✅ v2.0.3 FIX-A: نمط Regex المُستخدم في filters يُحدَّث أيضاً
+_FILTER_REGEX = (
+    r"^(?:@[a-zA-Z][a-zA-Z0-9_]{3,31}|"
+    r"(?:https?://)?(?:www\.)?t\.me/[a-zA-Z][a-zA-Z0-9_]{3,31}/?)$"
 )
 
 
@@ -966,7 +1039,7 @@ async def add_channel_from_message(
     user_id = message.from_user.id
 
     # ═══════════════════════════════════════════════════════════════
-    # ✅ v2.0.2: لا تعترض إذا كان المستخدم في حالة معلقة
+    # ✅ v2.0.2 + v2.0.3 FIX-B: لا تعترض إذا كان المستخدم في حالة معلقة
     # ═══════════════════════════════════════════════════════════════
     if _user_has_pending_state(user_id):
         logger.debug(
@@ -1005,7 +1078,8 @@ async def add_channel_from_message(
 
     # ═══ فحص المستخدم ═══
     try:
-        user = await DB.get_user_full_data(user_id, include_stats=True)
+        user_raw = await DB.get_user_full_data(user_id, include_stats=True)
+        user = _row_to_dict(user_raw)
         if not user:
             await _edit_or_send(
                 processing_msg, message,
@@ -1028,10 +1102,11 @@ async def add_channel_from_message(
             )
             return
 
-        channels_count = user.get("channels_count", 0)
-        active_sub = await DB.get_active_subscription(user_id)
+        channels_count = user.get("channels_count", 0) or 0
+        active_sub_raw = await DB.get_active_subscription(user_id)
+        active_sub = _row_to_dict(active_sub_raw)
         if active_sub:
-            max_channels = active_sub.get("max_channels", 0)
+            max_channels = active_sub.get("max_channels", 0) or 0
             if channels_count >= max_channels:
                 await _edit_or_send(
                     processing_msg, message,
@@ -1115,9 +1190,16 @@ async def add_channel_from_message(
         return
 
     # ═══ النتيجة ═══
-    if result:
-        channel_name = result.get("channel_name", chat.title) if isinstance(result, dict) else chat.title
-        posts_count = result.get("posts_count", 0) if isinstance(result, dict) else 0
+    result_d = _row_to_dict(result)
+    if result_d or result:
+        channel_name = (
+            result_d.get("channel_name")
+            if result_d else chat.title
+        ) or chat.title
+        posts_count = (
+            result_d.get("posts_count", 0)
+            if result_d else 0
+        ) or 0
 
         success_text = (
             f"✅ <b>تم إضافة القناة بنجاح!</b>\n\n"
@@ -1164,17 +1246,24 @@ async def add_channel_from_message(
 
 
 async def _edit_or_send(processing_msg, message, text: str):
-    """تعديل الرسالة أو إرسال جديدة."""
-    try:
-        if processing_msg:
-            await processing_msg.edit_text(text, parse_mode="HTML")
-        else:
-            await message.reply_text(text, parse_mode="HTML")
-    except Exception:
+    """
+    تعديل الرسالة أو إرسال جديدة.
+
+    ✅ v2.0.3 FIX-E: فحص processing_msg.message_id (قد يكون محذوفاً).
+    """
+    if processing_msg is not None:
         try:
-            await message.reply_text(text, parse_mode="HTML")
-        except Exception:
-            pass
+            mid = getattr(processing_msg, "message_id", None)
+            if mid:
+                await processing_msg.edit_text(text, parse_mode="HTML")
+                return
+        except Exception as e:
+            logger.debug(f"_edit_or_send edit_text: {e}")
+
+    try:
+        await message.reply_text(text, parse_mode="HTML")
+    except Exception as e:
+        logger.debug(f"_edit_or_send reply_text: {e}")
 
 
 # =====================================================================
@@ -1208,8 +1297,9 @@ async def posts_add_callback(
             """,
             (user_id,),
         )
-        if row:
-            ch_name = row.get("channel_name")
+        row_d = _row_to_dict(row)
+        if row_d:
+            ch_name = row_d.get("channel_name")
     except Exception as e:
         logger.error(f"posts_add_callback query: {e}")
 
@@ -1242,9 +1332,10 @@ async def posts_add_callback(
     except Exception as e:
         logger.debug(f"edit_message_text: {e}")
         try:
-            await query.message.reply_text(
-                text, reply_markup=keyboard, parse_mode="HTML",
-            )
+            if query.message is not None:
+                await query.message.reply_text(
+                    text, reply_markup=keyboard, parse_mode="HTML",
+                )
         except Exception as e2:
             logger.error(f"reply_text: {e2}")
 
@@ -1333,21 +1424,19 @@ def register_channels_list_handlers(application):
         # ✅ v2.0.2: هذا المعالج في group=-1 (قبل handlers_message).
         #    الآن يفحص الحالة أولاً عبر _user_has_pending_state
         #    ولا يعترض إذا كان المستخدم في WAIT_UPDATE_CH وغيره.
+        # ✅ v2.0.3 FIX-A: نمط Regex محدَّث للقواعد الفعلية.
         application.add_handler(
             MessageHandler(
                 filters.TEXT
                 & filters.ChatType.PRIVATE
                 & ~filters.COMMAND
-                & filters.Regex(
-                    r"^(?:@[a-zA-Z0-9_]{4,}|"
-                    r"(?:https?://)?(?:www\.)?t\.me/[a-zA-Z0-9_]{4,}/?)$"
-                ),
+                & filters.Regex(_FILTER_REGEX),
                 add_channel_from_message,
             ),
             group=-1,
         )
 
-        logger.info("✅ تم تسجيل handlers قائمة القنوات (v2.0.2)")
+        logger.info("✅ تم تسجيل handlers قائمة القنوات (v2.0.3)")
         return True
     except Exception as e:
         logger.error(f"❌ فشل تسجيل handlers: {e}", exc_info=True)
