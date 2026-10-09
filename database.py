@@ -1,8 +1,27 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-database.py - قاعدة البيانات المتكاملة (v7.7.63 — REVIEW-FIXES-2026)
+database.py - قاعدة البيانات المتكاملة (v7.7.64 — REVIEW-FIXES-2026-R2)
 ================================================================================
+🆕 v7.7.64 (REVIEW-FIXES-2026-R2):
+  🔴 FIX-E1: _refresh_user_subscription_end — استُخدم ? في كل الفروع
+             بدل $1/%s (كان يُسبب فشل صامت على MySQL).
+  🔴 FIX-E2: _import_auto_replies — أُضيف chat_id = ? لاستعلام
+             existing_file_keys (كان يجلب كل المجموعات ثم يفلتر محلياً).
+  🟡 FIX-E3: _ensure_materialized_views_postgres — عند فشل CREATE
+             غير "already exists" نُعيد False بدل raise (كان يوقف
+             bootstrap كاملاً عند permission denied).
+  🟡 FIX-E4: mark_published_batch + _verify_pairs_belong — chunking
+             لـ IN (...) (SQLITE_MAX_VARIABLE_NUMBER).
+  🟡 FIX-E5: _sqlite_is_alive — cursor cleanup في finally (كان
+             يُسرّب cursor عند فشل fetchone).
+  🟡 FIX-E6: _pg_in_transaction — log.debug عند الاستثناء بدل
+             الصمت التام.
+  🟡 FIX-E7: _import_banned_words — رسالة log أوضح (كانت توحي
+             بأن to_delete لن يُحذف).
+  🟡 FIX-E8: _destroy_connection — تفريق pool vs conn في PG
+             (terminate sync / close awaitable).
+
 🆕 v7.7.63 (REVIEW-FIXES-2026):
   🔴 FIX-C13: _import_auto_replies — إزالة WHERE auto_replies.added_by = 0
              (كانت تُسبب استثناء ValueError على MySQL بسبب
@@ -67,6 +86,8 @@ database.py - قاعدة البيانات المتكاملة (v7.7.63 — REVIEW
 # [20] v7.7.61: idle-in-transaction → rollback/destroy
 # [21] v7.7.62: idle-tx audit دوري + auto-log + cleanup
 # [22] v7.7.63: PG conn مع tx مفتوحة → log warning
+# [23] v7.7.64: placeholders موحّدة (?) في كل الفروع
+# [24] v7.7.64: IN (...) chunking لـ SQLite/MySQL
 # =====================================================================
 
 import os
@@ -537,6 +558,9 @@ DB_SIZE_CACHE_TTL = float(os.getenv("DB_SIZE_CACHE_TTL", "60"))
 
 IMPORT_MARKER_ADDED_BY = 0
 
+# 🆕 v7.7.64 FIX-E4: chunking للـ IN (...)
+MAX_SQL_IN_PARAMS = int(os.getenv("MAX_SQL_IN_PARAMS", "500"))
+
 PG_MAX_INACTIVE_LIFETIME = float(
     os.getenv("PG_MAX_INACTIVE_LIFETIME", "15.0"))
 PG_CONN_PING_IDLE_THRESHOLD = float(
@@ -768,11 +792,15 @@ def _normalize_params(params: Any) -> tuple:
 
 
 def _pg_in_transaction(conn) -> bool:
+    """🆕 v7.7.64 FIX-E6: log.debug عند الاستثناء بدل الصمت."""
     if not USE_POSTGRES:
         return False
     try:
         return bool(conn.is_in_transaction())
-    except Exception:
+    except Exception as _te:
+        logger.debug(
+            f"_pg_in_transaction: is_in_transaction() threw: {_te} "
+            f"— نفترض True للسلامة")
         return True
 
 
@@ -2805,6 +2833,10 @@ class Database(
         return len(tables_unique)
 
     async def _ensure_materialized_views_postgres(self, conn) -> bool:
+        """
+        🆕 v7.7.64 FIX-E3: عند فشل CREATE غير "already exists"
+        نُعيد False بدل raise (كان يوقف bootstrap كاملاً).
+        """
         if not USE_POSTGRES:
             self._mv_available = False
             return False
@@ -2851,7 +2883,13 @@ class Database(
                             "ℹ️ mv_active_user_limits أُنشئ من "
                             "instance آخر")
                     else:
-                        raise
+                        # 🆕 FIX-E3: لا نرفع — نُعيد False
+                        logger.warning(
+                            f"⚠️ فشل إنشاء mv_active_user_limits: "
+                            f"{create_e} — تعطيل MV، fallback "
+                            f"للاستعلامات المباشرة")
+                        self._mv_available = False
+                        return False
             else:
                 logger.info("⏩ mv_active_user_limits موجود")
             row_count = await conn.fetchval(
@@ -3048,6 +3086,7 @@ class Database(
                 self._sqlite_open_count = 0
             logger.error(f"❌ فشل التهيئة: {e}", exc_info=True)
             raise
+
     async def _create_sqlite_connection(self):
         conn = None
         try:
@@ -3147,19 +3186,24 @@ class Database(
             logger.debug(f"_pg_init_connection: {e}")
 
     async def _sqlite_is_alive(self, conn) -> bool:
+        """
+        🆕 v7.7.64 FIX-E5: cursor cleanup في finally (كان يُسرّب
+        cursor عند فشل fetchone).
+        """
         if not self._use_alive_cache or self._sqlite_alive_ts is None:
+            cursor = None
             try:
                 cursor = await conn.execute("SELECT 1")
-                try:
-                    await cursor.fetchone()
-                finally:
+                await cursor.fetchone()
+                return True
+            except Exception:
+                return False
+            finally:
+                if cursor is not None:
                     try:
                         await cursor.close()
                     except Exception:
                         pass
-                return True
-            except Exception:
-                return False
         now = time.monotonic()
         try:
             last = self._sqlite_alive_ts.get(conn, 0)
@@ -3168,29 +3212,25 @@ class Database(
                 logger.debug(
                     "⚠️ WeakKeyDictionary.get فشل — fallback مباشر")
                 self._alive_cache_warned = True
+            cursor = None
             try:
                 cursor = await conn.execute("SELECT 1")
-                try:
-                    await cursor.fetchone()
-                finally:
+                await cursor.fetchone()
+                return True
+            except Exception:
+                return False
+            finally:
+                if cursor is not None:
                     try:
                         await cursor.close()
                     except Exception:
                         pass
-                return True
-            except Exception:
-                return False
         if now - last < self._sqlite_alive_check_interval:
             return True
+        cursor = None
         try:
             cursor = await conn.execute("SELECT 1")
-            try:
-                await cursor.fetchone()
-            finally:
-                try:
-                    await cursor.close()
-                except Exception:
-                    pass
+            await cursor.fetchone()
             try:
                 self._sqlite_alive_ts[conn] = now
             except (TypeError, KeyError):
@@ -3202,6 +3242,12 @@ class Database(
             except (TypeError, KeyError):
                 pass
             return False
+        finally:
+            if cursor is not None:
+                try:
+                    await cursor.close()
+                except Exception:
+                    pass
 
     async def close(self):
         async with self._lifecycle_lock:
@@ -3615,14 +3661,26 @@ class Database(
                         0, self._sqlite_open_count - 1)
 
     async def _destroy_connection(self, conn):
+        """
+        🆕 v7.7.64 FIX-E8: تفريق pool vs conn في PG
+        (terminate sync / close awaitable).
+        """
         if USE_POSTGRES:
-            try:
-                if hasattr(conn, "terminate"):
-                    conn.terminate()
-                else:
-                    await conn.close()
-            except Exception as e:
-                logger.debug(f"PG destroy: {e}")
+            terminate = getattr(conn, "terminate", None)
+            if callable(terminate):
+                try:
+                    terminate()
+                except Exception as e:
+                    logger.debug(f"PG terminate: {e}")
+            else:
+                close_fn = getattr(conn, "close", None)
+                if callable(close_fn):
+                    try:
+                        result = close_fn()
+                        if inspect.isawaitable(result):
+                            await result
+                    except Exception as e:
+                        logger.debug(f"PG close: {e}")
             try:
                 self._conn_last_used.pop(id(conn), None)
             except Exception:
@@ -4998,9 +5056,11 @@ class Database(
             to_delete = existing_file_words - normalized_words
             to_insert = normalized_words - existing_file_words
             if to_delete:
+                # 🆕 v7.7.64 FIX-E7: رسالة أوضح
                 logger.info(
-                    f"🔍 BW-FIX-1: كلمات الملف المُزالة من المصدر: "
-                    f"{len(to_delete)} (لن تُحذف كلمات البوت)")
+                    f"🔍 BW-FIX-1: كلمات من الملف ستُحذف من DB "
+                    f"(المصدر): {len(to_delete)} — "
+                    f"(كلمات البوت added_by≠0 محفوظة)")
             if to_insert:
                 logger.info(
                     f"🔍 BW-FIX-1: كلمات جديدة في الملف: "
@@ -5103,8 +5163,8 @@ class Database(
         من ON CONFLICT DO UPDATE (كانت تُسبب ValueError على MySQL
         بسبب _convert_upsert الذي يرفض WHERE بعد ON DUPLICATE KEY).
 
-        الحماية الآن عبر منطق pre-check: نحفظ added_by = 0 فقط
-        للصفوف التي نستوردها، فلا نلمس صفوف المستخدمين.
+        🆕 v7.7.64 FIX-E2: أُضيف chat_id = ? لاستعلام existing (كان
+        يجلب كل المجموعات ثم يفلتر محلياً).
         """
         try:
             from auto_replies import AUTO_REPLIES
@@ -5191,22 +5251,17 @@ class Database(
                     "ℹ️ auto_replies.py لم يتغيّر — تخطي "
                     "(ردود البوت محفوظة)")
                 return
+            # 🆕 FIX-E2: أُضيف chat_id = ? للاستعلام
             existing_rows = await self._fetchall_with_conn(
                 conn,
                 "SELECT chat_id, keyword FROM auto_replies "
-                "WHERE added_by = ?",
-                IMPORT_MARKER_ADDED_BY)
+                "WHERE added_by = ? AND chat_id = ?",
+                IMPORT_MARKER_ADDED_BY, GLOBAL_CHAT_ID)
             existing_file_keys: Set[Tuple[int, str]] = set()
             for r in (existing_rows or []):
-                cid = r.get("chat_id")
                 kw = (r.get("keyword") or "").lower()
-                if cid is not None and kw:
-                    try:
-                        cid_int = int(cid)
-                    except (TypeError, ValueError):
-                        continue
-                    if cid_int == GLOBAL_CHAT_ID:
-                        existing_file_keys.add((cid_int, kw))
+                if kw:
+                    existing_file_keys.add((GLOBAL_CHAT_ID, kw))
             to_delete = existing_file_keys - set(normalized.keys())
             to_upsert = set(normalized.keys())
             allowed, reason = self._safety_check_mass_delete(
@@ -5598,35 +5653,40 @@ class Database(
     async def _refresh_user_subscription_end(
         self, conn, user_id: int,
     ) -> None:
+        """
+        🆕 v7.7.64 FIX-E1: استُخدم ? في كل الفروع بدل $1/%s
+        (كان يُسبب فشل صامت على MySQL لأن _fetchval_with_conn
+        يستدعي _convert_placeholders التي تبحث عن ? فقط).
+        """
         if USE_POSTGRES:
             end = await self._fetchval_with_conn(
                 conn,
                 "SELECT MAX(end_date) FROM subscriptions "
-                "WHERE user_id = $1 AND status = 'active' "
+                "WHERE user_id = ? AND status = 'active' "
                 "AND end_date > CURRENT_TIMESTAMP AT TIME ZONE 'UTC'",
                 user_id)
-            await self._execute_with_conn(
-                conn,
-                "UPDATE users SET subscription_end = $1, "
-                "updated_at = $2 WHERE user_id = $3",
-                end, TimeUtils.utc_now(), user_id)
         elif USE_MYSQL:
             end = await self._fetchval_with_conn(
                 conn,
                 "SELECT MAX(end_date) FROM subscriptions "
-                "WHERE user_id = %s AND status = 'active' "
-                "AND end_date > UTC_TIMESTAMP()", user_id)
-            await self._execute_with_conn(
-                conn,
-                "UPDATE users SET subscription_end = %s, "
-                "updated_at = %s WHERE user_id = %s",
-                end, TimeUtils.sql_iso(), user_id)
+                "WHERE user_id = ? AND status = 'active' "
+                "AND end_date > UTC_TIMESTAMP()",
+                user_id)
         else:
             end = await self._fetchval_with_conn(
                 conn,
                 "SELECT MAX(end_date) FROM subscriptions "
                 "WHERE user_id = ? AND status = 'active' "
-                "AND end_date > datetime('now')", user_id)
+                "AND end_date > datetime('now')",
+                user_id)
+        # 🆕 FIX-E1: UPDATE بـ ? في كل الفروع
+        if USE_POSTGRES:
+            await self._execute_with_conn(
+                conn,
+                "UPDATE users SET subscription_end = ?, "
+                "updated_at = ? WHERE user_id = ?",
+                end, TimeUtils.utc_now(), user_id)
+        else:
             await self._execute_with_conn(
                 conn,
                 "UPDATE users SET subscription_end = ?, "
@@ -6781,6 +6841,10 @@ class Database(
     async def _verify_pairs_belong(
         self, conn, updates: List[Tuple[int, int]],
     ) -> List[Tuple[int, int]]:
+        """
+        🆕 v7.7.64 FIX-E4: chunking لـ IN (...) لتجنب تجاوز حد
+        SQLITE_MAX_VARIABLE_NUMBER.
+        """
         if not updates:
             return []
         valid: List[Tuple[int, int]] = []
@@ -6789,25 +6853,28 @@ class Database(
             for ch_id, post_id in updates:
                 by_channel[ch_id].append(post_id)
             for ch_id, post_ids in by_channel.items():
-                placeholders = ",".join(["?"] * len(post_ids))
-                rows = await self._fetchall_with_conn(
-                    conn,
-                    f"SELECT id FROM posts "
-                    f"WHERE channel_db_id = ? "
-                    f"  AND id IN ({placeholders})",
-                    ch_id, *post_ids)
                 found_ids: Set[int] = set()
-                for r in (rows or []):
-                    rid = r.get("id")
-                    if rid is None:
-                        continue
-                    try:
-                        found_ids.add(int(rid))
-                    except (TypeError, ValueError):
-                        logger.debug(
-                            f"_verify_pairs_belong: id غير صالح "
-                            f"{rid!r}")
-                        continue
+                # 🆕 FIX-E4: تقسيم post_ids إلى chunks
+                for i in range(0, len(post_ids), MAX_SQL_IN_PARAMS):
+                    chunk = post_ids[i: i + MAX_SQL_IN_PARAMS]
+                    placeholders = ",".join(["?"] * len(chunk))
+                    rows = await self._fetchall_with_conn(
+                        conn,
+                        f"SELECT id FROM posts "
+                        f"WHERE channel_db_id = ? "
+                        f"  AND id IN ({placeholders})",
+                        ch_id, *chunk)
+                    for r in (rows or []):
+                        rid = r.get("id")
+                        if rid is None:
+                            continue
+                        try:
+                            found_ids.add(int(rid))
+                        except (TypeError, ValueError):
+                            logger.debug(
+                                f"_verify_pairs_belong: id غير صالح "
+                                f"{rid!r}")
+                            continue
                 for pid in post_ids:
                     if pid in found_ids:
                         valid.append((ch_id, pid))
@@ -6827,6 +6894,10 @@ class Database(
     async def mark_published_batch(
         self, updates: List[Tuple[int, int]],
     ) -> bool:
+        """
+        🆕 v7.7.64 FIX-E4: chunking لـ IN (...) في UPDATE و
+        schedule fetch.
+        """
         if not updates:
             return True
         valid_updates: List[Tuple[int, int]] = []
@@ -6853,17 +6924,23 @@ class Database(
                     return False
                 ch_ids = [ch_id for ch_id, _ in valid_updates]
                 post_ids = [post_id for _, post_id in valid_updates]
-                post_placeholders = ",".join(["?"] * len(post_ids))
-                updated = await self._execute_with_conn(
-                    conn,
-                    f"UPDATE posts SET published = 1, "
-                    f"published_at = ?, fail_count = 0 "
-                    f"WHERE id IN ({post_placeholders})",
-                    now, *post_ids)
-                if isinstance(updated, int) and updated != len(post_ids):
+                # 🆕 FIX-E4: UPDATE على chunks
+                total_updated = 0
+                for i in range(0, len(post_ids), MAX_SQL_IN_PARAMS):
+                    chunk = post_ids[i: i + MAX_SQL_IN_PARAMS]
+                    chunk_placeholders = ",".join(["?"] * len(chunk))
+                    updated = await self._execute_with_conn(
+                        conn,
+                        f"UPDATE posts SET published = 1, "
+                        f"published_at = ?, fail_count = 0 "
+                        f"WHERE id IN ({chunk_placeholders})",
+                        now, *chunk)
+                    if isinstance(updated, int):
+                        total_updated += updated
+                if total_updated != len(post_ids):
                     logger.debug(
                         f"ℹ️ mark_published_batch: "
-                        f"{updated}/{len(post_ids)} منشور محدّث")
+                        f"{total_updated}/{len(post_ids)} منشور محدّث")
                 last_publish_params = [(ch_id, now) for ch_id in ch_ids]
                 await self._executemany_with_conn(
                     conn,
@@ -6875,19 +6952,25 @@ class Database(
                     last_publish_params)
                 schedule_map: Dict[int, Dict] = {}
                 try:
-                    ch_placeholders = ",".join(["?"] * len(ch_ids))
-                    rows = await self._fetchall_with_conn(
-                        conn,
-                        f"SELECT channel_db_id, schedule_type, "
-                        f"interval_minutes, interval_hours, "
-                        f"interval_days "
-                        f"FROM schedule "
-                        f"WHERE channel_db_id IN ({ch_placeholders})",
-                        *ch_ids)
-                    for r in (rows or []):
-                        ch_db_id_key = r.get("channel_db_id")
-                        if ch_db_id_key is not None:
-                            schedule_map[int(ch_db_id_key)] = r
+                    # 🆕 FIX-E4: fetch schedules على chunks
+                    unique_ch_ids = list(set(ch_ids))
+                    for i in range(0, len(unique_ch_ids),
+                                   MAX_SQL_IN_PARAMS):
+                        chunk = unique_ch_ids[i: i + MAX_SQL_IN_PARAMS]
+                        ch_placeholders = ",".join(["?"] * len(chunk))
+                        rows = await self._fetchall_with_conn(
+                            conn,
+                            f"SELECT channel_db_id, schedule_type, "
+                            f"interval_minutes, interval_hours, "
+                            f"interval_days "
+                            f"FROM schedule "
+                            f"WHERE channel_db_id IN "
+                            f"({ch_placeholders})",
+                            *chunk)
+                        for r in (rows or []):
+                            ch_db_id_key = r.get("channel_db_id")
+                            if ch_db_id_key is not None:
+                                schedule_map[int(ch_db_id_key)] = r
                 except Exception as se:
                     logger.debug(f"batch fetch schedules: {se}")
                 gi_str: Optional[str] = None
@@ -7577,6 +7660,7 @@ __all__ = [
     "IMPORT_MASS_DELETE_MIN_ABSOLUTE", "IMPORT_MASS_DELETE_MAX_RATIO",
     "DB_SIZE_CACHE_TTL",
     "IMPORT_MARKER_ADDED_BY",
+    "MAX_SQL_IN_PARAMS",
     "PG_MAX_INACTIVE_LIFETIME",
     "PG_CONN_PING_IDLE_THRESHOLD",
     "PG_CONN_PING_TIMEOUT",
@@ -7627,19 +7711,19 @@ __all__ = [
 
 
 # =====================================================================
-# LOAD BEACON — v7.7.63
+# LOAD BEACON — v7.7.64
 # =====================================================================
 
 try:
     logger.info(
-        "🛡️ database.py v7.7.63 REVIEW-FIXES loaded | "
+        "🛡️ database.py v7.7.64 REVIEW-FIXES-R2 loaded | "
         "DB=%s | Migrations=%s | Refactor=%s | Caches=%s | "
         "Idle-TX-Audit=%s (interval=%.0fs, threshold=%d) | "
         "PG-rollback-on-return=%.1fs | "
-        "Fixes: C13 (import_auto_replies), C14 (recover_pool), "
-        "D7 (dollar-quotes), B2 (conn tx warn), "
-        "D8 (_compute_text_hash public), D9 (_upsert_setting ?), "
-        "D10 (schema support)",
+        "Fixes: E1 (refresh_sub_end ?), E2 (auto_replies chat_id), "
+        "E3 (MV no-raise), E4 (IN chunking, max=%d), "
+        "E5 (_sqlite_is_alive cursor), E6 (pg_in_tx log), "
+        "E7 (banned_words log), E8 (_destroy_connection PG)",
         DB_TYPE.upper(),
         "yes" if MIGRATIONS_MIXIN_AVAILABLE else "no",
         "yes" if REFACTOR_MIXIN_AVAILABLE else "no",
@@ -7648,6 +7732,7 @@ try:
         IDLE_TX_AUDIT_INTERVAL_SEC,
         IDLE_TX_AUDIT_ALERT_THRESHOLD,
         PG_ROLLBACK_ON_RETURN_TIMEOUT,
+        MAX_SQL_IN_PARAMS,
     )
 except Exception:
     pass
