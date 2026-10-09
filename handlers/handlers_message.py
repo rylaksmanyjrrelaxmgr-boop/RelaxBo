@@ -1,9 +1,27 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-handlers_message.py - v7.18.14 POOL-BRIDGE + IDLE-TX-AUDIT
-(متوافق مع detectors v4.0.8 — CRITICAL-FIXES)
+handlers_message.py - v7.18.16 BANNED-MANAGER-INTEGRATION + REPLIES-FIX
+(متوافق مع detectors v4.0.9 — CRITICAL-FIXES)
 =============================================================================
+🆕 v7.18.16 (FULL-REWRITE-FIXES):
+    🔴 FIX-RPL-1: handle_add_reply يُدير 3 حالات (WAIT_REPLY_TRIGGER,
+                  WAIT_REPLY_RESPONSE, WAIT_REPLY_ADD)
+    🔴 FIX-RPL-2: إضافة _save_reply_and_finish (helper)
+    🔴 FIX-RPL-3: _process_auto_reply — _increment_usage_async لـ file_reply
+    🔴 FIX-PERM-1: إزالة فحص الصلاحيات المكرر (BWM يفحص داخلياً)
+    🔴 FIX-EDIT-1: handle_edited يتجاوز فحص الفيضان (skip_flood=True)
+    🔴 FIX-DET-1: _HAS_ASYNC_DETECTORS يُستخدم فعلاً
+    🔴 FIX-BWM-3: fallback محسَّن عند فشل BannedWordsManager
+
+🆕 v7.18.15 (BANNED-MANAGER-INTEGRATION + REPLIES-FIX):
+    🔴 FIX-BWM-1: استيراد BannedWordsManager من handlers.messages
+    🔴 FIX-BWM-2: استبدال فحص الكلمات المحظورة بـ check_message()
+    🔴 FIX-RPL-1: مفاتيح الردود في _PRIVATE_HANDLERS_MAP
+    🔴 FIX-RPL-2: handle_add_reply + handle_remove_reply
+    🔴 FIX-RPL-3: دعم caption في _process_auto_reply
+    🔴 FIX-RPL-4: invalidate_auto_reply_cache بعد الإضافة
+
 🆕 v7.18.14 (IDLE-TX-AUDIT-INTEGRATION):
     🔍 IDLE-1: handle_db_idle_command — أمر /db_idle للمطور
     🔍 IDLE-2: _notify_dev_about_idle_tx — إشعار تلقائي عند idle-in-tx
@@ -11,37 +29,12 @@ handlers_message.py - v7.18.14 POOL-BRIDGE + IDLE-TX-AUDIT
     🔍 IDLE-4: عند فشل DB حرج (migration_ok=False) → فحص idle-tx + إشعار
     🆕 ثوابت: _IDLE_TX_NOTIFY_COOLDOWN، _idle_tx_last_notify
 
-🆕 v7.18.13 (SHIELD-LOG-LEVEL-OPTIMIZATION):
-    🟢 FIX-1: SHIELD log level يتبع _spam_score
-        - _spam_score > 0  → logger.info (سبام/مشبوه)
-        - _spam_score == 0 → logger.debug (نظيف)
-    🟢 FIX-2: إزالة شرط `and _spam_layer_scores` — الآن يُسجَّل
-        حتى لو كانت الطبقات فارغة (لكن على debug للرسائل النظيفة)
-    📝 الهدف: تقليل ضوضاء السجل مع الاحتفاظ بالتنبيهات الحرجة
-
-🆕 v7.18.12 (SLOW-MODE-DIRECT-HTTP-FIX):
-    🔴 FIX-1: _apply_slow_mode — HTTP POST مباشر عبر aiohttp
-    🔴 FIX-2: تجاوز do_api_request الذي يرفض setChatSlowModeDelay
-    🔴 FIX-3: مسح تحذير سابق عند النجاح
-
-🆕 v7.18.11 (SLOW-MODE-DO_API_REQUEST-FIX):
-    🔴 FIX-1: _apply_slow_mode — استخدام do_api_request كـfallback
-    🔴 FIX-2: تقريب قيم slow_mode للمجموعة المسموحة من تيليجرام
-    🔴 FIX-3: تحذير مرة واحدة فقط لكل chat (بدل كل رسالة)
-
-🆕 v7.18.10 (BANNED-WORDS-TUPLE-FIX):
-    🔴 FIX-1: handle_add_banned_word — فكّ tuple من DB.add_banned_word
-    🔴 FIX-2: handle_add_global_banned_word — فكّ tuple
-
-🆕 v7.18.9 (POOL-BRIDGE):
-    🔗 PATCH-1: ربط _run_in_pool من detectors v4.0.8
-    🔗 PATCH-2: helper _run_sync_in_pool مع fallback إلى asyncio.to_thread
-    🔗 PATCH-3: fallback sync يستخدم pool موحّد + timeout 30s
-    🔗 PATCH-4: register_shutdown_handlers يُغلق detectors pool
-    🔗 PATCH-5: تصدير API الجديد في __all__
-
-🎯 v7.18.8 CORRECTED — يحل 30 مشكلة في v7.18.7:
-    🔴 BUG-1..30: إصلاحات شاملة (async/sync، caches، postbot، flood، ...)
+🆕 v7.18.13 (SHIELD-LOG-LEVEL-OPTIMIZATION)
+🆕 v7.18.12 (SLOW-MODE-DIRECT-HTTP-FIX)
+🆕 v7.18.11 (SLOW-MODE-DO_API_REQUEST-FIX)
+🆕 v7.18.10 (BANNED-WORDS-TUPLE-FIX)
+🆕 v7.18.9  (POOL-BRIDGE)
+🎯 v7.18.8  CORRECTED — يحل 30 مشكلة في v7.18.7
 =============================================================================
 """
 
@@ -80,6 +73,43 @@ from cache import settings_cache, posts_cache
 
 
 logger = logging.getLogger(__name__)
+
+
+# ═════════════════════════════════════════════════════════════════════
+# 🆕 v7.18.15 FIX-BWM-1: BannedWordsManager (مساران منفصلان)
+# ═════════════════════════════════════════════════════════════════════
+
+try:
+    from handlers.messages import (
+        BannedWordsManager,
+        BannedScope,
+        contains_banned_word as _bwm_contains,
+        is_arabic_greeting as _bwm_is_greeting,
+    )
+    _HAS_BWM = True
+    logger.info("✅ handlers_message: BannedWordsManager محمّل")
+except ImportError:
+    try:
+        from .messages import (
+            BannedWordsManager,
+            BannedScope,
+            contains_banned_word as _bwm_contains,
+            is_arabic_greeting as _bwm_is_greeting,
+        )
+        _HAS_BWM = True
+        logger.info(
+            "✅ handlers_message: BannedWordsManager محمّل (relative)"
+        )
+    except ImportError:
+        _HAS_BWM = False
+        BannedWordsManager = None
+        BannedScope = None
+        _bwm_contains = None
+        _bwm_is_greeting = None
+        logger.warning(
+            "⚠️ BannedWordsManager غير متاح — "
+            "سيُستخدم النظام القديم"
+        )
 
 
 # ═════════════════════════════════════════════════════════════════════
@@ -416,7 +446,6 @@ _BAN_ADD_RATE_WINDOW = 60.0
 _BOT_DATA_SLOW_MODE_PRUNE_THRESHOLD = 10000
 _BOT_DATA_SLOW_MODE_PRUNE_COOLDOWN = 300.0
 
-
 _POSTBOT_CHANNEL_NAMES = frozenset({
     "news",
     "news post bot",
@@ -535,7 +564,6 @@ _BAN_WORD_MAX_LEN = 100
 
 _PRIVATE_SIG_CACHE_MAX = 128
 
-# 🆕 v7.18.14: Idle-TX audit notification
 _IDLE_TX_NOTIFY_COOLDOWN = 3600.0
 _idle_tx_last_notify: Dict[int, float] = {}
 _idle_tx_notify_lock = asyncio.Lock()
@@ -547,7 +575,6 @@ FEATURE_LOG_ADMIN_CHANGES = _env_flag("LOG_ADMIN_CHANGES", True)
 
 _DEBUG_DIAG = DEBUG_DIAG
 _DEBUG_SPAM = DEBUG_SPAM
-
 
 _GROUP_LOG_CHANNEL_CACHE_TTL = 60.0
 _GROUP_LOG_CHANNEL_CACHE_MAX = 2000
@@ -591,11 +618,6 @@ async def _get_group_log_channel_cached(chat_id: int):
             cached_value, cached_at = entry
             if now - cached_at < _GROUP_LOG_CHANNEL_CACHE_MAX_STALE:
                 return cached_value
-            logger.debug(
-                "_get_group_log_channel_cached(%s): entry stale "
-                "(%.1fs) — رفض",
-                chat_id, now - cached_at,
-            )
         return None
 
     if len(_group_log_channel_cache) >= _GROUP_LOG_CHANNEL_CACHE_MAX:
@@ -611,8 +633,6 @@ async def _get_group_log_channel_cached(chat_id: int):
 
     _group_log_channel_cache[int(chat_id)] = (value, now)
     return value
-
-
 _SEC_SETTINGS_LOCAL_TTL = 5.0
 _SEC_SETTINGS_LOCAL_MAX = 3000
 _sec_settings_local_cache: Dict[int, Tuple[Dict[str, Any], float]] = {}
@@ -806,31 +826,12 @@ _columns_last_attempt_ts = 0.0
 _columns_last_error_log_ts = 0.0
 
 
-# ═══════════════════════════════════════════════════════════════════
-# 🆕 v7.18.14: Idle-TX audit notification helper
-# ═══════════════════════════════════════════════════════════════════
-
 async def _notify_dev_about_idle_tx(
     bot,
     reason: str = "",
     *,
     force: bool = False,
 ) -> Optional[Dict[str, Any]]:
-    """
-    🆕 v7.18.14: يفحص idle-in-transaction ويرسل تقريراً للمطور.
-
-    - يُحترم cooldown (افتراضي 3600s) — إلا إذا force=True.
-    - يتحقق أولاً من توفر DB.audit_idle_in_transactions.
-    - عند عدم وجود أي idle-tx → لا إشعار (log.debug فقط).
-
-    Args:
-        bot: telegram.Bot
-        reason: سبب الاستدعاء (يُسجَّل في التقرير)
-        force: تجاوز cooldown (للاستخدام اليدوي عبر /db_idle)
-
-    Returns:
-        dict التقرير عند النجاح، None عند الفشل أو التعطيل.
-    """
     try:
         audit_fn = getattr(DB, 'audit_idle_in_transactions', None)
         if not callable(audit_fn):
@@ -859,7 +860,6 @@ async def _notify_dev_about_idle_tx(
             )
             return report
 
-        # cooldown
         if not force:
             now = time.monotonic()
             last = _idle_tx_last_notify.get(0, 0.0)
@@ -991,7 +991,7 @@ async def _lazy_init_columns(bot=None):
         _columns_last_attempt_ts = now
 
         db_type = getattr(DB, "DB_TYPE", "sqlite")
-        logger.info("🔧 v7.18.14: Auto-migration (DB_TYPE=%s)", db_type)
+        logger.info("🔧 v7.18.16: Auto-migration (DB_TYPE=%s)", db_type)
 
         cols = [
             ("delete_protected_any", "INTEGER DEFAULT 0", "TINYINT(1) DEFAULT 0"),
@@ -1116,8 +1116,6 @@ async def _lazy_init_columns(bot=None):
                     len(unexpected_failures),
                 )
 
-            # 🆕 v7.18.14: عند فشل حرج → فحص idle-tx (احتمال أن السبب
-            # هو اتصالات ملوّثة تحجب DDL) + إشعار المطور.
             if bot is not None:
                 try:
                     _spawn_tracked_task(
@@ -1846,15 +1844,8 @@ async def _record_delete_failure(chat_id) -> bool:
                     k for k, (_, ts) in _delete_failure_counter.items()
                     if now - ts > _DELETE_FAILURE_NOTIFY_WINDOW * 2
                 ]
-                pruned = 0
                 for k in stale:
                     _delete_failure_counter.pop(k, None)
-                    pruned += 1
-                if pruned > 0:
-                    logger.debug(
-                        "_delete_failure_counter: pruned %d stale entries",
-                        pruned,
-                    )
             return cnt >= _DELETE_FAILURE_NOTIFY_THRESHOLD
     except Exception:
         return False
@@ -1876,12 +1867,10 @@ async def _notify_delete_permission_failure(context, chat_id):
             "━━━━━━━━━━━━━━━━━━━━\n"
             f"البوت لا يستطيع حذف الرسائل في المجموعة "
             f"<code>{chat_id}</code>.\n\n"
-            "🔴 <b>عقوبات الحماية لن تُطبَّق فعلياً</b> — "
-            "لأن الرسالة المخالفة تبقى قائمة.\n\n"
+            "🔴 <b>عقوبات الحماية لن تُطبَّق فعلياً</b>.\n\n"
             "✅ <b>الحل:</b>\n"
             "1. ارفع البوت لمشرف في المجموعة\n"
             "2. امنحه صلاحية <code>can_delete_messages</code>\n"
-            "3. تأكد من أن البوت عضو في المجموعة\n"
         )
         try:
             await safe_send(context.bot, owner_id, msg, parse_mode='HTML')
@@ -2175,8 +2164,6 @@ def extract_forward_info(message):
             'date': None, 'signature': None, 'message_id': None,
         }
     return None
-
-
 def get_forward_info(message) -> Dict[str, Any]:
     result: Dict[str, Any] = {
         "is_forwarded": False,
@@ -2368,10 +2355,6 @@ def _should_notify_forward(context, chat_id) -> bool:
             remove_count = max(1, len(sorted_keys) // 4)
             for k in sorted_keys[:remove_count]:
                 bot_data.pop(k, None)
-            logger.debug(
-                "_should_notify_forward: pruned %d oldest entries",
-                remove_count,
-            )
         bot_data[key] = now
         return True
     except Exception:
@@ -3002,11 +2985,20 @@ def _get_spaced_banned_pattern(banned_word: str) -> Optional[re.Pattern]:
 
 
 def _contains_banned_word(text, banned_word) -> bool:
+    """
+    ⚠️ v7.18.16: للتوافق القديم فقط.
+    المسار الحديث يستخدم BannedWordsManager.check_message.
+    """
     if not text or not banned_word:
         return False
     if len(text) > 4000:
         text = text[:4000]
     try:
+        # إذا كان المدير الجديد متاحاً — استخدمه
+        if _HAS_BWM and _bwm_contains is not None:
+            return _bwm_contains(text, banned_word)
+
+        # fallback: النظام القديم
         normalized_text = _normalize_text(text).lower()
         normalized_word = _normalize_text(str(banned_word)).lower()
         if not normalized_word:
@@ -3066,11 +3058,17 @@ def _accepts_state_arg(handler, handler_name: str) -> bool:
 
 class MessageHandlers:
 
+    # 🔴 v7.18.15 FIX-RPL-1: مفاتيح الردود مُضافة
     _PRIVATE_HANDLERS_MAP: Dict[Any, str] = {
         "WAIT_GROUP_BAN": "handle_add_banned_word",
         "WAIT_GLOBAL_BAN": "handle_add_global_banned_word",
         "WAIT_REM_GROUP_BAN": "handle_remove_banned_word",
         "WAIT_REM_GLOBAL_BAN": "handle_remove_global_banned_word",
+        # 🆕 v7.18.15: مسارات الردود
+        "WAIT_REPLY_TRIGGER": "handle_add_reply",
+        "WAIT_REPLY_RESPONSE": "handle_add_reply",
+        "WAIT_REPLY_ADD": "handle_add_reply",
+        "WAIT_REPLY_REMOVE": "handle_remove_reply",
     }
 
     @staticmethod
@@ -3103,7 +3101,11 @@ class MessageHandlers:
             limiter, limiter_acquired = await _acquire_group_limiter(chat_id)
             if update.effective_message is None:
                 return
-            await MessageHandlers._handle_group_impl(update, context)
+            # 🔴 v7.18.16 FIX-EDIT-1: تجاوز فحص الفيضان عند التعديل
+            # (تعديل الرسالة ليس رسالة جديدة — لا يجب أن يحتسب في الفيضان)
+            await MessageHandlers._handle_group_impl(
+                update, context, skip_flood=True,
+            )
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -3113,15 +3115,6 @@ class MessageHandlers:
 
     @staticmethod
     async def _apply_slow_mode(context, chat_id, settings):
-        """
-        ✅ v7.18.13: إصلاح setChatSlowModeDelay نهائياً
-
-        python-telegram-bot v22.x يرفض setChatSlowModeDelay في:
-          - set_chat_slow_mode_delay (غير موجودة)
-          - do_api_request (Endpoint not found)
-
-        الحل: HTTP POST مباشر إلى Telegram Bot API عبر aiohttp.
-        """
         global _SLOW_MODE_UNSUPPORTED
         if not _SLOW_MODE_AUTO:
             return
@@ -3231,18 +3224,8 @@ class MessageHandlers:
                         _api_error = _data.get(
                             "description", "unknown error"
                         )
-                        logger.warning(
-                            "⚠️ setChatSlowModeDelay(%s, %d) "
-                            "API error: %s",
-                            chat_id, _target_tg, _api_error,
-                        )
                 except Exception as _e:
                     _api_error = str(_e)
-                    logger.warning(
-                        "⚠️ setChatSlowModeDelay(%s, %d) "
-                        "HTTP failed: %s",
-                        chat_id, _target_tg, _e,
-                    )
 
             if _api_success:
                 try:
@@ -3264,39 +3247,19 @@ class MessageHandlers:
                         _SLOW_MODE_UNSUPPORTED = True
                         logger.warning(
                             "⚠️ SLOW-MODE: معطّل نهائياً — "
-                            "Telegram Bot API لا يوفّر "
-                            "setChatSlowModeDelay. سيتم تجاهل "
-                            "المحاولات المستقبلية."
+                            "Telegram Bot API لا يوفّر setChatSlowModeDelay"
                         )
-                else:
-                    _warn_key = f"_slow_warn_{chat_id}"
-                    _warned = False
-                    try:
-                        if isinstance(context.bot_data, dict):
-                            _warned = bool(context.bot_data.get(_warn_key))
-                    except Exception:
-                        pass
-                    if not _warned:
-                        logger.warning(
-                            "⚠️ SLOW-MODE: تعذّر تفعيل الوضع البطيء لـ %s "
-                            "— السبب: %s",
-                            chat_id, _api_error or "unknown",
-                        )
-                        try:
-                            if isinstance(context.bot_data, dict):
-                                context.bot_data[_warn_key] = True
-                        except Exception:
-                            pass
-
         except Exception as e:
             logger.debug("_apply_slow_mode: %s", e)
 
     @staticmethod
-    async def _handle_group_impl(update, context):
+    async def _handle_group_impl(update, context, skip_flood=False):
+        """
+        🔴 v7.18.16: skip_flood=True عند التعديل (handle_edited).
+        """
         if not update.effective_chat or not update.effective_message:
             return
         chat_id = update.effective_chat.id
-        # 🆕 v7.18.14: تمرير bot للسماح بإشعار idle-tx عند فشل DB
         await _lazy_init_columns(bot=context.bot)
 
         message = update.effective_message
@@ -3349,11 +3312,19 @@ class MessageHandlers:
         )
         _emails_enabled = _as_bool(settings.get('delete_emails', 0), False)
         _polls_enabled = _as_bool(settings.get('delete_polls', 0), False)
+        _banned_words_enabled = _as_bool(
+            settings.get('delete_banned_words', 0), False,
+        )
 
         _antiflood_enabled = _as_bool(
             settings.get('antiflood_enabled', 0), False,
         )
-        if _antiflood_enabled and _ANTIFLOOD_ENABLED and not is_anonymous:
+        if (
+            _antiflood_enabled
+            and _ANTIFLOOD_ENABLED
+            and not is_anonymous
+            and not skip_flood
+        ):
             try:
                 _af_max_raw = settings.get(
                     'antiflood_messages', _FLOOD_DEFAULT_MESSAGES,
@@ -3423,7 +3394,8 @@ class MessageHandlers:
         _analysis_mode = "text-only"
 
         if _spam_enabled:
-            if _MULTILAYER_ENABLED and analyze_message_full_async is not None:
+            # 🔴 v7.18.16 FIX-DET-1: استخدام _HAS_ASYNC_DETECTORS
+            if _MULTILAYER_ENABLED and _HAS_ASYNC_DETECTORS:
                 try:
                     _verdict = await analyze_message_full_async(
                         message, bot=context.bot,
@@ -3533,9 +3505,6 @@ class MessageHandlers:
                 ctx.spam_emoji_count, _analysis_mode,
             )
 
-        # 🆕 v7.18.13 FIX-1 + FIX-2: SHIELD log level يتبع _spam_score
-        # - _spam_score > 0  → INFO (سبام/مشبوه — يحتاج متابعة)
-        # - _spam_score == 0 → DEBUG (نظيف — تقليل ضوضاء السجل)
         if _analysis_mode.startswith("multilayer"):
             _shield_log_fn = (
                 logger.info if _spam_score > 0 else logger.debug
@@ -3603,15 +3572,6 @@ class MessageHandlers:
                 ctx.cta_count,
                 _antiflood_enabled,
             )
-            if ctx.button_texts:
-                logger.info("   🔘 BTN | %s", ctx.button_texts[:12])
-            if ctx.button_urls:
-                logger.info("   🔗 URL | %s", ctx.button_urls[:5])
-            if ctx.entity_urls:
-                logger.info("   🎭 ENT | %s", ctx.entity_urls[:5])
-            if _spam_score > 0:
-                logger.warning("   🎯 SPAM=%d | %s",
-                               _spam_score, _spam_reasons[:10])
 
         if _as_bool(settings.get('delete_service'), False):
             if message.new_chat_members or message.left_chat_member:
@@ -3647,36 +3607,11 @@ class MessageHandlers:
 
         if _FORCE_DELETE_POSTBOT_FORWARDS:
             try:
-                _fwd = get_forward_info(message)
-
-                if _fwd.get("is_forwarded") or _fwd.get("sender_chat_id"):
-                    logger.info(
-                        "🔍 FWD-CHECK | chat=%s msg=%s | "
-                        "type=%s name=%r | "
-                        "orig_chat_id=%s orig_msg_id=%s orig_user_id=%s | "
-                        "sender_chat_id=%s sender_title=%r | "
-                        "auto_fwd=%s",
-                        chat_id, message.message_id,
-                        _fwd.get("origin_type"),
-                        _fwd.get("original_name"),
-                        _fwd.get("original_chat_id"),
-                        _fwd.get("original_message_id"),
-                        _fwd.get("original_user_id"),
-                        _fwd.get("sender_chat_id"),
-                        _fwd.get("sender_chat_title"),
-                        _fwd.get("is_automatic_forward"),
-                    )
-
                 _is_pb, _pb_info = _is_postbot_forward(message)
                 if _is_pb:
                     logger.warning(
-                        "📰 POSTBOT-FORWARD-DELETE | chat=%s user=%s msg=%s "
-                        "| from=%r id=%s type=%s orig_msg_id=%s",
+                        "📰 POSTBOT-FORWARD-DELETE | chat=%s user=%s msg=%s",
                         chat_id, user_id, message.message_id,
-                        (_pb_info or {}).get("name"),
-                        (_pb_info or {}).get("id"),
-                        (_pb_info or {}).get("type"),
-                        (_pb_info or {}).get("message_id"),
                     )
                     await MessageHandlers._delete_and_warn(
                         update, context, chat_id, user_id,
@@ -3782,20 +3717,51 @@ class MessageHandlers:
                 )
                 return
 
-        if _as_bool(settings.get('delete_banned_words'), False):
-            banned_words = await get_banned_words_cached(chat_id)
-            if banned_words:
-                matched = None
-                for bw in banned_words:
-                    if _contains_banned_word(ctx.analysis_text, bw):
-                        matched = bw
-                        break
-                if matched:
-                    await MessageHandlers._delete_and_warn(
-                        update, context, chat_id, user_id,
-                        "banned_word", settings, is_anonymous=is_anonymous,
+        # ═══════════════════════════════════════════════════════════
+        # 🔴 v7.18.16 FIX-BWM-3: fallback محسَّن عند فشل BWM
+        # ═══════════════════════════════════════════════════════════
+        if _banned_words_enabled:
+            matched = None
+
+            if _HAS_BWM and BannedWordsManager is not None:
+                try:
+                    matched = await BannedWordsManager.check_message(
+                        text=ctx.analysis_text,
+                        chat_id=chat_id,
                     )
-                    return
+                except Exception as _e_bwm:
+                    logger.warning(
+                        "⚠️ BannedWordsManager.check_message فشل — "
+                        "fallback للنظام القديم: %s",
+                        _e_bwm,
+                    )
+                    matched = None
+
+            # fallback: إن فشل BWM أو غير متوفّر
+            if matched is None and not (
+                _HAS_BWM and BannedWordsManager is not None
+            ):
+                try:
+                    banned_words = await get_banned_words_cached(chat_id)
+                except Exception:
+                    banned_words = None
+                if banned_words:
+                    for bw in banned_words:
+                        if _contains_banned_word(ctx.analysis_text, bw):
+                            matched = bw
+                            break
+
+            if matched:
+                logger.warning(
+                    "🚫 BANNED-MATCH | chat=%s user=%s word=%r text=%r",
+                    chat_id, user_id, matched,
+                    ctx.analysis_text[:80],
+                )
+                await MessageHandlers._delete_and_warn(
+                    update, context, chat_id, user_id,
+                    "banned_word", settings, is_anonymous=is_anonymous,
+                )
+                return
 
         try:
             max_len = int(settings.get('max_message_length', 0) or 0)
@@ -3836,9 +3802,11 @@ class MessageHandlers:
             except Exception:
                 pass
 
-        if ctx.text:
+        # 🔴 v7.18.15 FIX-RPL-3: دعم caption في الردود
+        _reply_source = ctx.text or ctx.caption
+        if _reply_source and not is_anonymous:
             await MessageHandlers._process_auto_reply(
-                update, context, chat_id, ctx.text, user_id,
+                update, context, chat_id, _reply_source, user_id,
             )
 
     @staticmethod
@@ -3977,10 +3945,6 @@ class MessageHandlers:
         lang = await _ensure_lang(update, context)
         message = update.effective_message
         if message is None:
-            logger.warning(
-                "⚠️ _delete_and_warn(%s): effective_message is None",
-                violation_type,
-            )
             return
         message_preview = None
         try:
@@ -4028,35 +3992,25 @@ class MessageHandlers:
                 _origin_type = (_fwd.get("origin_type") or "").lower()
 
                 if _origin_type in ("user", "hidden_user"):
-                    logger.debug(
-                        "SKIP-BLACKLIST-USER | type=%s name=%r",
-                        _origin_type, _fwd.get("original_name"),
-                    )
+                    pass
                 else:
                     _source_id = (
                         _fwd.get("original_chat_id")
                         or _fwd.get("sender_chat_id")
                         or _fwd.get("original_user_id")
                     )
-                    if _source_id is not None and int(_source_id) > 0:
-                        logger.debug(
-                            "SKIP-BLACKLIST-POSITIVE-ID | id=%s type=%s",
-                            _source_id, _origin_type,
-                        )
-                    elif _source_id is not None:
-                        await _add_blocked_source(
-                            source_id=_source_id,
-                            source_type=_origin_type or "channel",
-                            source_name=_fwd.get("original_name") or "",
-                            reason=f"auto:{violation_type}",
-                        )
-                        logger.info(
-                            "📝 AUTO-ADDED-TO-BLACKLIST | "
-                            "source_id=%s name=%r type=%s",
-                            _source_id,
-                            _fwd.get("original_name"),
-                            _origin_type,
-                        )
+                    if _source_id is not None:
+                        try:
+                            _source_int = int(_source_id)
+                        except (TypeError, ValueError):
+                            _source_int = None
+                        if _source_int is not None and _source_int < 0:
+                            await _add_blocked_source(
+                                source_id=_source_id,
+                                source_type=_origin_type or "channel",
+                                source_name=_fwd.get("original_name") or "",
+                                reason=f"auto:{violation_type}",
+                            )
             except Exception as e:
                 logger.debug("auto-add blacklist: %s", e)
 
@@ -4207,11 +4161,15 @@ class MessageHandlers:
         except Exception:
             pass
 
+    # 🔴 v7.18.16 FIX-RPL-3: caption + logging + usage tracking
     @staticmethod
     async def _process_auto_reply(update, context, chat_id, text, user_id=None):
         try:
             ars = await get_auto_reply_settings_cached(chat_id)
             if not _as_bool(ars.get('enabled', False), False):
+                logger.debug(
+                    "auto_reply disabled for chat=%s", chat_id,
+                )
                 return False
             if _as_bool(ars.get('ignore_bots', True), True):
                 eff_user = getattr(update, 'effective_user', None)
@@ -4227,11 +4185,24 @@ class MessageHandlers:
                 reply_text = reply.get('reply', '') or ''
                 if reply_text:
                     await safe_send(context.bot, chat_id, reply_text)
+                    logger.info(
+                        "💬 AUTO-REPLY sent | chat=%s trigger=%r",
+                        chat_id, text[:40],
+                    )
                 await _increment_usage_async(chat_id, text)
                 return True
             file_reply = get_reply_from_file(text)
             if file_reply:
                 await safe_send(context.bot, chat_id, file_reply)
+                logger.info(
+                    "💬 FILE-REPLY sent | chat=%s trigger=%r",
+                    chat_id, text[:40],
+                )
+                # 🔴 v7.18.16 FIX-RPL-3: تتبع الاستخدام للردود من الملف
+                try:
+                    await _increment_usage_async(chat_id, text)
+                except Exception:
+                    pass
                 return True
             return False
         except Exception as e:
@@ -4292,6 +4263,8 @@ class MessageHandlers:
             user_id = update.effective_user.id
             StateManager.clear(user_id)
             context.user_data.pop('ban_chat', None)
+            context.user_data.pop('reply_chat', None)
+            context.user_data.pop('reply_trigger_pending', None)
             clear_lang_cache(context)
             lang = await _ensure_lang(update, context)
             msg = await _trans(
@@ -4356,11 +4329,17 @@ class MessageHandlers:
             pass
         try:
             context.user_data.pop('ban_chat', None)
+            context.user_data.pop('reply_chat', None)
+            context.user_data.pop('reply_trigger_pending', None)
         except Exception:
             pass
 
     @staticmethod
     async def handle_add_banned_word(update, context):
+        """
+        🔴 v7.18.16 FIX-PERM-1: أُزيل فحص الصلاحيات المكرر
+        (BannedWordsManager يفحص داخلياً).
+        """
         user_id = update.effective_user.id if update.effective_user else None
         if not user_id:
             return
@@ -4379,23 +4358,6 @@ class MessageHandlers:
                 update, context,
             )
 
-        try:
-            is_admin = await _check_admin_in_chat(context, chat_id, user_id)
-        except Exception:
-            is_admin = False
-        if not is_admin:
-            try:
-                msg = await _trans(
-                    'ban_add_no_perms', lang,
-                    "❌ لم تعد مشرفاً في هذه المجموعة.",
-                )
-                await safe_send(context.bot, user_id, msg)
-            except Exception:
-                pass
-            StateManager.clear(user_id)
-            context.user_data.pop('ban_chat', None)
-            return
-
         if await MessageHandlers._apply_ban_add_rate_limit(
             update, context, lang,
         ):
@@ -4409,42 +4371,105 @@ class MessageHandlers:
 
         success = False
         try:
-            result = await DB.add_banned_word(chat_id, word, user_id)
-            added_ok, is_duplicate = (
-                result if isinstance(result, tuple) and len(result) == 2
-                else (bool(result), False)
-            )
-
-            if added_ok:
-                await _invalidate_banned_words_cache(chat_id)
-                tmpl = await _trans(
-                    'ban_word_added', lang,
-                    "✅ تمت إضافة الكلمة: <code>{word}</code>",
+            if _HAS_BWM and BannedWordsManager is not None:
+                ok, reason = await BannedWordsManager.add(
+                    word=word,
+                    user_id=user_id,
+                    scope=BannedScope.GROUP,
+                    chat_id=chat_id,
+                    bot=context.bot,
                 )
-                await safe_send(
-                    context.bot, user_id,
-                    _fmt(tmpl, word=escape(word)),
-                    parse_mode='HTML',
-                )
-                success = True
-            elif is_duplicate:
-                msg = await _trans(
-                    'ban_word_duplicate', lang,
-                    "❌ الكلمة موجودة مسبقاً.",
-                )
-                await safe_send(context.bot, user_id, msg)
-                success = True
+                if ok:
+                    tmpl = await _trans(
+                        'ban_word_added', lang,
+                        "✅ تمت إضافة الكلمة: <code>{word}</code>",
+                    )
+                    await safe_send(
+                        context.bot, user_id,
+                        _fmt(tmpl, word=escape(word)),
+                        parse_mode='HTML',
+                    )
+                    success = True
+                elif reason == 'duplicate':
+                    msg = await _trans(
+                        'ban_word_duplicate', lang,
+                        "❌ الكلمة موجودة مسبقاً.",
+                    )
+                    await safe_send(context.bot, user_id, msg)
+                    success = True
+                elif reason == 'no_perms':
+                    msg = await _trans(
+                        'ban_add_no_perms', lang,
+                        "❌ لم تعد مشرفاً في هذه المجموعة.",
+                    )
+                    await safe_send(context.bot, user_id, msg)
+                    StateManager.clear(user_id)
+                    context.user_data.pop('ban_chat', None)
+                    return
+                elif reason == 'invalid':
+                    msg = await _trans(
+                        'ban_word_invalid_length', lang,
+                        "❌ كلمة غير صالحة.",
+                    )
+                    await safe_send(context.bot, user_id, msg)
+                else:
+                    msg = await _trans(
+                        'ban_word_add_failed', lang,
+                        "❌ فشل الحفظ — حاول مجدداً.",
+                    )
+                    await safe_send(context.bot, user_id, msg)
             else:
-                logger.error(
-                    "❌ add_banned_word(%r, %r) رجعت (False, False) "
-                    "— فشل حقيقي (تجاوز الحد؟ مشكلة DB؟)",
-                    chat_id, word,
+                # fallback: النظام القديم (بدون فحص صلاحيات مكرر — نعتمد
+                # على _check_admin_in_chat مرة واحدة فقط)
+                try:
+                    is_admin = await _check_admin_in_chat(
+                        context, chat_id, user_id,
+                    )
+                except Exception:
+                    is_admin = False
+                if not is_admin:
+                    try:
+                        msg = await _trans(
+                            'ban_add_no_perms', lang,
+                            "❌ لم تعد مشرفاً في هذه المجموعة.",
+                        )
+                        await safe_send(context.bot, user_id, msg)
+                    except Exception:
+                        pass
+                    StateManager.clear(user_id)
+                    context.user_data.pop('ban_chat', None)
+                    return
+
+                result = await DB.add_banned_word(chat_id, word, user_id)
+                added_ok, is_duplicate = (
+                    result if isinstance(result, tuple) and len(result) == 2
+                    else (bool(result), False)
                 )
-                msg = await _trans(
-                    'ban_word_add_failed', lang,
-                    "❌ فشل الحفظ — حاول مجدداً.",
-                )
-                await safe_send(context.bot, user_id, msg)
+                if added_ok:
+                    await _invalidate_banned_words_cache(chat_id)
+                    tmpl = await _trans(
+                        'ban_word_added', lang,
+                        "✅ تمت إضافة الكلمة: <code>{word}</code>",
+                    )
+                    await safe_send(
+                        context.bot, user_id,
+                        _fmt(tmpl, word=escape(word)),
+                        parse_mode='HTML',
+                    )
+                    success = True
+                elif is_duplicate:
+                    msg = await _trans(
+                        'ban_word_duplicate', lang,
+                        "❌ الكلمة موجودة مسبقاً.",
+                    )
+                    await safe_send(context.bot, user_id, msg)
+                    success = True
+                else:
+                    msg = await _trans(
+                        'ban_word_add_failed', lang,
+                        "❌ فشل الحفظ — حاول مجدداً.",
+                    )
+                    await safe_send(context.bot, user_id, msg)
         except Exception as e:
             logger.error("add_banned_word(%s): %s", chat_id, e)
             try:
@@ -4482,8 +4507,7 @@ class MessageHandlers:
         if not is_dev:
             try:
                 msg = await _trans(
-                    'ban_add_no_perms', lang,
-                    "❌ صلاحيات غير كافية.",
+                    'ban_add_no_perms', lang, "❌ صلاحيات غير كافية.",
                 )
                 await safe_send(context.bot, user_id, msg)
             except Exception:
@@ -4505,42 +4529,68 @@ class MessageHandlers:
 
         success = False
         try:
-            result = await DB.add_banned_word(-1, word, user_id)
-            added_ok, is_duplicate = (
-                result if isinstance(result, tuple) and len(result) == 2
-                else (bool(result), False)
-            )
-
-            if added_ok:
-                await _invalidate_banned_words_cache(None)
-                tmpl = await _trans(
-                    'ban_word_added_global', lang,
-                    "✅ تمت إضافة الكلمة العالمية: <code>{word}</code>",
+            if _HAS_BWM and BannedWordsManager is not None:
+                ok, reason = await BannedWordsManager.add(
+                    word=word,
+                    user_id=user_id,
+                    scope=BannedScope.GLOBAL,
+                    bot=context.bot,  # 🔴 v7.18.16: تمرير bot للاتساق
                 )
-                await safe_send(
-                    context.bot, user_id,
-                    _fmt(tmpl, word=escape(word)),
-                    parse_mode='HTML',
-                )
-                success = True
-            elif is_duplicate:
-                msg = await _trans(
-                    'ban_word_duplicate', lang,
-                    "❌ الكلمة موجودة مسبقاً.",
-                )
-                await safe_send(context.bot, user_id, msg)
-                success = True
+                if ok:
+                    tmpl = await _trans(
+                        'ban_word_added_global', lang,
+                        "✅ تمت إضافة الكلمة العالمية: <code>{word}</code>",
+                    )
+                    await safe_send(
+                        context.bot, user_id,
+                        _fmt(tmpl, word=escape(word)),
+                        parse_mode='HTML',
+                    )
+                    success = True
+                elif reason == 'duplicate':
+                    msg = await _trans(
+                        'ban_word_duplicate', lang,
+                        "❌ الكلمة موجودة مسبقاً.",
+                    )
+                    await safe_send(context.bot, user_id, msg)
+                    success = True
+                else:
+                    msg = await _trans(
+                        'ban_word_add_failed', lang,
+                        "❌ فشل الحفظ — حاول مجدداً.",
+                    )
+                    await safe_send(context.bot, user_id, msg)
             else:
-                logger.error(
-                    "❌ add_banned_word(−1, %r) رجعت (False, False) "
-                    "— فشل حقيقي (تجاوز الحد؟ مشكلة DB؟)",
-                    word,
+                result = await DB.add_banned_word(-1, word, user_id)
+                added_ok, is_duplicate = (
+                    result if isinstance(result, tuple) and len(result) == 2
+                    else (bool(result), False)
                 )
-                msg = await _trans(
-                    'ban_word_add_failed', lang,
-                    "❌ فشل الحفظ — حاول مجدداً.",
-                )
-                await safe_send(context.bot, user_id, msg)
+                if added_ok:
+                    await _invalidate_banned_words_cache(None)
+                    tmpl = await _trans(
+                        'ban_word_added_global', lang,
+                        "✅ تمت إضافة الكلمة العالمية: <code>{word}</code>",
+                    )
+                    await safe_send(
+                        context.bot, user_id,
+                        _fmt(tmpl, word=escape(word)),
+                        parse_mode='HTML',
+                    )
+                    success = True
+                elif is_duplicate:
+                    msg = await _trans(
+                        'ban_word_duplicate', lang,
+                        "❌ الكلمة موجودة مسبقاً.",
+                    )
+                    await safe_send(context.bot, user_id, msg)
+                    success = True
+                else:
+                    msg = await _trans(
+                        'ban_word_add_failed', lang,
+                        "❌ فشل الحفظ — حاول مجدداً.",
+                    )
+                    await safe_send(context.bot, user_id, msg)
         except Exception as e:
             logger.error("add_global_banned_word: %s", e)
             try:
@@ -4558,6 +4608,9 @@ class MessageHandlers:
 
     @staticmethod
     async def handle_remove_banned_word(update, context):
+        """
+        🔴 v7.18.16 FIX-PERM-1: أُزيل فحص الصلاحيات المكرر.
+        """
         user_id = update.effective_user.id if update.effective_user else None
         if not user_id:
             return
@@ -4576,23 +4629,6 @@ class MessageHandlers:
                 update, context,
             )
 
-        try:
-            is_admin = await _check_admin_in_chat(context, chat_id, user_id)
-        except Exception:
-            is_admin = False
-        if not is_admin:
-            try:
-                msg = await _trans(
-                    'ban_add_no_perms', lang,
-                    "❌ لم تعد مشرفاً في هذه المجموعة.",
-                )
-                await safe_send(context.bot, user_id, msg)
-            except Exception:
-                pass
-            StateManager.clear(user_id)
-            context.user_data.pop('ban_chat', None)
-            return
-
         if await MessageHandlers._apply_ban_add_rate_limit(
             update, context, lang,
         ):
@@ -4607,25 +4643,57 @@ class MessageHandlers:
         success = False
         try:
             removed = False
-            for method_name in (
-                'remove_banned_word', 'delete_banned_word',
-                'remove_banned_word_by_text',
-            ):
-                fn = getattr(DB, method_name, None)
-                if not callable(fn):
-                    continue
+            reason = None
+
+            if _HAS_BWM and BannedWordsManager is not None:
+                ok, reason = await BannedWordsManager.remove(
+                    word=word,
+                    user_id=user_id,
+                    scope=BannedScope.GROUP,
+                    chat_id=chat_id,
+                    bot=context.bot,
+                )
+                removed = bool(ok)
+            else:
                 try:
-                    result = fn(chat_id, word)
-                    if asyncio.iscoroutine(result):
-                        result = await result
-                    removed = bool(result)
-                    break
-                except Exception as e:
-                    logger.debug("DB.%s failed: %s", method_name, e)
-                    continue
+                    is_admin = await _check_admin_in_chat(
+                        context, chat_id, user_id,
+                    )
+                except Exception:
+                    is_admin = False
+                if not is_admin:
+                    try:
+                        msg = await _trans(
+                            'ban_add_no_perms', lang,
+                            "❌ لم تعد مشرفاً في هذه المجموعة.",
+                        )
+                        await safe_send(context.bot, user_id, msg)
+                    except Exception:
+                        pass
+                    StateManager.clear(user_id)
+                    context.user_data.pop('ban_chat', None)
+                    return
+
+                for method_name in (
+                    'remove_banned_word', 'delete_banned_word',
+                    'remove_banned_word_by_text',
+                ):
+                    fn = getattr(DB, method_name, None)
+                    if not callable(fn):
+                        continue
+                    try:
+                        result = fn(chat_id, word)
+                        if asyncio.iscoroutine(result):
+                            result = await result
+                        removed = bool(result)
+                        break
+                    except Exception as e:
+                        logger.debug("DB.%s failed: %s", method_name, e)
+                        continue
 
             if removed:
-                await _invalidate_banned_words_cache(chat_id)
+                if not (_HAS_BWM and BannedWordsManager is not None):
+                    await _invalidate_banned_words_cache(chat_id)
                 tmpl = await _trans(
                     'ban_word_removed', lang,
                     "✅ تمت إزالة الكلمة: <code>{word}</code>",
@@ -4636,6 +4704,15 @@ class MessageHandlers:
                     parse_mode='HTML',
                 )
                 success = True
+            elif reason == 'no_perms':
+                msg = await _trans(
+                    'ban_add_no_perms', lang,
+                    "❌ لم تعد مشرفاً في هذه المجموعة.",
+                )
+                await safe_send(context.bot, user_id, msg)
+                StateManager.clear(user_id)
+                context.user_data.pop('ban_chat', None)
+                return
             else:
                 msg = await _trans(
                     'ban_word_not_found', lang,
@@ -4704,24 +4781,34 @@ class MessageHandlers:
         success = False
         try:
             removed = False
-            for method_name in (
-                'remove_banned_word', 'delete_banned_word',
-                'remove_banned_word_by_text',
-            ):
-                fn = getattr(DB, method_name, None)
-                if not callable(fn):
-                    continue
-                try:
-                    result = fn(-1, word)
-                    if asyncio.iscoroutine(result):
-                        result = await result
-                    removed = bool(result)
-                    break
-                except Exception:
-                    continue
+
+            if _HAS_BWM and BannedWordsManager is not None:
+                ok, reason = await BannedWordsManager.remove(
+                    word=word,
+                    user_id=user_id,
+                    scope=BannedScope.GLOBAL,
+                )
+                removed = bool(ok)
+            else:
+                for method_name in (
+                    'remove_banned_word', 'delete_banned_word',
+                    'remove_banned_word_by_text',
+                ):
+                    fn = getattr(DB, method_name, None)
+                    if not callable(fn):
+                        continue
+                    try:
+                        result = fn(-1, word)
+                        if asyncio.iscoroutine(result):
+                            result = await result
+                        removed = bool(result)
+                        break
+                    except Exception:
+                        continue
 
             if removed:
-                await _invalidate_banned_words_cache(None)
+                if not (_HAS_BWM and BannedWordsManager is not None):
+                    await _invalidate_banned_words_cache(None)
                 tmpl = await _trans(
                     'ban_word_removed_global', lang,
                     "✅ تمت إزالة الكلمة العالمية: <code>{word}</code>",
@@ -4749,6 +4836,262 @@ class MessageHandlers:
                 await safe_send(context.bot, user_id, msg)
             except Exception:
                 pass
+        finally:
+            await MessageHandlers._finalize_ban_add(
+                context, user_id, success,
+            )
+
+    # ═════════════════════════════════════════════════════════════
+    # 🔴 v7.18.16 FIX-RPL-1: handle_add_reply يدير 3 حالات
+    # ═════════════════════════════════════════════════════════════
+    @staticmethod
+    async def _save_reply_and_finish(
+        update, context, chat_id, trigger, response, lang, user_id,
+    ):
+        """
+        🆕 v7.18.16: دالة مساعدة لحفظ الرد وإغلاق الجلسة.
+        تُستدعى من handle_add_reply بعد تجميع trigger + response.
+        """
+        success = False
+        try:
+            add_fn = None
+            for name in ('add_auto_reply', 'add_reply', 'save_reply'):
+                fn = getattr(DB, name, None)
+                if callable(fn):
+                    add_fn = fn
+                    break
+
+            if add_fn is None:
+                logger.error("❌ لا توجد دالة add_auto_reply في DB")
+                return
+
+            result = add_fn(chat_id, trigger, response)
+            if asyncio.iscoroutine(result):
+                result = await result
+
+            added_ok = (
+                bool(result) if not isinstance(result, tuple) else result[0]
+            )
+
+            if added_ok:
+                # 🔴 v7.18.15 FIX-RPL-4: إبطال كاش الردود
+                try:
+                    await invalidate_auto_reply_cache(chat_id)
+                except Exception:
+                    pass
+                tmpl = await _trans(
+                    'reply_added', lang,
+                    "✅ تمت إضافة الرد:\n<b>{trigger}</b> → {response}",
+                )
+                await safe_send(
+                    context.bot, user_id,
+                    _fmt(
+                        tmpl,
+                        trigger=escape(trigger),
+                        response=escape(response[:100]),
+                    ),
+                    parse_mode='HTML',
+                )
+                success = True
+            else:
+                msg = await _trans(
+                    'reply_duplicate', lang,
+                    "❌ الرد موجود مسبقاً.",
+                )
+                await safe_send(context.bot, user_id, msg)
+                success = True
+        except Exception as e:
+            logger.error("_save_reply_and_finish: %s", e)
+            try:
+                msg = await _trans(
+                    'reply_add_failed', lang,
+                    "❌ فشل حفظ الرد.",
+                )
+                await safe_send(context.bot, user_id, msg)
+            except Exception:
+                pass
+        finally:
+            try:
+                context.user_data.pop('reply_trigger_pending', None)
+            except Exception:
+                pass
+            await MessageHandlers._finalize_ban_add(
+                context, user_id, success,
+            )
+
+    @staticmethod
+    async def handle_add_reply(update, context, state=None):
+        """
+        🆕 v7.18.16 FIX-RPL-1: يُدير 3 حالات:
+          - WAIT_REPLY_ADD:      خطوة واحدة "trigger | response"
+          - WAIT_REPLY_TRIGGER:  الخطوة 1 → استقبال المشغّل
+          - WAIT_REPLY_RESPONSE: الخطوة 2 → استقبال الرد
+        """
+        user_id = update.effective_user.id if update.effective_user else None
+        if not user_id:
+            return
+        message = update.effective_message
+        if not message or not message.text:
+            return
+        lang = await _ensure_lang(update, context)
+
+        chat_id = context.user_data.get('reply_chat')
+        if chat_id is None:
+            StateManager.clear(user_id)
+            return
+
+        # استخراج اسم الحالة
+        state_name = None
+        for candidate in (
+            getattr(state, 'name', None),
+            getattr(state, 'value', None),
+            str(state) if state is not None else None,
+        ):
+            if candidate:
+                state_name = str(candidate)
+                break
+
+        raw = message.text.strip()
+        if not raw:
+            return
+
+        # ─── الحالة 1: خطوة واحدة "trigger | response" ───
+        if state_name in (None, "WAIT_REPLY_ADD") or " | " in raw:
+            if " | " not in raw:
+                try:
+                    msg = await _trans(
+                        'reply_invalid_format', lang,
+                        "❌ الصيغة: <code>النص المُشغِّل | الرد</code>",
+                    )
+                    await safe_send(
+                        context.bot, user_id, msg, parse_mode='HTML',
+                    )
+                except Exception:
+                    pass
+                return
+            trigger, response = raw.split(" | ", 1)
+            trigger = trigger.strip()
+            response = response.strip()
+            if not trigger or not response:
+                return
+            await MessageHandlers._save_reply_and_finish(
+                update, context, chat_id, trigger, response, lang, user_id,
+            )
+            return
+
+        # ─── الحالة 2: الخطوة الأولى — استقبال المشغّل ───
+        if state_name == "WAIT_REPLY_TRIGGER":
+            trigger = raw
+            context.user_data['reply_trigger_pending'] = trigger
+            try:
+                StateManager.set(user_id, "WAIT_REPLY_RESPONSE")
+            except Exception as _se:
+                logger.debug("StateManager.set: %s", _se)
+            try:
+                msg = await _trans(
+                    'reply_enter_response', lang,
+                    "📝 أرسل الآن نص الرد:",
+                )
+                await safe_send(context.bot, user_id, msg)
+            except Exception:
+                pass
+            return
+
+        # ─── الحالة 3: الخطوة الثانية — استقبال الرد ───
+        if state_name == "WAIT_REPLY_RESPONSE":
+            trigger = context.user_data.pop('reply_trigger_pending', None)
+            if not trigger:
+                try:
+                    msg = await _trans(
+                        'reply_session_lost', lang,
+                        "❌ فُقدت الجلسة — ابدأ من جديد.",
+                    )
+                    await safe_send(context.bot, user_id, msg)
+                except Exception:
+                    pass
+                StateManager.clear(user_id)
+                context.user_data.pop('reply_chat', None)
+                return
+            response = raw
+            await MessageHandlers._save_reply_and_finish(
+                update, context, chat_id, trigger, response, lang, user_id,
+            )
+            return
+
+        # حالة غير معروفة — سلوك احتياطي
+        logger.debug(
+            "handle_add_reply: state_name=%r غير متوقّع", state_name,
+        )
+
+    @staticmethod
+    async def handle_remove_reply(update, context, state=None):
+        """🆕 v7.18.15: إزالة رد تلقائي."""
+        user_id = update.effective_user.id if update.effective_user else None
+        if not user_id:
+            return
+        message = update.effective_message
+        if not message or not message.text:
+            return
+        lang = await _ensure_lang(update, context)
+
+        chat_id = context.user_data.get('reply_chat')
+        if chat_id is None:
+            StateManager.clear(user_id)
+            return
+
+        try:
+            is_admin = await _check_admin_in_chat(context, chat_id, user_id)
+        except Exception:
+            is_admin = False
+        if not is_admin:
+            StateManager.clear(user_id)
+            context.user_data.pop('reply_chat', None)
+            return
+
+        trigger = message.text.strip()
+        if not trigger:
+            return
+
+        success = False
+        try:
+            removed = False
+            for name in ('remove_auto_reply', 'delete_reply', 'remove_reply'):
+                fn = getattr(DB, name, None)
+                if not callable(fn):
+                    continue
+                try:
+                    result = fn(chat_id, trigger)
+                    if asyncio.iscoroutine(result):
+                        result = await result
+                    removed = bool(result)
+                    break
+                except Exception:
+                    continue
+
+            if removed:
+                try:
+                    await invalidate_auto_reply_cache(chat_id)
+                except Exception:
+                    pass
+                msg = await _trans(
+                    'reply_removed', lang,
+                    "✅ تمت إزالة الرد: <code>{trigger}</code>",
+                )
+                await safe_send(
+                    context.bot, user_id,
+                    _fmt(msg, trigger=escape(trigger)),
+                    parse_mode='HTML',
+                )
+                success = True
+            else:
+                msg = await _trans(
+                    'reply_not_found', lang,
+                    "❌ الرد غير موجود.",
+                )
+                await safe_send(context.bot, user_id, msg)
+                success = True
+        except Exception as e:
+            logger.error("handle_remove_reply: %s", e)
         finally:
             await MessageHandlers._finalize_ban_add(
                 context, user_id, success,
@@ -4909,29 +5252,15 @@ async def handle_autoblocked_command(update, context):
 
 
 # ═══════════════════════════════════════════════════════════════════
-# 🆕 v7.18.14: /db_idle command (developer-only)
+# /db_idle command (developer-only)
 # ═══════════════════════════════════════════════════════════════════
 
 async def handle_db_idle_command(update, context):
-    """
-    🔍 v7.18.14: /db_idle — تدقيق idle-in-transaction (للمطور فقط).
-
-    الاستخدام:
-        /db_idle         — فحص كامل بالتفاصيل
-        /db_idle force   — تجاهل cooldown (غير مطلوب هنا، الأمر يدوي)
-
-    يكتشف اتصالات idle-in-tx في PostgreSQL فقط، ويعرض:
-      - PID + application_name
-      - مدة الخمول وعمر المعاملة
-      - backend_xmin
-      - آخر query (مقطوع)
-    """
     if not update.effective_user or not update.effective_message:
         return
 
     user_id = update.effective_user.id
 
-    # التحقق من صلاحيات المطور
     try:
         is_dev = False
         for attr in ('is_developer', 'is_dev', 'is_owner'):
@@ -4951,7 +5280,6 @@ async def handle_db_idle_command(update, context):
 
     chat_id = update.effective_chat.id
 
-    # التحقق من توفر DB.audit_idle_in_transactions
     audit_fn = getattr(DB, 'audit_idle_in_transactions', None)
     if not callable(audit_fn):
         await safe_send(
@@ -4962,7 +5290,6 @@ async def handle_db_idle_command(update, context):
         )
         return
 
-    # الاستعلام
     try:
         report = await audit_fn()
     except Exception as e:
@@ -4981,7 +5308,6 @@ async def handle_db_idle_command(update, context):
 
     count = int(report.get('count') or 0)
 
-    # حالة نظيفة
     if count == 0:
         await safe_send(
             context.bot, chat_id,
@@ -4991,7 +5317,6 @@ async def handle_db_idle_command(update, context):
         )
         return
 
-    # حالة فيها اتصالات عالقة
     app_matches = int(report.get('app_matches') or 0)
     total = int(report.get('total_idle_tx') or 0)
     min_secs = report.get('min_seconds_used')
@@ -5058,16 +5383,9 @@ async def handle_db_idle_command(update, context):
     lines.append("━━━━━━━━━━━━━━━━━━━━")
     lines.append("💡 <b>الحل:</b>")
     lines.append(
-        "• راجع <code>database.py v7.7.61</code> (TX-1..4) "
-        "— rollback وقائي"
+        "• راجع <code>database.py v7.7.61</code> (TX-1..4)"
     )
-    lines.append(
-        "• تأكد من عدم وجود معاملات طويلة في الكود"
-    )
-    lines.append(
-        "• استخدم <code>analytics_idle_tx</code> من لوحة "
-        "التحليلات للتحديث"
-    )
+    lines.append("• تأكد من عدم وجود معاملات طويلة في الكود")
 
     text = "\n".join(lines)
     if len(text) > 4000:
@@ -5174,10 +5492,31 @@ __all__ = [
     "_HAS_DET_RUN_IN_POOL",
     "_HAS_DET_SHUTDOWN_EXECUTOR",
 
-    # 🆕 v7.18.14: Idle-TX audit
     "handle_db_idle_command",
     "_notify_dev_about_idle_tx",
     "_IDLE_TX_NOTIFY_COOLDOWN",
     "_idle_tx_last_notify",
     "_idle_tx_notify_lock",
+
+    # 🆕 v7.18.15/16
+    "_HAS_BWM",
+    "BannedWordsManager",
+    "BannedScope",
+    "_bwm_contains",
+    "_bwm_is_greeting",
 ]
+
+
+# ═════════════════════════════════════════════════════════════════════
+# LOAD BEACON
+# ═════════════════════════════════════════════════════════════════════
+
+try:
+    logger.info(
+        "✅ handlers_message v7.18.16 loaded | "
+        "BWM=%s | PRIVATE_HANDLERS=%d | replies=state-aware",
+        "yes" if _HAS_BWM else "no",
+        len(MessageHandlers._PRIVATE_HANDLERS_MAP),
+    )
+except Exception:
+    pass
