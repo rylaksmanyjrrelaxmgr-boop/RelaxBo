@@ -1,9 +1,19 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-handlers_message.py - v7.18.16 BANNED-MANAGER-INTEGRATION + REPLIES-FIX
-(متوافق مع detectors v4.0.9 — CRITICAL-FIXES)
+handlers_message.py - v7.18.17 DETECTORS-v4.1.0-COMPAT
+(متوافق مع detectors v4.1.0 — CRITICAL-FIXES-2026)
 =============================================================================
+🆕 v7.18.17 (DETECTORS-v4.1.0-COMPAT):
+    ✅ متوافق مع detectors v4.1.0 — لا تغييرات وظيفية مطلوبة.
+    📌 ملاحظة (REC-1): sync fallback (analyze_message_full) يعمل بشكل
+       محدود — طبقات OCR/Audio/Video/NSFW/Sticker/Stego معطّلة تقنياً
+       بسبب تعطيل _download_telegram_file (FIX-DL-1 في detectors).
+       المسار المُعتمد: analyze_message_full_async.
+    📌 ملاحظة (REC-2): _analysis_mode يميّز الآن الوضع المُخفَّض:
+       "multilayer-sync-pool-DEGRADED" بدلاً من "multilayer-sync-pool"
+       ليظهر في السجلات بوضوح.
+
 🆕 v7.18.16 (FULL-REWRITE-FIXES):
     🔴 FIX-RPL-1: handle_add_reply يُدير 3 حالات (WAIT_REPLY_TRIGGER,
                   WAIT_REPLY_RESPONSE, WAIT_REPLY_ADD)
@@ -27,14 +37,6 @@ handlers_message.py - v7.18.16 BANNED-MANAGER-INTEGRATION + REPLIES-FIX
     🔍 IDLE-2: _notify_dev_about_idle_tx — إشعار تلقائي عند idle-in-tx
     🔍 IDLE-3: _lazy_init_columns يقبل bot= اختيارياً
     🔍 IDLE-4: عند فشل DB حرج (migration_ok=False) → فحص idle-tx + إشعار
-    🆕 ثوابت: _IDLE_TX_NOTIFY_COOLDOWN، _idle_tx_last_notify
-
-🆕 v7.18.13 (SHIELD-LOG-LEVEL-OPTIMIZATION)
-🆕 v7.18.12 (SLOW-MODE-DIRECT-HTTP-FIX)
-🆕 v7.18.11 (SLOW-MODE-DO_API_REQUEST-FIX)
-🆕 v7.18.10 (BANNED-WORDS-TUPLE-FIX)
-🆕 v7.18.9  (POOL-BRIDGE)
-🎯 v7.18.8  CORRECTED — يحل 30 مشكلة في v7.18.7
 =============================================================================
 """
 
@@ -991,7 +993,7 @@ async def _lazy_init_columns(bot=None):
         _columns_last_attempt_ts = now
 
         db_type = getattr(DB, "DB_TYPE", "sqlite")
-        logger.info("🔧 v7.18.16: Auto-migration (DB_TYPE=%s)", db_type)
+        logger.info("🔧 v7.18.17: Auto-migration (DB_TYPE=%s)", db_type)
 
         cols = [
             ("delete_protected_any", "INTEGER DEFAULT 0", "TINYINT(1) DEFAULT 0"),
@@ -2986,7 +2988,7 @@ def _get_spaced_banned_pattern(banned_word: str) -> Optional[re.Pattern]:
 
 def _contains_banned_word(text, banned_word) -> bool:
     """
-    ⚠️ v7.18.16: للتوافق القديم فقط.
+    ⚠️ v7.18.17: للتوافق القديم فقط.
     المسار الحديث يستخدم BannedWordsManager.check_message.
     """
     if not text or not banned_word:
@@ -3102,7 +3104,6 @@ class MessageHandlers:
             if update.effective_message is None:
                 return
             # 🔴 v7.18.16 FIX-EDIT-1: تجاوز فحص الفيضان عند التعديل
-            # (تعديل الرسالة ليس رسالة جديدة — لا يجب أن يحتسب في الفيضان)
             await MessageHandlers._handle_group_impl(
                 update, context, skip_flood=True,
             )
@@ -3256,6 +3257,7 @@ class MessageHandlers:
     async def _handle_group_impl(update, context, skip_flood=False):
         """
         🔴 v7.18.16: skip_flood=True عند التعديل (handle_edited).
+        🆕 v7.18.17 REC-2: _analysis_mode يميّز الوضع المُخفَّض.
         """
         if not update.effective_chat or not update.effective_message:
             return
@@ -3443,7 +3445,9 @@ class MessageHandlers:
                                     _spam_reasons.append(f"{_layer}:{_r}")
                         except Exception:
                             pass
-                        _analysis_mode = "multilayer-sync-pool"
+                        # 🆕 v7.18.17 REC-2: تمييز الوضع المُخفَّض
+                        # (sync download معطّل في detectors v4.1.0)
+                        _analysis_mode = "multilayer-sync-pool-DEGRADED"
                 except asyncio.TimeoutError:
                     logger.warning(
                         "⚠️ multilayer sync pool: TIMEOUT (30s) | "
@@ -3737,7 +3741,6 @@ class MessageHandlers:
                     )
                     matched = None
 
-            # fallback: إن فشل BWM أو غير متوفّر
             if matched is None and not (
                 _HAS_BWM and BannedWordsManager is not None
             ):
@@ -4419,8 +4422,7 @@ class MessageHandlers:
                     )
                     await safe_send(context.bot, user_id, msg)
             else:
-                # fallback: النظام القديم (بدون فحص صلاحيات مكرر — نعتمد
-                # على _check_admin_in_chat مرة واحدة فقط)
+                # fallback: النظام القديم (فحص صلاحيات مرة واحدة)
                 try:
                     is_admin = await _check_admin_in_chat(
                         context, chat_id, user_id,
@@ -5513,8 +5515,11 @@ __all__ = [
 
 try:
     logger.info(
-        "✅ handlers_message v7.18.16 loaded | "
-        "BWM=%s | PRIVATE_HANDLERS=%d | replies=state-aware",
+        "✅ handlers_message v7.18.17 loaded | "
+        "BWM=%s | PRIVATE_HANDLERS=%d | "
+        "replies=state-aware | "
+        "detectors-compat=v4.1.0 | "
+        "sync-fallback=degraded",
         "yes" if _HAS_BWM else "no",
         len(MessageHandlers._PRIVATE_HANDLERS_MAP),
     )
