@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-database_analytics.py - دوال التحليلات المتقدمة (v1.0.4)
+database_analytics.py - دوال التحليلات المتقدمة (v1.1.0)
 ================================================================================
 AnalyticsMixin:
   - get_user_growth               : نمو المستخدمين آخر N يوم
@@ -19,45 +19,25 @@ AnalyticsMixin:
   - get_indexes_info              : الفهارس
   - get_autovacuum_settings       : إعدادات Autovacuum
   - get_maintenance_recommendations : توصيات SQL عملية
+  🆕 Idle-TX Integration (v1.1.0):
+  - get_idle_tx_info              : 🔍 idle-in-transaction فوري
+  - get_idle_tx_status_info       : 📊 حالة نظام الرصد الدوري
 ================================================================================
+🆕 v1.1.0 (IDLE-TX-INTEGRATION):
+  ✅ get_idle_tx_info(): wrapper نظيف لـ audit_idle_in_transactions()
+  ✅ get_idle_tx_status_info(): wrapper لـ get_idle_tx_audit_status()
+  ✅ get_db_diagnostics(): يضمّ idle_tx + summary.idle_tx_count
+  ✅ get_pool_live(): يضمّ rollback_timeout من v7.7.61
+  ✅ get_maintenance_recommendations(): توصية idle-tx عند الحاجة
+  ✅ توافق تام مع database.py < v7.7.62 (fallback نظيف بلا أخطاء)
+
 🆕 v1.0.4 (POST-AUDIT FIXES):
   🔴 FIX-1: get_user_growth — دعم PostgreSQL.
-      قبل: كان يستخدم DATE(created_at) وهي غير موجودة في PG
-            → الاستعلام يفشل على PG ويرجع قائمة فارغة بصمت.
-      بعد: فرع DB-specific (PG: created_at::date،
-            MySQL/SQLite: DATE(created_at)).
-  🟡 FIX-2: get_channel_success_rate — تنفيذ "الفلترة" المُعلَنة في
-      الـ changelog v1.0.3. أُضيف معامل اختياري filter_min_attempts
-      (افتراضي 0 = بدون فلترة، backward-compatible).
+  🟡 FIX-2: get_channel_success_rate — تنفيذ "الفلترة" المُعلَنة.
 
-🆕 v1.0.3 — إصلاحات ما بعد المراجعة النهائية:
-  ✅ get_channel_success_rate: مُضافة فعلياً (كانت في docstring فقط)
-  ✅ get_slowest_queries: alias موثّق — يتفادى التعارض مع database.py
-  ✅ get_db_diagnostics: تمرير البيانات المحسوبة (تجنّب 4 استعلامات → 2)
-  ✅ get_maintenance_recommendations: يقبل dead_tables/table_sizes
-                                      اختيارياً لتفادي التكرار
-  ✅ n_mod_since_analyze: مُعاد في result (كان مُحدَّداً في SQL فقط)
-  ✅ _format_kb: أُزيلت (غير مُستخدَمة)
-  ✅ import time: أُزيل (غير مُستخدَم)
-
-✅ v1.0.2 — تشخيص قاعدة البيانات:
-  ✅ _dead_tuple_color: ألوان ذكية (حجم + نسبة)
-  ✅ _dead_tuple_advice: توصية SQL بجانب كل جدول
-  ✅ get_db_diagnostics: تقرير موحّد
-  ✅ get_maintenance_recommendations: DELETE + VACUUM جاهز
-
-✅ v1.0.1 — إصلاحات ما بعد التدقيق:
-  ✅ get_top_channels: تمييز نسبة النجاح عن نسبة الإنجاز
-  ✅ get_subscription_rate: إصلاح MySQL (DATE_FORMAT)
-  ✅ get_pool_live: دعم asyncmy
-
-⚠️ ملاحظة توافق مهمة:
-    database.py يحتوي على:
-        get_slow_queries = get_slow_queries_report
-    مما يُستبدل نسخة الـMixin عند استدعاء get_slow_queries().
-    للوصول إلى السلوك "الأبطأ أولاً" من الـMixin استخدم:
-        await DB.get_slowest_queries(limit)
-    أو أزل الـalias من database.py.
+✅ v1.0.3 — إصلاحات ما بعد المراجعة النهائية.
+✅ v1.0.2 — تشخيص قاعدة البيانات.
+✅ v1.0.1 — إصلاحات ما بعد التدقيق.
 ================================================================================
 """
 
@@ -94,6 +74,11 @@ ADMIN_LOGS_WARN_COUNT = 5000
 
 # 🆕 v1.0.2: عدد الكلمات في banned_words قبل التنبيه
 BANNED_WORDS_WARN_COUNT = 500
+
+# 🆕 v1.1.0: عتبات idle-in-transaction
+# (تطابق افتراضيات v7.7.62 — للاستخدام في التوصيات)
+IDLE_TX_WARN_COUNT = 1        # تنبيه عند ≥ 1 اتصال
+IDLE_TX_CRIT_COUNT = 3        # حرج عند ≥ 3 اتصالات
 
 
 # =====================================================================
@@ -176,6 +161,15 @@ def _dead_tuple_advice(dead: int, live: int, table: str) -> str:
     return f"🔴 VACUUM FULL {table} عاجل"
 
 
+def _idle_tx_color(count: int) -> str:
+    """🆕 v1.1.0: لون لعدد idle-in-transaction."""
+    if count >= IDLE_TX_CRIT_COUNT:
+        return "🔴"
+    if count >= IDLE_TX_WARN_COUNT:
+        return "🟠"
+    return "🟢"
+
+
 def _format_bytes(num_bytes) -> str:
     """📏 تحويل بايت إلى صيغة مقروءة."""
     try:
@@ -189,6 +183,23 @@ def _format_bytes(num_bytes) -> str:
     if b < 1024 * 1024 * 1024:
         return f"{b / (1024 * 1024):.2f} MB"
     return f"{b / (1024 * 1024 * 1024):.2f} GB"
+
+
+def _format_duration_seconds(seconds: Any) -> str:
+    """🆕 v1.1.0: صيغة مدة مقروءة (s/m/h)."""
+    try:
+        s = int(seconds)
+    except (TypeError, ValueError):
+        return "?"
+    if s < 0:
+        return "?"
+    if s < 60:
+        return f"{s}s"
+    if s < 3600:
+        return f"{s // 60}m{s % 60}s"
+    if s < 86400:
+        return f"{s // 3600}h{(s % 3600) // 60}m"
+    return f"{s // 86400}d{(s % 86400) // 3600}h"
 
 
 # =====================================================================
@@ -491,7 +502,12 @@ class AnalyticsMixin:
     # =================================================================
 
     async def get_pool_live(self) -> Dict[str, Any]:
-        """🚀 حالة Pool مباشرة."""
+        """
+        🚀 حالة Pool مباشرة.
+
+        🆕 v1.1.0: يضمّ rollback_timeout + idle_tx_audit_active
+        من database.py v7.7.61+.
+        """
         if not (getattr(self, "USE_POSTGRES", False)
                 or getattr(self, "USE_MYSQL", False)):
             return {"available": False, "type": "sqlite"}
@@ -520,7 +536,7 @@ class AnalyticsMixin:
             in_use = max(0, current_size - idle_size)
             util = (in_use / max_size * 100) if max_size > 0 else 0.0
 
-            return {
+            result: Dict[str, Any] = {
                 "available": True,
                 "type": "postgres" if getattr(self, "USE_POSTGRES", False) else "mysql",
                 "max_size": max_size,
@@ -529,6 +545,25 @@ class AnalyticsMixin:
                 "in_use": in_use,
                 "utilization_pct": round(util, 1),
             }
+
+            # 🆕 v1.1.0: معلومات v7.7.61 + v7.7.62
+            if getattr(self, "USE_POSTGRES", False):
+                try:
+                    from database import PG_ROLLBACK_ON_RETURN_TIMEOUT
+                    result["rollback_timeout"] = PG_ROLLBACK_ON_RETURN_TIMEOUT
+                except Exception:
+                    pass
+
+                audit_task = getattr(self, "_idle_tx_audit_task", None)
+                result["idle_tx_audit_active"] = (
+                    audit_task is not None and not audit_task.done()
+                )
+
+                last_count = getattr(self, "_idle_tx_audit_last_count", None)
+                if last_count is not None:
+                    result["idle_tx_last_count"] = int(last_count)
+
+            return result
         except Exception as e:
             logger.warning(f"⚠️ get_pool_live: {e}")
             return {"available": False, "type": "error", "error": str(e)}
@@ -575,6 +610,95 @@ class AnalyticsMixin:
         except Exception as e:
             logger.warning(f"⚠️ get_slowest_queries: {e}")
             return []
+
+    # =================================================================
+    # 7.b) 🆕 v1.1.0: Idle-in-transaction info
+    # =================================================================
+
+    async def get_idle_tx_info(
+        self,
+        min_seconds: Optional[float] = None,
+        app_filter: Optional[str] = None,
+        limit: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """
+        🔍 v1.1.0: idle-in-transaction فوري.
+
+        Wrapper نظيف لـ database.audit_idle_in_transactions() (v7.7.62).
+        متوافق مع database.py < v7.7.62 (fallback بدون أخطاء).
+
+        Returns:
+            dict:
+                available: bool — True إن نجح الاستدعاء
+                + كل حقول audit_idle_in_transactions
+                (count, items, by_app, warning, ...)
+        """
+        if not getattr(self, "USE_POSTGRES", False):
+            return {"available": False, "reason": "not_postgres"}
+
+        audit_fn = getattr(self, "audit_idle_in_transactions", None)
+        if audit_fn is None:
+            return {
+                "available": False,
+                "reason": "requires_database_v7.7.62+",
+            }
+
+        try:
+            kwargs: Dict[str, Any] = {}
+            if min_seconds is not None:
+                kwargs["min_seconds"] = min_seconds
+            if app_filter is not None:
+                kwargs["app_filter"] = app_filter
+            if limit is not None:
+                kwargs["limit"] = limit
+
+            report = await audit_fn(**kwargs)
+            if not isinstance(report, dict):
+                return {
+                    "available": False,
+                    "reason": "invalid_report_type",
+                }
+            return {"available": True, **report}
+        except Exception as e:
+            logger.warning(f"⚠️ get_idle_tx_info: {e}")
+            return {
+                "available": False,
+                "reason": "call_failed",
+                "error": str(e),
+            }
+
+    async def get_idle_tx_status_info(self) -> Dict[str, Any]:
+        """
+        📊 v1.1.0: حالة نظام الرصد الدوري لـ idle-in-tx.
+
+        Wrapper نظيف لـ database.get_idle_tx_audit_status() (v7.7.62).
+        متوافق مع database.py < v7.7.62 (fallback بدون أخطاء).
+        """
+        if not getattr(self, "USE_POSTGRES", False):
+            return {"available": False, "reason": "not_postgres"}
+
+        status_fn = getattr(self, "get_idle_tx_audit_status", None)
+        if status_fn is None:
+            return {
+                "available": False,
+                "reason": "requires_database_v7.7.62+",
+            }
+
+        try:
+            status = await status_fn()
+            if not isinstance(status, dict):
+                return {
+                    "available": False,
+                    "reason": "invalid_status_type",
+                }
+            return {"available": True, **status}
+        except Exception as e:
+            logger.warning(f"⚠️ get_idle_tx_status_info: {e}")
+            return {
+                "available": False,
+                "reason": "call_failed",
+                "error": str(e),
+            }
 
     # =================================================================
     # 8) Dead Tuples لكل جدول
@@ -825,21 +949,48 @@ class AnalyticsMixin:
         self,
         dead_tables: Optional[List[Dict[str, Any]]] = None,
         table_sizes: Optional[List[Dict[str, Any]]] = None,
+        idle_tx_info: Optional[Dict[str, Any]] = None,
     ) -> List[str]:
         """
         🧹 توصيات صيانة عملية (قائمة أسطر SQL/text جاهزة).
 
-        ✅ v1.0.3: يقبل `dead_tables` و `table_sizes` اختيارياً
-        لتفادي إعادة الاستعلام عند الاستدعاء من get_db_diagnostics.
+        ✅ v1.0.3: يقبل `dead_tables` و `table_sizes` اختيارياً.
+        🆕 v1.1.0: يقبل `idle_tx_info` اختيارياً + يولّد توصية عند الحاجة.
 
         Args:
             dead_tables: إن مرَّرت، يُستخدَم بدل استدعاء get_dead_tuples()
             table_sizes: إن مرَّرت، يُستخدَم بدل استدعاء get_table_sizes()
+            idle_tx_info: إن مرَّرت، يُستخدَم بدل استدعاء get_idle_tx_info()
         """
         recs: List[str] = []
 
         if not getattr(self, "USE_POSTGRES", False):
             return recs
+
+        # --- 0) 🆕 v1.1.0: idle-in-transaction ---
+        try:
+            if idle_tx_info is None:
+                idle_tx_info = await self.get_idle_tx_info()
+            if idle_tx_info.get("available"):
+                count = int(idle_tx_info.get("count") or 0)
+                if count >= IDLE_TX_WARN_COUNT:
+                    app_matches = int(
+                        idle_tx_info.get("app_matches") or 0
+                    )
+                    color = _idle_tx_color(count)
+                    detail = ""
+                    if app_matches > 0:
+                        detail = (
+                            f"\n🚨 <b>{app_matches}</b> من تطبيقنا "
+                            f"(<code>relax_bot</code>) — "
+                            f"راجع database.py v7.7.61 (TX-1..4)"
+                        )
+                    recs.append(
+                        f"{color} <b>idle-in-transaction:</b> "
+                        f"<b>{count}</b> اتصال{detail}"
+                    )
+        except Exception as e:
+            logger.debug(f"idle_tx recs: {e}")
 
         # --- 1) admin_logs ---
         try:
@@ -965,8 +1116,8 @@ class AnalyticsMixin:
         """
         🔬 تقرير تشخيص شامل لقاعدة البيانات.
 
-        ✅ v1.0.3: تمرير البيانات المحسوبة لـget_maintenance_recommendations
-        → استعلامان بدل 4 (تحسين ~50% عند الفتح).
+        ✅ v1.0.3: تمرير البيانات المحسوبة → استعلامان بدل 4.
+        🆕 v1.1.0: يضمّ idle_tx + idle_tx_status.
 
         Returns dict:
           - available       : bool
@@ -975,6 +1126,8 @@ class AnalyticsMixin:
           - table_sizes     : list
           - indexes         : dict
           - autovacuum      : dict
+          - idle_tx         : dict (v7.7.62+)
+          - idle_tx_status  : dict (v7.7.62+)
           - recommendations : list[str]
           - summary         : dict
         """
@@ -985,6 +1138,8 @@ class AnalyticsMixin:
             'table_sizes': [],
             'indexes': {},
             'autovacuum': {},
+            'idle_tx': {},
+            'idle_tx_status': {},
             'recommendations': [],
             'summary': {},
         }
@@ -1024,12 +1179,29 @@ class AnalyticsMixin:
                 f"get_autovacuum_settings in diagnostics: {e}"
             )
 
-        # ✅ v1.0.3: Recommendations — تمرير البيانات المحسوبة
+        # 🆕 v1.1.0: Idle-TX فوري
+        try:
+            result['idle_tx'] = await self.get_idle_tx_info()
+        except Exception as e:
+            logger.warning(f"get_idle_tx_info in diagnostics: {e}")
+            result['idle_tx'] = {"available": False}
+
+        # 🆕 v1.1.0: حالة نظام الرصد الدوري
+        try:
+            result['idle_tx_status'] = await self.get_idle_tx_status_info()
+        except Exception as e:
+            logger.warning(
+                f"get_idle_tx_status_info in diagnostics: {e}"
+            )
+            result['idle_tx_status'] = {"available": False}
+
+        # ✅ v1.0.3 + v1.1.0: Recommendations — تمرير البيانات المحسوبة
         try:
             result['recommendations'] = (
                 await self.get_maintenance_recommendations(
                     dead_tables=result['dead_tuples'],
                     table_sizes=result['table_sizes'],
+                    idle_tx_info=result['idle_tx'],
                 )
             )
         except Exception as e:
@@ -1062,6 +1234,13 @@ class AnalyticsMixin:
                 elif global_ratio >= 0.05:
                     overall_color = "🟡"
 
+            # 🆕 v1.1.0: idle-tx في الـ summary
+            idle_count = 0
+            idle_color = "🟢"
+            if result['idle_tx'].get("available"):
+                idle_count = int(result['idle_tx'].get("count") or 0)
+                idle_color = _idle_tx_color(idle_count)
+
             result['summary'] = {
                 'dead_total': dead_total,
                 'live_total': live_total,
@@ -1069,6 +1248,9 @@ class AnalyticsMixin:
                 'worst_ratio': round(worst_ratio * 100, 1),
                 'overall_color': overall_color,
                 'tables_count': len(result['dead_tuples']),
+                # 🆕 v1.1.0
+                'idle_tx_count': idle_count,
+                'idle_tx_color': idle_color,
             }
         except Exception as e:
             logger.warning(f"summary build: {e}")
@@ -1087,4 +1269,7 @@ __all__ = [
     "TABLE_SIZE_CRITICAL_KB",
     "ADMIN_LOGS_WARN_COUNT",
     "BANNED_WORDS_WARN_COUNT",
+    # 🆕 v1.1.0
+    "IDLE_TX_WARN_COUNT",
+    "IDLE_TX_CRIT_COUNT",
 ]
