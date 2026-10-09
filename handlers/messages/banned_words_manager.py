@@ -3,21 +3,36 @@
 """
 handlers/messages/banned_words_manager.py
 ===============================================================================
-🛡️ Banned Words Manager v1.1.0 — Dual-Path System + Performance Fixes
+🛡️ Banned Words Manager v1.1.1 — Dual-Path System + Integration Docs
 ===============================================================================
 
 🎯 المساران المنفصلان:
     1. GlobalBannedWordsPath  (chat_id = -1)     → للمطور
     2. GroupBannedWordsPath   (chat_id = group)  → لمشرف المجموعة
 
+🆕 v1.1.1 (INTEGRATION-DOCS + FALLBACK-CONSISTENCY):
+    ✅ توثيق التكامل مع detectors v4.1.0 و handlers_message v7.18.17.
+    🔴 FIX-FALLBACK-1: fallback _normalize_arabic_for_compare يطابق
+                       الآن detectors v4.1.0 (حماية "الله" من إزالة "ال").
+                       سابقاً: عند فشل استيراد detectors، كان السلوك
+                       مختلفاً ("الله" → "له") مما يكسر مطابقة التحيات.
+    📌 ملاحظة (INTEG-1): هذا الملف يُستدعى من handlers_message.py v7.18.17
+       عبر BannedWordsManager.check_message() — لا تُغيِّر التوقيع.
+    📌 ملاحظة (INTEG-2): cache القائمة المُدمجة (_merged_words_cache)
+       صالح لمدة 30s (_MERGED_CACHE_TTL). التغييرات على الكلمات
+       المحظورة (add/remove) تُبطِل الـ cache فوراً عبر
+       _invalidate_merged_cache → يعمل تلقائياً.
+    📌 ملاحظة (INTEG-3): هذا الملف يعتمد على detectors v4.1.0 لاستيراد
+       _normalize_text, _normalize_arabic_for_compare, _is_arabic_dominant.
+       السلوك مُتَّسق بين النسخة المُستوردة والـ fallback المحلي بعد
+       FIX-FALLBACK-1.
+
 🆕 v1.1.0 (PERFORMANCE + SAFETY FIXES):
     🔴 FIX-GREET-1: is_arabic_greeting — تقييد substring-match
-                     (كان "با" يطابق "صباحخير" → تجاوز الفلترة!)
     🔴 FIX-PERF-1:  contains_banned_word — إضافة skip_greeting_check
-                     (كانت is_arabic_greeting تُستدعى N+1 مرة)
     🔴 FIX-PERF-2:  get_words_for_filtering — cache محلي بـ TTL 30s
-                     (كانت تُعاد البناء + التطبيع لكل رسالة)
     🔴 FIX-INV-1:   إبطال cache المُدمج في add/remove
+
 ===============================================================================
 """
 
@@ -33,7 +48,7 @@ from typing import Any, List, Optional, Set, Tuple
 
 logger = logging.getLogger(__name__)
 
-__version__ = "1.1.0"
+__version__ = "1.1.1"
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -46,7 +61,7 @@ MAX_WORD_LEN: int = 100
 _COMPACT_MIN_LEN: int = 5
 _CACHE_MAX_PATTERNS: int = 5000
 
-# 🆕 FIX-PERF-2: cache للقائمة المُدمجة (global + group)
+# 🆕 v1.1.0 FIX-PERF-2: cache للقائمة المُدمجة (global + group)
 _MERGED_CACHE_TTL: float = 30.0
 _MERGED_CACHE_MAX: int = 500
 
@@ -77,6 +92,9 @@ class OpReason(str, Enum):
 # 2. استيرادات خارجية مع fallbacks
 # ═════════════════════════════════════════════════════════════════════════════
 
+# 📌 INTEG-3: يُفضل استخدام detectors v4.1.0+ لأنها تحوي حماية "الله"
+# في _normalize_arabic_for_compare. الـ fallback أدناه يطابقها بعد
+# FIX-FALLBACK-1.
 try:
     from handlers.handlers_message_detectors import (
         _normalize_text,
@@ -95,22 +113,48 @@ except ImportError:
     except ImportError:
         _HAS_DETECTOR_HELPERS = False
 
+        # 🆕 FIX-FALLBACK-1: حماية "الله" من إزالة "ال"
+        # (يطابق detectors v4.1.0)
+        _FALLBACK_KEEP_AL_WORDS = frozenset({
+            "الله", "بالله", "تالله", "والله", "اللهم",
+            "الذي", "التي", "الذين", "اللاتي", "اللواتي",
+        })
+
         def _normalize_text(t: Any) -> str:
             return (str(t) if t is not None else "").lower().strip()
 
         def _normalize_arabic_for_compare(t: Any) -> str:
+            """
+            🔴 FIX-FALLBACK-1: يطابق detectors v4.1.0.
+
+            ملاحظة: "الله" و"بالله" إلخ. لا تُفقد "ال" الخاصة بها.
+            """
             if not t:
                 return ""
             s = str(t)
+            # إزالة التشكيل
             s = re.sub(
                 r"[\u064B-\u065F\u0670\u06D6-\u06DC"
                 r"\u06DF-\u06E8\u06EA-\u06ED\u0640]",
                 "", s,
             )
-            s = re.sub(r"(?<!\S)ال", "", s)
+            # إزالة غير العربي
             s = re.sub(r"[^\u0600-\u06FF\s]", "", s)
+            # توحيد الألف/الياء/التاء
             s = s.replace("أ", "ا").replace("إ", "ا").replace("آ", "ا")
             s = s.replace("ى", "ي").replace("ة", "ه")
+            # 🆕 FIX-FALLBACK-1: إزالة "ال" مع استثناء الكلمات المحفوظة
+            words = s.split()
+            result_words = []
+            for w in words:
+                if w in _FALLBACK_KEEP_AL_WORDS:
+                    result_words.append(w)
+                    continue
+                if w.startswith("ال") and len(w) > 3:
+                    result_words.append(w[2:])
+                else:
+                    result_words.append(w)
+            s = "".join(result_words)
             s = re.sub(r"\s+", "", s)
             return s.strip()
 
@@ -211,10 +255,6 @@ _NORMALIZED_GREETINGS: frozenset = frozenset(
     for g in _ARABIC_GREETINGS_RAW
 ) - {""}
 
-# 🆕 FIX-GREET-1: حد أدنى للطول للسماح بالاحتواء bidir
-# (يمنع "با" من مطابقة "صباحخير")
-_MIN_LEN_FOR_SUBSTRING_MATCH: int = 4
-
 
 def is_arabic_greeting(text: str) -> bool:
     """
@@ -227,6 +267,9 @@ def is_arabic_greeting(text: str) -> bool:
         - سابقاً كان `w_norm in g_norm` يقبل كلمات قصيرة جداً
           مثل "با" (substring من "صباحخير") — مما يسمح بتجاوز
           فحص الكلمات المحظورة.
+
+    📌 INTEG-3: التطبيع يستخدم _normalize_arabic_for_compare من
+        detectors v4.1.0 (أو fallback مطابق بعد FIX-FALLBACK-1).
     """
     if not text:
         return False
@@ -279,6 +322,9 @@ def is_arabic_greeting(text: str) -> bool:
 # ═════════════════════════════════════════════════════════════════════════════
 # 4. تطبيع + فحص الكلمات المحظورة
 # ═════════════════════════════════════════════════════════════════════════════
+
+# 🆕 FIX-GREET-1: حد أدنى للطول للسماح بالاحتواء bidir
+_MIN_LEN_FOR_SUBSTRING_MATCH: int = 4
 
 _WORD_SEP_CLASS = r'[\s\-_.|/*+=~^´`°•●○◦▪▫■□♦♢※]'
 _compiled_patterns: "OrderedDict[str, re.Pattern]" = OrderedDict()
@@ -382,6 +428,9 @@ def contains_banned_word(
           مرّر skip_greeting_check=True لتجنّب فحص N+1.
         - الاستدعاء المباشر (خارج check_message) يبقى آمناً:
           الفحص يعمل تلقائياً (skip=False افتراضياً).
+
+    📌 INTEG-1: تُصدَّر هذه الدالة كـ `_bwm_contains` في
+        handlers_message.py v7.18.17 (fallback فقط).
     """
     if not text or not banned_word:
         return False
@@ -460,6 +509,8 @@ def _invalidate_merged_cache(chat_id: Optional[int] = None) -> None:
     - chat_id=None          → مسح كل الـ cache.
     - chat_id=GLOBAL_CHAT_ID → مسح كل الـ cache (تغيير global يمسّ الجميع).
     - chat_id=<group_id>    → مسح إدخال المجموعة فقط.
+
+    📌 INTEG-2: تُستدعى تلقائياً عند add/remove عبر _invalidate_cache.
     """
     try:
         if chat_id is None or chat_id == GLOBAL_CHAT_ID:
@@ -758,6 +809,10 @@ class BannedWordsManager:
         chat_id: Optional[int] = None,
         bot: Any = None,
     ) -> Tuple[bool, str]:
+        """
+        📌 INTEG-1: يُستدعى من handlers_message.py v7.18.17.
+        توقيع ثابت — لا تكسره.
+        """
         if scope == BannedScope.GLOBAL:
             success, reason = await GlobalBannedWordsPath.add(word, user_id)
         elif scope == BannedScope.GROUP:
@@ -784,6 +839,10 @@ class BannedWordsManager:
         chat_id: Optional[int] = None,
         bot: Any = None,
     ) -> Tuple[bool, str]:
+        """
+        📌 INTEG-1: يُستدعى من handlers_message.py v7.18.17.
+        توقيع ثابت — لا تكسره.
+        """
         if scope == BannedScope.GLOBAL:
             success, reason = await GlobalBannedWordsPath.remove(word, user_id)
         elif scope == BannedScope.GROUP:
@@ -823,8 +882,9 @@ class BannedWordsManager:
             - cache محلي بـ TTL 30s لكل chat_id.
             - يُبطَل تلقائياً عند add/remove (عبر _invalidate_cache
               → _invalidate_merged_cache).
-            - سابقاً: بناء + تطبيع لكل رسالة (N عمليات regex).
-            - الآن: بناء مرة واحدة كل 30s (أو عند التغيير).
+
+        📌 INTEG-2: _MERGED_CACHE_TTL = 30s. بعد إضافة/إزالة كلمة،
+            الـ cache يُبطَل فوراً — التغييرات تظهر خلال ثوانٍ.
         """
         now = _time.monotonic()
         try:
@@ -884,6 +944,10 @@ class BannedWordsManager:
             - contains_banned_word يُستدعى بـ skip_greeting_check=True
               (لأننا فحصنا مسبقاً).
             - سابقاً: N+1 استدعاء لـ is_arabic_greeting (N = عدد الكلمات).
+
+        📌 INTEG-1: يُستدعى من handlers_message.py v7.18.17 في
+            _handle_group_impl عبر BannedWordsManager.check_message().
+            توقيع ثابت: (text, chat_id) → Optional[str].
         """
         if not text:
             return None
@@ -958,7 +1022,8 @@ try:
         "DUAL-PATH (global=%d, group) | "
         "greetings=%d | compact_min=%d | "
         "merged_cache_ttl=%.0fs | "
-        "detector_helpers=%s | db=%s | cache=%s",
+        "detector_helpers=%s | db=%s | cache=%s | "
+        "compat=(detectors=v4.1.0, handlers_message=v7.18.17)",
         __version__,
         GLOBAL_CHAT_ID,
         len(_ARABIC_GREETINGS_RAW),
