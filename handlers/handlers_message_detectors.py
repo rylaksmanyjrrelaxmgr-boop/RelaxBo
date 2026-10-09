@@ -653,7 +653,7 @@ _ARABIC_GREETINGS = frozenset({
     "مرحبا", "مرحباً", "مرحبتين", "هلا", "هلاوالله", "هلاوسهلا",
     "السلام", "سلام", "سلامو", "سلاما", "سلاماً", "سلامي",
     "عليكم", "عليكمالسلام", "عليكمورحمة", "عليكمورحمةالله",
-    "شكرا", "شكراً", "شكرالك", "شكراكتير", "شكراكتير",
+    "شكرا", "شكراً", "شكرالك", "شكراكتير",
     "مشكور", "مشكورة", "مشكورين", "مشكوره",
     "عفوا", "عفواً", "العفو",
     "تسلم", "تسلمي", "تسلملي", "تسلموا",
@@ -671,12 +671,12 @@ _ARABIC_GREETINGS = frozenset({
     "الجميل", "الجميلة", "الحلو", "الحلوة",
     "الطيب", "الطيبة", "الكريم", "الكريمة",
     "الحبيب", "الحبيبة", "الغالي", "الغالية",
-    "الله", "سبحان", "الحمدلله", "لاالهالاالله",
+    "الله", "سبحان", "لاالهالاالله",
     "انشاءالله", "إنشاءالله", "مافيه", "ماشاءالله",
     "يعطيك", "يعطيكالعافية", "يعطيكم", "يعطيكمالعافية",
     "اللهيعطيك", "اللهيعافيك",
     "تمام", "تم", "طيب", "اوك", "اوكي", "اوكيه",
-    "حسناً", "حسنا", "زين", "طيبين", "بخير",
+    "حسناً", "حسنا", "زين", "طيبين",
     "نعم", "لا", "اكيد", "بالتاكيد", "بالتأكيد",
     "احسنت", "احسنتي", "برافو", "ممتاز", "رائع", "رائعة",
     "جميل", "جميلة", "حلو", "حلوة",
@@ -687,7 +687,7 @@ _ARABIC_SPAM_OVERRIDE = frozenset({
     "حصري", "حصريه", "حصرية", "فيديو", "فيديوهات",
     "مقاطع", "مقطع", "صور", "ممنوع", "ممنوعة",
     "جنس", "جنسي", "جنسية", "اباحي", "إباحي", "اباحية", "إباحية",
-    "بورن", "سكس", "نيك", "عاري", "عاري", "عارية",
+    "بورن", "سكس", "نيك", "عاري", "عارية",
     "ربح", "ارباح", "أرباح", "استثمار", "تداول", "محفظة",
     "بيتكوين", "اثيريوم", "كريبتو", "عملات", "عملة",
     "كازينو", "مراهنات", "بوكر", "يانصيب", "جوائز",
@@ -696,7 +696,7 @@ _ARABIC_SPAM_OVERRIDE = frozenset({
     "انضم", "اشترك", "تحميل", "حمل", "حمّل",
     "احصل", "اربح", "استلم", "استقبل", "اطلب",
     "مجاناً", "مجانا", "مجانية", "مجاني",
-    "هدية", "جوائز", "جائزة", "بونص", "بونوس",
+    "هدية", "جائزة", "بونص", "بونوس",
     "خصم", "عرض", "تخفيض", "متجر", "شراء",
     "مليونير", "ثري", "مضاعفة", "مضاعف",
 })
@@ -751,9 +751,23 @@ def _normalize_arabic_for_compare(text: str) -> str:
     return s.strip()
 
 
+_NORMALIZED_GREETINGS = tuple(
+    _normalize_arabic_for_compare(g) for g in _ARABIC_GREETINGS
+)
+_NORMALIZED_GREETINGS = tuple(
+    g for g in _NORMALIZED_GREETINGS if g
+)
+_NORMALIZED_SPAM_OVERRIDE = frozenset(
+    _normalize_arabic_for_compare(s) for s in _ARABIC_SPAM_OVERRIDE
+) - {""}
+
+
 def _is_arabic_short_whitelisted(text: str) -> bool:
     """
     🆕 v4.0.9 FIX-AR-1: هل النص رسالة عربية قصيرة طبيعية (تحية/ردود)؟
+
+    ✅ v4.0.9-PERF: استخدام _NORMALIZED_GREETINGS المُحسَّبة مُسبقًا
+    لتجنّب O(n*m) في كل رسالة.
     """
     if not ARABIC_SHORT_WHITELIST_ENABLED:
         return False
@@ -785,19 +799,17 @@ def _is_arabic_short_whitelisted(text: str) -> bool:
         word_norm = _normalize_arabic_for_compare(word)
         if not word_norm:
             continue
-        if word_norm in _ARABIC_SPAM_OVERRIDE:
+        if word_norm in _NORMALIZED_SPAM_OVERRIDE:
             return False
         found_greeting = False
-        for greeting in _ARABIC_GREETINGS:
-            greeting_norm = _normalize_arabic_for_compare(greeting)
+        for greeting_norm in _NORMALIZED_GREETINGS:
             if greeting_norm and greeting_norm in word_norm:
                 found_greeting = True
                 break
         if not found_greeting:
             return False
 
-    for spam_word in _ARABIC_SPAM_OVERRIDE:
-        spam_norm = _normalize_arabic_for_compare(spam_word)
+    for spam_norm in _NORMALIZED_SPAM_OVERRIDE:
         if spam_norm and spam_norm in normalized_full:
             return False
 
@@ -1022,7 +1034,7 @@ _ARABIC_CTA_WORDS = {
     "اضغط", "شاهد", "مشاهدة", "شوف", "ادخل",
     "دخول", "افتح", "انضم", "اشترك", "تحميل",
     "حمل", "حمّل", "الرابط", "هنا", "اضغطهنا",
-    "سجل", "سجّل", "اشترك", "فعّل", "فعل",
+    "سجل", "سجّل", "فعّل", "فعل",
     "احصل", "اربح", "استلم", "استقبل", "اطلب",
 }
 
@@ -6310,6 +6322,7 @@ __all__ = [
     "ARABIC_SHORT_WHITELIST_ENABLED", "ARABIC_SHORT_MAX_CHARS",
     "ARABIC_SHORT_MAX_WORDS", "ARABIC_DOMINANCE_RATIO",
     "_ARABIC_GREETINGS", "_ARABIC_SPAM_OVERRIDE",
+    "_NORMALIZED_GREETINGS", "_NORMALIZED_SPAM_OVERRIDE",
     "_is_arabic_dominant", "_is_arabic_short_whitelisted",
     "_arabic_char_ratio", "_normalize_arabic_for_compare",
     "_strip_arabic_diacritics",
