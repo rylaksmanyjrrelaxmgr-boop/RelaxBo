@@ -1,7 +1,15 @@
 # handlers/handlers_group_log.py
 r"""
-handlers_group_log.py — MessageHandler لاستقبال معرّف قناة السجل (v1.6.4)
+handlers_group_log.py — MessageHandler لاستقبال معرّف قناة السجل (v1.6.5)
 =====================================================================
+🆕 v1.6.5 (TITLE-FALLBACK + TOTAL-TIMEOUT):
+    🟡 G1  Title fallback عند فشل جلب العنوان: "قناة <id>"
+           (كانت رسالة النجاح تظهر بدون عنوان عند فشل get_chat)
+    🟡 G2  _resolve_username_with_retry: total_timeout خارجي
+           (10.5s أسوأ حالة → محدود بـ 12s ضمانًا)
+    🟡 G3  Get_chat for title: total_timeout=6.0s صريح
+           (منع تراكم مع الحل السابق)
+
 🆕 v1.6.4 (SYNTAX-WARNING-FIX):
     ✅ إضافة r prefix لـdocstring الرئيسي
        (يحتوي \+ في وصف F4 → كان يسبب SyntaxWarning في Python 3.12)
@@ -87,6 +95,17 @@ except ImportError:
     _is_valid_channel_ref = None
 
 logger = logging.getLogger(__name__)
+
+
+# =====================================================================
+# 🆕 v1.6.5: ثوابت المهلات الزمنية
+# =====================================================================
+
+_RESOLVE_TOTAL_TIMEOUT = 12.0   # G2: سقف زمني شامل لـ_resolve_username_with_retry
+_GET_CHAT_TITLE_TIMEOUT = 6.0   # G3: سقف زمني لجلب العنوان
+_USERNAME_RESOLVE_ATTEMPT_TIMEOUT = 5.0  # F5: timeout لكل محاولة
+_USERNAME_RESOLVE_ATTEMPTS = 2
+_USERNAME_RESOLVE_DELAY = 0.5
 
 
 # =====================================================================
@@ -334,60 +353,80 @@ def _extract_forward_channel(msg) -> Tuple[Optional[int], str]:
 
 
 # =====================================================================
-# ✅ v1.6.1 + v1.6.3: حلّ @username مع retry و timeout
+# ✅ v1.6.1 + v1.6.3 + v1.6.5: حلّ @username مع retry و timeout
 # =====================================================================
 
 async def _resolve_username_with_retry(
     bot,
     username: str,
-    max_attempts: int = 2,
-    delay: float = 0.5,
-    timeout: float = 5.0,
+    max_attempts: int = _USERNAME_RESOLVE_ATTEMPTS,
+    delay: float = _USERNAME_RESOLVE_DELAY,
+    timeout: float = _USERNAME_RESOLVE_ATTEMPT_TIMEOUT,
+    total_timeout: float = _RESOLVE_TOTAL_TIMEOUT,
 ) -> Tuple[Optional[int], str]:
     """
     ✅ v1.6.1: يحلّ @username إلى (chat_id, title) مع retry خفيف.
     ✅ F5 (v1.6.3): asyncio.wait_for بـ timeout=5s لمنع التعليق.
     ✅ F7 (v1.6.3): title من username يُضاف @.
+    ✅ G2 (v1.6.5): total_timeout خارجي شامل (default 12s).
+
+    الاستراتيجية:
+        • كل محاولة محدودة بـ timeout.
+        • المجموع الكلي محدود بـ total_timeout — إن انتهى، نتوقف.
     """
-    for attempt in range(max_attempts):
-        try:
-            chat_obj = await asyncio.wait_for(
-                bot.get_chat(f"@{username}"),
-                timeout=timeout,
-            )
-            if chat_obj is not None:
-                cid = getattr(chat_obj, "id", None)
-                # ✅ F7: أضف @ للـ username
-                chat_title = getattr(chat_obj, "title", "") or ""
-                chat_username = getattr(chat_obj, "username", "") or ""
-                if chat_title:
-                    title = chat_title
-                elif chat_username:
-                    title = f"@{chat_username}"
-                else:
-                    title = f"@{username}"
-                return cid, title
-        except asyncio.TimeoutError:
-            logger.debug(
-                f"_resolve_username_with_retry "
-                f"(@{username}) attempt {attempt+1}/{max_attempts}: timeout"
-            )
-            if attempt < max_attempts - 1:
-                try:
-                    await asyncio.sleep(delay)
-                except Exception:
-                    pass
-        except Exception as e:
-            logger.debug(
-                f"_resolve_username_with_retry "
-                f"(@{username}) attempt {attempt+1}/{max_attempts}: {e}"
-            )
-            if attempt < max_attempts - 1:
-                try:
-                    await asyncio.sleep(delay)
-                except Exception:
-                    pass
-    return None, ""
+    async def _do_attempts():
+        for attempt in range(max_attempts):
+            try:
+                chat_obj = await asyncio.wait_for(
+                    bot.get_chat(f"@{username}"),
+                    timeout=timeout,
+                )
+                if chat_obj is not None:
+                    cid = getattr(chat_obj, "id", None)
+                    # ✅ F7: أضف @ للـ username
+                    chat_title = getattr(chat_obj, "title", "") or ""
+                    chat_username = getattr(chat_obj, "username", "") or ""
+                    if chat_title:
+                        title = chat_title
+                    elif chat_username:
+                        title = f"@{chat_username}"
+                    else:
+                        title = f"@{username}"
+                    return cid, title
+            except asyncio.TimeoutError:
+                logger.debug(
+                    f"_resolve_username_with_retry "
+                    f"(@{username}) attempt {attempt+1}/{max_attempts}: "
+                    f"timeout"
+                )
+                if attempt < max_attempts - 1:
+                    try:
+                        await asyncio.sleep(delay)
+                    except Exception:
+                        pass
+            except Exception as e:
+                logger.debug(
+                    f"_resolve_username_with_retry "
+                    f"(@{username}) attempt {attempt+1}/{max_attempts}: {e}"
+                )
+                if attempt < max_attempts - 1:
+                    try:
+                        await asyncio.sleep(delay)
+                    except Exception:
+                        pass
+        return None, ""
+
+    # ✅ G2 (v1.6.5): سقف زمني شامل
+    try:
+        return await asyncio.wait_for(
+            _do_attempts(), timeout=total_timeout,
+        )
+    except asyncio.TimeoutError:
+        logger.warning(
+            f"_resolve_username_with_retry(@{username}): "
+            f"total_timeout ({total_timeout}s) reached"
+        )
+        return None, ""
 
 
 # =====================================================================
@@ -432,6 +471,7 @@ async def receive_log_channel(
     ✅ v1.6.1: retry + كشف موحّد + رسائل خطأ أوضح.
     ✅ v1.6.2: يستخدم _is_valid_channel_ref و _is_forwarded فعلاً.
     ✅ v1.6.3: F1-F3 أمن + guards.
+    ✅ v1.6.5: G1 (title fallback) + G3 (total_timeout على get_chat).
     """
     user = update.effective_user
     if not user:
@@ -567,7 +607,10 @@ async def receive_log_channel(
             resolved_id, resolved_title = (
                 await _resolve_username_with_retry(
                     context.bot, parsed_username,
-                    max_attempts=2, delay=0.5, timeout=5.0,
+                    max_attempts=_USERNAME_RESOLVE_ATTEMPTS,
+                    delay=_USERNAME_RESOLVE_DELAY,
+                    timeout=_USERNAME_RESOLVE_ATTEMPT_TIMEOUT,
+                    total_timeout=_RESOLVE_TOTAL_TIMEOUT,
                 )
             )
             if resolved_id is not None:
@@ -680,20 +723,28 @@ async def receive_log_channel(
         pass
 
     # ─── محاولة استخراج عنوان القناة (إن لم نكن نملكه) ───
+    # ✅ G3 (v1.6.5): total_timeout صريح
     if not title:
         try:
             chat_obj = await asyncio.wait_for(
                 context.bot.get_chat(chat_id),
-                timeout=5.0,
+                timeout=_GET_CHAT_TITLE_TIMEOUT,
             )
             if chat_obj and chat_obj.title:
                 title = chat_obj.title
             elif chat_obj and chat_obj.username:
                 title = f"@{chat_obj.username}"
         except asyncio.TimeoutError:
-            logger.debug(f"get_chat for title ({chat_id}): timeout")
+            logger.debug(
+                f"get_chat for title ({chat_id}): "
+                f"timeout ({_GET_CHAT_TITLE_TIMEOUT}s)"
+            )
         except Exception as e:
             logger.debug(f"get_chat for title ({chat_id}): {e}")
+
+    # ✅ G1 (v1.6.5): title fallback — لا تترك العنوان فارغًا
+    if not title:
+        title = f"قناة {chat_id}"
 
     # ─── الحفظ في قاعدة البيانات ───
     try:
@@ -748,11 +799,8 @@ async def receive_log_channel(
             await msg.reply_text(
                 f"✅ <b>تم تعيين قناة السجل بنجاح</b>\n\n"
                 f"📌 المجموعة: <code>{group_id}</code>\n"
-                f"📢 القناة: <code>{chat_id}</code>"
-                + (
-                    f"\n🏷️ العنوان: {_safe_html(title)}"
-                    if title else ""
-                )
+                f"📢 القناة: <code>{chat_id}</code>\n"
+                f"🏷️ العنوان: {_safe_html(title)}"
                 + share_notice,
                 parse_mode="HTML",
             )
@@ -877,4 +925,10 @@ __all__ = [
     "_passes_initial_validation",
     "_safe_pop_user_data",
     "_looks_like_url",
+    # 🆕 v1.6.5: ثوابت المهلات الزمنية
+    "_RESOLVE_TOTAL_TIMEOUT",
+    "_GET_CHAT_TITLE_TIMEOUT",
+    "_USERNAME_RESOLVE_ATTEMPT_TIMEOUT",
+    "_USERNAME_RESOLVE_ATTEMPTS",
+    "_USERNAME_RESOLVE_DELAY",
 ]
