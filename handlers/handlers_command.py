@@ -2,8 +2,16 @@
 # -*- coding: utf-8 -*-
 
 """
-handlers_command.py - معالجات الأوامر (CommandHandlers) - v7.7.1
+handlers_command.py - معالجات الأوامر (CommandHandlers) - v7.7.2
 ===================================================================================
+🆕 v7.7.2 (PERF-FIXES للبطء):
+    🟢 PERF-1: Timing logs في start — لتشخيص أين البطء.
+    🟢 PERF-2: cache للاشتراك الإجباري في user_data (3600s TTL)
+               — يمنع استدعاء bot.get_chat_member في كل /start.
+    🟢 PERF-3: _FORCE_CHANNEL_CACHE_TTL من 600s إلى 1800s.
+    🟢 PERF-4: helper _timed لأي عملية (اختياري — بدون استدعاء).
+    ⚠️ لم يتم حذف أو تعديل أي منطق آخر.
+
 🆕 v7.7.1 (L1 REVIEW FIXES):
     🟠 Medium:
         ✅ L1  _truncate_grapheme_safe: فحص nxt in _EMOJI_MODIFIERS
@@ -98,6 +106,10 @@ CONTEST_DESC_DISPLAY_MAX = 80
 CONTEST_QUESTION_DISPLAY_MAX = 60
 
 _FORCE_SUB_FAILS_OPEN = True
+
+# 🆕 PERF-2: مفتاح cache الاشتراك في user_data
+_FORCE_SUB_UD_KEY = '_force_sub_check'
+_FORCE_SUB_UD_TTL = 3600  # ساعة
 
 # ✅ F4: regex لوسوم HTML الفعلية
 _HTML_TAG_RE = re.compile(r'</?[a-zA-Z][a-zA-Z0-9]*(\s[^<>]*)?/?>')
@@ -316,6 +328,41 @@ def _clear_stale_state(user_id: int, context) -> None:
                 ud.pop(k, None)
     except Exception as e:
         logger.debug(f"_clear_stale_state user_data failed: {e}")
+
+
+# ═══════════════════════════════════════════════════════════════════
+# 🆕 PERF-4: helper قياس زمني (اختياري)
+# ═══════════════════════════════════════════════════════════════════
+
+class _Timed:
+    """
+    🆕 PERF-4: context manager لقياس زمن عملية (logging.info).
+
+    الاستخدام:
+        async with _Timed("check_sub"):
+            await ...
+    """
+    __slots__ = ('_label', '_t0', '_prefix')
+
+    def __init__(self, label: str, prefix: str = "⏱️ [START]"):
+        self._label = label
+        self._prefix = prefix
+        self._t0 = 0.0
+
+    def __enter__(self):
+        self._t0 = time.monotonic()
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        elapsed_ms = (time.monotonic() - self._t0) * 1000
+        if exc is None:
+            logger.info(f"{self._prefix} {self._label}: {elapsed_ms:.0f}ms")
+        else:
+            logger.info(
+                f"{self._prefix} {self._label}: {elapsed_ms:.0f}ms "
+                f"(FAILED: {type(exc).__name__})"
+            )
+        return False
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -832,7 +879,8 @@ _FORCE_SUB_CACHE_TTL = 180
 _FORCE_SUB_CACHE_MAX = 10_000
 
 _force_channel_cache: dict = {}
-_FORCE_CHANNEL_CACHE_TTL = 600
+# 🆕 PERF-3: من 600s إلى 1800s (30 دقيقة)
+_FORCE_CHANNEL_CACHE_TTL = 1800
 _FORCE_CHANNEL_CACHE_MAX = 500
 
 
@@ -944,6 +992,51 @@ def _invalidate_force_sub_cache(user_id: int = None):
         keys_to_del = [k for k in _force_sub_cache if k[0] == user_id]
         for k in keys_to_del:
             _force_sub_cache.pop(k, None)
+
+
+# ═══════════════════════════════════════════════════════════════════
+# 🆕 PERF-2: cache الاشتراك الإجباري في user_data
+# ═══════════════════════════════════════════════════════════════════
+
+async def _check_force_sub_via_ud(
+    context, user_id: int, force_ch: str
+) -> bool:
+    """
+    🆕 PERF-2: يخزّن نتيجة فحص الاشتراك الإجباري في user_data لمدة ساعة.
+
+    في كل /start عادة:
+      - بدونه: استدعاء Telegram API كل 180s (TTL الكاش القديم).
+      - معه: استدعاء واحد كل 3600s (ساعة) — حتى لو أعيد تشغيل /start.
+
+    ⚠️ الاحتراس:
+      - user_data قد يكون None → نرجع للسلوك الافتراضي.
+      - عند إلغاء المستخدم للاشتراك، قد يستغرق اكتشافه حتى ساعة.
+      - لتحسين ذلك، استخدم /security لتفعيل "التحقق الصارم" (مستقبلاً).
+    """
+    ud = getattr(context, 'user_data', None)
+    if ud is None:
+        return await _check_force_subscription_cached(
+            context.bot, user_id, force_ch
+        )
+
+    now_ts = time.time()
+    cached = ud.get(_FORCE_SUB_UD_KEY)
+    if isinstance(cached, tuple) and len(cached) == 2:
+        ts, is_sub = cached
+        try:
+            if now_ts - float(ts) < _FORCE_SUB_UD_TTL:
+                return bool(is_sub)
+        except (TypeError, ValueError):
+            pass
+
+    is_sub = await _check_force_subscription_cached(
+        context.bot, user_id, force_ch
+    )
+    try:
+        ud[_FORCE_SUB_UD_KEY] = (now_ts, bool(is_sub))
+    except Exception:
+        pass
+    return is_sub
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -1134,16 +1227,28 @@ class CommandHandlers:
 
     # ═══════════════════════════════════════════════════════════════
     # start — ✅ G2 + H2 + J4 + K2 + K3
+    # 🆕 PERF-1: timing logs
+    # 🆕 PERF-2: cache الاشتراك في user_data
     # ═══════════════════════════════════════════════════════════════
 
     @staticmethod
     async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        # 🆕 PERF-1: قياس الزمن الكلي
+        _t_start = time.monotonic()
         user_id = update.effective_user.id
         username = update.effective_user.username or ""
         first_name = update.effective_user.first_name or ""
 
+        # 🆕 PERF-1: clear stale state
+        _t = time.monotonic()
         _clear_stale_state(user_id, context)
+        logger.info(
+            f"⏱️ [START] clear_stale: "
+            f"{(time.monotonic() - _t) * 1000:.0f}ms"
+        )
 
+        # 🆕 PERF-1: فحص المستخدم
+        _t = time.monotonic()
         try:
             user_exists = await DB.fetchval(
                 "SELECT 1 FROM users WHERE user_id = ?", (user_id,)
@@ -1156,9 +1261,13 @@ class CommandHandlers:
                 await DB.register_user(user_id, username, first_name)
             except Exception:
                 pass
+        logger.info(
+            f"⏱️ [START] user_check: "
+            f"{(time.monotonic() - _t) * 1000:.0f}ms"
+        )
 
+        # الإحالة
         args = context.args or []
-        # ✅ K2: تبسيط — إزالة `if not ref_code: pass else:`
         if args and args[0].startswith('ref_'):
             ref_code = args[0][4:]
             if ref_code:
@@ -1214,51 +1323,77 @@ class CommandHandlers:
                                     exc_info=True,
                                 )
 
+        # 🆕 PERF-1 + PERF-2: الاشتراك الإجباري مع قياس + cache user_data
+        _t = time.monotonic()
         force_ch = await DB.get_force_subscribe_channel()
+        _t_force_ch = time.monotonic()
+        logger.info(
+            f"⏱️ [START] get_force_ch: "
+            f"{(_t_force_ch - _t) * 1000:.0f}ms"
+        )
+
         if force_ch and user_id != CONFIG.PRIMARY_OWNER_ID:
+            _t_check = time.monotonic()
             try:
-                is_subscribed = await _check_force_subscription_cached(
-                    context.bot, user_id, force_ch
+                # 🆕 PERF-2: عبر user_data cache (ساعة TTL)
+                is_subscribed = await _check_force_sub_via_ud(
+                    context, user_id, force_ch
                 )
-                if not is_subscribed:
-                    chat = await _get_force_channel_cached(context.bot, force_ch)
-                    invite_link = None
-                    if chat:
-                        try:
-                            invite_link = await context.bot.export_chat_invite_link(chat.id)
-                        except Exception:
-                            pass
-
-                    lang = await _get_lang(user_id)
-                    subscribe_text = await _trans('subscribe_btn', lang, "📢 اشترك")
-                    check_text = await _trans('check_sub_btn', lang, "✅ تحقق")
-
-                    if invite_link:
-                        kb = InlineKeyboardMarkup([[
-                            InlineKeyboardButton(subscribe_text, url=invite_link),
-                            InlineKeyboardButton(check_text, callback_data=CB.CHECK_SUB)
-                        ]])
-                    else:
-                        kb = InlineKeyboardMarkup([[
-                            InlineKeyboardButton(check_text, callback_data=CB.CHECK_SUB)
-                        ]])
-
-                    force_msg = await _trans(
-                        'force_sub_message', lang,
-                        "⚠️ اشترك في القناة أولاً"
-                    )
-                    await _safe_edit_or_send(
-                        update, context, force_msg,
-                        reply_markup=kb, parse_mode=None,
-                    )
-                    return
             except Exception as e:
                 logger.error(f"❌ خطأ في التحقق من الاشتراك الإجباري: {e}")
+                is_subscribed = True  # fail-open
+            logger.info(
+                f"⏱️ [START] check_sub: "
+                f"{(time.monotonic() - _t_check) * 1000:.0f}ms"
+            )
+
+            if not is_subscribed:
+                chat = await _get_force_channel_cached(context.bot, force_ch)
+                invite_link = None
+                if chat:
+                    try:
+                        invite_link = await context.bot.export_chat_invite_link(chat.id)
+                    except Exception:
+                        pass
+
+                lang = await _get_lang(user_id)
+                subscribe_text = await _trans('subscribe_btn', lang, "📢 اشترك")
+                check_text = await _trans('check_sub_btn', lang, "✅ تحقق")
+
+                if invite_link:
+                    kb = InlineKeyboardMarkup([[
+                        InlineKeyboardButton(subscribe_text, url=invite_link),
+                        InlineKeyboardButton(check_text, callback_data=CB.CHECK_SUB)
+                    ]])
+                else:
+                    kb = InlineKeyboardMarkup([[
+                        InlineKeyboardButton(check_text, callback_data=CB.CHECK_SUB)
+                    ]])
+
+                force_msg = await _trans(
+                    'force_sub_message', lang,
+                    "⚠️ اشترك في القناة أولاً"
+                )
+                await _safe_edit_or_send(
+                    update, context, force_msg,
+                    reply_markup=kb, parse_mode=None,
+                )
+                logger.info(
+                    f"⏱️ [START] TOTAL: "
+                    f"{(time.monotonic() - _t_start) * 1000:.0f}ms "
+                    f"(force-sub blocked)"
+                )
+                return
 
         # ✅ H2: guard user_data
+        _t = time.monotonic()
         user_data = await user_cache.get_or_load(user_id, DB)
         if not isinstance(user_data, dict):
             user_data = {}
+        logger.info(
+            f"⏱️ [START] user_cache: "
+            f"{(time.monotonic() - _t) * 1000:.0f}ms"
+        )
 
         lang = user_data.get('language', 'ar') or 'ar'
         channel_info = user_data.get('channel_info')
@@ -1285,6 +1420,7 @@ class CommandHandlers:
             else await _trans('disabled', lang, "معطل")
 
         # ✅ J4: حماية get_menu من None
+        _t = time.monotonic()
         kb_rows = KeyboardFactory.get_menu("main_menu", lang) or []
         keyboard = []
         for row in kb_rows:
@@ -1310,6 +1446,12 @@ class CommandHandlers:
                 keyboard.append([InlineKeyboardButton(admin_text, callback_data=CB.ADMIN)])
 
         kb = InlineKeyboardMarkup(keyboard)
+        logger.info(
+            f"⏱️ [START] kb_build: "
+            f"{(time.monotonic() - _t) * 1000:.0f}ms"
+        )
+
+        _t = time.monotonic()
         title = await get_text(
             lang, 'main_menu',
             user_name=f"<code>{user_id}</code>",
@@ -1320,7 +1462,23 @@ class CommandHandlers:
             auto_recycle=recycle_text,
             subscription_status=sub_text
         )
+        logger.info(
+            f"⏱️ [START] get_text: "
+            f"{(time.monotonic() - _t) * 1000:.0f}ms"
+        )
+
+        _t = time.monotonic()
         await _safe_edit_or_send(update, context, title, reply_markup=kb, parse_mode='HTML')
+        logger.info(
+            f"⏱️ [START] send: "
+            f"{(time.monotonic() - _t) * 1000:.0f}ms"
+        )
+
+        # 🆕 PERF-1: الإجمالي
+        logger.info(
+            f"⏱️ [START] TOTAL: "
+            f"{(time.monotonic() - _t_start) * 1000:.0f}ms"
+        )
 
     @staticmethod
     async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -3054,4 +3212,23 @@ __all__ = [
     '_invalidate_force_sub_cache',
     '_trans',
     '_get_lang',
+    # 🆕 PERF-2: للاختبارات
+    '_check_force_sub_via_ud',
+    # 🆕 PERF-4: helper قياس
+    '_Timed',
 ]
+
+
+# ═══════════════════════════════════════════════════════════════════
+# LOAD BEACON
+# ═══════════════════════════════════════════════════════════════════
+try:
+    logger.info(
+        "📋 handlers_command.py v7.7.2 PERF-FIXES loaded | "
+        "Timing=✅(start) | ForceSubUD=✅(TTL=%ds) | "
+        "ForceChCache=✅(%ds) | Timed=✅",
+        _FORCE_SUB_UD_TTL,
+        _FORCE_CHANNEL_CACHE_TTL,
+    )
+except Exception:
+    pass
