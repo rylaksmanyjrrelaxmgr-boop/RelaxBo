@@ -1,44 +1,27 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-handlers_callback.py - معالج الأزرار (v9.7.16)
+handlers_callback.py - معالج الأزرار (v9.7.18-SEC-EXTRACTED)
 =====================================================================
-🆕 v9.7.16 (ANALYTICS-BUTTONS-FIX + DECLARE-WINNER-SEL-FIX):
-    🔴 FIX-ANALYTICS-BUTTONS: دمج خريطة صريحة لأزرار التحليلات الثمانية
-       (growth_30d_btn, top_channels_btn, publish_stats_btn,
-        channels_rate_btn, subscriptions_btn, pool_live_btn,
-        slow_queries_btn, export_excel_btn) مع _ANALYTICS_ALIASES.
-       كانت تسقط على fallback "غير متوفر".
-    🔴 FIX-DECLARE-WINNER-SEL: admin_declare_winner_sel يعمل بنفس
-       معالج admin_declare_winner.
-    🟡 FIX-ANALYTICS-MENU: دمج admin_analytics + refresh_btn في فحص واحد.
-    🟡 توثيق حذف SEC_ACTIONS_WITH_SPECIFIC_HANDLERS (v9.7.15).
+🆕 v9.7.18-SEC-EXTRACTED (SECURITY-EXTRACTED):
+    🔴 SEC-EXTRACT-1: نقل كل منطق الأمان (sec_* / log_channel_* /
+       set_warn_* / set_antiflood_* / set_duration / sec_penalty_*)
+       إلى callback_security.py.
+    🔴 SEC-EXTRACT-2: تفويض كامل عبر SecurityCallbacks.
+    🔴 SEC-EXTRACT-3: حقن الحاقنات:
+       - set_metrics_inc(_metrics_inc)
+       - set_safe_edit(safe_edit)
+    🟡 SEC-EXTRACT-4: توثيق نقاط التفويض.
 
-🆕 v9.7.15 (SECURITY-TOGGLE-MAP-BYPASS-FIX):
-    🔴 FIX-CB-BW-1: _SEC_ACTIONS_WITH_SPECIFIC_HANDLERS — ضمان أن
-       أزرار الأمان ذات المعالجات الخاصة (banned_words, warn) لا تُمرَّر
-       عبر SECURITY_TOGGLE_MAP قبل معالجاتها الخاصة.
-    🔴 FIX-CB-BW-2: نقل معالج banned_words قبل التوجل العام
-    🟡 FIX-CB-BW-3: توثيق voice في SECURITY_TOGGLE_MAP
-
-🆕 v9.7.14 (UPDATES-CHANNEL-HEALTH-CHECK):
-    🔴 UPD-HEALTH-1..6: فحص شامل لقناة التحديثات
-
-🆕 v9.7.13 (UPDATES-CHANNEL-LINK-FIX):
-    🔴 UPD-1..3: زر رابط قابل للنقر
-
-🆕 v9.7.12 (SYNTAX-FIX):
-    🔴 SYNTAX-1: إصلاح SyntaxError في _handle_auto_reply
-
-🆕 v9.7.11 (PERF-INTEGRATION): PERF-CB-1..5
-🆕 v9.7.10 (MISSING-METHODS-FIX): 3 دوال
-🆕 v9.7.9 (CLEANUP-AND-HARDENING)
-🆕 v9.7.8 (SECURITY-TABLE-MISMATCH-FIX)
-🆕 v9.7.7 (SECURITY-BRIDGE-INTEGRATION)
-🆕 v9.7.6 (ANTIFLOOD-BUTTONS)
-🆕 v9.7.5 (NEW SECURITY BUTTONS)
-🆕 v9.7.4 (SECOND REVIEW FIXES)
-🆕 v9.7.3 (REVIEW FIXES)
+🆕 v9.7.18 (ANALYTICS-ALIASES-ORDER-FIX): عكس ترتيب الدمج.
+🆕 v9.7.17 (SAFE_EDIT-PARSE-MODE-FIX): FIX-SAFE-EDIT-1..3
+🆕 v9.7.16 (ANALYTICS-BUTTONS-FIX + DECLARE-WINNER-SEL-FIX)
+🆕 v9.7.15 (SECURITY-TOGGLE-MAP-BYPASS-FIX)
+🆕 v9.7.14 (UPDATES-CHANNEL-HEALTH-CHECK)
+🆕 v9.7.13 (UPDATES-CHANNEL-LINK-FIX)
+🆕 v9.7.12 (SYNTAX-FIX)
+🆕 v9.7.11 (PERF-INTEGRATION)
+🆕 v9.7.10 (MISSING-METHODS-FIX)
 =====================================================================
 """
 import asyncio, importlib, logging, json, time, shutil, os, re
@@ -70,8 +53,7 @@ try:
         safe_send, is_authorized_in_group, get_text,
         StateManager, UserState, KeyboardFactory, CB,
         get_ram_usage, SmartCache, TranslationManager,
-        SECURITY_TOGGLE_MAP,
-        NEW_SECURITY_DEFAULTS,
+        SECURITY_TOGGLE_MAP, NEW_SECURITY_DEFAULTS,
         get_security_settings as bridge_get_security_settings,
         invalidate_security_settings_cache as bridge_invalidate_sec_cache,
     )
@@ -82,8 +64,7 @@ except ImportError:
             safe_send, is_authorized_in_group, get_text,
             StateManager, UserState, KeyboardFactory, CB,
             get_ram_usage, SmartCache, TranslationManager,
-            SECURITY_TOGGLE_MAP,
-            NEW_SECURITY_DEFAULTS,
+            SECURITY_TOGGLE_MAP, NEW_SECURITY_DEFAULTS,
             get_security_settings as bridge_get_security_settings,
             invalidate_security_settings_cache as bridge_invalidate_sec_cache,
         )
@@ -95,32 +76,22 @@ except ImportError:
             get_ram_usage, SmartCache, TranslationManager,
         )
         _SECURITY_BRIDGE_AVAILABLE = False
-
         SECURITY_TOGGLE_MAP: Dict[str, str] = {
-            "links": "delete_links",
-            "mentions": "mentions",
-            "forward": "delete_forwarded",
-            "video": "delete_videos",
-            "audio": "delete_voice",
-            "anim": "delete_animation",
-            "doc": "delete_documents",
-            "sticker": "delete_stickers",
-            "service": "delete_service",
-            "poll": "delete_polls",
-            "game": "delete_games",
-            "voice": "delete_voice_notes",
-            "videonote": "delete_video_note",
-            "nsfw": "nsfw_enabled",
+            "links": "delete_links", "mentions": "mentions",
+            "forward": "delete_forwarded", "video": "delete_videos",
+            "audio": "delete_voice", "anim": "delete_animation",
+            "doc": "delete_documents", "sticker": "delete_stickers",
+            "service": "delete_service", "poll": "delete_polls",
+            "game": "delete_games", "voice": "delete_voice_notes",
+            "videonote": "delete_video_note", "nsfw": "nsfw_enabled",
             "at_channel": "delete_at_channel",
             "tg_scheme": "delete_tg_scheme",
             "button_links": "delete_button_links",
             "emails": "delete_emails",
             "protected_any": "delete_protected_any",
             "postbot": "delete_postbot_pattern",
-            "flood": "antiflood_enabled",
-            "slow": "slow_mode_enabled",
-            "night": "night_mode_enabled",
-            "welcome": "welcome_enabled",
+            "flood": "antiflood_enabled", "slow": "slow_mode_enabled",
+            "night": "night_mode_enabled", "welcome": "welcome_enabled",
             "goodbye": "goodbye_enabled",
             "approve_join": "auto_approve_join",
             "reject_join": "auto_reject_join",
@@ -128,17 +99,12 @@ except ImportError:
             "warn": "warn_enabled",
         }
         NEW_SECURITY_DEFAULTS: Dict[str, int] = {
-            "delete_at_channel": 0,
-            "delete_tg_scheme": 1,
-            "delete_button_links": 1,
-            "delete_emails": 0,
-            "delete_protected_any": 0,
-            "delete_postbot_pattern": 0,
+            "delete_at_channel": 0, "delete_tg_scheme": 1,
+            "delete_button_links": 1, "delete_emails": 0,
+            "delete_protected_any": 0, "delete_postbot_pattern": 0,
         }
-
         async def bridge_get_security_settings(chat_id):  # type: ignore
             return {}
-
         def bridge_invalidate_sec_cache(chat_id=None):  # type: ignore
             return None
 
@@ -218,18 +184,34 @@ except ImportError:
         _is_valid_url, _mask_id, _make_user_cache_keys)
 
 # ═══════════════════════════════════════════════════════════════════
-# 🆕 v9.7.16 FIX-ANALYTICS-BUTTONS: خريطة صريحة لأزرار التحليلات
+# v9.7.18-SEC-EXTRACTED: استيراد SecurityCallbacks
 # ═══════════════════════════════════════════════════════════════════
-# المشكلة:
-#   أزرار analytics الرئيسية (growth_30d_btn, top_channels_btn, ...)
-#   لا تُطابق _ANALYTICS_ALIASES المُستوردة من handlers_callback_base
-#   → تسقط على fallback "غير متوفر" في نهاية handle().
-#
-# الحل:
-#   دمج خريطة صريحة مع _ANALYTICS_ALIASES قبل استخدامها في handle().
-#   الأولوية لمفاتيح handlers_callback_base (لا نطغى عليها).
-# ═══════════════════════════════════════════════════════════════════
+try:
+    from .callback_security import (
+        SecurityCallbacks,
+        set_metrics_inc as _sec_set_metrics_inc,
+        set_safe_edit as _sec_set_safe_edit,
+        _check_sec_auth,
+        _invalidate_sec_auth_cache,
+        _prune_sec_auth_cache,
+        _set_sec_chat,
+        _resolve_sec_chat_id,
+    )
+except ImportError:
+    from callback_security import (
+        SecurityCallbacks,
+        set_metrics_inc as _sec_set_metrics_inc,
+        set_safe_edit as _sec_set_safe_edit,
+        _check_sec_auth,
+        _invalidate_sec_auth_cache,
+        _prune_sec_auth_cache,
+        _set_sec_chat,
+        _resolve_sec_chat_id,
+    )
 
+# ═══════════════════════════════════════════════════════════════════
+# v9.7.18 FIX-ANALYTICS-ALIASES-ORDER
+# ═══════════════════════════════════════════════════════════════════
 _ANALYTICS_BUTTONS_DIRECT_MAP: Dict[str, str] = {
     "growth_30d_btn":     "user_growth",
     "top_channels_btn":   "top_channels",
@@ -244,48 +226,24 @@ _ANALYTICS_BUTTONS_DIRECT_MAP: Dict[str, str] = {
 try:
     if isinstance(_ANALYTICS_ALIASES, dict):
         _ANALYTICS_ALIASES = {
-            **_ANALYTICS_BUTTONS_DIRECT_MAP,
             **_ANALYTICS_ALIASES,
+            **_ANALYTICS_BUTTONS_DIRECT_MAP,
         }
     else:
         _ANALYTICS_ALIASES = dict(_ANALYTICS_BUTTONS_DIRECT_MAP)
     logger.info(
-        "✅ ANALYTICS-ALIASES-MERGE: %d مفتاح (منها %d جديد)",
-        len(_ANALYTICS_ALIASES),
-        len(_ANALYTICS_BUTTONS_DIRECT_MAP),
+        "✅ ANALYTICS-ALIASES-MERGE: %d مفتاح (Direct-Map يطغى | %d أزرار)",
+        len(_ANALYTICS_ALIASES), len(_ANALYTICS_BUTTONS_DIRECT_MAP),
     )
 except Exception as _e:
     _ANALYTICS_ALIASES = dict(_ANALYTICS_BUTTONS_DIRECT_MAP)
     logger.warning("⚠️ ANALYTICS-ALIASES-MERGE: %s", _e)
 
 
-_ANTIFLOOD_MESSAGES_OPTIONS: List[int] = [3, 5, 7, 10, 15, 20, 30]
-_ANTIFLOOD_SECONDS_OPTIONS: List[int] = [3, 5, 10, 15, 30, 60, 120]
-_ANTIFLOOD_MESSAGES_MAX = 100
-_ANTIFLOOD_SECONDS_MAX = 3600
-
-# ═══════════════════════════════════════════════════════════════════
-# 🆕 v9.7.15 FIX-CB-BW-1: أزرار أمان لها معالجات خاصة
-# ═══════════════════════════════════════════════════════════════════
-# ⚠️ هذه الأزرار تُوجَّه إلى معالجات خاصة داخل _handle_security
-#    ولا يجب أن تمرّ عبر SECURITY_TOGGLE_MAP العام.
-# ═══════════════════════════════════════════════════════════════════
-_SEC_ACTIONS_WITH_SPECIFIC_HANDLERS: frozenset = frozenset({
-    "warn",           # → يفتح قائمة إدارة التحذيرات
-    "banned_words",   # → يفتح قائمة الكلمات المحظورة
-})
-
 ACTIVE_TASKS: Set[asyncio.Task] = set()
 _publish_semaphore = asyncio.Semaphore(MAX_CONCURRENT_PUBLISH)
-_sec_auth_cache: Dict[Tuple[int, int], Tuple[bool, float]] = {}
-_sec_auth_neg_cache: Dict[Tuple[int, int], Tuple[float, int]] = {}
-_SEC_AUTH_NEG_BASE = 3.0
-_SEC_AUTH_NEG_MAX = 60.0
-_sec_auth_locks: Dict[Tuple[int, int], asyncio.Lock] = {}
-_security_stats_cache_local = SmartCache(ttl=SEC_STATS_CACHE_TTL, max_size=500)
 _post_count_cache = SmartCache(ttl=POST_COUNT_CACHE_TTL,
                                max_size=POST_COUNT_CACHE_MAX_SIZE)
-_SEC_AUTH_PRUNE_EVERY = 500
 _MAX_INLINE_SLEEP = 30.0
 _KICKED_NOTIFY_DEBOUNCE = 300
 _CB_USER_COUNTER_MAX = 100_000
@@ -301,267 +259,149 @@ _membership_table_created = False
 
 
 # ═══════════════════════════════════════════════════════════════════
-# 🆕 v9.7.13/9.7.14: Updates-channel helpers
+# Updates-channel helpers
 # ═══════════════════════════════════════════════════════════════════
 
 def _extract_updates_channel_link(ch_raw):
-    """
-    🆕 v9.7.13: استخراج رابط القناة + معرفتها النظيفة.
-
-    المُدخل قد يكون:
-        • "@my_channel"
-        • "my_channel"
-        • "https://t.me/my_channel"
-        • "http://t.me/my_channel"
-        • "t.me/my_channel"
-        • "-1001234567890" (ID رقمي)
-
-    المُخرج:
-        (clean, url_or_None, is_username)
-    """
-    if not ch_raw:
-        return "", None, False
-    try:
-        s = str(ch_raw).strip()
-    except Exception:
-        return "", None, False
-    if not s:
-        return "", None, False
-
-    if s.startswith('@'):
-        s = s[1:]
-
+    if not ch_raw: return "", None, False
+    try: s = str(ch_raw).strip()
+    except Exception: return "", None, False
+    if not s: return "", None, False
+    if s.startswith('@'): s = s[1:]
     for prefix in ("https://t.me/", "http://t.me/",
                    "https://telegram.me/", "http://telegram.me/",
                    "t.me/", "telegram.me/"):
         if s.lower().startswith(prefix):
-            s = s[len(prefix):]
-            break
-
+            s = s[len(prefix):]; break
     s = s.rstrip('/')
-
-    if '?' in s:
-        s = s.split('?', 1)[0]
-
-    if not s:
-        return "", None, False
-
-    if s.lstrip('-').isdigit():
-        return s, None, False
-
+    if '?' in s: s = s.split('?', 1)[0]
+    if not s: return "", None, False
+    if s.lstrip('-').isdigit(): return s, None, False
     return s, f"https://t.me/{s}", True
 
-
-# ═══════════════════════════════════════════════════════════════════
-# 🆕 v9.7.14: Updates channel health check
-# ═══════════════════════════════════════════════════════════════════
 
 _UPDATES_CHANNEL_HEALTH_CACHE: Dict[str, Tuple[dict, float]] = {}
 _UPDATES_CHANNEL_HEALTH_TTL = 300.0
 
 
 async def _check_updates_channel_health(bot, ch_raw):
-    """
-    🆕 v9.7.14: فحص شامل لقناة التحديثات.
-
-    يُعيد dict يحتوي:
-        {
-            'status': 'ok' | 'warn' | 'error' | 'empty',
-            'reason': str,
-            'action_required': str,
-            'url': str | None,
-            'chat_type': str | None,
-            'title': str | None,
-            'bot_is_admin': bool,
-            'bot_can_invite': bool,
-            'checked_at': float,
-        }
-    """
     now = time.monotonic()
     cache_key = str(ch_raw or '')
-
     cached = _UPDATES_CHANNEL_HEALTH_CACHE.get(cache_key)
     if cached and now - cached[1] < _UPDATES_CHANNEL_HEALTH_TTL:
         return cached[0]
-
     report = {
-        'status': 'error',
-        'reason': 'unknown',
-        'action_required': '',
-        'url': None,
-        'chat_type': None,
-        'title': None,
-        'bot_is_admin': False,
-        'bot_can_invite': False,
-        'checked_at': now,
+        'status': 'error', 'reason': 'unknown', 'action_required': '',
+        'url': None, 'chat_type': None, 'title': None,
+        'bot_is_admin': False, 'bot_can_invite': False, 'checked_at': now,
     }
-
     if not ch_raw:
-        report.update({
-            'status': 'empty',
-            'reason': 'no_channel_set',
-            'action_required': 'set_channel',
-        })
+        report.update({'status': 'empty', 'reason': 'no_channel_set',
+                       'action_required': 'set_channel'})
         _UPDATES_CHANNEL_HEALTH_CACHE[cache_key] = (report, now)
         return report
-
     clean, url, is_username = _extract_updates_channel_link(ch_raw)
-
     if is_username and url:
-        report.update({
-            'status': 'ok',
-            'reason': 'public_channel',
-            'url': url,
-        })
+        report.update({'status': 'ok', 'reason': 'public_channel', 'url': url})
         _UPDATES_CHANNEL_HEALTH_CACHE[cache_key] = (report, now)
         return report
-
     if not clean or not clean.lstrip('-').isdigit():
-        report.update({
-            'status': 'error',
-            'reason': 'invalid_format',
-            'action_required': 'set_valid_username_or_id',
-        })
+        report.update({'status': 'error', 'reason': 'invalid_format',
+                       'action_required': 'set_valid_username_or_id'})
         _UPDATES_CHANNEL_HEALTH_CACHE[cache_key] = (report, now)
         return report
-
     numeric_id = int(clean)
-
     try:
         chat = await bot.get_chat(numeric_id)
         report['title'] = getattr(chat, 'title', None)
         report['chat_type'] = getattr(chat, 'type', None)
     except Exception as e:
-        logger.debug(
-            f"_check_updates_channel_health: get_chat({numeric_id}) "
-            f"failed: {e}"
-        )
-        report.update({
-            'status': 'error',
-            'reason': 'bot_cannot_access_channel',
-            'action_required': 'add_bot_to_channel',
-            'url': f"https://t.me/c/{clean.lstrip('-')}",
-        })
+        logger.debug(f"_check_updates_channel_health: get_chat({numeric_id}) "
+                     f"failed: {e}")
+        report.update({'status': 'error',
+                       'reason': 'bot_cannot_access_channel',
+                       'action_required': 'add_bot_to_channel',
+                       'url': f"https://t.me/c/{clean.lstrip('-')}"})
         _UPDATES_CHANNEL_HEALTH_CACHE[cache_key] = (report, now)
         return report
-
     try:
         member = await bot.get_chat_member(numeric_id, bot.id)
         status = getattr(member, 'status', '')
         report['bot_is_admin'] = status in ('administrator', 'creator')
         report['bot_can_invite'] = bool(
-            getattr(member, 'can_invite_users', False)
-            or status == 'creator'
-        )
+            getattr(member, 'can_invite_users', False) or status == 'creator')
     except Exception as e:
-        logger.debug(
-            f"_check_updates_channel_health: get_chat_member failed: {e}"
-        )
-
-    invite_url = None
-    invite_error = None
+        logger.debug(f"_check_updates_channel_health: get_chat_member "
+                     f"failed: {e}")
+    invite_url = None; invite_error = None
     try:
         invite = await bot.create_chat_invite_link(
-            chat_id=numeric_id, member_limit=0,
-        )
+            chat_id=numeric_id, member_limit=0)
         invite_url = getattr(invite, 'invite_link', None)
     except Exception as e:
         invite_error = str(e)[:120]
-        logger.debug(
-            f"_check_updates_channel_health: create_invite_link failed: "
-            f"{invite_error}"
-        )
-
+        logger.debug(f"_check_updates_channel_health: create_invite_link "
+                     f"failed: {invite_error}")
     if invite_url:
-        report.update({
-            'status': 'ok',
-            'reason': 'private_with_invite_link',
-            'url': invite_url,
-        })
+        report.update({'status': 'ok',
+                       'reason': 'private_with_invite_link',
+                       'url': invite_url})
     else:
         report['url'] = f"https://t.me/c/{clean.lstrip('-')}"
-
         if not report['bot_is_admin']:
-            report.update({
-                'status': 'warn',
-                'reason': 'bot_not_admin',
-                'action_required': 'promote_bot_with_invite_permission',
-            })
+            report.update({'status': 'warn', 'reason': 'bot_not_admin',
+                'action_required': 'promote_bot_with_invite_permission'})
         elif not report['bot_can_invite']:
-            report.update({
-                'status': 'warn',
+            report.update({'status': 'warn',
                 'reason': 'bot_missing_invite_permission',
-                'action_required': 'grant_invite_users_permission',
-            })
+                'action_required': 'grant_invite_users_permission'})
         else:
-            report.update({
-                'status': 'warn',
+            report.update({'status': 'warn',
                 'reason': f'invite_creation_failed: {invite_error}',
-                'action_required': 'check_channel_settings',
-            })
-
+                'action_required': 'check_channel_settings'})
     _UPDATES_CHANNEL_HEALTH_CACHE[cache_key] = (report, now)
     return report
 
 
 def _invalidate_updates_channel_health_cache():
-    """🆕 v9.7.14: إبطال كاش فحص قناة التحديثات."""
-    try:
-        _UPDATES_CHANNEL_HEALTH_CACHE.clear()
-    except Exception:
-        pass
+    try: _UPDATES_CHANNEL_HEALTH_CACHE.clear()
+    except Exception: pass
 
 
 def _build_updates_channel_health_warning(report, lang='ar') -> str:
-    """
-    🆕 v9.7.14: بناء نص التحذير للعرض في لوحة الإدارة.
-    """
-    if not report:
-        return ""
-
+    if not report: return ""
     status = report.get('status', 'error')
-    if status in ('ok', 'empty'):
-        return ""
-
+    if status in ('ok', 'empty'): return ""
     reason = report.get('reason', '')
-
     header = "⚠️ <b>تنبيه: قناة التحديثات تحتاج إجراءً</b>"
     if status == 'error':
         header = "🔴 <b>خطأ في قناة التحديثات</b>"
-
     lines = [header, "━━━━━━━━━━━━━━━━━━━━━━", ""]
-
     title = report.get('title')
     if title:
         lines.append(f"📢 <b>القناة:</b> {_html.escape(str(title))}")
     else:
         lines.append(f"📢 <b>القناة:</b> <code>{report.get('url') or '?'}</code>")
     lines.append("")
-
     reason_messages = {
         'bot_cannot_access_channel': (
             "❌ <b>السبب:</b> البوت لا يستطيع الوصول إلى القناة.\n"
-            "✅ <b>الحل:</b> أضف البوت إلى القناة كعضو أو مشرف."
-        ),
+            "✅ <b>الحل:</b> أضف البوت إلى القناة كعضو أو مشرف."),
         'bot_not_admin': (
             "❌ <b>السبب:</b> البوت عضو عادي وليس مشرفاً.\n"
             "✅ <b>الحل:</b> ارفع البوت إلى مشرف مع تفعيل صلاحية:\n"
-            "   • <b>«دعوة المستخدمين عبر الرابط»</b> (Invite Users)"
-        ),
+            "   • <b>«دعوة المستخدمين عبر الرابط»</b> (Invite Users)"),
         'bot_missing_invite_permission': (
             "❌ <b>السبب:</b> البوت مشرف لكن بدون صلاحية "
             "«دعوة المستخدمين».\n"
             "✅ <b>الحل:</b> افتح إعدادات القناة → المشرفون → "
             "اختر البوت → فعّل:\n"
             "   • <b>«دعوة المستخدمين عبر الرابط»</b>\n\n"
-            "💡 <b>بديل أفضل:</b> اجعل القناة عامة بـ @username."
-        ),
+            "💡 <b>بديل أفضل:</b> اجعل القناة عامة بـ @username."),
         'invalid_format': (
             "❌ <b>السبب:</b> صيغة معرف القناة غير صحيحة.\n"
-            "✅ <b>الحل:</b> أدخل @username أو رابط أو ID رقمي."
-        ),
+            "✅ <b>الحل:</b> أدخل @username أو رابط أو ID رقمي."),
     }
-
     msg = reason_messages.get(reason)
     if msg:
         lines.append(msg)
@@ -569,24 +409,20 @@ def _build_updates_channel_health_warning(report, lang='ar') -> str:
         lines.append(
             f"❌ <b>السبب:</b> فشل إنشاء رابط الدعوة.\n"
             f"<code>{_html.escape(reason)}</code>\n"
-            "✅ <b>الحل:</b> راجع صلاحيات البوت في القناة."
-        )
+            "✅ <b>الحل:</b> راجع صلاحيات البوت في القناة.")
     else:
         lines.append(f"⚠️ <b>السبب:</b> <code>{_html.escape(reason)}</code>")
-
     lines.append("")
     lines.append("━━━━━━━━━━━━━━━━━━━━━━")
     lines.append("")
     lines.append(
         "🟡 <i>الرابط الحالي يعمل للأعضاء المضافين فقط. "
-        "الأعضاء الجدد لن يستطيعوا الدخول.</i>"
-    )
-
+        "الأعضاء الجدد لن يستطيعوا الدخول.</i>")
     return "\n".join(lines)
 
 
 # ═══════════════════════════════════════════════════════════════════
-# 🆕 v9.7.11 PERF-CB-1: Message-handlers cache invalidation bridge
+# Message-handlers cache invalidation bridge
 # ═══════════════════════════════════════════════════════════════════
 
 _message_handlers_module = None
@@ -594,7 +430,6 @@ _message_handlers_import_attempted = False
 
 
 def _get_message_handlers_module():
-    """🆕 v9.7.11: تحميل handlers_message مرة واحدة (lazy)."""
     global _message_handlers_module, _message_handlers_import_attempted
     if _message_handlers_module is not None:
         return _message_handlers_module
@@ -602,73 +437,46 @@ def _get_message_handlers_module():
         return None
     _message_handlers_import_attempted = True
     try:
-        _message_handlers_module = importlib.import_module(
-            "handlers_message"
-        )
+        _message_handlers_module = importlib.import_module("handlers_message")
     except ImportError:
         try:
             _message_handlers_module = importlib.import_module(
-                ".handlers_message", package=__package__
-            )
+                ".handlers_message", package=__package__)
         except (ImportError, TypeError, ValueError):
             _message_handlers_module = None
     return _message_handlers_module
 
 
-async def _invalidate_message_caches(
-    chat_id=None, user_id=None, reason="",
-):
-    """
-    🆕 v9.7.11 PERF-CB-1: إبطال caches handlers_message المحلية.
-    """
+async def _invalidate_message_caches(chat_id=None, user_id=None, reason=""):
     mod = _get_message_handlers_module()
     if mod is None:
         if reason:
-            logger.debug(
-                "🧹 PERF-CB: handlers_message غير متاح — تخطي invalidation "
-                "(%s)", reason,
-            )
+            logger.debug("🧹 PERF-CB: handlers_message غير متاح — تخطي "
+                         "invalidation (%s)", reason)
         return
-
     try:
         inv_sec = getattr(mod, "_invalidate_sec_settings_local", None)
-        if callable(inv_sec):
-            inv_sec(chat_id)
+        if callable(inv_sec): inv_sec(chat_id)
     except Exception as e:
-        logger.debug(
-            "🧹 PERF-CB: _invalidate_sec_settings_local(%s) failed: %s",
-            chat_id, e,
-        )
-
+        logger.debug("🧹 PERF-CB: _invalidate_sec_settings_local(%s) "
+                     "failed: %s", chat_id, e)
     try:
         inv_log = getattr(mod, "_invalidate_group_log_cache", None)
-        if callable(inv_log):
-            inv_log(chat_id)
+        if callable(inv_log): inv_log(chat_id)
     except Exception as e:
-        logger.debug(
-            "🧹 PERF-CB: _invalidate_group_log_cache(%s) failed: %s",
-            chat_id, e,
-        )
-
+        logger.debug("🧹 PERF-CB: _invalidate_group_log_cache(%s) "
+                     "failed: %s", chat_id, e)
     try:
         inv_admin = getattr(mod, "_invalidate_admin_check_cache", None)
         if callable(inv_admin):
-            if user_id is not None:
-                inv_admin(chat_id, user_id)
-            else:
-                inv_admin(chat_id)
+            if user_id is not None: inv_admin(chat_id, user_id)
+            else: inv_admin(chat_id)
     except Exception as e:
-        logger.debug(
-            "🧹 PERF-CB: _invalidate_admin_check_cache(%s, %s) failed: %s",
-            chat_id, user_id, e,
-        )
-
+        logger.debug("🧹 PERF-CB: _invalidate_admin_check_cache(%s, %s) "
+                     "failed: %s", chat_id, user_id, e)
     if reason:
-        logger.debug(
-            "🧹 PERF-CB: أُبطلت caches handlers_message | chat=%s "
-            "user=%s | %s",
-            chat_id, user_id, reason,
-        )
+        logger.debug("🧹 PERF-CB: أُبطلت caches handlers_message | chat=%s "
+                     "user=%s | %s", chat_id, user_id, reason)
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -710,6 +518,7 @@ async def _membership_ensure_table() -> None:
     except Exception as e:
         logger.debug(f"_membership_ensure_table: {type(e).__name__}: {e}")
 
+
 def _membership_should_send(chat_id):
     if chat_id is None: return False
     now = time.monotonic()
@@ -717,6 +526,7 @@ def _membership_should_send(chat_id):
     if now - last < _MEMBERSHIP_DEBOUNCE_SECONDS: return False
     _membership_recent_reports[chat_id] = now
     return True
+
 
 def _membership_prune_reports():
     try:
@@ -726,9 +536,11 @@ def _membership_prune_reports():
                 _membership_recent_reports.pop(k, None)
     except Exception: pass
 
+
 def _membership_safe_html(v, default=""):
     try: return default if v is None else _html.escape(str(v))
     except Exception: return default
+
 
 def _membership_build_user_link(uid, uname=None):
     try:
@@ -737,6 +549,7 @@ def _membership_build_user_link(uid, uname=None):
             if c: return f"https://t.me/{c}"
         return f"tg://user?id={uid}"
     except Exception: return f"tg://user?id={uid}"
+
 
 async def _membership_get_log_channel():
     try:
@@ -760,6 +573,7 @@ async def _membership_get_log_channel():
     except Exception: pass
     return None
 
+
 async def _membership_save_to_db(chat_id, chat_title, chat_type,
                                   chat_username, added_by_id, added_by_name,
                                   added_by_username, bot_status):
@@ -775,6 +589,7 @@ async def _membership_save_to_db(chat_id, chat_title, chat_type,
              bot_status or '', TimeUtils.sql_iso()))
         return True
     except Exception: return False
+
 
 def _membership_build_report_text(chat, user, new_status):
     is_ch = (chat.type == "channel")
@@ -805,6 +620,7 @@ def _membership_build_report_text(chat, user, new_status):
              f"🕐 <b>الوقت:</b> {_membership_safe_html(TimeUtils.mecca_iso())}")
     return text
 
+
 def _membership_build_keyboard(chat, user):
     rows = []
     uname = getattr(chat, 'username', None)
@@ -821,6 +637,7 @@ def _membership_build_keyboard(chat, user):
     try: return InlineKeyboardMarkup(rows)
     except Exception: return None
 
+
 async def _membership_try_get_photo(bot, chat, chat_type):
     try:
         photo = getattr(chat, 'photo', None)
@@ -836,6 +653,7 @@ async def _membership_try_get_photo(bot, chat, chat_type):
             except Exception: pass
     except Exception: pass
     return None
+
 
 async def handle_my_chat_member(update, context):
     result = update.my_chat_member
@@ -885,6 +703,7 @@ async def handle_my_chat_member(update, context):
                 parse_mode='HTML', disable_web_page_preview=True)
         except Exception: pass
 
+
 def register_membership_handlers(application):
     try:
         application.add_handler(ChatMemberHandler(
@@ -892,6 +711,7 @@ def register_membership_handlers(application):
         logger.info("✅ ChatMemberHandler مُسجَّل")
     except Exception as e:
         logger.error(f"❌ فشل تسجيل ChatMemberHandler: {e}", exc_info=True)
+
 
 class CircuitBreaker:
     __slots__ = ('failures', 'threshold', 'recovery', 'opened_at',
@@ -938,8 +758,10 @@ class CircuitBreaker:
         self._half_open_in_flight = False
         self.last_activity = time.monotonic()
 
+
 _publish_circuits: Dict[int, CircuitBreaker] = {}
 _CIRCUIT_STALE_AGE = 3600.0
+
 
 def _get_publish_circuit(ch_db_id):
     cb = _publish_circuits.get(ch_db_id)
@@ -947,6 +769,7 @@ def _get_publish_circuit(ch_db_id):
         cb = CircuitBreaker(threshold=5, recovery=300.0)
         _publish_circuits[ch_db_id] = cb
     return cb
+
 
 def _prune_publish_circuits():
     try:
@@ -960,6 +783,7 @@ def _prune_publish_circuits():
                 _publish_circuits.pop(ch_id, None)
     except Exception: pass
 
+
 _metrics = {
     'started_at': time.monotonic(), 'callbacks_total': 0,
     'callbacks_failed': 0, 'callbacks_rate_limited': 0,
@@ -970,9 +794,11 @@ _metrics = {
     'publishes_rate_limited': 0, 'circuit_opened': 0, 'circuit_blocked': 0}
 _TOP_CALLBACKS_MAX = 100
 
+
 def _metrics_inc(key, delta=1):
     try: _metrics[key] = _metrics.get(key, 0) + delta
     except Exception: pass
+
 
 def _metrics_top_cb(base_data):
     try:
@@ -983,6 +809,7 @@ def _metrics_top_cb(base_data):
             for k in keys[:len(keys) // 2]: top.pop(k, None)
     except Exception: pass
 
+
 def _metrics_latency(elapsed):
     try:
         b = _metrics['callbacks_latency']
@@ -991,6 +818,7 @@ def _metrics_latency(elapsed):
         else: b['>1s'] += 1
     except Exception: pass
 
+
 def _metrics_snapshot():
     try:
         snap = dict(_metrics)
@@ -998,6 +826,7 @@ def _metrics_snapshot():
         snap['callbacks_latency'] = dict(_metrics.get('callbacks_latency', {}))
         return snap
     except Exception: return {}
+
 
 def _metrics_reset():
     try:
@@ -1012,12 +841,15 @@ def _metrics_reset():
         _metrics['started_at'] = time.monotonic()
     except Exception: pass
 
+
 def _match_cb(data, *candidates):
+    """تطابق تام فقط (exact match) — ليس prefix match."""
     if not data: return False
     for c in candidates:
         if c is None or c == "": continue
         if data == c: return True
     return False
+
 
 def _clear_lang_cache_local(context):
     mod = sys.modules.get('handlers_message')
@@ -1028,7 +860,8 @@ def _clear_lang_cache_local(context):
     if mod is None:
         try: mod = importlib.import_module('handlers_message')
         except ImportError:
-            try: mod = importlib.import_module('.handlers_message', package=__package__)
+            try: mod = importlib.import_module('.handlers_message',
+                                                package=__package__)
             except (ImportError, TypeError, ValueError): mod = None
     if mod is not None:
         _clc = getattr(mod, 'clear_lang_cache', None)
@@ -1041,6 +874,7 @@ def _clear_lang_cache_local(context):
                        'cached_translations', 'last_translation'):
                 context.user_data.pop(_k, None)
     except Exception: pass
+
 
 def _apply_auto_reply_status_icons(kb, enabled, admins_only,
                                     enabled_label, admins_label):
@@ -1063,6 +897,7 @@ def _apply_auto_reply_status_icons(kb, enabled, admins_only,
         return InlineKeyboardMarkup(new_rows)
     except Exception: return kb
 
+
 def _patch_auto_reply_back(kb, chat_id):
     try:
         new_rows = []
@@ -1077,6 +912,7 @@ def _patch_auto_reply_back(kb, chat_id):
             new_rows.append(nr)
         return InlineKeyboardMarkup(new_rows)
     except Exception: return kb
+
 
 async def _render_auto_reply_menu(query, context, chat_id, lang):
     try:
@@ -1103,6 +939,7 @@ async def _render_auto_reply_menu(query, context, chat_id, lang):
         try: await safe_edit(query, await _trans('error_occurred', lang, "❌"),
             bot=context.bot)
         except Exception: pass
+
 
 async def _notify_channel_owner_kicked(context, ch_db_id):
     notify_key = f"_kicked_notify_{ch_db_id}"
@@ -1133,6 +970,7 @@ async def _notify_channel_owner_kicked(context, ch_db_id):
         except Exception: pass
     except Exception: pass
 
+
 def _prune_kicked_notify_state(context, now):
     if context is None: return 0
     bd = getattr(context, 'bot_data', None)
@@ -1146,30 +984,21 @@ def _prune_kicked_notify_state(context, now):
             except Exception: pass
     except Exception: pass
 
+
 async def _invalidate_log_channel_menu_cache(chat_id):
-    """🆕 v9.7.11 PERF-CB-3: إبطال 3 طبقات."""
     try:
         await internal_cache.invalidate(_log_channel_cache_key(chat_id))
-    except Exception:
-        pass
+    except Exception: pass
     try:
         await internal_cache.invalidate(f"group_log_{chat_id}")
-    except Exception:
-        pass
+    except Exception: pass
     try:
         await _invalidate_message_caches(
-            chat_id=chat_id, reason="log_channel_change"
-        )
+            chat_id=chat_id, reason="log_channel_change")
     except Exception as e:
-        logger.debug(
-            "🧹 PERF-CB: _invalidate_message_caches (log) failed: %s", e
-        )
+        logger.debug("🧹 PERF-CB: _invalidate_message_caches (log) "
+                     "failed: %s", e)
 
-def _set_sec_chat(context, chat_id):
-    try:
-        context.user_data['sec_chat'] = chat_id
-        context.user_data['security_chat_id'] = chat_id
-    except Exception: pass
 
 async def _get_log_channel_menu_data(chat_id):
     cache_key = _log_channel_cache_key(chat_id)
@@ -1199,6 +1028,7 @@ async def _get_log_channel_menu_data(chat_id):
     await internal_cache.set(cache_key, data, ttl=LOG_CHANNEL_MENU_CACHE_TTL)
     return data
 
+
 async def _safe_answer(query, text=None, show_alert=False):
     if not query: return False
     try:
@@ -1208,8 +1038,14 @@ async def _safe_answer(query, text=None, show_alert=False):
         logger.debug(f"_safe_answer failed: {type(e).__name__}: {e}")
         return False
 
-async def safe_edit(query, text, reply_markup=None, parse_mode=None,
+
+# ═══════════════════════════════════════════════════════════════════
+# safe_edit
+# ═══════════════════════════════════════════════════════════════════
+
+async def safe_edit(query, text, reply_markup=None, parse_mode="HTML",
                     bot=None, clear_markup=False):
+    """v9.7.17 FIX-SAFE-EDIT: parse_mode="HTML" افتراضي + تنظيف عند الفشل."""
     if not query or not query.message:
         if bot and query and query.from_user:
             try:
@@ -1229,7 +1065,8 @@ async def safe_edit(query, text, reply_markup=None, parse_mode=None,
         return True
     except BadRequest as e:
         em = str(e).lower()
-        if "message is not modified" in em: return True
+        if "message is not modified" in em:
+            return True
         elif "message is too long" in em:
             cid = query.message.chat_id
             try: await query.message.delete()
@@ -1245,17 +1082,28 @@ async def safe_edit(query, text, reply_markup=None, parse_mode=None,
             return False
         elif ("can't parse entities" in em or "parse" in em):
             try:
-                await query.edit_message_text(text, reply_markup=reply_markup,
-                    parse_mode=None)
+                _clean_text = re.sub(r'<[^>]+>', '', text)
+                await query.edit_message_text(_clean_text,
+                    reply_markup=reply_markup, parse_mode=None)
                 return True
             except Exception: return False
         elif "message text is empty" in em:
             try:
-                await query.edit_message_text("...", reply_markup=reply_markup)
+                await query.edit_message_text("...",
+                    reply_markup=reply_markup)
                 return True
             except Exception: return False
         return False
     except Exception: return False
+
+
+# ═══════════════════════════════════════════════════════════════════
+# v9.7.18-SEC-EXTRACTED: حقن الحاقنات في callback_security
+# ═══════════════════════════════════════════════════════════════════
+_sec_set_metrics_inc(_metrics_inc)
+_sec_set_safe_edit(safe_edit)
+logger.info("🔗 SEC-EXTRACT: تم حقن metrics_inc + safe_edit في callback_security")
+
 
 async def safe_delete_message(qm):
     try:
@@ -1264,9 +1112,11 @@ async def safe_delete_message(qm):
         elif qm: await qm.delete()
     except Exception: pass
 
+
 async def _is_channel_owner(user_id, channel_db_id):
     try: return await DB.is_channel_owner(user_id, channel_db_id)
     except Exception: return False
+
 
 async def _is_group_owner(user_id, chat_id):
     try:
@@ -1280,121 +1130,22 @@ async def _is_group_owner(user_id, chat_id):
         return False
     except Exception: return False
 
+
 def _clear_context_keys(context, extra_keys=None):
     for k in _CONTEXT_KEYS_TO_CLEAR: context.user_data.pop(k, None)
     if extra_keys:
         for k in extra_keys: context.user_data.pop(k, None)
 
+
 def _ensure_bot_start_time(context):
     if 'start_time' not in context.bot_data:
         context.bot_data['start_time'] = time.monotonic()
 
-async def _resolve_sec_chat_id(context, data):
-    for part in data.split(":")[1:]:
-        p = part.strip()
-        if p.startswith('-') and p[1:].isdigit(): return int(p)
-    stored = (context.user_data.get('security_chat_id')
-              or context.user_data.get('sec_chat'))
-    if stored:
-        try: return int(stored)
-        except (TypeError, ValueError): return None
-    return None
-
-def _prune_sec_auth_cache(now):
-    removed = 0
-    for k in [k for k, (_, ts) in _sec_auth_cache.items()
-              if now - ts >= SEC_AUTH_CACHE_TTL]:
-        _sec_auth_cache.pop(k, None); removed += 1
-    if len(_sec_auth_cache) > SEC_AUTH_CACHE_MAX_SIZE:
-        target = max(1, SEC_AUTH_CACHE_MAX_SIZE // 4)
-        for k, _ in sorted(_sec_auth_cache.items(),
-                           key=lambda kv: kv[1][1])[:target]:
-            _sec_auth_cache.pop(k, None); removed += 1
-    expired_neg = []
-    for k, val in _sec_auth_neg_cache.items():
-        try: until = val[0] if isinstance(val, tuple) else val
-        except Exception: expired_neg.append(k); continue
-        if until <= now: expired_neg.append(k)
-    for k in expired_neg: _sec_auth_neg_cache.pop(k, None)
-    for k in list(_sec_auth_locks.keys()):
-        lock = _sec_auth_locks.get(k)
-        if lock is None: continue
-        if (not lock.locked() and k not in _sec_auth_cache
-                and k not in _sec_auth_neg_cache):
-            _sec_auth_locks.pop(k, None)
-    try: _prune_publish_circuits()
-    except Exception: pass
-    return removed
-
-async def _check_sec_auth(context, user_id, chat_id):
-    if chat_id is None: return False
-    key = (user_id, chat_id)
-    now = time.monotonic()
-    cached = _sec_auth_cache.get(key)
-    if cached and now - cached[1] < SEC_AUTH_CACHE_TTL:
-        _metrics_inc('auth_cache_hits'); return cached[0]
-    neg_val = _sec_auth_neg_cache.get(key)
-    if neg_val is not None:
-        try:
-            until = neg_val[0] if isinstance(neg_val, tuple) else neg_val
-            if until > now:
-                _metrics_inc('auth_neg_cache_hits'); return False
-        except Exception: pass
-    _metrics_inc('auth_cache_misses')
-    lock = _sec_auth_locks.get(key)
-    if lock is None:
-        new_lock = asyncio.Lock()
-        lock = _sec_auth_locks.setdefault(key, new_lock)
-    async with lock:
-        now = time.monotonic()
-        cached = _sec_auth_cache.get(key)
-        if cached and now - cached[1] < SEC_AUTH_CACHE_TTL: return cached[0]
-        neg_val = _sec_auth_neg_cache.get(key)
-        if neg_val is not None:
-            try:
-                until = neg_val[0] if isinstance(neg_val, tuple) else neg_val
-                if until > now: return False
-            except Exception: pass
-        if len(_sec_auth_cache) >= SEC_AUTH_CACHE_MAX_SIZE:
-            _prune_sec_auth_cache(now)
-        try:
-            result = await is_authorized_in_group(context.bot, chat_id, user_id)
-        except Exception as e:
-            prev = _sec_auth_neg_cache.get(key)
-            fails = 0
-            if prev is not None and isinstance(prev, tuple):
-                try: fails = int(prev[1])
-                except Exception: fails = 0
-            nf = min(fails + 1, 6)
-            ttl = min(_SEC_AUTH_NEG_BASE * (2 ** (nf - 1)), _SEC_AUTH_NEG_MAX)
-            _sec_auth_neg_cache[key] = (now + ttl, nf)
-            _metrics_inc('auth_api_failures')
-            return False
-        _sec_auth_cache[key] = (result, now)
-        _sec_auth_neg_cache.pop(key, None)
-        return result
-
-def _invalidate_sec_auth_cache(chat_id=None):
-    if chat_id is None:
-        _sec_auth_cache.clear(); _sec_auth_neg_cache.clear()
-        for k in list(_sec_auth_locks.keys()):
-            lock = _sec_auth_locks.get(k)
-            if lock is not None and not lock.locked():
-                _sec_auth_locks.pop(k, None)
-    else:
-        for k in list(_sec_auth_cache.keys()):
-            if k[1] == chat_id: del _sec_auth_cache[k]
-        for k in list(_sec_auth_neg_cache.keys()):
-            if k[1] == chat_id: del _sec_auth_neg_cache[k]
-        for k in list(_sec_auth_locks.keys()):
-            if k[1] == chat_id:
-                lock = _sec_auth_locks.get(k)
-                if lock is not None and not lock.locked():
-                    _sec_auth_locks.pop(k, None)
 
 async def _invalidate_post_count_cache(channel_db_id):
     try: await _post_count_cache.delete(f"post_count_{channel_db_id}")
     except Exception: pass
+
 
 async def _invalidate_after_channel_change(user_id, channel_db_id=None,
                                             invalidate_posts=True):
@@ -1408,6 +1159,7 @@ async def _invalidate_after_channel_change(user_id, channel_db_id=None,
         try: await posts_cache.invalidate(channel_db_id)
         except Exception: pass
         await _invalidate_post_count_cache(channel_db_id)
+
 
 def _format_channel_rate_line(ch):
     published = _coerce_int(ch.get('published'), 0)
@@ -1427,6 +1179,7 @@ def _format_channel_rate_line(ch):
         line += f"   📈 {published}/{total}  ⏳ {pending}  ({completion_rate}%)\n"
     line += "\n"
     return line
+
 
 class CallbackHandlers:
 
@@ -1458,7 +1211,7 @@ class CallbackHandlers:
             CallbackHandlers._cleanup_user_data(context)
         cb_count = context.bot_data.get("_cb_counter", 0) + 1
         context.bot_data["_cb_counter"] = cb_count
-        if cb_count % _SEC_AUTH_PRUNE_EVERY == 0:
+        if cb_count % 500 == 0:
             try: _prune_sec_auth_cache(now_time)
             except Exception: pass
             try: _prune_kicked_notify_state(context, now_time)
@@ -1764,16 +1517,15 @@ class CallbackHandlers:
                 await safe_edit(query,
                     await _trans('admin_panel', lang, "👑"),
                     reply_markup=kb, bot=context.bot); return
+
+            # ═══ v9.7.18-SEC-EXTRACTED: تفويض الأمان لـ SecurityCallbacks ═══
             if data.startswith("log_channel_"):
-                await CallbackHandlers._handle_log_channel(
+                await SecurityCallbacks._handle_log_channel(
                     update, context, query, user_id, lang); return
             if data.startswith("sec_"):
-                await CallbackHandlers._handle_security(
+                await SecurityCallbacks.handle_security(
                     update, context, query, user_id, lang); return
 
-            # ═══════════════════════════════════════════════════════════
-            # 🆕 v9.7.16 FIX-ANALYTICS-MENU: دمج admin_analytics + refresh_btn
-            # ═══════════════════════════════════════════════════════════
             if data in ("admin_analytics", "refresh_btn"):
                 if not CONFIG.is_developer(user_id):
                     await safe_edit(query,
@@ -1781,11 +1533,6 @@ class CallbackHandlers:
                         bot=context.bot); return
                 await CallbackHandlers._show_analytics_menu(
                     query, context, user_id, lang); return
-
-            # ═══════════════════════════════════════════════════════════
-            # 🆕 v9.7.16 FIX-ANALYTICS-BUTTONS: أزرار التحليلات الثمانية
-            # تعمل الآن بفضل دمج _ANALYTICS_BUTTONS_DIRECT_MAP في الأعلى.
-            # ═══════════════════════════════════════════════════════════
             if (data.startswith("analytics_")
                     or data in _ANALYTICS_ALIASES):
                 if not CONFIG.is_developer(user_id):
@@ -1949,10 +1696,8 @@ class CallbackHandlers:
             try:
                 logger.debug(
                     f"⚠️ unhandled callback | user={user_id} "
-                    f"base={base_data!r} data={data!r}"
-                )
-            except Exception:
-                pass
+                    f"base={base_data!r} data={data!r}")
+            except Exception: pass
             await safe_edit(query,
                 await _trans('not_available', lang, "⚠️"),
                 bot=context.bot)
@@ -1989,253 +1734,6 @@ class CallbackHandlers:
             for k in keys_to_del:
                 context.user_data.pop(k, None)
         except Exception: pass
-
-    @staticmethod
-    async def _show_antiflood_messages_buttons(
-        update, context, query, chat_id, lang
-    ):
-        try:
-            settings = await CallbackHandlers._get_security_settings_cached(
-                chat_id
-            )
-            current = _coerce_int(settings.get('antiflood_messages'), 5)
-            title = await _trans('antiflood_messages_title', lang,
-                "🔢 <b>عدد الرسائل المسموحة</b>")
-            current_label = _fmt(await _trans(
-                'antiflood_messages_current', lang,
-                "📊 <b>القيمة الحالية:</b> <code>{count}</code> رسالة"),
-                count=current)
-            choose = await _trans('antiflood_messages_choose', lang,
-                "اختر الحد الأقصى للرسائل خلال النافذة الزمنية:")
-
-            text = (f"{title}\n━━━━━━━━━━━━━━━━━━━━━━\n\n"
-                    f"{current_label}\n\n{choose}")
-
-            kb = []
-            row = []
-            for n in _ANTIFLOOD_MESSAGES_OPTIONS:
-                icon = "✅" if n == current else "▫️"
-                row.append(InlineKeyboardButton(
-                    f"{icon} {n}",
-                    callback_data=f"set_antiflood_messages:{chat_id}:{n}"
-                ))
-                if len(row) == 3:
-                    kb.append(row); row = []
-            if row:
-                kb.append(row)
-
-            kb.append([InlineKeyboardButton(
-                KeyboardFactory.get_text("back", lang),
-                callback_data=f"sec_antiflood_settings:{chat_id}"
-            )])
-
-            await safe_edit(query, text,
-                reply_markup=InlineKeyboardMarkup(kb),
-                parse_mode='HTML', bot=context.bot)
-        except Exception as e:
-            logger.error(
-                f"_show_antiflood_messages_buttons: {e}",
-                exc_info=True,
-            )
-            await safe_edit(query,
-                await _trans('error_occurred', lang, "❌"),
-                bot=context.bot)
-
-    @staticmethod
-    async def _show_antiflood_seconds_buttons(
-        update, context, query, chat_id, lang
-    ):
-        try:
-            settings = await CallbackHandlers._get_security_settings_cached(
-                chat_id
-            )
-            current = _coerce_int(settings.get('antiflood_seconds'), 10)
-            title = await _trans('antiflood_seconds_title', lang,
-                "⏱️ <b>النافذة الزمنية (ثواني)</b>")
-            current_label = _fmt(await _trans(
-                'antiflood_seconds_current', lang,
-                "⏱️ <b>القيمة الحالية:</b> <code>{count}</code> ثانية"),
-                count=current)
-            choose = await _trans('antiflood_seconds_choose', lang,
-                "اختر النافذة الزمنية لعدّ الرسائل:")
-
-            text = (f"{title}\n━━━━━━━━━━━━━━━━━━━━━━\n\n"
-                    f"{current_label}\n\n{choose}")
-
-            kb = []
-            row = []
-            for n in _ANTIFLOOD_SECONDS_OPTIONS:
-                icon = "✅" if n == current else "▫️"
-                if n < 60:
-                    label = f"{icon} {n}s"
-                elif n % 60 == 0:
-                    label = f"{icon} {n // 60}m"
-                else:
-                    label = f"{icon} {n}s"
-                row.append(InlineKeyboardButton(
-                    label,
-                    callback_data=f"set_antiflood_seconds:{chat_id}:{n}"
-                ))
-                if len(row) == 3:
-                    kb.append(row); row = []
-            if row:
-                kb.append(row)
-
-            kb.append([InlineKeyboardButton(
-                KeyboardFactory.get_text("back", lang),
-                callback_data=f"sec_antiflood_settings:{chat_id}"
-            )])
-
-            await safe_edit(query, text,
-                reply_markup=InlineKeyboardMarkup(kb),
-                parse_mode='HTML', bot=context.bot)
-        except Exception as e:
-            logger.error(
-                f"_show_antiflood_seconds_buttons: {e}",
-                exc_info=True,
-            )
-            await safe_edit(query,
-                await _trans('error_occurred', lang, "❌"),
-                bot=context.bot)
-
-    @staticmethod
-    async def _invalidate_security_settings_cache(chat_id):
-        """🆕 v9.7.11 PERF-CB-2: إبطال 5 طبقات cache."""
-        try:
-            await settings_cache.invalidate_security(chat_id)
-        except Exception:
-            pass
-        try:
-            await _security_stats_cache_local.delete(f"sec_stats_{chat_id}")
-        except Exception:
-            pass
-        if _SECURITY_BRIDGE_AVAILABLE:
-            try:
-                bridge_invalidate_sec_cache(chat_id)
-            except Exception as e:
-                logger.debug(
-                    f"bridge_invalidate_sec_cache({chat_id}) failed: {e}"
-                )
-        try:
-            await _invalidate_message_caches(
-                chat_id=chat_id, reason="security_settings_change"
-            )
-        except Exception as e:
-            logger.debug(
-                "🧹 PERF-CB: _invalidate_message_caches (security) "
-                "failed: %s", e,
-            )
-
-    @staticmethod
-    async def _get_security_settings_cached(chat_id):
-        try:
-            cached = await settings_cache.get_security(chat_id)
-        except Exception:
-            cached = None
-        if cached is not None:
-            if isinstance(cached, dict):
-                return cached
-            as_dict = _row_to_dict(cached)
-            if as_dict is not None:
-                return as_dict
-            try:
-                await settings_cache.invalidate_security(chat_id)
-            except Exception:
-                pass
-            logger.debug(
-                f"_get_security_settings_cached: cached value corrupted "
-                f"for chat={chat_id} → invalidated"
-            )
-
-        settings: Dict = {}
-        try:
-            raw = await DB.get_security_settings(chat_id) or {}
-            if not isinstance(raw, dict):
-                raw = _row_to_dict(raw) or {}
-            settings = raw
-        except Exception as e:
-            logger.debug(f"DB.get_security_settings({chat_id}): {e}")
-            settings = {}
-
-        try:
-            await settings_cache.set_security(chat_id, settings)
-        except Exception:
-            pass
-        return settings
-
-    @staticmethod
-    async def _load_stats_and_edit(query, context, chat_id, lang, settings,
-                                    expected_token=None):
-        try:
-            if expected_token is not None:
-                if context.user_data.get('_sec_view_token') != expected_token:
-                    logger.debug(
-                        f"_load_stats_and_edit({chat_id}): token stale — تخطي"
-                    )
-                    return
-            cache_key = f"sec_stats_{chat_id}"
-            cached_stats = await _security_stats_cache_local.get(cache_key)
-            if cached_stats is not None:
-                stats = cached_stats
-            else:
-                stats = await KeyboardFactory._get_security_stats(chat_id) or {}
-                await _security_stats_cache_local.set(
-                    cache_key, stats, ttl=SEC_STATS_CACHE_TTL
-                )
-            if expected_token is not None:
-                if context.user_data.get('_sec_view_token') != expected_token:
-                    return
-            try:
-                text = KeyboardFactory._format_security_text(
-                    settings, stats, lang=lang
-                )
-            except TypeError:
-                text = KeyboardFactory._format_security_text(
-                    settings, stats
-                )
-            kb = KeyboardFactory.build("security", chat_id=chat_id, lang=lang)
-            await safe_edit(query, text, reply_markup=kb,
-                parse_mode='HTML', bot=context.bot)
-        except Exception as e:
-            logger.debug(f"_load_stats_and_edit({chat_id}): {e}")
-
-    @staticmethod
-    async def _render_security_two_phase(query, context, chat_id, lang,
-                                          force_refresh_settings=False):
-        try:
-            if force_refresh_settings:
-                await CallbackHandlers._invalidate_security_settings_cache(
-                    chat_id)
-            settings = await CallbackHandlers._get_security_settings_cached(
-                chat_id)
-            try:
-                text_no_stats = KeyboardFactory._format_security_text(
-                    settings, {}, lang=lang
-                )
-            except TypeError:
-                text_no_stats = KeyboardFactory._format_security_text(
-                    settings, {}
-                )
-            kb = KeyboardFactory.build("security", chat_id=chat_id, lang=lang)
-            await safe_edit(query, text_no_stats, reply_markup=kb,
-                parse_mode='HTML', bot=context.bot)
-            token = time.monotonic()
-            try:
-                context.user_data['_sec_view_token'] = token
-            except Exception:
-                pass
-            task = asyncio.create_task(
-                CallbackHandlers._load_stats_and_edit(
-                    query, context, chat_id, lang, settings,
-                    expected_token=token
-                )
-            )
-            ACTIVE_TASKS.add(task)
-            task.add_done_callback(ACTIVE_TASKS.discard)
-        except Exception as e:
-            logger.error(
-                f"_render_security_two_phase: {e}", exc_info=True
-            )
 
     @staticmethod
     async def _show_main_menu_inline(query, context, user_id):
@@ -2308,115 +1806,16 @@ class CallbackHandlers:
 
     @staticmethod
     async def _handle_parameterized(update, context, query, user_id, lang, data):
+        # ═══ v9.7.18-SEC-EXTRACTED: تفويض الأمان لـ SecurityCallbacks ═══
         try:
-            if data in ("sec_close", "grp_close", "security_close",
-                        "back_to_groups", "sec_back"):
-                StateManager.clear(user_id); _clear_context_keys(context)
-                await CallbackHandlers._show_groups_list(
-                    update, context, query, user_id, lang); return True
-            if (data.startswith("sec_close:")
-                    or data.startswith("grp_close:")
-                    or data.startswith("back_to_groups:")
-                    or data.startswith("sec_back:")):
-                StateManager.clear(user_id); _clear_context_keys(context)
-                await CallbackHandlers._show_groups_list(
-                    update, context, query, user_id, lang); return True
-            if data.startswith("set_warn_count:"):
-                parts = data.split(":")
-                if len(parts) != 3:
-                    await safe_edit(query, await _trans('invalid_data', lang, "❌"),
-                        bot=context.bot); return True
-                chat_id = _coerce_int(parts[1]); count = _coerce_int(parts[2])
-                if not await _check_sec_auth(context, user_id, chat_id):
-                    await safe_edit(query,
-                        await _trans('no_permission', lang, "❌"),
-                        bot=context.bot); return True
-                if count < 1 or count > 100:
-                    await safe_edit(query,
-                        await _trans('invalid_number', lang, "❌"),
-                        bot=context.bot); return True
-                await DB.update_security_settings(chat_id, max_warnings=count)
-                await CallbackHandlers._invalidate_security_settings_cache(
-                    chat_id)
-                await CallbackHandlers._refresh_security_view(
-                    query, context, chat_id, lang); return True
-
-            if data.startswith("set_antiflood_messages:"):
-                parts = data.split(":")
-                if len(parts) != 3:
-                    await safe_edit(query,
-                        await _trans('invalid_data', lang, "❌"),
-                        bot=context.bot); return True
-                chat_id = _coerce_int(parts[1])
-                value = _coerce_int(parts[2])
-                if not await _check_sec_auth(context, user_id, chat_id):
-                    await safe_edit(query,
-                        await _trans('no_permission', lang, "❌"),
-                        bot=context.bot); return True
-                if value < 1 or value > _ANTIFLOOD_MESSAGES_MAX:
-                    await safe_edit(query,
-                        await _trans('invalid_number', lang, "❌"),
-                        bot=context.bot); return True
-                try:
-                    await DB.update_security_settings(
-                        chat_id, antiflood_messages=value
-                    )
-                except Exception as e:
-                    logger.warning(
-                        f"set_antiflood_messages DB error: {e}"
-                    )
-                    await safe_edit(query,
-                        await _trans('error_occurred', lang, "❌"),
-                        bot=context.bot); return True
-                await CallbackHandlers.\
-                    _invalidate_security_settings_cache(chat_id)
-                logger.info(
-                    "🌊 ANTIFLOOD-MESSAGES | chat=%s value=%d by=%s",
-                    chat_id, value, user_id,
-                )
-                await CallbackHandlers._show_antiflood_messages_buttons(
-                    update, context, query, chat_id, lang
-                )
+            if await SecurityCallbacks.handle_parameterized(
+                    update, context, query, user_id, lang, data):
                 return True
+        except Exception as e:
+            logger.error(f"❌ security delegation: {e}", exc_info=True)
+            return True
 
-            if data.startswith("set_antiflood_seconds:"):
-                parts = data.split(":")
-                if len(parts) != 3:
-                    await safe_edit(query,
-                        await _trans('invalid_data', lang, "❌"),
-                        bot=context.bot); return True
-                chat_id = _coerce_int(parts[1])
-                value = _coerce_int(parts[2])
-                if not await _check_sec_auth(context, user_id, chat_id):
-                    await safe_edit(query,
-                        await _trans('no_permission', lang, "❌"),
-                        bot=context.bot); return True
-                if value < 1 or value > _ANTIFLOOD_SECONDS_MAX:
-                    await safe_edit(query,
-                        await _trans('invalid_number', lang, "❌"),
-                        bot=context.bot); return True
-                try:
-                    await DB.update_security_settings(
-                        chat_id, antiflood_seconds=value
-                    )
-                except Exception as e:
-                    logger.warning(
-                        f"set_antiflood_seconds DB error: {e}"
-                    )
-                    await safe_edit(query,
-                        await _trans('error_occurred', lang, "❌"),
-                        bot=context.bot); return True
-                await CallbackHandlers.\
-                    _invalidate_security_settings_cache(chat_id)
-                logger.info(
-                    "🌊 ANTIFLOOD-SECONDS | chat=%s value=%ds by=%s",
-                    chat_id, value, user_id,
-                )
-                await CallbackHandlers._show_antiflood_seconds_buttons(
-                    update, context, query, chat_id, lang
-                )
-                return True
-
+        try:
             if data == f"{CB.POST_CLEAR}_confirm":
                 active = await DB.get_active_channel(user_id)
                 if not active:
@@ -2479,392 +1878,6 @@ class CallbackHandlers:
                     await _trans('delete_group_confirm', lang, "⚠️"),
                     reply_markup=kb, parse_mode='HTML',
                     bot=context.bot); return True
-            if data.startswith("set_warn_penalty:"):
-                parts = data.split(":")
-                if len(parts) != 3:
-                    await safe_edit(query, await _trans('invalid_data', lang,
-                        "❌"), bot=context.bot); return True
-                _, penalty_type, chat_id_str = parts
-                chat_id = _coerce_int(chat_id_str)
-                if not await _check_sec_auth(context, user_id, chat_id):
-                    await safe_edit(query,
-                        await _trans('no_permission', lang, "❌"),
-                        bot=context.bot); return True
-                if penalty_type not in DB.VALID_PENALTY_TYPES:
-                    await safe_edit(query,
-                        await _trans('invalid_penalty_type', lang, "❌"),
-                        bot=context.bot); return True
-                await DB.update_security_settings(chat_id,
-                    warn_penalty=penalty_type)
-                await CallbackHandlers._invalidate_security_settings_cache(
-                    chat_id)
-                await CallbackHandlers._refresh_security_view(
-                    query, context, chat_id, lang); return True
-            if data.startswith("set_duration:"):
-                parts = data.split(":")
-                if len(parts) < 4:
-                    await safe_edit(query, await _trans('invalid_data', lang,
-                        "❌"), bot=context.bot); return True
-                penalty_type = parts[1]
-                chat_id = _coerce_int(parts[2])
-                duration = _coerce_int(parts[3])
-                if not await _check_sec_auth(context, user_id, chat_id):
-                    await safe_edit(query,
-                        await _trans('no_permission', lang, "❌"),
-                        bot=context.bot); return True
-                col_map = {
-                    'mute': 'mute_default_duration',
-                    'ban': 'ban_default_duration',
-                    'restrict': 'restrict_default_duration',
-                    'antiflood': 'antiflood_penalty_duration',
-                    'night': 'night_mode_action_duration',
-                    'warn_penalty': 'warn_penalty_duration',
-                    'delete_penalty': 'delete_penalty_duration',
-                    'violation': 'violation_penalty_duration'}
-                col = col_map.get(penalty_type)
-                if col is None:
-                    await safe_edit(query,
-                        await _trans('invalid_penalty_type', lang, "❌"),
-                        bot=context.bot); return True
-                await DB.update_security_settings(chat_id, **{col: duration})
-                await CallbackHandlers._invalidate_security_settings_cache(
-                    chat_id)
-                await CallbackHandlers._refresh_security_view(
-                    query, context, chat_id, lang); return True
-
-            if data.startswith("sec_set_del_penalty_duration:"):
-                parts = data.split(":")
-                if len(parts) != 2:
-                    await safe_edit(query, await _trans('invalid_data', lang,
-                        "❌"), bot=context.bot); return True
-                chat_id = _coerce_int(parts[1])
-                if not await _check_sec_auth(context, user_id, chat_id):
-                    await safe_edit(query,
-                        await _trans('no_permission', lang, "❌"),
-                        bot=context.bot); return True
-                await CallbackHandlers._show_penalty_durations(
-                    update, context, query, chat_id, lang, 'delete_penalty')
-                return True
-            if data.startswith("sec_set_del_penalty:"):
-                parts = data.split(":")
-                if len(parts) != 3:
-                    await safe_edit(query, await _trans('invalid_data', lang,
-                        "❌"), bot=context.bot); return True
-                _, penalty_type, chat_id_str = parts
-                chat_id = _coerce_int(chat_id_str)
-                if not await _check_sec_auth(context, user_id, chat_id):
-                    await safe_edit(query,
-                        await _trans('no_permission', lang, "❌"),
-                        bot=context.bot); return True
-                if penalty_type == "none":
-                    await DB.update_security_settings(chat_id,
-                        delete_penalty="none")
-                elif penalty_type in DB.VALID_PENALTY_TYPES:
-                    await DB.update_security_settings(chat_id,
-                        delete_penalty=penalty_type)
-                else:
-                    await safe_edit(query,
-                        await _trans('invalid_penalty_type', lang, "❌"),
-                        bot=context.bot); return True
-                await CallbackHandlers._invalidate_security_settings_cache(
-                    chat_id)
-                await CallbackHandlers._refresh_security_view(
-                    query, context, chat_id, lang); return True
-
-            if data.startswith("sec_penalty_durations:"):
-                parts = data.split(":")
-                if len(parts) != 2:
-                    await safe_edit(query, await _trans('invalid_data', lang,
-                        "❌"), bot=context.bot); return True
-                chat_id = _coerce_int(parts[1])
-                if not await _check_sec_auth(context, user_id, chat_id):
-                    await safe_edit(query,
-                        await _trans('no_permission', lang, "❌"),
-                        bot=context.bot); return True
-                await CallbackHandlers._show_all_penalty_durations_menu(
-                    query, context, chat_id, lang); return True
-            for prefix, action_type in (
-                ("sec_set_mute_duration:", "mute"),
-                ("sec_set_ban_duration:", "ban"),
-                ("sec_set_restrict_duration:", "restrict"),
-                ("sec_antiflood_duration:", "antiflood"),
-                ("sec_night_duration:", "night")):
-                if data.startswith(prefix):
-                    parts = data.split(":")
-                    if len(parts) != 2:
-                        await safe_edit(query, await _trans('invalid_data',
-                            lang, "❌"), bot=context.bot); return True
-                    chat_id = _coerce_int(parts[1])
-                    if not await _check_sec_auth(context, user_id, chat_id):
-                        await safe_edit(query,
-                            await _trans('no_permission', lang, "❌"),
-                            bot=context.bot); return True
-                    await CallbackHandlers._show_penalty_durations(
-                        update, context, query, chat_id, lang, action_type)
-                    return True
-            if data.startswith("sec_warn_penalty_duration:"):
-                parts = data.split(":")
-                if len(parts) != 2:
-                    await safe_edit(query, await _trans('invalid_data', lang,
-                        "❌"), bot=context.bot); return True
-                chat_id = _coerce_int(parts[1])
-                if not await _check_sec_auth(context, user_id, chat_id):
-                    await safe_edit(query,
-                        await _trans('no_permission', lang, "❌"),
-                        bot=context.bot); return True
-                await CallbackHandlers._show_penalty_durations(
-                    update, context, query, chat_id, lang, 'warn_penalty')
-                return True
-            if data.startswith("sec_warn_penalty:"):
-                parts = data.split(":")
-                if len(parts) != 2:
-                    await safe_edit(query, await _trans('invalid_data', lang,
-                        "❌"), bot=context.bot); return True
-                chat_id = _coerce_int(parts[1])
-                if not await _check_sec_auth(context, user_id, chat_id):
-                    await safe_edit(query,
-                        await _trans('no_permission', lang, "❌"),
-                        bot=context.bot); return True
-                await CallbackHandlers._show_warn_penalty_types(
-                    update, context, query, chat_id, lang); return True
-            if data.startswith("sec_warn_count:"):
-                parts = data.split(":")
-                if len(parts) != 2:
-                    await safe_edit(query, await _trans('invalid_data', lang,
-                        "❌"), bot=context.bot); return True
-                chat_id = _coerce_int(parts[1])
-                if not await _check_sec_auth(context, user_id, chat_id):
-                    await safe_edit(query,
-                        await _trans('no_permission', lang, "❌"),
-                        bot=context.bot); return True
-                await CallbackHandlers._show_warn_count_buttons(
-                    update, context, query, chat_id, lang); return True
-            if data.startswith("sec_warn_toggle:"):
-                parts = data.split(":")
-                if len(parts) != 2:
-                    await safe_edit(query, await _trans('invalid_data', lang,
-                        "❌"), bot=context.bot); return True
-                chat_id = _coerce_int(parts[1])
-                if not await _check_sec_auth(context, user_id, chat_id):
-                    await safe_edit(query,
-                        await _trans('no_permission', lang, "❌"),
-                        bot=context.bot); return True
-                settings = await CallbackHandlers._get_security_settings_cached(
-                    chat_id)
-                new_val = 1 - _coerce_int(settings.get('warn_enabled', 0))
-                await DB.update_security_settings(chat_id, warn_enabled=new_val)
-                await CallbackHandlers._invalidate_security_settings_cache(
-                    chat_id)
-                await CallbackHandlers._refresh_security_view(
-                    query, context, chat_id, lang); return True
-            if data.startswith("sec_penalty_"):
-                parts = data.split(":")
-                if len(parts) < 2:
-                    await safe_edit(query, await _trans('invalid_data', lang,
-                        "❌"), bot=context.bot); return True
-                if parts[1].lstrip('-').isdigit(): chat_id = int(parts[1])
-                else: chat_id = await _resolve_sec_chat_id(context, data)
-                if chat_id is None:
-                    await safe_edit(query,
-                        await _trans('group_not_specified', lang, "❌"),
-                        bot=context.bot); return True
-                if not await _check_sec_auth(context, user_id, chat_id):
-                    await safe_edit(query,
-                        await _trans('no_permission', lang, "❌"),
-                        bot=context.bot); return True
-                action = (parts[0][4:] if parts[0].startswith("sec_")
-                          else parts[0])
-                if action.startswith("penalty_"):
-                    action = action[len("penalty_"):]
-                if action in ('ban', 'mute', 'kick', 'restrict', 'none'):
-                    await DB.update_security_settings(chat_id,
-                        auto_penalty=action)
-                    await CallbackHandlers.\
-                        _invalidate_security_settings_cache(chat_id)
-                    await CallbackHandlers._refresh_security_view(
-                        query, context, chat_id, lang)
-                else:
-                    await safe_edit(query,
-                        await _trans('invalid_penalty_type', lang, "❌"),
-                        bot=context.bot)
-                return True
-
-            if data.startswith("sec_set_antiflood_messages:"):
-                parts = data.split(":")
-                if len(parts) != 2:
-                    await safe_edit(query,
-                        await _trans('invalid_data', lang, "❌"),
-                        bot=context.bot); return True
-                chat_id = _coerce_int(parts[1])
-                if not await _check_sec_auth(context, user_id, chat_id):
-                    await safe_edit(query,
-                        await _trans('no_permission', lang, "❌"),
-                        bot=context.bot); return True
-                StateManager.clear(user_id)
-                await CallbackHandlers._show_antiflood_messages_buttons(
-                    update, context, query, chat_id, lang
-                )
-                return True
-
-            if data.startswith("sec_set_antiflood_seconds:"):
-                parts = data.split(":")
-                if len(parts) != 2:
-                    await safe_edit(query,
-                        await _trans('invalid_data', lang, "❌"),
-                        bot=context.bot); return True
-                chat_id = _coerce_int(parts[1])
-                if not await _check_sec_auth(context, user_id, chat_id):
-                    await safe_edit(query,
-                        await _trans('no_permission', lang, "❌"),
-                        bot=context.bot); return True
-                StateManager.clear(user_id)
-                await CallbackHandlers._show_antiflood_seconds_buttons(
-                    update, context, query, chat_id, lang
-                )
-                return True
-
-            if data.startswith("sec_antiflood_penalty:"):
-                parts = data.split(":")
-                if len(parts) != 2:
-                    await safe_edit(query, await _trans('invalid_data', lang,
-                        "❌"), bot=context.bot); return True
-                chat_id = _coerce_int(parts[1])
-                if not await _check_sec_auth(context, user_id, chat_id):
-                    await safe_edit(query,
-                        await _trans('no_permission', lang, "❌"),
-                        bot=context.bot); return True
-                await CallbackHandlers._show_penalty_type_selection(
-                    update, context, query, chat_id, lang,
-                    'antiflood_penalty'); return True
-            if data.startswith("sec_set_antiflood_penalty:"):
-                parts = data.split(":")
-                if len(parts) < 3:
-                    await safe_edit(query, await _trans('invalid_data', lang,
-                        "❌"), bot=context.bot); return True
-                chat_id = _coerce_int(parts[1])
-                if not await _check_sec_auth(context, user_id, chat_id):
-                    await safe_edit(query,
-                        await _trans('no_permission', lang, "❌"),
-                        bot=context.bot); return True
-                penalty_type = parts[2]
-                if penalty_type in ('ban', 'mute', 'kick', 'restrict', 'none'):
-                    await DB.update_security_settings(chat_id,
-                        antiflood_penalty=penalty_type)
-                    await CallbackHandlers.\
-                        _invalidate_security_settings_cache(chat_id)
-                    await CallbackHandlers._refresh_security_view(
-                        query, context, chat_id, lang)
-                return True
-            for prefix, state, prompt_key, prompt_default in (
-                ("sec_set_night_start:", UserState.WAIT_NIGHT_START,
-                 "send_night_start", "🌙 Send start time (HH:MM):"),
-                ("sec_set_night_end:", UserState.WAIT_NIGHT_END,
-                 "send_night_end", "🌙 Send end time (HH:MM):")):
-                if data.startswith(prefix):
-                    parts = data.split(":")
-                    if len(parts) != 2:
-                        await safe_edit(query, await _trans('invalid_data',
-                            lang, "❌"), bot=context.bot); return True
-                    chat_id = _coerce_int(parts[1])
-                    if not await _check_sec_auth(context, user_id, chat_id):
-                        await safe_edit(query,
-                            await _trans('no_permission', lang, "❌"),
-                            bot=context.bot); return True
-                    StateManager.set(user_id, state)
-                    _set_sec_chat(context, chat_id)
-                    await safe_edit(query, await _trans(prompt_key, lang,
-                        prompt_default), bot=context.bot); return True
-            if data.startswith("sec_night_action:"):
-                parts = data.split(":")
-                if len(parts) != 2:
-                    await safe_edit(query, await _trans('invalid_data', lang,
-                        "❌"), bot=context.bot); return True
-                chat_id = _coerce_int(parts[1])
-                if not await _check_sec_auth(context, user_id, chat_id):
-                    await safe_edit(query,
-                        await _trans('no_permission', lang, "❌"),
-                        bot=context.bot); return True
-                await CallbackHandlers._show_penalty_type_selection(
-                    update, context, query, chat_id, lang,
-                    'night_action'); return True
-            if data.startswith("sec_set_night_action:"):
-                parts = data.split(":")
-                if len(parts) < 3:
-                    await safe_edit(query, await _trans('invalid_data', lang,
-                        "❌"), bot=context.bot); return True
-                chat_id = _coerce_int(parts[1])
-                if not await _check_sec_auth(context, user_id, chat_id):
-                    await safe_edit(query,
-                        await _trans('no_permission', lang, "❌"),
-                        bot=context.bot); return True
-                action_type = parts[2]
-                if action_type in ('ban', 'mute', 'kick', 'restrict'):
-                    await DB.update_security_settings(chat_id,
-                        night_mode_action=action_type)
-                    await CallbackHandlers.\
-                        _invalidate_security_settings_cache(chat_id)
-                    await CallbackHandlers._refresh_security_view(
-                        query, context, chat_id, lang)
-                return True
-            if data.startswith("sec_violation_settings:"):
-                parts = data.split(":")
-                if len(parts) != 2:
-                    await safe_edit(query, await _trans('invalid_data', lang,
-                        "❌"), bot=context.bot); return True
-                chat_id = _coerce_int(parts[1])
-                if not await _check_sec_auth(context, user_id, chat_id):
-                    await safe_edit(query,
-                        await _trans('no_permission', lang, "❌"),
-                        bot=context.bot); return True
-                await CallbackHandlers._show_violation_penalties(
-                    update, context, query, chat_id, lang); return True
-            if data.startswith("sec_set_violation_strikes:"):
-                parts = data.split(":")
-                if len(parts) != 2:
-                    await safe_edit(query, await _trans('invalid_data', lang,
-                        "❌"), bot=context.bot); return True
-                chat_id = _coerce_int(parts[1])
-                if not await _check_sec_auth(context, user_id, chat_id):
-                    await safe_edit(query,
-                        await _trans('no_permission', lang, "❌"),
-                        bot=context.bot); return True
-                StateManager.set(user_id, UserState.WAIT_VIOLATION_STRIKES)
-                _set_sec_chat(context, chat_id)
-                await safe_edit(query,
-                    await _trans('send_violation_strikes', lang, "🔢"),
-                    bot=context.bot); return True
-            if data.startswith("sec_set_violation_duration:"):
-                parts = data.split(":")
-                if len(parts) != 2:
-                    await safe_edit(query, await _trans('invalid_data', lang,
-                        "❌"), bot=context.bot); return True
-                chat_id = _coerce_int(parts[1])
-                if not await _check_sec_auth(context, user_id, chat_id):
-                    await safe_edit(query,
-                        await _trans('no_permission', lang, "❌"),
-                        bot=context.bot); return True
-                await CallbackHandlers._show_penalty_durations(
-                    update, context, query, chat_id, lang, 'violation')
-                return True
-            if data.startswith("sec_set_violation_penalty:"):
-                parts = data.split(":")
-                if len(parts) < 3:
-                    await safe_edit(query, await _trans('invalid_data', lang,
-                        "❌"), bot=context.bot); return True
-                chat_id = _coerce_int(parts[1])
-                if not await _check_sec_auth(context, user_id, chat_id):
-                    await safe_edit(query,
-                        await _trans('no_permission', lang, "❌"),
-                        bot=context.bot); return True
-                penalty_type = parts[2]
-                if penalty_type in ('ban', 'mute', 'kick', 'restrict', 'none'):
-                    await DB.update_security_settings(chat_id,
-                        violation_penalty=penalty_type)
-                    await CallbackHandlers.\
-                        _invalidate_security_settings_cache(chat_id)
-                    await CallbackHandlers._refresh_security_view(
-                        query, context, chat_id, lang)
-                return True
             if data.startswith("buy_sub_"):
                 await CallbackHandlers._handle_buy_subscription(
                     update, context, query, user_id, data, lang); return True
@@ -2874,9 +1887,6 @@ class CallbackHandlers:
             if data.startswith("grp_del:"):
                 await CallbackHandlers._handle_group_delete(
                     update, context, query, user_id, data, lang); return True
-            if data.startswith(CB.GRP_SET + ":"):
-                await CallbackHandlers._handle_group_settings(
-                    update, context, query, user_id, lang, data); return True
             if data.startswith(CB.CH_SEL + ":"):
                 await CallbackHandlers._handle_channel_select(
                     update, context, query, user_id, data, lang); return True
@@ -2901,15 +1911,6 @@ class CallbackHandlers:
                     lang, "❌"), bot=context.bot)
             except Exception: pass
             return True
-
-    @staticmethod
-    async def _refresh_security_view(query, context, chat_id, lang):
-        try:
-            await CallbackHandlers._invalidate_security_settings_cache(chat_id)
-            await CallbackHandlers._render_security_two_phase(
-                query, context, chat_id, lang, force_refresh_settings=False)
-        except Exception as e:
-            logger.error(f"_refresh_security_view: {e}", exc_info=True)
 
     @staticmethod
     async def _render_settings(query, context, user_id, lang):
@@ -3175,19 +2176,6 @@ class CallbackHandlers:
                 bot=context.bot)
 
     @staticmethod
-    async def _handle_group_settings(update, context, query, user_id, lang, data):
-        try: chat_id = int(data.split(":")[-1])
-        except (ValueError, IndexError):
-            await safe_edit(query, await _trans('invalid_data', lang, "❌"),
-                bot=context.bot); return
-        if not await _check_sec_auth(context, user_id, chat_id):
-            await safe_edit(query, await _trans('no_permission', lang, "❌"),
-                bot=context.bot); return
-        _set_sec_chat(context, chat_id)
-        await CallbackHandlers._render_security_two_phase(
-            query, context, chat_id, lang, force_refresh_settings=False)
-
-    @staticmethod
     async def _handle_channel_select(update, context, query, user_id, data, lang):
         try: ch_id = int(data.split(":")[-1])
         except (ValueError, IndexError):
@@ -3419,31 +2407,6 @@ class CallbackHandlers:
             KeyboardFactory.get_text("back", lang), callback_data=CB.BACK)])
         await safe_edit(query, text, reply_markup=InlineKeyboardMarkup(kb),
             bot=context.bot)
-        if first_chat_id:
-            task = asyncio.create_task(
-                CallbackHandlers._preload_group_security(first_chat_id))
-            ACTIVE_TASKS.add(task); task.add_done_callback(ACTIVE_TASKS.discard)
-
-    @staticmethod
-    async def _preload_group_security(chat_id):
-        try:
-            try: cached = await settings_cache.get_security(chat_id)
-            except Exception: cached = None
-            if cached is None:
-                settings = await CallbackHandlers._get_security_settings_cached(
-                    chat_id
-                )
-                if not isinstance(settings, dict):
-                    settings = _row_to_dict(settings) or {}
-                try: await settings_cache.set_security(chat_id, settings)
-                except Exception: pass
-            stats_key = f"sec_stats_{chat_id}"
-            cached_stats = await _security_stats_cache_local.get(stats_key)
-            if cached_stats is None:
-                stats = await KeyboardFactory._get_security_stats(chat_id) or {}
-                await _security_stats_cache_local.set(stats_key, stats,
-                                                       ttl=SEC_STATS_CACHE_TTL)
-        except Exception: pass
 
     @staticmethod
     def _unwrap_get_next_post(result):
@@ -3786,747 +2749,6 @@ class CallbackHandlers:
         await safe_edit(query, display_text,
             reply_markup=InlineKeyboardMarkup(kb), bot=context.bot)
 
-    # ═══════════════════════════════════════════════════════════════
-    # v9.7.15/v9.7.16: _handle_security مع FIX-CB-BW-1
-    # ═══════════════════════════════════════════════════════════════
-    @staticmethod
-    async def _handle_security(update, context, query, user_id, lang=None):
-        if not lang: lang = await DB.get_user_language(user_id) or 'ar'
-        data = query.data
-        parts = data.split(":")
-        chat_id = None
-        if len(parts) >= 2 and parts[1].lstrip('-').isdigit():
-            chat_id = int(parts[1])
-        else:
-            stored = (context.user_data.get('security_chat_id')
-                      or context.user_data.get('sec_chat'))
-            if stored:
-                try: chat_id = int(stored)
-                except (TypeError, ValueError): chat_id = None
-        if chat_id is None:
-            await safe_edit(query,
-                await _trans('group_not_specified', lang, "❌"),
-                bot=context.bot); return
-        prefix0 = parts[0]
-        action = (prefix0[4:] if prefix0.startswith("sec_") else prefix0)
-        if not await _check_sec_auth(context, user_id, chat_id):
-            await safe_edit(query, await _trans('no_permission', lang, "❌"),
-                bot=context.bot); return
-        try:
-            if action == "auto_reply_menu":
-                await _render_auto_reply_menu(query, context, chat_id, lang)
-                return
-            if action == "maxlen":
-                StateManager.set(user_id, UserState.WAIT_MAX_LEN)
-                _set_sec_chat(context, chat_id)
-                await safe_edit(query,
-                    await _trans('send_max_length', lang, "📏"),
-                    bot=context.bot); return
-            if action == "act_log":
-                await CallbackHandlers._show_admin_logs(
-                    update, context, query, chat_id, lang); return
-            if action in ("activate_all", "enable_all",
-                          "deactivate_all", "disable_all"):
-                is_activate = action in ("activate_all", "enable_all")
-                confirm_action = ("activate_all_confirm" if is_activate
-                                  else "deactivate_all_confirm")
-                if is_activate:
-                    confirm_text = await _trans('activate_all_confirmation',
-                                                 lang, "⚠️")
-                else:
-                    confirm_text = await _trans('deactivate_all_confirmation',
-                                                 lang, "⚠️")
-                kb = InlineKeyboardMarkup([
-                    [InlineKeyboardButton(await _trans('yes_btn', lang, "✅"),
-                        callback_data=f"sec_{confirm_action}:{chat_id}")],
-                    [InlineKeyboardButton(await _trans('cancel_btn', lang, "❌"),
-                        callback_data=f"{CB.GRP_SET}:{chat_id}")]])
-                await safe_edit(query, confirm_text, reply_markup=kb,
-                    bot=context.bot); return
-            if action in ("activate_all_confirm", "deactivate_all_confirm"):
-                is_activate = (action == "activate_all_confirm")
-                activate_values = dict(
-                    delete_links=1, delete_mentions=1, slow_mode=1,
-                    slow_mode_seconds=5, delete_videos=1, delete_audio=1,
-                    delete_animation=1, delete_service=1, delete_documents=1,
-                    delete_stickers=1, delete_forwarded=1, delete_polls=1,
-                    delete_games=1, delete_voice=1, delete_video_note=1,
-                    welcome_enabled=1, goodbye_enabled=1, antiflood_enabled=1,
-                    antiflood_messages=5, antiflood_seconds=10,
-                    antiflood_penalty="mute", antiflood_penalty_duration=60,
-                    night_mode_enabled=1, night_mode_start="22:00",
-                    night_mode_end="06:00", night_mode_action="mute",
-                    night_mode_action_duration=3600, auto_approve_join=0,
-                    auto_reject_join=0, nsfw_enabled=0, warn_enabled=1,
-                    max_warnings=3, warn_penalty="mute",
-                    warn_penalty_duration=3600, delete_banned_words=1,
-                    auto_penalty="mute", delete_penalty="mute",
-                    delete_penalty_duration=3600, violation_strikes=3,
-                    violation_duration=60,
-                    delete_at_channel=1, delete_tg_scheme=1,
-                    delete_button_links=1, delete_emails=1,
-                    delete_protected_any=1, delete_postbot_pattern=1)
-                deactivate_values = dict(
-                    delete_links=0, delete_mentions=0, slow_mode=0,
-                    slow_mode_seconds=0, delete_videos=0, delete_audio=0,
-                    delete_animation=0, delete_service=0, delete_documents=0,
-                    delete_stickers=0, delete_forwarded=0, delete_polls=0,
-                    delete_games=0, delete_voice=0, delete_video_note=0,
-                    welcome_enabled=0, goodbye_enabled=0, antiflood_enabled=0,
-                    antiflood_messages=0, antiflood_seconds=0,
-                    antiflood_penalty="none", antiflood_penalty_duration=0,
-                    night_mode_enabled=0, night_mode_start="",
-                    night_mode_end="", night_mode_action="none",
-                    night_mode_action_duration=0, auto_approve_join=0,
-                    auto_reject_join=0, nsfw_enabled=0, warn_enabled=0,
-                    max_warnings=0, warn_penalty="none",
-                    warn_penalty_duration=0, delete_banned_words=0,
-                    auto_penalty="none", delete_penalty="none",
-                    delete_penalty_duration=0, violation_strikes=0,
-                    violation_duration=0,
-                    delete_at_channel=0, delete_tg_scheme=0,
-                    delete_button_links=0, delete_emails=0,
-                    delete_protected_any=0, delete_postbot_pattern=0)
-                values = (activate_values if is_activate
-                          else deactivate_values)
-                action_name = (f"{'activate' if is_activate else 'deactivate'}"
-                               "_all_security")
-
-                settings_ok = False
-                try:
-                    async with DB.transaction() as _conn:
-                        await DB.update_security_settings(
-                            chat_id, conn=_conn, **values)
-                        await DB.add_admin_log(
-                            chat_id=chat_id, admin_id=user_id,
-                            action=action_name, target_id=None,
-                            reason="", conn=_conn)
-                    settings_ok = True
-                except TypeError:
-                    try:
-                        await DB.update_security_settings(chat_id, **values)
-                        settings_ok = True
-                    except Exception:
-                        await safe_edit(query,
-                            await _trans('error_occurred', lang, "❌"),
-                            bot=context.bot); return
-                    try:
-                        await DB.add_admin_log(chat_id=chat_id,
-                            admin_id=user_id, action=action_name)
-                    except Exception:
-                        pass
-                except Exception:
-                    await safe_edit(query,
-                        await _trans('error_occurred', lang, "❌"),
-                        bot=context.bot); return
-
-                if not settings_ok:
-                    await safe_edit(query,
-                        await _trans('error_occurred', lang, "❌"),
-                        bot=context.bot); return
-                await CallbackHandlers.\
-                    _invalidate_security_settings_cache(chat_id)
-                await safe_edit(query,
-                    await _trans('applying_changes', lang,
-                                 "⏳ جاري التطبيق..."),
-                    bot=context.bot)
-                task = asyncio.create_task(
-                    CallbackHandlers._refresh_security_view(
-                        query, context, chat_id, lang))
-                ACTIVE_TASKS.add(task)
-                task.add_done_callback(ACTIVE_TASKS.discard)
-                return
-
-            # ═══════════════════════════════════════════════════════════
-            # v9.7.15 FIX-CB-BW-2: معالجات خاصة قبل التوجل العام
-            # ═══════════════════════════════════════════════════════════
-            if action == "warn":
-                kb = InlineKeyboardMarkup([
-                    [InlineKeyboardButton(await _trans('warn_toggle_btn',
-                        lang, "✅"), callback_data=f"sec_warn_toggle:{chat_id}")],
-                    [InlineKeyboardButton(await _trans('warn_count_btn',
-                        lang, "🔢"), callback_data=f"sec_warn_count:{chat_id}")],
-                    [InlineKeyboardButton(await _trans('warn_penalty_btn',
-                        lang, "⚖️"), callback_data=f"sec_warn_penalty:{chat_id}")],
-                    [InlineKeyboardButton(await _trans(
-                        'warn_penalty_duration_btn', lang, "⏱️"),
-                        callback_data=f"sec_warn_penalty_duration:{chat_id}")],
-                    [InlineKeyboardButton(
-                        KeyboardFactory.get_text("back", lang),
-                        callback_data=f"{CB.GRP_SET}:{chat_id}")]])
-                await safe_edit(query,
-                    await _trans('warnings_management', lang, "⚠️"),
-                    reply_markup=kb, bot=context.bot); return
-
-            if action == "banned_words":
-                await CallbackHandlers._show_banned_words_menu(
-                    update, context, query, chat_id, lang); return
-
-            if action == "toggle_banned_words":
-                settings = (await CallbackHandlers.
-                            _get_security_settings_cached(chat_id))
-                new_val = 1 - _coerce_int(
-                    settings.get('delete_banned_words', 0))
-                await DB.update_security_settings(chat_id,
-                    delete_banned_words=new_val)
-                await CallbackHandlers.\
-                    _invalidate_security_settings_cache(chat_id)
-                await CallbackHandlers._show_banned_words_menu(
-                    update, context, query, chat_id, lang); return
-
-            # ═══════════════════════════════════════════════════════════
-            # v9.7.15 FIX-CB-BW-1: التوجل العام — مع استثناء
-            # ═══════════════════════════════════════════════════════════
-            if (action in SECURITY_TOGGLE_MAP
-                    and action not in _SEC_ACTIONS_WITH_SPECIFIC_HANDLERS):
-                col = SECURITY_TOGGLE_MAP[action]
-                settings = (await CallbackHandlers.
-                            _get_security_settings_cached(chat_id))
-                new_val = 1 - _coerce_int(settings.get(col, 0))
-                update_data = {col: new_val}
-
-                if action == "forward":
-                    update_data['delete_protected_forward'] = new_val
-                    update_data['delete_protected_any'] = new_val
-                    logger.info(
-                        f"🔄 FORWARD-TOGGLE | chat={chat_id} "
-                        f"delete_forwarded={new_val} "
-                        f"protected_forward={new_val} "
-                        f"protected_any={new_val}")
-
-                if action == "approve_join" and new_val:
-                    update_data['auto_reject_join'] = 0
-                elif action == "reject_join" and new_val:
-                    update_data['auto_approve_join'] = 0
-
-                if action in ("at_channel", "tg_scheme", "button_links",
-                              "emails", "protected_any", "postbot"):
-                    logger.info(
-                        f"🆕 SEC-NEW-TOGGLE | chat={chat_id} "
-                        f"action={action} col={col} new_val={new_val}"
-                    )
-
-                await DB.update_security_settings(chat_id, **update_data)
-                await CallbackHandlers.\
-                    _invalidate_security_settings_cache(chat_id)
-                await CallbackHandlers._refresh_security_view(
-                    query, context, chat_id, lang); return
-
-            if action == "penalty":
-                await CallbackHandlers._show_penalty_types(
-                    update, context, query, chat_id, lang); return
-            if action == "del_pen":
-                kb = InlineKeyboardMarkup([
-                    [InlineKeyboardButton(await _trans('ban_btn', lang, "🚫"),
-                        callback_data=f"sec_set_del_penalty:ban:{chat_id}"),
-                     InlineKeyboardButton(await _trans('mute_btn', lang, "🔇"),
-                        callback_data=f"sec_set_del_penalty:mute:{chat_id}")],
-                    [InlineKeyboardButton(await _trans('kick_btn', lang, "👢"),
-                        callback_data=f"sec_set_del_penalty:kick:{chat_id}"),
-                     InlineKeyboardButton(await _trans('restrict_btn', lang,
-                        "🔒"), callback_data=f"sec_set_del_penalty:restrict:{chat_id}")],
-                    [InlineKeyboardButton(await _trans('no_penalty_btn',
-                        lang, "🚫"), callback_data=f"sec_set_del_penalty:none:{chat_id}")],
-                    [InlineKeyboardButton(await _trans('penalty_duration_btn',
-                        lang, "⏱️"), callback_data=f"sec_set_del_penalty_duration:{chat_id}")],
-                    [InlineKeyboardButton(
-                        KeyboardFactory.get_text("back", lang),
-                        callback_data=f"{CB.GRP_SET}:{chat_id}")]])
-                await safe_edit(query,
-                    await _trans('choose_delete_penalty', lang, "🚫"),
-                    reply_markup=kb, bot=context.bot); return
-            if action in ("close", "back"):
-                StateManager.clear(user_id); _clear_context_keys(context)
-                await CallbackHandlers._show_groups_list(
-                    update, context, query, user_id, lang); return
-            if action == "antiflood_settings":
-                await CallbackHandlers._show_antiflood_settings(
-                    update, context, query, chat_id, lang); return
-            if action == "night_settings":
-                await CallbackHandlers._show_night_settings(
-                    update, context, query, chat_id, lang); return
-            if action == "adv_act":
-                await CallbackHandlers._show_advanced_actions(
-                    update, context, query, chat_id, lang); return
-            if action == "slow_mode_seconds":
-                StateManager.set(user_id, UserState.WAIT_SLOW_MODE_SECONDS)
-                _set_sec_chat(context, chat_id)
-                await safe_edit(query,
-                    await _trans('send_slow_mode_seconds', lang, "⏱️"),
-                    bot=context.bot); return
-            if action == "welcome_text":
-                StateManager.set(user_id, UserState.WAIT_WELCOME_TEXT)
-                _set_sec_chat(context, chat_id)
-                await safe_edit(query,
-                    await _trans('send_welcome_text', lang, "📝"),
-                    bot=context.bot); return
-            if action == "goodbye_text":
-                StateManager.set(user_id, UserState.WAIT_GOODBYE_TEXT)
-                _set_sec_chat(context, chat_id)
-                await safe_edit(query,
-                    await _trans('send_goodbye_text', lang, "📝"),
-                    bot=context.bot); return
-            if action == "set_antiflood_messages":
-                StateManager.set(user_id, UserState.WAIT_ANTIFLOOD_MESSAGES)
-                _set_sec_chat(context, chat_id)
-                await safe_edit(query,
-                    await _trans('send_antiflood_messages', lang, "📊"),
-                    bot=context.bot); return
-            if action == "set_antiflood_seconds":
-                StateManager.set(user_id, UserState.WAIT_ANTIFLOOD_SECONDS)
-                _set_sec_chat(context, chat_id)
-                await safe_edit(query,
-                    await _trans('send_antiflood_seconds', lang, "⏱️"),
-                    bot=context.bot); return
-            if action == "antiflood_penalty":
-                await CallbackHandlers._show_penalty_type_selection(
-                    update, context, query, chat_id, lang,
-                    'antiflood_penalty'); return
-            if action == "set_night_start":
-                StateManager.set(user_id, UserState.WAIT_NIGHT_START)
-                _set_sec_chat(context, chat_id)
-                await safe_edit(query,
-                    await _trans('send_night_start', lang, "🌙"),
-                    bot=context.bot); return
-            if action == "set_night_end":
-                StateManager.set(user_id, UserState.WAIT_NIGHT_END)
-                _set_sec_chat(context, chat_id)
-                await safe_edit(query,
-                    await _trans('send_night_end', lang, "🌙"),
-                    bot=context.bot); return
-            if action == "night_action":
-                await CallbackHandlers._show_penalty_type_selection(
-                    update, context, query, chat_id, lang,
-                    'night_action'); return
-            if action in ("violation_settings", "violation_penalties"):
-                await CallbackHandlers._show_violation_penalties(
-                    update, context, query, chat_id, lang); return
-            if action == "violation_penalty":
-                await CallbackHandlers._show_penalty_type_selection(
-                    update, context, query, chat_id, lang,
-                    'violation_penalty'); return
-            try:
-                logger.debug(
-                    f"⚠️ unhandled security action | user={user_id} "
-                    f"chat={chat_id} action={action!r} data={data!r}"
-                )
-            except Exception:
-                pass
-            await safe_edit(query,
-                await _trans('not_available', lang, "⚠️"),
-                bot=context.bot)
-        except Exception as e:
-            logger.error(f"security error: {e}", exc_info=True)
-            await safe_edit(query,
-                await _trans('error_occurred', lang, "❌"),
-                bot=context.bot)
-
-    @staticmethod
-    async def _show_log_channel_menu(query, context, chat_id, user_id, lang):
-        data = await _get_log_channel_menu_data(chat_id)
-        current = data.get('current')
-        effective = data.get('effective')
-        share_count = data.get('share_count', 0)
-        share_names = data.get('share_names', [])
-        if current:
-            if share_count == 0:
-                status_block = (f"✅ <b>Private</b>\n🆔 <code>{current}</code>")
-            else:
-                others_text = "، ".join(_html.escape(str(n))
-                                         for n in share_names)
-                if share_count > 3: others_text += f" +{share_count - 3}"
-                status_block = (f"🤝 <b>Shared</b>\n🆔 <code>{current}</code>\n"
-                                f"👥 {share_count + 1}\n📋 {others_text}")
-        elif effective:
-            status_block = f"🌐 <b>Global</b>\n🆔 <code>{effective}</code>"
-        else: status_block = "❌"
-        help_text = KeyboardFactory.get_text("log_channel_help", lang) or ""
-        title = await _trans('log_channel_btn', lang, "📢 Log channel")
-        text = (f"{title}\n━━━━━━━━━━━━━━━━━━━━━━\n\n"
-                f"{status_block}\n\n<i>{_html.escape(help_text)}</i>\n\n"
-                f"🆔 <code>{chat_id}</code>")
-        if current:
-            set_text = (KeyboardFactory.get_text("log_channel_change", lang)
-                        or "🔄 Change channel")
-        else:
-            set_text = (KeyboardFactory.get_text("log_channel_set", lang)
-                        or "🔗 Set log")
-        test_text = KeyboardFactory.get_text("log_channel_test", lang) or "🧪 Test"
-        remove_text = (KeyboardFactory.get_text("log_channel_remove", lang)
-                       or "🗑️ Remove log")
-        back_text = KeyboardFactory.get_text("back", lang) or "🔙 Back"
-        rows = [[InlineKeyboardButton(set_text,
-            callback_data=f"log_channel_set:{chat_id}")]]
-        if current:
-            rows.append([InlineKeyboardButton(test_text,
-                callback_data=f"log_channel_test:{chat_id}"),
-                InlineKeyboardButton(remove_text,
-                callback_data=f"log_channel_remove:{chat_id}")])
-        rows.append([InlineKeyboardButton(back_text,
-            callback_data=f"{CB.GRP_SET}:{chat_id}")])
-        await safe_edit(query, text, reply_markup=InlineKeyboardMarkup(rows),
-            parse_mode='HTML', bot=context.bot)
-
-    @staticmethod
-    async def _handle_log_channel(update, context, query, user_id, lang):
-        data = query.data or ""
-        parts = data.split(":")
-        chat_id = None
-        if len(parts) >= 2 and parts[1].lstrip('-').isdigit():
-            chat_id = int(parts[1])
-        if chat_id is None:
-            stored = (context.user_data.get('security_chat_id')
-                      or context.user_data.get('sec_chat'))
-            if stored:
-                try: chat_id = int(stored)
-                except (TypeError, ValueError): chat_id = None
-        if chat_id is None:
-            await safe_edit(query,
-                await _trans('group_not_specified', lang, "❌"),
-                bot=context.bot); return
-        if not await _check_sec_auth(context, user_id, chat_id):
-            await safe_edit(query, await _trans('no_permission', lang, "❌"),
-                bot=context.bot); return
-        if parts[0] == "log_channel_btn": action = "menu"
-        elif parts[0].startswith("log_channel_"):
-            action = parts[0][len("log_channel_"):]
-        else: action = parts[0]
-        try:
-            if action in ("menu", "btn", "show"):
-                await CallbackHandlers._show_log_channel_menu(
-                    query, context, chat_id, user_id, lang); return
-            if action == "set":
-                StateManager.set(user_id, UserState.WAIT_LOG_CH)
-                context.user_data['log_group_id'] = chat_id
-                await safe_edit(query,
-                    await _trans('log_channel_set', lang, "🔗 Set log"),
-                    parse_mode='HTML', bot=context.bot); return
-            if action == "remove":
-                current = await DB.get_group_log_channel(chat_id)
-                share_info = ""
-                if current:
-                    try:
-                        others = await DB.get_groups_sharing_log_channel(
-                            current, exclude_group_id=chat_id)
-                        if others:
-                            share_info = f"\n\n⚠️ {len(others)}"
-                    except Exception: pass
-                ok = await DB.remove_group_log_channel(chat_id)
-                await _invalidate_log_channel_menu_cache(chat_id)
-                if not ok:
-                    await safe_edit(query,
-                        await _trans('delete_failed', lang, "❌"),
-                        bot=context.bot); return
-                back_text = (KeyboardFactory.get_text("back", lang)
-                             or "🔙 Back")
-                msg = await _trans('log_channel_removed', lang,
-                                    "🗑️ Log channel removed")
-                await safe_edit(query,
-                    f"{msg}\n\n🆔 <code>{chat_id}</code>{share_info}",
-                    reply_markup=InlineKeyboardMarkup([[
-                        InlineKeyboardButton(back_text,
-                            callback_data=f"{CB.GRP_SET}:{chat_id}")]]),
-                    parse_mode='HTML', bot=context.bot); return
-            if action == "test":
-                current = await DB.get_group_log_channel(chat_id)
-                if not current: current = await DB.get_log_channel()
-                if not current:
-                    await safe_edit(query,
-                        await _trans('log_channel_none', lang,
-                                     "❌ No log channel"),
-                        bot=context.bot); return
-                try:
-                    test_msg = await _trans('log_channel_test', lang,
-                        "🧪 Test — Log channel works!")
-                    await safe_send(context.bot, current,
-                        f"{test_msg}\n🆔 <code>{chat_id}</code>\n"
-                        f"🕐 {TimeUtils.mecca_iso()}",
-                        parse_mode='HTML')
-                    await _invalidate_log_channel_menu_cache(chat_id)
-                    await safe_edit(query, f"✅ <code>{current}</code>",
-                        parse_mode='HTML', bot=context.bot)
-                except Exception as e:
-                    await safe_edit(query, f"❌ {str(e)[:100]}",
-                        bot=context.bot)
-                return
-            await safe_edit(query, await _trans('unknown_action', lang, "⚠️"),
-                bot=context.bot)
-        except Exception as e:
-            logger.error(f"_handle_log_channel: {e}", exc_info=True)
-            await safe_edit(query,
-                await _trans('error_occurred', lang, "❌"),
-                bot=context.bot)
-
-    @staticmethod
-    async def _show_warn_count_buttons(update, context, query, chat_id, lang):
-        settings = await CallbackHandlers._get_security_settings_cached(chat_id)
-        current = _coerce_int(settings.get('max_warnings'), 3)
-        title = await _trans('warn_count_title', lang, "🔢")
-        current_label = _fmt(await _trans('warn_count_current', lang,
-            "{count}"), count=current)
-        choose = await _trans('warn_count_choose', lang, "")
-        text = f"{title}\n\n{current_label}\n\n{choose}"
-        counts = [1, 2, 3, 4, 5, 10]
-        kb = []; row = []
-        for n in counts:
-            icon = "✅" if n == current else ""
-            row.append(InlineKeyboardButton(f"{icon} {n}",
-                callback_data=f"set_warn_count:{chat_id}:{n}"))
-            if len(row) == 3: kb.append(row); row = []
-        if row: kb.append(row)
-        kb.append([InlineKeyboardButton(
-            KeyboardFactory.get_text("back", lang),
-            callback_data=f"sec_warn:{chat_id}")])
-        await safe_edit(query, text, reply_markup=InlineKeyboardMarkup(kb),
-            parse_mode='HTML', bot=context.bot)
-
-    @staticmethod
-    async def _show_warn_penalty_types(update, context, query, chat_id, lang):
-        kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton(await _trans('ban_btn', lang, "🚫"),
-                callback_data=f"set_warn_penalty:ban:{chat_id}"),
-             InlineKeyboardButton(await _trans('mute_btn', lang, "🔇"),
-                callback_data=f"set_warn_penalty:mute:{chat_id}")],
-            [InlineKeyboardButton(await _trans('kick_btn', lang, "👢"),
-                callback_data=f"set_warn_penalty:kick:{chat_id}"),
-             InlineKeyboardButton(await _trans('restrict_btn', lang, "🔒"),
-                callback_data=f"set_warn_penalty:restrict:{chat_id}")],
-            [InlineKeyboardButton(KeyboardFactory.get_text("back", lang),
-                callback_data=f"sec_warn:{chat_id}")]])
-        await safe_edit(query,
-            await _trans('choose_warn_penalty', lang, "⚖️"),
-            reply_markup=kb, bot=context.bot)
-
-    @staticmethod
-    async def _show_banned_words_menu(update, context, query, chat_id, lang):
-        settings = await CallbackHandlers._get_security_settings_cached(chat_id)
-        is_enabled = _coerce_int(settings.get('delete_banned_words'), 0)
-        if is_enabled:
-            toggle_text = await _trans('banned_words_btn_on', lang,
-                "✅ حذف الكلمات المحظورة: مفعّل (اضغط للتعطيل)")
-        else:
-            toggle_text = await _trans('banned_words_btn_off', lang,
-                "❌ حذف الكلمات المحظورة: معطّل (اضغط للتفعيل)")
-        kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton(await _trans('add_word', lang, "➕"),
-                callback_data=f"ban_add:{chat_id}"),
-             InlineKeyboardButton(await _trans('words_list', lang, "📋"),
-                callback_data=f"ban_list:{chat_id}")],
-            [InlineKeyboardButton(await _trans('delete_word', lang, "🗑️"),
-                callback_data=f"ban_rem:{chat_id}")],
-            [InlineKeyboardButton(toggle_text,
-                callback_data=f"sec_toggle_banned_words:{chat_id}")],
-            [InlineKeyboardButton(KeyboardFactory.get_text("back", lang),
-                callback_data=f"{CB.GRP_SET}:{chat_id}")]])
-        await safe_edit(query,
-            await _trans('manage_banned_words', lang, "🚫"),
-            reply_markup=kb, bot=context.bot)
-
-    @staticmethod
-    async def _show_penalty_type_selection(update, context, query, chat_id,
-                                            lang, setting_key):
-        penalty_types = [
-            (await _trans('mute_btn', lang, "🔇"), "mute"),
-            (await _trans('ban_btn', lang, "🚫"), "ban"),
-            (await _trans('kick_btn', lang, "👢"), "kick"),
-            (await _trans('restrict_btn', lang, "🔒"), "restrict"),
-            (await _trans('no_penalty_btn', lang, "🚫"), "none")]
-        kb = []
-        for label, ptype in penalty_types:
-            callback = f"sec_set_{setting_key}:{chat_id}:{ptype}"
-            kb.append([InlineKeyboardButton(label, callback_data=callback)])
-        _back_map = {
-            'antiflood_penalty': f"sec_antiflood_settings:{chat_id}",
-            'night_action': f"sec_night_settings:{chat_id}",
-            'violation_penalty': f"sec_violation_settings:{chat_id}"}
-        back_cb = _back_map.get(setting_key, f"{CB.GRP_SET}:{chat_id}")
-        kb.append([InlineKeyboardButton(
-            KeyboardFactory.get_text("back", lang), callback_data=back_cb)])
-        text = await _trans('choose_penalty_type', lang, "🚫")
-        await safe_edit(query, text, reply_markup=InlineKeyboardMarkup(kb),
-            bot=context.bot)
-
-    @staticmethod
-    async def _show_all_penalty_durations_menu(query, context, chat_id, lang):
-        kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton(await _trans('mute_duration_btn', lang, "⏱️"),
-                callback_data=f"sec_set_mute_duration:{chat_id}"),
-             InlineKeyboardButton(await _trans('ban_duration_btn', lang, "⏱️"),
-                callback_data=f"sec_set_ban_duration:{chat_id}")],
-            [InlineKeyboardButton(await _trans('restrict_duration_btn', lang,
-                "⏱️"), callback_data=f"sec_set_restrict_duration:{chat_id}"),
-             InlineKeyboardButton(await _trans('warn_duration_btn', lang, "⏱️"),
-                callback_data=f"sec_warn_penalty_duration:{chat_id}")],
-            [InlineKeyboardButton(await _trans('flood_duration_btn', lang,
-                "⏱️"), callback_data=f"sec_antiflood_duration:{chat_id}"),
-             InlineKeyboardButton(await _trans('night_duration_btn', lang,
-                "⏱️"), callback_data=f"sec_night_duration:{chat_id}")],
-            [InlineKeyboardButton(await _trans('delete_penalty_duration_btn',
-                lang, "⏱️"), callback_data=f"sec_set_del_penalty_duration:{chat_id}")],
-            [InlineKeyboardButton(KeyboardFactory.get_text("back", lang),
-                callback_data=f"{CB.GRP_SET}:{chat_id}")]])
-        await safe_edit(query,
-            await _trans('penalty_durations_title', lang, "⏱️"),
-            reply_markup=kb, bot=context.bot)
-
-    @staticmethod
-    async def _show_penalty_durations(update, context, query, chat_id, lang,
-                                       penalty_type='mute'):
-        if penalty_type == 'kick':
-            kb = InlineKeyboardMarkup([[InlineKeyboardButton(
-                KeyboardFactory.get_text("back", lang),
-                callback_data=f"{CB.GRP_SET}:{chat_id}")]])
-            await safe_edit(query,
-                await _trans('kick_no_duration', lang, "✅"),
-                reply_markup=kb, bot=context.bot); return
-        durations = [
-            (await _trans('duration_permanent', lang, "∞"), 0),
-            (await _trans('duration_half_hour', lang, "30m"), 1800),
-            (await _trans('duration_hour', lang, "1h"), 3600),
-            (await _trans('duration_day', lang, "1d"), 86400),
-            (await _trans('duration_week', lang, "1w"), 604800),
-            (await _trans('duration_ten_days', lang, "10d"), 864000),
-            (await _trans('duration_month', lang, "1mo"), 2592000)]
-        kb = []
-        for i in range(0, len(durations), 2):
-            row = []
-            name, secs = durations[i]
-            row.append(InlineKeyboardButton(name,
-                callback_data=f"set_duration:{penalty_type}:{chat_id}:{secs}"))
-            if i + 1 < len(durations):
-                name2, secs2 = durations[i + 1]
-                row.append(InlineKeyboardButton(name2,
-                    callback_data=f"set_duration:{penalty_type}:{chat_id}:{secs2}"))
-            kb.append(row)
-        _back_map = {
-            'warn_penalty': f"sec_warn:{chat_id}",
-            'delete_penalty': f"sec_del_pen:{chat_id}",
-            'antiflood': f"sec_antiflood_settings:{chat_id}",
-            'night': f"sec_night_settings:{chat_id}",
-            'violation': f"sec_violation_settings:{chat_id}"}
-        back_cb = _back_map.get(penalty_type, f"{CB.GRP_SET}:{chat_id}")
-        kb.append([InlineKeyboardButton(
-            KeyboardFactory.get_text("back", lang), callback_data=back_cb)])
-        type_key = f"duration_type_{penalty_type}"
-        type_name = await _trans(type_key, lang, penalty_type)
-        msg = _fmt(await _trans('choose_duration_for', lang,
-            "⏱️ Choose {type_name} duration:"), type_name=type_name)
-        await safe_edit(query, msg, reply_markup=InlineKeyboardMarkup(kb),
-            bot=context.bot)
-
-    @staticmethod
-    async def _show_violation_penalties(update, context, query, chat_id, lang):
-        kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton(await _trans('violation_strikes_btn', lang,
-                "🔢"), callback_data=f"sec_set_violation_strikes:{chat_id}"),
-             InlineKeyboardButton(await _trans('violation_duration_btn', lang,
-                "⏱️"), callback_data=f"sec_set_violation_duration:{chat_id}")],
-            [InlineKeyboardButton(await _trans('violation_penalty_btn', lang,
-                "⚖️"), callback_data=f"sec_violation_penalty:{chat_id}")],
-            [InlineKeyboardButton(KeyboardFactory.get_text("back", lang),
-                callback_data=f"{CB.GRP_SET}:{chat_id}")]])
-        await safe_edit(query,
-            await _trans('violation_settings_title', lang, "🚨"),
-            reply_markup=kb, bot=context.bot)
-
-    @staticmethod
-    async def _show_antiflood_settings(update, context, query, chat_id, lang):
-        kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton(await _trans('messages_count_btn', lang, "🔢"),
-                callback_data=f"sec_set_antiflood_messages:{chat_id}"),
-             InlineKeyboardButton(await _trans('seconds_btn', lang, "⏱️"),
-                callback_data=f"sec_set_antiflood_seconds:{chat_id}")],
-            [InlineKeyboardButton(await _trans('penalty_type_btn', lang,
-                "Penalty type"), callback_data=f"sec_antiflood_penalty:{chat_id}"),
-             InlineKeyboardButton(await _trans('penalty_duration_btn', lang,
-                "⏱️"), callback_data=f"sec_antiflood_duration:{chat_id}")],
-            [InlineKeyboardButton(KeyboardFactory.get_text("back", lang),
-                callback_data=f"{CB.GRP_SET}:{chat_id}")]])
-        await safe_edit(query,
-            await _trans('antiflood_settings_title', lang, "🌊"),
-            reply_markup=kb, bot=context.bot)
-
-    @staticmethod
-    async def _show_night_settings(update, context, query, chat_id, lang):
-        kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton(await _trans('start_time_btn', lang, "🌙"),
-                callback_data=f"sec_set_night_start:{chat_id}"),
-             InlineKeyboardButton(await _trans('end_time_btn', lang, "🌙"),
-                callback_data=f"sec_set_night_end:{chat_id}")],
-            [InlineKeyboardButton(await _trans('action_type_btn', lang, "🎬"),
-                callback_data=f"sec_night_action:{chat_id}"),
-             InlineKeyboardButton(await _trans('action_duration_btn', lang,
-                "⏱️"), callback_data=f"sec_night_duration:{chat_id}")],
-            [InlineKeyboardButton(KeyboardFactory.get_text("back", lang),
-                callback_data=f"{CB.GRP_SET}:{chat_id}")]])
-        await safe_edit(query,
-            await _trans('night_mode_settings', lang, "🌙"),
-            reply_markup=kb, bot=context.bot)
-
-    @staticmethod
-    async def _show_advanced_actions(update, context, query, chat_id, lang):
-        kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton(await _trans('deactivate_all_btn', lang,
-                "🔴"), callback_data=f"sec_deactivate_all:{chat_id}"),
-             InlineKeyboardButton(await _trans('activate_all_btn_short', lang,
-                "🟢"), callback_data=f"sec_activate_all:{chat_id}")],
-            [InlineKeyboardButton(await _trans('act_ban', lang, "🚫"),
-                callback_data=f"act_ban:{chat_id}"),
-             InlineKeyboardButton(await _trans('act_mute', lang, "🔇"),
-                callback_data=f"act_mute:{chat_id}")],
-            [InlineKeyboardButton(await _trans('act_kick', lang, "👢"),
-                callback_data=f"act_kick:{chat_id}"),
-             InlineKeyboardButton(await _trans('act_restrict', lang, "🔒"),
-                callback_data=f"act_restrict:{chat_id}")],
-            [InlineKeyboardButton(await _trans('act_unban', lang, "🔓"),
-                callback_data=f"act_unban:{chat_id}"),
-             InlineKeyboardButton(await _trans('act_warn', lang, "⚠️"),
-                callback_data=f"act_warn:{chat_id}")],
-            [InlineKeyboardButton(await _trans('act_pin', lang, "📌"),
-                callback_data=f"act_pin:{chat_id}")],
-            [InlineKeyboardButton(await _trans('act_log', lang, "📜"),
-                callback_data=f"act_log:{chat_id}")],
-            [InlineKeyboardButton(KeyboardFactory.get_text("back", lang),
-                callback_data=f"{CB.GRP_SET}:{chat_id}")]])
-        await safe_edit(query,
-            await _trans('advanced_actions_title', lang, "🛠️"),
-            reply_markup=kb, bot=context.bot)
-
-    @staticmethod
-    async def _show_admin_logs(update, context, query, chat_id, lang):
-        logs = await DB.get_admin_logs(chat_id, 10)
-        if logs:
-            lines = []
-            for l in logs:
-                ld = _row_to_dict(l) or {}
-                lines.append(f"• {_safe_str(ld.get('admin_id'))} → "
-                             f"{_safe_str(ld.get('action'))}")
-            text = (await _trans('admin_logs_title', lang, "📋") + "\n\n"
-                    + "\n".join(lines))
-        else: text = await _trans('no_data', lang, "📭")
-        await safe_edit(query, text, reply_markup=InlineKeyboardMarkup([[
-            InlineKeyboardButton(KeyboardFactory.get_text("back", lang),
-                callback_data=f"{CB.GRP_SET}:{chat_id}")]]), bot=context.bot)
-
-    @staticmethod
-    async def _show_penalty_types(update, context, query, chat_id, lang):
-        kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton(await _trans('ban_btn', lang, "🚫"),
-                callback_data=f"sec_penalty_ban:{chat_id}"),
-             InlineKeyboardButton(await _trans('mute_btn', lang, "🔇"),
-                callback_data=f"sec_penalty_mute:{chat_id}")],
-            [InlineKeyboardButton(await _trans('kick_btn', lang, "👢"),
-                callback_data=f"sec_penalty_kick:{chat_id}"),
-             InlineKeyboardButton(await _trans('restrict_btn', lang, "🔒"),
-                callback_data=f"sec_penalty_restrict:{chat_id}")],
-            [InlineKeyboardButton(await _trans('no_penalty_btn', lang, "🚫"),
-                callback_data=f"sec_penalty_none:{chat_id}")],
-            [InlineKeyboardButton(KeyboardFactory.get_text("back", lang),
-                callback_data=f"{CB.GRP_SET}:{chat_id}")]])
-        await safe_edit(query,
-            await _trans('choose_penalty_type', lang, "🚫"),
-            reply_markup=kb, bot=context.bot)
-
     @staticmethod
     async def _handle_admin(update, context, query, user_id, lang=None):
         if not CONFIG.is_developer(user_id):
@@ -4711,11 +2933,6 @@ class CallbackHandlers:
                             logger.warning(
                                 f"admin_toggle_gr: leave_chat failed "
                                 f"for {chat_id}: {e}")
-                    elif new_val == 1 and not db_ok:
-                        logger.warning(
-                            f"admin_toggle_gr: DB فشل — لن يُنفَّذ leave_chat "
-                            f"لـ {chat_id} (تفادي عدم تناسق)"
-                        )
                 await CallbackHandlers._show_admin_groups(
                     update, context, query, user_id, lang); return
             if data == CB.ADMIN_ADD_ADMIN:
@@ -4829,13 +3046,11 @@ class CallbackHandlers:
                         except Exception as e:
                             logger.error(
                                 f"❌ DB reconnect بعد الاسترجاع فشل: {e}",
-                                exc_info=True,
-                            )
+                                exc_info=True)
                         if not reconnected:
                             logger.critical(
                                 "🚨 DB مغلق بعد الاسترجاع — لا توجد دالة "
-                                "إعادة اتصال متاحة! البوت معطوب."
-                            )
+                                "إعادة اتصال متاحة! البوت معطوب.")
                             await safe_edit(query,
                                 "🚨 <b>خطأ حرج</b>\n\n"
                                 "تم نسخ النسخة الاحتياطية لكن تعذّر إعادة "
@@ -5025,10 +3240,6 @@ class CallbackHandlers:
                 _invalidate_sec_auth_cache()
                 try: await invalidate_user_cache(user_id)
                 except Exception: pass
-                try: await _security_stats_cache_local.clear()
-                except Exception: pass
-                try: await _post_count_cache.clear()
-                except Exception: pass
                 try: await settings_cache.invalidate_security()
                 except Exception: pass
                 try: await settings_cache.invalidate_auto_reply()
@@ -5038,12 +3249,10 @@ class CallbackHandlers:
                     except Exception: pass
                 try:
                     await _invalidate_message_caches(
-                        chat_id=None, reason="admin_refresh_cache"
-                    )
+                        chat_id=None, reason="admin_refresh_cache")
                 except Exception as e:
                     logger.debug(
-                        "🧹 PERF-CB: admin refresh invalidation failed: %s", e
-                    )
+                        "🧹 PERF-CB: admin refresh invalidation failed: %s", e)
                 await safe_edit(query,
                     await _trans('cache_refreshed_admin', lang, "🔄"),
                     bot=context.bot); return
@@ -5228,10 +3437,6 @@ class CallbackHandlers:
                 await safe_edit(query, text, reply_markup=kb,
                     bot=context.bot); return
 
-            # ═══════════════════════════════════════════════════════════
-            # 🆕 v9.7.16 FIX-DECLARE-WINNER-SEL:
-            # يعالج كلا الاسمين admin_declare_winner + admin_declare_winner_sel
-            # ═══════════════════════════════════════════════════════════
             if data in (CB.ADMIN_DECLARE_WINNER, CB.ADMIN_DECLARE_WINNER_SEL):
                 contests = await DB.get_active_contests(5)
                 if not contests:
@@ -5292,10 +3497,8 @@ class CallbackHandlers:
             try:
                 logger.debug(
                     f"⚠️ unhandled admin callback | user={user_id} "
-                    f"data={data!r}"
-                )
-            except Exception:
-                pass
+                    f"data={data!r}")
+            except Exception: pass
             await safe_edit(query,
                 await _trans('not_available', lang, "⚠️"),
                 bot=context.bot)
@@ -5723,10 +3926,8 @@ class CallbackHandlers:
             try:
                 logger.debug(
                     f"⚠️ unknown analytics report | user={user_id} "
-                    f"action={action!r} data={data!r}"
-                )
-            except Exception:
-                pass
+                    f"action={action!r} data={data!r}")
+            except Exception: pass
             await safe_edit(query,
                 await _trans('unknown_report', lang, "⚠️"),
                 bot=context.bot)
@@ -6117,8 +4318,23 @@ class CallbackHandlers:
                         await _trans(prompt_key, lang, prompt_default),
                         bot=context.bot); return
                 if action == "log":
-                    await CallbackHandlers._show_admin_logs(
-                        update, context, query, chat_id, lang)
+                    logs = await DB.get_admin_logs(chat_id, 10)
+                    if logs:
+                        lines = []
+                        for l in logs:
+                            ld = _row_to_dict(l) or {}
+                            lines.append(f"• {_safe_str(ld.get('admin_id'))} → "
+                                         f"{_safe_str(ld.get('action'))}")
+                        text = (await _trans('admin_logs_title', lang, "📋")
+                                + "\n\n" + "\n".join(lines))
+                    else:
+                        text = await _trans('no_data', lang, "📭")
+                    await safe_edit(query, text,
+                        reply_markup=InlineKeyboardMarkup([[
+                            InlineKeyboardButton(
+                                KeyboardFactory.get_text("back", lang),
+                                callback_data=f"{CB.GRP_SET}:{chat_id}")]]),
+                        bot=context.bot)
                     StateManager.clear(user_id); return
                 return
             if prefix.startswith("pen_"):
@@ -6126,10 +4342,10 @@ class CallbackHandlers:
                 if action in penalty_types:
                     await DB.update_security_settings(chat_id,
                         auto_penalty=action)
-                    await CallbackHandlers.\
-                        _invalidate_security_settings_cache(chat_id)
-                    await CallbackHandlers._refresh_security_view(
-                        query, context, chat_id, lang)
+                    await safe_edit(query,
+                        await _trans('applying_changes', lang,
+                                     "⏳ جاري التطبيق..."),
+                        bot=context.bot)
                     return
                 return
         except Exception as e:
@@ -6311,80 +4527,48 @@ class CallbackHandlers:
 
     @staticmethod
     async def _show_updates_channel(query, context, user_id, lang='ar'):
-        """
-        🆕 v9.7.14: عرض قناة التحديثات مع فحص الصحة + إشعارات ذكية.
-        """
         try:
             ch = None
             try:
                 if hasattr(DB, 'get_updates_channel'):
                     ch = await DB.get_updates_channel()
-            except Exception:
-                ch = None
-
+            except Exception: ch = None
             title = await _trans(
-                'updates_channel_title', lang, "📢 <b>قناة التحديثات</b>"
-            )
-
+                'updates_channel_title', lang, "📢 <b>قناة التحديثات</b>")
             rows = []
             admin_notice = ""
-
             if ch:
-                report = await _check_updates_channel_health(
-                    context.bot, ch
-                )
+                report = await _check_updates_channel_health(context.bot, ch)
                 status = report.get('status', 'error')
                 url = report.get('url')
                 ch_str_escaped = _html.escape(str(ch).strip())
-
                 body = _fmt(
-                    await _trans(
-                        'updates_channel_set_line', lang,
-                        "✅ القناة الحالية: <code>{ch}</code>"
-                    ),
-                    ch=ch_str_escaped,
-                )
-                hint = await _trans(
-                    'updates_channel_hint_set', lang,
-                    "اضغط على الزر أدناه للدخول إلى القناة."
-                )
-
+                    await _trans('updates_channel_set_line', lang,
+                        "✅ القناة الحالية: <code>{ch}</code>"),
+                    ch=ch_str_escaped)
+                hint = await _trans('updates_channel_hint_set', lang,
+                    "اضغط على الزر أدناه للدخول إلى القناة.")
                 if url:
                     btn_label = (
                         await _trans('open_channel_btn', lang, "🔗 فتح القناة")
                         if status == 'ok' else
                         await _trans('try_open_channel_btn', lang,
-                                      "🔗 محاولة الفتح")
-                    )
-                    rows.append([InlineKeyboardButton(
-                        btn_label, url=url,
-                    )])
-
+                                      "🔗 محاولة الفتح"))
+                    rows.append([InlineKeyboardButton(btn_label, url=url)])
                 if status == 'warn':
-                    hint = await _trans(
-                        'updates_channel_warn_hint', lang,
-                        "⚠️ القناة تحتاج صلاحيات إضافية. تواصل مع المطور."
-                    )
+                    hint = await _trans('updates_channel_warn_hint', lang,
+                        "⚠️ القناة تحتاج صلاحيات إضافية. تواصل مع المطور.")
                 elif status == 'error':
-                    hint = await _trans(
-                        'updates_channel_error_hint', lang,
-                        "🔴 القناة غير متاحة حالياً. تواصل مع المطور."
-                    )
-
+                    hint = await _trans('updates_channel_error_hint', lang,
+                        "🔴 القناة غير متاحة حالياً. تواصل مع المطور.")
                 if CONFIG.is_developer(user_id) and status in ('warn', 'error'):
                     admin_notice = _build_updates_channel_health_warning(
-                        report, lang
-                    )
+                        report, lang)
             else:
-                body = await _trans(
-                    'updates_channel_none_line', lang,
-                    "❌ لم يتم تعيين قناة تحديثات بعد."
-                )
-                hint = await _trans(
-                    'updates_channel_hint_none', lang,
-                    "تواصل مع المطور لتعيينها."
-                )
-
+                body = await _trans('updates_channel_none_line', lang,
+                    "❌ لم يتم تعيين قناة تحديثات بعد.")
+                hint = await _trans('updates_channel_hint_none', lang,
+                    "تواصل مع المطور لتعيينها.")
             parts_text = [
                 f"{title}\n━━━━━━━━━━━━━━━━━━━━━━\n",
                 body,
@@ -6392,28 +4576,20 @@ class CallbackHandlers:
             ]
             if admin_notice:
                 parts_text.append(f"\n\n{admin_notice}")
-
             text = "".join(parts_text)
-
             rows.append([InlineKeyboardButton(
                 KeyboardFactory.get_text("back", lang),
-                callback_data=CB.BACK,
-            )])
-
+                callback_data=CB.BACK)])
             kb = InlineKeyboardMarkup(rows)
-
             await safe_edit(query, text, reply_markup=kb,
                             parse_mode='HTML', bot=context.bot)
         except Exception as e:
             logger.error(f"_show_updates_channel: {e}", exc_info=True)
             try:
-                await safe_edit(
-                    query,
+                await safe_edit(query,
                     await _trans('error_occurred', lang, "❌"),
-                    bot=context.bot,
-                )
-            except Exception:
-                pass
+                    bot=context.bot)
+            except Exception: pass
 
     @staticmethod
     async def _show_metrics_dashboard(query, context, user_id, lang='ar'):
@@ -6421,7 +4597,6 @@ class CallbackHandlers:
             snap = _metrics_snapshot() or {}
             started = snap.get('started_at', time.monotonic())
             uptime_s = int(time.monotonic() - started)
-
             total = snap.get('callbacks_total', 0)
             failed = snap.get('callbacks_failed', 0)
             rate_lim = snap.get('callbacks_rate_limited', 0)
@@ -6432,13 +4607,10 @@ class CallbackHandlers:
             circ_blocked = snap.get('circuit_blocked', 0)
             circ_opened = snap.get('circuit_opened', 0)
             lat = snap.get('callbacks_latency', {}) or {}
-
             h, rem = divmod(uptime_s, 3600)
             m, s = divmod(rem, 60)
-
             title = await _trans('metrics_dashboard_title', lang,
                                   "📊 <b>مقاييس الأداء المباشرة</b>")
-
             text = (
                 f"{title}\n"
                 f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
@@ -6461,73 +4633,48 @@ class CallbackHandlers:
                 f"   • فُتح: <code>{circ_opened}</code>\n"
                 f"   • حجب: <code>{circ_blocked}</code>"
             )
-
             kb = InlineKeyboardMarkup([
                 [InlineKeyboardButton(
                     await _trans('refresh_btn', lang, "🔄"),
-                    callback_data="admin_metrics_live",
-                ),
+                    callback_data="admin_metrics_live"),
                  InlineKeyboardButton(
                     await _trans('reset_btn', lang, "🗑️"),
-                    callback_data="admin_metrics_reset",
-                )],
+                    callback_data="admin_metrics_reset")],
                 [InlineKeyboardButton(
                     KeyboardFactory.get_text("back", lang),
-                    callback_data=CB.ADMIN,
-                )],
-            ])
-
+                    callback_data=CB.ADMIN)]])
             await safe_edit(query, text, reply_markup=kb,
                             parse_mode='HTML', bot=context.bot)
         except Exception as e:
             logger.error(f"_show_metrics_dashboard: {e}", exc_info=True)
             try:
-                await safe_edit(
-                    query,
+                await safe_edit(query,
                     await _trans('error_occurred', lang, "❌"),
-                    bot=context.bot,
-                )
-            except Exception:
-                pass
+                    bot=context.bot)
+            except Exception: pass
 
     @staticmethod
     async def _show_admin_update_channel_menu(query, context, user_id,
                                                 lang='ar'):
-        """
-        🆕 v9.7.14: قائمة إدارة قناة التحديثات (للمطور)
-        """
         try:
             ch = None
             try:
                 if hasattr(DB, 'get_updates_channel'):
                     ch = await DB.get_updates_channel()
-            except Exception:
-                ch = None
-
-            title = await _trans(
-                'admin_updates_channel_title', lang,
-                "📢 <b>إدارة قناة التحديثات</b>"
-            )
-
+            except Exception: ch = None
+            title = await _trans('admin_updates_channel_title', lang,
+                "📢 <b>إدارة قناة التحديثات</b>")
             rows = []
             health_notice = ""
-
             if ch:
-                report = await _check_updates_channel_health(
-                    context.bot, ch
-                )
+                report = await _check_updates_channel_health(context.bot, ch)
                 status = report.get('status', 'error')
                 url = report.get('url')
                 ch_str_escaped = _html.escape(str(ch).strip())
-
                 body = _fmt(
-                    await _trans(
-                        'updates_channel_set_line', lang,
-                        "✅ القناة الحالية: <code>{ch}</code>"
-                    ),
-                    ch=ch_str_escaped,
-                )
-
+                    await _trans('updates_channel_set_line', lang,
+                        "✅ القناة الحالية: <code>{ch}</code>"),
+                    ch=ch_str_escaped)
                 status_badge = {
                     'ok': "🟢 <b>الحالة:</b> سليمة",
                     'warn': "🟡 <b>الحالة:</b> تحتاج صلاحيات",
@@ -6535,59 +4682,41 @@ class CallbackHandlers:
                 }.get(status, '')
                 if status_badge:
                     body += f"\n{status_badge}"
-
                 if report.get('title'):
                     body += (f"\n📛 <b>الاسم:</b> "
                              f"{_html.escape(str(report['title']))}")
-
                 if url:
                     btn_label = (
                         await _trans('open_channel_btn', lang, "🔗 فتح القناة")
                         if status == 'ok' else
                         await _trans('try_open_channel_btn', lang,
-                                      "🔗 محاولة الفتح")
-                    )
-                    rows.append([InlineKeyboardButton(
-                        btn_label, url=url,
-                    )])
-
+                                      "🔗 محاولة الفتح"))
+                    rows.append([InlineKeyboardButton(btn_label, url=url)])
                 if status in ('warn', 'error'):
                     health_notice = _build_updates_channel_health_warning(
-                        report, lang
-                    )
-
+                        report, lang)
                 rows.append([InlineKeyboardButton(
                     await _trans('change_channel_btn', lang, "🔄 تغيير"),
-                    callback_data="admin_change_update_ch",
-                )])
+                    callback_data="admin_change_update_ch")])
                 rows.append([InlineKeyboardButton(
                     await _trans('remove_channel_btn', lang, "🗑️ إزالة"),
-                    callback_data="admin_remove_update_ch",
-                )])
+                    callback_data="admin_remove_update_ch")])
                 rows.append([InlineKeyboardButton(
                     await _trans('recheck_channel_btn', lang,
                                   "🔍 إعادة الفحص"),
-                    callback_data="admin_recheck_update_ch",
-                )])
+                    callback_data="admin_recheck_update_ch")])
             else:
-                body = await _trans(
-                    'updates_channel_none_line', lang,
-                    "❌ لم يتم تعيين قناة تحديثات بعد."
-                )
+                body = await _trans('updates_channel_none_line', lang,
+                    "❌ لم يتم تعيين قناة تحديثات بعد.")
                 rows.append([InlineKeyboardButton(
                     await _trans('set_channel_btn', lang, "🔗 تعيين"),
-                    callback_data="admin_change_update_ch",
-                )])
-
+                    callback_data="admin_change_update_ch")])
             text = f"{title}\n━━━━━━━━━━━━━━━━━━━━━━\n\n{body}"
             if health_notice:
                 text += f"\n\n{health_notice}"
-
             rows.append([InlineKeyboardButton(
                 KeyboardFactory.get_text("back", lang),
-                callback_data=CB.ADMIN,
-            )])
-
+                callback_data=CB.ADMIN)])
             await safe_edit(query, text,
                             reply_markup=InlineKeyboardMarkup(rows),
                             parse_mode='HTML', bot=context.bot)
@@ -6595,13 +4724,10 @@ class CallbackHandlers:
             logger.error(f"_show_admin_update_channel_menu: {e}",
                           exc_info=True)
             try:
-                await safe_edit(
-                    query,
+                await safe_edit(query,
                     await _trans('error_occurred', lang, "❌"),
-                    bot=context.bot,
-                )
-            except Exception:
-                pass
+                    bot=context.bot)
+            except Exception: pass
 
     @staticmethod
     async def _do_backup(context, user_id, lang='ar'):
@@ -6646,8 +4772,10 @@ class CallbackHandlers:
                 await safe_send(context.bot, user_id, msg)
             except Exception: pass
 
+
 __all__ = [
     "CallbackHandlers",
+    "SecurityCallbacks",
     "handle_my_chat_member", "register_membership_handlers",
     "_membership_should_send", "_membership_prune_reports",
     "_membership_get_log_channel", "_membership_save_to_db",
@@ -6657,11 +4785,11 @@ __all__ = [
     "_membership_recent_reports", "_membership_table_created",
     "_MEMBERSHIP_DEBOUNCE_SECONDS", "_MEMBERSHIP_DEBOUNCE_STALE_AGE",
     "_MEMBERSHIP_OUT_STATUSES", "_MEMBERSHIP_IN_STATUSES",
-    "_invalidate_sec_auth_cache", "_invalidate_after_channel_change",
-    "_set_sec_chat", "_format_channel_rate_line", "_md_to_html",
+    "_invalidate_after_channel_change",
+    "_format_channel_rate_line", "_md_to_html",
     "_get_log_channel_menu_data", "_invalidate_log_channel_menu_cache",
     "_clear_lang_cache_local", "_apply_auto_reply_status_icons",
-    "_patch_auto_reply_back", "_prune_sec_auth_cache",
+    "_patch_auto_reply_back",
     "_make_user_cache_keys", "_invalidate_post_count_cache",
     "_render_auto_reply_menu", "_notify_channel_owner_kicked",
     "_match_cb", "_prune_kicked_notify_state",
@@ -6669,52 +4797,42 @@ __all__ = [
     "_publish_circuits", "_prune_publish_circuits", "_get_publish_circuit",
     "_ANALYTICS_ALIASES", "CONTEST_DURATIONS", "_KNOWN_CB_PREFIXES",
     "_MAX_INLINE_SLEEP", "_KICKED_NOTIFY_DEBOUNCE", "_CB_USER_COUNTER_MAX",
-    "_SEC_AUTH_NEG_BASE", "_SEC_AUTH_NEG_MAX", "_CIRCUIT_STALE_AGE",
-    "_TOP_CALLBACKS_MAX",
+    "_CIRCUIT_STALE_AGE", "_TOP_CALLBACKS_MAX",
     "ACTIVE_TASKS", "settings_cache", "user_cache", "posts_cache",
-    "_sec_auth_cache", "_sec_auth_neg_cache", "_sec_auth_locks",
-    "_security_stats_cache_local", "_post_count_cache",
-    "_ANTIFLOOD_MESSAGES_OPTIONS", "_ANTIFLOOD_SECONDS_OPTIONS",
-    "_ANTIFLOOD_MESSAGES_MAX", "_ANTIFLOOD_SECONDS_MAX",
+    "_post_count_cache",
     "_SECURITY_BRIDGE_AVAILABLE",
     "SECURITY_TOGGLE_MAP", "NEW_SECURITY_DEFAULTS",
     "bridge_get_security_settings", "bridge_invalidate_sec_cache",
 
-    # v9.7.11 — PERF integration
     "_invalidate_message_caches",
     "_get_message_handlers_module",
     "_message_handlers_module",
     "_message_handlers_import_attempted",
 
-    # v9.7.13 — Updates-channel link helper
     "_extract_updates_channel_link",
-
-    # v9.7.14 — Updates-channel health check
     "_check_updates_channel_health",
     "_invalidate_updates_channel_health_cache",
     "_build_updates_channel_health_warning",
     "_UPDATES_CHANNEL_HEALTH_CACHE",
     "_UPDATES_CHANNEL_HEALTH_TTL",
 
-    # v9.7.15 — SECURITY-TOGGLE-MAP-BYPASS-FIX
-    "_SEC_ACTIONS_WITH_SPECIFIC_HANDLERS",
-
-    # 🆕 v9.7.16 — ANALYTICS-BUTTONS-FIX
     "_ANALYTICS_BUTTONS_DIRECT_MAP",
+    "safe_edit",
+    # v9.7.18-SEC-EXTRACTED: إعادة تصدير مراجع الأمان
+    "_check_sec_auth", "_invalidate_sec_auth_cache", "_prune_sec_auth_cache",
+    "_set_sec_chat", "_resolve_sec_chat_id",
 ]
 
 try:
     _bridge_icon = "✅" if _SECURITY_BRIDGE_AVAILABLE else "⚠️"
     logger.info(
-        "🛡️ handlers_callback.py v9.7.16 ANALYTICS-BUTTONS-FIX "
-        "loaded | Bridge=%s | Antiflood-Msgs=%d | Antiflood-Secs=%d | "
-        "Message-Cache-Invalidation=ON | Updates-Link=ON | "
-        "Updates-Health-Check=ON | Sec-Toggle-Bypass=%d-actions | "
-        "Analytics-Direct-Map=%d-buttons | Declare-Winner-Sel=FIXED",
+        "🛡️ handlers_callback.py v9.7.18-SEC-EXTRACTED loaded | "
+        "Bridge=%s | Message-Cache-Invalidation=ON | "
+        "Updates-Link=ON | Updates-Health-Check=ON | "
+        "Analytics-Direct-Map=%d-buttons (DIRECT-WINS) | "
+        "Declare-Winner-Sel=FIXED | Safe-Edit-HTML=ON | "
+        "SECURITY-EXTRACTED→callback_security.py",
         _bridge_icon,
-        len(_ANTIFLOOD_MESSAGES_OPTIONS),
-        len(_ANTIFLOOD_SECONDS_OPTIONS),
-        len(_SEC_ACTIONS_WITH_SPECIFIC_HANDLERS),
         len(_ANALYTICS_BUTTONS_DIRECT_MAP),
     )
 except Exception:
