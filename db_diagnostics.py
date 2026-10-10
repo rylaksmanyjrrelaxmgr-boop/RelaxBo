@@ -1,17 +1,21 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-db_diagnostics.py — واجهة تشخيص وصيانة قاعدة البيانات (v6.9.3 — FIXED + AUTO-VACUUM)
+db_diagnostics.py — واجهة تشخيص وصيانة قاعدة البيانات (v6.9.4 — SAFE CLEANUP)
 ================================================================================
-🆕 v6.9.3 — إصلاحات دقيقة + التنظيف التلقائي:
-    🔴 FIX-1: _get_all_table_names() يشمل الآن Materialized Views
-              (كان يستخدم pg_tables التي تستثني MVs → VACUUM لا يصل إليها).
-    🔴 FIX-2: _calc_technical_score() يضيف حداً أدنى مطلقاً (dead >= 50)
-              لتجنّب الإنذارات الكاذبة على الجداول الصغيرة.
-    🔴 FIX-3: _dead_color() يضيف حداً أدنى مطلقاً (dead >= 10).
-    🟡 FIX-4: التقرير يميّز بين Table و Materialized View بوسم [MV].
-    🟡 FIX-5: _get_all_tables_health() يجلب relkind لتحديد النوع.
-    🟢 FEAT-1: auto_vacuum_dirty_mvs() — تنظيف تلقائي للجداول/MVs المتسخة.
+🆕 v6.9.4 — سياسة تنظيف آمنة + حماية المشتركين:
+    🔒 SAFE-1: سياسة تنظيف هيكلية (dict) لكل جدول.
+    🔒 SAFE-2: جداول المستخدمين/المشتركين/المالية محمية تماماً.
+    🔒 SAFE-3: استثناء المستخدمين المشتركين من الحذف (dynamic).
+    🔒 SAFE-4: لا حذف إن لم يتجاوز الجدول الحد المحدد.
+    🔒 SAFE-5: معاينة إلزامية قبل التنفيذ.
+
+    🔴 FIX-1: _get_all_table_names() يشمل Materialized Views.
+    🔴 FIX-2: _calc_technical_score() بحد أدنى مطلق (dead >= 50).
+    🔴 FIX-3: _dead_color() بحد أدنى مطلق (dead >= 10).
+    🟡 FIX-4: وسم [MV] في التقارير.
+    🟡 FIX-5: _get_all_tables_health() يجلب relkind.
+    🟢 FEAT-1: auto_vacuum_dirty_mvs() — تنظيف تلقائي للـ MVs.
 
 ⚠️ v6.5.1+: user_violations.last_violation_time (بدل created_at)
 ================================================================================
@@ -30,11 +34,117 @@ logger = logging.getLogger(__name__)
 # الإصدار
 # ═══════════════════════════════════════════════════════════════════════
 
-VERSION = "6.9.3"
+VERSION = "6.9.4"
 
-# 🆕 v6.9.3: حدود الدقة — تمنع الإنذارات الكاذبة
+# 🆕 v6.9.4: حدود الدقة — تمنع الإنذارات الكاذبة
 _MIN_DEAD_FOR_CRITICAL = 50   # أقل من هذا → لا يُصنَّف حرجاً مهما كانت النسبة
 _MIN_DEAD_FOR_COLOR = 10      # أقل من هذا → ✅ دائماً
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# 🆕 v6.9.4 — سياسة التنظيف الآمنة
+# ═══════════════════════════════════════════════════════════════════════
+#
+# البنية لكل جدول:
+#   "date_column":   عمود التاريخ (يُستعمل في DELETE)
+#   "retention":     عدد أيام الاحتفاظ
+#   "max_mb":        الحد الأقصى (MB) — لا حذف إذا أقل منه
+#   "extra_where":   شرط SQL إضافي لحماية المشتركين (اختياري)
+#   "protected":     True = الجدول محمي تماماً — لا حذف أبداً
+#
+# 🔒 القاعدة: الجداول الحساسة (users, subscriptions, user_*) محمية.
+# 🔒 القاعدة: لا يُحذف سجل مستخدم نشط/مشترك، حتى لو مرّت مدة الاحتفاظ.
+# ═══════════════════════════════════════════════════════════════════════
+
+_CLEANUP_POLICY: Dict[str, Dict[str, Any]] = {
+
+    # ── المجموعة 1: سجلات النظام (آمنة تماماً) ──────────────────────
+    "admin_logs": {
+        "date_column": "created_at",
+        "retention":   30,
+        "max_mb":      20,
+        "extra_where": None,
+    },
+    "payment_logs": {
+        "date_column": "created_at",
+        "retention":   90,
+        "max_mb":      20,
+        "extra_where": None,
+    },
+    "bot_addition_log": {
+        "date_column": "created_at",
+        "retention":   90,
+        "max_mb":      20,
+        "extra_where": None,
+    },
+
+    # ── المجموعة 2: سجلات سلوكية ────────────────────────────────────
+    "sentiment_history": {
+        "date_column": "created_at",
+        "retention":   90,
+        "max_mb":      20,
+        "extra_where": None,
+    },
+
+    # رسائل المستخدمين — 🔒 لا تحذف رسائل مشترك نشط
+    "user_messages": {
+        "date_column": "created_at",
+        "retention":   30,
+        "max_mb":      20,
+        "extra_where": (
+            "user_id NOT IN ("
+            "  SELECT user_id FROM subscriptions "
+            "  WHERE status = 'active'"
+            ")"
+        ),
+    },
+
+    # ── المجموعة 3: أرشيف (محذوف من الأصل) ─────────────────────────
+    "penalty_archive": {
+        "date_column": "created_at",
+        "retention":   90,
+        "max_mb":      20,
+        "extra_where": None,
+    },
+
+    # ── المجموعة 4: حساسة — حماية مشددة ────────────────────────────
+    "user_violations": {
+        "date_column": "last_violation_time",
+        "retention":   180,   # احتفظ بـ 6 أشهر
+        "max_mb":      20,
+        "extra_where": (
+            "user_id NOT IN ("
+            "  SELECT user_id FROM subscriptions "
+            "  WHERE status = 'active'"
+            ")"
+        ),
+    },
+
+    # ═══════════════════════════════════════════════════════════════
+    # 🔒 جداول محمية — لا حذف أبداً (بيانات المستخدمين والأعمال)
+    # ═══════════════════════════════════════════════════════════════
+    "users":             {"protected": True},
+    "subscriptions":     {"protected": True},
+    "user_penalties":    {"protected": True},
+    "user_warnings":     {"protected": True},
+    "user_points":       {"protected": True},
+    "referrals":         {"protected": True},
+    "referral_rewards":  {"protected": True},
+    "support_tickets":   {"protected": True},
+    "scheduled_posts":   {"protected": True},
+    "banned_words":      {"protected": True},
+    "posts":             {"protected": True},
+    "bot_groups":        {"protected": True},
+    "user_channels":     {"protected": True},
+    "plans":             {"protected": True},
+}
+
+# للتوافق مع الكود القديم
+_CLEANUP_TABLES = tuple(
+    k for k, v in _CLEANUP_POLICY.items()
+    if not v.get("protected")
+)
+_CLEANUP_THRESHOLD_KB = 20 * 1024
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -141,11 +251,7 @@ def _bar(value: float, max_value: float, width: int = 10,
 
 
 def _dead_color(dead: int, live: int) -> str:
-    """
-    🆕 v6.9.3: يضيف حداً أدنى مطلقاً.
-    4 dead tuples في MV صغير ليست مشكلة أدائية.
-    """
-    # 🔴 FIX-3: حد أدنى مطلق — لا تلوين على الأعداد التافهة
+    """🆕 v6.9.3: حد أدنى مطلق — لا إنذارات على الأعداد التافهة."""
     if dead < _MIN_DEAD_FOR_COLOR:
         return "✅"
 
@@ -222,7 +328,7 @@ async def _get_db_metadata() -> Dict[str, Any]:
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# 2) Dead Tuples + Clean Tables  — 🆕 v6.9.3 مع تمييز MV
+# 2) Dead Tuples + Clean Tables — 🆕 مع تمييز MV
 # ═══════════════════════════════════════════════════════════════════════
 
 async def _get_all_tables_health() -> Tuple[List[Dict], List[Dict]]:
@@ -231,7 +337,6 @@ async def _get_all_tables_health() -> Tuple[List[Dict], List[Dict]]:
         return [], []
 
     try:
-        # 🔴 FIX-5: نجلب relkind لتمييز MVs
         rows = await db.fetchall("""
             SELECT
                 c.relname AS table_name,
@@ -441,24 +546,20 @@ async def _get_indexes(tables: List[str]) -> Dict[str, List[Dict[str, Any]]]:
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# 6) Auto-Cleanup Status
+# 6) Auto-Cleanup Status — 🆕 v6.9.4 سياسة فردية
 # ═══════════════════════════════════════════════════════════════════════
 
-_CLEANUP_TABLES = (
-    "admin_logs",
-    "payment_logs",
-    "sentiment_history",
-    "user_messages",
-    "bot_addition_log",
-    "penalty_archive",
-    "user_violations",
-)
-_CLEANUP_THRESHOLD_KB = 20 * 1024
-
-
 async def _get_cleanup_status() -> List[Dict[str, Any]]:
+    """🆕 v6.9.4: يقرأ السياسة الفردية لكل جدول."""
     db = _get_db()
     if db is None or not _is_postgres():
+        return []
+
+    deletable = [
+        k for k, v in _CLEANUP_POLICY.items()
+        if not v.get("protected")
+    ]
+    if not deletable:
         return []
 
     try:
@@ -467,7 +568,7 @@ async def _get_cleanup_status() -> List[Dict[str, Any]]:
                    pg_total_relation_size(relid) AS total_bytes
             FROM pg_stat_user_tables
             WHERE relname = ANY($1::text[])
-        """, (list(_CLEANUP_TABLES),)) or []
+        """, (deletable,)) or []
     except Exception as e:
         logger.debug(f"_get_cleanup_status: {e}")
         return []
@@ -477,35 +578,51 @@ async def _get_cleanup_status() -> List[Dict[str, Any]]:
         if not isinstance(r, dict):
             continue
         name = r.get("table_name")
+        if name not in _CLEANUP_POLICY:
+            continue
+
+        policy = _CLEANUP_POLICY[name]
+        retention_days = policy["retention"]
+        max_mb = policy["max_mb"]
+
         b = int(r.get("total_bytes") or 0)
         kb = b / 1024
-        if kb >= _CLEANUP_THRESHOLD_KB:
+        threshold_kb = max_mb * 1024
+
+        if kb >= threshold_kb:
             color = "🔴"
-            status = "تجاوز الحد"
-        elif kb >= _CLEANUP_THRESHOLD_KB * 0.75:
+            status = f"تجاوز الحد ({max_mb}MB) — سيُنظَّف"
+        elif kb >= threshold_kb * 0.75:
             color = "🟡"
-            status = "قريب من الحد"
+            status = f"قريب من الحد ({max_mb}MB)"
         else:
             color = "🟢"
-            status = "ضمن الحد"
+            status = f"ضمن الحد ({max_mb}MB)"
+
         out.append({
             "name": name,
             "bytes": b,
             "display": _fmt_bytes(b),
             "color": color,
             "status": status,
+            "retention_days": retention_days,
+            "max_mb": max_mb,
         })
+
+    out.sort(key=lambda x: (
+        {"🔴": 0, "🟡": 1, "🟢": 2}.get(x["color"], 3),
+        -x["bytes"],
+    ))
     return out
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# 7) Table Names Helper — 🔴 FIX-1: يشمل MVs الآن
+# 7) Table Names Helper — 🔴 FIX-1: يشمل MVs
 # ═══════════════════════════════════════════════════════════════════════
 
 async def _get_all_table_names() -> List[str]:
     """
-    🔴 FIX-1 v6.9.3: يستخدم pg_class بدل pg_tables
-    ليشمل Materialized Views (relkind='m').
+    🔴 FIX-1 v6.9.3: يستخدم pg_class ليشمل Materialized Views.
     """
     db = _get_db()
     if db is None:
@@ -522,7 +639,6 @@ async def _get_all_table_names() -> List[str]:
             return []
 
     try:
-        # 🔴 FIX-1: relkind IN ('r','m') → جدول عادي + Materialized View
         rows = await db.fetchall("""
             SELECT c.relname AS tablename
             FROM pg_class c
@@ -535,7 +651,6 @@ async def _get_all_table_names() -> List[str]:
                 if isinstance(r, dict) and r.get("tablename")]
     except Exception as e:
         logger.debug(f"_get_all_table_names: {e}")
-        # Fallback للسلوك القديم
         try:
             rows = await db.fetchall("""
                 SELECT tablename FROM pg_tables
@@ -549,7 +664,7 @@ async def _get_all_table_names() -> List[str]:
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# 8) Score — 🔴 FIX-2: حد أدنى مطلق
+# 8) Score — 🔴 FIX-2
 # ═══════════════════════════════════════════════════════════════════════
 
 def _calc_technical_score(
@@ -557,10 +672,7 @@ def _calc_technical_score(
     activity: Dict,
     settings: Dict,
 ) -> Tuple[int, int, int, int]:
-    """
-    🔴 FIX-2 v6.9.3: الحد الأدنى المطلق dead >= 50
-    يمنع تصنيف MVs/جداول صغيرة كنقاط حرجة.
-    """
+    """🔴 FIX-2: الحد الأدنى المطلق dead >= 50."""
     score = 100
     critical = 0
     warn = 0
@@ -569,7 +681,6 @@ def _calc_technical_score(
         dead = int(t.get("dead", 0))
         r = float(t.get("ratio", 0))
 
-        # 🔴 FIX-2: تخطّي الأعداد التافهة
         if dead < _MIN_DEAD_FOR_CRITICAL:
             continue
 
@@ -592,14 +703,12 @@ def _calc_technical_score(
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# 9) Maintenance — dict API
+# 9) Maintenance — dict API — 🆕 v6.9.4 آمن
 # ═══════════════════════════════════════════════════════════════════════
 
 async def preview_maintenance() -> Dict[str, Any]:
     """
-    معاينة الصيانة — dict.
-    ⚠️ v6.5.1+: user_violations.last_violation_time
-    🆕 v6.9.3: vacuum_tables يشمل MVs الآن (بعد FIX-1).
+    🆕 v6.9.4: معاينة آمنة — تحمي المشتركين تلقائياً.
     """
     db = _get_db()
     result: Dict[str, Any] = {
@@ -607,37 +716,83 @@ async def preview_maintenance() -> Dict[str, Any]:
         'total_deletions': 0,
         'vacuum_tables': [],
         'db_type': _get_db_type(),
+        'protected_tables': [
+            k for k, v in _CLEANUP_POLICY.items()
+            if v.get("protected")
+        ],
     }
     if db is None:
         return result
 
-    deletions_spec = [
-        ("admin_logs", "created_at", 30),
-        ("penalty_archive", "created_at", 90),
-        ("user_violations", "last_violation_time", 90),
+    if not _is_postgres():
+        result['vacuum_tables'] = await _get_all_table_names()
+        return result
+
+    deletable = [
+        k for k, v in _CLEANUP_POLICY.items()
+        if not v.get("protected")
     ]
 
+    # 1) اقرأ الأحجام
+    sizes_map: Dict[str, int] = {}
+    try:
+        rows = await db.fetchall("""
+            SELECT relname AS table_name,
+                   pg_total_relation_size(relid) AS total_bytes
+            FROM pg_stat_user_tables
+            WHERE relname = ANY($1::text[])
+        """, (deletable,)) or []
+        for r in rows:
+            if isinstance(r, dict) and r.get("table_name"):
+                sizes_map[r["table_name"]] = int(r.get("total_bytes") or 0)
+    except Exception as e:
+        logger.debug(f"preview_maintenance sizes: {e}")
+
+    # 2) ابنِ الخطة
     total = 0
-    for tbl, col, days in deletions_spec:
+    for tbl in deletable:
+        policy = _CLEANUP_POLICY[tbl]
+        col = policy["date_column"]
+        days = policy["retention"]
+        max_mb = policy["max_mb"]
+        extra_where = policy.get("extra_where")
+
+        size_bytes = sizes_map.get(tbl, 0)
+        size_kb = size_bytes / 1024
+        threshold_kb = max_mb * 1024
+
         entry = {
             'name': tbl,
             'column': col,
             'days': days,
-            'threshold_str': f">{days}d",
+            'max_mb': max_mb,
+            'threshold_str': f">{days}d | {max_mb}MB",
+            'size_display': _fmt_bytes(size_bytes),
+            'over_limit': size_kb >= threshold_kb,
             'count': 0,
             'error': None,
         }
+
+        if not entry['over_limit']:
+            entry['skip_reason'] = 'within_limit'
+            result['plan'].append(entry)
+            continue
+
+        # احسب المرشحين — مع حماية المشتركين
         try:
-            if _is_postgres():
-                row = await db.fetchone(
-                    f"SELECT COUNT(*) AS cnt FROM {tbl} "
-                    f"WHERE {col} < NOW() - INTERVAL '{days} days'"
-                )
-                cnt = int((row or {}).get("cnt") or 0)
-                entry['count'] = cnt
-                total += cnt
+            base_where = f"{col} < NOW() - INTERVAL '{days} days'"
+            if extra_where:
+                full_where = f"({base_where}) AND ({extra_where})"
             else:
-                entry['count'] = 0
+                full_where = base_where
+
+            row = await db.fetchone(
+                f"SELECT COUNT(*) AS cnt FROM {tbl} "
+                f"WHERE {full_where}"
+            )
+            cnt = int((row or {}).get("cnt") or 0)
+            entry['count'] = cnt
+            total += cnt
         except Exception as e:
             logger.warning(f"preview_maintenance({tbl}): {e}")
             entry['count'] = -1
@@ -652,9 +807,7 @@ async def preview_maintenance() -> Dict[str, Any]:
 
 async def run_maintenance() -> Dict[str, Any]:
     """
-    تنفيذ الصيانة — dict.
-    ⚠️ v6.5.1+: user_violations.last_violation_time
-    🆕 v6.9.3: VACUUM يشمل MVs → يحل مشكلة mv_active_user_limits نهائياً.
+    🆕 v6.9.4: تنفيذ آمن — المشتركون النشطون محميون.
     """
     db = _get_db()
     start = time.monotonic()
@@ -662,33 +815,74 @@ async def run_maintenance() -> Dict[str, Any]:
         'duration_sec': 0.0,
         'deletions': {},
         'deletion_errors': {},
+        'skipped': [],
+        'protected': [
+            k for k, v in _CLEANUP_POLICY.items()
+            if v.get("protected")
+        ],
         'vacuum': {'success': 0, 'failed': 0, 'details': []},
     }
     if db is None:
         result['duration_sec'] = round(time.monotonic() - start, 2)
         return result
 
-    deletions_spec = [
-        ("admin_logs", "created_at", 30),
-        ("penalty_archive", "created_at", 90),
-        ("user_violations", "last_violation_time", 90),
-    ]
+    if _is_postgres():
+        deletable = [
+            k for k, v in _CLEANUP_POLICY.items()
+            if not v.get("protected")
+        ]
 
-    for tbl, col, days in deletions_spec:
+        # 1) اقرأ الأحجام
+        sizes_map: Dict[str, int] = {}
         try:
-            if _is_postgres():
+            rows = await db.fetchall("""
+                SELECT relname AS table_name,
+                       pg_total_relation_size(relid) AS total_bytes
+                FROM pg_stat_user_tables
+                WHERE relname = ANY($1::text[])
+            """, (deletable,)) or []
+            for r in rows:
+                if isinstance(r, dict) and r.get("table_name"):
+                    sizes_map[r["table_name"]] = int(r.get("total_bytes") or 0)
+        except Exception as e:
+            logger.debug(f"run_maintenance sizes: {e}")
+
+        # 2) نفّذ الحذف
+        for tbl in deletable:
+            policy = _CLEANUP_POLICY[tbl]
+            col = policy["date_column"]
+            days = policy["retention"]
+            max_mb = policy["max_mb"]
+            extra_where = policy.get("extra_where")
+
+            size_kb = sizes_map.get(tbl, 0) / 1024
+            threshold_kb = max_mb * 1024
+
+            if size_kb < threshold_kb:
+                result['skipped'].append({
+                    'name': tbl,
+                    'reason': 'within_limit',
+                    'size_display': _fmt_bytes(sizes_map.get(tbl, 0)),
+                })
+                continue
+
+            try:
+                base_where = f"{col} < NOW() - INTERVAL '{days} days'"
+                if extra_where:
+                    full_where = f"({base_where}) AND ({extra_where})"
+                else:
+                    full_where = base_where
+
                 r = await db.execute(
-                    f"DELETE FROM {tbl} "
-                    f"WHERE {col} < NOW() - INTERVAL '{days} days'"
+                    f"DELETE FROM {tbl} WHERE {full_where}"
                 )
                 result['deletions'][tbl] = int(r or 0)
-            else:
+            except Exception as e:
+                logger.warning(f"run_maintenance delete({tbl}): {e}")
                 result['deletions'][tbl] = 0
-        except Exception as e:
-            logger.warning(f"run_maintenance delete({tbl}): {e}")
-            result['deletions'][tbl] = 0
-            result['deletion_errors'][tbl] = str(e)[:100]
+                result['deletion_errors'][tbl] = str(e)[:100]
 
+    # 3) VACUUM على كل الجداول + MVs
     tables = await _get_all_table_names()
     for t in tables:
         try:
@@ -717,43 +911,64 @@ async def run_maintenance() -> Dict[str, Any]:
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# 10) Maintenance — HTML formatters
+# 10) Maintenance — HTML formatters — 🆕 v6.9.4
 # ═══════════════════════════════════════════════════════════════════════
 
 def format_maintenance_preview(preview: Dict[str, Any]) -> str:
     lines: List[str] = []
-    lines.append("🧹 <b>معاينة الصيانة</b>")
+    lines.append("🧹 <b>معاينة الصيانة الآمنة</b>")
     lines.append("━━━━━━━━━━━━━━━━━━━━━━")
     lines.append("")
-    lines.append("🗑️ <b>الحذف المخطط:</b>")
+    lines.append("🔒 <i>المشتركون النشطون محميون تلقائياً</i>")
+    lines.append("")
 
     plan = preview.get('plan', []) if isinstance(preview, dict) else []
     has_errors = False
 
-    for item in plan:
-        if not isinstance(item, dict):
-            continue
-        name = _esc(item.get('name', '?'))
-        threshold = _esc(item.get('threshold_str', '?'))
-        cnt = item.get('count', 0)
-        err = item.get('error')
+    over = [p for p in plan if p.get('over_limit')]
+    within = [p for p in plan if not p.get('over_limit')]
 
-        if cnt == -1:
-            icon = "❌"
-            val = f"<i>فشل: {_esc(err or '?')[:60]}</i>"
-            has_errors = True
-        elif cnt == 0:
-            icon = "✅"
-            val = "لا شيء"
-        else:
-            icon = "⚠️"
-            val = str(cnt)
+    if over:
+        lines.append("🗑️ <b>جداول ستُحذف منها سجلات قديمة:</b>")
+        for item in over:
+            name = _esc(item.get('name', '?'))
+            threshold = _esc(item.get('threshold_str', '?'))
+            cnt = item.get('count', 0)
+            size = _esc(item.get('size_display', '?'))
 
+            if cnt == -1:
+                icon = "❌"
+                val = f"<i>فشل: {_esc(item.get('error', '?'))[:40]}</i>"
+                has_errors = True
+            elif cnt == 0:
+                icon = "✅"
+                val = "لا شيء (كلها محمية أو حديثة)"
+            else:
+                icon = "🗑️"
+                val = f"<b>{cnt}</b> صف"
+
+            lines.append(f"  {icon} <code>{name:<22}</code>")
+            lines.append(f"      {size} | {threshold} → {val}")
+        lines.append("")
+
+    if within:
+        lines.append(f"✅ <b>جداول ضمن الحد ({len(within)}):</b>")
+        for item in within:
+            name = _esc(item.get('name', '?'))
+            size = _esc(item.get('size_display', '?'))
+            max_mb = item.get('max_mb', '?')
+            lines.append(f"  🟢 <code>{name:<22}</code> {size} / {max_mb}MB")
+        lines.append("")
+
+    protected = preview.get('protected_tables', []) if isinstance(preview, dict) else []
+    if protected:
+        lines.append(f"🔒 <b>جداول محمية ({len(protected)}):</b>")
         lines.append(
-            f"  {icon} <code>{name:<20}</code> ({threshold}): {val}"
+            "  <i>users, subscriptions, user_penalties, "
+            "user_warnings, referral_rewards, ...</i>"
         )
+        lines.append("")
 
-    lines.append("")
     total = (preview.get('total_deletions', 0)
              if isinstance(preview, dict) else 0)
     lines.append(f"📊 <b>الإجمالي:</b> {total} صف سيُحذف")
@@ -762,21 +977,16 @@ def format_maintenance_preview(preview: Dict[str, Any]) -> str:
     tables = (preview.get('vacuum_tables', [])
               if isinstance(preview, dict) else [])
     if tables:
-        lines.append(f"🧹 <b>VACUUM سيعمل على ({len(tables)} جدول):</b>")
-        for t in tables:
-            lines.append(f"  • {_esc(t)}")
+        lines.append(f"🧹 <b>VACUUM على ({len(tables)} جدول/MV)</b>")
         lines.append("")
 
     lines.append("━━━━━━━━━━━━━━━━━━━━━━")
-    lines.append("لتنفيذ الصيانة، أرسل:")
+    lines.append("لتنفيذ الصيانة:")
     lines.append("<code>/db_maintenance confirm</code>")
 
     if has_errors:
         lines.append("")
-        lines.append(
-            "⚠️ <i>بعض استعلامات العدّ فشلت — "
-            "تأكد من تحديث db_diagnostics</i>"
-        )
+        lines.append("⚠️ <i>بعض استعلامات العدّ فشلت.</i>")
 
     return "\n".join(lines)
 
@@ -792,15 +1002,15 @@ def format_maintenance_result(result: Dict[str, Any]) -> str:
     lines.append(f"⏱️ <b>المدة:</b> {duration:.2f}s")
     lines.append("")
 
-    lines.append("🗑️ <b>الحذف:</b>")
     deletions = (result.get('deletions', {})
                  if isinstance(result, dict) else {})
     deletion_errors = (result.get('deletion_errors', {})
                        if isinstance(result, dict) else {})
+    skipped = (result.get('skipped', [])
+               if isinstance(result, dict) else [])
 
-    if not deletions:
-        lines.append("  ℹ️ لا توجد عمليات حذف")
-    else:
+    if deletions:
+        lines.append("🗑️ <b>الحذف:</b>")
         for name, cnt in deletions.items():
             if name in deletion_errors:
                 icon = "❌"
@@ -810,41 +1020,33 @@ def format_maintenance_result(result: Dict[str, Any]) -> str:
                 val = "لا شيء"
             else:
                 icon = "🗑️"
-                val = str(cnt)
-            lines.append(f"  {icon} <code>{_esc(name):<20}</code> {val}")
+                val = f"<b>{cnt}</b>"
+            lines.append(f"  {icon} <code>{_esc(name):<22}</code> {val}")
+        lines.append("")
 
-    lines.append("")
+    if skipped:
+        lines.append(f"⏭️ <b>تخطّي ({len(skipped)} — ضمن الحد)</b>")
+        lines.append("")
 
-    lines.append("🧹 <b>VACUUM:</b>")
+    protected = result.get('protected', [])
+    if protected:
+        lines.append(f"🔒 <b>محمية ({len(protected)}):</b>")
+        lines.append(
+            f"  <i>{', '.join(protected[:6])}"
+            + ("..." if len(protected) > 6 else "")
+            + "</i>"
+        )
+        lines.append("")
+
     vacuum = (result.get('vacuum', {})
               if isinstance(result, dict) else {})
-    details = (vacuum.get('details', [])
-               if isinstance(vacuum, dict) else [])
+    success = vacuum.get('success', 0) if isinstance(vacuum, dict) else 0
+    failed = vacuum.get('failed', 0) if isinstance(vacuum, dict) else 0
 
-    if not details:
-        lines.append("  ℹ️ لا توجد عمليات VACUUM")
-    else:
-        for item in details:
-            if not isinstance(item, tuple) or len(item) < 3:
-                continue
-            tname, ok, err = item
-            if ok and err is None:
-                lines.append(f"  ✅ {_esc(tname)}")
-            elif ok and err == "skip":
-                lines.append(f"  ⏭️ {_esc(tname)} <i>(غير موجود)</i>")
-            else:
-                lines.append(
-                    f"  ❌ {_esc(tname)} — "
-                    f"<code>{_esc(str(err or '?')[:60])}</code>"
-                )
-
-    lines.append("")
-    lines.append("━━━━━━━━━━━━━━━━━━━━━━")
-    success = (vacuum.get('success', 0)
-               if isinstance(vacuum, dict) else 0)
-    failed = (vacuum.get('failed', 0)
-              if isinstance(vacuum, dict) else 0)
-    lines.append(f"📊 <b>نجح:</b> {success} | <b>فشل:</b> {failed}")
+    lines.append("🧹 <b>VACUUM:</b>")
+    lines.append(f"  ✅ نجح: <b>{success}</b>")
+    if failed:
+        lines.append(f"  ❌ فشل: <b>{failed}</b>")
 
     return "\n".join(lines)
 
@@ -901,24 +1103,12 @@ async def vacuum_analyze_tables() -> str:
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# 11b) 🆕 v6.9.3 — التنظيف التلقائي للـ MVs والجداول المتسخة
+# 11b) 🆕 التنظيف التلقائي للـ MVs
 # ═══════════════════════════════════════════════════════════════════════
 
 async def auto_vacuum_dirty_mvs(min_dead: int = 10) -> Dict[str, Any]:
     """
-    🧹 v6.9.3: تنظيف تلقائي.
-    يمر على كل الجداول والـ Materialized Views التي فيها
-    dead tuples ≥ min_dead ويعمل عليها VACUUM ANALYZE.
-
-    Returns:
-        dict: {
-            'vacuumed': list[{name, dead_before, is_matview}],
-            'failed':   list[{name, error}],
-            'total_dead_before': int,
-            'total_dead_after':  int,
-            'cleaned':  int,
-            'duration_sec': float,
-        }
+    🧹 v6.9.3: تنظيف تلقائي للجداول/MVs التي فيها dead tuples ≥ min_dead.
     """
     db = _get_db()
     result: Dict[str, Any] = {
@@ -934,13 +1124,11 @@ async def auto_vacuum_dirty_mvs(min_dead: int = 10) -> Dict[str, Any]:
 
     start = time.monotonic()
 
-    # 1) افحص الحالة الحالية
     dirty, _ = await _get_all_tables_health()
     result['total_dead_before'] = sum(
         int(t.get('dead', 0)) for t in dirty
     )
 
-    # 2) اختر الأهداف: dead >= min_dead (يشمل MVs تلقائياً)
     targets = [
         t for t in dirty
         if int(t.get('dead', 0)) >= int(min_dead)
@@ -950,7 +1138,6 @@ async def auto_vacuum_dirty_mvs(min_dead: int = 10) -> Dict[str, Any]:
         result['duration_sec'] = round(time.monotonic() - start, 2)
         return result
 
-    # 3) VACUUM لكل هدف
     for t in targets:
         name = t.get('name')
         dead_before = int(t.get('dead', 0))
@@ -975,7 +1162,6 @@ async def auto_vacuum_dirty_mvs(min_dead: int = 10) -> Dict[str, Any]:
         except Exception:
             pass
 
-    # 4) أعد القياس للتأكيد
     dirty_after, _ = await _get_all_tables_health()
     result['total_dead_after'] = sum(
         int(t.get('dead', 0)) for t in dirty_after
@@ -1058,8 +1244,8 @@ async def _build_sections() -> List[str]:
 
     if settings.get("synchronous_commit") == "off":
         s2.append("")
-        s2.append("ℹ️ synchronous_commit=off — مقصود من v7.7.36 "
-                  "لتحسين الأداء. لا تعتبره خطأً.")
+        s2.append("ℹ️ synchronous_commit=off — مقصود لتحسين الأداء. "
+                  "لا تعتبره خطأً.")
 
     if critical_count > 0:
         s2.append("")
@@ -1067,10 +1253,14 @@ async def _build_sections() -> List[str]:
     else:
         s2.append("")
         s2.append("✅ لا توجد جداول حرجة (الحد الأدنى "
-                  f"{_MIN_DEAD_FOR_CRITICAL} dead tuples للتصنيف).")
+                  f"{_MIN_DEAD_FOR_CRITICAL} dead tuples).")
+
+    s2.append("")
+    s2.append("🔒 <b>سياسة التنظيف:</b> آمنة — "
+              "المشتركون والمستخدمون محميون.")
     parts.append("\n".join(s2))
 
-    # SECTION 3 — 🆕 v6.9.3: وسم [MV]
+    # SECTION 3
     if dirty:
         s3: List[str] = []
         s3.append("━━━━━━━━━━━━━━━━━━━━━━")
@@ -1195,13 +1385,28 @@ async def _build_sections() -> List[str]:
     # SECTION 9
     if cleanup_status:
         s9: List[str] = []
-        s9.append("8. <b>Auto-Cleanup</b>")
+        s9.append("8. <b>Auto-Cleanup (سياسة آمنة)</b>")
+        s9.append("")
+        s9.append("🔒 <i>المشتركون والمستخدمون محميون تلقائياً</i>")
         s9.append("")
         for c in cleanup_status:
+            retention = c.get("retention_days", "?")
             s9.append(f"  {c['color']} <b>{_esc(c['name'])}</b> — "
-                      f"{c['display']} (الحد: 20MB) — {c['status']}")
+                      f"{c['display']} (حد {c['max_mb']}MB, "
+                      f"احتفاظ {retention}d)")
         s9.append("")
-        s9.append("⚙️ يُشغَّل كل 6h | VACUUM: ON 🟢 | Mode: all")
+
+        protected_list = [
+            k for k, v in _CLEANUP_POLICY.items()
+            if v.get("protected")
+        ]
+        s9.append(f"🔒 <b>جداول محمية ({len(protected_list)}):</b>")
+        s9.append(
+            "  <i>users, subscriptions, user_penalties, "
+            "user_warnings, referral_rewards, scheduled_posts, ...</i>"
+        )
+        s9.append("")
+        s9.append("⚙️ كل 6h | VACUUM: ON 🟢 | Mode: safe")
         parts.append("\n".join(s9))
 
     # SECTION 10
@@ -1236,9 +1441,6 @@ async def diagnose_db_split() -> List[str]:
 
 
 async def diagnose_db_quick() -> str:
-    """
-    🆕 v6.9.3: التصنيف يعتمد على العدد المطلق، ليس النسبة فقط.
-    """
     db = _get_db()
     if db is None:
         return "❌ DB غير مستورد"
@@ -1257,7 +1459,6 @@ async def diagnose_db_quick() -> str:
     try:
         dirty, clean = await _get_all_tables_health()
         total_dead = sum(t.get("dead", 0) for t in dirty)
-        # 🔴 FIX-2: نفس منطق _calc_technical_score
         critical = sum(
             1 for t in dirty
             if t.get("ratio", 0) >= 0.20
@@ -1338,7 +1539,7 @@ get_db_info = _get_db_metadata
 get_database_info = _get_db_metadata
 get_pg_info = _get_db_metadata
 
-# 🆕 v6.9.3: aliases للتنظيف التلقائي
+# 🆕 v6.9.4: aliases للتنظيف التلقائي
 auto_vacuum = auto_vacuum_dirty_mvs
 auto_cleanup = auto_vacuum_dirty_mvs
 cleanup_dead_tuples = auto_vacuum_dirty_mvs
@@ -1355,11 +1556,11 @@ __all__ = [
     "diagnose_db_split",
     "diagnose_db_quick",
     "get_diagnostics_data",
-    "auto_vacuum_dirty_mvs",      # 🆕 v6.9.3
-    "auto_vacuum",                # 🆕 alias
-    "auto_cleanup",               # 🆕 alias
-    "cleanup_dead_tuples",        # 🆕 alias
-    "vacuum_dirty_tables",        # 🆕 alias
+    "auto_vacuum_dirty_mvs",
+    "auto_vacuum",
+    "auto_cleanup",
+    "cleanup_dead_tuples",
+    "vacuum_dirty_tables",
     "preview_maintenance",
     "run_maintenance",
     "format_maintenance_preview",
@@ -1403,8 +1604,9 @@ __all__ = [
 try:
     logger.info(
         "🛡️ db_diagnostics.py v%s loaded | "
-        "13 sections + maintenance API | "
-        "MVs included in VACUUM ✅ | "
+        "SAFE CLEANUP ✅ | "
+        "subscribers protected 🔒 | "
+        "MVs in VACUUM ✅ | "
         "abs-threshold=%d dead | "
         "auto-vacuum API ✅ | "
         "user_violations.last_violation_time ✅ | exports=%d",
