@@ -2,9 +2,16 @@
 # -*- coding: utf-8 -*-
 
 """
-🌿 Relax Manager – البوت الرئيسي (bot.py v5.6.17-ROBUST-MAINT-IMPORT)
+🌿 Relax Manager – البوت الرئيسي (bot.py v5.6.18-PERF-FIXES)
 ================================================================================
 📌 نقطة الدخول الرسمية للتطبيق (entrypoint).
+
+🆕 v5.6.18 (PERF-FIXES):
+    🟢 PERF-1: keep_alive — الفاصل من 300s إلى 180s (3 دقائق)
+               + دعم KEEP_ALIVE_URL المخصص.
+    🟢 PERF-2: سجل تشخيصي يعرض PERF Tuning (MAX_CHANNELS + SLOW_QUERY).
+    🟢 PERF-3: رسالة توضيحية عن Cron-job.org عند غياب RENDER_EXTERNAL_URL.
+    ⚠️ لم يتم تغيير أي منطق آخر.
 
 🆕 v5.6.17 (ROBUST-MAINT-IMPORT):
     🟢 PATCH-1: تحسين استيراد db_maintenance_commands — يدعم 5 أسماء:
@@ -372,7 +379,7 @@ except ImportError as _e_cs1:
         _CACHE_STATS_IMPORT_ERROR = f"{_e_cs1} | {_e_cs2}"
 
 # ═════════════════════════════════════════════════════════════════════
-# db_maintenance_commands — 🆕 v5.6.17 ROBUST IMPORT
+# db_maintenance_commands — استيراد مرن
 # ═════════════════════════════════════════════════════════════════════
 register_maintenance_commands = None
 start_weekly_diagnostic_task = None
@@ -380,7 +387,6 @@ stop_weekly_diagnostic_task = None
 _MAINT_CMDS_AVAILABLE = False
 _MAINT_CMDS_IMPORT_ERROR = None
 
-# 🆕 v5.6.17: قائمة الأسماء المحتملة بترتيب الأولوية
 _MAINT_REGISTER_NAMES = (
     "register_maintenance_commands",
     "register",
@@ -393,7 +399,6 @@ _MAINT_REGISTER_NAMES = (
 
 _maint_import_attempts: List[str] = []
 
-# 1) حاول استيراد الوحدة كاملة
 try:
     import db_maintenance_commands as _maint_mod
     _mod_import_ok = True
@@ -402,7 +407,6 @@ except ImportError as _e_mod:
     _maint_import_attempts.append(f"import module: {_e_mod}")
     _maint_mod = None
 
-# 2) حاول استيراد دوال start/stop weekly
 if _mod_import_ok:
     try:
         start_weekly_diagnostic_task = getattr(
@@ -418,7 +422,6 @@ if _mod_import_ok:
     except Exception:
         stop_weekly_diagnostic_task = None
 
-    # 3) حاول إيجاد دالة register بأي اسم
     for _name in _MAINT_REGISTER_NAMES:
         _fn = getattr(_maint_mod, _name, None)
         if callable(_fn):
@@ -543,6 +546,10 @@ _PAYMENT_AMOUNT_EPSILON = 0.01
 _DIAG_INCOMING = os.getenv("DIAG_INCOMING", "0").strip().lower() in (
     "1", "true", "yes", "on", "enabled",
 )
+
+# 🆕 PERF-1: فاصل keep_alive (3 دقائق بدل 5)
+_KEEP_ALIVE_INTERVAL_SEC = 180.0
+_KEEP_ALIVE_INITIAL_DELAY = 30.0
 
 # ═══════════════════════════════════════════════════════════════════
 # مساعد مقارنة المبالغ
@@ -781,6 +788,51 @@ def _log_security_bridge_status() -> None:
         )
 
 # ═══════════════════════════════════════════════════════════════════
+# 🆕 PERF-2: سجل تشخيصي لقيم الأداء
+# ═══════════════════════════════════════════════════════════════════
+
+def _log_perf_tuning_status() -> None:
+    """🆕 PERF-2: يعرض قيم الأداء المهمة عند الإقلاع."""
+    try:
+        _max_ch = getattr(CONFIG, "MAX_CHANNELS_PER_CYCLE", "?")
+        _slow_q = getattr(CONFIG, "SLOW_QUERY_LOG_THRESHOLD", "?")
+        _stmt_to = getattr(CONFIG, "PG_STATEMENT_TIMEOUT_MS", "?")
+        _pool_size = getattr(CONFIG, "DB_POOL_SIZE", "?")
+
+        logger.info(
+            "⚡ PERF Tuning: "
+            "MAX_CHANNELS/CYCLE=%s | "
+            "SLOW_QUERY_THRESHOLD=%ss | "
+            "PG_STMT_TIMEOUT=%sms | "
+            "DB_POOL_SIZE=%s",
+            _max_ch, _slow_q, _stmt_to, _pool_size,
+        )
+
+        # تحذير إذا كانت القيم قديمة (لم تُطبَّق بعد)
+        try:
+            if int(_max_ch) > 10:
+                logger.warning(
+                    "⚠️ MAX_CHANNELS_PER_CYCLE=%s مرتفع — قد يسبب "
+                    "بطء /start أثناء النشر التلقائي. الموصى به: 5.",
+                    _max_ch,
+                )
+        except (TypeError, ValueError):
+            pass
+
+        try:
+            if float(_slow_q) > 0.5:
+                logger.info(
+                    "ℹ️ SLOW_QUERY_THRESHOLD=%ss — قد يفوت "
+                    "استعلامات بطيئة. الموصى به: 0.2s.",
+                    _slow_q,
+                )
+        except (TypeError, ValueError):
+            pass
+
+    except Exception as _e:
+        logger.debug("_log_perf_tuning_status: %s", _e)
+
+# ═══════════════════════════════════════════════════════════════════
 # Diagnostics — Mixins
 # ═══════════════════════════════════════════════════════════════════
 
@@ -906,7 +958,6 @@ else:
         _CH_DELETE_IMPORT_ERROR or "unknown",
     )
 
-# 🆕 v5.6.17: إشعار db_maintenance_commands (محسّن)
 if _MAINT_CMDS_AVAILABLE:
     logger.info(
         "✅ db_maintenance_commands متاح — "
@@ -953,6 +1004,9 @@ else:
 
 _log_spam_detector_status()
 _log_security_bridge_status()
+
+# 🆕 PERF-2: سجل قيم الأداء
+_log_perf_tuning_status()
 
 # ═══════════════════════════════════════════════════════════════════
 # Allowed updates
@@ -1800,37 +1854,90 @@ async def health_check(request):
     return web.Response(text="OK", status=200)
 
 async def keep_alive():
+    """
+    🆕 v5.6.18 PERF-1: keep_alive محسّن.
+
+    التغييرات:
+      - الفاصل: 180s (3 دقائق) بدل 300s (5 دقائق).
+      - تأخير أولي: 30s بدل 60s.
+      - دعم KEEP_ALIVE_URL المخصص (بأولوية).
+      - رسائل توضيحية عن Cron-job.org.
+
+    ⚠️ ملاحظة مهمة:
+      - Render Free قد **لا يحسب** ping من نفس الخدمة كنشاط.
+      - الحل الأمثل: Cron-job.org خارجي على /health كل 5 دقائق.
+      - keep_alive الداخلي يبقى كطبقة احتياطية.
+    """
     try:
-        await asyncio.sleep(60)
+        await asyncio.sleep(_KEEP_ALIVE_INITIAL_DELAY)
     except asyncio.CancelledError:
         logger.info("🛑 keep_alive أُلغي (initial sleep)")
         raise
 
-    url = os.getenv("RENDER_EXTERNAL_URL") or os.getenv("KEEP_ALIVE_URL")
+    # 🆕 PERF-1: دعم KEEP_ALIVE_URL المخصص (أولوية)
+    url = (
+        os.getenv("KEEP_ALIVE_URL")
+        or os.getenv("RENDER_EXTERNAL_URL")
+    )
+
     if not url:
         logger.info(
-            "ℹ️ keep_alive: RENDER_EXTERNAL_URL غير موجود — معطّل"
+            "ℹ️ keep_alive: RENDER_EXTERNAL_URL/KEEP_ALIVE_URL غير موجود "
+            "— معطّل داخلياً."
+        )
+        logger.info(
+            "💡 الحل الموصى به: استخدم Cron-job.org (خارجي) "
+            "على https://<your-app>.onrender.com/health كل 5 دقائق."
         )
         return
 
     url = url.rstrip('/')
     health_url = f"{url}/health"
 
-    logger.info("💓 keep_alive مُفعّل — Ping كل 5 دقائق")
+    logger.info(
+        "💓 keep_alive مُفعّل — Ping كل %.0f دقيقة على %s",
+        _KEEP_ALIVE_INTERVAL_SEC / 60.0, health_url,
+    )
+    logger.info(
+        "💡 نصيحة: أضف Cron-job.org خارجي أيضاً لضمان عدم Sleep."
+    )
+
+    _consecutive_errors = 0
 
     while True:
         try:
-            await asyncio.sleep(300)
+            await asyncio.sleep(_KEEP_ALIVE_INTERVAL_SEC)
             timeout = aiohttp.ClientTimeout(total=15)
             async with aiohttp.ClientSession(timeout=timeout) as session:
                 async with session.get(health_url) as response:
                     await response.read()
-                    logger.debug("💓 Keep-alive: %s", response.status)
+                    if response.status == 200:
+                        if _consecutive_errors > 0:
+                            logger.info(
+                                "💓 keep_alive: استُعيد الاتصال بعد "
+                                "%d أخطاء",
+                                _consecutive_errors,
+                            )
+                        _consecutive_errors = 0
+                        logger.debug("💓 Keep-alive: %s", response.status)
+                    else:
+                        _consecutive_errors += 1
+                        logger.debug(
+                            "💓 Keep-alive: status=%s (errors=%d)",
+                            response.status, _consecutive_errors,
+                        )
         except asyncio.CancelledError:
             logger.info("🛑 keep_alive تم إلغاؤه")
             raise
         except Exception as e:
-            logger.debug("💓 keep-alive: %s", e)
+            _consecutive_errors += 1
+            if _consecutive_errors >= 3:
+                logger.warning(
+                    "💓 keep-alive: %d أخطاء متتالية — آخرها: %s",
+                    _consecutive_errors, e,
+                )
+            else:
+                logger.debug("💓 keep-alive: %s", e)
 
 # ═══════════════════════════════════════════════════════════════════
 # Pool health monitor
@@ -2473,7 +2580,7 @@ async def main():
     logger.info("👨‍💼 المالك: %s", CONFIG.PRIMARY_OWNER_ID)
 
     logger.info(
-        "📦 bot.py: v5.6.17 | "
+        "📦 bot.py: v5.6.18 | "
         "detectors=%s | layers=%d | helpers=%s | "
         "db_idle=%s | cache_stats=%s | analytics=%s | maint_cmds=%s",
         _SPAM_DETECTOR_VERSION or "N/A",
@@ -2834,9 +2941,6 @@ async def main():
             "/cancel لن يعمل"
         )
 
-    # ═══════════════════════════════════════════════════════════════
-    # 🆕 v5.6.17: db_maintenance_commands — استدعاء محسّن
-    # ═══════════════════════════════════════════════════════════════
     if _MAINT_CMDS_AVAILABLE and callable(register_maintenance_commands):
         try:
             if register_maintenance_commands(app):
@@ -2906,7 +3010,6 @@ async def main():
     else:
         logger.warning("⚠️ group_log غير متاح — زر قناة السجل لن يعمل")
 
-    # handlers_analytics BEFORE العام
     if _ANALYTICS_HANDLERS_AVAILABLE and \
        _show_analytics_menu is not None and \
        _handle_analytics_callback is not None:
