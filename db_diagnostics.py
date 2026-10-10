@@ -1,18 +1,20 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-db_diagnostics.py — واجهة تشخيص قاعدة البيانات (v2.0.0)
+db_diagnostics.py — واجهة تشخيص قاعدة البيانات (v2.1.0 — DETAILED)
 ================================================================================
 الأسماء المتوقعة من handlers_command.py:
   - diagnose_db()             : تقرير كامل (HTML string)
-  - diagnose_db_split()       : تقرير مقسّم (List[str])
+  - diagnose_db_split()       : تقرير مقسّم (List[str]) — أجزاء مفصّلة
   - vacuum_analyze_tables()   : VACUUM ANALYZE (HTML string)
 
-+ Aliases (للتوافق):
-  - get_diagnostics_data()    : بيانات خام
-  - get_diagnostics_report()  : تقرير
-  - get_quick_health()        : فحص سريع
-  - get_diagnostics_one_liner()
+v2.1.0:
+  🆕 إضافة الفهارس (Indexes) لكل جدول
+  🆕 إضافة تفاصيل Vacuum/Analyze لكل جدول
+  🆕 إضافة n_mod_since_analyze
+  🆕 إضافة حالة نظام رصد idle-tx (idle_tx_status)
+  🆕 إضافة إعدادات Autovacuum الكاملة
+  🆕 أقسام مفصّلة أكثر (10 أجزاء في split)
 ================================================================================
 """
 
@@ -32,7 +34,6 @@ _DB_IMPORT_ERROR: Optional[str] = None
 
 
 def _get_db():
-    """Lazy import لـ DB — يعيد None إذا فشل."""
     global _DB_IMPORT_ERROR
     try:
         from database import DB
@@ -40,14 +41,11 @@ def _get_db():
     except Exception as e:
         if _DB_IMPORT_ERROR is None:
             _DB_IMPORT_ERROR = f"{type(e).__name__}: {e}"
-            logger.error(
-                f"❌ db_diagnostics: فشل استيراد DB: {_DB_IMPORT_ERROR}"
-            )
+            logger.error(f"❌ db_diagnostics: فشل استيراد DB: {_DB_IMPORT_ERROR}")
         return None
 
 
 def _now_iso() -> str:
-    """وقت ISO مع fallback."""
     try:
         from utils import TimeUtils
         return TimeUtils.mecca_iso()[:19]
@@ -99,11 +97,25 @@ def _bar(value: float, max_value: float, width: int = 10,
         return empty * width
 
 
+def _format_ts(ts: Any) -> str:
+    """تنسيق timestamp قصير."""
+    if not ts:
+        return "—"
+    try:
+        s = str(ts)
+        # ISO format: 2026-10-09 12:34:56+00:00 → 10-09 12:34
+        if len(s) >= 16:
+            return s[5:16].replace("-", "/")
+        return s[:16]
+    except Exception:
+        return "—"
+
+
 # ═══════════════════════════════════════════════════════════════════════
 # 1) البيانات الخام
 # ═══════════════════════════════════════════════════════════════════════
 
-async def get_diagnostics_data(top_n: int = 10) -> Dict[str, Any]:
+async def get_diagnostics_data(top_n: int = 15) -> Dict[str, Any]:
     """جلب بيانات التشخيص من DB.get_db_diagnostics()."""
     result: Dict[str, Any] = {
         "available": False,
@@ -126,7 +138,6 @@ async def get_diagnostics_data(top_n: int = 10) -> Dict[str, Any]:
         )
         return result
 
-    # محاولة get_db_diagnostics
     fn = getattr(db, "get_db_diagnostics", None)
     if callable(fn):
         try:
@@ -139,21 +150,31 @@ async def get_diagnostics_data(top_n: int = 10) -> Dict[str, Any]:
             logger.warning(f"get_db_diagnostics failed: {e}")
             result["errors"].append(f"get_db_diagnostics: {e}")
 
-    # Fallback
-    dts = getattr(db, "get_dead_tuples", None)
-    if callable(dts):
-        try:
-            result["dead_tuples"] = await dts(top_n) or []
-        except Exception as e:
-            result["errors"].append(f"get_dead_tuples: {e}")
+    # Fallback — جمع يدوي
+    for name, key in [
+        ("get_dead_tuples", "dead_tuples"),
+        ("get_table_sizes", "table_sizes"),
+    ]:
+        fn2 = getattr(db, name, None)
+        if callable(fn2):
+            try:
+                result[key] = await fn2(top_n) or []
+            except Exception as e:
+                result["errors"].append(f"{name}: {e}")
 
-    ts = getattr(db, "get_table_sizes", None)
-    if callable(ts):
-        try:
-            result["table_sizes"] = await ts(top_n) or []
-        except Exception as e:
-            result["errors"].append(f"get_table_sizes: {e}")
+    for name, key in [
+        ("get_autovacuum_settings", "autovacuum"),
+        ("get_idle_tx_info", "idle_tx"),
+        ("get_idle_tx_status_info", "idle_tx_status"),
+    ]:
+        fn2 = getattr(db, name, None)
+        if callable(fn2):
+            try:
+                result[key] = await fn2() or {}
+            except Exception as e:
+                result["errors"].append(f"{name}: {e}")
 
+    # Indexes
     ii = getattr(db, "get_indexes_info", None)
     if callable(ii):
         try:
@@ -163,27 +184,7 @@ async def get_diagnostics_data(top_n: int = 10) -> Dict[str, Any]:
         except Exception as e:
             result["errors"].append(f"get_indexes_info: {e}")
 
-    av = getattr(db, "get_autovacuum_settings", None)
-    if callable(av):
-        try:
-            result["autovacuum"] = await av() or {}
-        except Exception as e:
-            result["errors"].append(f"get_autovacuum_settings: {e}")
-
-    itx = getattr(db, "get_idle_tx_info", None)
-    if callable(itx):
-        try:
-            result["idle_tx"] = await itx() or {}
-        except Exception as e:
-            result["errors"].append(f"get_idle_tx_info: {e}")
-
-    its = getattr(db, "get_idle_tx_status_info", None)
-    if callable(its):
-        try:
-            result["idle_tx_status"] = await its() or {}
-        except Exception as e:
-            result["errors"].append(f"get_idle_tx_status_info: {e}")
-
+    # Recommendations
     mr = getattr(db, "get_maintenance_recommendations", None)
     if callable(mr):
         try:
@@ -253,71 +254,87 @@ async def get_diagnostics_data(top_n: int = 10) -> Dict[str, Any]:
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# 2) التنسيق — HTML
+# 2) بناء الأجزاء — الدالة المركزية
 # ═══════════════════════════════════════════════════════════════════════
 
-def _format_html_from_data(
-    data: Dict[str, Any],
-    top_n: int = 10,
-) -> str:
-    """تنسيق HTML من البيانات."""
-    lines: List[str] = []
+def _build_sections(data: Dict[str, Any], top_n: int = 15) -> List[str]:
+    """يبني كل الأجزاء ويُعيد قائمة HTML strings."""
+    parts: List[str] = []
 
-    lines.append("🔬 <b>تشخيص قاعدة البيانات</b>")
-    lines.append("━━━━━━━━━━━━━━━━━━━━━━")
-    lines.append("")
+    # ═══════════════════════════════════════════════
+    # الجزء 1: Header + Summary
+    # ═══════════════════════════════════════════════
+    h: List[str] = []
+    h.append("🔬 <b>تشخيص قاعدة البيانات</b>")
+    h.append("━━━━━━━━━━━━━━━━━━━━━━")
+    h.append("")
+    h.append(f"🗄️ <b>النوع:</b> <code>{_safe_escape(data.get('db_type'))}</code>")
+    h.append(f"🕐 <b>الوقت:</b> {_now_iso()}")
 
-    db_type = data.get("db_type", _get_db_type())
     available = data.get("available", False)
-    avail_icon = "✅" if available else "⚠️"
-    lines.append(f"🗄️ <b>النوع:</b> <code>{_safe_escape(db_type)}</code>")
-    lines.append(f"{avail_icon} <b>التشخيص:</b> "
-                 f"{'متاح' if available else 'fallback'}")
-    lines.append(f"🕐 <b>الوقت:</b> {_now_iso()}")
-    lines.append("")
+    h.append(f"{'✅' if available else '⚠️'} <b>الحالة:</b> "
+             f"{'كامل' if available else 'fallback'}")
+    h.append("")
 
-    # Summary
     summary = data.get("summary", {}) or {}
     if summary:
         color = summary.get("overall_color", "🟢")
-        dead_total = summary.get("dead_total", 0)
-        live_total = summary.get("live_total", 0)
-        worst = summary.get("worst_table")
-        worst_ratio = summary.get("worst_ratio", 0)
-        idle_count = summary.get("idle_tx_count", 0)
-        idle_color = summary.get("idle_tx_color", "🟢")
+        h.append(f"<b>{color} الحالة العامة</b>")
+        h.append(f"  📊 Dead: <b>{_format_number(summary.get('dead_total', 0))}</b>"
+                 f"  |  Live: <b>{_format_number(summary.get('live_total', 0))}</b>")
+        if summary.get("worst_table"):
+            h.append(f"  ⚠️ أسوأ جدول: <code>{_safe_escape(summary['worst_table'])}</code>"
+                     f" ({summary.get('worst_ratio', 0)}%)")
+        h.append(f"  🔌 idle-tx: {summary.get('idle_tx_color', '🟢')} "
+                 f"<b>{summary.get('idle_tx_count', 0)}</b>")
+    parts.append("\n".join(h))
 
-        lines.append(f"<b>{color} الحالة العامة</b>")
-        lines.append(f"  • Dead tuples: <b>{_format_number(dead_total)}</b>")
-        lines.append(f"  • Live tuples: <b>{_format_number(live_total)}</b>")
-        if worst:
-            lines.append(f"  • أسوأ جدول: <code>{_safe_escape(worst)}</code> "
-                         f"({worst_ratio}%)")
-        lines.append(f"  • idle-tx: {idle_color} <b>{idle_count}</b>")
-        lines.append("")
-
-    # Dead tuples
+    # ═══════════════════════════════════════════════
+    # الجزء 2: Dead Tuples — مفصّل
+    # ═══════════════════════════════════════════════
     dead_tuples = data.get("dead_tuples", [])
     if dead_tuples:
-        lines.append("🗑️ <b>أكبر Dead Tuples</b>")
+        dt: List[str] = []
+        dt.append(f"🗑️ <b>Dead Tuples ({len(dead_tuples)} جدول)</b>")
+        dt.append("━━━━━━━━━━━━━━━━━━━━━━")
         for t in dead_tuples[:top_n]:
             if not isinstance(t, dict):
                 continue
             name = _safe_escape(t.get("name", "?"))
             dead = t.get("dead", 0)
+            live = t.get("live", 0)
             ratio = t.get("dead_ratio", 0) * 100
             color = t.get("color", "🟢")
             advice = t.get("advice", "")
-            lines.append(f"  {color} <code>{name}</code> — "
-                         f"<b>{_format_number(dead)}</b> ({ratio:.1f}%)")
-            if advice:
-                lines.append(f"     💡 <i>{_safe_escape(advice)}</i>")
-        lines.append("")
+            n_mod = t.get("n_mod_since_analyze", 0)
 
-    # Table sizes
+            dt.append(f"{color} <b>{name}</b>")
+            dt.append(f"   📊 Dead: <b>{_format_number(dead)}</b> "
+                      f"| Live: {_format_number(live)} "
+                      f"| ({ratio:.1f}%)")
+
+            # آخر vacuum/analyze
+            last_vac = t.get("last_vacuum") or t.get("last_autovacuum")
+            last_an = t.get("last_analyze") or t.get("last_autoanalyze")
+            if last_vac or last_an:
+                dt.append(f"   🧹 Vacuum: {_format_ts(last_vac)} "
+                          f"| Analyze: {_format_ts(last_an)}")
+            if n_mod:
+                dt.append(f"   ✏️ تعديلات منذ آخر Analyze: <b>{_format_number(n_mod)}</b>")
+
+            if advice:
+                dt.append(f"   💡 <i>{_safe_escape(advice)}</i>")
+            dt.append("")
+        parts.append("\n".join(dt))
+
+    # ═══════════════════════════════════════════════
+    # الجزء 3: أحجام الجداول
+    # ═══════════════════════════════════════════════
     table_sizes = data.get("table_sizes", [])
     if table_sizes:
-        lines.append("📦 <b>أكبر الجداول</b>")
+        ts: List[str] = []
+        ts.append("📦 <b>أحجام الجداول</b>")
+        ts.append("━━━━━━━━━━━━━━━━━━━━━━")
         max_size = max(
             (t.get("total_bytes", 0) for t in table_sizes
              if isinstance(t, dict)),
@@ -328,208 +345,202 @@ def _format_html_from_data(
                 continue
             name = _safe_escape(t.get("name", "?"))
             display = t.get("total_display", "0 B")
+            table_b = t.get("table_bytes", 0)
+            index_b = t.get("index_bytes", 0)
             color = t.get("size_color", "🟢")
             bar = _bar(t.get("total_bytes", 0), max_size, width=8)
-            lines.append(f"  {color} <code>{name}</code>\n"
-                         f"     {bar} <b>{display}</b>")
-        lines.append("")
 
-    # idle-tx
+            ts.append(f"{color} <b>{name}</b>")
+            ts.append(f"   {bar} <b>{display}</b>")
+            if table_b and index_b:
+                # تحويل لصيغة مقروءة
+                def _fmt_b(b):
+                    try:
+                        b = float(b)
+                        if b < 1024:
+                            return f"{int(b)}B"
+                        if b < 1024*1024:
+                            return f"{b/1024:.1f}KB"
+                        if b < 1024*1024*1024:
+                            return f"{b/(1024*1024):.2f}MB"
+                        return f"{b/(1024*1024*1024):.2f}GB"
+                    except Exception:
+                        return "?"
+                ts.append(f"   📄 بيانات: {_fmt_b(table_b)} "
+                          f"| 🗂️ فهارس: {_fmt_b(index_b)}")
+            ts.append("")
+        parts.append("\n".join(ts))
+
+    # ═══════════════════════════════════════════════
+    # الجزء 4: الفهارس — 🆕
+    # ═══════════════════════════════════════════════
+    indexes = data.get("indexes", {}) or {}
+    if indexes:
+        ix: List[str] = []
+        ix.append("🗂️ <b>الفهارس (Indexes)</b>")
+        ix.append("━━━━━━━━━━━━━━━━━━━━━━")
+        total_idx = sum(len(v) for v in indexes.values() if v)
+        ix.append(f"📊 إجمالي: <b>{total_idx}</b> فهرس "
+                  f"على <b>{len(indexes)}</b> جدول")
+        ix.append("")
+
+        for tname, idx_list in indexes.items():
+            if not idx_list:
+                continue
+            tname_esc = _safe_escape(tname)
+            ix.append(f"📋 <b>{tname_esc}</b> ({len(idx_list)})")
+            for idx in idx_list[:6]:
+                if not isinstance(idx, dict):
+                    continue
+                iname = _safe_escape(idx.get("index_name", "?"))
+                is_unique = "🔒" if idx.get("is_unique") else "  "
+                is_primary = "🔑" if idx.get("is_primary") else "  "
+                size = idx.get("size_display", "0 B")
+                ix.append(f"   {is_primary}{is_unique} <code>{iname}</code> "
+                          f"— {size}")
+            if len(idx_list) > 6:
+                ix.append(f"   <i>... و{len(idx_list) - 6} آخرين</i>")
+            ix.append("")
+        parts.append("\n".join(ix))
+
+    # ═══════════════════════════════════════════════
+    # الجزء 5: idle-in-transaction
+    # ═══════════════════════════════════════════════
     idle_tx = data.get("idle_tx", {}) or {}
     if isinstance(idle_tx, dict) and idle_tx.get("available"):
         count = int(idle_tx.get("count") or 0)
         if count > 0:
+            itx: List[str] = []
             color = "🔴" if count >= 3 else "🟠"
-            lines.append(f"{color} <b>idle-in-transaction</b>")
-            lines.append(f"  عدد الاتصالات: <b>{count}</b>")
+            itx.append(f"{color} <b>idle-in-transaction</b>")
+            itx.append("━━━━━━━━━━━━━━━━━━━━━━")
+            itx.append(f"عدد الاتصالات: <b>{count}</b>")
+            itx.append(f"من تطبيقنا: <b>{idle_tx.get('app_matches', 0)}</b>")
+            itx.append(f"إجمالي idle-tx: <b>{idle_tx.get('total_idle_tx', 0)}</b>")
+            itx.append("")
+
+            by_app = idle_tx.get("by_app", {}) or {}
+            if by_app:
+                itx.append("👥 <b>حسب التطبيق:</b>")
+                for app, cnt in sorted(by_app.items(),
+                                        key=lambda x: -x[1])[:5]:
+                    itx.append(f"   • <code>{_safe_escape(app)}</code>: {cnt}")
+                itx.append("")
+
             items = idle_tx.get("items") or []
-            for it in items[:5]:
-                if not isinstance(it, dict):
-                    continue
-                pid = it.get("pid")
-                app = _safe_escape(it.get("app", "?"))
-                idle_s = it.get("idle_sec", 0)
-                lines.append(f"  • pid=<code>{pid}</code> "
-                             f"app=<b>{app}</b> idle={idle_s}s")
-            lines.append("")
+            if items:
+                itx.append("🔍 <b>أقدم الاتصالات:</b>")
+                for it in items[:5]:
+                    if not isinstance(it, dict):
+                        continue
+                    pid = it.get("pid")
+                    app = _safe_escape(it.get("app", "?"))
+                    idle_s = it.get("idle_sec", 0)
+                    tx_age = it.get("tx_age_sec", 0)
+                    itx.append(f"   • pid=<code>{pid}</code> "
+                               f"app=<b>{app}</b>")
+                    itx.append(f"     idle: {idle_s}s | tx_age: {tx_age}s")
+            parts.append("\n".join(itx))
 
-    # Autovacuum
-    autovacuum = data.get("autovacuum", {}) or {}
-    if autovacuum:
-        lines.append("⚙️ <b>Autovacuum</b>")
-        for k in ("autovacuum", "autovacuum_naptime",
-                  "autovacuum_max_workers"):
-            if k in autovacuum:
-                lines.append(f"  • {k}: <code>{_safe_escape(autovacuum[k])}</code>")
-        lines.append("")
+    # ═══════════════════════════════════════════════
+    # الجزء 6: حالة نظام رصد idle-tx — 🆕
+    # ═══════════════════════════════════════════════
+    idle_status = data.get("idle_tx_status", {}) or {}
+    if isinstance(idle_status, dict) and idle_status.get("available"):
+        ist: List[str] = []
+        ist.append("📡 <b>نظام رصد idle-tx الدوري</b>")
+        ist.append("━━━━━━━━━━━━━━━━━━━━━━")
 
-    # Recommendations
+        enabled = idle_status.get("enabled", False)
+        running = idle_status.get("running", False)
+
+        ist.append(f"{'✅' if enabled else '❌'} مُفعّل: "
+                   f"<b>{'نعم' if enabled else 'لا'}</b>")
+        ist.append(f"{'🟢' if running else '🔴'} يعمل الآن: "
+                   f"<b>{'نعم' if running else 'لا'}</b>")
+        ist.append(f"⏱️ الفترة: <b>{idle_status.get('interval_sec', 0)}s</b>")
+        ist.append(f"🎯 الحد: <b>{idle_status.get('alert_threshold', 1)}</b>")
+
+        if idle_status.get("app_filter"):
+            ist.append(f"🔍 فلتر: <code>{_safe_escape(idle_status['app_filter'])}</code>")
+
+        ist.append("")
+        ist.append(f"📊 دورات الفحص: <b>{idle_status.get('iterations', 0)}</b>")
+        ist.append(f"🚨 تنبيهات: <b>{idle_status.get('alert_count', 0)}</b>")
+        ist.append(f"📍 آخر قراءة: <b>{idle_status.get('last_count', 0)}</b>")
+        ist.append(f"⏱️ مُشتغل منذ: <b>{idle_status.get('uptime_sec', 0)}s</b>")
+
+        parts.append("\n".join(ist))
+
+    # ═══════════════════════════════════════════════
+    # الجزء 7: Autovacuum — 🆕 (كل الحقول)
+    # ═══════════════════════════════════════════════
+    av = data.get("autovacuum", {}) or {}
+    if av:
+        avg: List[str] = []
+        avg.append("⚙️ <b>إعدادات Autovacuum</b>")
+        avg.append("━━━━━━━━━━━━━━━━━━━━━━")
+        for k, v in av.items():
+            k_esc = _safe_escape(k)
+            v_esc = _safe_escape(v)
+            avg.append(f"  • <code>{k_esc}</code>: {v_esc}")
+        parts.append("\n".join(avg))
+
+    # ═══════════════════════════════════════════════
+    # الجزء 8: توصيات الصيانة
+    # ═══════════════════════════════════════════════
     recommendations = data.get("recommendations", [])
     if recommendations:
-        lines.append("🧹 <b>توصيات الصيانة</b>")
-        for r in recommendations[:8]:
-            lines.append(f"  • {r}")
-        lines.append("")
+        rc: List[str] = []
+        rc.append("🧹 <b>توصيات الصيانة</b>")
+        rc.append("━━━━━━━━━━━━━━━━━━━━━━")
+        for r in recommendations[:10]:
+            rc.append(f"  • {r}")
+        parts.append("\n".join(rc))
 
-    # Errors
+    # ═══════════════════════════════════════════════
+    # الجزء 9: Errors (إن وجدت)
+    # ═══════════════════════════════════════════════
     errors = data.get("errors", [])
     if errors:
-        lines.append("⚠️ <b>أخطاء أثناء التشخيص</b>")
-        for e in errors[:5]:
-            lines.append(f"  • <code>{_safe_escape(e)[:100]}</code>")
-        lines.append("")
+        er: List[str] = []
+        er.append("⚠️ <b>أخطاء أثناء التشخيص</b>")
+        er.append("━━━━━━━━━━━━━━━━━━━━━━")
+        for e in errors[:8]:
+            er.append(f"  • <code>{_safe_escape(e)[:120]}</code>")
+        parts.append("\n".join(er))
 
-    lines.append("━━━━━━━━━━━━━━━━━━━━━━")
-    lines.append("<i>💡 للتحديث: اضغط 🔄</i>")
-
-    return "\n".join(lines)
-
-
-# ═══════════════════════════════════════════════════════════════════════
-# 3) الدوال الرئيسية — الأسماء المتوقعة من handlers_command
-# ═══════════════════════════════════════════════════════════════════════
-
-async def diagnose_db() -> str:
-    """
-    ✅ /db_diag — التقرير الكامل (HTML string).
-
-    الأسماء المتوقعة من handlers_command.py.
-    """
-    data = await get_diagnostics_data(top_n=10)
-    return _format_html_from_data(data, top_n=10)
-
-
-async def diagnose_db_split() -> List[str]:
-    """
-    ✅ /db_diag — التقرير مقسّم لأجزاء (List[str]).
-
-    يُستخدم أولاً من handlers_command، قبل diagnose_db.
-    كل جزء يحتوي HTML صالح.
-    """
-    data = await get_diagnostics_data(top_n=10)
-
-    parts: List[str] = []
-
-    # الجزء 1: المعلومات العامة + Summary
-    header_lines: List[str] = []
-    header_lines.append("🔬 <b>تشخيص قاعدة البيانات</b>")
-    header_lines.append("━━━━━━━━━━━━━━━━━━━━━━")
-    header_lines.append("")
-    header_lines.append(f"🗄️ <b>النوع:</b> <code>{_safe_escape(data.get('db_type'))}</code>")
-    header_lines.append(f"🕐 <b>الوقت:</b> {_now_iso()}")
-    header_lines.append("")
-
-    summary = data.get("summary", {}) or {}
-    if summary:
-        color = summary.get("overall_color", "🟢")
-        header_lines.append(f"<b>{color} الحالة العامة</b>")
-        header_lines.append(
-            f"  • Dead tuples: <b>{_format_number(summary.get('dead_total', 0))}</b>"
-        )
-        header_lines.append(
-            f"  • Live tuples: <b>{_format_number(summary.get('live_total', 0))}</b>"
-        )
-        worst = summary.get("worst_table")
-        if worst:
-            header_lines.append(
-                f"  • أسوأ جدول: <code>{_safe_escape(worst)}</code> "
-                f"({summary.get('worst_ratio', 0)}%)"
-            )
-        header_lines.append(
-            f"  • idle-tx: {summary.get('idle_tx_color', '🟢')} "
-            f"<b>{summary.get('idle_tx_count', 0)}</b>"
-        )
-
-    parts.append("\n".join(header_lines))
-
-    # الجزء 2: Dead tuples
-    dead_tuples = data.get("dead_tuples", [])
-    if dead_tuples:
-        dt_lines = ["🗑️ <b>أكبر Dead Tuples</b>", ""]
-        for t in dead_tuples[:10]:
-            if not isinstance(t, dict):
-                continue
-            name = _safe_escape(t.get("name", "?"))
-            dead = t.get("dead", 0)
-            ratio = t.get("dead_ratio", 0) * 100
-            color = t.get("color", "🟢")
-            advice = t.get("advice", "")
-            dt_lines.append(
-                f"  {color} <code>{name}</code> — "
-                f"<b>{_format_number(dead)}</b> ({ratio:.1f}%)"
-            )
-            if advice:
-                dt_lines.append(f"     💡 <i>{_safe_escape(advice)}</i>")
-        parts.append("\n".join(dt_lines))
-
-    # الجزء 3: Table sizes
-    table_sizes = data.get("table_sizes", [])
-    if table_sizes:
-        ts_lines = ["📦 <b>أكبر الجداول</b>", ""]
-        max_size = max(
-            (t.get("total_bytes", 0) for t in table_sizes
-             if isinstance(t, dict)),
-            default=1
-        ) or 1
-        for t in table_sizes[:10]:
-            if not isinstance(t, dict):
-                continue
-            name = _safe_escape(t.get("name", "?"))
-            display = t.get("total_display", "0 B")
-            color = t.get("size_color", "🟢")
-            bar = _bar(t.get("total_bytes", 0), max_size, width=8)
-            ts_lines.append(f"  {color} <code>{name}</code>")
-            ts_lines.append(f"     {bar} <b>{display}</b>")
-        parts.append("\n".join(ts_lines))
-
-    # الجزء 4: idle-tx
-    idle_tx = data.get("idle_tx", {}) or {}
-    if isinstance(idle_tx, dict) and idle_tx.get("available"):
-        count = int(idle_tx.get("count") or 0)
-        if count > 0:
-            itx_lines = ["🔴 <b>idle-in-transaction</b>", ""]
-            itx_lines.append(f"عدد الاتصالات: <b>{count}</b>")
-            items = idle_tx.get("items") or []
-            for it in items[:5]:
-                if not isinstance(it, dict):
-                    continue
-                pid = it.get("pid")
-                app = _safe_escape(it.get("app", "?"))
-                idle_s = it.get("idle_sec", 0)
-                itx_lines.append(
-                    f"  • pid=<code>{pid}</code> "
-                    f"app=<b>{app}</b> idle={idle_s}s"
-                )
-            parts.append("\n".join(itx_lines))
-
-    # الجزء 5: Recommendations
-    recommendations = data.get("recommendations", [])
-    if recommendations:
-        rec_lines = ["🧹 <b>توصيات الصيانة</b>", ""]
-        for r in recommendations[:8]:
-            rec_lines.append(f"  • {r}")
-        parts.append("\n".join(rec_lines))
-
-    # الجزء 6: Errors (إن وجدت)
-    errors = data.get("errors", [])
-    if errors:
-        err_lines = ["⚠️ <b>أخطاء أثناء التشخيص</b>", ""]
-        for e in errors[:5]:
-            err_lines.append(f"  • <code>{_safe_escape(e)[:100]}</code>")
-        parts.append("\n".join(err_lines))
-
-    if not parts:
-        parts.append("⚠️ لا توجد بيانات")
+    # ═══════════════════════════════════════════════
+    # الجزء 10: Footer
+    # ═══════════════════════════════════════════════
+    parts.append(
+        "━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"<i>🕐 {_now_iso()}</i>\n"
+        "<i>💡 /db_vacuum لتنظيف الجداول</i>"
+    )
 
     return parts
 
 
-async def vacuum_analyze_tables() -> str:
-    """
-    ✅ /db_vacuum — VACUUM ANALYZE لكل الجداول المهمة.
+# ═══════════════════════════════════════════════════════════════════════
+# 3) الدوال الرئيسية
+# ═══════════════════════════════════════════════════════════════════════
 
-    يعيد HTML string بنتيجة العملية.
-    """
+async def diagnose_db() -> str:
+    """✅ /db_diag — التقرير الكامل (HTML string)."""
+    data = await get_diagnostics_data(top_n=15)
+    parts = _build_sections(data, top_n=15)
+    return "\n\n".join(parts)
+
+
+async def diagnose_db_split() -> List[str]:
+    """✅ /db_diag — التقرير مقسّم لأجزاء (List[str])."""
+    data = await get_diagnostics_data(top_n=15)
+    return _build_sections(data, top_n=15)
+
+
+async def vacuum_analyze_tables() -> str:
+    """✅ /db_vacuum — VACUUM ANALYZE لكل الجداول."""
     db = _get_db()
     if db is None:
         return "❌ <b>DB غير مستورد</b>"
@@ -539,7 +550,6 @@ async def vacuum_analyze_tables() -> str:
     lines.append("━━━━━━━━━━━━━━━━━━━━━━")
     lines.append("")
 
-    # قائمة الجداول المهمة
     tables = [
         "posts", "subscriptions", "user_penalties", "users",
         "user_channels", "admin_logs", "banned_words",
@@ -553,14 +563,12 @@ async def vacuum_analyze_tables() -> str:
 
     for table in tables:
         try:
-            # استخدم vacuum() من DB إن وجدت
             vacuum_fn = getattr(db, "vacuum", None)
             if callable(vacuum_fn):
                 await vacuum_fn(table)
                 success_count += 1
                 lines.append(f"  ✅ <code>{_safe_escape(table)}</code>")
             else:
-                # Fallback: VACUUM مباشر
                 await db.execute(f"VACUUM (ANALYZE) {table}")
                 success_count += 1
                 lines.append(f"  ✅ <code>{_safe_escape(table)}</code>")
@@ -579,7 +587,6 @@ async def vacuum_analyze_tables() -> str:
                     f"  ❌ <code>{_safe_escape(table)}</code> — "
                     f"<code>{_safe_escape(str(e)[:80])}</code>"
                 )
-        # استراحة صغيرة بين الجداول
         try:
             await asyncio.sleep(0.1)
         except Exception:
@@ -599,19 +606,14 @@ async def vacuum_analyze_tables() -> str:
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# 4) Aliases + Helpers
+# 4) Aliases
 # ═══════════════════════════════════════════════════════════════════════
 
-async def get_diagnostics_report(
-    top_n: int = 10,
-    as_html: bool = True,
-) -> str:
-    """تقرير كامل — alias لـ diagnose_db."""
+async def get_diagnostics_report(top_n: int = 15, as_html: bool = True) -> str:
     return await diagnose_db()
 
 
 async def get_quick_health() -> Dict[str, Any]:
-    """فحص سريع للحالة العامة."""
     health = {
         "ok": True,
         "color": "🟢",
@@ -619,7 +621,6 @@ async def get_quick_health() -> Dict[str, Any]:
         "db_type": _get_db_type(),
         "pool": {},
     }
-
     db = _get_db()
     if db is None:
         health["ok"] = False
@@ -650,12 +651,10 @@ async def get_quick_health() -> Dict[str, Any]:
         health["ok"] = False
         health["color"] = "🔴"
         health["message"] = f"فشل الاتصال: {str(e)[:80]}"
-
     return health
 
 
 async def get_diagnostics_one_liner() -> str:
-    """سطر واحد مختصر."""
     try:
         health = await get_quick_health()
         color = health.get("color", "🟢")
@@ -667,8 +666,7 @@ async def get_diagnostics_one_liner() -> str:
         return f"🔴 DB=ERROR ({str(e)[:30]})"
 
 
-async def send_diagnostics_to_chat(bot, chat_id: int, top_n: int = 10) -> bool:
-    """إرسال التقرير عبر Telegram."""
+async def send_diagnostics_to_chat(bot, chat_id: int, top_n: int = 15) -> bool:
     try:
         from utils import safe_send
         report = await diagnose_db()
@@ -683,16 +681,10 @@ async def send_diagnostics_to_chat(bot, chat_id: int, top_n: int = 10) -> bool:
         return False
 
 
-# ═══════════════════════════════════════════════════════════════════════
-# __all__
-# ═══════════════════════════════════════════════════════════════════════
-
 __all__ = [
-    # الأسماء الرئيسية (متوقعة من handlers_command)
     "diagnose_db",
     "diagnose_db_split",
     "vacuum_analyze_tables",
-    # Aliases
     "get_diagnostics_data",
     "get_diagnostics_report",
     "get_quick_health",
@@ -701,14 +693,10 @@ __all__ = [
 ]
 
 
-# ═══════════════════════════════════════════════════════════════════════
-# LOAD BEACON
-# ═══════════════════════════════════════════════════════════════════════
-
 try:
     logger.info(
-        "🛡️ db_diagnostics.py v2.0.0 loaded | "
-        "diagnose_db + diagnose_db_split + vacuum_analyze_tables"
+        "🛡️ db_diagnostics.py v2.1.0 DETAILED loaded | "
+        "10 sections | indexes + idle_tx_status + full autovacuum"
     )
 except Exception:
     pass
