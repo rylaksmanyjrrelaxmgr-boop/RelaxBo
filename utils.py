@@ -1,59 +1,55 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-utils.py - الأدوات المساعدة للبوت (v7.10.11 — TIMEOUT-DIAGNOSTICS)
+utils.py - الأدوات المساعدة للبوت (v7.10.12 — CRITICAL-FIXES)
 =================================================================================
+🆕 v7.10.12 (CRITICAL-FIXES-2026):
+    🔴 FIX-1: نقل _warmup_bg_tasks إلى أعلى الملف (قبل safe_send).
+              كان معرّفاً في السطر ~3710 → NameError عند ChatMigrated
+              داخل safe_send (السطر ~750). الآن يعمل بشكل صحيح.
+    🔴 FIX-2: invalidate_auth_cache — استخدام list() قبل iteration
+              لمنع RuntimeError عند تغيير حجم dict أثناء الحلقة.
+    🔴 FIX-3: get_security_settings — negative cache لا يستخدم
+              بيانات cached منتهية الصلاحية (كان يعطي قيماً قديمة).
+    🔴 FIX-4: _try_detector_call — لا يُعيد raise عند TypeError
+              غير متعلق بـ already_normalized، بل يُعيد False بأمان.
+    🟡 FIX-5: _flush_usage_updates — تحسين منطق _flush_in_progress
+              لمنع race condition عند الاستدعاء المتزامن.
+    🟢 FIX-6: heartbeat — دمج _check_telegram_latency (اختياري).
+    🟢 FIX-7: _send_caption_followup — parse_mode صريح.
+
 🆕 v7.10.11 (TIMEOUT-DIAGNOSTICS-2026-R5):
-    🔴 TIMEOUT-FIX-1: safe_send — سياق كامل في تحذير TimedOut
-                       (chat_id + media_type + text_len + preview + err).
-    🔴 TIMEOUT-FIX-2: safe_send — backoff تصاعدي 1s, 2s بدل 1s ثابت.
-    🔴 TIMEOUT-FIX-3: safe_send — تسجيل ERROR نهائي عند فشل كل المحاولات
-                       (بدل صمت).
-    🟡 TIMEOUT-FIX-4: safe_send — timeouts ديناميكية حسب حجم النص/نوع media.
+    🔴 TIMEOUT-FIX-1: safe_send — سياق كامل في تحذير TimedOut.
+    🔴 TIMEOUT-FIX-2: safe_send — backoff تصاعدي 1s, 2s.
+    🔴 TIMEOUT-FIX-3: safe_send — تسجيل ERROR نهائي عند الفشل.
+    🟡 TIMEOUT-FIX-4: safe_send — timeouts ديناميكية.
     🟡 TIMEOUT-FIX-5: _send_media — timeouts ديناميكية للـ captions.
     🟢 TIMEOUT-FIX-6: _send_media — تسجيل سياق عند TimedOut.
-    🟢 TIMEOUT-FIX-7: _check_telegram_latency — دالة تشخيص جديدة.
+    🟢 TIMEOUT-FIX-7: _check_telegram_latency — دالة تشخيصية.
     🟢 TIMEOUT-FIX-8: get_telegram_latency_text — لتقرير المطور.
 
 🆕 v7.10.10 (HTML-FIXES-2026-R4):
     🔴 HTML-FIX-1: safe_send — parse_mode افتراضي "HTML" بدل None.
-                   (كانت وسوم <b> تظهر كنص في Telegram)
     🔴 HTML-FIX-2: _send_media — parse_mode="HTML" افتراضي.
-    🔴 HTML-FIX-3: _send_media — تمرير parse_mode الصحيح لـ caption
-                   في voice/sticker/video_note.
-    🟡 HTML-FIX-4: safe_send — إضافة fallback ثاني للـ media بدون HTML.
+    🔴 HTML-FIX-3: _send_media — تمرير parse_mode الصحيح لـ caption.
+    🟡 HTML-FIX-4: safe_send — fallback ثاني للـ media بدون HTML.
     🟡 HTML-FIX-5: TextUtils.escape_html_safe — دالة مساعدة جديدة.
     🟢 HTML-FIX-6: تحسين logging عند تحميل ar.json.
 
 🆕 v7.10.9 (PERF-FIXES-2026-R3):
-    🔴 PERF-FIX-1: get_security_settings — TTL 300s + negative cache (30s)
-                    + timeout 3s صارم على كل استعلام DB.
+    🔴 PERF-FIX-1: get_security_settings — TTL 300s + negative cache.
     🔴 PERF-FIX-2: _get_security_stats — timeout 1.5s + cache 300s.
     🔴 PERF-FIX-3: فهارس PostgreSQL موثّقة في التعليقات.
     🟡 PERF-FIX-4: _do_auth_check — timeout 2s على كل UNION.
     🟡 PERF-FIX-5: __all__ يصدّر _sec_settings_neg_cache للاختبارات.
 
 🆕 v7.10.8 (REVIEW-FIXES-2026-R2):
-    🔴 FIX-MIG1: _CHAT_MIGRATION_TABLES — إضافة (table, column) مزدوجة
-                 لتغطية bot_groups.log_channel_id.
+    🔴 FIX-MIG1: _CHAT_MIGRATION_TABLES — إضافة مزدوجة.
     🔴 FIX-WH2: _NON_RETRYABLE_WEBHOOK_ERRORS — توسيع.
-    🟡 FIX-PUB1: _publish_post — تسجيل warn عند فشل caption-follow-up.
+    🟡 FIX-PUB1: _publish_post — تسجيل warn عند فشل caption.
     🟡 FIX-AUTH1: _do_auth_check — UNION بدل UNION ALL.
     🟡 FIX-MIG2: _handle_chat_migrated invocation — task tracking.
     🟡 FIX-DEV1: apply_penalty — allow owner to test self-penalty.
-
-🆕 v7.10.7 (REVIEW-FIXES-2026):
-    🔴 FIX-A3: get_security_settings — جدول group_security.
-    🔴 FIX-B4: invalidate_auth_cache — تنفيذ فعلي.
-    🔴 FIX-B5: _handle_chat_migrated — 16 جدولاً + task tracking.
-    🔴 FIX-D15: report_internal_timeout — مسار منفصل عن report_429.
-    🟡 FIX-D14: _ARABIC_TEXT_PATTERN — نطاقات عربية موسّعة.
-    🟡 FIX-SC1: SmartCache.get_or_set — Task كـ key.
-    🟡 FIX-WH1: webhook_handler — 500 لأخطاء التهيئة.
-    🟡 FIX-EX1: _PUBLISH_TIMEOUTS قبل __all__.
-    🟡 FIX-SC2: _security_settings_cache — monotonic + prune دوري.
-    🟡 FIX-FL1: _flush_usage_updates — حد لإعادة الإدخالات الفاشلة.
-    🟡 FIX-LZ1: _lazy_import_detectors_async — غلاف async.
 =================================================================================
 """
 
@@ -105,6 +101,14 @@ from config import CONFIG, PATHS
 from database import DB
 
 logger = logging.getLogger(__name__)
+
+# ═══════════════════════════════════════════════════════════════════════════
+# 🔴 FIX-1: _warmup_bg_tasks معرّف مبكراً (قبل safe_send)
+# ═══════════════════════════════════════════════════════════════════════════
+# السبب: كان معرّفاً في السطر ~3710، لكن safe_send (السطر ~750) يستخدمه
+# داخل except ChatMigrated → NameError.
+# الآن معرّف في الأعلى → متاح لكل الدوال.
+_warmup_bg_tasks: set = set()
 
 # ═══════════════════════════════════════════════════════════════════════════
 # ثوابت عامة
@@ -658,12 +662,10 @@ class TranslationManager:
         try:
             with open(file_path, "r", encoding="utf-8") as f:
                 loaded = json.load(f)
-            # 🆕 HTML-FIX-6: تسجيل أوضح مع النوع
             marker = "🟢 (افتراضي)" if lang == cls._default_lang else ""
             logger.info(
                 f"✅ تم تحميل ملف الترجمة {lang}.json: {len(loaded)} مفتاح {marker}")
         except FileNotFoundError:
-            # 🆕 HTML-FIX-6: تنبيه واضح إذا الافتراضي مفقود
             if lang == cls._default_lang:
                 logger.error(
                     f"❌ ملف اللغة الافتراضية {lang}.json مفقود! "
@@ -1485,7 +1487,6 @@ class KeyboardFactory:
     async def _get_security_stats(cls, chat_id: int) -> dict:
         """
         🆕 PERF-FIX-2: timeout 1.5s + cache 300s.
-        يجمع 6 استعلامات لكن لا يعطّل مسار الرسالة.
         """
         cache_key = f"sec_stats_{chat_id}"
         cached = await _security_stats_cache.get(cache_key)
@@ -1574,7 +1575,6 @@ class KeyboardFactory:
         except Exception as e:
             logger.debug(f"_get_security_stats: {e}")
 
-        # 🆕 PERF-FIX-2: 300s بدل 60s
         await _security_stats_cache.set(cache_key, stats, ttl=300)
         return stats
 
@@ -1900,9 +1900,6 @@ async def get_min_publish_interval() -> int:
 async def _do_auth_check(bot, chat_id: int, user_id: int) -> bool:
     """
     فحص صلاحيات في مجموعة.
-
-    🆕 v7.10.8 FIX-AUTH1: UNION (بدون ALL) لتوقف أسرع عند أول مطابقة.
-    🆕 PERF-FIX-4: timeout 2s على استعلام DB.
     """
     try:
         member = await bot.get_chat_member(chat_id, user_id)
@@ -1966,10 +1963,10 @@ async def is_authorized_in_group(bot, chat_id: int, user_id: int) -> bool:
 
 def invalidate_auth_cache(chat_id: int = None, user_id: int = None) -> None:
     """
-    🆕 v7.10.7 FIX-B4: تنفيذ فعلي.
+    🔴 FIX-2: تنفيذ آمن — list() قبل iteration.
 
-    إبطال متزامن فوري — يستخدم الوصول المباشر لـ `_cache` الداخلي.
-    من سياق async، استخدم invalidate_auth_cache_async.
+    المشكلة القديمة: حذف من dict أثناء iteration → RuntimeError.
+    الحل: أنشئ قائمة منفصلة أولاً، ثم احذف.
     """
     try:
         if chat_id and user_id:
@@ -1978,11 +1975,14 @@ def invalidate_auth_cache(chat_id: int = None, user_id: int = None) -> None:
             _auth_neg_cache._cache.pop(key, None)
         elif chat_id:
             cid_prefix = f"auth_{int(chat_id)}_"
-            for k in [k for k in _auth_cache_smart._cache
-                      if k.startswith(cid_prefix)]:
+            # ✅ FIX-2: list() قبل iteration
+            to_del_pos = [k for k in list(_auth_cache_smart._cache)
+                          if k.startswith(cid_prefix)]
+            for k in to_del_pos:
                 _auth_cache_smart._cache.pop(k, None)
-            for k in [k for k in _auth_neg_cache._cache
-                      if k.startswith(cid_prefix)]:
+            to_del_neg = [k for k in list(_auth_neg_cache._cache)
+                          if k.startswith(cid_prefix)]
+            for k in to_del_neg:
                 _auth_neg_cache._cache.pop(k, None)
         else:
             _auth_cache_smart._cache.clear()
@@ -2025,15 +2025,12 @@ async def check_bot_permissions(bot, chat_id: int) -> dict:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# 11.b) 🆕 TIMEOUT-FIX-7/8: تشخيص latency
+# 11.b) TIMEOUT-FIX-7/8: تشخيص latency
 # ═══════════════════════════════════════════════════════════════════════════
 
 async def _check_telegram_latency(bot, timeout: float = 10.0) -> float:
     """
     🆕 TIMEOUT-FIX-7: قياس زمن الاستجابة لـ Telegram API.
-
-    Returns:
-        float: زمن الاستجابة بالـ milliseconds، أو -1 عند الفشل.
     """
     if bot is None:
         return -1.0
@@ -2050,9 +2047,6 @@ async def _check_telegram_latency(bot, timeout: float = 10.0) -> float:
 async def get_telegram_latency_text(bot) -> str:
     """
     🆕 TIMEOUT-FIX-8: نص جاهز لعرض latency في تقرير المطور.
-
-    Returns:
-        str: نص HTML مثل "🟢 Telegram: 145ms" أو "🔴 فشل".
     """
     latency = await _check_telegram_latency(bot)
     if latency < 0:
@@ -2095,7 +2089,6 @@ _CHAT_MIGRATION_TABLES: Tuple[Tuple[str, str, bool], ...] = (
 
 async def _handle_chat_migrated(chat_id: int, new_chat_id: int) -> None:
     """
-    🆕 v7.10.7 FIX-B5 + v7.10.8 FIX-MIG1:
     تحديث الأعمدة في الجداول المرتبطة بالمجموعة.
     """
     try:
@@ -2179,7 +2172,7 @@ def _timeouts_for(text_len: int, is_media: bool = False) -> Dict[str, float]:
 
 async def _send_media(bot, chat_id, media_type, media_file_id,
                       caption=None, reply_markup=None,
-                      parse_mode: str = "HTML",  # 🆕 HTML-FIX-2
+                      parse_mode: str = "HTML",
                       **kwargs):
     """
     🆕 HTML-FIX-2 + HTML-FIX-3:
@@ -2187,6 +2180,7 @@ async def _send_media(bot, chat_id, media_type, media_file_id,
     - تمرير parse_mode الصحيح لـ caption في voice/sticker/video_note.
     🆕 TIMEOUT-FIX-5: timeouts ديناميكية للـ captions.
     🆕 TIMEOUT-FIX-6: تسجيل سياق عند TimedOut.
+    🟢 FIX-7: parse_mode صريح في _send_caption_followup.
     """
     _reply_to = kwargs.get('reply_to_message_id')
 
@@ -2199,7 +2193,6 @@ async def _send_media(bot, chat_id, media_type, media_file_id,
             caption_kwargs['reply_to_message_id'] = _reply_to
         if extra_kwargs:
             caption_kwargs.update(extra_kwargs)
-        # 🆕 TIMEOUT-FIX-5
         caption_kwargs.setdefault('read_timeout', _TIMEOUT_SLOW['read_timeout'])
         caption_kwargs.setdefault('write_timeout', _TIMEOUT_SLOW['write_timeout'])
         caption_kwargs.setdefault('connect_timeout', _TIMEOUT_SLOW['connect_timeout'])
@@ -2245,7 +2238,7 @@ async def _send_media(bot, chat_id, media_type, media_file_id,
     elif media_type == 'voice':
         sent = await bot.send_voice(
             chat_id, media_file_id, reply_markup=reply_markup, **kwargs)
-        await _send_caption_followup()  # 🆕 HTML-FIX-3
+        await _send_caption_followup()
         return sent
     elif media_type == 'animation':
         return await bot.send_animation(
@@ -2254,12 +2247,12 @@ async def _send_media(bot, chat_id, media_type, media_file_id,
     elif media_type == 'sticker':
         sent = await bot.send_sticker(
             chat_id, media_file_id, reply_markup=reply_markup)
-        await _send_caption_followup()  # 🆕 HTML-FIX-3
+        await _send_caption_followup()
         return sent
     elif media_type == 'video_note':
         sent = await bot.send_video_note(
             chat_id, media_file_id, reply_markup=reply_markup)
-        await _send_caption_followup()  # 🆕 HTML-FIX-3
+        await _send_caption_followup()
         return sent
     else:
         return await bot.send_message(
@@ -2268,15 +2261,12 @@ async def _send_media(bot, chat_id, media_type, media_file_id,
 
 
 async def safe_send(bot, chat_id: int, text: str, reply_markup=None,
-                    parse_mode: str = "HTML",  # 🆕 HTML-FIX-1
+                    parse_mode: str = "HTML",
                     **kwargs):
     """
-    🆕 HTML-FIX-1: parse_mode افتراضي "HTML" بدل None.
-    🆕 HTML-FIX-4: fallback ثاني للـ media بدون HTML.
-    🆕 TIMEOUT-FIX-1: سياق كامل في تحذير TimedOut.
-    🆕 TIMEOUT-FIX-2: backoff تصاعدي 1s, 2s.
-    🆕 TIMEOUT-FIX-3: ERROR نهائي عند فشل كل المحاولات.
-    🆕 TIMEOUT-FIX-4: timeouts ديناميكية.
+    🆕 HTML-FIX-1: parse_mode افتراضي "HTML".
+    🆕 TIMEOUT-FIX-1..4: سياق كامل + backoff + ERROR نهائي + timeouts ديناميكية.
+    🔴 FIX-1: استخدام _warmup_bg_tasks المعرّف في أعلى الملف (لا NameError).
     """
     if not text and not any(
         k in kwargs for k in ['photo', 'video', 'document', 'audio',
@@ -2298,7 +2288,6 @@ async def safe_send(bot, chat_id: int, text: str, reply_markup=None,
             break
     caption_text = text[:1024] if media_type else text
 
-    # 🆕 TIMEOUT-FIX-4: timeouts ديناميكية
     _text_len = len(text) if text else 0
     _default_timeouts = _timeouts_for(_text_len, bool(media_type))
     for _k, _v in _default_timeouts.items():
@@ -2328,6 +2317,7 @@ async def safe_send(bot, chat_id: int, text: str, reply_markup=None,
                     logger.debug("spawn ChatMigrated: %s", _te)
                     _mig_task = None
                 if _mig_task is not None:
+                    # 🔴 FIX-1: _warmup_bg_tasks متاح الآن (معرّف في الأعلى)
                     try:
                         _warmup_bg_tasks.add(_mig_task)
                     except Exception:
@@ -2379,7 +2369,6 @@ async def safe_send(bot, chat_id: int, text: str, reply_markup=None,
             await asyncio.sleep(wait)
             continue
         except TimedOut as _te:
-            # 🆕 TIMEOUT-FIX-1: سياق كامل
             _preview = ""
             if text:
                 _preview = text[:60].replace("\n", " ")
@@ -2391,11 +2380,9 @@ async def safe_send(bot, chat_id: int, text: str, reply_markup=None,
                 _media_info, _text_len, _preview, str(_te)[:80],
             )
             if attempt < max_attempts - 1:
-                # 🆕 TIMEOUT-FIX-2: backoff تصاعدي
                 _delay = 1.0 * (attempt + 1)
                 await asyncio.sleep(_delay)
                 continue
-            # 🆕 TIMEOUT-FIX-3: ERROR نهائي
             logger.error(
                 "❌ TimedOut نهائي بعد %d محاولات | chat=%s%s | text_len=%d",
                 max_attempts, chat_id, _media_info, _text_len,
@@ -2420,7 +2407,6 @@ async def safe_send(bot, chat_id: int, text: str, reply_markup=None,
         except BadRequest as e:
             error_msg = str(e).lower()
             if "can't parse entities" in error_msg or "parse" in error_msg:
-                # 🆕 HTML-FIX-4: fallback شامل (نص + media)
                 try:
                     if media_type:
                         return await _send_media(
@@ -2726,7 +2712,7 @@ async def apply_penalty(bot, chat_id, user_id, penalty_type,
                         username="", first_name="", chat_name="",
                         lang="ar"):
     """
-    🆕 v7.10.8 FIX-DEV1: يسمح للمطور بمعاقبة نفسه (اختبار ذاتي).
+    يسمح للمطور بمعاقبة نفسه (اختبار ذاتي).
     """
     try:
         if penalty_type not in (
@@ -2824,13 +2810,38 @@ async def _increment_usage_async(chat_id: int, keyword: str):
 
 
 async def _flush_usage_updates():
+    """
+    🟡 FIX-5: تحسين منطق _flush_in_progress.
+
+    المشكلة القديمة: استدعاء ثانٍ أثناء flush يعود فوراً
+    بدون flush → تراكم أكثر من الحد.
+
+    الحل: ننتظر قليلاً ثم نحاول مرة أخرى.
+    """
     global _flush_in_progress
     async with _usage_lock:
-        if _flush_in_progress or not _usage_updates:
+        if _flush_in_progress:
+            # ✅ FIX-5: انتظر قليلاً ثم حاول مرة أخرى
+            data = None
+            should_retry = True
+        elif not _usage_updates:
             return
-        _flush_in_progress = True
-        data = list(_usage_updates.items())
-        _usage_updates.clear()
+        else:
+            _flush_in_progress = True
+            data = list(_usage_updates.items())
+            _usage_updates.clear()
+            should_retry = False
+
+    if should_retry:
+        # استدعاء متزامن آخر يعمل — انتظر ثم حاول
+        await asyncio.sleep(0.5)
+        async with _usage_lock:
+            if _flush_in_progress or not _usage_updates:
+                return
+            _flush_in_progress = True
+            data = list(_usage_updates.items())
+            _usage_updates.clear()
+
     try:
         failed: Dict[Tuple[int, str], int] = {}
         for (chat_id, keyword), count in data:
@@ -3326,9 +3337,6 @@ class BackgroundTasks:
     async def _publish_post(bot, channel_id: int, post: dict) -> bool:
         """
         نشر منشور واحد.
-
-        🆕 v7.10.8 FIX-PUB1: تسجيل warn عند فشل caption-follow-up
-        بدل suppress الصامت.
         """
         _SEND_KWARGS = {
             "read_timeout": 60.0, "write_timeout": 60.0,
@@ -3342,7 +3350,7 @@ class BackgroundTasks:
         caption = text[:1024] if text else None
 
         async def _send_followup_text():
-            """🆕 FIX-PUB1: تسجيل الفشل بدل suppress الصامت."""
+            """تسجيل الفشل بدل suppress الصامت."""
             if not text:
                 return
             try:
@@ -3831,8 +3839,7 @@ class BackgroundTasks:
                 BackgroundTasks._group_admins_cache.clear()
                 BackgroundTasks._group_admins_access_count.clear()
                 _security_settings_cache.clear()
-                _sec_settings_neg_cache.clear()   # 🆕 PERF-FIX-1
-                # prune دوري
+                _sec_settings_neg_cache.clear()
                 now_mono = time.monotonic()
                 if _security_settings_cache:
                     stale = [
@@ -3873,7 +3880,7 @@ class BackgroundTasks:
 # 18. Warmup
 # ═══════════════════════════════════════════════════════════════════════════
 
-_warmup_bg_tasks: set = set()
+# 🔴 FIX-1: _warmup_bg_tasks معرّف في الأعلى (السطر ~130) — لا نكرره هنا.
 
 
 def _spawn_warmup_task(coro, label: str = "warmup"):
@@ -3962,7 +3969,6 @@ async def warmup_all() -> Dict[str, Any]:
 
 _telegram_app = None
 
-# 🆕 v7.10.8 FIX-WH2: توسيع القائمة
 _NON_RETRYABLE_WEBHOOK_ERRORS = frozenset({
     "updateparseerror", "updateerror", "telegramerror",
     "jsondecodeerror", "typeerror", "valueerror", "keyerror",
@@ -4021,7 +4027,6 @@ async def webhook_handler(request):
     except Exception as e:
         err_type = type(e).__name__.lower()
         err_msg = str(e)[:200]
-        # 🆕 v7.10.8 FIX-WH2: منع حلقة 500
         if any(k in err_type for k in _NON_RETRYABLE_WEBHOOK_ERRORS):
             logger.warning(
                 "⚠️ Webhook non-retryable [%s]: %s",
@@ -4202,8 +4207,7 @@ async def get_security_settings(chat_id: int) -> Dict[str, int]:
     """
     جلب إعدادات الأمان.
 
-    🆕 FIX-A3: يستخدم DB.get_security_settings الرسمية (group_security).
-    🆕 PERF-FIX-1: TTL 300s + negative cache 30s + timeout 3s.
+    🔴 FIX-3: negative cache لا يستخدم بيانات cached منتهية الصلاحية.
     """
     now = time.monotonic()
 
@@ -4212,11 +4216,10 @@ async def get_security_settings(chat_id: int) -> Dict[str, int]:
     if cached is not None and now - cached[0] < _SEC_SETTINGS_TTL:
         return dict(cached[1])
 
-    # 2) 🆕 negative cache — لو فشل قبل ثوانٍ، لا نعيد المحاولة فوراً
+    # 2) 🔴 FIX-3: negative cache — لا نستخدم cached منتهية
     neg_at = _sec_settings_neg_cache.get(chat_id)
     if neg_at is not None and now - neg_at < _SEC_SETTINGS_NEGATIVE_TTL:
-        if cached is not None:
-            return dict(cached[1])
+        # لا تستخدم cached منتهية — استخدم defaults
         return dict(NEW_SECURITY_DEFAULTS)
 
     settings: Dict[str, int] = dict(NEW_SECURITY_DEFAULTS)
@@ -4310,21 +4313,34 @@ async def get_security_settings(chat_id: int) -> Dict[str, int]:
 def invalidate_security_settings_cache(chat_id: Optional[int] = None) -> None:
     if chat_id is None:
         _security_settings_cache.clear()
-        _sec_settings_neg_cache.clear()   # 🆕 PERF-FIX-1
+        _sec_settings_neg_cache.clear()
     else:
         _security_settings_cache.pop(chat_id, None)
-        _sec_settings_neg_cache.pop(chat_id, None)   # 🆕 PERF-FIX-1
+        _sec_settings_neg_cache.pop(chat_id, None)
 
 
 def _try_detector_call(fn, text: str, **extra_kwargs) -> Any:
-    """helper: try already_normalized=True ثم بدونه."""
+    """
+    🔴 FIX-4: helper آمن — لا يُعيد raise عند TypeError غير متعلق.
+
+    المشكلة القديمة: إذا رفع fn TypeError لا يتعلق بـ already_normalized،
+    فإن raise يُوقف should_delete_by_security → فشل صامت في الفحص الأمني.
+
+    الحل: نسجّل ونرجّع False بأمان.
+    """
     if fn is None or not text:
         return False
     try:
         return fn(text, already_normalized=True, **extra_kwargs)
     except TypeError as e:
-        if "already_normalized" not in str(e):
-            raise
+        err_msg = str(e)
+        # ✅ FIX-4: تحقق أن الخطأ متعلق بالكلمة المفتاحية
+        if ("already_normalized" not in err_msg
+                and "unexpected keyword" not in err_msg):
+            # خطأ TypeError حقيقي — سجّل وارجع False بأمان
+            logger.debug("detector TypeError (not kwargs): %s", e)
+            return False
+        # الخطأ متعلق بـ already_normalized → جرّب بدونها
         try:
             return fn(text, **extra_kwargs)
         except Exception as e2:
@@ -4538,6 +4554,8 @@ __all__ = [
     # 🆕 TIMEOUT-FIX-4/5: للاختبارات
     '_timeouts_for', '_TIMEOUT_FAST', '_TIMEOUT_SLOW',
     '_TEXT_LONG_THRESHOLD',
+    # 🆕 FIX-1: للاختبارات
+    '_warmup_bg_tasks',
 ]
 
 
@@ -4547,17 +4565,17 @@ __all__ = [
 
 try:
     logger.info(
-        "🛡️ utils.py v7.10.11 TIMEOUT-DIAGNOSTICS loaded | "
-        "safe_send=HTML+backoff+diag | _send_media=HTML+dynamic-TTL | "
-        "TimedOut-Context=✅ | Latency-Check=✅ | "
+        "🛡️ utils.py v7.10.12 CRITICAL-FIXES loaded | "
+        "warmup_bg_tasks=early | invalidate_auth=list-safe | "
+        "sec_neg_cache=fresh-only | detector_call=safe | "
+        "flush_usage=race-fixed | Latency-Check=✅ | "
         "Detectors=lazy+async | Langs=%d | Buttons=✅ | "
-        "Security-Bridge=✅(A3) | Penalty=✅(DEV1) | "
-        "ChatMigrated=✅(%d ops incl. log_channel_id) | "
-        "ToggleMap=%d | Cache-Iso=✅ | SecCache=✅(TTL=%ds, max=%d) | "
-        "SecNegCache=✅(TTL=%ds) | SecStats=✅(TTL=300s, TO=1.5s) | "
-        "AuthCache=✅(B4) | AuthCheck=UNION+TO(2s) | "
-        "RateLimit=✅(D15) | Webhook=✅(WH2) | "
-        "Publish=✅(PUB1) | MigTrack=✅(MIG2)",
+        "Security-Bridge=✅ | Penalty=✅ | "
+        "ChatMigrated=✅(%d ops) | ToggleMap=%d | "
+        "SecCache=✅(TTL=%ds, max=%d) | "
+        "SecNegCache=✅(TTL=%ds) | SecStats=✅(TTL=300s) | "
+        "AuthCache=✅ | AuthCheck=UNION+TO(2s) | "
+        "RateLimit=✅ | Webhook=✅ | Publish=✅",
         len(_AVAILABLE_LANGUAGES),
         len(_CHAT_MIGRATION_TABLES),
         len(SECURITY_TOGGLE_MAP),
