@@ -1,26 +1,14 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-callback_security.py - معالج أزرار الأمان (مُستخرج من handlers_callback v9.7.17)
+callback_security.py - معالج أزرار الأمان (v9.7.19-ROUTING-FIX)
 =====================================================================
-يحتوي هذا الملف على كل منطق الأمان المُستخرج من handlers_callback.py:
-
-  • _handle_security              - الموجّه الرئيسي لأزرار sec_*
-  • _handle_parameterized_security - الموجّه للأزرار المعاملاتية
-  • _handle_log_channel           - إدارة قناة السجل
-  • _handle_group_settings        - إعدادات أمان المجموعة
-  • جميع شاشات العرض (_show_*)
-  • فحص المصادقة (_check_sec_auth)
-  • كاش الإعدادات والصلاحيات
-
-🔗 التكامل مع handlers_callback.py:
-    from callback_security import (
-        SecurityCallbacks, set_metrics_inc, set_safe_edit,
-        _check_sec_auth, _invalidate_sec_auth_cache,
-        _prune_sec_auth_cache, _set_sec_chat, _resolve_sec_chat_id,
-    )
-    set_metrics_inc(_metrics_inc)
-    set_safe_edit(safe_edit)
+🆕 v9.7.19-ROUTING-FIX:
+    🟢 FIX-1: إضافة معالجة act_* / ban_* / pen_* داخل handle_parameterized
+              لتمريرها عبر _check_sec_auth المخزَّن (بدل is_authorized_in_group المباشر).
+    🟢 FIX-2: تفعيل زر act_log:<chat> (كان ميتاً لأن الزر لا يبدأ بـ sec_).
+    🟢 FIX-3: توحيد سلوك أزرار الأدوات المتقدمة مع بقية أزرار الأمان.
+    🟢 FIX-4: حماية شاملة بـ try/except مع رسائل خطأ واضحة للمستخدم.
 =====================================================================
 """
 import asyncio
@@ -112,7 +100,7 @@ _security_stats_cache_local = SmartCache(ttl=SEC_STATS_CACHE_TTL, max_size=500)
 
 
 # ═══════════════════════════════════════════════════════════════════
-# الحاقنات (Dependency Injection) — تُضبط من handlers_callback.py
+# الحاقنات (Dependency Injection)
 # ═══════════════════════════════════════════════════════════════════
 
 _metrics_inc_fn = None
@@ -120,13 +108,11 @@ _safe_edit_fn = None
 
 
 def set_metrics_inc(fn):
-    """يُستدعى من handlers_callback.py لمشاركة عدّاد المقاييس."""
     global _metrics_inc_fn
     _metrics_inc_fn = fn
 
 
 def set_safe_edit(fn):
-    """يُستدعى من handlers_callback.py لمشاركة دالة safe_edit."""
     global _safe_edit_fn
     _safe_edit_fn = fn
 
@@ -142,20 +128,14 @@ def _metrics_inc(key, delta=1):
 
 async def _safe_edit(query, text, reply_markup=None, parse_mode="HTML",
                      bot=None, clear_markup=False):
-    """
-    نسخة محلية احتياطية من safe_edit (نفس سلوك v9.7.17).
-    إن ضُبطت الدالة الحقيقية عبر set_safe_edit()، تُستخدم بدلاً منها.
-    """
     if _safe_edit_fn is not None:
         try:
             return await _safe_edit_fn(
                 query, text, reply_markup, parse_mode, bot, clear_markup
             )
         except TypeError:
-            # توافق مع توقيع قديم
             return await _safe_edit_fn(query, text, reply_markup,
                                         parse_mode, bot)
-    # fallback
     import re
     if not query or not query.message:
         return False
@@ -190,6 +170,16 @@ async def _safe_answer(query, text=None, show_alert=False):
         return True
     except Exception:
         return False
+
+
+async def _show_error(query, context, lang):
+    """v9.7.19: عرض خطأ موحّد للمستخدم."""
+    try:
+        await _safe_edit(query,
+            await _trans('error_occurred', lang, "❌ حدث خطأ"),
+            bot=context.bot)
+    except Exception:
+        pass
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -343,7 +333,6 @@ async def _resolve_sec_chat_id(context, data):
 
 class SecurityCallbacks:
 
-    # ─── كاش الإعدادات ───────────────────────────────────────────
     @staticmethod
     async def _invalidate_security_settings_cache(chat_id):
         try:
@@ -393,7 +382,6 @@ class SecurityCallbacks:
             pass
         return settings
 
-    # ─── عرض مرحلتين (نص سريع ثم إحصائيات) ────────────────────────
     @staticmethod
     async def _load_stats_and_edit(query, context, chat_id, lang, settings,
                                     expected_token=None):
@@ -458,7 +446,6 @@ class SecurityCallbacks:
                     expected_token=token
                 )
             )
-            # ملاحظة: ACTIVE_TASKS يُدار من handlers_callback
             try:
                 from handlers_callback import ACTIVE_TASKS
                 ACTIVE_TASKS.add(task)
@@ -521,8 +508,7 @@ class SecurityCallbacks:
         except Exception as e:
             logger.error(f"_show_antiflood_messages_buttons: {e}",
                           exc_info=True)
-            await _safe_edit(query,
-                await _trans('error_occurred', lang, "❌"), bot=context.bot)
+            await _show_error(query, context, lang)
 
     @staticmethod
     async def _show_antiflood_seconds_buttons(update, context, query,
@@ -570,8 +556,7 @@ class SecurityCallbacks:
         except Exception as e:
             logger.error(f"_show_antiflood_seconds_buttons: {e}",
                           exc_info=True)
-            await _safe_edit(query,
-                await _trans('error_occurred', lang, "❌"), bot=context.bot)
+            await _show_error(query, context, lang)
 
     @staticmethod
     async def _show_warn_count_buttons(update, context, query, chat_id, lang):
@@ -810,7 +795,7 @@ class SecurityCallbacks:
             [InlineKeyboardButton(await _trans('act_pin', lang, "📌"),
                 callback_data=f"act_pin:{chat_id}")],
             [InlineKeyboardButton(await _trans('act_log', lang, "📜"),
-                callback_data=f"act_log:{chat_id}")],
+                callback_data=f"sec_act_log:{chat_id}")],  # ✅ FIX-2: sec_ prefix
             [InlineKeyboardButton(KeyboardFactory.get_text("back", lang),
                 callback_data=f"{CB.GRP_SET}:{chat_id}")]])
         await _safe_edit(query,
@@ -819,20 +804,25 @@ class SecurityCallbacks:
 
     @staticmethod
     async def _show_admin_logs(update, context, query, chat_id, lang):
-        logs = await DB.get_admin_logs(chat_id, 10)
-        if logs:
-            lines = []
-            for l in logs:
-                ld = _row_to_dict(l) or {}
-                lines.append(f"• {_safe_str(ld.get('admin_id'))} → "
-                             f"{_safe_str(ld.get('action'))}")
-            text = (await _trans('admin_logs_title', lang, "📋") + "\n\n"
-                    + "\n".join(lines))
-        else:
-            text = await _trans('no_data', lang, "📭")
-        await _safe_edit(query, text, reply_markup=InlineKeyboardMarkup([[
-            InlineKeyboardButton(KeyboardFactory.get_text("back", lang),
-                callback_data=f"{CB.GRP_SET}:{chat_id}")]]), bot=context.bot)
+        try:
+            logs = await DB.get_admin_logs(chat_id, 10)
+            if logs:
+                lines = []
+                for l in logs:
+                    ld = _row_to_dict(l) or {}
+                    lines.append(f"• {_safe_str(ld.get('admin_id'))} → "
+                                 f"{_safe_str(ld.get('action'))}")
+                text = (await _trans('admin_logs_title', lang, "📋") + "\n\n"
+                        + "\n".join(lines))
+            else:
+                text = await _trans('no_data', lang, "📭")
+            await _safe_edit(query, text, reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton(KeyboardFactory.get_text("back", lang),
+                    callback_data=f"{CB.GRP_SET}:{chat_id}")]]),
+                bot=context.bot)
+        except Exception as e:
+            logger.error(f"_show_admin_logs: {e}", exc_info=True)
+            await _show_error(query, context, lang)
 
     @staticmethod
     async def _show_penalty_types(update, context, query, chat_id, lang):
@@ -1008,8 +998,7 @@ class SecurityCallbacks:
                 await _trans('unknown_action', lang, "⚠️"), bot=context.bot)
         except Exception as e:
             logger.error(f"_handle_log_channel: {e}", exc_info=True)
-            await _safe_edit(query,
-                await _trans('error_occurred', lang, "❌"), bot=context.bot)
+            await _show_error(query, context, lang)
 
     # ═══════════════════════════════════════════════════════════════
     # الموجّه الرئيسي لأزرار sec_*
@@ -1255,13 +1244,11 @@ class SecurityCallbacks:
                 await _trans('not_available', lang, "⚠️"), bot=context.bot)
         except Exception as e:
             logger.error(f"security error: {e}", exc_info=True)
-            await _safe_edit(query,
-                await _trans('error_occurred', lang, "❌"), bot=context.bot)
+            await _show_error(query, context, lang)
 
     @staticmethod
     async def _apply_all_toggle(update, context, query, user_id, lang,
                                  chat_id, action):
-        """تنفيذ تفعيل/تعطيل كل الإعدادات مع تأكيد."""
         is_activate = (action == "activate_all_confirm")
         activate_values = dict(
             delete_links=1, delete_mentions=1, slow_mode=1,
@@ -1323,9 +1310,7 @@ class SecurityCallbacks:
                 await DB.update_security_settings(chat_id, **values)
                 settings_ok = True
             except Exception:
-                await _safe_edit(query,
-                    await _trans('error_occurred', lang, "❌"),
-                    bot=context.bot)
+                await _show_error(query, context, lang)
                 return
             try:
                 await DB.add_admin_log(chat_id=chat_id,
@@ -1333,12 +1318,10 @@ class SecurityCallbacks:
             except Exception:
                 pass
         except Exception:
-            await _safe_edit(query,
-                await _trans('error_occurred', lang, "❌"), bot=context.bot)
+            await _show_error(query, context, lang)
             return
         if not settings_ok:
-            await _safe_edit(query,
-                await _trans('error_occurred', lang, "❌"), bot=context.bot)
+            await _show_error(query, context, lang)
             return
         await SecurityCallbacks._invalidate_security_settings_cache(chat_id)
         await _safe_edit(query,
@@ -1355,21 +1338,193 @@ class SecurityCallbacks:
             pass
 
     # ═══════════════════════════════════════════════════════════════
-    # الموجّه للأزرار المعاملاتية (set_*, sec_set_*, sec_warn_*...)
+    # الموجّه للأزرار المعاملاتية
     # ═══════════════════════════════════════════════════════════════
     @staticmethod
     async def handle_parameterized(update, context, query, user_id, lang,
                                     data) -> bool:
         """
-        يعالج الأزرار ذات المعاملات الخاصة بالأمان.
-        يُعيد True إذا عالج الطلب، False إذا لم يتعرف عليه.
+        v9.7.19-ROUTING-FIX: يعالج كل الأزرار المعاملاتية التالية:
+          - set_warn_count / set_warn_penalty / set_duration
+          - set_antiflood_messages / set_antiflood_seconds
+          - sec_set_* / sec_penalty_* / sec_warn_*
+          - 🆕 act_* / ban_* / pen_* — بمرور cache auth
         """
+        try:
+            return await SecurityCallbacks._handle_parameterized_inner(
+                update, context, query, user_id, lang, data
+            )
+        except Exception as e:
+            logger.error(f"❌ security param: {e}", exc_info=True)
+            try:
+                await _show_error(query, context, lang)
+            except Exception:
+                pass
+            return True
+
+    @staticmethod
+    async def _handle_parameterized_inner(update, context, query, user_id,
+                                           lang, data) -> bool:
+        # ═══════════════════════════════════════════════════════════
+        # 🆕 v9.7.19 FIX-1/2/3: معالجة act_* / ban_* / pen_*
+        # ═══════════════════════════════════════════════════════════
+
+        # ─── act_log:<chat> ──────────────────────────────────────
+        if data.startswith("act_log:"):
+            parts = data.split(":")
+            if len(parts) < 2:
+                await _safe_edit(query,
+                    await _trans('invalid_data', lang, "❌"),
+                    bot=context.bot)
+                return True
+            chat_id = _coerce_int(parts[1])
+            if chat_id == 0 or chat_id == -1:
+                await _safe_edit(query,
+                    await _trans('invalid_data', lang, "❌"),
+                    bot=context.bot)
+                return True
+            if not await _check_sec_auth(context, user_id, chat_id):
+                await _safe_edit(query,
+                    await _trans('no_permission', lang, "❌"),
+                    bot=context.bot)
+                return True
+            await SecurityCallbacks._show_admin_logs(
+                update, context, query, chat_id, lang)
+            return True
+
+        # ─── ban_add / ban_list / ban_rem ────────────────────────
+        if (data.startswith("ban_add:")
+                or data.startswith("ban_list:")
+                or data.startswith("ban_rem:")):
+            parts = data.split(":")
+            if len(parts) < 2:
+                await _safe_edit(query,
+                    await _trans('invalid_data', lang, "❌"),
+                    bot=context.bot)
+                return True
+            action = parts[0][4:]  # add/list/rem
+            chat_id = _coerce_int(parts[1])
+            # global (-1) يتطلب developer
+            if chat_id == -1:
+                if not CONFIG.is_developer(user_id):
+                    await _safe_edit(query,
+                        await _trans('unauthorized', lang, "❌"),
+                        bot=context.bot)
+                    return True
+            else:
+                if not await _check_sec_auth(context, user_id, chat_id):
+                    await _safe_edit(query,
+                        await _trans('no_permission', lang, "❌"),
+                        bot=context.bot)
+                    return True
+            if action == "add":
+                state = (UserState.WAIT_GROUP_BAN if chat_id != -1
+                         else UserState.WAIT_GLOBAL_BAN)
+                StateManager.set(user_id, state)
+                context.user_data['ban_chat'] = chat_id
+                await _safe_edit(query,
+                    await _trans('send_keyword_prompt', lang, "📝"),
+                    bot=context.bot)
+                return True
+            if action == "list":
+                try:
+                    words = await DB.get_banned_words(chat_id)
+                except Exception:
+                    words = None
+                if words:
+                    text = (await _trans('words_list_title_full', lang, "🚫")
+                            + "\n\n" + "\n".join(
+                                f"• {w}" for w in words[:50]))
+                else:
+                    text = await _trans('no_data', lang, "📭")
+                await _safe_edit(query, text, bot=context.bot)
+                return True
+            if action == "rem":
+                state = (UserState.WAIT_REM_GROUP_BAN if chat_id != -1
+                         else UserState.WAIT_REM_GLOBAL_BAN)
+                StateManager.set(user_id, state)
+                context.user_data['ban_chat'] = chat_id
+                await _safe_edit(query,
+                    await _trans('send_keyword_delete_prompt', lang, "🗑️"),
+                    bot=context.bot)
+                return True
+
+        # ─── act_ban / act_mute / act_warn / act_kick / act_restrict /
+        #     act_unban / act_pin ───────────────────────────────────
+        _act_user_actions = {
+            "act_ban":      (UserState.WAIT_BAN,      "send_user_id_ban",      "🚫"),
+            "act_mute":     (UserState.WAIT_MUTE,     "send_user_id_mute",     "🔇"),
+            "act_warn":     (UserState.WAIT_WARN,     "send_user_id_warn",     "⚠️"),
+            "act_kick":     (UserState.WAIT_KICK,     "send_user_id_kick",     "👢"),
+            "act_restrict": (UserState.WAIT_RESTRICT, "send_user_id_restrict", "🔒"),
+            "act_unban":    (UserState.WAIT_UNBAN,    "send_user_id_unban",    "🔓"),
+            "act_pin":      (UserState.WAIT_PIN,      "pin_prompt_full",       "📌"),
+        }
+        for act_prefix, (state, prompt_key, prompt_default) in \
+                _act_user_actions.items():
+            if data.startswith(act_prefix + ":"):
+                parts = data.split(":")
+                if len(parts) < 2:
+                    await _safe_edit(query,
+                        await _trans('invalid_data', lang, "❌"),
+                        bot=context.bot)
+                    return True
+                chat_id = _coerce_int(parts[1])
+                if chat_id == 0 or chat_id == -1:
+                    await _safe_edit(query,
+                        await _trans('invalid_data', lang, "❌"),
+                        bot=context.bot)
+                    return True
+                if not await _check_sec_auth(context, user_id, chat_id):
+                    await _safe_edit(query,
+                        await _trans('no_permission', lang, "❌"),
+                        bot=context.bot)
+                    return True
+                StateManager.set(user_id, state)
+                context.user_data['adv_chat'] = chat_id
+                await _safe_edit(query,
+                    await _trans(prompt_key, lang, prompt_default),
+                    bot=context.bot)
+                return True
+
+        # ─── pen_<type>:<chat>  (auto_penalty) ───────────────────
+        if data.startswith("pen_"):
+            parts = data.split(":")
+            if len(parts) >= 2:
+                penalty_type = parts[0][4:]
+                chat_id = _coerce_int(parts[1])
+                if penalty_type in ('ban', 'mute', 'kick',
+                                     'restrict', 'none'):
+                    if not await _check_sec_auth(context, user_id, chat_id):
+                        await _safe_edit(query,
+                            await _trans('no_permission', lang, "❌"),
+                            bot=context.bot)
+                        return True
+                    try:
+                        await DB.update_security_settings(
+                            chat_id, auto_penalty=penalty_type)
+                    except Exception:
+                        await _show_error(query, context, lang)
+                        return True
+                    await SecurityCallbacks.\
+                        _invalidate_security_settings_cache(chat_id)
+                    await _safe_edit(query,
+                        await _trans('applying_changes', lang,
+                                     "⏳ جاري التطبيق..."),
+                        bot=context.bot)
+                    return True
+
+        # ═══════════════════════════════════════════════════════════
+        # نهاية إصلاح v9.7.19 — ما يلي من النسخة الأصلية v9.7.17
+        # ═══════════════════════════════════════════════════════════
+
         # ─── set_warn_count:<chat>:<n> ───────────────────────────
         if data.startswith("set_warn_count:"):
             parts = data.split(":")
             if len(parts) != 3:
                 await _safe_edit(query,
-                    await _trans('invalid_data', lang, "❌"), bot=context.bot)
+                    await _trans('invalid_data', lang, "❌"),
+                    bot=context.bot)
                 return True
             chat_id = _coerce_int(parts[1]); count = _coerce_int(parts[2])
             if not await _check_sec_auth(context, user_id, chat_id):
@@ -1383,7 +1538,8 @@ class SecurityCallbacks:
                     bot=context.bot)
                 return True
             await DB.update_security_settings(chat_id, max_warnings=count)
-            await SecurityCallbacks._invalidate_security_settings_cache(chat_id)
+            await SecurityCallbacks._invalidate_security_settings_cache(
+                chat_id)
             await SecurityCallbacks._refresh_security_view(
                 query, context, chat_id, lang)
             return True
@@ -1393,7 +1549,8 @@ class SecurityCallbacks:
             parts = data.split(":")
             if len(parts) != 3:
                 await _safe_edit(query,
-                    await _trans('invalid_data', lang, "❌"), bot=context.bot)
+                    await _trans('invalid_data', lang, "❌"),
+                    bot=context.bot)
                 return True
             chat_id = _coerce_int(parts[1])
             value = _coerce_int(parts[2])
@@ -1412,11 +1569,10 @@ class SecurityCallbacks:
                     chat_id, antiflood_messages=value
                 )
             except Exception:
-                await _safe_edit(query,
-                    await _trans('error_occurred', lang, "❌"),
-                    bot=context.bot)
+                await _show_error(query, context, lang)
                 return True
-            await SecurityCallbacks._invalidate_security_settings_cache(chat_id)
+            await SecurityCallbacks._invalidate_security_settings_cache(
+                chat_id)
             await SecurityCallbacks._show_antiflood_messages_buttons(
                 update, context, query, chat_id, lang
             )
@@ -1427,7 +1583,8 @@ class SecurityCallbacks:
             parts = data.split(":")
             if len(parts) != 3:
                 await _safe_edit(query,
-                    await _trans('invalid_data', lang, "❌"), bot=context.bot)
+                    await _trans('invalid_data', lang, "❌"),
+                    bot=context.bot)
                 return True
             chat_id = _coerce_int(parts[1])
             value = _coerce_int(parts[2])
@@ -1446,11 +1603,10 @@ class SecurityCallbacks:
                     chat_id, antiflood_seconds=value
                 )
             except Exception:
-                await _safe_edit(query,
-                    await _trans('error_occurred', lang, "❌"),
-                    bot=context.bot)
+                await _show_error(query, context, lang)
                 return True
-            await SecurityCallbacks._invalidate_security_settings_cache(chat_id)
+            await SecurityCallbacks._invalidate_security_settings_cache(
+                chat_id)
             await SecurityCallbacks._show_antiflood_seconds_buttons(
                 update, context, query, chat_id, lang
             )
@@ -1461,7 +1617,8 @@ class SecurityCallbacks:
             parts = data.split(":")
             if len(parts) != 3:
                 await _safe_edit(query,
-                    await _trans('invalid_data', lang, "❌"), bot=context.bot)
+                    await _trans('invalid_data', lang, "❌"),
+                    bot=context.bot)
                 return True
             _, penalty_type, chat_id_str = parts
             chat_id = _coerce_int(chat_id_str)
@@ -1477,7 +1634,8 @@ class SecurityCallbacks:
                 return True
             await DB.update_security_settings(chat_id,
                 warn_penalty=penalty_type)
-            await SecurityCallbacks._invalidate_security_settings_cache(chat_id)
+            await SecurityCallbacks._invalidate_security_settings_cache(
+                chat_id)
             await SecurityCallbacks._refresh_security_view(
                 query, context, chat_id, lang)
             return True
@@ -1487,7 +1645,8 @@ class SecurityCallbacks:
             parts = data.split(":")
             if len(parts) < 4:
                 await _safe_edit(query,
-                    await _trans('invalid_data', lang, "❌"), bot=context.bot)
+                    await _trans('invalid_data', lang, "❌"),
+                    bot=context.bot)
                 return True
             penalty_type = parts[1]
             chat_id = _coerce_int(parts[2])
@@ -1513,7 +1672,8 @@ class SecurityCallbacks:
                     bot=context.bot)
                 return True
             await DB.update_security_settings(chat_id, **{col: duration})
-            await SecurityCallbacks._invalidate_security_settings_cache(chat_id)
+            await SecurityCallbacks._invalidate_security_settings_cache(
+                chat_id)
             await SecurityCallbacks._refresh_security_view(
                 query, context, chat_id, lang)
             return True
@@ -1523,7 +1683,8 @@ class SecurityCallbacks:
             parts = data.split(":")
             if len(parts) != 2:
                 await _safe_edit(query,
-                    await _trans('invalid_data', lang, "❌"), bot=context.bot)
+                    await _trans('invalid_data', lang, "❌"),
+                    bot=context.bot)
                 return True
             chat_id = _coerce_int(parts[1])
             if not await _check_sec_auth(context, user_id, chat_id):
@@ -1540,7 +1701,8 @@ class SecurityCallbacks:
             parts = data.split(":")
             if len(parts) != 3:
                 await _safe_edit(query,
-                    await _trans('invalid_data', lang, "❌"), bot=context.bot)
+                    await _trans('invalid_data', lang, "❌"),
+                    bot=context.bot)
                 return True
             _, penalty_type, chat_id_str = parts
             chat_id = _coerce_int(chat_id_str)
@@ -1560,7 +1722,8 @@ class SecurityCallbacks:
                     await _trans('invalid_penalty_type', lang, "❌"),
                     bot=context.bot)
                 return True
-            await SecurityCallbacks._invalidate_security_settings_cache(chat_id)
+            await SecurityCallbacks._invalidate_security_settings_cache(
+                chat_id)
             await SecurityCallbacks._refresh_security_view(
                 query, context, chat_id, lang)
             return True
@@ -1570,7 +1733,8 @@ class SecurityCallbacks:
             parts = data.split(":")
             if len(parts) != 2:
                 await _safe_edit(query,
-                    await _trans('invalid_data', lang, "❌"), bot=context.bot)
+                    await _trans('invalid_data', lang, "❌"),
+                    bot=context.bot)
                 return True
             chat_id = _coerce_int(parts[1])
             if not await _check_sec_auth(context, user_id, chat_id):
@@ -1582,7 +1746,7 @@ class SecurityCallbacks:
                 query, context, chat_id, lang)
             return True
 
-        # ─── sec_set_*_duration:<chat> / sec_*_duration:<chat> ────
+        # ─── sec_set_*_duration / sec_*_duration ──────────────────
         for prefix, action_type in (
             ("sec_set_mute_duration:", "mute"),
             ("sec_set_ban_duration:", "ban"),
@@ -1612,7 +1776,8 @@ class SecurityCallbacks:
             parts = data.split(":")
             if len(parts) != 2:
                 await _safe_edit(query,
-                    await _trans('invalid_data', lang, "❌"), bot=context.bot)
+                    await _trans('invalid_data', lang, "❌"),
+                    bot=context.bot)
                 return True
             chat_id = _coerce_int(parts[1])
             if not await _check_sec_auth(context, user_id, chat_id):
@@ -1629,7 +1794,8 @@ class SecurityCallbacks:
             parts = data.split(":")
             if len(parts) != 2:
                 await _safe_edit(query,
-                    await _trans('invalid_data', lang, "❌"), bot=context.bot)
+                    await _trans('invalid_data', lang, "❌"),
+                    bot=context.bot)
                 return True
             chat_id = _coerce_int(parts[1])
             if not await _check_sec_auth(context, user_id, chat_id):
@@ -1646,7 +1812,8 @@ class SecurityCallbacks:
             parts = data.split(":")
             if len(parts) != 2:
                 await _safe_edit(query,
-                    await _trans('invalid_data', lang, "❌"), bot=context.bot)
+                    await _trans('invalid_data', lang, "❌"),
+                    bot=context.bot)
                 return True
             chat_id = _coerce_int(parts[1])
             if not await _check_sec_auth(context, user_id, chat_id):
@@ -1663,7 +1830,8 @@ class SecurityCallbacks:
             parts = data.split(":")
             if len(parts) != 2:
                 await _safe_edit(query,
-                    await _trans('invalid_data', lang, "❌"), bot=context.bot)
+                    await _trans('invalid_data', lang, "❌"),
+                    bot=context.bot)
                 return True
             chat_id = _coerce_int(parts[1])
             if not await _check_sec_auth(context, user_id, chat_id):
@@ -1671,12 +1839,12 @@ class SecurityCallbacks:
                     await _trans('no_permission', lang, "❌"),
                     bot=context.bot)
                 return True
-            settings = await SecurityCallbacks._get_security_settings_cached(
-                chat_id
-            )
+            settings = (await SecurityCallbacks.
+                        _get_security_settings_cached(chat_id))
             new_val = 1 - _coerce_int(settings.get('warn_enabled', 0))
             await DB.update_security_settings(chat_id, warn_enabled=new_val)
-            await SecurityCallbacks._invalidate_security_settings_cache(chat_id)
+            await SecurityCallbacks._invalidate_security_settings_cache(
+                chat_id)
             await SecurityCallbacks._refresh_security_view(
                 query, context, chat_id, lang)
             return True
@@ -1686,7 +1854,8 @@ class SecurityCallbacks:
             parts = data.split(":")
             if len(parts) < 2:
                 await _safe_edit(query,
-                    await _trans('invalid_data', lang, "❌"), bot=context.bot)
+                    await _trans('invalid_data', lang, "❌"),
+                    bot=context.bot)
                 return True
             if parts[1].lstrip('-').isdigit():
                 chat_id = int(parts[1])
@@ -1725,7 +1894,8 @@ class SecurityCallbacks:
             parts = data.split(":")
             if len(parts) != 2:
                 await _safe_edit(query,
-                    await _trans('invalid_data', lang, "❌"), bot=context.bot)
+                    await _trans('invalid_data', lang, "❌"),
+                    bot=context.bot)
                 return True
             chat_id = _coerce_int(parts[1])
             if not await _check_sec_auth(context, user_id, chat_id):
@@ -1742,7 +1912,8 @@ class SecurityCallbacks:
             parts = data.split(":")
             if len(parts) != 2:
                 await _safe_edit(query,
-                    await _trans('invalid_data', lang, "❌"), bot=context.bot)
+                    await _trans('invalid_data', lang, "❌"),
+                    bot=context.bot)
                 return True
             chat_id = _coerce_int(parts[1])
             if not await _check_sec_auth(context, user_id, chat_id):
@@ -1755,12 +1926,13 @@ class SecurityCallbacks:
                 update, context, query, chat_id, lang)
             return True
 
-        # ─── sec_antiflood_penalty / set_antiflood_penalty ────────
+        # ─── sec_antiflood_penalty / sec_set_antiflood_penalty ────
         if data.startswith("sec_antiflood_penalty:"):
             parts = data.split(":")
             if len(parts) != 2:
                 await _safe_edit(query,
-                    await _trans('invalid_data', lang, "❌"), bot=context.bot)
+                    await _trans('invalid_data', lang, "❌"),
+                    bot=context.bot)
                 return True
             chat_id = _coerce_int(parts[1])
             if not await _check_sec_auth(context, user_id, chat_id):
@@ -1776,7 +1948,8 @@ class SecurityCallbacks:
             parts = data.split(":")
             if len(parts) < 3:
                 await _safe_edit(query,
-                    await _trans('invalid_data', lang, "❌"), bot=context.bot)
+                    await _trans('invalid_data', lang, "❌"),
+                    bot=context.bot)
                 return True
             chat_id = _coerce_int(parts[1])
             if not await _check_sec_auth(context, user_id, chat_id):
@@ -1826,7 +1999,8 @@ class SecurityCallbacks:
             parts = data.split(":")
             if len(parts) != 2:
                 await _safe_edit(query,
-                    await _trans('invalid_data', lang, "❌"), bot=context.bot)
+                    await _trans('invalid_data', lang, "❌"),
+                    bot=context.bot)
                 return True
             chat_id = _coerce_int(parts[1])
             if not await _check_sec_auth(context, user_id, chat_id):
@@ -1842,7 +2016,8 @@ class SecurityCallbacks:
             parts = data.split(":")
             if len(parts) < 3:
                 await _safe_edit(query,
-                    await _trans('invalid_data', lang, "❌"), bot=context.bot)
+                    await _trans('invalid_data', lang, "❌"),
+                    bot=context.bot)
                 return True
             chat_id = _coerce_int(parts[1])
             if not await _check_sec_auth(context, user_id, chat_id):
@@ -1866,7 +2041,8 @@ class SecurityCallbacks:
             parts = data.split(":")
             if len(parts) != 2:
                 await _safe_edit(query,
-                    await _trans('invalid_data', lang, "❌"), bot=context.bot)
+                    await _trans('invalid_data', lang, "❌"),
+                    bot=context.bot)
                 return True
             chat_id = _coerce_int(parts[1])
             if not await _check_sec_auth(context, user_id, chat_id):
@@ -1883,7 +2059,8 @@ class SecurityCallbacks:
             parts = data.split(":")
             if len(parts) != 2:
                 await _safe_edit(query,
-                    await _trans('invalid_data', lang, "❌"), bot=context.bot)
+                    await _trans('invalid_data', lang, "❌"),
+                    bot=context.bot)
                 return True
             chat_id = _coerce_int(parts[1])
             if not await _check_sec_auth(context, user_id, chat_id):
@@ -1903,7 +2080,8 @@ class SecurityCallbacks:
             parts = data.split(":")
             if len(parts) != 2:
                 await _safe_edit(query,
-                    await _trans('invalid_data', lang, "❌"), bot=context.bot)
+                    await _trans('invalid_data', lang, "❌"),
+                    bot=context.bot)
                 return True
             chat_id = _coerce_int(parts[1])
             if not await _check_sec_auth(context, user_id, chat_id):
@@ -1920,7 +2098,8 @@ class SecurityCallbacks:
             parts = data.split(":")
             if len(parts) < 3:
                 await _safe_edit(query,
-                    await _trans('invalid_data', lang, "❌"), bot=context.bot)
+                    await _trans('invalid_data', lang, "❌"),
+                    bot=context.bot)
                 return True
             chat_id = _coerce_int(parts[1])
             if not await _check_sec_auth(context, user_id, chat_id):
@@ -1939,7 +2118,7 @@ class SecurityCallbacks:
                     query, context, chat_id, lang)
             return True
 
-        # ─── sec_close / grp_close / back_to_groups / sec_back ────
+        # ─── sec_close / grp_close / back_to_groups ───────────────
         if data in ("sec_close", "grp_close", "security_close",
                     "back_to_groups", "sec_back"):
             StateManager.clear(user_id)
@@ -2001,7 +2180,7 @@ __all__ = [
     "_ANTIFLOOD_MESSAGES_MAX", "_ANTIFLOOD_SECONDS_MAX",
     "_SEC_ACTIONS_WITH_SPECIFIC_HANDLERS",
     "_SEC_AUTH_NEG_BASE", "_SEC_AUTH_NEG_MAX", "_SEC_AUTH_PRUNE_EVERY",
-    "safe_edit",  # fallback — لكن الأفضل استدعاء set_safe_edit(safe_edit)
+    "safe_edit",
 ]
 
-logger.info("🔐 callback_security.py loaded (v9.7.17 extraction)")
+logger.info("🔐 callback_security.py loaded (v9.7.19-ROUTING-FIX)")
