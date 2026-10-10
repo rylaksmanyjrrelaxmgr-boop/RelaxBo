@@ -1,824 +1,523 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-handlers_analytics.py — واجهة التحليلات المتقدمة (v1.0.0)
-================================================================================
-يستخدم AnalyticsMixin من database_analytics.py v1.1.0
-
-الأزرار المُدعَمة (من buttons_config_*.json → menus.analytics):
-    - admin_analytics   → القائمة الرئيسية
-    - growth_30d_btn    → نمو المستخدمين (30 يوم)
-    - top_channels_btn  → أفضل 10 قنوات
-    - publish_stats_btn → متوسط النشر
-    - channels_rate_btn → نسبة النجاح
-    - subscriptions_btn → الاشتراكات الشهرية
-    - pool_live_btn     → Pool مباشر
-    - slow_queries_btn  → أبطأ الاستعلامات
-    - export_excel_btn  → تصدير Excel
-    - refresh_btn       → تحديث القائمة الحالية
-
---------------------------------------------------------------------------------
-v1.0.0:
-    ✅ كل الأزرار العشرة مُعالَجة
-    ✅ استخدام AnalyticsMixin (get_user_growth, get_top_channels,
-       get_publish_stats, get_channel_success_rate, get_subscription_rate,
-       get_pool_live, get_slowest_queries, get_db_diagnostics)
-    ✅ رسائل خطأ واضحة (لو DB لا يدعم PostgreSQL)
-    ✅ HTML parse_mode مع safe_send
-    ✅ دعم refresh للقوائم الحيّة (Pool)
-    ✅ تصدير Excel (يتطلب openpyxl)
+database_analytics.py - دوال التحليلات المتقدمة (v1.1.0)
 ================================================================================
 """
 
 import logging
-import io
-import re
 from datetime import datetime, timedelta
-from typing import Optional, Dict, Any, List
-
-from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
-from telegram.ext import (
-    ContextTypes, CallbackQueryHandler, CommandHandler,
-)
-
-from config import CONFIG
-from database import DB
-from utils import (
-    CB, TimeUtils, safe_send, KeyboardFactory,
-    TranslationManager, is_authorized_in_group,
-)
+from typing import Dict, List, Any, Optional
 
 logger = logging.getLogger(__name__)
 
 
-# ═══════════════════════════════════════════════════════════════════════
-# قائمة الأزرار
-# ═══════════════════════════════════════════════════════════════════════
-
-ANALYTICS_BUTTONS = (
-    "admin_analytics",
-    "growth_30d_btn",
-    "top_channels_btn",
-    "publish_stats_btn",
-    "channels_rate_btn",
-    "subscriptions_btn",
-    "pool_live_btn",
-    "slow_queries_btn",
-    "export_excel_btn",
-    "refresh_btn",
-)
+DEFAULT_SUCCESS_RATE = 100.0
+FAIL_COUNT_THRESHOLD = 3
+DEAD_TUPLE_THRESHOLDS = (0.05, 0.10, 0.20)
+DEAD_TUPLE_MIN_LIVE = 1000
+TABLE_SIZE_WARN_KB = 5 * 1024
+TABLE_SIZE_CRITICAL_KB = 50 * 1024
+ADMIN_LOGS_WARN_COUNT = 5000
+BANNED_WORDS_WARN_COUNT = 500
+IDLE_TX_WARN_COUNT = 1
+IDLE_TX_CRIT_COUNT = 3
 
 
-# ═══════════════════════════════════════════════════════════════════════
-# أدوات مساعدة
-# ═══════════════════════════════════════════════════════════════════════
-
-def _t(key: str, default: str, lang: str = "ar") -> str:
-    """ترجمة مع fallback."""
-    try:
-        text = TranslationManager.get_text(lang, key)
-        if text and text != key:
-            return text
-    except Exception:
-        pass
-    try:
-        return KeyboardFactory.get_text(key, lang) or default
-    except Exception:
-        return default
-
-
-def _bar(value: float, max_value: float, width: int = 10,
-         filled: str = "█", empty: str = "░") -> str:
-    """شريط تقدّم بصري."""
+def color_emoji(value: float, thresholds=(0.3, 0.7), inverse=False) -> str:
     try:
         v = float(value)
-        m = float(max_value)
-        if m <= 0:
-            return empty * width
-        ratio = min(1.0, max(0.0, v / m))
-        n = int(round(ratio * width))
-        return filled * n + empty * (width - n)
-    except Exception:
-        return empty * width
-
-
-def _check_developer(user_id: int) -> bool:
-    """فحص صلاحية المطور."""
-    try:
-        return bool(CONFIG.is_developer(user_id))
-    except Exception:
-        try:
-            return user_id == int(CONFIG.PRIMARY_OWNER_ID)
-        except Exception:
-            return False
-
-
-async def _safe_edit(query, text: str, keyboard=None, parse_mode: str = "HTML"):
-    """تعديل الرسالة مع fallback عند الفشل."""
-    try:
-        await query.edit_message_text(
-            text, parse_mode=parse_mode, reply_markup=keyboard,
-            disable_web_page_preview=True,
-        )
-        return True
-    except Exception as e:
-        err = str(e).lower()
-        if "message is not modified" in err:
-            return True
-        logger.debug("edit_message_text failed: %s", e)
-        # fallback: أرسل رسالة جديدة
-        try:
-            if query.message:
-                await safe_send(
-                    query.bot, query.message.chat_id, text,
-                    reply_markup=keyboard, parse_mode=parse_mode,
-                )
-                return True
-        except Exception as e2:
-            logger.warning("fallback send failed: %s", e2)
-        return False
-
-
-def _back_keyboard(target: str = "admin_analytics") -> InlineKeyboardMarkup:
-    """لوحة رجوع موحّدة."""
-    return InlineKeyboardMarkup([[
-        InlineKeyboardButton(
-            _t("back", "🔙 رجوع"),
-            callback_data=target,
-        )
-    ]])
-
-
-def _back_refresh_keyboard(target: str = "admin_analytics",
-                           refresh: str = "refresh_btn"
-                           ) -> InlineKeyboardMarkup:
-    """لوحة رجوع + تحديث."""
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton(
-            _t("refresh_btn", "🔄 تحديث"),
-            callback_data=refresh,
-        )],
-        [InlineKeyboardButton(
-            _t("back", "🔙 رجوع"),
-            callback_data=target,
-        )],
-    ])
-
-
-def _fmt_num(n) -> str:
-    """تنسيق رقم بفواصل الآلاف."""
-    try:
-        return f"{int(n):,}"
     except (TypeError, ValueError):
-        return "0"
-
-
-# ═══════════════════════════════════════════════════════════════════════
-# 1) القائمة الرئيسية — admin_analytics
-# ═══════════════════════════════════════════════════════════════════════
-
-async def show_analytics_menu(update: Update,
-                              context: ContextTypes.DEFAULT_TYPE) -> None:
-    """عرض القائمة الرئيسية للتحليلات."""
-    try:
-        query = update.callback_query
-        user_id = update.effective_user.id
-
-        if query:
-            await query.answer()
-
-        if not _check_developer(user_id):
-            msg = "❌ هذه الميزة للمطور فقط."
-            if query:
-                await query.answer(msg, show_alert=True)
-            return
-
-        if not getattr(DB, "USE_POSTGRES", False):
-            db_type = getattr(DB, "DB_TYPE", "sqlite")
-            text = (
-                "📊 <b>التحليلات المتقدمة</b>\n"
-                "━━━━━━━━━━━━━━━━━━━━━━\n\n"
-                f"⚠️ هذه الميزة تتطلب <b>PostgreSQL</b>.\n"
-                f"قاعدة البيانات الحالية: <code>{db_type}</code>"
-            )
-            if query:
-                await _safe_edit(query, text, _back_keyboard("admin"))
-            return
-
-        # لوحة الأزرار — نستخدم KeyboardFactory.build
-        keyboard = KeyboardFactory.build("analytics", lang="ar")
-
-        text = (
-            "📊 <b>التحليلات المتقدمة</b>\n"
-            "━━━━━━━━━━━━━━━━━━━━━━\n\n"
-            "اختر نوع التقرير من الأزرار أدناه.\n\n"
-            f"🕐 <i>{TimeUtils.mecca_iso()[:19]}</i>"
-        )
-
-        if query:
-            await _safe_edit(query, text, keyboard)
-        else:
-            await safe_send(
-                context.bot, update.effective_chat.id, text,
-                reply_markup=keyboard, parse_mode="HTML",
-            )
-    except Exception as e:
-        logger.error("show_analytics_menu: %s", e, exc_info=True)
-
-
-# ═══════════════════════════════════════════════════════════════════════
-# 2) نمو المستخدمين — growth_30d_btn
-# ═══════════════════════════════════════════════════════════════════════
-
-async def show_growth_30d(update: Update,
-                          context: ContextTypes.DEFAULT_TYPE) -> None:
-    """📈 نمو المستخدمين آخر 30 يوم."""
-    query = update.callback_query
-    await query.answer("⏳ جاري الحساب...")
-
-    if not _check_developer(update.effective_user.id):
-        await query.answer("❌ للمطور فقط", show_alert=True)
-        return
-
-    try:
-        rows = await DB.get_user_growth(days=30)
-        rows = rows or []
-
-        total_count = sum(r.get("count", 0) for r in rows)
-        avg = round(total_count / 30, 1) if total_count else 0.0
-        max_count = max((r.get("count", 0) for r in rows), default=0)
-
-        lines = [
-            "📈 <b>نمو المستخدمين — 30 يوم</b>",
-            "━━━━━━━━━━━━━━━━━━━━━━",
-            "",
-            f"📊 الإجمالي: <b>{_fmt_num(total_count)}</b>",
-            f"📅 المتوسط اليومي: <b>{avg}</b>",
-            f"🏔️ الذروة: <b>{_fmt_num(max_count)}</b>",
-            "",
-        ]
-
-        if rows:
-            lines.append("<b>آخر 10 أيام:</b>")
-            for r in rows[-10:]:
-                day = r.get("date", "?")[-5:]  # MM-DD
-                cnt = r.get("count", 0)
-                bar = _bar(cnt, max_count or 1, width=8)
-                lines.append(f"  <code>{day}</code> {bar} <b>{cnt}</b>")
-        else:
-            lines.append("<i>📭 لا توجد بيانات</i>")
-
-        text = "\n".join(lines)
-        kb = _back_refresh_keyboard(target="admin_analytics",
-                                    refresh="growth_30d_btn")
-        await _safe_edit(query, text, kb)
-    except Exception as e:
-        logger.error("show_growth_30d: %s", e, exc_info=True)
-        await _safe_edit(
-            query, "❌ فشل حساب النمو.",
-            _back_keyboard("admin_analytics"),
-        )
-
-
-# ═══════════════════════════════════════════════════════════════════════
-# 3) أفضل 10 قنوات — top_channels_btn
-# ═══════════════════════════════════════════════════════════════════════
-
-async def show_top_channels(update: Update,
-                            context: ContextTypes.DEFAULT_TYPE) -> None:
-    """🏆 أفضل 10 قنوات."""
-    query = update.callback_query
-    await query.answer("⏳ جاري الحساب...")
-
-    if not _check_developer(update.effective_user.id):
-        await query.answer("❌ للمطور فقط", show_alert=True)
-        return
-
-    try:
-        rows = await DB.get_top_channels(limit=10)
-        rows = rows or []
-
-        lines = [
-            "🏆 <b>أفضل 10 قنوات</b>",
-            "━━━━━━━━━━━━━━━━━━━━━━",
-            "",
-        ]
-
-        if not rows:
-            lines.append("<i>📭 لا توجد قنوات مسجّلة بعد.</i>")
-        else:
-            medals = ["🥇", "🥈", "🥉"] + ["🔹"] * 7
-            for i, r in enumerate(rows):
-                name = (r.get("name") or "—")[:28]
-                published = int(r.get("published") or 0)
-                total = int(r.get("total") or 0)
-                rate = r.get("success_rate", 0)
-                lines.append(
-                    f"{medals[i]} <b>{name}</b>\n"
-                    f"   📤 {published}/{total} "
-                    f"({rate}% نجاح)"
-                )
-
-        text = "\n".join(lines)
-        kb = _back_refresh_keyboard(target="admin_analytics",
-                                    refresh="top_channels_btn")
-        await _safe_edit(query, text, kb)
-    except Exception as e:
-        logger.error("show_top_channels: %s", e, exc_info=True)
-        await _safe_edit(
-            query, "❌ فشل جلب القنوات.",
-            _back_keyboard("admin_analytics"),
-        )
-
-
-# ═══════════════════════════════════════════════════════════════════════
-# 4) إحصائيات النشر — publish_stats_btn
-# ═══════════════════════════════════════════════════════════════════════
-
-async def show_publish_stats(update: Update,
-                             context: ContextTypes.DEFAULT_TYPE) -> None:
-    """📊 متوسط النشر وإحصائيات عامة."""
-    query = update.callback_query
-    await query.answer("⏳ جاري الحساب...")
-
-    if not _check_developer(update.effective_user.id):
-        await query.answer("❌ للمطور فقط", show_alert=True)
-        return
-
-    try:
-        stats = await DB.get_publish_stats() or {}
-
-        total_ch = int(stats.get("total_channels") or 0)
-        total_po = int(stats.get("total_posts") or 0)
-        pub = int(stats.get("published") or 0)
-        failed = int(stats.get("failed") or 0)
-        pending = int(stats.get("pending") or 0)
-        avg_posts = stats.get("avg_posts_per_channel", 0)
-        avg_pub = stats.get("avg_published_per_channel", 0)
-        succ = stats.get("success_rate", 0)
-        comp = stats.get("completion_rate", 0)
-
-        text = (
-            "📊 <b>إحصائيات النشر</b>\n"
-            "━━━━━━━━━━━━━━━━━━━━━━\n\n"
-            f"📡 عدد القنوات: <b>{_fmt_num(total_ch)}</b>\n"
-            f"📥 إجمالي المنشورات: <b>{_fmt_num(total_po)}</b>\n"
-            f"✅ نُشرت: <b>{_fmt_num(pub)}</b>\n"
-            f"❌ فشلت: <b>{_fmt_num(failed)}</b>\n"
-            f"⏳ منتظرة: <b>{_fmt_num(pending)}</b>\n\n"
-            f"📈 متوسط لكل قناة: <b>{avg_posts}</b>\n"
-            f"📤 متوسط المنشور: <b>{avg_pub}</b>\n\n"
-            f"🎯 نسبة النجاح: <b>{succ}%</b>\n"
-            f"🏁 نسبة الإنجاز: <b>{comp}%</b>"
-        )
-        kb = _back_refresh_keyboard(target="admin_analytics",
-                                    refresh="publish_stats_btn")
-        await _safe_edit(query, text, kb)
-    except Exception as e:
-        logger.error("show_publish_stats: %s", e, exc_info=True)
-        await _safe_edit(
-            query, "❌ فشل جلب الإحصائيات.",
-            _back_keyboard("admin_analytics"),
-        )
-
-
-# ═══════════════════════════════════════════════════════════════════════
-# 5) نسبة النجاح — channels_rate_btn
-# ═══════════════════════════════════════════════════════════════════════
-
-async def show_channels_rate(update: Update,
-                             context: ContextTypes.DEFAULT_TYPE) -> None:
-    """🎯 نسبة النجاح لكل قناة (الأقل أولاً)."""
-    query = update.callback_query
-    await query.answer("⏳ جاري الحساب...")
-
-    if not _check_developer(update.effective_user.id):
-        await query.answer("❌ للمطور فقط", show_alert=True)
-        return
-
-    try:
-        rows = await DB.get_channel_success_rate(
-            limit=20, filter_min_attempts=3,
-        )
-        rows = rows or []
-
-        lines = [
-            "🎯 <b>نسبة النجاح</b>",
-            "━━━━━━━━━━━━━━━━━━━━━━",
-            "<i>الأقل نجاحاً أولاً (≥ 3 محاولات)</i>",
-            "",
-        ]
-
-        if not rows:
-            lines.append("<i>📭 لا توجد بيانات كافية بعد.</i>")
-        else:
-            # رتّب تصاعدياً بـ success_rate
-            rows = sorted(rows, key=lambda x: x.get("success_rate", 100))
-            for r in rows[:15]:
-                name = (r.get("name") or "—")[:24]
-                rate = r.get("success_rate", 0)
-                att = int(r.get("attempted") or 0)
-                color = "🟢" if rate >= 80 else ("🟡" if rate >= 50 else "🔴")
-                bar = _bar(rate, 100, width=10)
-                lines.append(
-                    f"{color} <b>{name}</b>\n"
-                    f"   {bar} <b>{rate}%</b> ({att} محاولة)"
-                )
-
-        text = "\n".join(lines)
-        kb = _back_refresh_keyboard(target="admin_analytics",
-                                    refresh="channels_rate_btn")
-        await _safe_edit(query, text, kb)
-    except Exception as e:
-        logger.error("show_channels_rate: %s", e, exc_info=True)
-        await _safe_edit(
-            query, "❌ فشل جلب النسب.",
-            _back_keyboard("admin_analytics"),
-        )
-
-
-# ═══════════════════════════════════════════════════════════════════════
-# 6) الاشتراكات — subscriptions_btn
-# ═══════════════════════════════════════════════════════════════════════
-
-async def show_subscriptions(update: Update,
-                             context: ContextTypes.DEFAULT_TYPE) -> None:
-    """💎 اشتراكات جديدة شهرياً."""
-    query = update.callback_query
-    await query.answer("⏳ جاري الحساب...")
-
-    if not _check_developer(update.effective_user.id):
-        await query.answer("❌ للمطور فقط", show_alert=True)
-        return
-
-    try:
-        rows = await DB.get_subscription_rate(months=6)
-        rows = rows or []
-
-        total = sum(r.get("count", 0) for r in rows)
-        max_c = max((r.get("count", 0) for r in rows), default=0)
-
-        lines = [
-            "💎 <b>الاشتراكات — 6 أشهر</b>",
-            "━━━━━━━━━━━━━━━━━━━━━━",
-            "",
-            f"📊 الإجمالي: <b>{_fmt_num(total)}</b>",
-            "",
-        ]
-
-        if rows:
-            for r in rows:
-                month = str(r.get("month", "?"))
-                cnt = r.get("count", 0)
-                bar = _bar(cnt, max_c or 1, width=10)
-                lines.append(f"  <code>{month}</code> {bar} <b>{cnt}</b>")
-        else:
-            lines.append("<i>📭 لا توجد اشتراكات بعد.</i>")
-
-        text = "\n".join(lines)
-        kb = _back_refresh_keyboard(target="admin_analytics",
-                                    refresh="subscriptions_btn")
-        await _safe_edit(query, text, kb)
-    except Exception as e:
-        logger.error("show_subscriptions: %s", e, exc_info=True)
-        await _safe_edit(
-            query, "❌ فشل جلب الاشتراكات.",
-            _back_keyboard("admin_analytics"),
-        )
-
-
-# ═══════════════════════════════════════════════════════════════════════
-# 7) Pool مباشر — pool_live_btn
-# ═══════════════════════════════════════════════════════════════════════
-
-async def show_pool_live(update: Update,
-                         context: ContextTypes.DEFAULT_TYPE) -> None:
-    """🚀 حالة Pool مباشرة (يحدّث نفسه)."""
-    query = update.callback_query
-    await query.answer("⏳ جاري الفحص...")
-
-    if not _check_developer(update.effective_user.id):
-        await query.answer("❌ للمطور فقط", show_alert=True)
-        return
-
-    try:
-        pool = await DB.get_pool_live() or {}
-
-        if not pool.get("available"):
-            reason = pool.get("type", "unknown")
-            await _safe_edit(
-                query,
-                f"⚠️ Pool غير متاح: <code>{reason}</code>",
-                _back_keyboard("admin_analytics"),
-            )
-            return
-
-        util = pool.get("utilization_pct", 0)
-        color = "🟢" if util < 50 else ("🟡" if util < 80 else "🔴")
-        bar = _bar(util, 100, width=15)
-
-        lines = [
-            "🚀 <b>Pool مباشر</b>",
-            "━━━━━━━━━━━━━━━━━━━━━━",
-            "",
-            f"{color} الاستخدام: <b>{util}%</b>",
-            f"<code>{bar}</code>",
-            "",
-            f"📊 الحجم: <b>{pool.get('in_use', 0)}/{pool.get('max_size', 0)}</b>",
-            f"🆓 فاضي: <b>{pool.get('idle_size', 0)}</b>",
-            f"🔗 مفتوح: <b>{pool.get('current_size', 0)}</b>",
-        ]
-
-        if "rollback_timeout" in pool:
-            lines.append(f"\n⏱️ rollback timeout: "
-                         f"<b>{pool['rollback_timeout']}s</b>")
-        if "idle_tx_audit_active" in pool:
-            active = pool["idle_tx_audit_active"]
-            icon = "✅" if active else "❌"
-            lines.append(f"{icon} رصد idle-tx: "
-                         f"<b>{'نشط' if active else 'معطّل'}</b>")
-        if "idle_tx_last_count" in pool:
-            cnt = pool["idle_tx_last_count"]
-            ic = "🟢" if cnt == 0 else ("🟠" if cnt < 3 else "🔴")
-            lines.append(f"{ic} idle-tx آخر قراءة: <b>{cnt}</b>")
-
-        lines.append(f"\n🕐 <i>{TimeUtils.mecca_iso()[:19]}</i>")
-
-        text = "\n".join(lines)
-        kb = _back_refresh_keyboard(target="admin_analytics",
-                                    refresh="pool_live_btn")
-        await _safe_edit(query, text, kb)
-    except Exception as e:
-        logger.error("show_pool_live: %s", e, exc_info=True)
-        await _safe_edit(
-            query, "❌ فشل فحص Pool.",
-            _back_keyboard("admin_analytics"),
-        )
-
-
-# ═══════════════════════════════════════════════════════════════════════
-# 8) أبطأ الاستعلامات — slow_queries_btn
-# ═══════════════════════════════════════════════════════════════════════
-
-async def show_slow_queries(update: Update,
-                            context: ContextTypes.DEFAULT_TYPE) -> None:
-    """🐌 أبطأ الاستعلامات."""
-    query = update.callback_query
-    await query.answer("⏳ جاري الفحص...")
-
-    if not _check_developer(update.effective_user.id):
-        await query.answer("❌ للمطور فقط", show_alert=True)
-        return
-
-    try:
-        rows = await DB.get_slowest_queries(limit=15)
-        rows = rows or []
-
-        lines = [
-            "🐌 <b>أبطأ الاستعلامات</b>",
-            "━━━━━━━━━━━━━━━━━━━━━━",
-            "",
-        ]
-
-        if not rows:
-            lines.append(
-                "<i>📭 لا توجد استعلامات بطيئة مسجّلة.</i>\n\n"
-                "💡 تظهر هنا الاستعلامات التي تتجاوز العتبة."
-            )
-        else:
-            for i, r in enumerate(rows[:10], 1):
-                q = (r.get("query") or r.get("sql") or "?")[:80]
-                elapsed = r.get("elapsed", 0)
-                # escape HTML
-                q = q.replace("<", "&lt;").replace(">", "&gt;")
-                lines.append(
-                    f"{i}. <code>{q}</code>\n"
-                    f"   ⏱️ <b>{elapsed:.2f}s</b>"
-                )
-
-        text = "\n".join(lines)
-        kb = _back_refresh_keyboard(target="admin_analytics",
-                                    refresh="slow_queries_btn")
-        await _safe_edit(query, text, kb)
-    except Exception as e:
-        logger.error("show_slow_queries: %s", e, exc_info=True)
-        await _safe_edit(
-            query, "❌ فشل جلب الاستعلامات.",
-            _back_keyboard("admin_analytics"),
-        )
-
-
-# ═══════════════════════════════════════════════════════════════════════
-# 9) تصدير Excel — export_excel_btn
-# ═══════════════════════════════════════════════════════════════════════
-
-async def export_excel(update: Update,
-                       context: ContextTypes.DEFAULT_TYPE) -> None:
-    """📤 تصدير بيانات التحليلات إلى Excel."""
-    query = update.callback_query
-    await query.answer("⏳ جاري التصدير...")
-
-    if not _check_developer(update.effective_user.id):
-        await query.answer("❌ للمطور فقط", show_alert=True)
-        return
-
-    try:
-        try:
-            import openpyxl
-        except ImportError:
-            await query.answer(
-                "❌ مكتبة openpyxl غير مُثبّتة.\n"
-                "ثبّتها: pip install openpyxl",
-                show_alert=True,
-            )
-            return
-
-        wb = openpyxl.Workbook()
-
-        # ─── ورقة 1: نمو المستخدمين ───
-        ws1 = wb.active
-        ws1.title = "User Growth"
-        ws1.append(["Date", "Count"])
-        rows1 = await DB.get_user_growth(days=30) or []
-        for r in rows1:
-            ws1.append([r.get("date"), r.get("count")])
-
-        # ─── ورقة 2: أفضل القنوات ───
-        ws2 = wb.create_sheet("Top Channels")
-        ws2.append([
-            "Name", "Channel ID", "Total", "Published",
-            "Failed", "Success %", "Completion %",
-        ])
-        rows2 = await DB.get_top_channels(limit=50) or []
-        for r in rows2:
-            ws2.append([
-                r.get("name"), r.get("channel_id"),
-                r.get("total"), r.get("published"),
-                r.get("failed"), r.get("success_rate"),
-                r.get("completion_rate"),
-            ])
-
-        # ─── ورقة 3: إحصائيات النشر ───
-        ws3 = wb.create_sheet("Publish Stats")
-        stats = await DB.get_publish_stats() or {}
-        ws3.append(["Metric", "Value"])
-        for k, v in stats.items():
-            ws3.append([k, v])
-
-        # ─── ورقة 4: الاشتراكات ───
-        ws4 = wb.create_sheet("Subscriptions")
-        ws4.append(["Month", "Count"])
-        rows4 = await DB.get_subscription_rate(months=12) or []
-        for r in rows4:
-            ws4.append([r.get("month"), r.get("count")])
-
-        # حفظ في الذاكرة
-        buf = io.BytesIO()
-        wb.save(buf)
-        buf.seek(0)
-
-        filename = (
-            f"analytics_"
-            f"{TimeUtils.utc_now().strftime('%Y%m%d_%H%M%S')}.xlsx"
-        )
-
-        await context.bot.send_document(
-            chat_id=query.message.chat_id,
-            document=buf,
-            filename=filename,
-            caption=(
-                "📤 <b>تصدير التحليلات</b>\n"
-                "━━━━━━━━━━━━━━━━━━━━━━\n"
-                "📊 4 أوراق:\n"
-                "  • User Growth\n"
-                "  • Top Channels\n"
-                "  • Publish Stats\n"
-                "  • Subscriptions"
-            ),
-            parse_mode="HTML",
-        )
-        await query.answer("✅ تم التصدير", show_alert=False)
-    except Exception as e:
-        logger.error("export_excel: %s", e, exc_info=True)
-        await query.answer(
-            f"❌ فشل التصدير: {str(e)[:100]}",
-            show_alert=True,
-        )
-
-
-# ═══════════════════════════════════════════════════════════════════════
-# 10) التوجيه المركزي
-# ═══════════════════════════════════════════════════════════════════════
-
-_ANALYTICS_HANDLERS = {
-    "admin_analytics": show_analytics_menu,
-    "growth_30d_btn": show_growth_30d,
-    "top_channels_btn": show_top_channels,
-    "publish_stats_btn": show_publish_stats,
-    "channels_rate_btn": show_channels_rate,
-    "subscriptions_btn": show_subscriptions,
-    "pool_live_btn": show_pool_live,
-    "slow_queries_btn": show_slow_queries,
-    "export_excel_btn": export_excel,
-    "refresh_btn": None,  # يُعالَج من قِبَل نفس الزر السابق
-}
-
-
-async def handle_analytics_callback(
-    update: Update, context: ContextTypes.DEFAULT_TYPE
-) -> None:
-    """موزّع أزرار التحليلات."""
-    query = update.callback_query
-    if not query:
-        return
-
-    # استخرج المفتاح (قد يأتي بصيغة "admin_analytics" أو "admin_analytics:123")
-    data = (query.data or "").split(":")[0]
-    if data not in ANALYTICS_BUTTONS:
-        return
-
-    if data == "refresh_btn":
-        # استخدم آخر زر تم الضغط عليه من context.user_data
-        last = context.user_data.get("last_analytics_btn", "admin_analytics")
-        data = last
+        return "⚪"
+    low, high = thresholds
+    if inverse:
+        if v <= low: return "🟢"
+        if v <= high: return "🟡"
+        return "🔴"
     else:
-        context.user_data["last_analytics_btn"] = data
+        if v >= high: return "🟢"
+        if v >= low: return "🟡"
+        return "🔴"
 
-    handler = _ANALYTICS_HANDLERS.get(data)
-    if handler is None:
-        await query.answer("⚠️ غير مدعوم", show_alert=False)
-        return
 
+def _dead_tuple_color(dead: int, live: int) -> str:
+    total = live + dead
+    if total == 0: return "⚪"
+    ratio = dead / total
+    if live < DEAD_TUPLE_MIN_LIVE and ratio < 0.20: return "🟢"
+    low, mid, high = DEAD_TUPLE_THRESHOLDS
+    if ratio < low: return "🟢"
+    if ratio < mid: return "🟡"
+    if ratio < high: return "🟠"
+    return "🔴"
+
+
+def _dead_tuple_advice(dead: int, live: int, table: str) -> str:
+    total = live + dead
+    if total == 0: return ""
+    ratio = dead / total
+    if live < DEAD_TUPLE_MIN_LIVE and ratio < 0.20: return ""
+    if ratio < 0.05: return ""
+    if ratio < 0.10: return f"💡 راقب {table}"
+    if ratio < 0.20: return f"⚠️ VACUUM ANALYZE {table}"
+    return f"🔴 VACUUM FULL {table} عاجل"
+
+
+def _idle_tx_color(count: int) -> str:
+    if count >= IDLE_TX_CRIT_COUNT: return "🔴"
+    if count >= IDLE_TX_WARN_COUNT: return "🟠"
+    return "🟢"
+
+
+def _format_bytes(num_bytes) -> str:
     try:
-        await handler(update, context)
-    except Exception as e:
-        logger.error(
-            "handle_analytics_callback[%s]: %s", data, e, exc_info=True)
+        b = float(num_bytes or 0)
+    except (TypeError, ValueError):
+        return "0 B"
+    if b < 1024: return f"{int(b)} B"
+    if b < 1024 * 1024: return f"{b / 1024:.1f} KB"
+    if b < 1024 * 1024 * 1024: return f"{b / (1024 * 1024):.2f} MB"
+    return f"{b / (1024 * 1024 * 1024):.2f} GB"
+
+
+def _compute_channel_rates(total: int, published: int, failed: int) -> Dict[str, Any]:
+    attempted = published + failed
+    pending = max(0, total - attempted)
+    success_rate = round(published / attempted * 100, 1) if attempted > 0 else DEFAULT_SUCCESS_RATE
+    completion_rate = round(published / total * 100, 1) if total > 0 else 0.0
+    return {'attempted': attempted, 'pending': pending,
+            'success_rate': success_rate, 'completion_rate': completion_rate}
+
+
+class AnalyticsMixin:
+
+    async def get_user_growth(self, days: int = 30) -> List[Dict[str, Any]]:
         try:
-            await query.answer(f"❌ خطأ: {str(e)[:80]}", show_alert=True)
-        except Exception:
-            pass
+            days = max(1, min(int(days), 365))
+            since = self.TimeUtils.utc_now() - timedelta(days=days)
+            if getattr(self, "USE_POSTGRES", False):
+                query = """SELECT created_at::date AS day, COUNT(*) AS cnt
+                    FROM users WHERE created_at >= $1
+                    GROUP BY created_at::date ORDER BY day ASC"""
+            else:
+                query = """SELECT DATE(created_at) AS day, COUNT(*) AS cnt
+                    FROM users WHERE created_at >= ?
+                    GROUP BY DATE(created_at) ORDER BY day ASC"""
+            rows = await self.fetchall(query, (since,))
+            result = []
+            for r in (rows or []):
+                rd = r if isinstance(r, dict) else dict(r)
+                day = rd.get('day')
+                cnt = rd.get('cnt', 0)
+                if day is None: continue
+                result.append({'date': str(day)[:10], 'count': int(cnt or 0)})
+            return result
+        except Exception as e:
+            logger.error(f"❌ get_user_growth: {e}", exc_info=True)
+            return []
 
+    async def get_top_channels(self, limit: int = 10) -> List[Dict[str, Any]]:
+        try:
+            limit = max(1, min(int(limit), 50))
+            query = f"""SELECT uc.id, uc.channel_name, uc.channel_id, uc.user_id,
+                COUNT(p.id) AS total_posts,
+                SUM(CASE WHEN p.published = 1 THEN 1 ELSE 0 END) AS published,
+                SUM(CASE WHEN p.published = 0 AND p.fail_count >= {FAIL_COUNT_THRESHOLD}
+                    THEN 1 ELSE 0 END) AS failed
+                FROM user_channels uc
+                LEFT JOIN posts p ON p.channel_db_id = uc.id
+                WHERE uc.banned = 0
+                GROUP BY uc.id, uc.channel_name, uc.channel_id, uc.user_id
+                ORDER BY published DESC, total_posts DESC LIMIT ?"""
+            rows = await self.fetchall(query, (limit,))
+            result = []
+            for r in (rows or []):
+                rd = r if isinstance(r, dict) else dict(r)
+                total = int(rd.get('total_posts', 0) or 0)
+                published = int(rd.get('published', 0) or 0)
+                failed = int(rd.get('failed', 0) or 0)
+                rates = _compute_channel_rates(total, published, failed)
+                result.append({
+                    'name': rd.get('channel_name') or f"قناة {rd.get('id')}",
+                    'channel_id': rd.get('channel_id'),
+                    'user_id': rd.get('user_id'), 'total': total,
+                    'published': published, 'failed': failed,
+                    'attempted': rates['attempted'], 'pending': rates['pending'],
+                    'success_rate': rates['success_rate'],
+                    'completion_rate': rates['completion_rate']})
+            return result
+        except Exception as e:
+            logger.error(f"❌ get_top_channels: {e}", exc_info=True)
+            return []
 
-# ═══════════════════════════════════════════════════════════════════════
-# 11) /analytics — أمر مباشر
-# ═══════════════════════════════════════════════════════════════════════
+    async def get_channel_success_rate(self, limit: int = 20, filter_min_attempts: int = 0) -> List[Dict[str, Any]]:
+        channels = await self.get_top_channels(limit)
+        if filter_min_attempts > 0:
+            min_att = max(0, int(filter_min_attempts))
+            channels = [c for c in channels if c.get('attempted', 0) >= min_att]
+        return channels
 
-async def cmd_analytics(update: Update,
-                        context: ContextTypes.DEFAULT_TYPE) -> None:
-    """/analytics — فتح لوحة التحليلات."""
-    if not _check_developer(update.effective_user.id):
-        await safe_send(
-            context.bot, update.effective_chat.id,
-            "❌ هذا الأمر للمطور فقط.",
-        )
-        return
-    await show_analytics_menu(update, context)
+    async def get_publish_stats(self) -> Dict[str, Any]:
+        try:
+            row = await self.fetchone(f"""SELECT
+                COUNT(DISTINCT uc.id) AS total_channels,
+                COUNT(p.id) AS total_posts,
+                SUM(CASE WHEN p.published = 1 THEN 1 ELSE 0 END) AS published,
+                SUM(CASE WHEN p.published = 0 AND p.fail_count >= {FAIL_COUNT_THRESHOLD}
+                    THEN 1 ELSE 0 END) AS failed
+                FROM user_channels uc
+                LEFT JOIN posts p ON p.channel_db_id = uc.id
+                WHERE uc.banned = 0""") or {}
+            rd = row if isinstance(row, dict) else dict(row)
+            total_channels = int(rd.get('total_channels', 0) or 0)
+            total_posts = int(rd.get('total_posts', 0) or 0)
+            published = int(rd.get('published', 0) or 0)
+            failed = int(rd.get('failed', 0) or 0)
+            avg_posts = round(total_posts / total_channels, 1) if total_channels > 0 else 0
+            avg_published = round(published / total_channels, 1) if total_channels > 0 else 0
+            rates = _compute_channel_rates(total_posts, published, failed)
+            return {'total_channels': total_channels, 'total_posts': total_posts,
+                    'published': published, 'failed': failed,
+                    'attempted': rates['attempted'], 'pending': rates['pending'],
+                    'avg_posts_per_channel': avg_posts,
+                    'avg_published_per_channel': avg_published,
+                    'success_rate': rates['success_rate'],
+                    'completion_rate': rates['completion_rate']}
+        except Exception as e:
+            logger.error(f"❌ get_publish_stats: {e}", exc_info=True)
+            return {'total_channels': 0, 'total_posts': 0, 'published': 0,
+                    'failed': 0, 'attempted': 0, 'pending': 0,
+                    'avg_posts_per_channel': 0, 'avg_published_per_channel': 0,
+                    'success_rate': DEFAULT_SUCCESS_RATE, 'completion_rate': 0.0}
 
+    async def get_subscription_rate(self, months: int = 6) -> List[Dict[str, Any]]:
+        try:
+            months = max(1, min(int(months), 24))
+            since = self.TimeUtils.utc_now() - timedelta(days=months * 31)
+            if getattr(self, "USE_POSTGRES", False):
+                query = """SELECT TO_CHAR(created_at, 'YYYY-MM') AS month,
+                    COUNT(*) AS cnt FROM subscriptions WHERE created_at >= $1
+                    GROUP BY TO_CHAR(created_at, 'YYYY-MM') ORDER BY month ASC"""
+            elif getattr(self, "USE_MYSQL", False):
+                query = """SELECT DATE_FORMAT(created_at, '%%Y-%%m') AS month,
+                    COUNT(*) AS cnt FROM subscriptions WHERE created_at >= %s
+                    GROUP BY DATE_FORMAT(created_at, '%%Y-%%m') ORDER BY month ASC"""
+            else:
+                query = """SELECT strftime('%Y-%m', created_at) AS month,
+                    COUNT(*) AS cnt FROM subscriptions WHERE created_at >= ?
+                    GROUP BY strftime('%Y-%m', created_at) ORDER BY month ASC"""
+            rows = await self.fetchall(query, (since,))
+            result = []
+            for r in (rows or []):
+                rd = r if isinstance(r, dict) else dict(r)
+                month = rd.get('month')
+                cnt = rd.get('cnt', 0)
+                if month is None: continue
+                result.append({'month': str(month), 'count': int(cnt or 0)})
+            return result
+        except Exception as e:
+            logger.error(f"❌ get_subscription_rate: {e}", exc_info=True)
+            return []
 
-# ═══════════════════════════════════════════════════════════════════════
-# 12) التسجيل
-# ═══════════════════════════════════════════════════════════════════════
+    async def get_pool_live(self) -> Dict[str, Any]:
+        if not (getattr(self, "USE_POSTGRES", False) or getattr(self, "USE_MYSQL", False)):
+            return {"available": False, "type": "sqlite"}
+        pool = getattr(self, "_pool", None)
+        if pool is None: return {"available": False, "type": "none"}
+        try:
+            max_size = pool.get_max_size() if hasattr(pool, 'get_max_size') else None
+            current_size = pool.get_size() if hasattr(pool, 'get_size') else None
+            idle_size = pool.get_idle_size() if hasattr(pool, 'get_idle_size') else None
+            if max_size is None: max_size = getattr(pool, 'maxsize', None)
+            if current_size is None: current_size = getattr(pool, 'size', None)
+            if idle_size is None: idle_size = getattr(pool, 'freesize', None)
+            if max_size is None or current_size is None:
+                return {"available": False, "type": "unknown"}
+            if idle_size is None: idle_size = 0
+            in_use = max(0, current_size - idle_size)
+            util = (in_use / max_size * 100) if max_size > 0 else 0.0
+            result = {"available": True,
+                    "type": "postgres" if getattr(self, "USE_POSTGRES", False) else "mysql",
+                    "max_size": max_size, "current_size": current_size,
+                    "idle_size": idle_size, "in_use": in_use,
+                    "utilization_pct": round(util, 1)}
+            if getattr(self, "USE_POSTGRES", False):
+                try:
+                    from database import PG_ROLLBACK_ON_RETURN_TIMEOUT
+                    result["rollback_timeout"] = PG_ROLLBACK_ON_RETURN_TIMEOUT
+                except Exception: pass
+                audit_task = getattr(self, "_idle_tx_audit_task", None)
+                result["idle_tx_audit_active"] = (audit_task is not None and not audit_task.done())
+                last_count = getattr(self, "_idle_tx_audit_last_count", None)
+                if last_count is not None: result["idle_tx_last_count"] = int(last_count)
+            return result
+        except Exception as e:
+            logger.warning(f"⚠️ get_pool_live: {e}")
+            return {"available": False, "type": "error", "error": str(e)}
 
-def register_handlers(application) -> None:
-    """
-    تسجيل كل معالجات التحليلات.
+    async def get_slow_queries(self, limit: int = 20) -> List[Dict[str, Any]]:
+        return await self.get_slowest_queries(limit)
 
-    ⚠️ مهم: يجب استدعاؤها BEFORE المعالج العام في main.py/bot.py
-    """
-    # موزّع مركزي
-    application.add_handler(
-        CallbackQueryHandler(
-            handle_analytics_callback,
-            pattern=r"^(?:" + "|".join(ANALYTICS_BUTTONS) + r")(?::\d+)?$",
-        )
-    )
-    # أمر مباشر
-    application.add_handler(CommandHandler("analytics", cmd_analytics))
+    async def get_slowest_queries(self, limit: int = 20) -> List[Dict[str, Any]]:
+        try:
+            limit = max(1, min(int(limit), 100))
+            log = getattr(self, "_slow_queries_log", None)
+            if not log: return []
+            lock = getattr(self, "_slow_queries_lock", None)
+            if lock is not None:
+                async with lock: snapshot = list(log)
+            else: snapshot = list(log)
+            snapshot.sort(key=lambda x: x.get('elapsed', 0), reverse=True)
+            return snapshot[:limit]
+        except Exception as e:
+            logger.warning(f"⚠️ get_slowest_queries: {e}")
+            return []
 
-    logger.info(
-        "✅ handlers_analytics: تم تسجيل %d زر + /analytics",
-        len(ANALYTICS_BUTTONS),
-    )
+    async def get_idle_tx_info(self, min_seconds=None, app_filter=None, limit=None) -> Dict[str, Any]:
+        if not getattr(self, "USE_POSTGRES", False):
+            return {"available": False, "reason": "not_postgres"}
+        audit_fn = getattr(self, "audit_idle_in_transactions", None)
+        if audit_fn is None:
+            return {"available": False, "reason": "requires_database_v7.7.62+"}
+        try:
+            kwargs = {}
+            if min_seconds is not None: kwargs["min_seconds"] = min_seconds
+            if app_filter is not None: kwargs["app_filter"] = app_filter
+            if limit is not None: kwargs["limit"] = limit
+            report = await audit_fn(**kwargs)
+            if not isinstance(report, dict):
+                return {"available": False, "reason": "invalid_report_type"}
+            return {"available": True, **report}
+        except Exception as e:
+            logger.warning(f"⚠️ get_idle_tx_info: {e}")
+            return {"available": False, "reason": "call_failed", "error": str(e)}
 
+    async def get_idle_tx_status_info(self) -> Dict[str, Any]:
+        if not getattr(self, "USE_POSTGRES", False):
+            return {"available": False, "reason": "not_postgres"}
+        status_fn = getattr(self, "get_idle_tx_audit_status", None)
+        if status_fn is None:
+            return {"available": False, "reason": "requires_database_v7.7.62+"}
+        try:
+            status = await status_fn()
+            if not isinstance(status, dict):
+                return {"available": False, "reason": "invalid_status_type"}
+            return {"available": True, **status}
+        except Exception as e:
+            logger.warning(f"⚠️ get_idle_tx_status_info: {e}")
+            return {"available": False, "reason": "call_failed", "error": str(e)}
 
-# alias شائع
-register = register_handlers
+    async def get_dead_tuples(self, limit: int = 20) -> List[Dict[str, Any]]:
+        if not getattr(self, "USE_POSTGRES", False): return []
+        try:
+            limit = max(1, min(int(limit), 100))
+            rows = await self.fetchall("""SELECT relname AS table_name,
+                n_live_tup AS live_tuples, n_dead_tup AS dead_tuples,
+                n_mod_since_analyze, last_vacuum, last_autovacuum,
+                last_analyze, last_autoanalyze
+                FROM pg_stat_user_tables ORDER BY n_dead_tup DESC LIMIT $1""", (limit,))
+            result = []
+            for r in (rows or []):
+                rd = r if isinstance(r, dict) else dict(r)
+                name = rd.get('table_name') or '?'
+                live = int(rd.get('live_tuples', 0) or 0)
+                dead = int(rd.get('dead_tuples', 0) or 0)
+                total = live + dead
+                ratio = (dead / total) if total > 0 else 0.0
+                try: n_mod = int(rd.get('n_mod_since_analyze', 0) or 0)
+                except (TypeError, ValueError): n_mod = 0
+                result.append({'name': name, 'live': live, 'dead': dead,
+                    'total': total, 'dead_ratio': round(ratio, 4),
+                    'color': _dead_tuple_color(dead, live),
+                    'advice': _dead_tuple_advice(dead, live, name),
+                    'n_mod_since_analyze': n_mod,
+                    'last_vacuum': rd.get('last_vacuum'),
+                    'last_autovacuum': rd.get('last_autovacuum'),
+                    'last_analyze': rd.get('last_analyze'),
+                    'last_autoanalyze': rd.get('last_autoanalyze')})
+            return result
+        except Exception as e:
+            logger.error(f"❌ get_dead_tuples: {e}", exc_info=True)
+            return []
+
+    async def get_table_sizes(self, limit: int = 20) -> List[Dict[str, Any]]:
+        if not getattr(self, "USE_POSTGRES", False): return []
+        try:
+            limit = max(1, min(int(limit), 100))
+            rows = await self.fetchall("""SELECT relname AS table_name,
+                pg_total_relation_size(relid) AS total_bytes,
+                pg_relation_size(relid) AS table_bytes,
+                pg_indexes_size(relid) AS index_bytes
+                FROM pg_stat_user_tables
+                ORDER BY pg_total_relation_size(relid) DESC LIMIT $1""", (limit,))
+            result = []
+            for r in (rows or []):
+                rd = r if isinstance(r, dict) else dict(r)
+                total_bytes = int(rd.get('total_bytes', 0) or 0)
+                total_kb = total_bytes / 1024
+                if total_kb >= TABLE_SIZE_CRITICAL_KB: size_color = "🔴"
+                elif total_kb >= TABLE_SIZE_WARN_KB: size_color = "🟡"
+                else: size_color = "🟢"
+                result.append({'name': rd.get('table_name') or '?',
+                    'total_bytes': total_bytes,
+                    'table_bytes': int(rd.get('table_bytes', 0) or 0),
+                    'index_bytes': int(rd.get('index_bytes', 0) or 0),
+                    'total_display': _format_bytes(total_bytes),
+                    'size_color': size_color})
+            return result
+        except Exception as e:
+            logger.error(f"❌ get_table_sizes: {e}", exc_info=True)
+            return []
+
+    async def get_indexes_info(self, tables=None) -> Dict[str, List[Dict[str, Any]]]:
+        if not getattr(self, "USE_POSTGRES", False): return {}
+        try:
+            if tables:
+                placeholders = ",".join(f"${i+1}" for i in range(len(tables)))
+                query = f"""SELECT t.relname AS table_name, i.relname AS index_name,
+                    pg_relation_size(i.oid) AS index_bytes,
+                    idx.indisunique AS is_unique, idx.indisprimary AS is_primary
+                    FROM pg_index idx JOIN pg_class i ON i.oid = idx.indexrelid
+                    JOIN pg_class t ON t.oid = idx.indrelid
+                    JOIN pg_namespace n ON n.oid = t.relnamespace
+                    WHERE n.nspname = 'public' AND t.relname IN ({placeholders})
+                    ORDER BY t.relname, i.relname"""
+                rows = await self.fetchall(query, tuple(tables))
+            else:
+                rows = await self.fetchall("""SELECT t.relname AS table_name,
+                    i.relname AS index_name, pg_relation_size(i.oid) AS index_bytes,
+                    idx.indisunique AS is_unique, idx.indisprimary AS is_primary
+                    FROM pg_index idx JOIN pg_class i ON i.oid = idx.indexrelid
+                    JOIN pg_class t ON t.oid = idx.indrelid
+                    JOIN pg_namespace n ON n.oid = t.relnamespace
+                    WHERE n.nspname = 'public'
+                    ORDER BY t.relname, i.relname""")
+            result = {}
+            for r in (rows or []):
+                rd = r if isinstance(r, dict) else dict(r)
+                tname = rd.get('table_name') or '?'
+                ibytes = int(rd.get('index_bytes', 0) or 0)
+                result.setdefault(tname, []).append({
+                    'index_name': rd.get('index_name') or '?',
+                    'is_unique': bool(rd.get('is_unique')),
+                    'is_primary': bool(rd.get('is_primary')),
+                    'size_bytes': ibytes,
+                    'size_display': _format_bytes(ibytes)})
+            return result
+        except Exception as e:
+            logger.error(f"❌ get_indexes_info: {e}", exc_info=True)
+            return {}
+
+    async def get_autovacuum_settings(self) -> Dict[str, Any]:
+        if not getattr(self, "USE_POSTGRES", False): return {}
+        try:
+            rows = await self.fetchall("""SELECT name, setting, unit
+                FROM pg_settings WHERE name IN ('autovacuum','autovacuum_naptime',
+                'autovacuum_vacuum_scale_factor','autovacuum_analyze_scale_factor',
+                'autovacuum_vacuum_threshold','autovacuum_analyze_threshold',
+                'autovacuum_max_workers')""")
+            result = {}
+            for r in (rows or []):
+                rd = r if isinstance(r, dict) else dict(r)
+                name = rd.get('name')
+                setting = rd.get('setting')
+                unit = rd.get('unit') or ''
+                if name:
+                    result[name] = f"{setting}{unit}" if unit else str(setting)
+            return result
+        except Exception as e:
+            logger.error(f"❌ get_autovacuum_settings: {e}", exc_info=True)
+            return {}
+
+    async def get_maintenance_recommendations(self, dead_tables=None, table_sizes=None, idle_tx_info=None) -> List[str]:
+        recs: List[str] = []
+        if not getattr(self, "USE_POSTGRES", False): return recs
+        try:
+            if idle_tx_info is None: idle_tx_info = await self.get_idle_tx_info()
+            if idle_tx_info.get("available"):
+                count = int(idle_tx_info.get("count") or 0)
+                if count >= IDLE_TX_WARN_COUNT:
+                    app_matches = int(idle_tx_info.get("app_matches") or 0)
+                    color = _idle_tx_color(count)
+                    detail = ""
+                    if app_matches > 0:
+                        detail = f"\n🚨 <b>{app_matches}</b> من تطبيقنا"
+                    recs.append(f"{color} <b>idle-in-transaction:</b> <b>{count}</b> اتصال{detail}")
+        except Exception: pass
+        try:
+            admin_count = await self.fetchval("SELECT COUNT(*) FROM admin_logs", default=0) or 0
+            if int(admin_count) > ADMIN_LOGS_WARN_COUNT:
+                recs.append(f"🟠 <b>admin_logs</b> = {admin_count} سجل")
+        except Exception: pass
+        try:
+            bw_count = await self.fetchval("SELECT COUNT(*) FROM banned_words", default=0) or 0
+            if int(bw_count) > BANNED_WORDS_WARN_COUNT:
+                recs.append(f"🟡 <b>banned_words</b> = {bw_count} كلمة")
+        except Exception: pass
+        try:
+            if dead_tables is None: dead_tables = await self.get_dead_tuples(20)
+            for t in dead_tables:
+                if t.get('dead_ratio', 0) >= 0.10:
+                    recs.append(f"🟠 <b>{t['name']}</b> — dead={t['dead']} ({t['dead_ratio'] * 100:.1f}%)")
+        except Exception: pass
+        if not recs:
+            recs.append("✅ لا توجد توصيات — قاعدة البيانات في حالة ممتازة")
+        return recs
+
+    async def get_db_diagnostics(self, top_n: int = 10) -> Dict[str, Any]:
+        result = {'available': False, 'db_type': 'sqlite',
+                'dead_tuples': [], 'table_sizes': [], 'indexes': {},
+                'autovacuum': {}, 'idle_tx': {}, 'idle_tx_status': {},
+                'recommendations': [], 'summary': {}}
+        if not getattr(self, "USE_POSTGRES", False): return result
+        result['available'] = True
+        result['db_type'] = 'postgres'
+        try: result['dead_tuples'] = await self.get_dead_tuples(top_n)
+        except Exception: pass
+        try: result['table_sizes'] = await self.get_table_sizes(top_n)
+        except Exception: pass
+        try:
+            active_tables = [t['name'] for t in result['table_sizes'][:8]]
+            result['indexes'] = await self.get_indexes_info(active_tables)
+        except Exception: pass
+        try: result['autovacuum'] = await self.get_autovacuum_settings()
+        except Exception: pass
+        try: result['idle_tx'] = await self.get_idle_tx_info()
+        except Exception: result['idle_tx'] = {"available": False}
+        try: result['idle_tx_status'] = await self.get_idle_tx_status_info()
+        except Exception: result['idle_tx_status'] = {"available": False}
+        try:
+            result['recommendations'] = await self.get_maintenance_recommendations(
+                dead_tables=result['dead_tuples'],
+                table_sizes=result['table_sizes'],
+                idle_tx_info=result['idle_tx'])
+        except Exception: pass
+        try:
+            dead_total = sum(t.get('dead', 0) for t in result['dead_tuples'])
+            live_total = sum(t.get('live', 0) for t in result['dead_tuples'])
+            overall_color = "🟢"
+            if live_total > 0:
+                g = dead_total / (live_total + dead_total)
+                if g >= 0.20: overall_color = "🔴"
+                elif g >= 0.10: overall_color = "🟠"
+                elif g >= 0.05: overall_color = "🟡"
+            idle_count = 0
+            idle_color = "🟢"
+            if result['idle_tx'].get("available"):
+                idle_count = int(result['idle_tx'].get("count") or 0)
+                idle_color = _idle_tx_color(idle_count)
+            result['summary'] = {'dead_total': dead_total, 'live_total': live_total,
+                'overall_color': overall_color,
+                'tables_count': len(result['dead_tuples']),
+                'idle_tx_count': idle_count, 'idle_tx_color': idle_color}
+        except Exception: pass
+        return result
 
 
 __all__ = [
-    "ANALYTICS_BUTTONS",
-    "show_analytics_menu",
-    "handle_analytics_callback",
-    "show_growth_30d",
-    "show_top_channels",
-    "show_publish_stats",
-    "show_channels_rate",
-    "show_subscriptions",
-    "show_pool_live",
-    "show_slow_queries",
-    "export_excel",
-    "cmd_analytics",
-    "register_handlers",
-    "register",
+    "AnalyticsMixin", "color_emoji", "DEFAULT_SUCCESS_RATE",
+    "FAIL_COUNT_THRESHOLD", "DEAD_TUPLE_THRESHOLDS",
+    "DEAD_TUPLE_MIN_LIVE", "TABLE_SIZE_WARN_KB",
+    "TABLE_SIZE_CRITICAL_KB", "ADMIN_LOGS_WARN_COUNT",
+    "BANNED_WORDS_WARN_COUNT", "IDLE_TX_WARN_COUNT", "IDLE_TX_CRIT_COUNT",
 ]
