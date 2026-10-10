@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-callback_security.py - معالج أزرار الأمان (v9.7.20-NIGHT-NONE-FIX)
+callback_security.py - معالج أزرار الأمان (v9.7.21-PACKAGE-IMPORT-FIX)
 =====================================================================
+🆕 v9.7.21-PACKAGE-IMPORT-FIX:
+    🟢 FIX-1: استبدال كل `from handlers_callback import X` بـ try/except
+              ليدعم الحزمة (`handlers/`) والوحدة المستقلة معاً.
+              كان يسبب ModuleNotFoundError → جميع أزرار sec_* معطلة.
+
 🆕 v9.7.20-NIGHT-NONE-FIX:
-    🟢 FIX-1: إضافة 'none' لقائمة العقوبات المقبولة في sec_set_night_action
-              (كان الزر "بدون عقوبة" في الوضع الليلي معطلاً تماماً).
+    🟢 FIX-1: إضافة 'none' للعقوبات المقبولة في sec_set_night_action.
 
 🆕 v9.7.19-ROUTING-FIX:
-    🟢 FIX-1: إضافة معالجة act_* / ban_* / pen_* داخل handle_parameterized
-              لتمريرها عبر _check_sec_auth المخزَّن.
-    🟢 FIX-2: تفعيل زر act_log:<chat>.
-    🟢 FIX-3: توحيد سلوك أزرار الأدوات المتقدمة.
-    🟢 FIX-4: حماية شاملة بـ try/except مع رسائل خطأ واضحة.
+    🟢 act_* / ban_* / pen_* تُعالج عبر cache auth.
 =====================================================================
 """
 import asyncio
@@ -74,6 +74,31 @@ logger = logging.getLogger(__name__)
 
 
 # ═══════════════════════════════════════════════════════════════════
+# v9.7.21-PACKAGE-IMPORT-FIX: مساعد الاستيراد الآمن لـ handlers_callback
+# ═══════════════════════════════════════════════════════════════════
+
+def _hc_import():
+    """استيراد وحدة handlers_callback بأمان (يدعم الحزمة والوحدة المستقلة)."""
+    try:
+        from . import handlers_callback
+        return handlers_callback
+    except ImportError:
+        try:
+            import handlers_callback
+            return handlers_callback
+        except ImportError:
+            return None
+
+
+def _hc_get(name, default=None):
+    """إرجاع خاصية من handlers_callback بأمان (لا يرمي استثناء)."""
+    mod = _hc_import()
+    if mod is None:
+        return default
+    return getattr(mod, name, default)
+
+
+# ═══════════════════════════════════════════════════════════════════
 # ثوابت الأمان
 # ═══════════════════════════════════════════════════════════════════
 
@@ -94,7 +119,7 @@ _SEC_VIEW_TOKEN_KEY = '_sec_view_token'
 
 
 # ═══════════════════════════════════════════════════════════════════
-# كاشات المصادقة (module-level state)
+# كاشات المصادقة
 # ═══════════════════════════════════════════════════════════════════
 
 _sec_auth_cache: Dict[Tuple[int, int], Tuple[bool, float]] = {}
@@ -104,7 +129,7 @@ _security_stats_cache_local = SmartCache(ttl=SEC_STATS_CACHE_TTL, max_size=500)
 
 
 # ═══════════════════════════════════════════════════════════════════
-# الحاقنات (Dependency Injection)
+# الحاقنات
 # ═══════════════════════════════════════════════════════════════════
 
 _metrics_inc_fn = None
@@ -177,7 +202,6 @@ async def _safe_answer(query, text=None, show_alert=False):
 
 
 async def _show_error(query, context, lang):
-    """عرض خطأ موحّد للمستخدم."""
     try:
         await _safe_edit(query,
             await _trans('error_occurred', lang, "❌ حدث خطأ"),
@@ -187,7 +211,7 @@ async def _show_error(query, context, lang):
 
 
 # ═══════════════════════════════════════════════════════════════════
-# فحص المصادقة وتخزينها المؤقت
+# المصادقة
 # ═══════════════════════════════════════════════════════════════════
 
 def _prune_sec_auth_cache(now):
@@ -332,7 +356,7 @@ async def _resolve_sec_chat_id(context, data):
 
 
 # ═══════════════════════════════════════════════════════════════════
-# SecurityCallbacks — الفئة الرئيسية
+# SecurityCallbacks
 # ═══════════════════════════════════════════════════════════════════
 
 class SecurityCallbacks:
@@ -369,7 +393,6 @@ class SecurityCallbacks:
                 await settings_cache.invalidate_security(chat_id)
             except Exception:
                 pass
-
         settings: Dict = {}
         try:
             raw = await DB.get_security_settings(chat_id) or {}
@@ -379,7 +402,6 @@ class SecurityCallbacks:
         except Exception as e:
             logger.debug(f"DB.get_security_settings({chat_id}): {e}")
             settings = {}
-
         try:
             await settings_cache.set_security(chat_id, settings)
         except Exception:
@@ -450,12 +472,14 @@ class SecurityCallbacks:
                     expected_token=token
                 )
             )
-            try:
-                from handlers_callback import ACTIVE_TASKS
-                ACTIVE_TASKS.add(task)
-                task.add_done_callback(ACTIVE_TASKS.discard)
-            except Exception:
-                pass
+            # v9.7.21: استخدام _hc_get بدل import المباشر
+            active_tasks = _hc_get('ACTIVE_TASKS')
+            if active_tasks is not None:
+                try:
+                    active_tasks.add(task)
+                    task.add_done_callback(active_tasks.discard)
+                except Exception:
+                    pass
         except Exception as e:
             logger.error(f"_render_security_two_phase: {e}", exc_info=True)
 
@@ -850,10 +874,13 @@ class SecurityCallbacks:
     # ─── قناة السجل ───────────────────────────────────────────────
     @staticmethod
     async def _show_log_channel_menu(query, context, chat_id, user_id, lang):
-        from handlers_callback import (
-            _get_log_channel_menu_data, _log_channel_cache_key,
-        )
-        data = await _get_log_channel_menu_data(chat_id)
+        # 🟢 v9.7.21: استخدام _hc_get بدل import المباشر
+        get_data_fn = _hc_get('_get_log_channel_menu_data')
+        if get_data_fn is None:
+            logger.warning("⚠️ _get_log_channel_menu_data غير متاح")
+            await _show_error(query, context, lang)
+            return
+        data = await get_data_fn(chat_id)
         current = data.get('current')
         effective = data.get('effective')
         share_count = data.get('share_count', 0)
@@ -905,7 +932,8 @@ class SecurityCallbacks:
 
     @staticmethod
     async def _handle_log_channel(update, context, query, user_id, lang):
-        from handlers_callback import _invalidate_log_channel_menu_cache
+        # 🟢 v9.7.21: استخدام _hc_get
+        invalidate_fn = _hc_get('_invalidate_log_channel_menu_cache')
         data = query.data or ""
         parts = data.split(":")
         chat_id = None
@@ -958,7 +986,11 @@ class SecurityCallbacks:
                     except Exception:
                         pass
                 ok = await DB.remove_group_log_channel(chat_id)
-                await _invalidate_log_channel_menu_cache(chat_id)
+                if invalidate_fn is not None:
+                    try:
+                        await invalidate_fn(chat_id)
+                    except Exception:
+                        pass
                 if not ok:
                     await _safe_edit(query,
                         await _trans('delete_failed', lang, "❌"),
@@ -991,7 +1023,11 @@ class SecurityCallbacks:
                         f"{test_msg}\n🆔 <code>{chat_id}</code>\n"
                         f"🕐 {TimeUtils.mecca_iso()}",
                         parse_mode='HTML')
-                    await _invalidate_log_channel_menu_cache(chat_id)
+                    if invalidate_fn is not None:
+                        try:
+                            await invalidate_fn(chat_id)
+                        except Exception:
+                            pass
                     await _safe_edit(query, f"✅ <code>{current}</code>",
                         parse_mode='HTML', bot=context.bot)
                 except Exception as e:
@@ -1005,11 +1041,12 @@ class SecurityCallbacks:
             await _show_error(query, context, lang)
 
     # ═══════════════════════════════════════════════════════════════
-    # الموجّه الرئيسي لأزرار sec_*
+    # الموجّه الرئيسي
     # ═══════════════════════════════════════════════════════════════
     @staticmethod
     async def handle_security(update, context, query, user_id, lang=None):
-        from handlers_callback import _render_auto_reply_menu
+        # 🟢 v9.7.21: استخدام _hc_get بدل import المباشر
+        render_auto_reply_fn = _hc_get('_render_auto_reply_menu')
         if not lang:
             lang = await DB.get_user_language(user_id) or 'ar'
         data = query.data
@@ -1038,7 +1075,10 @@ class SecurityCallbacks:
             return
         try:
             if action == "auto_reply_menu":
-                await _render_auto_reply_menu(query, context, chat_id, lang)
+                if render_auto_reply_fn is not None:
+                    await render_auto_reply_fn(query, context, chat_id, lang)
+                else:
+                    await _show_error(query, context, lang)
                 return
             if action == "maxlen":
                 StateManager.set(user_id, UserState.WAIT_MAX_LEN)
@@ -1161,9 +1201,10 @@ class SecurityCallbacks:
                 return
             if action in ("close", "back"):
                 StateManager.clear(user_id)
-                from handlers_callback import CallbackHandlers
-                await CallbackHandlers._show_groups_list(
-                    update, context, query, user_id, lang)
+                show_groups_fn = _hc_get('CallbackHandlers')
+                if show_groups_fn is not None:
+                    await show_groups_fn._show_groups_list(
+                        update, context, query, user_id, lang)
                 return
             if action == "antiflood_settings":
                 await SecurityCallbacks._show_antiflood_settings(
@@ -1334,26 +1375,20 @@ class SecurityCallbacks:
         task = asyncio.create_task(
             SecurityCallbacks._refresh_security_view(
                 query, context, chat_id, lang))
-        try:
-            from handlers_callback import ACTIVE_TASKS
-            ACTIVE_TASKS.add(task)
-            task.add_done_callback(ACTIVE_TASKS.discard)
-        except Exception:
-            pass
+        active_tasks = _hc_get('ACTIVE_TASKS')
+        if active_tasks is not None:
+            try:
+                active_tasks.add(task)
+                task.add_done_callback(active_tasks.discard)
+            except Exception:
+                pass
 
     # ═══════════════════════════════════════════════════════════════
-    # الموجّه للأزرار المعاملاتية
+    # الموجّه المعاملاتي
     # ═══════════════════════════════════════════════════════════════
     @staticmethod
     async def handle_parameterized(update, context, query, user_id, lang,
                                     data) -> bool:
-        """
-        v9.7.20-NIGHT-NONE-FIX: يعالج كل الأزرار المعاملاتية التالية:
-          - set_warn_count / set_warn_penalty / set_duration
-          - set_antiflood_messages / set_antiflood_seconds
-          - sec_set_* / sec_penalty_* / sec_warn_*
-          - act_* / ban_* / pen_* (عبر cache auth)
-        """
         try:
             return await SecurityCallbacks._handle_parameterized_inner(
                 update, context, query, user_id, lang, data
@@ -1369,10 +1404,6 @@ class SecurityCallbacks:
     @staticmethod
     async def _handle_parameterized_inner(update, context, query, user_id,
                                            lang, data) -> bool:
-        # ═══════════════════════════════════════════════════════════
-        # v9.7.19 FIX-1/2/3: معالجة act_* / ban_* / pen_*
-        # ═══════════════════════════════════════════════════════════
-
         # ─── act_log:<chat> ──────────────────────────────────────
         if data.startswith("act_log:"):
             parts = data.split(":")
@@ -1406,7 +1437,7 @@ class SecurityCallbacks:
                     await _trans('invalid_data', lang, "❌"),
                     bot=context.bot)
                 return True
-            action = parts[0][4:]  # add/list/rem
+            action = parts[0][4:]
             chat_id = _coerce_int(parts[1])
             if chat_id == -1:
                 if not CONFIG.is_developer(user_id):
@@ -1490,7 +1521,7 @@ class SecurityCallbacks:
                     bot=context.bot)
                 return True
 
-        # ─── pen_<type>:<chat>  (auto_penalty) ───────────────────
+        # ─── pen_<type>:<chat> ───────────────────────────────────
         if data.startswith("pen_"):
             parts = data.split(":")
             if len(parts) >= 2:
@@ -1516,10 +1547,6 @@ class SecurityCallbacks:
                                      "⏳ جاري التطبيق..."),
                         bot=context.bot)
                     return True
-
-        # ═══════════════════════════════════════════════════════════
-        # نهاية إصلاح v9.7.19 — ما يلي من النسخة الأصلية v9.7.17
-        # ═══════════════════════════════════════════════════════════
 
         # ─── set_warn_count:<chat>:<n> ───────────────────────────
         if data.startswith("set_warn_count:"):
@@ -1547,7 +1574,7 @@ class SecurityCallbacks:
                 query, context, chat_id, lang)
             return True
 
-        # ─── set_antiflood_messages:<chat>:<n> ────────────────────
+        # ─── set_antiflood_messages / seconds ────────────────────
         if data.startswith("set_antiflood_messages:"):
             parts = data.split(":")
             if len(parts) != 3:
@@ -1581,7 +1608,6 @@ class SecurityCallbacks:
             )
             return True
 
-        # ─── set_antiflood_seconds:<chat>:<n> ─────────────────────
         if data.startswith("set_antiflood_seconds:"):
             parts = data.split(":")
             if len(parts) != 3:
@@ -1681,7 +1707,7 @@ class SecurityCallbacks:
                 query, context, chat_id, lang)
             return True
 
-        # ─── sec_set_del_penalty_duration:<chat> ──────────────────
+        # ─── sec_set_del_penalty_duration ─────────────────────────
         if data.startswith("sec_set_del_penalty_duration:"):
             parts = data.split(":")
             if len(parts) != 2:
@@ -1749,7 +1775,7 @@ class SecurityCallbacks:
                 query, context, chat_id, lang)
             return True
 
-        # ─── sec_set_*_duration / sec_*_duration ──────────────────
+        # ─── sec_set_*_duration ───────────────────────────────────
         for prefix, action_type in (
             ("sec_set_mute_duration:", "mute"),
             ("sec_set_ban_duration:", "ban"),
@@ -1774,7 +1800,7 @@ class SecurityCallbacks:
                     update, context, query, chat_id, lang, action_type)
                 return True
 
-        # ─── sec_warn_penalty_duration:<chat> ─────────────────────
+        # ─── sec_warn_penalty_duration ────────────────────────────
         if data.startswith("sec_warn_penalty_duration:"):
             parts = data.split(":")
             if len(parts) != 2:
@@ -1792,7 +1818,7 @@ class SecurityCallbacks:
                 update, context, query, chat_id, lang, 'warn_penalty')
             return True
 
-        # ─── sec_warn_penalty:<chat> ──────────────────────────────
+        # ─── sec_warn_penalty ─────────────────────────────────────
         if data.startswith("sec_warn_penalty:"):
             parts = data.split(":")
             if len(parts) != 2:
@@ -1810,7 +1836,7 @@ class SecurityCallbacks:
                 update, context, query, chat_id, lang)
             return True
 
-        # ─── sec_warn_count:<chat> ────────────────────────────────
+        # ─── sec_warn_count ───────────────────────────────────────
         if data.startswith("sec_warn_count:"):
             parts = data.split(":")
             if len(parts) != 2:
@@ -1828,7 +1854,7 @@ class SecurityCallbacks:
                 update, context, query, chat_id, lang)
             return True
 
-        # ─── sec_warn_toggle:<chat> ───────────────────────────────
+        # ─── sec_warn_toggle ──────────────────────────────────────
         if data.startswith("sec_warn_toggle:"):
             parts = data.split(":")
             if len(parts) != 2:
@@ -1852,7 +1878,7 @@ class SecurityCallbacks:
                 query, context, chat_id, lang)
             return True
 
-        # ─── sec_penalty_<type>:<chat> ────────────────────────────
+        # ─── sec_penalty_<type> ───────────────────────────────────
         if data.startswith("sec_penalty_"):
             parts = data.split(":")
             if len(parts) < 2:
@@ -1892,7 +1918,7 @@ class SecurityCallbacks:
                     bot=context.bot)
             return True
 
-        # ─── sec_set_antiflood_messages / seconds:<chat> ──────────
+        # ─── sec_set_antiflood_messages / seconds ─────────────────
         if data.startswith("sec_set_antiflood_messages:"):
             parts = data.split(":")
             if len(parts) != 2:
@@ -2015,7 +2041,7 @@ class SecurityCallbacks:
                 update, context, query, chat_id, lang, 'night_action')
             return True
 
-        # 🟢 v9.7.20-NIGHT-NONE-FIX: أُضيف 'none' للقائمة
+        # 🟢 v9.7.20: 'none' مُضمَّن
         if data.startswith("sec_set_night_action:"):
             parts = data.split(":")
             if len(parts) < 3:
@@ -2044,7 +2070,7 @@ class SecurityCallbacks:
                     bot=context.bot)
             return True
 
-        # ─── sec_violation_settings:<chat> ────────────────────────
+        # ─── sec_violation_settings / violation_penalties ─────────
         if data.startswith("sec_violation_settings:"):
             parts = data.split(":")
             if len(parts) != 2:
@@ -2062,7 +2088,7 @@ class SecurityCallbacks:
                 update, context, query, chat_id, lang)
             return True
 
-        # ─── sec_set_violation_strikes:<chat> ─────────────────────
+        # ─── sec_set_violation_strikes ────────────────────────────
         if data.startswith("sec_set_violation_strikes:"):
             parts = data.split(":")
             if len(parts) != 2:
@@ -2083,7 +2109,7 @@ class SecurityCallbacks:
                 bot=context.bot)
             return True
 
-        # ─── sec_set_violation_duration:<chat> ────────────────────
+        # ─── sec_set_violation_duration ───────────────────────────
         if data.startswith("sec_set_violation_duration:"):
             parts = data.split(":")
             if len(parts) != 2:
@@ -2101,7 +2127,7 @@ class SecurityCallbacks:
                 update, context, query, chat_id, lang, 'violation')
             return True
 
-        # ─── sec_set_violation_penalty:<chat>:<type> ──────────────
+        # ─── sec_set_violation_penalty ────────────────────────────
         if data.startswith("sec_set_violation_penalty:"):
             parts = data.split(":")
             if len(parts) < 3:
@@ -2130,27 +2156,42 @@ class SecurityCallbacks:
         if data in ("sec_close", "grp_close", "security_close",
                     "back_to_groups", "sec_back"):
             StateManager.clear(user_id)
-            from handlers_callback import (
-                CallbackHandlers, _clear_context_keys,
-            )
-            _clear_context_keys(context)
-            await CallbackHandlers._show_groups_list(
-                update, context, query, user_id, lang)
+            # 🟢 v9.7.21: استخدام _hc_get
+            callbacks_cls = _hc_get('CallbackHandlers')
+            clear_keys_fn = _hc_get('_clear_context_keys')
+            if clear_keys_fn is not None:
+                try:
+                    clear_keys_fn(context)
+                except Exception:
+                    pass
+            if callbacks_cls is not None:
+                try:
+                    await callbacks_cls._show_groups_list(
+                        update, context, query, user_id, lang)
+                except Exception as e:
+                    logger.error(f"close/back error: {e}", exc_info=True)
             return True
         if (data.startswith("sec_close:")
                 or data.startswith("grp_close:")
                 or data.startswith("back_to_groups:")
                 or data.startswith("sec_back:")):
             StateManager.clear(user_id)
-            from handlers_callback import (
-                CallbackHandlers, _clear_context_keys,
-            )
-            _clear_context_keys(context)
-            await CallbackHandlers._show_groups_list(
-                update, context, query, user_id, lang)
+            callbacks_cls = _hc_get('CallbackHandlers')
+            clear_keys_fn = _hc_get('_clear_context_keys')
+            if clear_keys_fn is not None:
+                try:
+                    clear_keys_fn(context)
+                except Exception:
+                    pass
+            if callbacks_cls is not None:
+                try:
+                    await callbacks_cls._show_groups_list(
+                        update, context, query, user_id, lang)
+                except Exception as e:
+                    logger.error(f"close/back error: {e}", exc_info=True)
             return True
 
-        # ─── CB.GRP_SET:<chat> → فتح شاشة الأمان ──────────────────
+        # ─── CB.GRP_SET:<chat> ────────────────────────────────────
         if data.startswith(CB.GRP_SET + ":"):
             await SecurityCallbacks.handle_group_settings(
                 update, context, query, user_id, lang, data)
@@ -2189,6 +2230,7 @@ __all__ = [
     "_SEC_ACTIONS_WITH_SPECIFIC_HANDLERS",
     "_SEC_AUTH_NEG_BASE", "_SEC_AUTH_NEG_MAX", "_SEC_AUTH_PRUNE_EVERY",
     "safe_edit",
+    "_hc_import", "_hc_get",
 ]
 
-logger.info("🔐 callback_security.py loaded (v9.7.20-NIGHT-NONE-FIX)")
+logger.info("🔐 callback_security.py loaded (v9.7.21-PACKAGE-IMPORT-FIX)")
