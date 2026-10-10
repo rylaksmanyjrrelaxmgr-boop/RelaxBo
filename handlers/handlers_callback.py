@@ -1,8 +1,14 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-handlers_callback.py - معالج الأزرار (v9.7.18-SEC-EXTRACTED)
+handlers_callback.py - معالج الأزرار (v9.7.19-ROUTING-FIX-INTEGRATED)
 =====================================================================
+🆕 v9.7.19-ROUTING-FIX-INTEGRATED:
+    🟢 ROUTE-FIX-1: _handle_parameterized لم يعد يبتلع الاستثناءات صامتاً.
+    🟢 ROUTE-FIX-2: توافقية كاملة مع callback_security.py v9.7.19
+                    التي تعالج act_* / ban_* / pen_* عبر cache auth.
+    🟢 ROUTE-FIX-3: إظهار خطأ واضح للمستخدم بدلاً من التجاهل الصامت.
+
 🆕 v9.7.18-SEC-EXTRACTED (SECURITY-EXTRACTED):
     🔴 SEC-EXTRACT-1: نقل كل منطق الأمان (sec_* / log_channel_* /
        set_warn_* / set_antiflood_* / set_duration / sec_penalty_*)
@@ -12,16 +18,6 @@ handlers_callback.py - معالج الأزرار (v9.7.18-SEC-EXTRACTED)
        - set_metrics_inc(_metrics_inc)
        - set_safe_edit(safe_edit)
     🟡 SEC-EXTRACT-4: توثيق نقاط التفويض.
-
-🆕 v9.7.18 (ANALYTICS-ALIASES-ORDER-FIX): عكس ترتيب الدمج.
-🆕 v9.7.17 (SAFE_EDIT-PARSE-MODE-FIX): FIX-SAFE-EDIT-1..3
-🆕 v9.7.16 (ANALYTICS-BUTTONS-FIX + DECLARE-WINNER-SEL-FIX)
-🆕 v9.7.15 (SECURITY-TOGGLE-MAP-BYPASS-FIX)
-🆕 v9.7.14 (UPDATES-CHANNEL-HEALTH-CHECK)
-🆕 v9.7.13 (UPDATES-CHANNEL-LINK-FIX)
-🆕 v9.7.12 (SYNTAX-FIX)
-🆕 v9.7.11 (PERF-INTEGRATION)
-🆕 v9.7.10 (MISSING-METHODS-FIX)
 =====================================================================
 """
 import asyncio, importlib, logging, json, time, shutil, os, re
@@ -1557,6 +1553,9 @@ class CallbackHandlers:
             if (data.startswith("sched_open:") or data.startswith("sched_")):
                 await CallbackHandlers._handle_schedule(
                     update, context, query, user_id); return
+            # 🟢 v9.7.19: ملاحظة — act_* / ban_* / pen_* تمت معالجتها
+            #     بالفعل في _handle_parameterized أعلاه عبر SecurityCallbacks.
+            #     هذا الفرع يبقى كـ fallback فقط.
             if (data.startswith("ban_") or data.startswith("act_")
                     or data.startswith("pen_")):
                 await CallbackHandlers._handle_advanced_actions(
@@ -1806,13 +1805,26 @@ class CallbackHandlers:
 
     @staticmethod
     async def _handle_parameterized(update, context, query, user_id, lang, data):
-        # ═══ v9.7.18-SEC-EXTRACTED: تفويض الأمان لـ SecurityCallbacks ═══
+        # ═══════════════════════════════════════════════════════════
+        # v9.7.19-ROUTING-FIX-INTEGRATED:
+        #   SecurityCallbacks.handle_parameterized أصبح الآن يعالج
+        #   act_* / ban_* / pen_* عبر cache auth (وليس is_authorized_in_group
+        #   المباشر). أي استثناء لم يعد يُبتلع صامتاً — يُظهر خطأً للمستخدم.
+        # ═══════════════════════════════════════════════════════════
         try:
             if await SecurityCallbacks.handle_parameterized(
                     update, context, query, user_id, lang, data):
                 return True
         except Exception as e:
             logger.error(f"❌ security delegation: {e}", exc_info=True)
+            # 🟢 لم يعد ابتلاعاً صامتاً: نُظهر خطأً واضحاً
+            try:
+                await safe_edit(query,
+                    await _trans('error_occurred', lang,
+                                 "⚠️ حدث خطأ، حاول مرة أخرى"),
+                    bot=context.bot)
+            except Exception:
+                pass
             return True
 
         try:
@@ -4240,6 +4252,11 @@ class CallbackHandlers:
 
     @staticmethod
     async def _handle_advanced_actions(update, context, query, user_id):
+        """
+        v9.7.19: ملاحظة — هذا المسار أصبح fallback فقط.
+        الأزرار act_* / ban_* / pen_* تُعالَج أولاً بواسطة
+        SecurityCallbacks.handle_parameterized (cache auth).
+        """
         lang = await DB.get_user_language(user_id) or 'ar'
         data = query.data; parts = data.split(":")
         if len(parts) < 2:
@@ -4818,7 +4835,6 @@ __all__ = [
 
     "_ANALYTICS_BUTTONS_DIRECT_MAP",
     "safe_edit",
-    # v9.7.18-SEC-EXTRACTED: إعادة تصدير مراجع الأمان
     "_check_sec_auth", "_invalidate_sec_auth_cache", "_prune_sec_auth_cache",
     "_set_sec_chat", "_resolve_sec_chat_id",
 ]
@@ -4826,12 +4842,13 @@ __all__ = [
 try:
     _bridge_icon = "✅" if _SECURITY_BRIDGE_AVAILABLE else "⚠️"
     logger.info(
-        "🛡️ handlers_callback.py v9.7.18-SEC-EXTRACTED loaded | "
+        "🛡️ handlers_callback.py v9.7.19-ROUTING-FIX-INTEGRATED loaded | "
         "Bridge=%s | Message-Cache-Invalidation=ON | "
         "Updates-Link=ON | Updates-Health-Check=ON | "
         "Analytics-Direct-Map=%d-buttons (DIRECT-WINS) | "
         "Declare-Winner-Sel=FIXED | Safe-Edit-HTML=ON | "
-        "SECURITY-EXTRACTED→callback_security.py",
+        "SECURITY-EXTRACTED→callback_security.py | "
+        "ROUTING-FIX: act_*/ban_*/pen_* عبر SecurityCallbacks",
         _bridge_icon,
         len(_ANALYTICS_BUTTONS_DIRECT_MAP),
     )
