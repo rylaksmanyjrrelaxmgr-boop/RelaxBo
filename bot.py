@@ -2,42 +2,37 @@
 # -*- coding: utf-8 -*-
 
 """
-🌿 Relax Manager – البوت الرئيسي (bot.py v5.6.16-ANALYTICS-HANDLERS-FIX)
+🌿 Relax Manager – البوت الرئيسي (bot.py v5.6.17-ROBUST-MAINT-IMPORT)
 ================================================================================
 📌 نقطة الدخول الرسمية للتطبيق (entrypoint).
 
-================================================================================
+🆕 v5.6.17 (ROBUST-MAINT-IMPORT):
+    🟢 PATCH-1: تحسين استيراد db_maintenance_commands — يدعم 5 أسماء:
+                register_maintenance_commands
+                register
+                register_commands
+                setup_commands
+                setup
+    🟢 PATCH-2: رسالة خطأ مُفصَّلة عند الفشل (تُظهر كل المحاولات).
+
 🆕 v5.6.16 (ANALYTICS-HANDLERS-FIX):
     🟢 PATCH-1: استيراد آمن لـ handle_analytics_callback + show_analytics_menu
-                من handlers.handlers_analytics
-    🟢 PATCH-2: تسجيل 2 CallbackQueryHandler BEFORE العام:
-                - admin_analytics → show_analytics_menu
-                - 9 أزرار التقارير → handle_analytics_callback
+    🟢 PATCH-2: تسجيل 2 CallbackQueryHandler BEFORE العام
     🟢 PATCH-3: إشعار حالة handlers_analytics في diagnostics
     🟢 PATCH-4: تحديث Load Beacon إلى v5.6.16
 
 🆕 v5.6.15 (CACHE-STATS + CANCEL-COMMAND):
     🟢 PATCH-1: استيراد آمن لـ handle_cache_stats_command من handlers_message
-    🟢 PATCH-2: تسجيل /cache_stats (للمطور فقط — إحصائيات الكاش الحية)
+    🟢 PATCH-2: تسجيل /cache_stats (للمطور فقط)
     🟢 PATCH-3: إضافة "cache_stats" إلى ADMIN_COMMANDS
-    🟢 PATCH-4: إشعار حالة /cache_stats في diagnostics
-    🟢 PATCH-5: تسجيل /cancel (إلغاء العمليات المنتظرة)
-    🟢 PATCH-6: تحديث Load Beacon إلى v5.6.15
+    🟢 PATCH-4: تسجيل /cancel
+    🟢 PATCH-5: تحديث Load Beacon إلى v5.6.15
 
 🆕 v5.6.14 (DB-IDLE-COMMAND):
-    🟢 PATCH-1: استيراد آمن لـ handle_db_idle_command من handlers_message
-    🟢 PATCH-2: تسجيل /db_idle (للمطور فقط — تدقيق idle-in-transaction)
+    🟢 PATCH-1: استيراد آمن لـ handle_db_idle_command
+    🟢 PATCH-2: تسجيل /db_idle
     🟢 PATCH-3: إضافة "db_idle" إلى ADMIN_COMMANDS
-    🟢 PATCH-4: تحديث Load Beacon إلى v5.6.14
-
-🆕 v5.6.13:
-    🟡 Minor: تحذير "التبعيات المفقودة" أصبح debug-level (لا يزعج في الإنتاج)
-
-🆕 v5.6.12 (DETECTORS-4.0.8-BRIDGE):
-    🟢 PATCH-1: استيراد install_default_executor + shutdown_default_executor
-    🟢 PATCH-2: install_default_executor قبل main() + cleanup شامل للحلقة
-    🟢 PATCH-3: _shutdown_detector_tasks — 3-tier fallback مع v4.0.8 أولاً
-    🟢 PATCH-4: تقرير status يُظهر helpers availability
+    🟢 PATCH-4: تحديث Load Beacon
 ================================================================================
 """
 
@@ -134,7 +129,7 @@ except ImportError as _e1:
                 )
 
 # ═════════════════════════════════════════════════════════════════════
-# 🆕 v5.6.16 PATCH-1: handlers_analytics — استيراد آمن
+# handlers_analytics — استيراد آمن
 # ═════════════════════════════════════════════════════════════════════
 _ANALYTICS_HANDLERS_AVAILABLE = False
 _ANALYTICS_HANDLERS_IMPORT_ERROR = None
@@ -329,7 +324,7 @@ from handlers.handlers_message import (
 )
 
 # ═════════════════════════════════════════════════════════════════════
-# 🆕 v5.6.14 PATCH-1: /db_idle — استيراد آمن
+# /db_idle — استيراد آمن
 # ═════════════════════════════════════════════════════════════════════
 _HAS_DB_IDLE_CMD = False
 _handle_db_idle_command = None
@@ -353,7 +348,7 @@ except ImportError as _e_dbidle1:
         _DB_IDLE_IMPORT_ERROR = f"{_e_dbidle1} | {_e_dbidle2}"
 
 # ═════════════════════════════════════════════════════════════════════
-# 🆕 v5.6.15 PATCH-1: /cache_stats — استيراد آمن
+# /cache_stats — استيراد آمن
 # ═════════════════════════════════════════════════════════════════════
 _HAS_CACHE_STATS_CMD = False
 _handle_cache_stats_command = None
@@ -377,7 +372,7 @@ except ImportError as _e_cs1:
         _CACHE_STATS_IMPORT_ERROR = f"{_e_cs1} | {_e_cs2}"
 
 # ═════════════════════════════════════════════════════════════════════
-# db_maintenance_commands
+# db_maintenance_commands — 🆕 v5.6.17 ROBUST IMPORT
 # ═════════════════════════════════════════════════════════════════════
 register_maintenance_commands = None
 start_weekly_diagnostic_task = None
@@ -385,18 +380,66 @@ stop_weekly_diagnostic_task = None
 _MAINT_CMDS_AVAILABLE = False
 _MAINT_CMDS_IMPORT_ERROR = None
 
+# 🆕 v5.6.17: قائمة الأسماء المحتملة بترتيب الأولوية
+_MAINT_REGISTER_NAMES = (
+    "register_maintenance_commands",
+    "register",
+    "register_commands",
+    "setup_commands",
+    "setup",
+    "register_maintenance",
+    "register_db_maintenance",
+)
+
+_maint_import_attempts: List[str] = []
+
+# 1) حاول استيراد الوحدة كاملة
 try:
-    from db_maintenance_commands import (
-        register_maintenance_commands as _reg_maint,
-        start_weekly_diagnostic_task as _start_weekly,
-        stop_weekly_diagnostic_task as _stop_weekly,
-    )
-    register_maintenance_commands = _reg_maint
-    start_weekly_diagnostic_task = _start_weekly
-    stop_weekly_diagnostic_task = _stop_weekly
-    _MAINT_CMDS_AVAILABLE = True
-except ImportError as _e:
-    _MAINT_CMDS_IMPORT_ERROR = str(_e)
+    import db_maintenance_commands as _maint_mod
+    _mod_import_ok = True
+except ImportError as _e_mod:
+    _mod_import_ok = False
+    _maint_import_attempts.append(f"import module: {_e_mod}")
+    _maint_mod = None
+
+# 2) حاول استيراد دوال start/stop weekly
+if _mod_import_ok:
+    try:
+        start_weekly_diagnostic_task = getattr(
+            _maint_mod, "start_weekly_diagnostic_task", None
+        )
+    except Exception:
+        start_weekly_diagnostic_task = None
+
+    try:
+        stop_weekly_diagnostic_task = getattr(
+            _maint_mod, "stop_weekly_diagnostic_task", None
+        )
+    except Exception:
+        stop_weekly_diagnostic_task = None
+
+    # 3) حاول إيجاد دالة register بأي اسم
+    for _name in _MAINT_REGISTER_NAMES:
+        _fn = getattr(_maint_mod, _name, None)
+        if callable(_fn):
+            register_maintenance_commands = _fn
+            _MAINT_CMDS_AVAILABLE = True
+            logger_temp = logging.getLogger(__name__)
+            logger_temp.info(
+                "✅ db_maintenance_commands: وجدتُ الدالة بالاسم %r",
+                _name,
+            )
+            break
+        else:
+            _maint_import_attempts.append(f"getattr({_name}): not found")
+
+    if not _MAINT_CMDS_AVAILABLE:
+        _MAINT_CMDS_IMPORT_ERROR = (
+            "لم أجد أي دالة register بالأسماء: "
+            + ", ".join(_MAINT_REGISTER_NAMES)
+        )
+else:
+    _MAINT_CMDS_IMPORT_ERROR = " | ".join(_maint_import_attempts) or "unknown"
 
 # ═════════════════════════════════════════════════════════════════════
 # _notify_dev_log
@@ -539,7 +582,7 @@ def _spawn_notify_dev_log(context, text: str) -> None:
         logger.debug("_spawn_notify_dev_log: %s", _e)
 
 # ═══════════════════════════════════════════════════════════════════
-# ✅ v5.6.13: تقرير محرك كشف السبام — التبعيات المفقودة = debug
+# تقرير محرك كشف السبام
 # ═══════════════════════════════════════════════════════════════════
 
 def _log_spam_detector_status() -> None:
@@ -863,6 +906,7 @@ else:
         _CH_DELETE_IMPORT_ERROR or "unknown",
     )
 
+# 🆕 v5.6.17: إشعار db_maintenance_commands (محسّن)
 if _MAINT_CMDS_AVAILABLE:
     logger.info(
         "✅ db_maintenance_commands متاح — "
@@ -875,7 +919,6 @@ else:
         _MAINT_CMDS_IMPORT_ERROR or "unknown",
     )
 
-# 🆕 v5.6.14: إشعار حالة /db_idle
 if _HAS_DB_IDLE_CMD:
     logger.info(
         "✅ /db_idle متاح — تدقيق idle-in-transaction (للمطور فقط)"
@@ -886,7 +929,6 @@ else:
         "يتطلب handlers_message.py v7.18.14+"
     )
 
-# 🆕 v5.6.15: إشعار حالة /cache_stats
 if _HAS_CACHE_STATS_CMD:
     logger.info(
         "✅ /cache_stats متاح — إحصائيات الكاش الحية (للمطور فقط)"
@@ -897,7 +939,6 @@ else:
         "يتطلب handlers_message.py v7.18.18+"
     )
 
-# 🆕 v5.6.16: إشعار حالة handlers_analytics
 if _ANALYTICS_HANDLERS_AVAILABLE:
     logger.info(
         "✅ handlers_analytics متاح — "
@@ -2432,9 +2473,9 @@ async def main():
     logger.info("👨‍💼 المالك: %s", CONFIG.PRIMARY_OWNER_ID)
 
     logger.info(
-        "📦 bot.py: v5.6.16 | "
+        "📦 bot.py: v5.6.17 | "
         "detectors=%s | layers=%d | helpers=%s | "
-        "db_idle=%s | cache_stats=%s | analytics=%s",
+        "db_idle=%s | cache_stats=%s | analytics=%s | maint_cmds=%s",
         _SPAM_DETECTOR_VERSION or "N/A",
         _SPAM_DETECTOR_LAYERS_COUNT,
         (
@@ -2448,6 +2489,7 @@ async def main():
         "yes" if _HAS_DB_IDLE_CMD else "no",
         "yes" if _HAS_CACHE_STATS_CMD else "no",
         "yes" if _ANALYTICS_HANDLERS_AVAILABLE else "no",
+        "yes" if _MAINT_CMDS_AVAILABLE else "no",
     )
 
     try:
@@ -2792,6 +2834,9 @@ async def main():
             "/cancel لن يعمل"
         )
 
+    # ═══════════════════════════════════════════════════════════════
+    # 🆕 v5.6.17: db_maintenance_commands — استدعاء محسّن
+    # ═══════════════════════════════════════════════════════════════
     if _MAINT_CMDS_AVAILABLE and callable(register_maintenance_commands):
         try:
             if register_maintenance_commands(app):
@@ -2861,19 +2906,15 @@ async def main():
     else:
         logger.warning("⚠️ group_log غير متاح — زر قناة السجل لن يعمل")
 
-    # ═══════════════════════════════════════════════════════════════════
-    # 🆕 v5.6.16 PATCH-2: handlers_analytics BEFORE العام
-    # ═══════════════════════════════════════════════════════════════════
+    # handlers_analytics BEFORE العام
     if _ANALYTICS_HANDLERS_AVAILABLE and \
        _show_analytics_menu is not None and \
        _handle_analytics_callback is not None:
         try:
-            # 1) زر admin_analytics → قائمة التحليلات
             app.add_handler(CallbackQueryHandler(
                 _show_analytics_menu,
                 pattern=r"^admin_analytics$",
             ))
-            # 2) كل أزرار التحليلات (9 أزرار) → router موحّد
             app.add_handler(CallbackQueryHandler(
                 _handle_analytics_callback,
                 pattern=(
@@ -2898,7 +2939,6 @@ async def main():
             _ANALYTICS_HANDLERS_IMPORT_ERROR or "unknown",
         )
 
-    # ⚠️ الـ handler العام يأتي أخيراً — يجب أن يكون AFTER التحليلات
     app.add_handler(CallbackQueryHandler(CallbackHandlers.handle))
 
     app.add_handler(MessageHandler(
