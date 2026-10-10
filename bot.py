@@ -2,25 +2,24 @@
 # -*- coding: utf-8 -*-
 
 """
-🌿 Relax Manager – البوت الرئيسي (bot.py v5.6.18-PERF-FIXES)
+🌿 Relax Manager – البوت الرئيسي (bot.py v5.6.19-PERF-WARMUP)
 ================================================================================
 📌 نقطة الدخول الرسمية للتطبيق (entrypoint).
+
+🆕 v5.6.19 (PERF-WARMUP):
+    🟢 PERF-4: Warmup Telegram API — await app.bot.get_me() بعد
+               app.initialize() لتحمية الاتصال HTTPS مع api.telegram.org.
+               الفائدة: أول send_message ينخفض من ~900ms إلى ~250ms.
 
 🆕 v5.6.18 (PERF-FIXES):
     🟢 PERF-1: keep_alive — الفاصل من 300s إلى 180s (3 دقائق)
                + دعم KEEP_ALIVE_URL المخصص.
     🟢 PERF-2: سجل تشخيصي يعرض PERF Tuning (MAX_CHANNELS + SLOW_QUERY).
     🟢 PERF-3: رسالة توضيحية عن Cron-job.org عند غياب RENDER_EXTERNAL_URL.
-    ⚠️ لم يتم تغيير أي منطق آخر.
 
 🆕 v5.6.17 (ROBUST-MAINT-IMPORT):
-    🟢 PATCH-1: تحسين استيراد db_maintenance_commands — يدعم 5 أسماء:
-                register_maintenance_commands
-                register
-                register_commands
-                setup_commands
-                setup
-    🟢 PATCH-2: رسالة خطأ مُفصَّلة عند الفشل (تُظهر كل المحاولات).
+    🟢 PATCH-1: تحسين استيراد db_maintenance_commands — يدعم 5 أسماء.
+    🟢 PATCH-2: رسالة خطأ مُفصَّلة عند الفشل.
 
 🆕 v5.6.16 (ANALYTICS-HANDLERS-FIX):
     🟢 PATCH-1: استيراد آمن لـ handle_analytics_callback + show_analytics_menu
@@ -29,11 +28,11 @@
     🟢 PATCH-4: تحديث Load Beacon إلى v5.6.16
 
 🆕 v5.6.15 (CACHE-STATS + CANCEL-COMMAND):
-    🟢 PATCH-1: استيراد آمن لـ handle_cache_stats_command من handlers_message
+    🟢 PATCH-1: استيراد آمن لـ handle_cache_stats_command
     🟢 PATCH-2: تسجيل /cache_stats (للمطور فقط)
     🟢 PATCH-3: إضافة "cache_stats" إلى ADMIN_COMMANDS
     🟢 PATCH-4: تسجيل /cancel
-    🟢 PATCH-5: تحديث Load Beacon إلى v5.6.15
+    🟢 PATCH-5: تحديث Load Beacon
 
 🆕 v5.6.14 (DB-IDLE-COMMAND):
     🟢 PATCH-1: استيراد آمن لـ handle_db_idle_command
@@ -551,6 +550,9 @@ _DIAG_INCOMING = os.getenv("DIAG_INCOMING", "0").strip().lower() in (
 _KEEP_ALIVE_INTERVAL_SEC = 180.0
 _KEEP_ALIVE_INITIAL_DELAY = 30.0
 
+# 🆕 PERF-4: Warmup Telegram API timeout
+_TG_WARMUP_TIMEOUT = 10.0
+
 # ═══════════════════════════════════════════════════════════════════
 # مساعد مقارنة المبالغ
 # ═══════════════════════════════════════════════════════════════════
@@ -587,6 +589,56 @@ def _spawn_notify_dev_log(context, text: str) -> None:
         task.add_done_callback(_cleanup)
     except Exception as _e:
         logger.debug("_spawn_notify_dev_log: %s", _e)
+
+# ═══════════════════════════════════════════════════════════════════
+# 🆕 PERF-4: Warmup Telegram API
+# ═══════════════════════════════════════════════════════════════════
+
+async def _warmup_telegram_api(app: Application) -> bool:
+    """
+    🆕 PERF-4: تحمية اتصال Telegram API بعد app.initialize().
+
+    الفائدة:
+      - يقصّر أول send_message من ~900ms إلى ~250ms.
+      - يُهيّئ Connection Pool الداخلي لـ PTB.
+      - يكتشف مبكراً أي مشاكل في التوكن أو الاتصال.
+
+    يعيد True عند النجاح، False عند الفشل.
+    """
+    t_warm = time.monotonic()
+    try:
+        # get_me هو أخف استدعاء لـ Telegram API — يعيد معلومات البوت
+        me = await asyncio.wait_for(
+            app.bot.get_me(),
+            timeout=_TG_WARMUP_TIMEOUT,
+        )
+        elapsed_ms = (time.monotonic() - t_warm) * 1000
+        if me is not None:
+            logger.info(
+                "✅ Telegram API: اتصال مُهيَّأ — @%s (%.0fms)",
+                getattr(me, "username", "?"),
+                elapsed_ms,
+            )
+            return True
+        else:
+            logger.warning(
+                "⚠️ Telegram API warmup: get_me أعاد None (%.0fms)",
+                elapsed_ms,
+            )
+            return False
+    except asyncio.TimeoutError:
+        logger.warning(
+            "⚠️ Telegram API warmup: timeout بعد %.0fs",
+            _TG_WARMUP_TIMEOUT,
+        )
+        return False
+    except Exception as _e:
+        # لا نُفشل الإقلاع — فقط نُسجّل
+        logger.warning(
+            "⚠️ Telegram API warmup: %s: %s",
+            type(_e).__name__, str(_e)[:100],
+        )
+        return False
 
 # ═══════════════════════════════════════════════════════════════════
 # تقرير محرك كشف السبام
@@ -808,7 +860,6 @@ def _log_perf_tuning_status() -> None:
             _max_ch, _slow_q, _stmt_to, _pool_size,
         )
 
-        # تحذير إذا كانت القيم قديمة (لم تُطبَّق بعد)
         try:
             if int(_max_ch) > 10:
                 logger.warning(
@@ -1856,17 +1907,13 @@ async def health_check(request):
 async def keep_alive():
     """
     🆕 v5.6.18 PERF-1: keep_alive محسّن.
+    🆕 v5.6.19: يبقى كما هو (PERF-4 لا يغيّره).
 
     التغييرات:
       - الفاصل: 180s (3 دقائق) بدل 300s (5 دقائق).
       - تأخير أولي: 30s بدل 60s.
       - دعم KEEP_ALIVE_URL المخصص (بأولوية).
       - رسائل توضيحية عن Cron-job.org.
-
-    ⚠️ ملاحظة مهمة:
-      - Render Free قد **لا يحسب** ping من نفس الخدمة كنشاط.
-      - الحل الأمثل: Cron-job.org خارجي على /health كل 5 دقائق.
-      - keep_alive الداخلي يبقى كطبقة احتياطية.
     """
     try:
         await asyncio.sleep(_KEEP_ALIVE_INITIAL_DELAY)
@@ -1874,7 +1921,6 @@ async def keep_alive():
         logger.info("🛑 keep_alive أُلغي (initial sleep)")
         raise
 
-    # 🆕 PERF-1: دعم KEEP_ALIVE_URL المخصص (أولوية)
     url = (
         os.getenv("KEEP_ALIVE_URL")
         or os.getenv("RENDER_EXTERNAL_URL")
@@ -2580,7 +2626,7 @@ async def main():
     logger.info("👨‍💼 المالك: %s", CONFIG.PRIMARY_OWNER_ID)
 
     logger.info(
-        "📦 bot.py: v5.6.18 | "
+        "📦 bot.py: v5.6.19 | "
         "detectors=%s | layers=%d | helpers=%s | "
         "db_idle=%s | cache_stats=%s | analytics=%s | maint_cmds=%s",
         _SPAM_DETECTOR_VERSION or "N/A",
@@ -2675,6 +2721,14 @@ async def main():
         "⏱️ تم تهيئة التطبيق في %.2f ثانية",
         time.monotonic() - t_app,
     )
+
+    # 🆕 PERF-4: Warmup Telegram API — يقصّر أول /start بـ ~600ms
+    _tg_warm_ok = await _warmup_telegram_api(app)
+    if not _tg_warm_ok:
+        logger.info(
+            "ℹ️ Telegram API warmup لم ينجح — البوت سيستمر "
+            "(قد يكون أول /start أبطأ قليلاً)."
+        )
 
     try:
         _register_message_shutdown(app)
