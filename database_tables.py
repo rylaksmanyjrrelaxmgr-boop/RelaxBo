@@ -2,31 +2,36 @@
 # -*- coding: utf-8 -*-
 
 """
-database_tables.py — إنشاء الجداول والفهارس لكل قواعد البيانات (v7.9.2)
+database_tables.py — إنشاء الجداول والفهارس لكل قواعد البيانات (v7.9.3)
 ================================================================================
+🆕 v7.9.3 (PERF-INDEXES-LOG-TABLES):
+  🟢 PERF-6: 5 فهارس جديدة لتحسين الاستعلامات البطيئة المكتشفة:
+      • idx_mv_active_user_limits_user_id  — على MV
+      • idx_schedule_channel_db_id         — على schedule
+      • idx_schedule_next_publish          — على schedule
+      • idx_posts_channel_published_created — تسريع نشر التلقائي
+      • idx_user_channels_user_id_only     — تسريع get_user_channels
+  🟢 PERF-7: EXPECTED_INDEX_COUNT 78 → 83
+  🟢 PERF-8: CURRENT_SCHEMA_VERSION 27 → 28
+  🟢 PERF-9: توسيع CRITICAL_INDEX_NAMES للفهارس الجديدة
+  🟡 PERF-10: تحديث __all__
+
 🆕 v7.9.2 (MV-AUTO-VACUUM):
   🔴 MV-FIX-1 CRITICAL: MAINTENANCE_TABLES يشمل الآن:
       • mv_active_user_limits (Materialized View)
       • penalty_archive, user_violations, user_warnings
       • sentiment_history, payment_logs, user_messages
       • bot_addition_log
-      السبب: autovacuum لا يعمل على MVs أبداً، وهذه الجداول
-      كانت خارج قائمة الصيانة الدورية.
   🔴 MV-FIX-2 CRITICAL: _run_maintenance_postgres يجمع الآن
-      كل MVs من pg_class تلقائياً + كل الجداول، فلا حاجة
-      لتحديث القائمة يدوياً عند إضافة MV جديد.
-  🟢 MV-FIX-3: دالة جديدة _vacuum_dirty_mvs_postgres تُنظّف
-      الـ MVs التي فيها dead_tuples >= 10 فقط (ذكية).
-  🟡 MV-FIX-4: توسيع SMALL_TABLES_FOR_AGGRESSIVE_AUTOVACUUM
-      ليشمل الجداول السبع الجديدة.
+      كل MVs من pg_class تلقائياً.
+  🟢 MV-FIX-3: دالة جديدة _vacuum_dirty_mvs_postgres.
+  🟡 MV-FIX-4: توسيع SMALL_TABLES_FOR_AGGRESSIVE_AUTOVACUUM.
   🟡 MV-FIX-5: __all__ يشمل _vacuum_dirty_mvs_postgres.
 
 🆕 v7.9.1 (BANNED-WORDS-ADDED-BY-MIGRATION):
-  🔴 BW-MIG-1 CRITICAL: migration لعمود added_by في banned_words
-  🔴 BW-MIG-2 CRITICAL: migration لعمود added_by في auto_replies
+  🔴 BW-MIG-1: migration لعمود added_by في banned_words
+  🔴 BW-MIG-2: migration لعمود added_by في auto_replies
   🟡 BW-MIG-3: CURRENT_SCHEMA_VERSION 26 → 27
-  🟡 BW-MIG-4: _BANNED_WORDS_NEW_COLUMNS و _AUTO_REPLIES_NEW_COLUMNS
-  🟢 BW-MIG-5: تحديث __all__
 
 🆕 v7.9.0 (SECURITY-V7.10.0-COLUMNS):
   ✅ CURRENT_SCHEMA_VERSION: 25 → 26
@@ -53,8 +58,8 @@ from datetime import datetime, timezone, timedelta
 # 0. ثوابت
 # =====================================================================
 
-# ✅ v7.9.1: 26 → 27 (إضافة migrations لـ banned_words + auto_replies)
-CURRENT_SCHEMA_VERSION = 27
+# ✅ v7.9.3 PERF-8: 27 → 28 (إضافة 5 فهارس أداء)
+CURRENT_SCHEMA_VERSION = 28
 
 CLEANUP_ANONYMOUS_BOT_IDS = (1087968824, 136817688)
 
@@ -156,8 +161,8 @@ DEFAULT_SETTINGS = (
     ("last_backup", ""),
 )
 
-# ✅ v7.9.0: 77 → 78
-EXPECTED_INDEX_COUNT = 78
+# ✅ v7.9.3 PERF-7: 78 → 83 (إضافة 5 فهارس أداء)
+EXPECTED_INDEX_COUNT = 83
 
 MYSQL_SKIP_INDEXES = frozenset({
     "idx_penalties_active_id",
@@ -338,6 +343,26 @@ COMMON_INDEXES = [
     ("group_security", "idx_group_security_postbot",
      "group_security(delete_postbot_pattern) "
      "WHERE delete_postbot_pattern = 1"),
+
+    # ═══════════════════════════════════════════════════════════════
+    # 🆕 v7.9.3 PERF-6: فهارس الأداء الجديدة
+    # (معالجة الاستعلامات البطيئة المكتشفة في السجل)
+    # ═══════════════════════════════════════════════════════════════
+    # 🟢 للـ Materialized View (SELECT 1 FROM mv_active_user_limits ...)
+    ("mv_active_user_limits", "idx_mv_active_user_limits_user_id",
+     "mv_active_user_limits(user_id)"),
+    # 🟢 للـ schedule (SELECT schedule_type, ... FROM schedule WHERE channel_db_id = $1)
+    ("schedule", "idx_schedule_channel_db_id",
+     "schedule(channel_db_id)"),
+    # 🟢 للـ schedule (INSERT/UPSERT على channel_db_id)
+    ("schedule", "idx_schedule_channel_lookup",
+     "schedule(channel_db_id, next_publish_date)"),
+    # 🟢 للنشر التلقائي (SELECT posts للقنوات)
+    ("posts", "idx_posts_channel_published_created",
+     "posts(channel_db_id, published, created_at DESC)"),
+    # 🟢 للـ get_user_channels
+    ("user_channels", "idx_user_channels_user_id_only",
+     "user_channels(user_id) WHERE banned = 0"),
 ]
 
 DEPRECATED_INDEXES = [
@@ -410,6 +435,7 @@ DEPRECATED_INDEXES = [
     "idx_ugl_user",
 ]
 
+# ✅ v7.9.3 PERF-9: توسيع CRITICAL_INDEX_NAMES للفهارس الجديدة
 CRITICAL_INDEX_NAMES = frozenset({
     "idx_bot_groups_log_channel",
     "idx_posts_channel_pub_fail_created",
@@ -431,6 +457,12 @@ CRITICAL_INDEX_NAMES = frozenset({
     "idx_bot_addition_log_chat",
     "idx_user_channels_removed_at",
     "idx_group_security_postbot",
+    # 🆕 v7.9.3 PERF-9: الفهارس الجديدة
+    "idx_mv_active_user_limits_user_id",
+    "idx_schedule_channel_db_id",
+    "idx_schedule_channel_lookup",
+    "idx_posts_channel_published_created",
+    "idx_user_channels_user_id_only",
 })
 
 if len(COMMON_INDEXES) != EXPECTED_INDEX_COUNT:
@@ -3503,7 +3535,7 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
             "(version, applied_at, description) "
             "VALUES (?, ?, ?) ON CONFLICT(version) DO NOTHING",
             (CURRENT_SCHEMA_VERSION, _safe_now_iso(TimeUtils),
-             "v7.9.2-mv-auto-vacuum"),
+             "v7.9.3-perf-indexes"),
         )
         await conn.commit()
     except Exception as e:
@@ -3513,7 +3545,7 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
     if logger:
         logger.info(
             "✅ تم إنشاء جميع جداول SQLite مع الفهارس المحسنة "
-            "(v7.9.2 — MV-AUTO-VACUUM)"
+            "(v7.9.3 — PERF-INDEXES)"
         )
 
 
@@ -4192,7 +4224,7 @@ async def create_tables_postgres(conn, logger, TimeUtils):
             "VALUES ($1, $2, $3) ON CONFLICT (version) DO NOTHING",
             CURRENT_SCHEMA_VERSION,
             _safe_now_dt(TimeUtils),
-            "v7.9.2-mv-auto-vacuum",
+            "v7.9.3-perf-indexes",
         )
     except Exception as e:
         if logger:
@@ -4201,7 +4233,7 @@ async def create_tables_postgres(conn, logger, TimeUtils):
     if logger:
         logger.info(
             "✅ تم إنشاء جميع جداول PostgreSQL مع الفهارس المحسنة "
-            "(v7.9.2 — MV-AUTO-VACUUM)"
+            "(v7.9.3 — PERF-INDEXES)"
         )
 
 
@@ -4881,7 +4913,7 @@ async def create_tables_mysql(conn, logger, TimeUtils):
                 (
                     CURRENT_SCHEMA_VERSION,
                     _safe_now_iso(TimeUtils),
-                    "v7.9.2-mv-auto-vacuum",
+                    "v7.9.3-perf-indexes",
                 ),
             )
         except Exception as e:
@@ -4891,7 +4923,7 @@ async def create_tables_mysql(conn, logger, TimeUtils):
         if logger:
             logger.info(
                 "✅ تم إنشاء جميع جداول MySQL مع الفهارس المحسنة "
-                "(v7.9.2 — MV-AUTO-VACUUM)"
+                "(v7.9.3 — PERF-INDEXES)"
             )
 
     finally:
