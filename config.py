@@ -2,8 +2,19 @@
 # -*- coding: utf-8 -*-
 
 """
-config.py - إعدادات البوت الأساسية (v7.0.4 — PG-IDLE-TX-INTEGRATION)
+config.py - إعدادات البوت الأساسية (v7.0.5 — PERF-FIXES)
 ================================================================================
+🆕 v7.0.5 (PERF-FIXES):
+    🟢 PERF-1: MAX_CHANNELS_PER_CYCLE — من 20 إلى 5
+               (يمنع إشباع DB Pool → /start سريع دائماً).
+    🟢 PERF-2: SLOW_QUERY_LOG_THRESHOLD — من 1.0 إلى 0.2
+               (يكشف الاستعلامات > 200ms).
+    🟢 PERF-3: PG_STATEMENT_TIMEOUT_MS — من 8000 إلى 3000
+               (كشف أسرع للاستعلامات المتعثرة).
+    🟢 PERF-4: تحذير في validate() عند MAX_CHANNELS_PER_CYCLE > 10.
+    🟢 PERF-5: تحذير في validate() عند DB_POOL_SIZE > 20.
+    🟢 PERF-6: سجل إقلاع إضافي (PERF Tuning).
+
 🆕 v7.0.4:
     ✅ إضافة PG_ROLLBACK_ON_RETURN_TIMEOUT (v7.7.61)
     ✅ إضافة قسم 13.12: IDLE_TX_AUDIT_* (8 متغيرات — v7.7.62)
@@ -189,8 +200,10 @@ class AppConfig:
 
     MV_REFRESH_COOLDOWN: int = safe_int(os.getenv("MV_REFRESH_COOLDOWN", "3600"))
     VACUUM_TIMEOUT: int = safe_int(os.getenv("VACUUM_TIMEOUT", "300"))
+
+    # 🆕 PERF-2: من 1.0 إلى 0.2 — يكشف الاستعلامات > 200ms
     SLOW_QUERY_LOG_THRESHOLD: float = safe_float(
-        os.getenv("SLOW_QUERY_LOG_THRESHOLD", "1.0")
+        os.getenv("SLOW_QUERY_LOG_THRESHOLD", "0.2")
     )
     SLOW_QUERY_FULL_STACK: bool = safe_bool(
         os.getenv("SLOW_QUERY_FULL_STACK", "true")
@@ -221,8 +234,10 @@ class AppConfig:
     MIN_PUBLISH_INTERVAL: int = safe_int(
         os.getenv("MIN_PUBLISH_INTERVAL", "5")
     )
+
+    # 🆕 PERF-1: من 20 إلى 5 — يمنع إشباع DB Pool أثناء النشر
     MAX_CHANNELS_PER_CYCLE: int = safe_int(
-        os.getenv("MAX_CHANNELS_PER_CYCLE", "20")
+        os.getenv("MAX_CHANNELS_PER_CYCLE", "5")
     )
     PUBLISH_RETRY_DELAY: int = safe_int(os.getenv("PUBLISH_RETRY_DELAY", "5"))
 
@@ -651,8 +666,10 @@ class AppConfig:
     PG_TCP_KEEPIDLE: int = safe_int(os.getenv("PG_TCP_KEEPIDLE", "20"))
     PG_TCP_KEEPINTVL: int = safe_int(os.getenv("PG_TCP_KEEPINTVL", "5"))
     PG_TCP_KEEPCNT: int = safe_int(os.getenv("PG_TCP_KEEPCNT", "3"))
+
+    # 🆕 PERF-3: من 8000 إلى 3000 — كشف أسرع للاستعلامات المتعثرة
     PG_STATEMENT_TIMEOUT_MS: int = safe_int(
-        os.getenv("PG_STATEMENT_TIMEOUT_MS", "8000")
+        os.getenv("PG_STATEMENT_TIMEOUT_MS", "3000")
     )
     PG_IDLE_TX_TIMEOUT_MS: int = safe_int(
         os.getenv("PG_IDLE_TX_TIMEOUT_MS", "30000")
@@ -1023,6 +1040,14 @@ class AppConfig:
         if self.MAX_CHANNELS_PER_CYCLE < 1:
             errors.append("MAX_CHANNELS_PER_CYCLE يجب أن يكون أكبر من 0")
 
+        # 🆕 PERF-4: تحذير عند زيادة القنوات المتزامنة
+        if self.MAX_CHANNELS_PER_CYCLE > 10:
+            warnings.append(
+                f"⚠️ MAX_CHANNELS_PER_CYCLE={self.MAX_CHANNELS_PER_CYCLE} "
+                f"مرتفع — قد يُشبع DB Pool أثناء النشر التلقائي "
+                f"ويسبب بطء /start. الموصى به: 5-10."
+            )
+
         # ─── 3. الموارد والشبكة ───
         if self.WEB_PORT < 1 or self.WEB_PORT > 65535:
             errors.append(f"WEB_PORT غير صالح: {self.WEB_PORT}")
@@ -1044,6 +1069,14 @@ class AppConfig:
             errors.append(
                 f"DB_POOL_MIN_SIZE ({self.DB_POOL_MIN_SIZE}) "
                 f"يجب أن يكون < DB_POOL_SIZE ({self.DB_POOL_SIZE})"
+            )
+
+        # 🆕 PERF-5: تحذير عند تجاوز Supabase Free max_connections
+        if self.DB_POOL_SIZE > 20:
+            warnings.append(
+                f"⚠️ DB_POOL_SIZE={self.DB_POOL_SIZE} > 20 — "
+                f"قد يتجاوز max_connections في Supabase Free Plan. "
+                f"راجع اشتراكك أو قلّل القيمة."
             )
 
         if self.PUBLISH_DB_CONCURRENCY < 1 or self.PUBLISH_DB_CONCURRENCY > 10:
@@ -1421,6 +1454,14 @@ logger.info(
     f"stmt_timeout={CONFIG.PG_STATEMENT_TIMEOUT_MS}ms "
     f"rollback_timeout={CONFIG.PG_ROLLBACK_ON_RETURN_TIMEOUT:.1f}s"
 )
+
+# 🆕 v7.0.5: سجل PERF Tuning (للتأكد من تطبيق القيم)
+logger.info(
+    f"⚡ PERF Tuning: "
+    f"MAX_CHANNELS/CYCLE={CONFIG.MAX_CHANNELS_PER_CYCLE} | "
+    f"SLOW_QUERY_THRESHOLD={CONFIG.SLOW_QUERY_LOG_THRESHOLD}s"
+)
+
 logger.info(
     f"🔒 Webhook secret: "
     f"{'مُهيَّأ ✅' if CONFIG.WEBHOOK_SECRET else 'غير مُهيَّأ (اختياري)'}"
