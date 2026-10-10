@@ -1,26 +1,17 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-db_diagnostics.py — واجهة تشخيص وصيانة قاعدة البيانات (v6.9.2 — FULL DETAILED)
+db_diagnostics.py — واجهة تشخيص وصيانة قاعدة البيانات (v6.9.3 — FIXED + AUTO-VACUUM)
 ================================================================================
-الوظائف المُصدَّرة:
-
-  📊 التشخيص:
-    - diagnose_db()                   : تقرير كامل (HTML string)
-    - diagnose_db_split()             : List[str] — أجزاء
-    - diagnose_db_quick()             : تقرير مختصر (5 أسطر)
-
-  🧹 الصيانة:
-    - preview_maintenance()           : معاينة (dict)
-    - run_maintenance()               : تنفيذ فعلي (dict)
-    - format_maintenance_preview()    : تنسيق المعاينة → HTML
-    - format_maintenance_result()     : تنسيق النتيجة → HTML
-    - diagnose_maintenance_preview()  : معاينة مباشرة (HTML)
-    - run_db_maintenance()            : تنفيذ مباشر (HTML)
-    - vacuum_analyze_tables()         : VACUUM فقط
-
-  🔧 Meta:
-    - VERSION                         : "6.9.2"
+🆕 v6.9.3 — إصلاحات دقيقة + التنظيف التلقائي:
+    🔴 FIX-1: _get_all_table_names() يشمل الآن Materialized Views
+              (كان يستخدم pg_tables التي تستثني MVs → VACUUM لا يصل إليها).
+    🔴 FIX-2: _calc_technical_score() يضيف حداً أدنى مطلقاً (dead >= 50)
+              لتجنّب الإنذارات الكاذبة على الجداول الصغيرة.
+    🔴 FIX-3: _dead_color() يضيف حداً أدنى مطلقاً (dead >= 10).
+    🟡 FIX-4: التقرير يميّز بين Table و Materialized View بوسم [MV].
+    🟡 FIX-5: _get_all_tables_health() يجلب relkind لتحديد النوع.
+    🟢 FEAT-1: auto_vacuum_dirty_mvs() — تنظيف تلقائي للجداول/MVs المتسخة.
 
 ⚠️ v6.5.1+: user_violations.last_violation_time (بدل created_at)
 ================================================================================
@@ -39,7 +30,11 @@ logger = logging.getLogger(__name__)
 # الإصدار
 # ═══════════════════════════════════════════════════════════════════════
 
-VERSION = "6.9.2"
+VERSION = "6.9.3"
+
+# 🆕 v6.9.3: حدود الدقة — تمنع الإنذارات الكاذبة
+_MIN_DEAD_FOR_CRITICAL = 50   # أقل من هذا → لا يُصنَّف حرجاً مهما كانت النسبة
+_MIN_DEAD_FOR_COLOR = 10      # أقل من هذا → ✅ دائماً
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -146,10 +141,19 @@ def _bar(value: float, max_value: float, width: int = 10,
 
 
 def _dead_color(dead: int, live: int) -> str:
+    """
+    🆕 v6.9.3: يضيف حداً أدنى مطلقاً.
+    4 dead tuples في MV صغير ليست مشكلة أدائية.
+    """
+    # 🔴 FIX-3: حد أدنى مطلق — لا تلوين على الأعداد التافهة
+    if dead < _MIN_DEAD_FOR_COLOR:
+        return "✅"
+
     total = live + dead
     if total == 0:
         return "⚪"
     ratio = dead / total
+
     if live < 1000 and ratio < 0.20:
         return "✅"
     if ratio < 0.05:
@@ -218,7 +222,7 @@ async def _get_db_metadata() -> Dict[str, Any]:
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# 2) Dead Tuples + Clean Tables
+# 2) Dead Tuples + Clean Tables  — 🆕 v6.9.3 مع تمييز MV
 # ═══════════════════════════════════════════════════════════════════════
 
 async def _get_all_tables_health() -> Tuple[List[Dict], List[Dict]]:
@@ -227,9 +231,11 @@ async def _get_all_tables_health() -> Tuple[List[Dict], List[Dict]]:
         return [], []
 
     try:
+        # 🔴 FIX-5: نجلب relkind لتمييز MVs
         rows = await db.fetchall("""
             SELECT
                 c.relname AS table_name,
+                c.relkind AS relkind,
                 s.n_live_tup AS live_tuples,
                 s.n_dead_tup AS dead_tuples,
                 s.n_mod_since_analyze,
@@ -255,6 +261,9 @@ async def _get_all_tables_health() -> Tuple[List[Dict], List[Dict]]:
             continue
 
         name = r.get("table_name") or "?"
+        relkind = str(r.get("relkind") or "r")
+        is_matview = relkind == "m"
+
         live = int(r.get("live_tuples") or 0)
         dead = int(r.get("dead_tuples") or 0)
         total = live + dead
@@ -283,6 +292,8 @@ async def _get_all_tables_health() -> Tuple[List[Dict], List[Dict]]:
 
         entry = {
             "name": name,
+            "relkind": relkind,
+            "is_matview": is_matview,
             "live": live,
             "dead": dead,
             "total": total,
@@ -488,10 +499,14 @@ async def _get_cleanup_status() -> List[Dict[str, Any]]:
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# 7) Table Names Helper
+# 7) Table Names Helper — 🔴 FIX-1: يشمل MVs الآن
 # ═══════════════════════════════════════════════════════════════════════
 
 async def _get_all_table_names() -> List[str]:
+    """
+    🔴 FIX-1 v6.9.3: يستخدم pg_class بدل pg_tables
+    ليشمل Materialized Views (relkind='m').
+    """
     db = _get_db()
     if db is None:
         return []
@@ -507,20 +522,34 @@ async def _get_all_table_names() -> List[str]:
             return []
 
     try:
+        # 🔴 FIX-1: relkind IN ('r','m') → جدول عادي + Materialized View
         rows = await db.fetchall("""
-            SELECT tablename FROM pg_tables
-            WHERE schemaname = current_schema()
-            ORDER BY tablename
+            SELECT c.relname AS tablename
+            FROM pg_class c
+            JOIN pg_namespace n ON n.oid = c.relnamespace
+            WHERE n.nspname = current_schema()
+              AND c.relkind IN ('r', 'm')
+            ORDER BY c.relkind DESC, c.relname
         """) or []
         return [r.get("tablename") for r in rows
                 if isinstance(r, dict) and r.get("tablename")]
     except Exception as e:
         logger.debug(f"_get_all_table_names: {e}")
-        return []
+        # Fallback للسلوك القديم
+        try:
+            rows = await db.fetchall("""
+                SELECT tablename FROM pg_tables
+                WHERE schemaname = current_schema()
+                ORDER BY tablename
+            """) or []
+            return [r.get("tablename") for r in rows
+                    if isinstance(r, dict) and r.get("tablename")]
+        except Exception:
+            return []
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# 8) Score
+# 8) Score — 🔴 FIX-2: حد أدنى مطلق
 # ═══════════════════════════════════════════════════════════════════════
 
 def _calc_technical_score(
@@ -528,12 +557,22 @@ def _calc_technical_score(
     activity: Dict,
     settings: Dict,
 ) -> Tuple[int, int, int, int]:
+    """
+    🔴 FIX-2 v6.9.3: الحد الأدنى المطلق dead >= 50
+    يمنع تصنيف MVs/جداول صغيرة كنقاط حرجة.
+    """
     score = 100
     critical = 0
     warn = 0
 
     for t in dirty:
-        r = t.get("ratio", 0)
+        dead = int(t.get("dead", 0))
+        r = float(t.get("ratio", 0))
+
+        # 🔴 FIX-2: تخطّي الأعداد التافهة
+        if dead < _MIN_DEAD_FOR_CRITICAL:
+            continue
+
         if r >= 0.20:
             critical += 1
             score -= 10
@@ -560,6 +599,7 @@ async def preview_maintenance() -> Dict[str, Any]:
     """
     معاينة الصيانة — dict.
     ⚠️ v6.5.1+: user_violations.last_violation_time
+    🆕 v6.9.3: vacuum_tables يشمل MVs الآن (بعد FIX-1).
     """
     db = _get_db()
     result: Dict[str, Any] = {
@@ -614,6 +654,7 @@ async def run_maintenance() -> Dict[str, Any]:
     """
     تنفيذ الصيانة — dict.
     ⚠️ v6.5.1+: user_violations.last_violation_time
+    🆕 v6.9.3: VACUUM يشمل MVs → يحل مشكلة mv_active_user_limits نهائياً.
     """
     db = _get_db()
     start = time.monotonic()
@@ -860,6 +901,98 @@ async def vacuum_analyze_tables() -> str:
 
 
 # ═══════════════════════════════════════════════════════════════════════
+# 11b) 🆕 v6.9.3 — التنظيف التلقائي للـ MVs والجداول المتسخة
+# ═══════════════════════════════════════════════════════════════════════
+
+async def auto_vacuum_dirty_mvs(min_dead: int = 10) -> Dict[str, Any]:
+    """
+    🧹 v6.9.3: تنظيف تلقائي.
+    يمر على كل الجداول والـ Materialized Views التي فيها
+    dead tuples ≥ min_dead ويعمل عليها VACUUM ANALYZE.
+
+    Returns:
+        dict: {
+            'vacuumed': list[{name, dead_before, is_matview}],
+            'failed':   list[{name, error}],
+            'total_dead_before': int,
+            'total_dead_after':  int,
+            'cleaned':  int,
+            'duration_sec': float,
+        }
+    """
+    db = _get_db()
+    result: Dict[str, Any] = {
+        'vacuumed': [],
+        'failed': [],
+        'total_dead_before': 0,
+        'total_dead_after': 0,
+        'cleaned': 0,
+        'duration_sec': 0.0,
+    }
+    if db is None or not _is_postgres():
+        return result
+
+    start = time.monotonic()
+
+    # 1) افحص الحالة الحالية
+    dirty, _ = await _get_all_tables_health()
+    result['total_dead_before'] = sum(
+        int(t.get('dead', 0)) for t in dirty
+    )
+
+    # 2) اختر الأهداف: dead >= min_dead (يشمل MVs تلقائياً)
+    targets = [
+        t for t in dirty
+        if int(t.get('dead', 0)) >= int(min_dead)
+    ]
+
+    if not targets:
+        result['duration_sec'] = round(time.monotonic() - start, 2)
+        return result
+
+    # 3) VACUUM لكل هدف
+    for t in targets:
+        name = t.get('name')
+        dead_before = int(t.get('dead', 0))
+        is_mv = bool(t.get('is_matview', False))
+        try:
+            if hasattr(db, "vacuum") and callable(db.vacuum):
+                await db.vacuum(name)
+            else:
+                await db.execute(f'VACUUM ANALYZE "{name}"')
+            result['vacuumed'].append({
+                'name': name,
+                'dead_before': dead_before,
+                'is_matview': is_mv,
+            })
+            result['cleaned'] += 1
+        except Exception as e:
+            err = str(e)[:120]
+            logger.warning(f"auto_vacuum({name}): {err}")
+            result['failed'].append({'name': name, 'error': err})
+        try:
+            await asyncio.sleep(0.05)
+        except Exception:
+            pass
+
+    # 4) أعد القياس للتأكيد
+    dirty_after, _ = await _get_all_tables_health()
+    result['total_dead_after'] = sum(
+        int(t.get('dead', 0)) for t in dirty_after
+    )
+    result['duration_sec'] = round(time.monotonic() - start, 2)
+
+    logger.info(
+        "🧹 auto_vacuum_dirty_mvs: cleaned=%d | dead %d → %d | %.2fs",
+        result['cleaned'],
+        result['total_dead_before'],
+        result['total_dead_after'],
+        result['duration_sec'],
+    )
+    return result
+
+
+# ═══════════════════════════════════════════════════════════════════════
 # 12) Build Sections — التقرير الكامل
 # ═══════════════════════════════════════════════════════════════════════
 
@@ -931,9 +1064,13 @@ async def _build_sections() -> List[str]:
     if critical_count > 0:
         s2.append("")
         s2.append(f"🔴 <b>{critical_count} جدول حرج</b> — راجع التفاصيل.")
+    else:
+        s2.append("")
+        s2.append("✅ لا توجد جداول حرجة (الحد الأدنى "
+                  f"{_MIN_DEAD_FOR_CRITICAL} dead tuples للتصنيف).")
     parts.append("\n".join(s2))
 
-    # SECTION 3
+    # SECTION 3 — 🆕 v6.9.3: وسم [MV]
     if dirty:
         s3: List[str] = []
         s3.append("━━━━━━━━━━━━━━━━━━━━━━")
@@ -945,8 +1082,9 @@ async def _build_sections() -> List[str]:
         for t in dirty[:20]:
             color = _dead_color(t["dead"], t["live"])
             name = _esc(t["name"])
+            mv_tag = " <code>[MV]</code>" if t.get("is_matview") else ""
             ratio_pct = t["ratio"] * 100
-            s3.append(f"{color} <b>{name}</b>")
+            s3.append(f"{color} <b>{name}</b>{mv_tag}")
             s3.append(f"     live={_fmt_num(t['live'])} "
                       f"dead={_fmt_num(t['dead'])} ({ratio_pct:.1f}%)")
             av = _fmt_ts(t["last_av"])
@@ -964,7 +1102,8 @@ async def _build_sections() -> List[str]:
         clean_sorted = sorted(clean, key=lambda x: -x["live"])
         for t in clean_sorted[:15]:
             an = _fmt_ts(t["last_an"])
-            s3b.append(f"✅ <b>{_esc(t['name'])}</b>")
+            mv_tag = " <code>[MV]</code>" if t.get("is_matview") else ""
+            s3b.append(f"✅ <b>{_esc(t['name'])}</b>{mv_tag}")
             s3b.append(f"     live={_fmt_num(t['live'])} | 📊 AN: {an}")
         if len(clean_sorted) > 15:
             s3b.append(f"… و{len(clean_sorted) - 15} جدول نظيف آخر")
@@ -996,7 +1135,8 @@ async def _build_sections() -> List[str]:
                    f"({len(not_tuned)} من {len(tuned) + len(not_tuned)})</b>")
         s4b.append("")
         for t in not_tuned[:15]:
-            s4b.append(f"⚙️ <b>{_esc(t['name'])}</b> — "
+            mv_tag = " <code>[MV]</code>" if t.get("is_matview") else ""
+            s4b.append(f"⚙️ <b>{_esc(t['name'])}</b>{mv_tag} — "
                        f"live={_fmt_num(t['live'])} dead={_fmt_num(t['dead'])}")
         if len(not_tuned) > 15:
             s4b.append(f"… و{len(not_tuned) - 15} آخر")
@@ -1096,6 +1236,9 @@ async def diagnose_db_split() -> List[str]:
 
 
 async def diagnose_db_quick() -> str:
+    """
+    🆕 v6.9.3: التصنيف يعتمد على العدد المطلق، ليس النسبة فقط.
+    """
     db = _get_db()
     if db is None:
         return "❌ DB غير مستورد"
@@ -1114,7 +1257,12 @@ async def diagnose_db_quick() -> str:
     try:
         dirty, clean = await _get_all_tables_health()
         total_dead = sum(t.get("dead", 0) for t in dirty)
-        critical = sum(1 for t in dirty if t.get("ratio", 0) >= 0.20)
+        # 🔴 FIX-2: نفس منطق _calc_technical_score
+        critical = sum(
+            1 for t in dirty
+            if t.get("ratio", 0) >= 0.20
+            and int(t.get("dead", 0)) >= _MIN_DEAD_FOR_CRITICAL
+        )
     except Exception:
         pass
     lines.append(
@@ -1190,6 +1338,12 @@ get_db_info = _get_db_metadata
 get_database_info = _get_db_metadata
 get_pg_info = _get_db_metadata
 
+# 🆕 v6.9.3: aliases للتنظيف التلقائي
+auto_vacuum = auto_vacuum_dirty_mvs
+auto_cleanup = auto_vacuum_dirty_mvs
+cleanup_dead_tuples = auto_vacuum_dirty_mvs
+vacuum_dirty_tables = auto_vacuum_dirty_mvs
+
 
 # ═══════════════════════════════════════════════════════════════════════
 # 15) __all__
@@ -1201,6 +1355,11 @@ __all__ = [
     "diagnose_db_split",
     "diagnose_db_quick",
     "get_diagnostics_data",
+    "auto_vacuum_dirty_mvs",      # 🆕 v6.9.3
+    "auto_vacuum",                # 🆕 alias
+    "auto_cleanup",               # 🆕 alias
+    "cleanup_dead_tuples",        # 🆕 alias
+    "vacuum_dirty_tables",        # 🆕 alias
     "preview_maintenance",
     "run_maintenance",
     "format_maintenance_preview",
@@ -1245,8 +1404,12 @@ try:
     logger.info(
         "🛡️ db_diagnostics.py v%s loaded | "
         "13 sections + maintenance API | "
+        "MVs included in VACUUM ✅ | "
+        "abs-threshold=%d dead | "
+        "auto-vacuum API ✅ | "
         "user_violations.last_violation_time ✅ | exports=%d",
         VERSION,
+        _MIN_DEAD_FOR_CRITICAL,
         len(__all__),
     )
 except Exception:
