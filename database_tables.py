@@ -2,20 +2,31 @@
 # -*- coding: utf-8 -*-
 
 """
-database_tables.py — إنشاء الجداول والفهارس لكل قواعد البيانات (v7.9.1)
+database_tables.py — إنشاء الجداول والفهارس لكل قواعد البيانات (v7.9.2)
 ================================================================================
+🆕 v7.9.2 (MV-AUTO-VACUUM):
+  🔴 MV-FIX-1 CRITICAL: MAINTENANCE_TABLES يشمل الآن:
+      • mv_active_user_limits (Materialized View)
+      • penalty_archive, user_violations, user_warnings
+      • sentiment_history, payment_logs, user_messages
+      • bot_addition_log
+      السبب: autovacuum لا يعمل على MVs أبداً، وهذه الجداول
+      كانت خارج قائمة الصيانة الدورية.
+  🔴 MV-FIX-2 CRITICAL: _run_maintenance_postgres يجمع الآن
+      كل MVs من pg_class تلقائياً + كل الجداول، فلا حاجة
+      لتحديث القائمة يدوياً عند إضافة MV جديد.
+  🟢 MV-FIX-3: دالة جديدة _vacuum_dirty_mvs_postgres تُنظّف
+      الـ MVs التي فيها dead_tuples >= 10 فقط (ذكية).
+  🟡 MV-FIX-4: توسيع SMALL_TABLES_FOR_AGGRESSIVE_AUTOVACUUM
+      ليشمل الجداول السبع الجديدة.
+  🟡 MV-FIX-5: __all__ يشمل _vacuum_dirty_mvs_postgres.
+
 🆕 v7.9.1 (BANNED-WORDS-ADDED-BY-MIGRATION):
   🔴 BW-MIG-1 CRITICAL: migration لعمود added_by في banned_words
-      السبب: database.py v7.7.57 يحتاج added_by للفصل بين
-      كلمات الملف (0) وكلمات البوت (user_id). القواعد القديمة
-      ليس لديها هذا العمود → فشل الاستعلام → توقف المزامنة.
   🔴 BW-MIG-2 CRITICAL: migration لعمود added_by في auto_replies
-      نفس المنطق لـ BW-FIX-2 في database.py v7.7.57.
-  🟡 BW-MIG-3: CURRENT_SCHEMA_VERSION 26 → 27 (لإجبار fast-path
-      الجديد على تشغيل الـ migrations الإضافية).
-  🟡 BW-MIG-4: إضافة _BANNED_WORDS_NEW_COLUMNS و
-      _AUTO_REPLIES_NEW_COLUMNS كقوائم مستقلة.
-  🟢 BW-MIG-5: تحديث __all__ لتصدير القوائم الجديدة.
+  🟡 BW-MIG-3: CURRENT_SCHEMA_VERSION 26 → 27
+  🟡 BW-MIG-4: _BANNED_WORDS_NEW_COLUMNS و _AUTO_REPLIES_NEW_COLUMNS
+  🟢 BW-MIG-5: تحديث __all__
 
 🆕 v7.9.0 (SECURITY-V7.10.0-COLUMNS):
   ✅ CURRENT_SCHEMA_VERSION: 25 → 26
@@ -57,8 +68,11 @@ ADMIN_LOGS_MAX_ROWS = 5000
 
 REMOVED_CHANNELS_GRACE_DAYS = 30
 
-# ✅ v7.7.0: إضافة auto_blocked_sources
+# ═══════════════════════════════════════════════════════════════════════
+# ✅ v7.9.2: MAINTENANCE_TABLES موسّع — يشمل MVs وجداول سجلات
+# ═══════════════════════════════════════════════════════════════════════
 MAINTENANCE_TABLES = (
+    # ── الأساسية (منذ v7.6.28) ──
     "posts",
     "users",
     "auto_replies",
@@ -69,9 +83,26 @@ MAINTENANCE_TABLES = (
     "schedule",
     "admin_logs",
     "auto_blocked_sources",
+    # ═══════════════════════════════════════════════════════════════
+    # 🆕 v7.9.2 MV-FIX-1: Materialized Views
+    # autovacuum لا يعمل عليها — يجب تضمينها يدوياً
+    # ═══════════════════════════════════════════════════════════════
+    "mv_active_user_limits",
+    # ═══════════════════════════════════════════════════════════════
+    # 🆕 v7.9.2 MV-FIX-1: جداول سجلات متراكمة
+    # ═══════════════════════════════════════════════════════════════
+    "penalty_archive",
+    "user_violations",
+    "user_warnings",
+    "sentiment_history",
+    "payment_logs",
+    "user_messages",
+    "bot_addition_log",
 )
 
-# ✅ v7.8.0: توسيع من 23 → 33 جدولاً
+# ═══════════════════════════════════════════════════════════════════════
+# ✅ v7.8.0 + v7.9.2: توسيع autovacuum على الجداول الصغيرة
+# ═══════════════════════════════════════════════════════════════════════
 SMALL_TABLES_FOR_AGGRESSIVE_AUTOVACUUM = (
     "auto_replies",
     "auto_reply_settings",
@@ -96,7 +127,7 @@ SMALL_TABLES_FOR_AGGRESSIVE_AUTOVACUUM = (
     "support_tickets",
     "bot_addition_log",
     "auto_blocked_sources",
-    # ✅ v7.8.0: 10 جداول جديدة
+    # ✅ v7.8.0: 10 جداول
     "admin_logs",
     "banned_words",
     "penalty_archive",
@@ -107,6 +138,15 @@ SMALL_TABLES_FOR_AGGRESSIVE_AUTOVACUUM = (
     "sentiment_history",
     "payment_logs",
     "referrals",
+    # 🆕 v7.9.2 MV-FIX-4: جداول إضافية
+    "user_translation",
+    "user_reminder_settings",
+    "contests",
+    "contest_participants",
+    "contest_winners",
+    "gift_codes",
+    "violation_penalties",
+    "invoices",
 )
 
 DEFAULT_SETTINGS = (
@@ -116,7 +156,7 @@ DEFAULT_SETTINGS = (
     ("last_backup", ""),
 )
 
-# ✅ v7.9.0: 77 → 78 (فهرس جديد idx_group_security_postbot)
+# ✅ v7.9.0: 77 → 78
 EXPECTED_INDEX_COUNT = 78
 
 MYSQL_SKIP_INDEXES = frozenset({
@@ -1064,10 +1104,112 @@ async def _quick_analyze_mysql(conn, logger):
 
 
 # =====================================================================
-# VACUUM ANALYZE الدوري
+# 🆕 v7.9.2 MV-FIX-3: VACUUM ذكي على الـ Materialized Views المتسخة
+# =====================================================================
+
+async def _vacuum_dirty_mvs_postgres(conn, logger, min_dead: int = 10):
+    """
+    🆕 v7.9.2 MV-FIX-3: تنظيف MVs المتسخة.
+
+    autovacuum لا يعمل على Materialized Views إطلاقاً.
+    هذه الدالة تجد كل MVs التي فيها dead_tuples >= min_dead
+    وتشغّل عليها VACUUM (ANALYZE) فقط عند الحاجة.
+
+    Args:
+        conn:     اتصال PostgreSQL
+        logger:   logger
+        min_dead: الحد الأدنى لـ dead_tuples قبل التنظيف (افتراضي 10)
+
+    Returns:
+        int: عدد MVs التي نُظّفت
+    """
+    if not _is_valid_index_name:
+        return 0
+
+    try:
+        rows = await conn.fetch("""
+            SELECT c.relname AS name,
+                   s.n_dead_tup AS dead,
+                   s.n_live_tup AS live
+            FROM pg_stat_user_tables s
+            JOIN pg_class c ON c.oid = s.relid
+            WHERE s.schemaname = current_schema()
+              AND c.relkind = 'm'
+              AND s.n_dead_tup >= $1
+            ORDER BY s.n_dead_tup DESC
+        """, min_dead)
+
+        if not rows:
+            if logger:
+                logger.debug(
+                    "🧹 PG: لا MVs متسخة (dead < %d)", min_dead
+                )
+            return 0
+
+        if logger:
+            logger.info(
+                f"🧹 PG: وُجد {len(rows)} MV متسخ — بدء VACUUM..."
+            )
+
+        cleaned = 0
+        failed = 0
+        for r in rows:
+            name = r["name"]
+            dead = r["dead"]
+            live = r["live"]
+
+            # تحقق أمني: لا VACUUM على أسماء غير صالحة
+            if not _is_valid_index_name(name):
+                failed += 1
+                if logger:
+                    logger.warning(
+                        f"⚠️ PG: اسم MV غير صالح — تخطي: {name!r}"
+                    )
+                continue
+
+            try:
+                await conn.execute(f'VACUUM (ANALYZE) "{name}"')
+                cleaned += 1
+                if logger:
+                    logger.info(
+                        f"✅ PG: VACUUM على MV {name} "
+                        f"(dead={dead}, live={live})"
+                    )
+            except Exception as e:
+                failed += 1
+                if logger:
+                    logger.debug(f"⚠️ VACUUM MV {name}: {e}")
+
+            try:
+                await asyncio.sleep(VACUUM_INTER_TABLE_DELAY_SECONDS)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                pass
+
+        if logger and cleaned:
+            logger.info(
+                f"✅ PG: نُظّف {cleaned} MV "
+                f"({failed} فشل)"
+            )
+        return cleaned
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:
+        if logger:
+            logger.debug(f"_vacuum_dirty_mvs_postgres: {e}")
+        return 0
+
+
+# =====================================================================
+# VACUUM ANALYZE الدوري — 🆕 v7.9.2: يشمل MVs تلقائياً
 # =====================================================================
 
 async def _run_maintenance_postgres(conn, logger):
+    """
+    🆕 v7.9.2 MV-FIX-2: يجمع الآن كل الجداول و MVs تلقائياً من
+    pg_class بدلاً من الاعتماد على MAINTENANCE_TABLES فقط.
+    """
     try:
         try:
             last_val = await conn.fetchval(
@@ -1092,15 +1234,43 @@ async def _run_maintenance_postgres(conn, logger):
             except (ValueError, TypeError):
                 pass
 
+        # ═══════════════════════════════════════════════════════════
+        # 🆕 v7.9.2 MV-FIX-2: اجمع كل relations (tables + MVs)
+        # ═══════════════════════════════════════════════════════════
+        all_objects: list = []
+        try:
+            rows = await conn.fetch("""
+                SELECT c.relname AS name,
+                       c.relkind AS kind
+                FROM pg_class c
+                JOIN pg_namespace n ON n.oid = c.relnamespace
+                WHERE n.nspname = current_schema()
+                  AND c.relkind IN ('r', 'm')
+                ORDER BY c.relkind DESC, c.relname
+            """)
+            all_objects = [r["name"] for r in rows]
+        except Exception as e:
+            if logger:
+                logger.debug(f"⚠️ PG fetch relations: {e}")
+            all_objects = list(MAINTENANCE_TABLES)
+
+        # ادمج MAINTENANCE_TABLES + كل relations (dict يحافظ على الترتيب)
+        merged_targets = list(dict.fromkeys(
+            list(MAINTENANCE_TABLES) + all_objects
+        ))
+
         if logger:
             logger.info(
-                "🧹 PG: بدء VACUUM (ANALYZE, SKIP_LOCKED) "
-                "على الجداول الحرجة..."
+                f"🧹 PG: بدء VACUUM (ANALYZE, SKIP_LOCKED) "
+                f"على {len(merged_targets)} كائن (جداول + MVs)..."
             )
 
         done = 0
         failed = 0
-        for tbl in MAINTENANCE_TABLES:
+        for tbl in merged_targets:
+            if not _is_valid_index_name(tbl):
+                failed += 1
+                continue
             try:
                 await conn.execute(
                     f"VACUUM (ANALYZE, SKIP_LOCKED) {tbl}"
@@ -1117,6 +1287,21 @@ async def _run_maintenance_postgres(conn, logger):
             except Exception:
                 pass
 
+        # ═══════════════════════════════════════════════════════════
+        # 🆕 v7.9.2 MV-FIX-3: تنظيف ذكي إضافي للـ MVs المتسخة
+        # (ضمان مزدوج — لو فشل VACUUM في القائمة الرئيسية)
+        # ═══════════════════════════════════════════════════════════
+        mvs_cleaned = 0
+        try:
+            mvs_cleaned = await _vacuum_dirty_mvs_postgres(
+                conn, logger, min_dead=10
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            if logger:
+                logger.debug(f"⚠️ _vacuum_dirty_mvs_postgres: {e}")
+
         try:
             await conn.execute(
                 "INSERT INTO settings (key, value) VALUES ($1, $2) "
@@ -1130,8 +1315,8 @@ async def _run_maintenance_postgres(conn, logger):
 
         if logger and done:
             logger.info(
-                f"✅ PG: VACUUM (ANALYZE, SKIP_LOCKED) على {done} جدول "
-                f"({failed} فشل)"
+                f"✅ PG: VACUUM (ANALYZE, SKIP_LOCKED) على {done} كائن "
+                f"({failed} فشل، {mvs_cleaned} MV إضافي)"
             )
         return done
     except asyncio.CancelledError:
@@ -1285,23 +1470,16 @@ async def _run_maintenance_mysql(conn, logger):
 # Migrations — إضافة أعمدة مفقودة
 # =====================================================================
 
-# ✅ v7.9.0: 7 أعمدة للأزرار الستة + forward toggle
 _GROUP_SECURITY_NEW_COLUMNS = [
-    # ─── الموجودة مسبقًا ───
     ("violation_penalty", "TEXT DEFAULT 'none'"),
     ("violation_penalty_duration", "INTEGER DEFAULT 3600"),
-
-    # ═══════════════════════════════════════════════════════════════
-    # 🆕 v7.9.0 (v7.10.0 أزرار): 6 أعمدة الأزرار + forward
-    # ═══════════════════════════════════════════════════════════════
+    # 🆕 v7.9.0
     ("delete_at_channel", "INTEGER DEFAULT 0"),
     ("delete_tg_scheme", "INTEGER DEFAULT 1"),
     ("delete_button_links", "INTEGER DEFAULT 1"),
     ("delete_emails", "INTEGER DEFAULT 0"),
     ("delete_protected_any", "INTEGER DEFAULT 0"),
     ("delete_postbot_pattern", "INTEGER DEFAULT 0"),
-
-    # ─── دعم forward toggle ───
     ("delete_protected_forward", "INTEGER DEFAULT 0"),
 ]
 
@@ -1316,12 +1494,12 @@ _USER_CHANNELS_NEW_COLUMNS = [
     ("removal_reason", "TEXT DEFAULT NULL"),
 ]
 
-# ✅ v7.9.1 BW-MIG-1: عمود added_by لجدول banned_words
+# ✅ v7.9.1 BW-MIG-1
 _BANNED_WORDS_NEW_COLUMNS = [
     ("added_by", "BIGINT DEFAULT 0"),
 ]
 
-# ✅ v7.9.1 BW-MIG-2: عمود added_by لجدول auto_replies
+# ✅ v7.9.1 BW-MIG-2
 _AUTO_REPLIES_NEW_COLUMNS = [
     ("added_by", "BIGINT DEFAULT 0"),
 ]
@@ -1395,7 +1573,7 @@ async def _migrate_missing_columns_sqlite(conn, logger):
                     f"⚠️ SQLite migration user_channels.{col_name}: {e}"
                 )
 
-    # ✅ v7.9.1 BW-MIG-1: banned_words.added_by
+    # ✅ v7.9.1 BW-MIG-1
     for col_name, col_def in _BANNED_WORDS_NEW_COLUMNS:
         checked += 1
         try:
@@ -1417,7 +1595,7 @@ async def _migrate_missing_columns_sqlite(conn, logger):
                     f"⚠️ SQLite migration banned_words.{col_name}: {e}"
                 )
 
-    # ✅ v7.9.1 BW-MIG-2: auto_replies.added_by
+    # ✅ v7.9.1 BW-MIG-2
     for col_name, col_def in _AUTO_REPLIES_NEW_COLUMNS:
         checked += 1
         try:
@@ -1541,7 +1719,7 @@ async def _migrate_missing_columns_postgres(conn, logger):
                     f"⚠️ PG migration user_channels.{col_name}: {e}"
                 )
 
-    # ✅ v7.9.1 BW-MIG-1: banned_words.added_by
+    # ✅ v7.9.1 BW-MIG-1
     for col_name, col_def in _BANNED_WORDS_NEW_COLUMNS:
         try:
             exists = await conn.fetchval(
@@ -1572,7 +1750,7 @@ async def _migrate_missing_columns_postgres(conn, logger):
                     f"⚠️ PG migration banned_words.{col_name}: {e}"
                 )
 
-    # ✅ v7.9.1 BW-MIG-2: auto_replies.added_by
+    # ✅ v7.9.1 BW-MIG-2
     for col_name, col_def in _AUTO_REPLIES_NEW_COLUMNS:
         try:
             exists = await conn.fetchval(
@@ -1618,11 +1796,9 @@ async def _migrate_missing_columns_mysql(conn, logger):
 
     await _ensure_auto_blocked_table_mysql(conn, logger)
 
-    # MySQL: قيم افتراضية مختلفة (TINYINT للبوليانات)
     _mysql_group_security_cols = [
         ("violation_penalty", "VARCHAR(50) DEFAULT 'none'"),
         ("violation_penalty_duration", "INT DEFAULT 3600"),
-        # 🆕 v7.9.0
         ("delete_at_channel", "TINYINT(1) DEFAULT 0"),
         ("delete_tg_scheme", "TINYINT(1) DEFAULT 1"),
         ("delete_button_links", "TINYINT(1) DEFAULT 1"),
@@ -1752,7 +1928,7 @@ async def _migrate_missing_columns_mysql(conn, logger):
                     f"⚠️ MySQL migration user_channels.{col_name}: {e}"
                 )
 
-    # ✅ v7.9.1 BW-MIG-1: banned_words.added_by
+    # ✅ v7.9.1 BW-MIG-1
     _mysql_banned_words_cols = [
         ("added_by", "BIGINT DEFAULT 0"),
     ]
@@ -1796,7 +1972,7 @@ async def _migrate_missing_columns_mysql(conn, logger):
                     f"⚠️ MySQL migration banned_words.{col_name}: {e}"
                 )
 
-    # ✅ v7.9.1 BW-MIG-2: auto_replies.added_by
+    # ✅ v7.9.1 BW-MIG-2
     _mysql_auto_replies_cols = [
         ("added_by", "BIGINT DEFAULT 0"),
     ]
@@ -2913,9 +3089,6 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
             violation_duration INTEGER DEFAULT 60,
             violation_penalty TEXT DEFAULT 'none',
             violation_penalty_duration INTEGER DEFAULT 3600,
-            -- ═══════════════════════════════════════════════════════
-            -- 🆕 v7.9.0: 7 أعمدة الأزرار الستة + forward
-            -- ═══════════════════════════════════════════════════════
             delete_at_channel INTEGER DEFAULT 0,
             delete_tg_scheme INTEGER DEFAULT 1,
             delete_button_links INTEGER DEFAULT 1,
@@ -2926,7 +3099,6 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
         )
     """)
 
-    # ✅ v7.9.1 BW-MIG-1: banned_words مع added_by (للأجهزة الجديدة)
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS banned_words (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -2938,7 +3110,6 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
         )
     """)
 
-    # ✅ v7.9.1 BW-MIG-2: auto_replies مع added_by (للأجهزة الجديدة)
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS auto_replies (
             chat_id INTEGER,
@@ -3332,7 +3503,7 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
             "(version, applied_at, description) "
             "VALUES (?, ?, ?) ON CONFLICT(version) DO NOTHING",
             (CURRENT_SCHEMA_VERSION, _safe_now_iso(TimeUtils),
-             "v7.9.1-banned-words-added-by"),
+             "v7.9.2-mv-auto-vacuum"),
         )
         await conn.commit()
     except Exception as e:
@@ -3342,7 +3513,7 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
     if logger:
         logger.info(
             "✅ تم إنشاء جميع جداول SQLite مع الفهارس المحسنة "
-            "(v7.9.1 — BW-MIG-1 + BW-MIG-2)"
+            "(v7.9.2 — MV-AUTO-VACUUM)"
         )
 
 
@@ -3367,6 +3538,8 @@ async def create_tables_postgres(conn, logger, TimeUtils):
         await _cleanup_old_admin_logs_postgres(conn, logger)
         await _tune_autovacuum_postgres(conn, logger)
         await _quick_analyze_postgres(conn, logger)
+        # 🆕 v7.9.2 MV-FIX-2/3: VACUUM يشمل MVs تلقائياً
+        await _run_maintenance_postgres(conn, logger)
         if logger:
             logger.info(
                 f"⏩ PG: schema v{current} محدّث — تخطي (fast-path)"
@@ -3596,9 +3769,6 @@ async def create_tables_postgres(conn, logger, TimeUtils):
             violation_duration INTEGER DEFAULT 60,
             violation_penalty TEXT DEFAULT 'none',
             violation_penalty_duration INTEGER DEFAULT 3600,
-            -- ═══════════════════════════════════════════════════════
-            -- 🆕 v7.9.0: 7 أعمدة الأزرار الستة + forward
-            -- ═══════════════════════════════════════════════════════
             delete_at_channel INTEGER DEFAULT 0,
             delete_tg_scheme INTEGER DEFAULT 1,
             delete_button_links INTEGER DEFAULT 1,
@@ -3609,7 +3779,6 @@ async def create_tables_postgres(conn, logger, TimeUtils):
         )
     """)
 
-    # ✅ v7.9.1 BW-MIG-1: banned_words مع added_by
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS banned_words (
             id SERIAL PRIMARY KEY,
@@ -3621,7 +3790,6 @@ async def create_tables_postgres(conn, logger, TimeUtils):
         )
     """)
 
-    # ✅ v7.9.1 BW-MIG-2: auto_replies مع added_by
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS auto_replies (
             chat_id BIGINT,
@@ -4014,6 +4182,8 @@ async def create_tables_postgres(conn, logger, TimeUtils):
     await _cleanup_old_admin_logs_postgres(conn, logger)
     await _tune_autovacuum_postgres(conn, logger)
     await _quick_analyze_postgres(conn, logger)
+    # 🆕 v7.9.2 MV-FIX-2/3: VACUUM يشمل MVs
+    await _run_maintenance_postgres(conn, logger)
 
     try:
         await conn.execute(
@@ -4022,7 +4192,7 @@ async def create_tables_postgres(conn, logger, TimeUtils):
             "VALUES ($1, $2, $3) ON CONFLICT (version) DO NOTHING",
             CURRENT_SCHEMA_VERSION,
             _safe_now_dt(TimeUtils),
-            "v7.9.1-banned-words-added-by",
+            "v7.9.2-mv-auto-vacuum",
         )
     except Exception as e:
         if logger:
@@ -4031,7 +4201,7 @@ async def create_tables_postgres(conn, logger, TimeUtils):
     if logger:
         logger.info(
             "✅ تم إنشاء جميع جداول PostgreSQL مع الفهارس المحسنة "
-            "(v7.9.1 — BW-MIG-1 + BW-MIG-2)"
+            "(v7.9.2 — MV-AUTO-VACUUM)"
         )
 
 
@@ -4294,9 +4464,6 @@ async def create_tables_mysql(conn, logger, TimeUtils):
                 violation_duration INT DEFAULT 60,
                 violation_penalty VARCHAR(50) DEFAULT 'none',
                 violation_penalty_duration INT DEFAULT 3600,
-                -- ═══════════════════════════════════════════════════════
-                -- 🆕 v7.9.0: 7 أعمدة الأزرار الستة + forward
-                -- ═══════════════════════════════════════════════════════
                 delete_at_channel TINYINT(1) DEFAULT 0,
                 delete_tg_scheme TINYINT(1) DEFAULT 1,
                 delete_button_links TINYINT(1) DEFAULT 1,
@@ -4307,7 +4474,6 @@ async def create_tables_mysql(conn, logger, TimeUtils):
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
         """)
 
-        # ✅ v7.9.1 BW-MIG-1: banned_words مع added_by
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS banned_words (
                 id INT PRIMARY KEY AUTO_INCREMENT,
@@ -4319,7 +4485,6 @@ async def create_tables_mysql(conn, logger, TimeUtils):
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
         """)
 
-        # ✅ v7.9.1 BW-MIG-2: auto_replies مع added_by
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS auto_replies (
                 chat_id BIGINT,
@@ -4716,7 +4881,7 @@ async def create_tables_mysql(conn, logger, TimeUtils):
                 (
                     CURRENT_SCHEMA_VERSION,
                     _safe_now_iso(TimeUtils),
-                    "v7.9.1-banned-words-added-by",
+                    "v7.9.2-mv-auto-vacuum",
                 ),
             )
         except Exception as e:
@@ -4726,7 +4891,7 @@ async def create_tables_mysql(conn, logger, TimeUtils):
         if logger:
             logger.info(
                 "✅ تم إنشاء جميع جداول MySQL مع الفهارس المحسنة "
-                "(v7.9.1 — BW-MIG-1 + BW-MIG-2)"
+                "(v7.9.2 — MV-AUTO-VACUUM)"
             )
 
     finally:
@@ -4768,6 +4933,8 @@ __all__ = [
     "_run_maintenance_postgres",
     "_run_maintenance_sqlite",
     "_run_maintenance_mysql",
+    # 🆕 v7.9.2 MV-FIX-3
+    "_vacuum_dirty_mvs_postgres",
     "_ensure_auto_blocked_table_postgres",
     "_ensure_auto_blocked_table_sqlite",
     "_ensure_auto_blocked_table_mysql",
