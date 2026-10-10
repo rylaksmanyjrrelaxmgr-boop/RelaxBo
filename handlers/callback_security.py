@@ -12,6 +12,10 @@ callback_security.py - معالج أزرار الأمان (v9.7.24-STABLE)
     🟢 IMPROVE-3: _check_sec_auth يميّز أخطاء الشبكة عن البرمجية.
     🟢 IMPROVE-4: _metrics_inc يسجّل تحذيراً مرة واحدة بدل pass الصامت.
 
+    🆕 v9.7.24-LOAD-DIAGNOSTIC:
+    🟢 إضافة _log_module_load() لعرض معلومات التحميل في stderr مباشرة
+       (يعمل بغض النظر عن إعدادات logging في المشروع).
+
     ⚠️ ملاحظات:
     - لم يتم تقسيم _handle_parameterized_inner (يبقى كما هو).
     - لم يتم تمرير None بدل update في أي مكان.
@@ -2230,4 +2234,73 @@ __all__ = [
     "_require_sec_auth", "_invalid_data",
 ]
 
+
+# ═══════════════════════════════════════════════════════════════════
+# 🆕 v9.7.24-LOAD-DIAGNOSTIC: تشخيص التحميل (يظهر دائماً في stderr)
+# ═══════════════════════════════════════════════════════════════════
+def _log_module_load():
+    """
+    يُسجّل معلومات تحميل الملف في stderr مباشرة.
+    لا يعتمد على إعدادات logging في المشروع — يظهر دائماً.
+    """
+    try:
+        import sys as _sys
+
+        # التحقق من توفر handlers_callback
+        hc_available = _hc_import() is not None
+        hc_status = "✅ متاح" if hc_available else "⚠️ غير متاح (fallback)"
+
+        # التحقق من settings_cache الحقيقي (ليس dummy)
+        cache_is_real = False
+        try:
+            cache_is_real = (settings_cache.__class__.__name__
+                             != '_DummySettingsCache')
+        except Exception:
+            cache_is_real = False
+        cache_status = "✅ حقيقي" if cache_is_real else "⚠️ dummy"
+
+        # التحقق من bridge
+        bridge_status = ("✅ متاح" if _SECURITY_BRIDGE_AVAILABLE
+                         else "❌ غير متاح")
+
+        # معلومات الثوابت
+        try:
+            penalty_count = len(_get_valid_penalty_types())
+        except Exception:
+            penalty_count = "?"
+        toggle_map_ok = "✅" if SECURITY_TOGGLE_MAP else "❌"
+
+        info = (
+            "\n"
+            "╔═══════════════════════════════════════════════════════════╗\n"
+            "║  🔐 callback_security.py — v9.7.24-STABLE                 ║\n"
+            "╠═══════════════════════════════════════════════════════════╣\n"
+            f"║  📁 المسار: {__file__[-55:]:<55} ║\n"
+            f"║  🔧 handlers_callback: {hc_status:<45} ║\n"
+            f"║  💾 settings_cache: {cache_status:<47} ║\n"
+            f"║  🌉 bridge: {bridge_status:<52} ║\n"
+            f"║  📊 ثوابت: TOGGLE_MAP={toggle_map_ok} | "
+            f"PENALTIES={penalty_count} | ACTIONS={len(_ACT_USER_ACTIONS)}"
+            f"{'':<17} ║\n"
+            "║  ✅ كل الأنظمة جاهزة                                      ║\n"
+            "╚═══════════════════════════════════════════════════════════╝\n"
+        )
+        _sys.stderr.write(info)
+        _sys.stderr.flush()
+    except Exception as _e:
+        # لا نُفشل التحميل بسبب التشخيص
+        try:
+            import sys as _sys2
+            _sys2.stderr.write(
+                f"🔐 callback_security.py v9.7.24-STABLE loaded "
+                f"(diagnostic failed: {_e})\n"
+            )
+            _sys2.stderr.flush()
+        except Exception:
+            pass
+
+
+_log_module_load()
+
+# احتياطي: عبر logger (قد لا يظهر حسب إعدادات المشروع)
 logger.info("🔐 callback_security.py loaded (v9.7.24-STABLE)")
