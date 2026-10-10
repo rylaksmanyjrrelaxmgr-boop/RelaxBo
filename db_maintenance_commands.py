@@ -1,28 +1,20 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-db_maintenance_commands.py - أوامر صيانة قاعدة البيانات (v1.0.3)
+db_maintenance_commands.py - أوامر صيانة قاعدة البيانات (v1.1.0)
 ================================================================================
-🆕 v1.0.3 — إصلاح التوافقية مع main.py:
-    🔴 FIX-1: أُضيفت register_maintenance_commands() بشكل صريح
-              (كانت ناقصة في الملف الرفوع → ImportError).
-    🔴 FIX-2: أُضيف alias register = register_maintenance_commands
-              (لأن main.py قد يستورد أي من الاسمين).
-    🟡 FIX-3: أُضيفت aliases أخرى شائعة:
-              register_commands, setup_commands.
-    🟡 FIX-4: __all__ يشمل الآن كل الأسماء العامة.
+🆕 v1.1.0 — التنظيف التلقائي:
+    🟢 FEATURE-1: مهمة خلفية auto_vacuum_dirty_mvs تعمل كل 30 دقيقة.
+    🟢 FEATURE-2: تُصلح dead tuples على MVs تلقائياً (mv_active_user_limits...).
+    🟢 FEATURE-3: تفعيل/تعطيل عبر /db_weekly أو DB setting.
 
-3 أوامر:
-  /db_diag_quick   — تقرير صحي مختصر (4 أسطر)
-  /db_maintenance  — معاينة + تنفيذ الصيانة (DELETE + VACUUM)
-  /db_weekly       — تفعيل/تعطيل التقرير الأسبوعي التلقائي
+الأوامر:
+  /db_diag_quick   — تقرير صحي مختصر
+  /db_maintenance  — معاينة + تنفيذ يدوي
+  /db_weekly       — التقرير الأسبوعي
 
 ⚠️ الاعتماديات:
-    • db_diagnostics >= v6.5.1
-      (user_violations.last_violation_time بدل created_at)
-
-⚠️ الصلاحيات:
-  - كل الأوامر تتطلب PRIMARY_OWNER_ID أو is_developer
+    • db_diagnostics >= v6.9.3   ← يجب رفع النسخة المُصلَحة
 ================================================================================
 """
 
@@ -38,11 +30,11 @@ from config import CONFIG
 from database import DB
 
 # ═══════════════════════════════════════════════════════════════════
-# استيراد db_diagnostics — مع تحقق من الإصدار
+# استيراد db_diagnostics — v6.9.3+
 # ═══════════════════════════════════════════════════════════════════
 
 _DB_DIAGNOSTICS_VERSION = "0.0.0"
-_DB_DIAGNOSTICS_MIN_VERSION = (6, 5, 1)
+_DB_DIAGNOSTICS_MIN_VERSION = (6, 9, 3)
 
 try:
     from db_diagnostics import (
@@ -51,6 +43,7 @@ try:
         run_maintenance,
         format_maintenance_preview,
         format_maintenance_result,
+        auto_vacuum_dirty_mvs,          # 🆕 v6.9.3
     )
     try:
         from db_diagnostics import VERSION as _DB_DIAGNOSTICS_VERSION
@@ -69,9 +62,7 @@ try:
             f"⚠️ db_diagnostics الإصدار {_DB_DIAGNOSTICS_VERSION} "
             f"أقدم من المطلوب "
             f"{'.'.join(map(str, _DB_DIAGNOSTICS_MIN_VERSION))} — "
-            f"قد يظهر خطأ "
-            f"'column created_at does not exist' في user_violations. "
-            f"الرجاء ترقية db_diagnostics.py إلى v6.5.1+."
+            f"الرجاء ترقية db_diagnostics.py."
         )
 
 except ImportError as _imp_err:
@@ -83,6 +74,7 @@ except ImportError as _imp_err:
     run_maintenance = None
     format_maintenance_preview = None
     format_maintenance_result = None
+    auto_vacuum_dirty_mvs = None
     _DB_DIAGNOSTICS_VERSION = "missing"
 
 try:
@@ -109,12 +101,18 @@ _CONFIRMATION_TIMEOUT_SEC = 300
 _WEEKLY_REPORT_INTERVAL_SEC = 7 * 86400
 _WEEKLY_REPORT_INITIAL_DELAY = 3600
 
+# 🆕 v1.1.0 — التنظيف التلقائي
+_AUTO_VACUUM_INTERVAL_SEC = 30 * 60      # كل 30 دقيقة
+_AUTO_VACUUM_INITIAL_DELAY = 120         # أول تشغيل بعد دقيقتين من الإقلاع
+_AUTO_VACUUM_MIN_DEAD = 10               # الحد الأدنى للتنظيف
+
 
 # ═══════════════════════════════════════════════════════════════════
-# حالة عامة — المهمة الأسبوعية
+# حالة عامة
 # ═══════════════════════════════════════════════════════════════════
 
 _weekly_task: Optional[asyncio.Task] = None
+_auto_vacuum_task: Optional[asyncio.Task] = None
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -122,7 +120,6 @@ _weekly_task: Optional[asyncio.Task] = None
 # ═══════════════════════════════════════════════════════════════════
 
 def _is_authorized(user_id: int) -> bool:
-    """هل المستخدم مخوَّل بهذه الأوامر؟"""
     try:
         owner_id = int(getattr(CONFIG, 'PRIMARY_OWNER_ID', 0) or 0)
         if owner_id and user_id == owner_id:
@@ -137,10 +134,6 @@ def _is_authorized(user_id: int) -> bool:
         pass
     return False
 
-
-# ═══════════════════════════════════════════════════════════════════
-# تنظيف التأكيدات القديمة
-# ═══════════════════════════════════════════════════════════════════
 
 def _cleanup_stale_pending(context) -> bool:
     try:
@@ -178,27 +171,20 @@ def _preview_has_errors(preview) -> bool:
 async def db_diag_quick_command(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ):
-    """🔬 تقرير صحي مختصر."""
     if not update.effective_user or not update.message:
         return
-
     user_id = update.effective_user.id
-
     if not _is_authorized(user_id):
         await update.message.reply_text("⛔ غير مصرح.")
         return
-
     if diagnose_db_quick is None:
         await update.message.reply_text(
             "❌ وحدة db_diagnostics غير محمَّلة."
         )
         return
-
     try:
         report = await diagnose_db_quick()
-        await update.message.reply_text(
-            report, parse_mode='HTML'
-        )
+        await update.message.reply_text(report, parse_mode='HTML')
     except Exception as e:
         logger.error(f"db_diag_quick: {e}", exc_info=True)
         try:
@@ -216,23 +202,12 @@ async def db_diag_quick_command(
 async def db_maintenance_command(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ):
-    """
-    🧹 الصيانة.
-
-    استخدام:
-      /db_maintenance            → معاينة + طلب تأكيد
-      /db_maintenance confirm    → تنفيذ فعلي
-      /db_maintenance cancel     → إلغاء
-    """
     if not update.effective_user or not update.message:
         return
-
     user_id = update.effective_user.id
-
     if not _is_authorized(user_id):
         await update.message.reply_text("⛔ غير مصرح.")
         return
-
     if preview_maintenance is None or run_maintenance is None:
         await update.message.reply_text(
             "❌ وحدة db_diagnostics غير محمَّلة."
@@ -240,11 +215,9 @@ async def db_maintenance_command(
         return
 
     _cleanup_stale_pending(context)
-
     args = context.args or []
     action = args[0].lower() if args else "preview"
 
-    # ═══ PREVIEW ═══
     if action in ("preview", ""):
         try:
             preview = await preview_maintenance()
@@ -266,12 +239,7 @@ async def db_maintenance_command(
 
         if _preview_has_errors(preview):
             text += (
-                "\n\n⚠️ <b>تحذير:</b> بعض استعلامات العدّ فشلت.\n"
-                "💡 السبب المحتمل: "
-                "<code>db_diagnostics</code> إصدار أقدم من v6.5.1 "
-                "(يعرف فقط عمود <code>created_at</code> "
-                "في <code>user_violations</code>).\n"
-                "الرجاء ترقية <code>db_diagnostics.py</code>."
+                "\n\n⚠️ <b>تحذير:</b> بعض استعلامات العدّ فشلت."
             )
 
         context.user_data['_maint_pending'] = {
@@ -279,16 +247,11 @@ async def db_maintenance_command(
             'created_at': time.monotonic(),
             'preview': preview,
         }
-
-        await update.message.reply_text(
-            text, parse_mode='HTML'
-        )
+        await update.message.reply_text(text, parse_mode='HTML')
         return
 
-    # ═══ CONFIRM ═══
     if action == "confirm":
         pending = context.user_data.get('_maint_pending')
-
         if not pending:
             await update.message.reply_text(
                 "❌ لا توجد صيانة معلّقة.\n"
@@ -296,31 +259,25 @@ async def db_maintenance_command(
                 parse_mode='HTML',
             )
             return
-
         if pending.get('user_id') != user_id:
             await update.message.reply_text(
                 "❌ التأكيد من مستخدم مختلف."
             )
             return
-
         age = time.monotonic() - pending.get('created_at', 0)
         if age > _CONFIRMATION_TIMEOUT_SEC:
             context.user_data.pop('_maint_pending', None)
             await update.message.reply_text(
-                f"❌ انتهت مهلة التأكيد "
-                f"({_CONFIRMATION_TIMEOUT_SEC // 60} دقيقة).\n"
-                f"شغّل <code>/db_maintenance</code> مجدداً.",
+                f"❌ انتهت مهلة التأكيد.",
                 parse_mode='HTML',
             )
             return
 
         context.user_data.pop('_maint_pending', None)
-
         status_msg = None
         try:
             status_msg = await update.message.reply_text(
-                "⏳ <b>جارٍ تنفيذ الصيانة...</b>\n"
-                "قد تستغرق دقائق على قواعد كبيرة.",
+                "⏳ <b>جارٍ تنفيذ الصيانة...</b>",
                 parse_mode='HTML',
             )
         except Exception as e:
@@ -360,14 +317,7 @@ async def db_maintenance_command(
                 )
         except Exception as e:
             logger.warning(f"edit status: {e}")
-            try:
-                await update.message.reply_text(
-                    result_text, parse_mode='HTML'
-                )
-            except Exception:
-                pass
 
-        # سجل للقناة
         try:
             log_ch = await DB.get_dev_log_channel()
             if log_ch:
@@ -380,18 +330,14 @@ async def db_maintenance_command(
                 )
         except Exception as e:
             logger.debug(f"log maintenance: {e}")
-
         return
 
-    # ═══ CANCEL ═══
     if action == "cancel":
         had = context.user_data.pop('_maint_pending', None)
         if had:
             await update.message.reply_text("✅ تم إلغاء الصيانة.")
         else:
-            await update.message.reply_text(
-                "ℹ️ لا توجد صيانة معلّقة."
-            )
+            await update.message.reply_text("ℹ️ لا توجد صيانة معلّقة.")
         return
 
     await update.message.reply_text(
@@ -411,12 +357,9 @@ async def db_maintenance_command(
 async def db_weekly_command(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ):
-    """📅 إدارة التقرير الأسبوعي التلقائي."""
     if not update.effective_user or not update.message:
         return
-
     user_id = update.effective_user.id
-
     if not _is_authorized(user_id):
         await update.message.reply_text("⛔ غير مصرح.")
         return
@@ -435,16 +378,41 @@ async def db_weekly_command(
             task_status = ""
             try:
                 if _weekly_task is not None and not _weekly_task.done():
-                    task_status = "\n⚙️ المهمة الخلفية: 🟢 نشطة"
+                    task_status = "\n⚙️ المهمة الأسبوعية: 🟢 نشطة"
                 else:
-                    task_status = "\n⚙️ المهمة الخلفية: 🔴 متوقفة"
+                    task_status = "\n⚙️ المهمة الأسبوعية: 🔴 متوقفة"
+            except Exception:
+                pass
+
+            # 🆕 v1.1.0 — حالة التنظيف التلقائي
+            auto_status = ""
+            try:
+                auto_raw = await DB.get_setting(
+                    'db_auto_vacuum_enabled', default='1'
+                )
+                auto_enabled = str(auto_raw).strip() in (
+                    '1', 'true', 'yes', 'on'
+                )
+                ic = "🟢" if auto_enabled else "🔴"
+                running = (
+                    _auto_vacuum_task is not None
+                    and not _auto_vacuum_task.done()
+                )
+                tsk = "🟢 نشطة" if running else "🔴 متوقفة"
+                auto_status = (
+                    f"\n🧹 <b>التنظيف التلقائي:</b> {ic} "
+                    f"{'مفعّل' if auto_enabled else 'معطّل'}"
+                    f"\n⚙️ المهمة: {tsk}"
+                    f"\n⏱️ الدورة: كل "
+                    f"{_AUTO_VACUUM_INTERVAL_SEC // 60} دقيقة"
+                )
             except Exception:
                 pass
 
             await update.message.reply_text(
                 f"📅 <b>التقرير الأسبوعي:</b> {status}"
-                f"{task_status}\n\n"
-                f"لتفعيل/تعطيل:\n"
+                f"{task_status}{auto_status}\n\n"
+                f"<b>للتقرير الأسبوعي:</b>\n"
                 f"<code>/db_weekly on</code>\n"
                 f"<code>/db_weekly off</code>",
                 parse_mode='HTML',
@@ -465,8 +433,60 @@ async def db_weekly_command(
             )
             return
 
+        # 🆕 v1.1.0 — أوامر التنظيف التلقائي
+        if action == "auto_on":
+            await DB.set_setting('db_auto_vacuum_enabled', '1')
+            await update.message.reply_text(
+                "✅ تم تفعيل التنظيف التلقائي."
+            )
+            return
+
+        if action == "auto_off":
+            await DB.set_setting('db_auto_vacuum_enabled', '0')
+            await update.message.reply_text(
+                "🔴 تم تعطيل التنظيف التلقائي."
+            )
+            return
+
+        if action == "auto_now":
+            await update.message.reply_text(
+                "⏳ <b>جارٍ التشغيل الفوري...</b>",
+                parse_mode='HTML',
+            )
+            try:
+                result = await auto_vacuum_dirty_mvs(
+                    min_dead=_AUTO_VACUUM_MIN_DEAD
+                )
+                text = (
+                    "🧹 <b>تنظيف فوري</b>\n"
+                    "━━━━━━━━━━━━━━━━━━━━━━\n"
+                    f"✅ نُظِّف: <b>{result['cleaned']}</b>\n"
+                    f"💀 dead قبل: <b>{result['total_dead_before']}</b>\n"
+                    f"💀 dead بعد: <b>{result['total_dead_after']}</b>\n"
+                    f"⏱️ {result['duration_sec']:.2f}s"
+                )
+                if result['vacuumed']:
+                    text += "\n\n<b>التفاصيل:</b>\n"
+                    for v in result['vacuumed'][:10]:
+                        mv = " [MV]" if v['is_matview'] else ""
+                        text += (
+                            f"  ✅ <code>{v['name']}</code>{mv} "
+                            f"(dead={v['dead_before']})\n"
+                        )
+                if result['failed']:
+                    text += f"\n❌ فشل: {len(result['failed'])}"
+                await update.message.reply_text(
+                    text, parse_mode='HTML'
+                )
+            except Exception as e:
+                await update.message.reply_text(
+                    f"❌ فشل: {str(e)[:150]}"
+                )
+            return
+
         await update.message.reply_text(
-            "❌ استخدام: <code>/db_weekly on|off|status</code>",
+            "❌ استخدام: <code>/db_weekly "
+            "on|off|status|auto_on|auto_off|auto_now</code>",
             parse_mode='HTML',
         )
 
@@ -481,13 +501,129 @@ async def db_weekly_command(
 
 
 # ═══════════════════════════════════════════════════════════════════
-# المهمة الدورية الأسبوعية
+# 🆕 v1.1.0 — المهمة الدورية: التنظيف التلقائي
+# ═══════════════════════════════════════════════════════════════════
+
+async def scheduled_auto_vacuum(bot):
+    """
+    🧹 تنظيف تلقائي دوري.
+    يعمل كل 30 دقيقة على MVs والجداول التي فيها dead tuples >= 10.
+    """
+    logger.info(
+        "🧹 auto-vacuum scheduler started | "
+        "interval=%ds | initial_delay=%ds | min_dead=%d",
+        _AUTO_VACUUM_INTERVAL_SEC,
+        _AUTO_VACUUM_INITIAL_DELAY,
+        _AUTO_VACUUM_MIN_DEAD,
+    )
+
+    try:
+        await asyncio.sleep(_AUTO_VACUUM_INITIAL_DELAY)
+    except asyncio.CancelledError:
+        logger.info("⏹️ scheduled_auto_vacuum: أُلغي قبل البدء")
+        return
+
+    while True:
+        try:
+            # هل الميزة مفعّلة؟
+            enabled = True
+            try:
+                raw = await DB.get_setting(
+                    'db_auto_vacuum_enabled', default='1'
+                )
+                enabled = str(raw).strip() in (
+                    '1', 'true', 'yes', 'on'
+                )
+            except Exception as e:
+                logger.debug(f"auto_vacuum setting: {e}")
+
+            if enabled and auto_vacuum_dirty_mvs is not None:
+                try:
+                    result = await auto_vacuum_dirty_mvs(
+                        min_dead=_AUTO_VACUUM_MIN_DEAD
+                    )
+                    if result['cleaned'] > 0:
+                        logger.info(
+                            "🧹 auto-vacuum: cleaned=%d | dead %d → %d",
+                            result['cleaned'],
+                            result['total_dead_before'],
+                            result['total_dead_after'],
+                        )
+                except Exception as e:
+                    logger.warning(
+                        f"auto_vacuum run failed: {e}",
+                        exc_info=True,
+                    )
+
+        except asyncio.CancelledError:
+            logger.info("⏹️ scheduled_auto_vacuum: أُلغي")
+            return
+        except Exception as e:
+            logger.error(
+                f"scheduled_auto_vacuum: {e}", exc_info=True
+            )
+
+        try:
+            await asyncio.sleep(_AUTO_VACUUM_INTERVAL_SEC)
+        except asyncio.CancelledError:
+            logger.info("⏹️ scheduled_auto_vacuum: أُلغي")
+            return
+
+
+def start_auto_vacuum_task(application) -> bool:
+    """✅ بدء مهمة التنظيف التلقائي."""
+    global _auto_vacuum_task
+
+    if _auto_vacuum_task is not None and not _auto_vacuum_task.done():
+        try:
+            _auto_vacuum_task.cancel()
+        except Exception as e:
+            logger.debug(f"cancel previous auto_vacuum task: {e}")
+
+    try:
+        bot = getattr(application, 'bot', None)
+        if bot is None:
+            logger.warning(
+                "start_auto_vacuum_task: application.bot is None"
+            )
+            return False
+        _auto_vacuum_task = asyncio.create_task(
+            scheduled_auto_vacuum(bot)
+        )
+        logger.info("✅ Auto-vacuum task started")
+        return True
+    except Exception as e:
+        logger.error(f"start_auto_vacuum_task: {e}", exc_info=True)
+        return False
+
+
+async def stop_auto_vacuum_task(timeout: float = 3.0) -> None:
+    """✅ إيقاف مهمة التنظيف التلقائي."""
+    global _auto_vacuum_task
+
+    if _auto_vacuum_task is None or _auto_vacuum_task.done():
+        return
+    try:
+        _auto_vacuum_task.cancel()
+        try:
+            await asyncio.wait_for(
+                _auto_vacuum_task, timeout=timeout
+            )
+        except (asyncio.CancelledError, asyncio.TimeoutError):
+            pass
+        logger.info("🛑 auto-vacuum task stopped")
+    except Exception as e:
+        logger.debug(f"stop_auto_vacuum_task: {e}")
+    finally:
+        _auto_vacuum_task = None
+
+
+# ═══════════════════════════════════════════════════════════════════
+# المهمة الأسبوعية
 # ═══════════════════════════════════════════════════════════════════
 
 async def scheduled_weekly_diagnostic(bot):
-    """📅 مهمة دورية — ترسل التقرير الأسبوعي."""
     logger.info("📅 جدولة التقرير الأسبوعي: تبدأ بعد ساعة")
-
     try:
         await asyncio.sleep(_WEEKLY_REPORT_INITIAL_DELAY)
     except asyncio.CancelledError:
@@ -496,16 +632,12 @@ async def scheduled_weekly_diagnostic(bot):
 
     while True:
         try:
-            try:
-                enabled_raw = await DB.get_setting(
-                    'db_weekly_report_enabled', default='0'
-                )
-                enabled = str(enabled_raw).strip() in (
-                    '1', 'true', 'yes', 'on'
-                )
-            except Exception as e:
-                logger.debug(f"weekly setting: {e}")
-                enabled = False
+            enabled_raw = await DB.get_setting(
+                'db_weekly_report_enabled', default='0'
+            )
+            enabled = str(enabled_raw).strip() in (
+                '1', 'true', 'yes', 'on'
+            )
 
             if enabled and diagnose_db_quick is not None:
                 target_chat = None
@@ -513,7 +645,6 @@ async def scheduled_weekly_diagnostic(bot):
                     target_chat = await DB.get_dev_log_channel()
                 except Exception:
                     pass
-
                 if not target_chat:
                     try:
                         owner = int(
@@ -536,85 +667,56 @@ async def scheduled_weekly_diagnostic(bot):
                             bot, target_chat, text,
                             parse_mode='HTML',
                         )
-                        logger.info(
-                            f"✅ أُرسل التقرير الأسبوعي إلى "
-                            f"{target_chat}"
-                        )
                     except Exception as e:
                         logger.warning(
                             f"فشل إرسال التقرير الأسبوعي: {e}"
                         )
-                else:
-                    logger.debug(
-                        "لا قناة سجل ولا owner — تخطي التقرير"
-                    )
 
         except asyncio.CancelledError:
             logger.info("⏹️ scheduled_weekly_diagnostic: أُلغي")
             return
         except Exception as e:
             logger.error(
-                f"scheduled_weekly_diagnostic: {e}",
-                exc_info=True,
+                f"scheduled_weekly_diagnostic: {e}", exc_info=True
             )
 
         try:
             await asyncio.sleep(_WEEKLY_REPORT_INTERVAL_SEC)
         except asyncio.CancelledError:
-            logger.info("⏹️ scheduled_weekly_diagnostic: أُلغي")
             return
 
 
-# ═══════════════════════════════════════════════════════════════════
-# إدارة المهمة الأسبوعية
-# ═══════════════════════════════════════════════════════════════════
-
 def start_weekly_diagnostic_task(application) -> bool:
-    """✅ بدء المهمة الأسبوعية كـ asyncio background task."""
     global _weekly_task
-
     if _weekly_task is not None and not _weekly_task.done():
         try:
             _weekly_task.cancel()
-            logger.info("🔄 إلغاء المهمة الأسبوعية السابقة")
         except Exception as e:
             logger.debug(f"cancel previous weekly task: {e}")
-
     try:
         bot = getattr(application, 'bot', None)
         if bot is None:
-            logger.warning(
-                "start_weekly_diagnostic_task: application.bot is None"
-            )
             return False
-
         _weekly_task = asyncio.create_task(
             scheduled_weekly_diagnostic(bot)
         )
         logger.info("✅ Weekly diagnostic task started")
         return True
-
     except Exception as e:
-        logger.error(
-            f"start_weekly_diagnostic_task: {e}", exc_info=True
-        )
+        logger.error(f"start_weekly_diagnostic_task: {e}", exc_info=True)
         return False
 
 
 async def stop_weekly_diagnostic_task(timeout: float = 3.0) -> None:
-    """✅ إيقاف المهمة الأسبوعية بشكل نظيف."""
     global _weekly_task
-
     if _weekly_task is None or _weekly_task.done():
         return
-
     try:
         _weekly_task.cancel()
         try:
             await asyncio.wait_for(_weekly_task, timeout=timeout)
         except (asyncio.CancelledError, asyncio.TimeoutError):
             pass
-        logger.info("🛑 weekly diagnostic task stopped")
     except Exception as e:
         logger.debug(f"stop_weekly_diagnostic_task: {e}")
     finally:
@@ -622,24 +724,15 @@ async def stop_weekly_diagnostic_task(timeout: float = 3.0) -> None:
 
 
 # ═══════════════════════════════════════════════════════════════════
-# 🆕 v1.0.3 — التسجيل (register_maintenance_commands)
+# التسجيل
 # ═══════════════════════════════════════════════════════════════════
 
 def register_maintenance_commands(application) -> bool:
     """
-    ✅ v1.0.3: تسجيل الأوامر الثلاثة.
-
-    كل أمر في try/except منفصل — إذا فشل أمر، الآخرون يُسجَّلون.
-
-    Args:
-        application: telegram.ext.Application
-
-    Returns:
-        True إذا نجح الكل، False إذا فشل أمر واحد على الأقل
+    ✅ v1.1.0: تسجيل الأوامر + بدء مهمة التنظيف التلقائي.
     """
     ok_all = True
 
-    # /db_diag_quick
     try:
         application.add_handler(CommandHandler(
             "db_diag_quick", db_diag_quick_command
@@ -648,7 +741,6 @@ def register_maintenance_commands(application) -> bool:
         logger.error(f"❌ register db_diag_quick: {e}", exc_info=True)
         ok_all = False
 
-    # /db_maintenance
     try:
         application.add_handler(CommandHandler(
             "db_maintenance", db_maintenance_command
@@ -657,7 +749,6 @@ def register_maintenance_commands(application) -> bool:
         logger.error(f"❌ register db_maintenance: {e}", exc_info=True)
         ok_all = False
 
-    # /db_weekly
     try:
         application.add_handler(CommandHandler(
             "db_weekly", db_weekly_command
@@ -665,6 +756,28 @@ def register_maintenance_commands(application) -> bool:
     except Exception as e:
         logger.error(f"❌ register db_weekly: {e}", exc_info=True)
         ok_all = False
+
+    # 🆕 v1.1.0 — ابدأ مهمة التنظيف التلقائي
+    try:
+        if auto_vacuum_dirty_mvs is not None:
+            started = start_auto_vacuum_task(application)
+            if started:
+                logger.info(
+                    "✅ Auto-vacuum scheduler registered "
+                    "(every %d min)",
+                    _AUTO_VACUUM_INTERVAL_SEC // 60,
+                )
+            else:
+                logger.warning(
+                    "⚠️ فشل بدء مهمة التنظيف التلقائي"
+                )
+        else:
+            logger.warning(
+                "⚠️ auto_vacuum_dirty_mvs غير متوفر — "
+                "تأكد من db_diagnostics >= v6.9.3"
+            )
+    except Exception as e:
+        logger.error(f"auto_vacuum startup: {e}", exc_info=True)
 
     if ok_all:
         logger.info(
@@ -680,13 +793,10 @@ def register_maintenance_commands(application) -> bool:
 
 
 # ═══════════════════════════════════════════════════════════════════
-# 🆕 v1.0.3 — Aliases (لأي اسم يستورده main.py)
+# Aliases
 # ═══════════════════════════════════════════════════════════════════
 
-# الاسم الرئيسي
 register = register_maintenance_commands
-
-# aliases شائعة
 register_commands = register_maintenance_commands
 setup_commands = register_maintenance_commands
 setup = register_maintenance_commands
@@ -694,20 +804,16 @@ register_maintenance = register_maintenance_commands
 register_db_maintenance = register_maintenance_commands
 
 
-# ═══════════════════════════════════════════════════════════════════
-# __all__ — يشمل كل الأسماء العامة
-# ═══════════════════════════════════════════════════════════════════
-
 __all__ = [
-    # الأوامر
     "db_diag_quick_command",
     "db_maintenance_command",
     "db_weekly_command",
-    # المهمة الأسبوعية
     "scheduled_weekly_diagnostic",
     "start_weekly_diagnostic_task",
     "stop_weekly_diagnostic_task",
-    # التسجيل (الرئيسي + aliases)
+    "scheduled_auto_vacuum",
+    "start_auto_vacuum_task",
+    "stop_auto_vacuum_task",
     "register_maintenance_commands",
     "register",
     "register_commands",
@@ -724,11 +830,11 @@ __all__ = [
 
 try:
     logger.info(
-        "🛡️ db_maintenance_commands.py v1.0.3 loaded | "
+        "🛡️ db_maintenance_commands.py v1.1.0 loaded | "
         "commands: /db_diag_quick, /db_maintenance, /db_weekly | "
-        "register_maintenance_commands ✅ | "
-        "aliases: register, register_commands, setup_commands | "
+        "auto-vacuum: ✅ every %d min | "
         "db_diagnostics=%s",
+        _AUTO_VACUUM_INTERVAL_SEC // 60,
         _DB_DIAGNOSTICS_VERSION,
     )
 except Exception:
