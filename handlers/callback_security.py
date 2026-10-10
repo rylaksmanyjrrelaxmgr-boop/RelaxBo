@@ -1,14 +1,18 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-callback_security.py - معالج أزرار الأمان (v9.7.19-ROUTING-FIX)
+callback_security.py - معالج أزرار الأمان (v9.7.20-NIGHT-NONE-FIX)
 =====================================================================
+🆕 v9.7.20-NIGHT-NONE-FIX:
+    🟢 FIX-1: إضافة 'none' لقائمة العقوبات المقبولة في sec_set_night_action
+              (كان الزر "بدون عقوبة" في الوضع الليلي معطلاً تماماً).
+
 🆕 v9.7.19-ROUTING-FIX:
     🟢 FIX-1: إضافة معالجة act_* / ban_* / pen_* داخل handle_parameterized
-              لتمريرها عبر _check_sec_auth المخزَّن (بدل is_authorized_in_group المباشر).
-    🟢 FIX-2: تفعيل زر act_log:<chat> (كان ميتاً لأن الزر لا يبدأ بـ sec_).
-    🟢 FIX-3: توحيد سلوك أزرار الأدوات المتقدمة مع بقية أزرار الأمان.
-    🟢 FIX-4: حماية شاملة بـ try/except مع رسائل خطأ واضحة للمستخدم.
+              لتمريرها عبر _check_sec_auth المخزَّن.
+    🟢 FIX-2: تفعيل زر act_log:<chat>.
+    🟢 FIX-3: توحيد سلوك أزرار الأدوات المتقدمة.
+    🟢 FIX-4: حماية شاملة بـ try/except مع رسائل خطأ واضحة.
 =====================================================================
 """
 import asyncio
@@ -173,7 +177,7 @@ async def _safe_answer(query, text=None, show_alert=False):
 
 
 async def _show_error(query, context, lang):
-    """v9.7.19: عرض خطأ موحّد للمستخدم."""
+    """عرض خطأ موحّد للمستخدم."""
     try:
         await _safe_edit(query,
             await _trans('error_occurred', lang, "❌ حدث خطأ"),
@@ -795,7 +799,7 @@ class SecurityCallbacks:
             [InlineKeyboardButton(await _trans('act_pin', lang, "📌"),
                 callback_data=f"act_pin:{chat_id}")],
             [InlineKeyboardButton(await _trans('act_log', lang, "📜"),
-                callback_data=f"sec_act_log:{chat_id}")],  # ✅ FIX-2: sec_ prefix
+                callback_data=f"sec_act_log:{chat_id}")],
             [InlineKeyboardButton(KeyboardFactory.get_text("back", lang),
                 callback_data=f"{CB.GRP_SET}:{chat_id}")]])
         await _safe_edit(query,
@@ -1344,11 +1348,11 @@ class SecurityCallbacks:
     async def handle_parameterized(update, context, query, user_id, lang,
                                     data) -> bool:
         """
-        v9.7.19-ROUTING-FIX: يعالج كل الأزرار المعاملاتية التالية:
+        v9.7.20-NIGHT-NONE-FIX: يعالج كل الأزرار المعاملاتية التالية:
           - set_warn_count / set_warn_penalty / set_duration
           - set_antiflood_messages / set_antiflood_seconds
           - sec_set_* / sec_penalty_* / sec_warn_*
-          - 🆕 act_* / ban_* / pen_* — بمرور cache auth
+          - act_* / ban_* / pen_* (عبر cache auth)
         """
         try:
             return await SecurityCallbacks._handle_parameterized_inner(
@@ -1366,7 +1370,7 @@ class SecurityCallbacks:
     async def _handle_parameterized_inner(update, context, query, user_id,
                                            lang, data) -> bool:
         # ═══════════════════════════════════════════════════════════
-        # 🆕 v9.7.19 FIX-1/2/3: معالجة act_* / ban_* / pen_*
+        # v9.7.19 FIX-1/2/3: معالجة act_* / ban_* / pen_*
         # ═══════════════════════════════════════════════════════════
 
         # ─── act_log:<chat> ──────────────────────────────────────
@@ -1404,7 +1408,6 @@ class SecurityCallbacks:
                 return True
             action = parts[0][4:]  # add/list/rem
             chat_id = _coerce_int(parts[1])
-            # global (-1) يتطلب developer
             if chat_id == -1:
                 if not CONFIG.is_developer(user_id):
                     await _safe_edit(query,
@@ -2012,6 +2015,7 @@ class SecurityCallbacks:
                 update, context, query, chat_id, lang, 'night_action')
             return True
 
+        # 🟢 v9.7.20-NIGHT-NONE-FIX: أُضيف 'none' للقائمة
         if data.startswith("sec_set_night_action:"):
             parts = data.split(":")
             if len(parts) < 3:
@@ -2026,7 +2030,7 @@ class SecurityCallbacks:
                     bot=context.bot)
                 return True
             action_type = parts[2]
-            if action_type in ('ban', 'mute', 'kick', 'restrict'):
+            if action_type in ('ban', 'mute', 'kick', 'restrict', 'none'):
                 await DB.update_security_settings(chat_id,
                     night_mode_action=action_type)
                 await SecurityCallbacks._invalidate_security_settings_cache(
@@ -2034,6 +2038,10 @@ class SecurityCallbacks:
                 )
                 await SecurityCallbacks._refresh_security_view(
                     query, context, chat_id, lang)
+            else:
+                await _safe_edit(query,
+                    await _trans('invalid_penalty_type', lang, "❌"),
+                    bot=context.bot)
             return True
 
         # ─── sec_violation_settings:<chat> ────────────────────────
@@ -2183,4 +2191,4 @@ __all__ = [
     "safe_edit",
 ]
 
-logger.info("🔐 callback_security.py loaded (v9.7.19-ROUTING-FIX)")
+logger.info("🔐 callback_security.py loaded (v9.7.20-NIGHT-NONE-FIX)")
