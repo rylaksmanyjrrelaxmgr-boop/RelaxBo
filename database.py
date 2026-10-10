@@ -5,100 +5,70 @@ database.py - قاعدة البيانات المتكاملة (v7.7.65 — ANALYT
 ================================================================================
 🆕 v7.7.65 (ANALYTICS-MIXIN-FIX):
   🔴 FIX-MIXIN-1: _load_mixin — التقاط كل الاستثناءات (كان ImportError فقط).
-                   الآن: أي خطأ (SyntaxError/NameError/KeyError/...) يُسجَّل
-                   مع traceback كامل، والفallback يُفعَّل بدل انهيار الاستيراد.
-  🔴 FIX-MIXIN-2: _verify_analytics_methods() — فحص شامل بعد DB = Database()
-                   يتحقق من 16 دالة تحليلات + محاولة ربط طارئ يدوي عند الفشل.
-  🟡 FIX-MIXIN-3: _load_mixin — فحص مسبق لـ AnalyticsMixin.get_user_growth
-                   (يرفض Fallback صامت إذا كان الكلاس فارغاً).
-  🟢 تحديث LOAD BEACON ليعكس ANALYTICS-MIXIN-FIX.
+  🔴 FIX-MIXIN-2: _verify_analytics_methods() — فحص شامل بعد DB = Database().
+  🟡 FIX-MIXIN-3: _load_mixin — فحص مسبق لـ AnalyticsMixin.get_user_growth.
+  🟢 تحديث LOAD BEACON.
 
 🆕 v7.7.64 (REVIEW-FIXES-2026-R2):
-  🔴 FIX-E1: _refresh_user_subscription_end — استُخدم ? في كل الفروع
-             بدل $1/%s (كان يُسبب فشل صامت على MySQL).
-  🔴 FIX-E2: _import_auto_replies — أُضيف chat_id = ? لاستعلام
-             existing_file_keys (كان يجلب كل المجموعات ثم يفلتر محلياً).
-  🟡 FIX-E3: _ensure_materialized_views_postgres — عند فشل CREATE
-             غير "already exists" نُعيد False بدل raise (كان يوقف
-             bootstrap كاملاً عند permission denied).
-  🟡 FIX-E4: mark_published_batch + _verify_pairs_belong — chunking
-             لـ IN (...) (SQLITE_MAX_VARIABLE_NUMBER).
-  🟡 FIX-E5: _sqlite_is_alive — cursor cleanup في finally (كان
-             يُسرّب cursor عند فشل fetchone).
-  🟡 FIX-E6: _pg_in_transaction — log.debug عند الاستثناء بدل
-             الصمت التام.
-  🟡 FIX-E7: _import_banned_words — رسالة log أوضح (كانت توحي
-             بأن to_delete لن يُحذف).
-  🟡 FIX-E8: _destroy_connection — تفريق pool vs conn في PG
-             (terminate sync / close awaitable).
+  🔴 FIX-E1: _refresh_user_subscription_end — ? في كل الفروع.
+  🔴 FIX-E2: _import_auto_replies — chat_id = ? في existing query.
+  🟡 FIX-E3: _ensure_materialized_views_postgres — return False بدل raise.
+  🟡 FIX-E4: mark_published_batch + _verify_pairs_belong — chunking.
+  🟡 FIX-E5: _sqlite_is_alive — cursor cleanup في finally.
+  🟡 FIX-E6: _pg_in_transaction — log.debug.
+  🟡 FIX-E7: _import_banned_words — رسالة أوضح.
+  🟡 FIX-E8: _destroy_connection — تفريق pool vs conn.
 
 🆕 v7.7.63 (REVIEW-FIXES-2026):
-  🔴 FIX-C13: _import_auto_replies — إزالة WHERE auto_replies.added_by = 0
-             (كانت تُسبب استثناء ValueError على MySQL بسبب
-             _convert_upsert الذي يرفض WHERE بعد ON DUPLICATE KEY).
-  🔴 FIX-C14: _recover_pool — تمييز pool-dead من connection-dead
-             (كان يُعاد إنشاء الـ pool عند أي PostgresConnectionError
-             حتى لو كان الاتصال الواحد فقط ميتاً — تعافٍ مفرط).
-  🟡 FIX-D7: _find_values_end — دعم dollar quotes في PG ($$tag$$)
-             (كانت لا تُعالج، مما يُفشل INSERT OR IGNORE/REPLACE مع
-             محتوى يحتوي $$).
-  🟡 FIX-B2: connection() — log warning عند إرجاع PG conn مع tx
-             مفتوحة (كان فقدان البيانات صامتاً).
-  🟡 FIX-D8: _compute_text_hash — توثيق أنها عامة للاستخدام من الخارج.
-  🟡 FIX-D9: _upsert_setting — يستخدم ? مع _execute_with_conn
-             (كان يستخدم $1/$2 مباشرة → لا يعمل على MySQL/SQLite).
-  🟡 FIX-D10: _get_unique_columns_impl — دعم الجداول في schemas مختلفة.
+  🔴 FIX-C13: _import_auto_replies — إزالة WHERE added_by = 0.
+  🔴 FIX-C14: _recover_pool — تمييز pool-dead من connection-dead.
+  🟡 FIX-D7: _find_values_end — dollar quotes.
+  🟡 FIX-B2: connection() — log warning عند PG tx مفتوحة.
+  🟡 FIX-D8: _compute_text_hash — توثيق عامة.
+  🟡 FIX-D9: _upsert_setting — ? مع _execute_with_conn.
+  🟡 FIX-D10: _get_unique_columns_impl — schemas مختلفة.
 
 🆕 v7.7.62 (IDLE-TX-AUTO-AUDIT):
-  🔍 AUDIT-1: مهمة دورية _auto_audit_idle_tx (كل 60s افتراضياً)
-  🔍 AUDIT-2: طريقة audit_idle_in_transactions() داخل Database
-  🔍 AUDIT-3: تسجيل تلقائي عند تجاوز العتبة
-  🔍 AUDIT-4: إيقاف نظيف في close()
-  🆕 ثوابت: IDLE_TX_AUDIT_ENABLED/INTERVAL_SEC/MIN_SECONDS/
-                ALERT_THRESHOLD/APP_FILTER/MAX_ITEMS/LOG_EVERY
-  🆕 get_idle_tx_audit_status() للرصد من الخارج
+  🔍 AUDIT-1..4: مهمة دورية + audit_idle_in_transactions + إيقاف نظيف.
+  🆕 ثوابت: IDLE_TX_AUDIT_* + get_idle_tx_audit_status().
 
 🆕 v7.7.61 (IDLE-TX-ROLLBACK-FINAL):
-  🔴 TX-1: ping-before-use يفحص is_in_transaction أولاً
-  🔴 TX-2: _return_connection — rollback وقائي قبل release
-  🔴 TX-3: connection() CM — فرع PG صريح في except/finally
-  🔴 TX-4: transaction() — فحص tx داخلية بعد commit
-  🆕 PG_ROLLBACK_ON_RETURN_TIMEOUT (env, default 2.0s)
+  🔴 TX-1..4: ping-before-use + rollback وقائي + فرع PG صريح.
+  🆕 PG_ROLLBACK_ON_RETURN_TIMEOUT (env, default 2.0s).
 
 🆕 v7.7.60 (POOL-KEEPALIVE-FINAL):
-  🐌 SQ-1..SQ-5: pool lifecycle 15s + ping-before-use + تعريفات factories
-📌 v7.7.56 .. v7.2 — (راجع الأرشيف)
+  🐌 SQ-1..SQ-5: pool lifecycle 15s + ping-before-use + factories.
 ================================================================================
 """
 
 # =====================================================================
 # 🧭 CHECKLIST
 # =====================================================================
-# [1]  التناظر: هل توجد دالة/نمط مماثل يستحق نفس الإصلاح؟
-# [2]  التغطية عبر DBs: SQLite / MySQL / PostgreSQL
-# [3]  hash/cache: _upsert_setting خارج كل if
-# [4]  Escape chars: استخدم '!' — موحّد
-# [5]  القيود في ALTER TABLE على MySQL
+# [1]  التناظر
+# [2]  التغطية عبر DBs
+# [3]  hash/cache
+# [4]  Escape chars '!'
+# [5]  MySQL ALTER constraints
 # [6]  Magic numbers → constants
-# [7]  LIKE audit: ESCAPE '!'
-# [8]  CancelledError: catch BaseException
-# [9]  Iteration safety: list(...) snapshot
+# [7]  LIKE audit ESCAPE '!'
+# [8]  CancelledError: BaseException
+# [9]  Iteration safety: list(...)
 # [10] Reserved SQL words: backticks
-# [11] v7.7.54: delete-massive يحتاج threshold safety
+# [11] v7.7.54: delete-massive threshold safety
 # [12] v7.7.54: hash-based imports تشمل كل الحقول
 # [13] v7.7.55: MySQL DDL = implicit commit
-# [14] v7.7.56: any `while True` يجب أن يُحقّق تقدّم
+# [14] v7.7.56: `while True` تحقّق تقدّم
 # [15] v7.7.56: PG فشل DML = ABORTED
 # [16] v7.7.56: `#` تعليق MySQL فقط
-# [17] v7.7.57: import من ملف → added_by=0
+# [17] v7.7.57: import → added_by=0
 # [18] v7.7.59: TCP keepalive + كاش schedule
 # [19] v7.7.60: pool lifecycle 15s + ping-before-use
 # [20] v7.7.61: idle-in-transaction → rollback/destroy
-# [21] v7.7.62: idle-tx audit دوري + auto-log + cleanup
-# [22] v7.7.63: PG conn مع tx مفتوحة → log warning
-# [23] v7.7.64: placeholders موحّدة (?) في كل الفروع
-# [24] v7.7.64: IN (...) chunking لـ SQLite/MySQL
-# [25] v7.7.65: _load_mixin يلتقط BaseException + verify methods
+# [21] v7.7.62: idle-tx audit دوري
+# [22] v7.7.63: PG conn مع tx → log warning
+# [23] v7.7.64: placeholders موحّدة (?)
+# [24] v7.7.64: IN (...) chunking
+# [25] v7.7.65: _load_mixin BaseException + verify methods
 # =====================================================================
 
 import os
@@ -157,7 +127,7 @@ USE_POSTGRES = (DB_TYPE == "postgres")
 USE_MYSQL = (DB_TYPE == "mysql")
 
 # =====================================================================
-# 0.0.1) AsyncMySQLError + تحذير
+# 0.0.1) AsyncMySQLError
 # =====================================================================
 
 _ASYNC_MYSQL_ERROR = None
@@ -326,18 +296,15 @@ except ImportError as _re:
     REFACTOR_MIXIN_AVAILABLE = False
 
 # =====================================================================
-# Mixins
+# Mixins — 🆕 FIX-MIXIN-1/3
 # =====================================================================
 
 def _load_mixin(module_name: str, class_name: str):
     """
     🆕 v7.7.65 FIX-MIXIN-1: التقاط كل الاستثناءات + تشخيص واضح.
 
-    سابقاً: كان يلتقط ImportError فقط. إذا فشل التحميل بأي خطأ آخر
-    (SyntaxError/NameError/AttributeError/KeyError/...) → الاستثناء
-    ينتشر ويوقف استيراد database.py بالكامل.
-
-    الآن: يلتقط كل الاستثناءات، يطبع traceback كامل، ويستخدم Fallback.
+    سابقاً: كان يلتقط ImportError فقط.
+    الآن: يلتقط أي BaseException، يطبع traceback كامل، ويستخدم Fallback.
     """
     try:
         module = __import__(module_name, fromlist=[class_name])
@@ -369,15 +336,12 @@ def _load_mixin(module_name: str, class_name: str):
         )
         return fallback, False
     except BaseException as e:
-        # 🆕 v7.7.65 FIX-MIXIN-1: أي خطأ آخر — نطبع كامل التتبع
         import traceback as _tb
         logger.error(
             f"❌ فشل تحميل {module_name}.{class_name}: "
             f"{type(e).__name__}: {e}"
         )
-        logger.error(
-            f"📋 Traceback:\n{_tb.format_exc()}"
-        )
+        logger.error(f"📋 Traceback:\n{_tb.format_exc()}")
         fallback = type(
             f"_Fallback_{module_name}_{class_name}",
             (object,),
@@ -410,7 +374,7 @@ AnalyticsMixin, ANALYTICS_MIXIN_AVAILABLE = _load_mixin(
     "database_analytics", "AnalyticsMixin")
 
 # =====================================================================
-# Caches من database_caches.py
+# Caches
 # =====================================================================
 
 try:
@@ -610,7 +574,6 @@ DB_SIZE_CACHE_TTL = float(os.getenv("DB_SIZE_CACHE_TTL", "60"))
 
 IMPORT_MARKER_ADDED_BY = 0
 
-# 🆕 v7.7.64 FIX-E4: chunking للـ IN (...)
 MAX_SQL_IN_PARAMS = int(os.getenv("MAX_SQL_IN_PARAMS", "500"))
 
 PG_MAX_INACTIVE_LIFETIME = float(
@@ -631,7 +594,6 @@ PG_COMMAND_TIMEOUT = float(os.getenv("PG_COMMAND_TIMEOUT", "10.0"))
 PG_ROLLBACK_ON_RETURN_TIMEOUT = float(
     os.getenv("PG_ROLLBACK_ON_RETURN_TIMEOUT", "2.0"))
 
-# 🆕 v7.7.62: IDLE-TX AUTO-AUDIT
 IDLE_TX_AUDIT_ENABLED = (
     os.getenv("IDLE_TX_AUDIT_ENABLED", "true").lower() == "true")
 IDLE_TX_AUDIT_INTERVAL_SEC = float(
@@ -844,7 +806,6 @@ def _normalize_params(params: Any) -> tuple:
 
 
 def _pg_in_transaction(conn) -> bool:
-    """🆕 v7.7.64 FIX-E6: log.debug عند الاستثناء بدل الصمت."""
     if not USE_POSTGRES:
         return False
     try:
@@ -857,11 +818,6 @@ def _pg_in_transaction(conn) -> bool:
 
 
 def _find_values_end(query: str) -> int:
-    """
-    يجد موضع نهاية VALUES(...) لدعم INSERT ... ON CONFLICT.
-
-    🆕 v7.7.63 FIX-D7: دعم dollar quotes في PG ($$tag$$).
-    """
     m = re.search(r"\bVALUES\b\s*", query, re.IGNORECASE)
     if not m:
         return -1
@@ -876,11 +832,9 @@ def _find_values_end(query: str) -> int:
     depth = 0
     j = i
     last_close = -1
-    # 🆕 FIX-D7: تتبّع dollar-quote tag
     dollar_tag: Optional[str] = None
 
     while j < n:
-        # حالة داخل dollar quote — نبحث عن نهايته
         if dollar_tag is not None:
             if query.startswith(dollar_tag, j):
                 j += len(dollar_tag)
@@ -923,7 +877,6 @@ def _find_values_end(query: str) -> int:
                 in_line_c = True
                 j += 1
                 continue
-        # 🆕 FIX-D7: dollar quote
         if ch == "$" and not in_single and not in_double:
             k = j + 1
             while k < n and (query[k].isalnum() or query[k] == "_"):
@@ -2885,10 +2838,6 @@ class Database(
         return len(tables_unique)
 
     async def _ensure_materialized_views_postgres(self, conn) -> bool:
-        """
-        🆕 v7.7.64 FIX-E3: عند فشل CREATE غير "already exists"
-        نُعيد False بدل raise (كان يوقف bootstrap كاملاً).
-        """
         if not USE_POSTGRES:
             self._mv_available = False
             return False
@@ -3173,7 +3122,6 @@ class Database(
             return None
 
     async def _pg_init_connection(self, conn) -> None:
-        """تهيئة كل اتصال PG جديد بـ TCP keepalive."""
         try:
             transport = None
             try:
@@ -3237,10 +3185,6 @@ class Database(
             logger.debug(f"_pg_init_connection: {e}")
 
     async def _sqlite_is_alive(self, conn) -> bool:
-        """
-        🆕 v7.7.64 FIX-E5: cursor cleanup في finally (كان يُسرّب
-        cursor عند فشل fetchone).
-        """
         if not self._use_alive_cache or self._sqlite_alive_ts is None:
             cursor = None
             try:
@@ -3439,9 +3383,6 @@ class Database(
             return False
 
     async def _recover_pool(self):
-        """
-        🆕 v7.7.63 FIX-C14: تمييز pool-dead من connection-dead.
-        """
         if self._recovering_pool:
             return
         async with self._recover_lock:
@@ -3483,10 +3424,6 @@ class Database(
             self._recovering_pool = False
 
     async def _get_connection(self):
-        """
-        v7.7.60 SQ-3: ping-before-use للاتصالات التي كانت idle >5s.
-        v7.7.61 TX-1: فحص is_in_transaction أولاً.
-        """
         if self._closing:
             raise RuntimeError("Database is closing")
         if not self._initialized:
@@ -3705,10 +3642,6 @@ class Database(
                         0, self._sqlite_open_count - 1)
 
     async def _destroy_connection(self, conn):
-        """
-        🆕 v7.7.64 FIX-E8: تفريق pool vs conn في PG
-        (terminate sync / close awaitable).
-        """
         if USE_POSTGRES:
             terminate = getattr(conn, "terminate", None)
             if callable(terminate):
@@ -5199,14 +5132,6 @@ class Database(
             logger.error(f"❌ banned_words: {e}", exc_info=True)
 
     async def _import_auto_replies(self, conn):
-        """
-        🆕 v7.7.63 FIX-C13: أزلنا WHERE auto_replies.added_by = 0
-        من ON CONFLICT DO UPDATE (كانت تُسبب ValueError على MySQL
-        بسبب _convert_upsert الذي يرفض WHERE بعد ON DUPLICATE KEY).
-
-        🆕 v7.7.64 FIX-E2: أُضيف chat_id = ? لاستعلام existing (كان
-        يجلب كل المجموعات ثم يفلتر محلياً).
-        """
         try:
             from auto_replies import AUTO_REPLIES
             if not AUTO_REPLIES:
@@ -5435,10 +5360,6 @@ class Database(
             json.dumps(data, sort_keys=True).encode("utf-8")).hexdigest()
 
     def _compute_text_hash(self, text: str) -> str:
-        """
-        🆕 v7.7.63 FIX-D8: دالة عامة (public) — تُستخدم من خارج
-        database.py لتوليد text_hash للمنشورات.
-        """
         if not text:
             return ""
         return hashlib.sha256(
@@ -5471,10 +5392,6 @@ class Database(
     async def _upsert_setting(
         self, conn, key: str, value: str,
     ) -> bool:
-        """
-        🆕 v7.7.63 FIX-D9: يستخدم _execute_with_conn بـ ? (يعمل
-        على كل DBs) بدل $1/$2 الصريحة.
-        """
         try:
             await self._execute_with_conn(
                 conn,
@@ -5689,11 +5606,6 @@ class Database(
     async def _refresh_user_subscription_end(
         self, conn, user_id: int,
     ) -> None:
-        """
-        🆕 v7.7.64 FIX-E1: استُخدم ? في كل الفروع بدل $1/%s
-        (كان يُسبب فشل صامت على MySQL لأن _fetchval_with_conn
-        يستدعي _convert_placeholders التي تبحث عن ? فقط).
-        """
         if USE_POSTGRES:
             end = await self._fetchval_with_conn(
                 conn,
@@ -6876,10 +6788,6 @@ class Database(
     async def _verify_pairs_belong(
         self, conn, updates: List[Tuple[int, int]],
     ) -> List[Tuple[int, int]]:
-        """
-        🆕 v7.7.64 FIX-E4: chunking لـ IN (...) لتجنب تجاوز حد
-        SQLITE_MAX_VARIABLE_NUMBER.
-        """
         if not updates:
             return []
         valid: List[Tuple[int, int]] = []
@@ -6928,10 +6836,6 @@ class Database(
     async def mark_published_batch(
         self, updates: List[Tuple[int, int]],
     ) -> bool:
-        """
-        🆕 v7.7.64 FIX-E4: chunking لـ IN (...) في UPDATE و
-        schedule fetch.
-        """
         if not updates:
             return True
         valid_updates: List[Tuple[int, int]] = []
@@ -7673,35 +7577,22 @@ DB = Database()
 # ═════════════════════════════════════════════════════════════════════
 
 def _verify_analytics_methods() -> bool:
-    """
-    🆕 v7.7.65 FIX-MIXIN-2: يتحقق من وجود كل دوال التحليلات في
-    Database. إذا ناقصة → يسجّل تشخيصاً واضحاً + محاولة ربط يدوي.
-
-    Returns:
-        True إذا كل الدوال موجودة (أو رُبطت بنجاح)، False غير ذلك.
-    """
+    """🆕 v7.7.65 FIX-MIXIN-2: يتحقق من وجود 16 دالة تحليلات."""
     required = [
-        # نمو المستخدمين
         "get_user_growth",
-        # القنوات
         "get_top_channels",
         "get_channel_success_rate",
-        # إحصائيات النشر
         "get_publish_stats",
         "get_subscription_rate",
-        # Pool
         "get_pool_live",
-        # الاستعلامات البطيئة
         "get_slowest_queries",
-        "get_slow_queries",  # alias
-        # التشخيص
+        "get_slow_queries",
         "get_dead_tuples",
         "get_table_sizes",
         "get_indexes_info",
         "get_autovacuum_settings",
         "get_maintenance_recommendations",
         "get_db_diagnostics",
-        # idle-tx
         "get_idle_tx_info",
         "get_idle_tx_status_info",
     ]
@@ -7714,7 +7605,6 @@ def _verify_analytics_methods() -> bool:
         )
         return True
 
-    # ═══ في حالة النقص ═══
     logger.error(
         "╔══════════════════════════════════════════════════════╗\n"
         "║  🚨 AnalyticsMixin لم يُحمَّل بشكل صحيح!              ║\n"
@@ -7729,7 +7619,6 @@ def _verify_analytics_methods() -> bool:
         f"{ANALYTICS_MIXIN_AVAILABLE}"
     )
 
-    # 🆕 محاولة ربط طارئ يدوي
     logger.warning(
         "🔧 v7.7.65: محاولة ربط طارئ يدوي لكل دوال AnalyticsMixin..."
     )
@@ -7860,7 +7749,6 @@ __all__ = [
     "_ALLOWED_COL_KEYWORDS",
     "_ASYNC_MYSQL_ERROR",
     "_FROZENSET_WARN_SITES",
-    # 🆕 v7.7.65
     "_verify_analytics_methods",
     "_load_mixin",
     "ANALYTICS_MIXIN_AVAILABLE",
