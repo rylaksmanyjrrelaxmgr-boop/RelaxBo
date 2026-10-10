@@ -1,32 +1,28 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-db_diagnostics.py — واجهة تشخيص قاعدة البيانات (v6.9.1 — FULL DETAILED)
+db_diagnostics.py — واجهة تشخيص وصيانة قاعدة البيانات (v6.9.2 — FULL DETAILED)
 ================================================================================
-محاكاة كاملة للتقرير القديم مع 13 قسماً:
+الوظائف المُصدَّرة:
 
-  1. Header + DB metadata (الحجم، Schema، Database name)
-  2. الخلاصة التقنية (score/100 + جداول حرجة)
-  3. التحليل المنطقي
-  4. Dead Tuples + نشاط التنظيف (مفصّل: AV/AN/mod)
-  4b. الجداول النظيفة (dead=0)
-  5. Autovacuum للجداول الحرجة
-  5b. الجداول غير المضبوطة
-  6. نشاط PostgreSQL / Blockers
-  7. أحجام الجداول Top 15
-  8. الفهارس الحرجة
-  9. إعدادات PostgreSQL
-  10. Auto-Cleanup status
-  11. معاينة الصيانة
-  12. قائمة VACUUM الكاملة
-  13. التنفيذ (/db_maintenance confirm)
+  📊 التشخيص:
+    - diagnose_db()                   : تقرير كامل (HTML string)
+    - diagnose_db_split()             : List[str] — أجزاء
+    - diagnose_db_quick()             : تقرير مختصر (5 أسطر)
 
-الأسماء المُصدَّرة (متوقعة من handlers_command.py):
-  - diagnose_db()             : تقرير كامل (HTML string)
-  - diagnose_db_split()       : List[str] — أجزاء
-  - vacuum_analyze_tables()   : VACUUM ANALYZE
-  - diagnose_maintenance_preview() : معاينة الصيانة
-  - run_db_maintenance()      : تنفيذ الصيانة الفعلي
+  🧹 الصيانة:
+    - preview_maintenance()           : معاينة (dict)
+    - run_maintenance()               : تنفيذ فعلي (dict)
+    - format_maintenance_preview()    : تنسيق المعاينة → HTML
+    - format_maintenance_result()     : تنسيق النتيجة → HTML
+    - diagnose_maintenance_preview()  : معاينة مباشرة (HTML)
+    - run_db_maintenance()            : تنفيذ مباشر (HTML)
+    - vacuum_analyze_tables()         : VACUUM فقط
+
+  🔧 Meta:
+    - VERSION                         : "6.9.2"
+
+⚠️ v6.5.1+: user_violations.last_violation_time (بدل created_at)
 ================================================================================
 """
 
@@ -37,6 +33,13 @@ import time
 from typing import Dict, List, Any, Optional, Tuple
 
 logger = logging.getLogger(__name__)
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# الإصدار
+# ═══════════════════════════════════════════════════════════════════════
+
+VERSION = "6.9.2"
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -87,11 +90,14 @@ def _is_postgres() -> bool:
 # أدوات مساعدة
 # ═══════════════════════════════════════════════════════════════════════
 
-def _esc(text: Any) -> str:
+def _safe_escape(text: Any) -> str:
     try:
         return _html.escape(str(text)) if text is not None else ""
     except Exception:
         return ""
+
+
+_esc = _safe_escape
 
 
 def _fmt_num(n: Any) -> str:
@@ -116,24 +122,50 @@ def _fmt_bytes(num: Any) -> str:
 
 
 def _fmt_ts(ts: Any) -> str:
-    """تنسيق timestamp قصير: 2026-10-09 21:46"""
     if not ts:
         return "—"
     try:
         s = str(ts)
-        if len(s) >= 16:
-            return s[:16]
-        return s
+        return s[:16] if len(s) >= 16 else s
     except Exception:
         return "—"
 
 
+def _bar(value: float, max_value: float, width: int = 10,
+         filled: str = "█", empty: str = "░") -> str:
+    try:
+        v = float(value)
+        m = float(max_value)
+        if m <= 0:
+            return empty * width
+        ratio = min(1.0, max(0.0, v / m))
+        n = int(round(ratio * width))
+        return filled * n + empty * (width - n)
+    except Exception:
+        return empty * width
+
+
+def _dead_color(dead: int, live: int) -> str:
+    total = live + dead
+    if total == 0:
+        return "⚪"
+    ratio = dead / total
+    if live < 1000 and ratio < 0.20:
+        return "✅"
+    if ratio < 0.05:
+        return "✅"
+    if ratio < 0.10:
+        return "🟡"
+    if ratio < 0.20:
+        return "🟠"
+    return "🔴"
+
+
 # ═══════════════════════════════════════════════════════════════════════
-# 1) Metadata
+# 1) DB Metadata
 # ═══════════════════════════════════════════════════════════════════════
 
 async def _get_db_metadata() -> Dict[str, Any]:
-    """جلب معلومات DB الحجم/الإسم/Schema."""
     db = _get_db()
     meta = {
         "size_bytes": 0,
@@ -172,7 +204,8 @@ async def _get_db_metadata() -> Dict[str, Any]:
                 "SELECT current_database()", default="?"
             ) or "?"
         else:
-            size_kb = await db.get_db_size_kb() if hasattr(db, "get_db_size_kb") else 0
+            size_kb = (await db.get_db_size_kb()
+                       if hasattr(db, "get_db_size_kb") else 0)
             meta["size_bytes"] = int(size_kb * 1024)
             meta["size_display"] = _fmt_bytes(meta["size_bytes"])
             meta["current_schema"] = "main"
@@ -185,16 +218,10 @@ async def _get_db_metadata() -> Dict[str, Any]:
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# 2) Dead Tuples + Clean Tables + Autovacuum tuning
+# 2) Dead Tuples + Clean Tables
 # ═══════════════════════════════════════════════════════════════════════
 
 async def _get_all_tables_health() -> Tuple[List[Dict], List[Dict]]:
-    """
-    يعيد (dirty_tables, clean_tables).
-
-    كل جدول: {name, live, dead, ratio, last_av, last_an, n_mod,
-              auto_tuned, av_scale, an_scale}
-    """
     db = _get_db()
     if db is None or not _is_postgres():
         return [], []
@@ -234,7 +261,6 @@ async def _get_all_tables_health() -> Tuple[List[Dict], List[Dict]]:
         ratio = (dead / total) if total > 0 else 0.0
         n_mod = int(r.get("n_mod_since_analyze") or 0)
 
-        # فحص autovacuum tuning
         opts = r.get("reloptions") or []
         av_scale = None
         an_scale = None
@@ -252,7 +278,6 @@ async def _get_all_tables_health() -> Tuple[List[Dict], List[Dict]]:
                         pass
 
         auto_tuned = av_scale is not None and an_scale is not None
-
         last_av = r.get("last_vacuum") or r.get("last_autovacuum")
         last_an = r.get("last_analyze") or r.get("last_autoanalyze")
 
@@ -278,29 +303,11 @@ async def _get_all_tables_health() -> Tuple[List[Dict], List[Dict]]:
     return dirty, clean
 
 
-def _dead_color(dead: int, live: int) -> str:
-    """لون ذكي."""
-    total = live + dead
-    if total == 0:
-        return "⚪"
-    ratio = dead / total
-    if live < 1000 and ratio < 0.20:
-        return "✅"
-    if ratio < 0.05:
-        return "✅"
-    if ratio < 0.10:
-        return "🟡"
-    if ratio < 0.20:
-        return "🟠"
-    return "🔴"
-
-
 # ═══════════════════════════════════════════════════════════════════════
-# 3) PostgreSQL Activity / Blockers
+# 3) Activity Stats
 # ═══════════════════════════════════════════════════════════════════════
 
 async def _get_activity_stats() -> Dict[str, Any]:
-    """Long tx / idle tx / vacuum running."""
     out = {
         "long_tx": 0,
         "idle_tx": 0,
@@ -343,7 +350,7 @@ async def _get_activity_stats() -> Dict[str, Any]:
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# 4) PostgreSQL Settings
+# 4) PG Settings
 # ═══════════════════════════════════════════════════════════════════════
 
 _CRITICAL_SETTINGS = (
@@ -391,7 +398,7 @@ async def _get_pg_settings() -> Dict[str, str]:
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# 5) Table sizes + Indexes
+# 5) Sizes + Indexes
 # ═══════════════════════════════════════════════════════════════════════
 
 async def _get_table_sizes(limit: int = 15) -> List[Dict[str, Any]]:
@@ -423,7 +430,7 @@ async def _get_indexes(tables: List[str]) -> Dict[str, List[Dict[str, Any]]]:
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# 6) Auto-Cleanup thresholds
+# 6) Auto-Cleanup Status
 # ═══════════════════════════════════════════════════════════════════════
 
 _CLEANUP_TABLES = (
@@ -435,7 +442,7 @@ _CLEANUP_TABLES = (
     "penalty_archive",
     "user_violations",
 )
-_CLEANUP_THRESHOLD_KB = 20 * 1024  # 20 MB
+_CLEANUP_THRESHOLD_KB = 20 * 1024
 
 
 async def _get_cleanup_status() -> List[Dict[str, Any]]:
@@ -481,50 +488,10 @@ async def _get_cleanup_status() -> List[Dict[str, Any]]:
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# 7) Maintenance preview
+# 7) Table Names Helper
 # ═══════════════════════════════════════════════════════════════════════
 
-async def _get_maintenance_preview() -> Dict[str, Any]:
-    """يحسب ما سيُحذف عند /db_maintenance."""
-    db = _get_db()
-    if db is None:
-        return {"deletions": {}, "total_deletions": 0}
-
-    out = {
-        "deletions": {
-            "admin_logs_30d": 0,
-            "penalty_archive_90d": 0,
-            "user_violations_90d": 0,
-        },
-        "total_deletions": 0,
-    }
-
-    if not _is_postgres():
-        return out
-
-    try:
-        row = await db.fetchone("""
-            SELECT
-                (SELECT COUNT(*) FROM admin_logs
-                 WHERE created_at < NOW() - INTERVAL '30 days') AS al,
-                (SELECT COUNT(*) FROM penalty_archive
-                 WHERE created_at < NOW() - INTERVAL '90 days') AS pa,
-                (SELECT COUNT(*) FROM user_violations
-                 WHERE created_at < NOW() - INTERVAL '90 days') AS uv
-        """) or {}
-        if isinstance(row, dict):
-            out["deletions"]["admin_logs_30d"] = int(row.get("al") or 0)
-            out["deletions"]["penalty_archive_90d"] = int(row.get("pa") or 0)
-            out["deletions"]["user_violations_90d"] = int(row.get("uv") or 0)
-            out["total_deletions"] = sum(out["deletions"].values())
-    except Exception as e:
-        logger.debug(f"_get_maintenance_preview: {e}")
-
-    return out
-
-
 async def _get_all_table_names() -> List[str]:
-    """كل أسماء الجداول — لـ VACUUM."""
     db = _get_db()
     if db is None:
         return []
@@ -553,7 +520,7 @@ async def _get_all_table_names() -> List[str]:
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# 8) Build Sections
+# 8) Score
 # ═══════════════════════════════════════════════════════════════════════
 
 def _calc_technical_score(
@@ -561,7 +528,6 @@ def _calc_technical_score(
     activity: Dict,
     settings: Dict,
 ) -> Tuple[int, int, int, int]:
-    """يعيد (score/100, critical_count, warn_count, idle_tx_count)."""
     score = 100
     critical = 0
     warn = 0
@@ -586,419 +552,277 @@ def _calc_technical_score(
     return score, critical, warn, activity.get("idle_tx", 0)
 
 
-async def _build_sections() -> List[str]:
-    parts: List[str] = []
+# ═══════════════════════════════════════════════════════════════════════
+# 9) Maintenance — dict API
+# ═══════════════════════════════════════════════════════════════════════
 
-    # جمع البيانات
-    meta = await _get_db_metadata()
-    dirty, clean = await _get_all_tables_health()
-    activity = await _get_activity_stats()
-    settings = await _get_pg_settings()
-    sizes = await _get_table_sizes(limit=15)
-    cleanup_status = await _get_cleanup_status()
-    preview = await _get_maintenance_preview()
-    all_tables = await _get_all_table_names()
+async def preview_maintenance() -> Dict[str, Any]:
+    """
+    معاينة الصيانة — dict.
+    ⚠️ v6.5.1+: user_violations.last_violation_time
+    """
+    db = _get_db()
+    result: Dict[str, Any] = {
+        'plan': [],
+        'total_deletions': 0,
+        'vacuum_tables': [],
+        'db_type': _get_db_type(),
+    }
+    if db is None:
+        return result
 
-    # الفهارس للجداول الحرجة
-    critical_idx_tables = ["posts", "banned_words", "bot_groups",
-                           "users", "user_channels", "subscriptions"]
-    idx_map = await _get_indexes(critical_idx_tables)
+    deletions_spec = [
+        ("admin_logs", "created_at", 30),
+        ("penalty_archive", "created_at", 90),
+        ("user_violations", "last_violation_time", 90),
+    ]
 
-    score, critical_count, warn_count, idle_tx_count = _calc_technical_score(
-        dirty, activity, settings
-    )
-    total_dead = sum(t.get("dead", 0) for t in dirty)
-    total_tables = len(dirty) + len(clean)
+    total = 0
+    for tbl, col, days in deletions_spec:
+        entry = {
+            'name': tbl,
+            'column': col,
+            'days': days,
+            'threshold_str': f">{days}d",
+            'count': 0,
+            'error': None,
+        }
+        try:
+            if _is_postgres():
+                row = await db.fetchone(
+                    f"SELECT COUNT(*) AS cnt FROM {tbl} "
+                    f"WHERE {col} < NOW() - INTERVAL '{days} days'"
+                )
+                cnt = int((row or {}).get("cnt") or 0)
+                entry['count'] = cnt
+                total += cnt
+            else:
+                entry['count'] = 0
+        except Exception as e:
+            logger.warning(f"preview_maintenance({tbl}): {e}")
+            entry['count'] = -1
+            entry['error'] = str(e)[:100]
 
-    # ═══════════════════════════════════════════════════════════
-    # SECTION 1: Header + Metadata + Summary
-    # ═══════════════════════════════════════════════════════════
-    s1: List[str] = []
-    s1.append("🔬 <b>تشخيص قاعدة البيانات v6.9.1</b>")
-    s1.append("━━━━━━━━━━━━━━━━━━━━━━")
-    s1.append(f"🗄️ <b>النوع:</b> {_esc(meta['database_name']) and 'PostgreSQL' or _get_db_type()}")
-    s1.append(f"💾 <b>الحجم:</b> {meta['size_display']}")
-    s1.append(f"📋 <b>Schema:</b> {_esc(meta['current_schema'])}")
-    if meta["schemas"]:
-        s1.append(f"📋 <b>Schemas المتاحة:</b> {_esc(', '.join(meta['schemas']))}")
-    s1.append(f"🗃️ <b>Database:</b> {_esc(meta['database_name'])}")
-    s1.append("")
+        result['plan'].append(entry)
 
-    # الخلاصة التقنية
-    score_icon = "🟢" if score >= 80 else ("🟡" if score >= 60 else "🔴")
-    s1.append("📌 <b>الخلاصة التقنية</b>")
-    s1.append(f"  🔴 جداول حرجة: <b>{critical_count}</b>")
-    s1.append(f"  🟡 جداول تحتاج انتباه: <b>{warn_count}</b>")
-    s1.append(f"  ⚠️ Long transactions: <b>{activity.get('long_tx', 0)}</b>")
-    s1.append(f"  🟠 Idle transactions: <b>{idle_tx_count}</b>")
-    s1.append(f"  💀 إجمالي dead tuples: <b>{_fmt_num(total_dead)}</b>")
-    s1.append(f"  📊 جداول مهمة: <b>{len(dirty)}</b>")
-    s1.append(f"  🗂️ إجمالي الجداول: <b>{total_tables}</b>")
-    av_setting = settings.get("autovacuum", "?")
-    av_icon = "🟢" if av_setting == "on" else "🔴"
-    s1.append(f"  autovacuum: {av_icon} <b>{_esc(av_setting).upper()}</b>")
-    s1.append(f"  مؤشر الحالة التقني: <b>{score}/100</b> {score_icon}")
-    parts.append("\n".join(s1))
+    result['total_deletions'] = total
+    result['vacuum_tables'] = await _get_all_table_names()
+    return result
 
-    # ═══════════════════════════════════════════════════════════
-    # SECTION 2: التحليل المنطقي
-    # ═══════════════════════════════════════════════════════════
-    s2: List[str] = []
-    s2.append("╔══════════════════════════════════╗")
-    s2.append("║  🎯 التحليل المنطقي          ║")
-    s2.append("╚══════════════════════════════════╝")
-    s2.append("")
-    if av_setting == "on":
-        s2.append("🟢 autovacuum = ON.")
-    else:
-        s2.append("🔴 autovacuum = OFF — خطر على الأداء.")
 
-    if settings.get("synchronous_commit") == "off":
-        s2.append("")
-        s2.append("ℹ️ synchronous_commit=off — مقصود من v7.7.36 "
-                  "لتحسين الأداء. لا تعتبره خطأً.")
+async def run_maintenance() -> Dict[str, Any]:
+    """
+    تنفيذ الصيانة — dict.
+    ⚠️ v6.5.1+: user_violations.last_violation_time
+    """
+    db = _get_db()
+    start = time.monotonic()
+    result: Dict[str, Any] = {
+        'duration_sec': 0.0,
+        'deletions': {},
+        'deletion_errors': {},
+        'vacuum': {'success': 0, 'failed': 0, 'details': []},
+    }
+    if db is None:
+        result['duration_sec'] = round(time.monotonic() - start, 2)
+        return result
 
-    if critical_count > 0:
-        s2.append("")
-        s2.append(f"🔴 <b>{critical_count} جدول حرج</b> — راجع التفاصيل.")
-    parts.append("\n".join(s2))
+    deletions_spec = [
+        ("admin_logs", "created_at", 30),
+        ("penalty_archive", "created_at", 90),
+        ("user_violations", "last_violation_time", 90),
+    ]
 
-    # ═══════════════════════════════════════════════════════════
-    # SECTION 3: Dead Tuples المُفصَّل
-    # ═══════════════════════════════════════════════════════════
-    if dirty:
-        s3: List[str] = []
-        s3.append("━━━━━━━━━━━━━━━━━━━━━━")
-        s3.append("📊 <b>التفاصيل الكاملة</b>")
-        s3.append("━━━━━━━━━━━━━━━━━━━━━━")
-        s3.append("")
-        s3.append("1. <b>Dead Tuples + نشاط التنظيف</b>")
-        s3.append("")
-        for t in dirty[:20]:
-            color = _dead_color(t["dead"], t["live"])
-            name = _esc(t["name"])
-            ratio_pct = t["ratio"] * 100
-            s3.append(f"{color} <b>{name}</b>")
-            s3.append(f"     live={_fmt_num(t['live'])} "
-                      f"dead={_fmt_num(t['dead'])} ({ratio_pct:.1f}%)")
-            av = _fmt_ts(t["last_av"])
-            an = _fmt_ts(t["last_an"])
-            mod = t["n_mod"]
-            s3.append(f"     🧹 AV: {av} | 📊 AN: {an} | 🔄 mod={mod}")
-            s3.append("")
-        parts.append("\n".join(s3))
+    for tbl, col, days in deletions_spec:
+        try:
+            if _is_postgres():
+                r = await db.execute(
+                    f"DELETE FROM {tbl} "
+                    f"WHERE {col} < NOW() - INTERVAL '{days} days'"
+                )
+                result['deletions'][tbl] = int(r or 0)
+            else:
+                result['deletions'][tbl] = 0
+        except Exception as e:
+            logger.warning(f"run_maintenance delete({tbl}): {e}")
+            result['deletions'][tbl] = 0
+            result['deletion_errors'][tbl] = str(e)[:100]
 
-    # ═══════════════════════════════════════════════════════════
-    # SECTION 3b: الجداول النظيفة
-    # ═══════════════════════════════════════════════════════════
-    if clean:
-        s3b: List[str] = []
-        s3b.append("1b. <b>جداول نظيفة (dead=0)</b>")
-        s3b.append("")
-        # رتب حسب live تنازلياً
-        clean_sorted = sorted(clean, key=lambda x: -x["live"])
-        for t in clean_sorted[:15]:
-            an = _fmt_ts(t["last_an"])
-            s3b.append(f"✅ <b>{_esc(t['name'])}</b>")
-            s3b.append(f"     live={_fmt_num(t['live'])} | 📊 AN: {an}")
-        if len(clean_sorted) > 15:
-            s3b.append(f"… و{len(clean_sorted) - 15} جدول نظيف آخر")
-        parts.append("\n".join(s3b))
+    tables = await _get_all_table_names()
+    for t in tables:
+        try:
+            if hasattr(db, "vacuum") and callable(db.vacuum):
+                await db.vacuum(t)
+            else:
+                await db.execute(f"VACUUM ANALYZE {t}")
+            result['vacuum']['success'] += 1
+            result['vacuum']['details'].append((t, True, None))
+        except Exception as e:
+            err = str(e).lower()
+            if "does not exist" in err or "no such" in err:
+                result['vacuum']['details'].append((t, True, "skip"))
+            else:
+                result['vacuum']['failed'] += 1
+                result['vacuum']['details'].append(
+                    (t, False, str(e)[:80])
+                )
+        try:
+            await asyncio.sleep(0.05)
+        except Exception:
+            pass
 
-    # ═══════════════════════════════════════════════════════════
-    # SECTION 4: Autovacuum tuning
-    # ═══════════════════════════════════════════════════════════
-    tuned = [t for t in dirty + clean if t.get("auto_tuned")]
-    not_tuned = [t for t in dirty + clean if not t.get("auto_tuned")]
-
-    s4: List[str] = []
-    s4.append("2. <b>Autovacuum للجداول الحرجة (HEAVY)</b>")
-    s4.append("")
-    for tname in ("posts", "subscriptions", "user_penalties", "users"):
-        match = next((t for t in tuned if t["name"] == tname), None)
-        if match:
-            av = match.get("av_scale", "?")
-            an = match.get("an_scale", "?")
-            s4.append(f"✅ <b>{_esc(tname)}</b> — مضبوط ({av}/{an})")
-        else:
-            match2 = next((t for t in not_tuned if t["name"] == tname), None)
-            if match2:
-                s4.append(f"⚙️ <b>{_esc(tname)}</b> — غير مضبوط")
-    parts.append("\n".join(s4))
-
-    # الجداول غير المضبوطة
-    if not_tuned:
-        s4b: List[str] = []
-        s4b.append("")
-        s4b.append(f"2b. <b>جداول ليست مضبوطة autovacuum "
-                   f"({len(not_tuned)} من {len(tuned) + len(not_tuned)})</b>")
-        s4b.append("")
-        for t in not_tuned[:15]:
-            s4b.append(f"⚙️ <b>{_esc(t['name'])}</b> — "
-                       f"live={_fmt_num(t['live'])} dead={_fmt_num(t['dead'])}")
-        if len(not_tuned) > 15:
-            s4b.append(f"… و{len(not_tuned) - 15} آخر")
-        parts.append("\n".join(s4b))
-
-    # ═══════════════════════════════════════════════════════════
-    # SECTION 5: Activity
-    # ═══════════════════════════════════════════════════════════
-    s5: List[str] = []
-    s5.append("3. <b>نشاط PostgreSQL / Blockers</b>")
-    s5.append("")
-    if (activity.get("long_tx", 0) == 0
-            and activity.get("idle_tx", 0) == 0
-            and activity.get("vacuum_running", 0) == 0):
-        s5.append("✅ لا توجد معاملات طويلة / idle-in-tx / VACUUM جارٍ.")
-    else:
-        if activity.get("long_tx", 0):
-            s5.append(f"⚠️ Long transactions: <b>{activity['long_tx']}</b>")
-        if activity.get("idle_tx", 0):
-            s5.append(f"🟠 Idle transactions: <b>{activity['idle_tx']}</b>")
-        if activity.get("vacuum_running", 0):
-            s5.append(f"🧹 VACUUM قيد التنفيذ: <b>{activity['vacuum_running']}</b>")
-    s5.append(f"📊 إجمالي الاتصالات: <b>{activity.get('total_connections', 0)}</b>")
-    parts.append("\n".join(s5))
-
-    # ═══════════════════════════════════════════════════════════
-    # SECTION 6: أحجام الجداول Top 15
-    # ═══════════════════════════════════════════════════════════
-    if sizes:
-        s6: List[str] = []
-        s6.append("4. <b>أحجام الجداول — Top 15</b>")
-        s6.append("")
-        for t in sizes[:15]:
-            name = t.get("name", "?")
-            display = t.get("total_display", "0 B")
-            s6.append(f"  <code>{_esc(name):<22}</code> {display}")
-        parts.append("\n".join(s6))
-
-    # ═══════════════════════════════════════════════════════════
-    # SECTION 7: الفهارس الحرجة
-    # ═══════════════════════════════════════════════════════════
-    if idx_map:
-        s7: List[str] = []
-        s7.append("5. <b>الفهارس الحرجة (يدوياً)</b>")
-        s7.append("")
-        for tname in critical_idx_tables:
-            if tname in idx_map:
-                cnt = len(idx_map[tname])
-                s7.append(f"✅ <b>{_esc(tname)}</b> ({cnt})")
-        parts.append("\n".join(s7))
-
-    # ═══════════════════════════════════════════════════════════
-    # SECTION 8: PostgreSQL Settings
-    # ═══════════════════════════════════════════════════════════
-    if settings:
-        s8: List[str] = []
-        s8.append("6. <b>إعدادات PostgreSQL</b>")
-        s8.append("")
-        for k in _CRITICAL_SETTINGS:
-            if k in settings:
-                s8.append(f"  <code>{_esc(k)}</code> = {_esc(settings[k])}")
-        parts.append("\n".join(s8))
-
-    # ═══════════════════════════════════════════════════════════
-    # SECTION 9: Auto-Cleanup
-    # ═══════════════════════════════════════════════════════════
-    if cleanup_status:
-        s9: List[str] = []
-        s9.append("8. <b>Auto-Cleanup</b>")
-        s9.append("")
-        for c in cleanup_status:
-            s9.append(f"  {c['color']} <b>{_esc(c['name'])}</b> — "
-                      f"{c['display']} (الحد: 20MB) — {c['status']}")
-        s9.append("")
-        s9.append("⚙️ يُشغَّل كل 6h | VACUUM: ON 🟢 | Mode: all")
-        parts.append("\n".join(s9))
-
-    # ═══════════════════════════════════════════════════════════
-    # SECTION 10: Footer
-    # ═══════════════════════════════════════════════════════════
-    parts.append(
-        "━━━━━━━━━━━━━━━━━━━━━━\n"
-        "✅ <b>اكتمل التشخيص</b>\n"
-        f"🕐 <i>{_now_iso()}</i>"
-    )
-
-    # ═══════════════════════════════════════════════════════════
-    # SECTION 11: Maintenance Preview
-    # ═══════════════════════════════════════════════════════════
-    s11: List[str] = []
-    s11.append("")
-    s11.append("🧹 <b>معاينة الصيانة</b>")
-    s11.append("━━━━━━━━━━━━━━━━━━━━━━")
-    s11.append("")
-    s11.append("🗑️ <b>الحذف المخطط:</b>")
-    d = preview.get("deletions", {})
-    s11.append(f"  {'✅' if d.get('admin_logs_30d', 0) == 0 else '⚠️'} "
-               f"admin_logs (>30d): "
-               f"{'لا شيء' if d.get('admin_logs_30d', 0) == 0 else d['admin_logs_30d']}")
-    s11.append(f"  {'✅' if d.get('penalty_archive_90d', 0) == 0 else '⚠️'} "
-               f"penalty_archive (>90d): "
-               f"{'لا شيء' if d.get('penalty_archive_90d', 0) == 0 else d['penalty_archive_90d']}")
-    s11.append(f"  {'✅' if d.get('user_violations_90d', 0) == 0 else '⚠️'} "
-               f"user_violations (>90d): "
-               f"{'لا شيء' if d.get('user_violations_90d', 0) == 0 else d['user_violations_90d']}")
-    s11.append("")
-    total_del = preview.get("total_deletions", 0)
-    s11.append(f"📊 <b>الإجمالي:</b> {total_del} صف سيُحذف")
-    s11.append("")
-
-    if all_tables:
-        s11.append(f"🧹 <b>VACUUM سيعمل على ({len(all_tables)} جدول):</b>")
-        for t in all_tables:
-            s11.append(f"  • {_esc(t)}")
-    parts.append("\n".join(s11))
-
-    # ═══════════════════════════════════════════════════════════
-    # SECTION 12: تنفيذ
-    # ═══════════════════════════════════════════════════════════
-    parts.append(
-        "━━━━━━━━━━━━━━━━━━━━━━\n"
-        "لتنفيذ الصيانة، أرسل:\n"
-        "<code>/db_maintenance confirm</code>"
-    )
-
-    return parts
+    result['duration_sec'] = round(time.monotonic() - start, 2)
+    return result
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# 9) Public API
+# 10) Maintenance — HTML formatters
 # ═══════════════════════════════════════════════════════════════════════
 
-async def diagnose_db() -> str:
-    """التقرير الكامل (HTML string)."""
-    parts = await _build_sections()
-    return "\n\n".join(parts)
-
-
-async def diagnose_db_split() -> List[str]:
-    """التقرير مقسّم لأجزاء."""
-    return await _build_sections()
-
-
-async def diagnose_maintenance_preview() -> str:
-    """معاينة الصيانة منفصلة (للـ /db_maintenance)."""
-    preview = await _get_maintenance_preview()
-    all_tables = await _get_all_table_names()
-
-    lines = []
+def format_maintenance_preview(preview: Dict[str, Any]) -> str:
+    lines: List[str] = []
     lines.append("🧹 <b>معاينة الصيانة</b>")
     lines.append("━━━━━━━━━━━━━━━━━━━━━━")
     lines.append("")
     lines.append("🗑️ <b>الحذف المخطط:</b>")
-    d = preview.get("deletions", {})
-    for key, label in (
-        ("admin_logs_30d", "admin_logs (>30d)"),
-        ("penalty_archive_90d", "penalty_archive (>90d)"),
-        ("user_violations_90d", "user_violations (>90d)"),
-    ):
-        cnt = d.get(key, 0)
-        icon = "✅" if cnt == 0 else "⚠️"
-        val = "لا شيء" if cnt == 0 else cnt
-        lines.append(f"  {icon} {label}: {val}")
+
+    plan = preview.get('plan', []) if isinstance(preview, dict) else []
+    has_errors = False
+
+    for item in plan:
+        if not isinstance(item, dict):
+            continue
+        name = _esc(item.get('name', '?'))
+        threshold = _esc(item.get('threshold_str', '?'))
+        cnt = item.get('count', 0)
+        err = item.get('error')
+
+        if cnt == -1:
+            icon = "❌"
+            val = f"<i>فشل: {_esc(err or '?')[:60]}</i>"
+            has_errors = True
+        elif cnt == 0:
+            icon = "✅"
+            val = "لا شيء"
+        else:
+            icon = "⚠️"
+            val = str(cnt)
+
+        lines.append(
+            f"  {icon} <code>{name:<20}</code> ({threshold}): {val}"
+        )
+
     lines.append("")
-    lines.append(f"📊 <b>الإجمالي:</b> "
-                 f"{preview.get('total_deletions', 0)} صف سيُحذف")
+    total = (preview.get('total_deletions', 0)
+             if isinstance(preview, dict) else 0)
+    lines.append(f"📊 <b>الإجمالي:</b> {total} صف سيُحذف")
     lines.append("")
-    if all_tables:
-        lines.append(f"🧹 <b>VACUUM سيعمل على ({len(all_tables)} جدول):</b>")
-        for t in all_tables:
+
+    tables = (preview.get('vacuum_tables', [])
+              if isinstance(preview, dict) else [])
+    if tables:
+        lines.append(f"🧹 <b>VACUUM سيعمل على ({len(tables)} جدول):</b>")
+        for t in tables:
             lines.append(f"  • {_esc(t)}")
-    lines.append("")
+        lines.append("")
+
     lines.append("━━━━━━━━━━━━━━━━━━━━━━")
     lines.append("لتنفيذ الصيانة، أرسل:")
     lines.append("<code>/db_maintenance confirm</code>")
+
+    if has_errors:
+        lines.append("")
+        lines.append(
+            "⚠️ <i>بعض استعلامات العدّ فشلت — "
+            "تأكد من تحديث db_diagnostics</i>"
+        )
+
     return "\n".join(lines)
 
 
-async def run_db_maintenance() -> str:
-    """تنفيذ الصيانة الفعلية (حذف + VACUUM)."""
-    db = _get_db()
-    if db is None:
-        return "❌ DB غير مستورد"
-
-    start = time.monotonic()
+def format_maintenance_result(result: Dict[str, Any]) -> str:
     lines: List[str] = []
     lines.append("✅ <b>اكتملت الصيانة بنجاح</b>")
     lines.append("━━━━━━━━━━━━━━━━━━━━━━")
     lines.append("")
 
-    # ═══ 1. الحذف ═══
-    deleted = {
-        "admin_logs": 0,
-        "penalty_archive": 0,
-        "user_violations": 0,
-    }
-
-    if _is_postgres():
-        try:
-            r = await db.execute(
-                "DELETE FROM admin_logs "
-                "WHERE created_at < NOW() - INTERVAL '30 days'"
-            )
-            deleted["admin_logs"] = int(r or 0)
-        except Exception as e:
-            logger.warning(f"cleanup admin_logs: {e}")
-        try:
-            r = await db.execute(
-                "DELETE FROM penalty_archive "
-                "WHERE created_at < NOW() - INTERVAL '90 days'"
-            )
-            deleted["penalty_archive"] = int(r or 0)
-        except Exception as e:
-            logger.warning(f"cleanup penalty_archive: {e}")
-        try:
-            r = await db.execute(
-                "DELETE FROM user_violations "
-                "WHERE created_at < NOW() - INTERVAL '90 days'"
-            )
-            deleted["user_violations"] = int(r or 0)
-        except Exception as e:
-            logger.warning(f"cleanup user_violations: {e}")
-
-    lines.append("🗑️ <b>الحذف:</b>")
-    for name, cnt in deleted.items():
-        icon = "✅" if cnt == 0 else "🗑️"
-        val = "لا شيء" if cnt == 0 else cnt
-        lines.append(f"  {icon} {_esc(name):<20} {val}")
+    duration = (result.get('duration_sec', 0.0)
+                if isinstance(result, dict) else 0.0)
+    lines.append(f"⏱️ <b>المدة:</b> {duration:.2f}s")
     lines.append("")
 
-    # ═══ 2. VACUUM ═══
-    all_tables = await _get_all_table_names()
+    lines.append("🗑️ <b>الحذف:</b>")
+    deletions = (result.get('deletions', {})
+                 if isinstance(result, dict) else {})
+    deletion_errors = (result.get('deletion_errors', {})
+                       if isinstance(result, dict) else {})
+
+    if not deletions:
+        lines.append("  ℹ️ لا توجد عمليات حذف")
+    else:
+        for name, cnt in deletions.items():
+            if name in deletion_errors:
+                icon = "❌"
+                val = "<i>فشل</i>"
+            elif cnt == 0:
+                icon = "✅"
+                val = "لا شيء"
+            else:
+                icon = "🗑️"
+                val = str(cnt)
+            lines.append(f"  {icon} <code>{_esc(name):<20}</code> {val}")
+
+    lines.append("")
+
     lines.append("🧹 <b>VACUUM:</b>")
-    success = 0
-    fail = 0
-    for t in all_tables:
-        try:
-            if hasattr(db, "vacuum"):
-                await db.vacuum(t)
+    vacuum = (result.get('vacuum', {})
+              if isinstance(result, dict) else {})
+    details = (vacuum.get('details', [])
+               if isinstance(vacuum, dict) else [])
+
+    if not details:
+        lines.append("  ℹ️ لا توجد عمليات VACUUM")
+    else:
+        for item in details:
+            if not isinstance(item, tuple) or len(item) < 3:
+                continue
+            tname, ok, err = item
+            if ok and err is None:
+                lines.append(f"  ✅ {_esc(tname)}")
+            elif ok and err == "skip":
+                lines.append(f"  ⏭️ {_esc(tname)} <i>(غير موجود)</i>")
             else:
-                await db.execute(f"VACUUM ANALYZE {t}")
-            success += 1
-            lines.append(f"  ✅ {_esc(t)}")
-        except Exception as e:
-            err = str(e).lower()
-            if "does not exist" in err or "no such" in err:
-                lines.append(f"  ⏭️ {_esc(t)} (غير موجود)")
-            else:
-                fail += 1
-                lines.append(f"  ❌ {_esc(t)} — "
-                             f"<code>{_esc(str(e)[:60])}</code>")
-        await asyncio.sleep(0.05)
+                lines.append(
+                    f"  ❌ {_esc(tname)} — "
+                    f"<code>{_esc(str(err or '?')[:60])}</code>"
+                )
 
     lines.append("")
     lines.append("━━━━━━━━━━━━━━━━━━━━━━")
-    elapsed = time.monotonic() - start
-    lines.append(f"⏱️ <b>المدة:</b> {elapsed:.2f}s")
-    lines.append(f"📊 <b>نجح:</b> {success} | <b>فشل:</b> {fail}")
+    success = (vacuum.get('success', 0)
+               if isinstance(vacuum, dict) else 0)
+    failed = (vacuum.get('failed', 0)
+              if isinstance(vacuum, dict) else 0)
+    lines.append(f"📊 <b>نجح:</b> {success} | <b>فشل:</b> {failed}")
 
     return "\n".join(lines)
 
 
+# ═══════════════════════════════════════════════════════════════════════
+# 11) Maintenance — HTML shortcuts
+# ═══════════════════════════════════════════════════════════════════════
+
+async def diagnose_maintenance_preview() -> str:
+    preview = await preview_maintenance()
+    return format_maintenance_preview(preview)
+
+
+async def run_db_maintenance() -> str:
+    result = await run_maintenance()
+    return format_maintenance_result(result)
+
+
 async def vacuum_analyze_tables() -> str:
-    """VACUUM سريع (بدون حذف)."""
     db = _get_db()
     if db is None:
         return "❌ DB غير مستورد"
@@ -1011,7 +835,7 @@ async def vacuum_analyze_tables() -> str:
     fail = 0
     for t in tables:
         try:
-            if hasattr(db, "vacuum"):
+            if hasattr(db, "vacuum") and callable(db.vacuum):
                 await db.vacuum(t)
             else:
                 await db.execute(f"VACUUM ANALYZE {t}")
@@ -1035,32 +859,395 @@ async def vacuum_analyze_tables() -> str:
     return "\n".join(lines)
 
 
-# Aliases
+# ═══════════════════════════════════════════════════════════════════════
+# 12) Build Sections — التقرير الكامل
+# ═══════════════════════════════════════════════════════════════════════
+
+async def _build_sections() -> List[str]:
+    parts: List[str] = []
+
+    meta = await _get_db_metadata()
+    dirty, clean = await _get_all_tables_health()
+    activity = await _get_activity_stats()
+    settings = await _get_pg_settings()
+    sizes = await _get_table_sizes(limit=15)
+    cleanup_status = await _get_cleanup_status()
+    all_tables = await _get_all_table_names()
+
+    critical_idx_tables = ["posts", "banned_words", "bot_groups",
+                           "users", "user_channels", "subscriptions"]
+    idx_map = await _get_indexes(critical_idx_tables)
+
+    score, critical_count, warn_count, idle_tx_count = _calc_technical_score(
+        dirty, activity, settings
+    )
+    total_dead = sum(t.get("dead", 0) for t in dirty)
+    total_tables = len(dirty) + len(clean)
+
+    # SECTION 1
+    s1: List[str] = []
+    s1.append(f"🔬 <b>تشخيص قاعدة البيانات v{VERSION}</b>")
+    s1.append("━━━━━━━━━━━━━━━━━━━━━━")
+    db_type_label = "PostgreSQL" if _is_postgres() else _get_db_type()
+    s1.append(f"🗄️ <b>النوع:</b> {_esc(db_type_label)}")
+    s1.append(f"💾 <b>الحجم:</b> {meta['size_display']}")
+    s1.append(f"📋 <b>Schema:</b> {_esc(meta['current_schema'])}")
+    if meta["schemas"]:
+        s1.append(f"📋 <b>Schemas المتاحة:</b> {_esc(', '.join(meta['schemas']))}")
+    s1.append(f"🗃️ <b>Database:</b> {_esc(meta['database_name'])}")
+    s1.append("")
+
+    score_icon = "🟢" if score >= 80 else ("🟡" if score >= 60 else "🔴")
+    s1.append("📌 <b>الخلاصة التقنية</b>")
+    s1.append(f"  🔴 جداول حرجة: <b>{critical_count}</b>")
+    s1.append(f"  🟡 جداول تحتاج انتباه: <b>{warn_count}</b>")
+    s1.append(f"  ⚠️ Long transactions: <b>{activity.get('long_tx', 0)}</b>")
+    s1.append(f"  🟠 Idle transactions: <b>{idle_tx_count}</b>")
+    s1.append(f"  💀 إجمالي dead tuples: <b>{_fmt_num(total_dead)}</b>")
+    s1.append(f"  📊 جداول مهمة: <b>{len(dirty)}</b>")
+    s1.append(f"  🗂️ إجمالي الجداول: <b>{total_tables}</b>")
+    av_setting = settings.get("autovacuum", "?")
+    av_icon = "🟢" if av_setting == "on" else "🔴"
+    s1.append(f"  autovacuum: {av_icon} <b>{_esc(av_setting).upper()}</b>")
+    s1.append(f"  مؤشر الحالة التقني: <b>{score}/100</b> {score_icon}")
+    parts.append("\n".join(s1))
+
+    # SECTION 2
+    s2: List[str] = []
+    s2.append("╔══════════════════════════════════╗")
+    s2.append("║  🎯 التحليل المنطقي          ║")
+    s2.append("╚══════════════════════════════════╝")
+    s2.append("")
+    if av_setting == "on":
+        s2.append("🟢 autovacuum = ON.")
+    else:
+        s2.append("🔴 autovacuum = OFF — خطر على الأداء.")
+
+    if settings.get("synchronous_commit") == "off":
+        s2.append("")
+        s2.append("ℹ️ synchronous_commit=off — مقصود من v7.7.36 "
+                  "لتحسين الأداء. لا تعتبره خطأً.")
+
+    if critical_count > 0:
+        s2.append("")
+        s2.append(f"🔴 <b>{critical_count} جدول حرج</b> — راجع التفاصيل.")
+    parts.append("\n".join(s2))
+
+    # SECTION 3
+    if dirty:
+        s3: List[str] = []
+        s3.append("━━━━━━━━━━━━━━━━━━━━━━")
+        s3.append("📊 <b>التفاصيل الكاملة</b>")
+        s3.append("━━━━━━━━━━━━━━━━━━━━━━")
+        s3.append("")
+        s3.append("1. <b>Dead Tuples + نشاط التنظيف</b>")
+        s3.append("")
+        for t in dirty[:20]:
+            color = _dead_color(t["dead"], t["live"])
+            name = _esc(t["name"])
+            ratio_pct = t["ratio"] * 100
+            s3.append(f"{color} <b>{name}</b>")
+            s3.append(f"     live={_fmt_num(t['live'])} "
+                      f"dead={_fmt_num(t['dead'])} ({ratio_pct:.1f}%)")
+            av = _fmt_ts(t["last_av"])
+            an = _fmt_ts(t["last_an"])
+            mod = t["n_mod"]
+            s3.append(f"     🧹 AV: {av} | 📊 AN: {an} | 🔄 mod={mod}")
+            s3.append("")
+        parts.append("\n".join(s3))
+
+    # SECTION 3b
+    if clean:
+        s3b: List[str] = []
+        s3b.append("1b. <b>جداول نظيفة (dead=0)</b>")
+        s3b.append("")
+        clean_sorted = sorted(clean, key=lambda x: -x["live"])
+        for t in clean_sorted[:15]:
+            an = _fmt_ts(t["last_an"])
+            s3b.append(f"✅ <b>{_esc(t['name'])}</b>")
+            s3b.append(f"     live={_fmt_num(t['live'])} | 📊 AN: {an}")
+        if len(clean_sorted) > 15:
+            s3b.append(f"… و{len(clean_sorted) - 15} جدول نظيف آخر")
+        parts.append("\n".join(s3b))
+
+    # SECTION 4
+    tuned = [t for t in dirty + clean if t.get("auto_tuned")]
+    not_tuned = [t for t in dirty + clean if not t.get("auto_tuned")]
+
+    s4: List[str] = []
+    s4.append("2. <b>Autovacuum للجداول الحرجة (HEAVY)</b>")
+    s4.append("")
+    for tname in ("posts", "subscriptions", "user_penalties", "users"):
+        match = next((t for t in tuned if t["name"] == tname), None)
+        if match:
+            av = match.get("av_scale", "?")
+            an = match.get("an_scale", "?")
+            s4.append(f"✅ <b>{_esc(tname)}</b> — مضبوط ({av}/{an})")
+        else:
+            match2 = next((t for t in not_tuned if t["name"] == tname), None)
+            if match2:
+                s4.append(f"⚙️ <b>{_esc(tname)}</b> — غير مضبوط")
+    parts.append("\n".join(s4))
+
+    if not_tuned:
+        s4b: List[str] = []
+        s4b.append("")
+        s4b.append(f"2b. <b>جداول ليست مضبوطة autovacuum "
+                   f"({len(not_tuned)} من {len(tuned) + len(not_tuned)})</b>")
+        s4b.append("")
+        for t in not_tuned[:15]:
+            s4b.append(f"⚙️ <b>{_esc(t['name'])}</b> — "
+                       f"live={_fmt_num(t['live'])} dead={_fmt_num(t['dead'])}")
+        if len(not_tuned) > 15:
+            s4b.append(f"… و{len(not_tuned) - 15} آخر")
+        parts.append("\n".join(s4b))
+
+    # SECTION 5
+    s5: List[str] = []
+    s5.append("3. <b>نشاط PostgreSQL / Blockers</b>")
+    s5.append("")
+    if (activity.get("long_tx", 0) == 0
+            and activity.get("idle_tx", 0) == 0
+            and activity.get("vacuum_running", 0) == 0):
+        s5.append("✅ لا توجد معاملات طويلة / idle-in-tx / VACUUM جارٍ.")
+    else:
+        if activity.get("long_tx", 0):
+            s5.append(f"⚠️ Long transactions: <b>{activity['long_tx']}</b>")
+        if activity.get("idle_tx", 0):
+            s5.append(f"🟠 Idle transactions: <b>{activity['idle_tx']}</b>")
+        if activity.get("vacuum_running", 0):
+            s5.append(f"🧹 VACUUM قيد التنفيذ: <b>{activity['vacuum_running']}</b>")
+    s5.append(f"📊 إجمالي الاتصالات: <b>{activity.get('total_connections', 0)}</b>")
+    parts.append("\n".join(s5))
+
+    # SECTION 6
+    if sizes:
+        s6: List[str] = []
+        s6.append("4. <b>أحجام الجداول — Top 15</b>")
+        s6.append("")
+        for t in sizes[:15]:
+            name = t.get("name", "?")
+            display = t.get("total_display", "0 B")
+            s6.append(f"  <code>{_esc(name):<22}</code> {display}")
+        parts.append("\n".join(s6))
+
+    # SECTION 7
+    if idx_map:
+        s7: List[str] = []
+        s7.append("5. <b>الفهارس الحرجة (يدوياً)</b>")
+        s7.append("")
+        for tname in critical_idx_tables:
+            if tname in idx_map:
+                cnt = len(idx_map[tname])
+                s7.append(f"✅ <b>{_esc(tname)}</b> ({cnt})")
+        parts.append("\n".join(s7))
+
+    # SECTION 8
+    if settings:
+        s8: List[str] = []
+        s8.append("6. <b>إعدادات PostgreSQL</b>")
+        s8.append("")
+        for k in _CRITICAL_SETTINGS:
+            if k in settings:
+                s8.append(f"  <code>{_esc(k)}</code> = {_esc(settings[k])}")
+        parts.append("\n".join(s8))
+
+    # SECTION 9
+    if cleanup_status:
+        s9: List[str] = []
+        s9.append("8. <b>Auto-Cleanup</b>")
+        s9.append("")
+        for c in cleanup_status:
+            s9.append(f"  {c['color']} <b>{_esc(c['name'])}</b> — "
+                      f"{c['display']} (الحد: 20MB) — {c['status']}")
+        s9.append("")
+        s9.append("⚙️ يُشغَّل كل 6h | VACUUM: ON 🟢 | Mode: all")
+        parts.append("\n".join(s9))
+
+    # SECTION 10
+    parts.append(
+        "━━━━━━━━━━━━━━━━━━━━━━\n"
+        "✅ <b>اكتمل التشخيص</b>\n"
+        f"🕐 <i>{_now_iso()}</i>"
+    )
+
+    # SECTION 11: Maintenance Preview
+    try:
+        preview = await preview_maintenance()
+        s11_text = format_maintenance_preview(preview)
+        parts.append(s11_text)
+    except Exception as e:
+        logger.warning(f"maintenance preview in sections: {e}")
+
+    return parts
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# 13) Public API — Diagnostics
+# ═══════════════════════════════════════════════════════════════════════
+
+async def diagnose_db() -> str:
+    parts = await _build_sections()
+    return "\n\n".join(parts)
+
+
+async def diagnose_db_split() -> List[str]:
+    return await _build_sections()
+
+
+async def diagnose_db_quick() -> str:
+    db = _get_db()
+    if db is None:
+        return "❌ DB غير مستورد"
+
+    lines: List[str] = []
+
+    try:
+        meta = await _get_db_metadata()
+        db_type = "PostgreSQL" if _is_postgres() else _get_db_type()
+        lines.append(f"🔬 <b>DB:</b> {db_type} | 💾 {meta['size_display']}")
+    except Exception:
+        lines.append(f"🔬 <b>DB:</b> {_get_db_type()}")
+
+    total_dead = 0
+    critical = 0
+    try:
+        dirty, clean = await _get_all_tables_health()
+        total_dead = sum(t.get("dead", 0) for t in dirty)
+        critical = sum(1 for t in dirty if t.get("ratio", 0) >= 0.20)
+    except Exception:
+        pass
+    lines.append(
+        f"💀 Dead: <b>{_fmt_num(total_dead)}</b> | "
+        f"🔴 حرجة: <b>{critical}</b>"
+    )
+
+    try:
+        activity = await _get_activity_stats()
+        idle = activity.get("idle_tx", 0)
+        long_tx = activity.get("long_tx", 0)
+        idle_icon = "🟢" if idle == 0 else ("🟡" if idle < 3 else "🔴")
+        long_icon = "🟢" if long_tx == 0 else "🔴"
+        lines.append(
+            f"{idle_icon} idle-tx: <b>{idle}</b> | "
+            f"{long_icon} long-tx: <b>{long_tx}</b>"
+        )
+    except Exception:
+        lines.append("🟠 idle-tx: ? | long-tx: ?")
+
+    try:
+        settings = await _get_pg_settings()
+        av = settings.get("autovacuum", "?")
+        av_icon = "🟢" if av == "on" else "🔴"
+        lines.append(f"{av_icon} autovacuum: <b>{_esc(av).upper()}</b>")
+    except Exception:
+        pass
+
+    return "\n".join(lines)
+
+
 async def get_diagnostics_data(top_n: int = 15) -> Dict[str, Any]:
-    """للتوافق — يعيد نفس الأقسام كـ dict."""
     parts = await _build_sections()
     return {
         "sections": parts,
         "available": True,
         "db_type": _get_db_type(),
+        "version": VERSION,
     }
 
 
+# ═══════════════════════════════════════════════════════════════════════
+# 14) Aliases
+# ═══════════════════════════════════════════════════════════════════════
+
+maintenance_preview = diagnose_maintenance_preview
+preview_maintenance_html = diagnose_maintenance_preview
+run_maintenance_html = run_db_maintenance
+execute_maintenance = run_db_maintenance
+perform_maintenance = run_db_maintenance
+do_maintenance = run_db_maintenance
+
+vacuum_all_tables = vacuum_analyze_tables
+vacuum_tables = vacuum_analyze_tables
+run_vacuum = vacuum_analyze_tables
+do_vacuum = vacuum_analyze_tables
+vacuum_db = vacuum_analyze_tables
+
+diagnose = diagnose_db
+run_diagnostics = diagnose_db
+get_diagnostics = diagnose_db
+diagnose_postgres = diagnose_db
+diag = diagnose_db
+diagnose_database = diagnose_db
+diagnose_split = diagnose_db_split
+get_diagnostics_split = diagnose_db_split
+diagnostics_split = diagnose_db_split
+split_diagnostics = diagnose_db_split
+get_diagnostics_report = diagnose_db
+get_quick_health = diagnose_db_quick
+
+get_db_info = _get_db_metadata
+get_database_info = _get_db_metadata
+get_pg_info = _get_db_metadata
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# 15) __all__
+# ═══════════════════════════════════════════════════════════════════════
+
 __all__ = [
+    "VERSION",
     "diagnose_db",
     "diagnose_db_split",
+    "diagnose_db_quick",
+    "get_diagnostics_data",
+    "preview_maintenance",
+    "run_maintenance",
+    "format_maintenance_preview",
+    "format_maintenance_result",
     "diagnose_maintenance_preview",
     "run_db_maintenance",
     "vacuum_analyze_tables",
-    "get_diagnostics_data",
+    "maintenance_preview",
+    "preview_maintenance_html",
+    "run_maintenance_html",
+    "execute_maintenance",
+    "perform_maintenance",
+    "do_maintenance",
+    "vacuum_all_tables",
+    "vacuum_tables",
+    "run_vacuum",
+    "do_vacuum",
+    "vacuum_db",
+    "diagnose",
+    "run_diagnostics",
+    "get_diagnostics",
+    "diagnose_postgres",
+    "diag",
+    "diagnose_database",
+    "diagnose_split",
+    "get_diagnostics_split",
+    "diagnostics_split",
+    "split_diagnostics",
+    "get_diagnostics_report",
+    "get_quick_health",
+    "get_db_info",
+    "get_database_info",
+    "get_pg_info",
 ]
 
 
+# ═══════════════════════════════════════════════════════════════════════
+# LOAD BEACON
+# ═══════════════════════════════════════════════════════════════════════
+
 try:
     logger.info(
-        "🛡️ db_diagnostics.py v6.9.1 FULL DETAILED loaded | "
-        "13 sections | metadata + dead_tuples + activity + settings + "
-        "cleanup_status + maintenance_preview"
+        "🛡️ db_diagnostics.py v%s loaded | "
+        "13 sections + maintenance API | "
+        "user_violations.last_violation_time ✅ | exports=%d",
+        VERSION,
+        len(__all__),
     )
 except Exception:
     pass
