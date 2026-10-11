@@ -1045,6 +1045,8 @@ async def _safe_answer(query, text=None, show_alert=False):
     except Exception as e:
         logger.debug(f"_safe_answer failed: {type(e).__name__}: {e}")
         return False
+
+
 # ═══════════════════════════════════════════════════════════════════
 # safe_edit
 # ═══════════════════════════════════════════════════════════════════
@@ -2672,888 +2674,888 @@ class CallbackHandlers:
                 await safe_send(bot, user_id, msg)
             except Exception: pass
 
-@staticmethod
-async def _show_channel_list(update, context, query, user_id, lang=None):
-    if not lang: lang = await DB.get_user_language(user_id) or 'ar'
-    channels = await DB.get_user_channels(user_id)
-    if not channels:
-        kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton(KeyboardFactory.get_text("ch_add", lang),
-                callback_data=CB.CH_ADD)],
-            [InlineKeyboardButton(KeyboardFactory.get_text("back", lang),
-                callback_data=CB.BACK)]])
-        await safe_edit(query, await _trans('no_channels', lang, "📭"),
-            reply_markup=kb, bot=context.bot); return
-    page = _coerce_int(context.user_data.get('channel_page'), 0)
-    per_page = 5
-    total_pages = max(1, (len(channels) + per_page - 1) // per_page)
-    if page >= total_pages: page = total_pages - 1
-    if page < 0: page = 0
-    context.user_data['channel_page'] = page
-    page_channels = channels[page * per_page:(page + 1) * per_page]
-    start_index = page * per_page
-    title = await _trans('your_channels', lang, "📡")
-    text = (f"{title} ({len(channels)})\n<i>{page + 1}/{total_pages}</i>\n\n")
-    kb = []; display_idx = start_index
-    for ch in page_channels:
-        chd = _row_to_dict(ch) or {}
-        ch_id = chd.get('id')
-        if ch_id is None: continue
-        display_idx += 1
-        number = _group_number(display_idx)
-        st = "✅" if not chd.get('banned') else "🚫"
-        raw_name = chd.get('channel_name') or f"Channel {display_idx}"
-        name = _html.escape(str(raw_name)[:35])
-        text += f"{st} {number}  {name}\n"
-        kb.append([
-            InlineKeyboardButton(f"{number} 📌",
-                callback_data=f"{CB.CH_SEL}:{ch_id}"),
-            InlineKeyboardButton(f"{number} 📅",
-                callback_data=f"sched_open:{ch_id}")])
-        kb.append([
-            InlineKeyboardButton(f"{number} 📊",
-                callback_data=f"{CB.CH_STATS}:{ch_id}"),
-            InlineKeyboardButton(f"{number} 🗑️",
-                callback_data=f"ch_del_confirm:{ch_id}")])
-    nav = []
-    if page > 0:
-        nav.append(InlineKeyboardButton(await _trans('prev_btn', lang, "⬅️"),
-            callback_data="ch_page_prev"))
-    if page < total_pages - 1:
-        nav.append(InlineKeyboardButton(await _trans('next_btn', lang,
-            "Next ➡️"), callback_data="ch_page_next"))
-    if nav: kb.append(nav)
-    kb.append([InlineKeyboardButton(
-        KeyboardFactory.get_text("ch_add", lang),
-        callback_data=CB.CH_ADD)])
-    kb.append([InlineKeyboardButton(
-        KeyboardFactory.get_text("back", lang), callback_data=CB.BACK)])
-    await safe_edit(query, text, reply_markup=InlineKeyboardMarkup(kb),
-        parse_mode='HTML', bot=context.bot)
-
-@staticmethod
-async def _show_post_list(update, context, query, user_id, lang=None):
-    if not lang: lang = await DB.get_user_language(user_id) or 'ar'
-    active = await DB.get_active_channel(user_id)
-    if not active:
-        await safe_edit(query,
-            await _trans('no_active_channel', lang, "❌"),
-            bot=context.bot); return
-    per_page = 5
-    cache_key = f"post_count_{active}"
-    try: total = await _post_count_cache.get(cache_key)
-    except Exception: total = None
-    if total is None:
-        total = await DB.fetchval(
-            "SELECT COUNT(*) FROM posts WHERE channel_db_id=?",
-            (active,), default=0)
-        try: await _post_count_cache.set(cache_key, total,
-            ttl=POST_COUNT_CACHE_TTL)
-        except Exception: pass
-    if not isinstance(total, int):
-        try: total = int(total)
-        except (TypeError, ValueError): total = 0
-    if total < 0: total = 0
-    total_pages = max(1, (total + per_page - 1) // per_page)
-    page = _coerce_int(context.user_data.get('post_page'), 0)
-    if page >= total_pages: page = total_pages - 1
-    if page < 0: page = 0
-    context.user_data['post_page'] = page
-    posts = await DB.fetchall(
-        "SELECT id, text, published FROM posts WHERE channel_db_id=? "
-        "ORDER BY created_at ASC LIMIT ? OFFSET ?",
-        (active, per_page, page * per_page))
-    title = await _trans('post_list', lang, "📋")
-    text = f"{title} ({page + 1}/{total_pages})\n\n"
-    kb = []
-    for p in posts:
-        pd = _row_to_dict(p) or {}
-        pid = pd.get('id')
-        if pid is None: continue
-        raw_preview = str(pd.get('text') or '')
-        preview = raw_preview.translate(_CONTROL_CHARS_MAP)[:30]
-        text += f"🆔 {pid}: {preview}\n"
-        kb.append([InlineKeyboardButton(f"🗑️ {pid}",
-            callback_data=f"post_del_confirm:{pid}")])
-    nav = []
-    if page > 0:
-        nav.append(InlineKeyboardButton(await _trans('prev_btn', lang, "⬅️"),
-            callback_data="post_page_prev"))
-    if page < total_pages - 1:
-        nav.append(InlineKeyboardButton(await _trans('next_btn', lang,
-            "Next ➡️"), callback_data="post_page_next"))
-    if nav: kb.append(nav)
-    kb.append([InlineKeyboardButton(await _trans('post_rec', lang, "♻️"),
-        callback_data=CB.POST_REC)])
-    kb.append([InlineKeyboardButton(await _trans('post_clear', lang, "🧹"),
-        callback_data=f"{CB.POST_CLEAR}_confirm")])
-    kb.append([InlineKeyboardButton(
-        KeyboardFactory.get_text("back", lang), callback_data=CB.BACK)])
-    display_text = (text if posts
-                    else await _trans('no_posts', lang, "📭"))
-    await safe_edit(query, display_text,
-        reply_markup=InlineKeyboardMarkup(kb), bot=context.bot)
-
-@staticmethod
-async def _handle_admin(update, context, query, user_id, lang=None):
-    if not CONFIG.is_developer(user_id):
-        await safe_edit(query,
-            await _trans('unauthorized', lang or 'ar', "❌"),
-            bot=context.bot); return
-    if not lang: lang = await DB.get_user_language(user_id) or 'ar'
-    data = query.data
-    try:
-        if data == "admin_metrics_live":
-            await CallbackHandlers._show_metrics_dashboard(
-                query, context, user_id, lang); return
-        if data == "admin_metrics_reset":
-            _metrics_reset()
-            await CallbackHandlers._show_metrics_dashboard(
-                query, context, user_id, lang); return
-        if _match_cb(data, getattr(CB, 'ADMIN_UPDATE_CH_BTN', None),
-                      "admin_update_ch_btn"):
-            await CallbackHandlers._show_admin_update_channel_menu(
-                query, context, user_id, lang); return
-        if data == "admin_recheck_update_ch":
-            _invalidate_updates_channel_health_cache()
-            await safe_edit(query,
-                await _trans('rechecking_channel', lang,
-                              "🔍 جاري إعادة الفحص..."),
-                bot=context.bot)
-            await asyncio.sleep(0.3)
-            await CallbackHandlers._show_admin_update_channel_menu(
-                query, context, user_id, lang)
-            return
-        if _match_cb(data, getattr(CB, 'ADMIN_CHANGE_UPDATE_CH', None),
-                      "admin_change_update_ch"):
-            StateManager.set(user_id, UserState.WAIT_UPDATE_CH)
-            await safe_edit(query,
-                await _trans('send_update_ch_prompt', lang,
-                             "📢 أرسل معرف قناة التحديثات:"),
-                bot=context.bot); return
-        if _match_cb(data, getattr(CB, 'ADMIN_REMOVE_UPDATE_CH', None),
-                      "admin_remove_update_ch"):
-            try: ok = await DB.set_setting('updates_channel', '')
-            except Exception: ok = False
-            _invalidate_updates_channel_health_cache()
-            await safe_edit(query,
-                await _trans('update_channel_removed' if ok else
-                             'save_failed', lang,
-                             "🗑️ تم حذف قناة التحديثات" if ok
-                             else "❌ فشل الحذف"),
-                bot=context.bot); return
-        if data == "admin_grant_free":
-            StateManager.set(user_id, UserState.WAIT_GRANT_FREE)
-            await safe_edit(query,
-                await _trans('grant_usage', lang, "🎁"),
-                bot=context.bot); return
-        if data == "admin_ban_user":
-            StateManager.set(user_id, UserState.WAIT_BAN_USER_ID)
-            await safe_edit(query,
-                await _trans('ban_user_title', lang, "🚫") + "\n\n"
-                + await _trans('ban_user_prompt', lang, "") + "\n"
-                + await _trans('ban_user_example', lang, ""),
-                bot=context.bot); return
-        if data == "admin_unban_user":
-            StateManager.set(user_id, UserState.WAIT_UNBAN_USER_ID)
-            await safe_edit(query,
-                await _trans('unban_user_title', lang, "✅") + "\n\n"
-                + await _trans('unban_user_prompt', lang, "") + "\n"
-                + await _trans('unban_user_example', lang, ""),
-                bot=context.bot); return
-        if data == CB.ADMIN_USERS:
-            try:
-                stats = await DB.get_user_stats() or {}
-                if not isinstance(stats, dict):
-                    stats = _row_to_dict(stats) or {}
-            except Exception: stats = {}
-            text = (await _trans('users_title', lang, "👥") + "\n\n"
-                    + _fmt(await _trans('users_total', lang,
-                        "👥 {count}"), count=stats.get('users', 0))
-                    + "\n" + _fmt(await _trans('users_banned', lang,
-                        "⛔ {count}"), count=stats.get('banned', 0)))
+    @staticmethod
+    async def _show_channel_list(update, context, query, user_id, lang=None):
+        if not lang: lang = await DB.get_user_language(user_id) or 'ar'
+        channels = await DB.get_user_channels(user_id)
+        if not channels:
             kb = InlineKeyboardMarkup([
-                [InlineKeyboardButton(await _trans('banned_users_btn',
-                    lang, "⛔"), callback_data=CB.ADMIN_BANNED)],
-                [InlineKeyboardButton(
-                    KeyboardFactory.get_text("back", lang),
-                    callback_data=CB.ADMIN)]])
-            await safe_edit(query, text, reply_markup=kb,
-                bot=context.bot); return
-        if data == CB.ADMIN_BANNED:
-            banned_users = await DB.fetchall(
-                "SELECT user_id FROM users WHERE banned=1 LIMIT 20")
-            if banned_users:
-                text = (await _trans('banned_users_title', lang, "⛔")
-                        + "\n\n" + "\n".join(
-                            _safe_str((_row_to_dict(u) or {}).get('user_id'))
-                            for u in banned_users))
-            else: text = await _trans('no_banned_users', lang, "📭")
-            kb = InlineKeyboardMarkup([
-                [InlineKeyboardButton(await _trans('unban_all_btn',
-                    lang, "✅"), callback_data=CB.ADMIN_UNBAN_ALL)],
-                [InlineKeyboardButton(
-                    KeyboardFactory.get_text("back", lang),
-                    callback_data=CB.ADMIN)]])
-            await safe_edit(query, text, reply_markup=kb,
-                bot=context.bot); return
-        if data == CB.ADMIN_UNBAN_ALL:
-            await DB.execute("UPDATE users SET banned=0 WHERE banned=1")
+                [InlineKeyboardButton(KeyboardFactory.get_text("ch_add", lang),
+                    callback_data=CB.CH_ADD)],
+                [InlineKeyboardButton(KeyboardFactory.get_text("back", lang),
+                    callback_data=CB.BACK)]])
+            await safe_edit(query, await _trans('no_channels', lang, "📭"),
+                reply_markup=kb, bot=context.bot); return
+        page = _coerce_int(context.user_data.get('channel_page'), 0)
+        per_page = 5
+        total_pages = max(1, (len(channels) + per_page - 1) // per_page)
+        if page >= total_pages: page = total_pages - 1
+        if page < 0: page = 0
+        context.user_data['channel_page'] = page
+        page_channels = channels[page * per_page:(page + 1) * per_page]
+        start_index = page * per_page
+        title = await _trans('your_channels', lang, "📡")
+        text = (f"{title} ({len(channels)})\n<i>{page + 1}/{total_pages}</i>\n\n")
+        kb = []; display_idx = start_index
+        for ch in page_channels:
+            chd = _row_to_dict(ch) or {}
+            ch_id = chd.get('id')
+            if ch_id is None: continue
+            display_idx += 1
+            number = _group_number(display_idx)
+            st = "✅" if not chd.get('banned') else "🚫"
+            raw_name = chd.get('channel_name') or f"Channel {display_idx}"
+            name = _html.escape(str(raw_name)[:35])
+            text += f"{st} {number}  {name}\n"
+            kb.append([
+                InlineKeyboardButton(f"{number} 📌",
+                    callback_data=f"{CB.CH_SEL}:{ch_id}"),
+                InlineKeyboardButton(f"{number} 📅",
+                    callback_data=f"sched_open:{ch_id}")])
+            kb.append([
+                InlineKeyboardButton(f"{number} 📊",
+                    callback_data=f"{CB.CH_STATS}:{ch_id}"),
+                InlineKeyboardButton(f"{number} 🗑️",
+                    callback_data=f"ch_del_confirm:{ch_id}")])
+        nav = []
+        if page > 0:
+            nav.append(InlineKeyboardButton(await _trans('prev_btn', lang, "⬅️"),
+                callback_data="ch_page_prev"))
+        if page < total_pages - 1:
+            nav.append(InlineKeyboardButton(await _trans('next_btn', lang,
+                "Next ➡️"), callback_data="ch_page_next"))
+        if nav: kb.append(nav)
+        kb.append([InlineKeyboardButton(
+            KeyboardFactory.get_text("ch_add", lang),
+            callback_data=CB.CH_ADD)])
+        kb.append([InlineKeyboardButton(
+            KeyboardFactory.get_text("back", lang), callback_data=CB.BACK)])
+        await safe_edit(query, text, reply_markup=InlineKeyboardMarkup(kb),
+            parse_mode='HTML', bot=context.bot)
+
+    @staticmethod
+    async def _show_post_list(update, context, query, user_id, lang=None):
+        if not lang: lang = await DB.get_user_language(user_id) or 'ar'
+        active = await DB.get_active_channel(user_id)
+        if not active:
             await safe_edit(query,
-                await _trans('unban_all_success', lang, "✅"),
+                await _trans('no_active_channel', lang, "❌"),
                 bot=context.bot); return
-        if data == CB.ADMIN_STATS:
-            try:
-                stats = await DB.get_general_stats() or {}
-                if not isinstance(stats, dict):
-                    stats = _row_to_dict(stats) or {}
-            except Exception: stats = {}
-            text = (await _trans('general_stats_title', lang, "📊") + "\n\n"
-                    + _fmt(await _trans('stats_users', lang,
-                        "👥 {count}"), count=stats.get('users', 0)) + "\n"
-                    + _fmt(await _trans('stats_channels', lang,
-                        "📡 {count}"), count=stats.get('channels', 0)) + "\n"
-                    + _fmt(await _trans('stats_groups', lang,
-                        "👥 {count}"), count=stats.get('groups', 0)) + "\n"
-                    + _fmt(await _trans('stats_posts', lang,
-                        "📝 {count}"), count=stats.get('posts', 0)) + "\n"
-                    + _fmt(await _trans('stats_published', lang,
-                        "✅ {count}"), count=stats.get('published', 0)) + "\n"
-                    + _fmt(await _trans('stats_invoices', lang,
-                        "🧾 {count}"), count=stats.get('invoices', 0)) + "\n"
-                    + _fmt(await _trans('stats_tickets', lang,
-                        "🎫 {count}"), count=stats.get('tickets', 0)))
-            kb = InlineKeyboardMarkup([[InlineKeyboardButton(
-                KeyboardFactory.get_text("back", lang),
-                callback_data=CB.ADMIN)]])
-            await safe_edit(query, text, reply_markup=kb,
+        per_page = 5
+        cache_key = f"post_count_{active}"
+        try: total = await _post_count_cache.get(cache_key)
+        except Exception: total = None
+        if total is None:
+            total = await DB.fetchval(
+                "SELECT COUNT(*) FROM posts WHERE channel_db_id=?",
+                (active,), default=0)
+            try: await _post_count_cache.set(cache_key, total,
+                ttl=POST_COUNT_CACHE_TTL)
+            except Exception: pass
+        if not isinstance(total, int):
+            try: total = int(total)
+            except (TypeError, ValueError): total = 0
+        if total < 0: total = 0
+        total_pages = max(1, (total + per_page - 1) // per_page)
+        page = _coerce_int(context.user_data.get('post_page'), 0)
+        if page >= total_pages: page = total_pages - 1
+        if page < 0: page = 0
+        context.user_data['post_page'] = page
+        posts = await DB.fetchall(
+            "SELECT id, text, published FROM posts WHERE channel_db_id=? "
+            "ORDER BY created_at ASC LIMIT ? OFFSET ?",
+            (active, per_page, page * per_page))
+        title = await _trans('post_list', lang, "📋")
+        text = f"{title} ({page + 1}/{total_pages})\n\n"
+        kb = []
+        for p in posts:
+            pd = _row_to_dict(p) or {}
+            pid = pd.get('id')
+            if pid is None: continue
+            raw_preview = str(pd.get('text') or '')
+            preview = raw_preview.translate(_CONTROL_CHARS_MAP)[:30]
+            text += f"🆔 {pid}: {preview}\n"
+            kb.append([InlineKeyboardButton(f"🗑️ {pid}",
+                callback_data=f"post_del_confirm:{pid}")])
+        nav = []
+        if page > 0:
+            nav.append(InlineKeyboardButton(await _trans('prev_btn', lang, "⬅️"),
+                callback_data="post_page_prev"))
+        if page < total_pages - 1:
+            nav.append(InlineKeyboardButton(await _trans('next_btn', lang,
+                "Next ➡️"), callback_data="post_page_next"))
+        if nav: kb.append(nav)
+        kb.append([InlineKeyboardButton(await _trans('post_rec', lang, "♻️"),
+            callback_data=CB.POST_REC)])
+        kb.append([InlineKeyboardButton(await _trans('post_clear', lang, "🧹"),
+            callback_data=f"{CB.POST_CLEAR}_confirm")])
+        kb.append([InlineKeyboardButton(
+            KeyboardFactory.get_text("back", lang), callback_data=CB.BACK)])
+        display_text = (text if posts
+                        else await _trans('no_posts', lang, "📭"))
+        await safe_edit(query, display_text,
+            reply_markup=InlineKeyboardMarkup(kb), bot=context.bot)
+
+    @staticmethod
+    async def _handle_admin(update, context, query, user_id, lang=None):
+        if not CONFIG.is_developer(user_id):
+            await safe_edit(query,
+                await _trans('unauthorized', lang or 'ar', "❌"),
                 bot=context.bot); return
-        if data == CB.ADMIN_CHANNELS:
-            context.user_data['adm_ch_page'] = 0
-            await CallbackHandlers._show_admin_channels(
-                update, context, query, user_id, lang); return
-        if data.startswith("admin_toggle_ch:"):
-            ch_db_id = _coerce_int(data.split(":")[-1])
-            if ch_db_id <= 0:
+        if not lang: lang = await DB.get_user_language(user_id) or 'ar'
+        data = query.data
+        try:
+            if data == "admin_metrics_live":
+                await CallbackHandlers._show_metrics_dashboard(
+                    query, context, user_id, lang); return
+            if data == "admin_metrics_reset":
+                _metrics_reset()
+                await CallbackHandlers._show_metrics_dashboard(
+                    query, context, user_id, lang); return
+            if _match_cb(data, getattr(CB, 'ADMIN_UPDATE_CH_BTN', None),
+                          "admin_update_ch_btn"):
+                await CallbackHandlers._show_admin_update_channel_menu(
+                    query, context, user_id, lang); return
+            if data == "admin_recheck_update_ch":
+                _invalidate_updates_channel_health_cache()
                 await safe_edit(query,
-                    await _trans('invalid_data', lang, "❌"),
-                    bot=context.bot); return
-            await DB.execute(
-                "UPDATE user_channels SET banned = "
-                "  CASE WHEN COALESCE(banned, 0) = 1 THEN 0 ELSE 1 END "
-                "WHERE id=?",
-                (ch_db_id,))
-            await CallbackHandlers._show_admin_channels(
-                update, context, query, user_id, lang); return
-        if data == CB.ADMIN_GROUPS:
-            context.user_data['adm_gr_page'] = 0
-            await CallbackHandlers._show_admin_groups(
-                update, context, query, user_id, lang); return
-        if data.startswith("admin_toggle_gr:"):
-            chat_id = _coerce_int(data.split(":")[-1])
-            if chat_id == 0:
+                    await _trans('rechecking_channel', lang,
+                                  "🔍 جاري إعادة الفحص..."),
+                    bot=context.bot)
+                await asyncio.sleep(0.3)
+                await CallbackHandlers._show_admin_update_channel_menu(
+                    query, context, user_id, lang)
+                return
+            if _match_cb(data, getattr(CB, 'ADMIN_CHANGE_UPDATE_CH', None),
+                          "admin_change_update_ch"):
+                StateManager.set(user_id, UserState.WAIT_UPDATE_CH)
                 await safe_edit(query,
-                    await _trans('invalid_data', lang, "❌"),
+                    await _trans('send_update_ch_prompt', lang,
+                                 "📢 أرسل معرف قناة التحديثات:"),
                     bot=context.bot); return
-            row = await DB.fetchone(
-                "SELECT banned FROM bot_groups WHERE chat_id=?",
-                (chat_id,))
-            row_d = _row_to_dict(row) or {}
-            if row_d:
-                new_val = 0 if row_d.get('banned') else 1
-                db_ok = False
+            if _match_cb(data, getattr(CB, 'ADMIN_REMOVE_UPDATE_CH', None),
+                          "admin_remove_update_ch"):
+                try: ok = await DB.set_setting('updates_channel', '')
+                except Exception: ok = False
+                _invalidate_updates_channel_health_cache()
+                await safe_edit(query,
+                    await _trans('update_channel_removed' if ok else
+                                 'save_failed', lang,
+                                 "🗑️ تم حذف قناة التحديثات" if ok
+                                 else "❌ فشل الحذف"),
+                    bot=context.bot); return
+            if data == "admin_grant_free":
+                StateManager.set(user_id, UserState.WAIT_GRANT_FREE)
+                await safe_edit(query,
+                    await _trans('grant_usage', lang, "🎁"),
+                    bot=context.bot); return
+            if data == "admin_ban_user":
+                StateManager.set(user_id, UserState.WAIT_BAN_USER_ID)
+                await safe_edit(query,
+                    await _trans('ban_user_title', lang, "🚫") + "\n\n"
+                    + await _trans('ban_user_prompt', lang, "") + "\n"
+                    + await _trans('ban_user_example', lang, ""),
+                    bot=context.bot); return
+            if data == "admin_unban_user":
+                StateManager.set(user_id, UserState.WAIT_UNBAN_USER_ID)
+                await safe_edit(query,
+                    await _trans('unban_user_title', lang, "✅") + "\n\n"
+                    + await _trans('unban_user_prompt', lang, "") + "\n"
+                    + await _trans('unban_user_example', lang, ""),
+                    bot=context.bot); return
+            if data == CB.ADMIN_USERS:
                 try:
-                    await DB.execute(
-                        "UPDATE bot_groups SET banned=? WHERE chat_id=?",
-                        (new_val, chat_id))
-                    db_ok = True
-                except Exception as e:
-                    logger.warning(
-                        f"admin_toggle_gr: DB update failed for "
-                        f"{chat_id}: {e}")
-                if new_val == 1 and db_ok:
+                    stats = await DB.get_user_stats() or {}
+                    if not isinstance(stats, dict):
+                        stats = _row_to_dict(stats) or {}
+                except Exception: stats = {}
+                text = (await _trans('users_title', lang, "👥") + "\n\n"
+                        + _fmt(await _trans('users_total', lang,
+                            "👥 {count}"), count=stats.get('users', 0))
+                        + "\n" + _fmt(await _trans('users_banned', lang,
+                            "⛔ {count}"), count=stats.get('banned', 0)))
+                kb = InlineKeyboardMarkup([
+                    [InlineKeyboardButton(await _trans('banned_users_btn',
+                        lang, "⛔"), callback_data=CB.ADMIN_BANNED)],
+                    [InlineKeyboardButton(
+                        KeyboardFactory.get_text("back", lang),
+                        callback_data=CB.ADMIN)]])
+                await safe_edit(query, text, reply_markup=kb,
+                    bot=context.bot); return
+            if data == CB.ADMIN_BANNED:
+                banned_users = await DB.fetchall(
+                    "SELECT user_id FROM users WHERE banned=1 LIMIT 20")
+                if banned_users:
+                    text = (await _trans('banned_users_title', lang, "⛔")
+                            + "\n\n" + "\n".join(
+                                _safe_str((_row_to_dict(u) or {}).get('user_id'))
+                                for u in banned_users))
+                else: text = await _trans('no_banned_users', lang, "📭")
+                kb = InlineKeyboardMarkup([
+                    [InlineKeyboardButton(await _trans('unban_all_btn',
+                        lang, "✅"), callback_data=CB.ADMIN_UNBAN_ALL)],
+                    [InlineKeyboardButton(
+                        KeyboardFactory.get_text("back", lang),
+                        callback_data=CB.ADMIN)]])
+                await safe_edit(query, text, reply_markup=kb,
+                    bot=context.bot); return
+            if data == CB.ADMIN_UNBAN_ALL:
+                await DB.execute("UPDATE users SET banned=0 WHERE banned=1")
+                await safe_edit(query,
+                    await _trans('unban_all_success', lang, "✅"),
+                    bot=context.bot); return
+            if data == CB.ADMIN_STATS:
+                try:
+                    stats = await DB.get_general_stats() or {}
+                    if not isinstance(stats, dict):
+                        stats = _row_to_dict(stats) or {}
+                except Exception: stats = {}
+                text = (await _trans('general_stats_title', lang, "📊") + "\n\n"
+                        + _fmt(await _trans('stats_users', lang,
+                            "👥 {count}"), count=stats.get('users', 0)) + "\n"
+                        + _fmt(await _trans('stats_channels', lang,
+                            "📡 {count}"), count=stats.get('channels', 0)) + "\n"
+                        + _fmt(await _trans('stats_groups', lang,
+                            "👥 {count}"), count=stats.get('groups', 0)) + "\n"
+                        + _fmt(await _trans('stats_posts', lang,
+                            "📝 {count}"), count=stats.get('posts', 0)) + "\n"
+                        + _fmt(await _trans('stats_published', lang,
+                            "✅ {count}"), count=stats.get('published', 0)) + "\n"
+                        + _fmt(await _trans('stats_invoices', lang,
+                            "🧾 {count}"), count=stats.get('invoices', 0)) + "\n"
+                        + _fmt(await _trans('stats_tickets', lang,
+                            "🎫 {count}"), count=stats.get('tickets', 0)))
+                kb = InlineKeyboardMarkup([[InlineKeyboardButton(
+                    KeyboardFactory.get_text("back", lang),
+                    callback_data=CB.ADMIN)]])
+                await safe_edit(query, text, reply_markup=kb,
+                    bot=context.bot); return
+            if data == CB.ADMIN_CHANNELS:
+                context.user_data['adm_ch_page'] = 0
+                await CallbackHandlers._show_admin_channels(
+                    update, context, query, user_id, lang); return
+            if data.startswith("admin_toggle_ch:"):
+                ch_db_id = _coerce_int(data.split(":")[-1])
+                if ch_db_id <= 0:
+                    await safe_edit(query,
+                        await _trans('invalid_data', lang, "❌"),
+                        bot=context.bot); return
+                await DB.execute(
+                    "UPDATE user_channels SET banned = "
+                    "  CASE WHEN COALESCE(banned, 0) = 1 THEN 0 ELSE 1 END "
+                    "WHERE id=?",
+                    (ch_db_id,))
+                await CallbackHandlers._show_admin_channels(
+                    update, context, query, user_id, lang); return
+            if data == CB.ADMIN_GROUPS:
+                context.user_data['adm_gr_page'] = 0
+                await CallbackHandlers._show_admin_groups(
+                    update, context, query, user_id, lang); return
+            if data.startswith("admin_toggle_gr:"):
+                chat_id = _coerce_int(data.split(":")[-1])
+                if chat_id == 0:
+                    await safe_edit(query,
+                        await _trans('invalid_data', lang, "❌"),
+                        bot=context.bot); return
+                row = await DB.fetchone(
+                    "SELECT banned FROM bot_groups WHERE chat_id=?",
+                    (chat_id,))
+                row_d = _row_to_dict(row) or {}
+                if row_d:
+                    new_val = 0 if row_d.get('banned') else 1
+                    db_ok = False
                     try:
-                        await context.bot.leave_chat(chat_id)
+                        await DB.execute(
+                            "UPDATE bot_groups SET banned=? WHERE chat_id=?",
+                            (new_val, chat_id))
+                        db_ok = True
                     except Exception as e:
                         logger.warning(
-                            f"admin_toggle_gr: leave_chat failed "
-                            f"for {chat_id}: {e}")
-            await CallbackHandlers._show_admin_groups(
-                update, context, query, user_id, lang); return
-        if data == CB.ADMIN_ADD_ADMIN:
-            StateManager.set(user_id, UserState.WAIT_ADMIN_ADD)
-            await safe_edit(query,
-                await _trans('add_admin_prompt', lang, "👑"),
-                bot=context.bot); return
-        if data == CB.ADMIN_REM_ADMIN:
-            StateManager.set(user_id, UserState.WAIT_ADMIN_REM)
-            await safe_edit(query,
-                await _trans('remove_admin_prompt', lang, "🗑️"),
-                bot=context.bot); return
-        if data == CB.ADMIN_LIST_ADMINS:
-            admins = await DB.get_admin_list()
-            if admins:
-                text = (await _trans('admins_list_title', lang, "👑")
-                        + "\n\n" + "\n".join(
-                            f"• {_safe_str((_row_to_dict(a) or {}).get('user_id'))}"
-                            for a in admins))
-            else: text = await _trans('no_admins', lang, "📭")
-            kb = InlineKeyboardMarkup([
-                [InlineKeyboardButton(await _trans('add_btn', lang, "➕"),
-                    callback_data=CB.ADMIN_ADD_ADMIN),
-                 InlineKeyboardButton(await _trans('remove_btn', lang, "🗑️"),
-                    callback_data=CB.ADMIN_REM_ADMIN)],
-                [InlineKeyboardButton(
+                            f"admin_toggle_gr: DB update failed for "
+                            f"{chat_id}: {e}")
+                    if new_val == 1 and db_ok:
+                        try:
+                            await context.bot.leave_chat(chat_id)
+                        except Exception as e:
+                            logger.warning(
+                                f"admin_toggle_gr: leave_chat failed "
+                                f"for {chat_id}: {e}")
+                await CallbackHandlers._show_admin_groups(
+                    update, context, query, user_id, lang); return
+            if data == CB.ADMIN_ADD_ADMIN:
+                StateManager.set(user_id, UserState.WAIT_ADMIN_ADD)
+                await safe_edit(query,
+                    await _trans('add_admin_prompt', lang, "👑"),
+                    bot=context.bot); return
+            if data == CB.ADMIN_REM_ADMIN:
+                StateManager.set(user_id, UserState.WAIT_ADMIN_REM)
+                await safe_edit(query,
+                    await _trans('remove_admin_prompt', lang, "🗑️"),
+                    bot=context.bot); return
+            if data == CB.ADMIN_LIST_ADMINS:
+                admins = await DB.get_admin_list()
+                if admins:
+                    text = (await _trans('admins_list_title', lang, "👑")
+                            + "\n\n" + "\n".join(
+                                f"• {_safe_str((_row_to_dict(a) or {}).get('user_id'))}"
+                                for a in admins))
+                else: text = await _trans('no_admins', lang, "📭")
+                kb = InlineKeyboardMarkup([
+                    [InlineKeyboardButton(await _trans('add_btn', lang, "➕"),
+                        callback_data=CB.ADMIN_ADD_ADMIN),
+                     InlineKeyboardButton(await _trans('remove_btn', lang, "🗑️"),
+                        callback_data=CB.ADMIN_REM_ADMIN)],
+                    [InlineKeyboardButton(
+                        KeyboardFactory.get_text("back", lang),
+                        callback_data=CB.ADMIN)]])
+                await safe_edit(query, text, reply_markup=kb,
+                    bot=context.bot); return
+            if data == CB.ADMIN_BROADCAST:
+                StateManager.set(user_id, UserState.WAIT_BROADCAST)
+                await safe_edit(query,
+                    await _trans('broadcast_prompt', lang, "📨"),
+                    bot=context.bot); return
+            if data == CB.ADMIN_INVOICES:
+                invoices = await DB.fetchall(
+                    "SELECT number, amount, status FROM invoices "
+                    "ORDER BY id DESC LIMIT 20")
+                if invoices:
+                    lines = []
+                    for i in invoices:
+                        id_ = _row_to_dict(i) or {}
+                        lines.append(f"• {_safe_str(id_.get('number'))} - "
+                            f"{_safe_str(id_.get('amount'), '0')} ⭐ - "
+                            f"{_safe_str(id_.get('status'))}")
+                    text = (await _trans('invoices_title', lang, "🧾")
+                            + "\n\n" + "\n".join(lines))
+                else: text = await _trans('no_invoices_admin', lang, "📭")
+                kb = InlineKeyboardMarkup([[InlineKeyboardButton(
                     KeyboardFactory.get_text("back", lang),
                     callback_data=CB.ADMIN)]])
-            await safe_edit(query, text, reply_markup=kb,
-                bot=context.bot); return
-        if data == CB.ADMIN_BROADCAST:
-            StateManager.set(user_id, UserState.WAIT_BROADCAST)
-            await safe_edit(query,
-                await _trans('broadcast_prompt', lang, "📨"),
-                bot=context.bot); return
-        if data == CB.ADMIN_INVOICES:
-            invoices = await DB.fetchall(
-                "SELECT number, amount, status FROM invoices "
-                "ORDER BY id DESC LIMIT 20")
-            if invoices:
-                lines = []
-                for i in invoices:
-                    id_ = _row_to_dict(i) or {}
-                    lines.append(f"• {_safe_str(id_.get('number'))} - "
-                        f"{_safe_str(id_.get('amount'), '0')} ⭐ - "
-                        f"{_safe_str(id_.get('status'))}")
-                text = (await _trans('invoices_title', lang, "🧾")
-                        + "\n\n" + "\n".join(lines))
-            else: text = await _trans('no_invoices_admin', lang, "📭")
-            kb = InlineKeyboardMarkup([[InlineKeyboardButton(
-                KeyboardFactory.get_text("back", lang),
-                callback_data=CB.ADMIN)]])
-            await safe_edit(query, text, reply_markup=kb,
-                bot=context.bot); return
-        if data == CB.ADMIN_BACKUP:
-            await safe_edit(query,
-                await _trans('backup_started', lang, "⏳"),
-                bot=context.bot)
-            task = asyncio.create_task(CallbackHandlers._do_backup(
-                context, user_id, lang))
-            ACTIVE_TASKS.add(task)
-            task.add_done_callback(ACTIVE_TASKS.discard); return
-        if data in (CB.ADMIN_RESTORE, CB.ADMIN_RESTORE_SEL):
-            await CallbackHandlers._show_restore_backups(
-                update, context, query, user_id, lang); return
-        if data.startswith("admin_restore_file:"):
-            fname = data.split(":", 1)[1]
-            backup_file = PATHS.BACKUPS / fname
-            try:
-                resolved = backup_file.resolve(strict=False)
-                base = PATHS.BACKUPS.resolve(strict=False)
-            except OSError:
-                await safe_edit(query, "❌", bot=context.bot); return
-            if resolved.parent != base or not backup_file.exists():
-                await safe_edit(query, "❌", bot=context.bot); return
-            try: _db_type = getattr(DB, "DB_TYPE", "sqlite")
-            except Exception: _db_type = "sqlite"
-            if _db_type != "sqlite":
-                _unsup_key = ('restore_postgres_unsupported'
-                              if _db_type == "postgres"
-                              else 'restore_mysql_unsupported')
-                await safe_edit(query,
-                    await _trans(_unsup_key, lang, "⚠️"),
+                await safe_edit(query, text, reply_markup=kb,
                     bot=context.bot); return
-            try:
-                pre_restore = (PATHS.BACKUPS
-                    / f"pre_restore_"
-                      f"{TimeUtils.mecca_now().strftime('%Y%m%d_%H%M%S_%f')}.db")
-                shutil.copy2(PATHS.DB, pre_restore)
-                db_closed = False
+            if data == CB.ADMIN_BACKUP:
+                await safe_edit(query,
+                    await _trans('backup_started', lang, "⏳"),
+                    bot=context.bot)
+                task = asyncio.create_task(CallbackHandlers._do_backup(
+                    context, user_id, lang))
+                ACTIVE_TASKS.add(task)
+                task.add_done_callback(ACTIVE_TASKS.discard); return
+            if data in (CB.ADMIN_RESTORE, CB.ADMIN_RESTORE_SEL):
+                await CallbackHandlers._show_restore_backups(
+                    update, context, query, user_id, lang); return
+            if data.startswith("admin_restore_file:"):
+                fname = data.split(":", 1)[1]
+                backup_file = PATHS.BACKUPS / fname
                 try:
-                    close_fn = getattr(DB, 'close', None)
-                    if callable(close_fn):
-                        await close_fn(); db_closed = True
-                except Exception: pass
-                shutil.copy2(backup_file, PATHS.DB)
-
-                if db_closed:
-                    reconnected = False
+                    resolved = backup_file.resolve(strict=False)
+                    base = PATHS.BACKUPS.resolve(strict=False)
+                except OSError:
+                    await safe_edit(query, "❌", bot=context.bot); return
+                if resolved.parent != base or not backup_file.exists():
+                    await safe_edit(query, "❌", bot=context.bot); return
+                try: _db_type = getattr(DB, "DB_TYPE", "sqlite")
+                except Exception: _db_type = "sqlite"
+                if _db_type != "sqlite":
+                    _unsup_key = ('restore_postgres_unsupported'
+                                  if _db_type == "postgres"
+                                  else 'restore_mysql_unsupported')
+                    await safe_edit(query,
+                        await _trans(_unsup_key, lang, "⚠️"),
+                        bot=context.bot); return
+                try:
+                    pre_restore = (PATHS.BACKUPS
+                        / f"pre_restore_"
+                          f"{TimeUtils.mecca_now().strftime('%Y%m%d_%H%M%S_%f')}.db")
+                    shutil.copy2(PATHS.DB, pre_restore)
+                    db_closed = False
                     try:
-                        reconnect_fn = getattr(DB, 'reconnect', None)
-                        if callable(reconnect_fn):
-                            await reconnect_fn(); reconnected = True
-                        else:
-                            for _name in ('initialize_db', 'initialize',
-                                          'pre_initialize'):
-                                _fn = getattr(DB, _name, None)
-                                if callable(_fn):
-                                    await _fn(); reconnected = True
-                                    break
-                    except Exception as e:
-                        logger.error(
-                            f"❌ DB reconnect بعد الاسترجاع فشل: {e}",
-                            exc_info=True)
-                    if not reconnected:
-                        logger.critical(
-                            "🚨 DB مغلق بعد الاسترجاع — لا توجد دالة "
-                            "إعادة اتصال متاحة! البوت معطوب.")
-                        await safe_edit(query,
-                            "🚨 <b>خطأ حرج</b>\n\n"
-                            "تم نسخ النسخة الاحتياطية لكن تعذّر إعادة "
-                            "الاتصال بقاعدة البيانات.\n"
-                            "أعد تشغيل البوت يدوياً.",
-                            parse_mode='HTML', bot=context.bot)
-                        return
+                        close_fn = getattr(DB, 'close', None)
+                        if callable(close_fn):
+                            await close_fn(); db_closed = True
+                    except Exception: pass
+                    shutil.copy2(backup_file, PATHS.DB)
 
-                await safe_edit(query,
-                    await _trans('restore_success', lang, "✅"),
-                    bot=context.bot)
-            except Exception as e:
-                await safe_edit(query, f"❌ {str(e)[:100]}",
-                    bot=context.bot)
-            return
-        if data == CB.ADMIN_RAM:
-            ram = get_ram_usage() or {}
-            text = (await _trans('ram_title', lang, "🖥️") + "\n\n"
-                    + _fmt(await _trans('ram_total', lang, "💾 {value}"),
-                        value=ram.get('total', 0)) + "\n"
-                    + _fmt(await _trans('ram_used', lang, "📊 {value}"),
-                        value=ram.get('used', 0)) + "\n"
-                    + _fmt(await _trans('ram_percent', lang,
-                        "📈 {value}"), value=ram.get('percent', 0)))
-            await safe_edit(query, text, bot=context.bot); return
-        if data == CB.ADMIN_METRICS:
-            try:
-                stats = await DB.get_general_stats() or {}
-                if not isinstance(stats, dict):
-                    stats = _row_to_dict(stats) or {}
-            except Exception: stats = {}
-            try:
-                db_size_kb = float(stats.get('db_size_kb', 0) or 0)
-                if db_size_kb == 0: db_size_kb = await DB.get_db_size_kb()
-            except Exception: db_size_kb = 0.0
-            if db_size_kb >= 1024 * 1024:
-                size_display = f"{db_size_kb / (1024 * 1024):.2f} GB"
-            elif db_size_kb >= 1024:
-                size_display = f"{db_size_kb / 1024:.2f} MB"
-            else: size_display = f"{db_size_kb:.1f} KB"
-            text = (await _trans('metrics_title', lang, "📊") + "\n\n"
-                    + _fmt(await _trans('stats_users', lang,
-                        "👥 {count}"), count=stats.get('users', 0)) + "\n"
-                    + _fmt(await _trans('stats_channels', lang,
-                        "📡 {count}"), count=stats.get('channels', 0)) + "\n"
-                    + _fmt(await _trans('stats_groups', lang,
-                        "👥 {count}"), count=stats.get('groups', 0)) + "\n"
-                    + _fmt(await _trans('stats_posts', lang,
-                        "📝 {count}"), count=stats.get('posts', 0)) + "\n"
-                    + _fmt(await _trans('stats_published', lang,
-                        "✅ {count}"), count=stats.get('published', 0)) + "\n"
-                    + _fmt(await _trans('stats_invoices', lang,
-                        "🧾 {count}"), count=stats.get('invoices', 0)) + "\n"
-                    + _fmt(await _trans('stats_tickets', lang,
-                        "🎫 {count}"), count=stats.get('tickets', 0)) + "\n"
-                    + _fmt(await _trans('metrics_db_size', lang,
-                        "💾 {size}"), size=size_display))
-            await safe_edit(query, text, bot=context.bot); return
-        if data == CB.ADMIN_UPTIME:
-            uptime = (time.monotonic()
-                      - context.bot_data.get('start_time',
-                                              time.monotonic()))
-            hours, remainder = divmod(uptime, 3600)
-            minutes, seconds = divmod(remainder, 60)
-            text = _fmt(await _trans('uptime_format', lang,
-                "{h}h {m}m {s}s"), h=int(hours), m=int(minutes),
-                s=int(seconds))
-            await safe_edit(query, text, bot=context.bot); return
-        if data == CB.ADMIN_TICKETS:
-            tickets = await DB.get_tickets()
-            if tickets:
-                lines = []
-                for t in tickets[:10]:
-                    td = _row_to_dict(t) or {}
-                    lines.append(f"• #{_safe_str(td.get('ticket_number'))} - "
-                        f"{_safe_str(td.get('user_id'))}: "
-                        f"{_safe_str(td.get('message'), '')[:50]}")
-                text = (await _trans('tickets_title', lang, "🎫")
-                        + "\n\n" + "\n".join(lines))
-            else: text = await _trans('no_tickets', lang, "📭")
-            kb = InlineKeyboardMarkup([
-                [InlineKeyboardButton(await _trans('delete_all_btn',
-                    lang, "🗑️"), callback_data=CB.ADMIN_DEL_TICKETS)],
-                [InlineKeyboardButton(
-                    KeyboardFactory.get_text("back", lang),
-                    callback_data=CB.ADMIN)]])
-            await safe_edit(query, text, reply_markup=kb,
-                bot=context.bot); return
-        if data == CB.ADMIN_DEL_TICKETS:
-            await DB.delete_all_tickets()
-            await safe_edit(query,
-                await _trans('tickets_deleted', lang, "✅"),
-                bot=context.bot); return
-        if data == CB.ADMIN_PAYMENT_LOGS:
-            logs = await DB.fetchall(
-                "SELECT user_id, event_type, created_at FROM payment_logs "
-                "ORDER BY id DESC LIMIT 20")
-            if logs:
-                lines = []
-                for l in logs:
-                    ld = _row_to_dict(l) or {}
-                    lines.append(f"• {_safe_str(ld.get('user_id'))} - "
-                        f"{_safe_str(ld.get('event_type'))} "
-                        f"({_safe_str(ld.get('created_at'))})")
-                text = (await _trans('payment_logs_title', lang, "💳")
-                        + "\n\n" + "\n".join(lines))
-            else: text = await _trans('no_data', lang, "📭")
-            await safe_edit(query, text, bot=context.bot); return
-        if _match_cb(data, getattr(CB, 'ADMIN_SET_UPDATE_CH', None),
-                      "admin_set_update_ch"):
-            StateManager.set(user_id, UserState.WAIT_UPDATE_CH)
-            await safe_edit(query,
-                await _trans('send_update_ch_prompt', lang, "📢"),
-                bot=context.bot); return
-        if _match_cb(data, getattr(CB, 'ADMIN_SEND_UPDATE', None),
-                      "admin_send_update"):
-            try:
-                ch_now = await DB.get_updates_channel()
-            except Exception:
-                ch_now = None
-            if not ch_now:
-                await safe_edit(query,
-                    await _trans('update_channel_not_set', lang,
-                                 "📭 لم يتم تعيين قناة تحديثات"),
-                    bot=context.bot); return
-            StateManager.set(user_id, UserState.WAIT_UPDATE)
-            await safe_edit(query,
-                await _trans('send_update_prompt', lang, "📝"),
-                bot=context.bot); return
-        if _match_cb(data, getattr(CB, 'ADMIN_SHOW_UPDATE', None),
-                      "admin_show_update"):
-            ch = await DB.get_updates_channel()
-            text = (_fmt(await _trans('update_channel_set', lang,
-                "📢 {ch}"), ch=ch) if ch
-                    else await _trans('update_channel_not_set',
-                                       lang, "📭"))
-            await safe_edit(query, text, bot=context.bot); return
-        if data == CB.ADMIN_SET_LOG_CH:
-            StateManager.set(user_id, UserState.WAIT_LOG_CH)
-            await safe_edit(query,
-                await _trans('send_log_ch_prompt', lang, "📋"),
-                bot=context.bot); return
-        if data == CB.ADMIN_LOG_CH:
-            ch = await DB.get_log_channel()
-            text = (_fmt(await _trans('log_channel_set_success', lang,
-                "📋 {ch}"), ch=ch) if ch
-                    else await _trans('log_channel_not_set', lang, "📭"))
-            await safe_edit(query, text, bot=context.bot); return
-        if data == CB.ADMIN_FORCE_SUB:
-            sub = await DB.get_force_subscribe_channel()
-            status = (await _trans('force_sub_enabled', lang, "✅")
-                      if sub else
-                      await _trans('force_sub_disabled', lang, "❌"))
-            text = _fmt(await _trans('force_sub_status', lang,
-                "🔒 {status}"), status=status)
-            if sub:
-                text += "\n" + _fmt(await _trans('force_sub_channel',
-                    lang, "Channel: {ch}"), ch=sub)
-            await safe_edit(query, text, bot=context.bot); return
-        if data == CB.ADMIN_SET_FORCE:
-            StateManager.set(user_id, UserState.WAIT_FORCE)
-            await safe_edit(query,
-                await _trans('send_force_ch_prompt', lang, "🔒"),
-                bot=context.bot); return
-        if data == "admin_disable_force":
-            try: await DB.set_setting('force_subscribe_channel', '')
-            except Exception:
-                try:
-                    await DB.execute(
-                        "UPDATE settings SET value = '' "
-                        "WHERE key = 'force_subscribe_channel'")
-                except Exception: pass
-            try: _invalidate_force_sub_cache()
-            except Exception: pass
-            await safe_edit(query,
-                await _trans('force_disabled_success', lang, "✅"),
-                bot=context.bot); return
-        if data == "admin_upload_backup":
-            StateManager.set(user_id, UserState.WAIT_BACKUP_FILE)
-            await safe_edit(query,
-                await _trans('upload_backup_prompt', lang, "📤"),
-                bot=context.bot); return
-        if data == "admin_show_backups":
-            await CallbackHandlers._show_restore_backups(
-                update, context, query, user_id, lang); return
-        if data == CB.ADMIN_REFRESH_CACHE:
-            _invalidate_sec_auth_cache()
-            try: await invalidate_user_cache(user_id)
-            except Exception: pass
-            try: await settings_cache.invalidate_security()
-            except Exception: pass
-            try: await settings_cache.invalidate_auto_reply()
-            except Exception: pass
-            if _SECURITY_BRIDGE_AVAILABLE:
-                try: bridge_invalidate_sec_cache(None)
-                except Exception: pass
-            try:
-                await _invalidate_message_caches(
-                    chat_id=None, reason="admin_refresh_cache")
-            except Exception as e:
-                logger.debug(
-                    "🧹 PERF-CB: admin refresh invalidation failed: %s", e)
-            await safe_edit(query,
-                await _trans('cache_refreshed_admin', lang, "🔄"),
-                bot=context.bot); return
-        if data == CB.ADMIN_BANNED_CH:
-            banned_channels = await DB.fetchall(
-                "SELECT channel_id, channel_name FROM user_channels "
-                "WHERE banned=1 LIMIT 20")
-            if banned_channels:
-                lines = []
-                for c in banned_channels:
-                    cd = _row_to_dict(c) or {}
-                    lines.append(f"• {_safe_str(cd.get('channel_name'))} "
-                        f"({_safe_str(cd.get('channel_id'))})")
-                text = (await _trans('banned_channels_title', lang, "🚫")
-                        + "\n\n" + "\n".join(lines))
-            else: text = await _trans('no_data', lang, "📭")
-            kb = InlineKeyboardMarkup([
-                [InlineKeyboardButton(await _trans('activate_all_btn',
-                    lang, "✅"), callback_data=CB.ADMIN_ACTIVATE_CH)],
-                [InlineKeyboardButton(
-                    KeyboardFactory.get_text("back", lang),
-                    callback_data=CB.ADMIN)]])
-            await safe_edit(query, text, reply_markup=kb,
-                bot=context.bot); return
-        if data == CB.ADMIN_ACTIVATE_CH:
-            await DB.execute(
-                "UPDATE user_channels SET banned=0 WHERE banned=1")
-            await safe_edit(query,
-                await _trans('channels_activated', lang, "✅"),
-                bot=context.bot); return
-        if data == CB.ADMIN_BANNED_GR:
-            banned_groups = await DB.fetchall(
-                "SELECT chat_id, chat_name FROM bot_groups "
-                "WHERE banned=1 LIMIT 20")
-            if banned_groups:
-                lines = []
-                for g in banned_groups:
-                    gd = _row_to_dict(g) or {}
-                    lines.append(f"• {_safe_str(gd.get('chat_name'))} "
-                        f"({_safe_str(gd.get('chat_id'))})")
-                text = (await _trans('banned_groups_title', lang, "🚫")
-                        + "\n\n" + "\n".join(lines))
-            else: text = await _trans('no_data', lang, "📭")
-            kb = InlineKeyboardMarkup([
-                [InlineKeyboardButton(await _trans(
-                    'unban_all_groups_btn', lang, "🔓"),
-                    callback_data=CB.ADMIN_UNBAN_GR)],
-                [InlineKeyboardButton(
-                    KeyboardFactory.get_text("back", lang),
-                    callback_data=CB.ADMIN)]])
-            await safe_edit(query, text, reply_markup=kb,
-                bot=context.bot); return
-        if data == CB.ADMIN_UNBAN_GR:
-            await DB.execute(
-                "UPDATE bot_groups SET banned=0 WHERE banned=1")
-            await safe_edit(query,
-                await _trans('groups_unbanned', lang, "✅"),
-                bot=context.bot); return
-        if data == CB.ADMIN_REPLIES:
-            replies = await DB.fetchall(
-                "SELECT keyword FROM auto_replies "
-                "WHERE chat_id=-1 LIMIT 30")
-            if replies:
-                lines = []
-                for r in replies:
-                    rd = _row_to_dict(r) or {}
-                    lines.append(f"• {_safe_str(rd.get('keyword'))}")
-                text = (await _trans('public_replies_title', lang, "💬")
-                        + "\n\n" + "\n".join(lines))
-            else: text = await _trans('no_replies', lang, "📭")
-            kb = InlineKeyboardMarkup([
-                [InlineKeyboardButton(await _trans('add_btn', lang, "➕"),
-                    callback_data="admin_add_reply"),
-                 InlineKeyboardButton(await _trans('remove_btn', lang, "🗑️"),
-                    callback_data="admin_del_reply")],
-                [InlineKeyboardButton(await _trans('export_btn', lang, "📤"),
-                    callback_data=CB.ADMIN_EXPORT_REPLIES),
-                 InlineKeyboardButton(await _trans('import_btn', lang, "📥"),
-                    callback_data=CB.ADMIN_IMPORT_REPLIES)],
-                [InlineKeyboardButton(
-                    KeyboardFactory.get_text("back", lang),
-                    callback_data=CB.ADMIN)]])
-            await safe_edit(query, text, reply_markup=kb,
-                bot=context.bot); return
-        if data == "admin_add_reply":
-            StateManager.set(user_id, UserState.WAIT_KEYWORD)
-            context.user_data['auto_chat'] = -1
-            await safe_edit(query,
-                await _trans('send_keyword_prompt', lang, "📝"),
-                bot=context.bot); return
-        if data == "admin_del_reply":
-            StateManager.set(user_id, UserState.WAIT_AUTO_DEL)
-            context.user_data['auto_chat'] = -1
-            await safe_edit(query,
-                await _trans('send_keyword_delete_prompt', lang, "🗑️"),
-                bot=context.bot); return
-        if data == "admin_list_replies":
-            replies = await DB.fetchall(
-                "SELECT keyword FROM auto_replies "
-                "WHERE chat_id=-1 LIMIT 50")
-            if replies:
-                lines = []
-                for r in replies:
-                    rd = _row_to_dict(r) or {}
-                    lines.append(f"• {_safe_str(rd.get('keyword'))}")
-                text = (await _trans('public_replies_list_title', lang, "📋")
-                        + "\n\n" + "\n".join(lines))
-            else: text = await _trans('no_replies', lang, "📭")
-            kb = InlineKeyboardMarkup([[InlineKeyboardButton(
-                KeyboardFactory.get_text("back", lang),
-                callback_data=CB.ADMIN_REPLIES)]])
-            await safe_edit(query, text, reply_markup=kb,
-                bot=context.bot); return
-        if data == CB.ADMIN_EXPORT_REPLIES:
-            try: file_path = await DB.export_auto_replies_to_file()
-            except (AttributeError, Exception): file_path = None
-            if file_path:
-                try:
-                    with open(file_path, 'rb') as f:
-                        await context.bot.send_document(
-                            chat_id=user_id, document=f,
-                            filename=Path(file_path).name)
+                    if db_closed:
+                        reconnected = False
+                        try:
+                            reconnect_fn = getattr(DB, 'reconnect', None)
+                            if callable(reconnect_fn):
+                                await reconnect_fn(); reconnected = True
+                            else:
+                                for _name in ('initialize_db', 'initialize',
+                                              'pre_initialize'):
+                                    _fn = getattr(DB, _name, None)
+                                    if callable(_fn):
+                                        await _fn(); reconnected = True
+                                        break
+                        except Exception as e:
+                            logger.error(
+                                f"❌ DB reconnect بعد الاسترجاع فشل: {e}",
+                                exc_info=True)
+                        if not reconnected:
+                            logger.critical(
+                                "🚨 DB مغلق بعد الاسترجاع — لا توجد دالة "
+                                "إعادة اتصال متاحة! البوت معطوب.")
+                            await safe_edit(query,
+                                "🚨 <b>خطأ حرج</b>\n\n"
+                                "تم نسخ النسخة الاحتياطية لكن تعذّر إعادة "
+                                "الاتصال بقاعدة البيانات.\n"
+                                "أعد تشغيل البوت يدوياً.",
+                                parse_mode='HTML', bot=context.bot)
+                            return
+
+                    await safe_edit(query,
+                        await _trans('restore_success', lang, "✅"),
+                        bot=context.bot)
                 except Exception as e:
-                    await safe_send(context.bot, user_id, f"❌ {e}")
-                finally:
-                    try: os.remove(file_path)
-                    except OSError: pass
-            else:
+                    await safe_edit(query, f"❌ {str(e)[:100]}",
+                        bot=context.bot)
+                return
+            if data == CB.ADMIN_RAM:
+                ram = get_ram_usage() or {}
+                text = (await _trans('ram_title', lang, "🖥️") + "\n\n"
+                        + _fmt(await _trans('ram_total', lang, "💾 {value}"),
+                            value=ram.get('total', 0)) + "\n"
+                        + _fmt(await _trans('ram_used', lang, "📊 {value}"),
+                            value=ram.get('used', 0)) + "\n"
+                        + _fmt(await _trans('ram_percent', lang,
+                            "📈 {value}"), value=ram.get('percent', 0)))
+                await safe_edit(query, text, bot=context.bot); return
+            if data == CB.ADMIN_METRICS:
+                try:
+                    stats = await DB.get_general_stats() or {}
+                    if not isinstance(stats, dict):
+                        stats = _row_to_dict(stats) or {}
+                except Exception: stats = {}
+                try:
+                    db_size_kb = float(stats.get('db_size_kb', 0) or 0)
+                    if db_size_kb == 0: db_size_kb = await DB.get_db_size_kb()
+                except Exception: db_size_kb = 0.0
+                if db_size_kb >= 1024 * 1024:
+                    size_display = f"{db_size_kb / (1024 * 1024):.2f} GB"
+                elif db_size_kb >= 1024:
+                    size_display = f"{db_size_kb / 1024:.2f} MB"
+                else: size_display = f"{db_size_kb:.1f} KB"
+                text = (await _trans('metrics_title', lang, "📊") + "\n\n"
+                        + _fmt(await _trans('stats_users', lang,
+                            "👥 {count}"), count=stats.get('users', 0)) + "\n"
+                        + _fmt(await _trans('stats_channels', lang,
+                            "📡 {count}"), count=stats.get('channels', 0)) + "\n"
+                        + _fmt(await _trans('stats_groups', lang,
+                            "👥 {count}"), count=stats.get('groups', 0)) + "\n"
+                        + _fmt(await _trans('stats_posts', lang,
+                            "📝 {count}"), count=stats.get('posts', 0)) + "\n"
+                        + _fmt(await _trans('stats_published', lang,
+                            "✅ {count}"), count=stats.get('published', 0)) + "\n"
+                        + _fmt(await _trans('stats_invoices', lang,
+                            "🧾 {count}"), count=stats.get('invoices', 0)) + "\n"
+                        + _fmt(await _trans('stats_tickets', lang,
+                            "🎫 {count}"), count=stats.get('tickets', 0)) + "\n"
+                        + _fmt(await _trans('metrics_db_size', lang,
+                            "💾 {size}"), size=size_display))
+                await safe_edit(query, text, bot=context.bot); return
+            if data == CB.ADMIN_UPTIME:
+                uptime = (time.monotonic()
+                          - context.bot_data.get('start_time',
+                                                  time.monotonic()))
+                hours, remainder = divmod(uptime, 3600)
+                minutes, seconds = divmod(remainder, 60)
+                text = _fmt(await _trans('uptime_format', lang,
+                    "{h}h {m}m {s}s"), h=int(hours), m=int(minutes),
+                    s=int(seconds))
+                await safe_edit(query, text, bot=context.bot); return
+            if data == CB.ADMIN_TICKETS:
+                tickets = await DB.get_tickets()
+                if tickets:
+                    lines = []
+                    for t in tickets[:10]:
+                        td = _row_to_dict(t) or {}
+                        lines.append(f"• #{_safe_str(td.get('ticket_number'))} - "
+                            f"{_safe_str(td.get('user_id'))}: "
+                            f"{_safe_str(td.get('message'), '')[:50]}")
+                    text = (await _trans('tickets_title', lang, "🎫")
+                            + "\n\n" + "\n".join(lines))
+                else: text = await _trans('no_tickets', lang, "📭")
+                kb = InlineKeyboardMarkup([
+                    [InlineKeyboardButton(await _trans('delete_all_btn',
+                        lang, "🗑️"), callback_data=CB.ADMIN_DEL_TICKETS)],
+                    [InlineKeyboardButton(
+                        KeyboardFactory.get_text("back", lang),
+                        callback_data=CB.ADMIN)]])
+                await safe_edit(query, text, reply_markup=kb,
+                    bot=context.bot); return
+            if data == CB.ADMIN_DEL_TICKETS:
+                await DB.delete_all_tickets()
                 await safe_edit(query,
-                    await _trans('no_replies', lang, "📭"),
-                    bot=context.bot)
-            return
-        if data == CB.ADMIN_IMPORT_REPLIES:
-            StateManager.set(user_id, UserState.WAIT_IMPORT_FILE)
-            await safe_edit(query,
-                await _trans('send_json_prompt', lang, "📤"),
-                bot=context.bot); return
-        if data == CB.ADMIN_IMPORT_GITHUB:
-            StateManager.set(user_id, UserState.WAIT_GITHUB_URL)
-            await safe_edit(query,
-                await _trans('send_url_prompt', lang, "📥"),
-                bot=context.bot); return
-        if data == CB.ADMIN_BANNED_WORDS:
-            words = await DB.get_banned_words(-1)
-            if words:
-                text = (await _trans('public_banned_words_title_full',
-                    lang, "🚫") + "\n\n"
-                        + "\n".join(f"• {w}" for w in words[:30]))
-            else: text = await _trans('no_data', lang, "📭")
-            kb = InlineKeyboardMarkup([
-                [InlineKeyboardButton(await _trans('add_btn', lang, "➕"),
-                    callback_data="admin_add_banned"),
-                 InlineKeyboardButton(await _trans('remove_btn', lang, "🗑️"),
-                    callback_data="admin_rem_banned")],
-                [InlineKeyboardButton(
+                    await _trans('tickets_deleted', lang, "✅"),
+                    bot=context.bot); return
+            if data == CB.ADMIN_PAYMENT_LOGS:
+                logs = await DB.fetchall(
+                    "SELECT user_id, event_type, created_at FROM payment_logs "
+                    "ORDER BY id DESC LIMIT 20")
+                if logs:
+                    lines = []
+                    for l in logs:
+                        ld = _row_to_dict(l) or {}
+                        lines.append(f"• {_safe_str(ld.get('user_id'))} - "
+                            f"{_safe_str(ld.get('event_type'))} "
+                            f"({_safe_str(ld.get('created_at'))})")
+                    text = (await _trans('payment_logs_title', lang, "💳")
+                            + "\n\n" + "\n".join(lines))
+                else: text = await _trans('no_data', lang, "📭")
+                await safe_edit(query, text, bot=context.bot); return
+            if _match_cb(data, getattr(CB, 'ADMIN_SET_UPDATE_CH', None),
+                          "admin_set_update_ch"):
+                StateManager.set(user_id, UserState.WAIT_UPDATE_CH)
+                await safe_edit(query,
+                    await _trans('send_update_ch_prompt', lang, "📢"),
+                    bot=context.bot); return
+            if _match_cb(data, getattr(CB, 'ADMIN_SEND_UPDATE', None),
+                          "admin_send_update"):
+                try:
+                    ch_now = await DB.get_updates_channel()
+                except Exception:
+                    ch_now = None
+                if not ch_now:
+                    await safe_edit(query,
+                        await _trans('update_channel_not_set', lang,
+                                     "📭 لم يتم تعيين قناة تحديثات"),
+                        bot=context.bot); return
+                StateManager.set(user_id, UserState.WAIT_UPDATE)
+                await safe_edit(query,
+                    await _trans('send_update_prompt', lang, "📝"),
+                    bot=context.bot); return
+            if _match_cb(data, getattr(CB, 'ADMIN_SHOW_UPDATE', None),
+                          "admin_show_update"):
+                ch = await DB.get_updates_channel()
+                text = (_fmt(await _trans('update_channel_set', lang,
+                    "📢 {ch}"), ch=ch) if ch
+                        else await _trans('update_channel_not_set',
+                                           lang, "📭"))
+                await safe_edit(query, text, bot=context.bot); return
+            if data == CB.ADMIN_SET_LOG_CH:
+                StateManager.set(user_id, UserState.WAIT_LOG_CH)
+                await safe_edit(query,
+                    await _trans('send_log_ch_prompt', lang, "📋"),
+                    bot=context.bot); return
+            if data == CB.ADMIN_LOG_CH:
+                ch = await DB.get_log_channel()
+                text = (_fmt(await _trans('log_channel_set_success', lang,
+                    "📋 {ch}"), ch=ch) if ch
+                        else await _trans('log_channel_not_set', lang, "📭"))
+                await safe_edit(query, text, bot=context.bot); return
+            if data == CB.ADMIN_FORCE_SUB:
+                sub = await DB.get_force_subscribe_channel()
+                status = (await _trans('force_sub_enabled', lang, "✅")
+                          if sub else
+                          await _trans('force_sub_disabled', lang, "❌"))
+                text = _fmt(await _trans('force_sub_status', lang,
+                    "🔒 {status}"), status=status)
+                if sub:
+                    text += "\n" + _fmt(await _trans('force_sub_channel',
+                        lang, "Channel: {ch}"), ch=sub)
+                await safe_edit(query, text, bot=context.bot); return
+            if data == CB.ADMIN_SET_FORCE:
+                StateManager.set(user_id, UserState.WAIT_FORCE)
+                await safe_edit(query,
+                    await _trans('send_force_ch_prompt', lang, "🔒"),
+                    bot=context.bot); return
+            if data == "admin_disable_force":
+                try: await DB.set_setting('force_subscribe_channel', '')
+                except Exception:
+                    try:
+                        await DB.execute(
+                            "UPDATE settings SET value = '' "
+                            "WHERE key = 'force_subscribe_channel'")
+                    except Exception: pass
+                try: _invalidate_force_sub_cache()
+                except Exception: pass
+                await safe_edit(query,
+                    await _trans('force_disabled_success', lang, "✅"),
+                    bot=context.bot); return
+            if data == "admin_upload_backup":
+                StateManager.set(user_id, UserState.WAIT_BACKUP_FILE)
+                await safe_edit(query,
+                    await _trans('upload_backup_prompt', lang, "📤"),
+                    bot=context.bot); return
+            if data == "admin_show_backups":
+                await CallbackHandlers._show_restore_backups(
+                    update, context, query, user_id, lang); return
+            if data == CB.ADMIN_REFRESH_CACHE:
+                _invalidate_sec_auth_cache()
+                try: await invalidate_user_cache(user_id)
+                except Exception: pass
+                try: await settings_cache.invalidate_security()
+                except Exception: pass
+                try: await settings_cache.invalidate_auto_reply()
+                except Exception: pass
+                if _SECURITY_BRIDGE_AVAILABLE:
+                    try: bridge_invalidate_sec_cache(None)
+                    except Exception: pass
+                try:
+                    await _invalidate_message_caches(
+                        chat_id=None, reason="admin_refresh_cache")
+                except Exception as e:
+                    logger.debug(
+                        "🧹 PERF-CB: admin refresh invalidation failed: %s", e)
+                await safe_edit(query,
+                    await _trans('cache_refreshed_admin', lang, "🔄"),
+                    bot=context.bot); return
+            if data == CB.ADMIN_BANNED_CH:
+                banned_channels = await DB.fetchall(
+                    "SELECT channel_id, channel_name FROM user_channels "
+                    "WHERE banned=1 LIMIT 20")
+                if banned_channels:
+                    lines = []
+                    for c in banned_channels:
+                        cd = _row_to_dict(c) or {}
+                        lines.append(f"• {_safe_str(cd.get('channel_name'))} "
+                            f"({_safe_str(cd.get('channel_id'))})")
+                    text = (await _trans('banned_channels_title', lang, "🚫")
+                            + "\n\n" + "\n".join(lines))
+                else: text = await _trans('no_data', lang, "📭")
+                kb = InlineKeyboardMarkup([
+                    [InlineKeyboardButton(await _trans('activate_all_btn',
+                        lang, "✅"), callback_data=CB.ADMIN_ACTIVATE_CH)],
+                    [InlineKeyboardButton(
+                        KeyboardFactory.get_text("back", lang),
+                        callback_data=CB.ADMIN)]])
+                await safe_edit(query, text, reply_markup=kb,
+                    bot=context.bot); return
+            if data == CB.ADMIN_ACTIVATE_CH:
+                await DB.execute(
+                    "UPDATE user_channels SET banned=0 WHERE banned=1")
+                await safe_edit(query,
+                    await _trans('channels_activated', lang, "✅"),
+                    bot=context.bot); return
+            if data == CB.ADMIN_BANNED_GR:
+                banned_groups = await DB.fetchall(
+                    "SELECT chat_id, chat_name FROM bot_groups "
+                    "WHERE banned=1 LIMIT 20")
+                if banned_groups:
+                    lines = []
+                    for g in banned_groups:
+                        gd = _row_to_dict(g) or {}
+                        lines.append(f"• {_safe_str(gd.get('chat_name'))} "
+                            f"({_safe_str(gd.get('chat_id'))})")
+                    text = (await _trans('banned_groups_title', lang, "🚫")
+                            + "\n\n" + "\n".join(lines))
+                else: text = await _trans('no_data', lang, "📭")
+                kb = InlineKeyboardMarkup([
+                    [InlineKeyboardButton(await _trans(
+                        'unban_all_groups_btn', lang, "🔓"),
+                        callback_data=CB.ADMIN_UNBAN_GR)],
+                    [InlineKeyboardButton(
+                        KeyboardFactory.get_text("back", lang),
+                        callback_data=CB.ADMIN)]])
+                await safe_edit(query, text, reply_markup=kb,
+                    bot=context.bot); return
+            if data == CB.ADMIN_UNBAN_GR:
+                await DB.execute(
+                    "UPDATE bot_groups SET banned=0 WHERE banned=1")
+                await safe_edit(query,
+                    await _trans('groups_unbanned', lang, "✅"),
+                    bot=context.bot); return
+            if data == CB.ADMIN_REPLIES:
+                replies = await DB.fetchall(
+                    "SELECT keyword FROM auto_replies "
+                    "WHERE chat_id=-1 LIMIT 30")
+                if replies:
+                    lines = []
+                    for r in replies:
+                        rd = _row_to_dict(r) or {}
+                        lines.append(f"• {_safe_str(rd.get('keyword'))}")
+                    text = (await _trans('public_replies_title', lang, "💬")
+                            + "\n\n" + "\n".join(lines))
+                else: text = await _trans('no_replies', lang, "📭")
+                kb = InlineKeyboardMarkup([
+                    [InlineKeyboardButton(await _trans('add_btn', lang, "➕"),
+                        callback_data="admin_add_reply"),
+                     InlineKeyboardButton(await _trans('remove_btn', lang, "🗑️"),
+                        callback_data="admin_del_reply")],
+                    [InlineKeyboardButton(await _trans('export_btn', lang, "📤"),
+                        callback_data=CB.ADMIN_EXPORT_REPLIES),
+                     InlineKeyboardButton(await _trans('import_btn', lang, "📥"),
+                        callback_data=CB.ADMIN_IMPORT_REPLIES)],
+                    [InlineKeyboardButton(
+                        KeyboardFactory.get_text("back", lang),
+                        callback_data=CB.ADMIN)]])
+                await safe_edit(query, text, reply_markup=kb,
+                    bot=context.bot); return
+            if data == "admin_add_reply":
+                StateManager.set(user_id, UserState.WAIT_KEYWORD)
+                context.user_data['auto_chat'] = -1
+                await safe_edit(query,
+                    await _trans('send_keyword_prompt', lang, "📝"),
+                    bot=context.bot); return
+            if data == "admin_del_reply":
+                StateManager.set(user_id, UserState.WAIT_AUTO_DEL)
+                context.user_data['auto_chat'] = -1
+                await safe_edit(query,
+                    await _trans('send_keyword_delete_prompt', lang, "🗑️"),
+                    bot=context.bot); return
+            if data == "admin_list_replies":
+                replies = await DB.fetchall(
+                    "SELECT keyword FROM auto_replies "
+                    "WHERE chat_id=-1 LIMIT 50")
+                if replies:
+                    lines = []
+                    for r in replies:
+                        rd = _row_to_dict(r) or {}
+                        lines.append(f"• {_safe_str(rd.get('keyword'))}")
+                    text = (await _trans('public_replies_list_title', lang, "📋")
+                            + "\n\n" + "\n".join(lines))
+                else: text = await _trans('no_replies', lang, "📭")
+                kb = InlineKeyboardMarkup([[InlineKeyboardButton(
                     KeyboardFactory.get_text("back", lang),
-                    callback_data=CB.ADMIN)]])
-            await safe_edit(query, text, reply_markup=kb,
-                bot=context.bot); return
-        if data == "admin_add_banned":
-            StateManager.set(user_id, UserState.WAIT_GLOBAL_BAN)
-            context.user_data['ban_chat'] = -1
-            await safe_edit(query,
-                await _trans('send_keyword_prompt', lang, "📝"),
-                bot=context.bot); return
-        if data == "admin_rem_banned":
-            StateManager.set(user_id, UserState.WAIT_REM_GLOBAL_BAN)
-            context.user_data['ban_chat'] = -1
-            await safe_edit(query,
-                await _trans('send_keyword_delete_prompt', lang, "🗑️"),
-                bot=context.bot); return
-        if data == "admin_list_banned":
-            words = await DB.get_banned_words(-1)
-            if words:
-                text = (await _trans('public_banned_words_list_full',
-                    lang, "📋") + "\n\n"
-                        + "\n".join(f"• {w}" for w in words))
-            else: text = await _trans('no_data', lang, "📭")
-            kb = InlineKeyboardMarkup([[InlineKeyboardButton(
-                KeyboardFactory.get_text("back", lang),
-                callback_data=CB.ADMIN_BANNED_WORDS)]])
-            await safe_edit(query, text, reply_markup=kb,
-                bot=context.bot); return
-
-        if data in (CB.ADMIN_DECLARE_WINNER, CB.ADMIN_DECLARE_WINNER_SEL):
-            contests = await DB.get_active_contests(5)
-            if not contests:
-                await safe_edit(query,
-                    await _trans('no_active_contests_admin', lang, "📭"),
+                    callback_data=CB.ADMIN_REPLIES)]])
+                await safe_edit(query, text, reply_markup=kb,
                     bot=context.bot); return
-            kb = []
-            for c in contests:
-                cd = _row_to_dict(c) or {}
-                kb.append([InlineKeyboardButton(
-                    f"🏆 {_safe_str(cd.get('title'))[:20]}",
-                    callback_data=f"{CB.DECLARE_WINNER_SEL}:{cd.get('id', 0)}")])
-            kb.append([InlineKeyboardButton(
-                KeyboardFactory.get_text("back", lang),
-                callback_data=CB.ADMIN)])
-            await safe_edit(query,
-                await _trans('choose_contest', lang, "🏆"),
-                reply_markup=InlineKeyboardMarkup(kb),
-                bot=context.bot); return
-
-        if data == CB.ADMIN_CREATE_CONTEST:
-            StateManager.set(user_id, UserState.WAIT_CONTEST_TITLE)
-            await safe_edit(query,
-                await _trans('contest_title_prompt', lang, "🏆"),
-                bot=context.bot); return
-        if data == CB.ADMIN_DEL_CONTEST:
-            contests = await DB.fetchall(
-                "SELECT id, title FROM contests "
-                "WHERE status='active' LIMIT 10")
-            if not contests:
+            if data == CB.ADMIN_EXPORT_REPLIES:
+                try: file_path = await DB.export_auto_replies_to_file()
+                except (AttributeError, Exception): file_path = None
+                if file_path:
+                    try:
+                        with open(file_path, 'rb') as f:
+                            await context.bot.send_document(
+                                chat_id=user_id, document=f,
+                                filename=Path(file_path).name)
+                    except Exception as e:
+                        await safe_send(context.bot, user_id, f"❌ {e}")
+                    finally:
+                        try: os.remove(file_path)
+                        except OSError: pass
+                else:
+                    await safe_edit(query,
+                        await _trans('no_replies', lang, "📭"),
+                        bot=context.bot)
+                return
+            if data == CB.ADMIN_IMPORT_REPLIES:
+                StateManager.set(user_id, UserState.WAIT_IMPORT_FILE)
                 await safe_edit(query,
-                    await _trans('no_contests_admin', lang, "📭"),
+                    await _trans('send_json_prompt', lang, "📤"),
                     bot=context.bot); return
-            kb = []
-            for c in contests:
-                cd = _row_to_dict(c) or {}
+            if data == CB.ADMIN_IMPORT_GITHUB:
+                StateManager.set(user_id, UserState.WAIT_GITHUB_URL)
+                await safe_edit(query,
+                    await _trans('send_url_prompt', lang, "📥"),
+                    bot=context.bot); return
+            if data == CB.ADMIN_BANNED_WORDS:
+                words = await DB.get_banned_words(-1)
+                if words:
+                    text = (await _trans('public_banned_words_title_full',
+                        lang, "🚫") + "\n\n"
+                            + "\n".join(f"• {w}" for w in words[:30]))
+                else: text = await _trans('no_data', lang, "📭")
+                kb = InlineKeyboardMarkup([
+                    [InlineKeyboardButton(await _trans('add_btn', lang, "➕"),
+                        callback_data="admin_add_banned"),
+                     InlineKeyboardButton(await _trans('remove_btn', lang, "🗑️"),
+                        callback_data="admin_rem_banned")],
+                    [InlineKeyboardButton(
+                        KeyboardFactory.get_text("back", lang),
+                        callback_data=CB.ADMIN)]])
+                await safe_edit(query, text, reply_markup=kb,
+                    bot=context.bot); return
+            if data == "admin_add_banned":
+                StateManager.set(user_id, UserState.WAIT_GLOBAL_BAN)
+                context.user_data['ban_chat'] = -1
+                await safe_edit(query,
+                    await _trans('send_keyword_prompt', lang, "📝"),
+                    bot=context.bot); return
+            if data == "admin_rem_banned":
+                StateManager.set(user_id, UserState.WAIT_REM_GLOBAL_BAN)
+                context.user_data['ban_chat'] = -1
+                await safe_edit(query,
+                    await _trans('send_keyword_delete_prompt', lang, "🗑️"),
+                    bot=context.bot); return
+            if data == "admin_list_banned":
+                words = await DB.get_banned_words(-1)
+                if words:
+                    text = (await _trans('public_banned_words_list_full',
+                        lang, "📋") + "\n\n"
+                            + "\n".join(f"• {w}" for w in words))
+                else: text = await _trans('no_data', lang, "📭")
+                kb = InlineKeyboardMarkup([[InlineKeyboardButton(
+                    KeyboardFactory.get_text("back", lang),
+                    callback_data=CB.ADMIN_BANNED_WORDS)]])
+                await safe_edit(query, text, reply_markup=kb,
+                    bot=context.bot); return
+
+            if data in (CB.ADMIN_DECLARE_WINNER, CB.ADMIN_DECLARE_WINNER_SEL):
+                contests = await DB.get_active_contests(5)
+                if not contests:
+                    await safe_edit(query,
+                        await _trans('no_active_contests_admin', lang, "📭"),
+                        bot=context.bot); return
+                kb = []
+                for c in contests:
+                    cd = _row_to_dict(c) or {}
+                    kb.append([InlineKeyboardButton(
+                        f"🏆 {_safe_str(cd.get('title'))[:20]}",
+                        callback_data=f"{CB.DECLARE_WINNER_SEL}:{cd.get('id', 0)}")])
                 kb.append([InlineKeyboardButton(
-                    f"🗑️ {_safe_str(cd.get('title'))[:20]}",
-                    callback_data=f"admin_delete_contest:{cd.get('id', 0)}")])
-            kb.append([InlineKeyboardButton(
-                KeyboardFactory.get_text("back", lang),
-                callback_data=CB.ADMIN)])
-            await safe_edit(query,
-                await _trans('choose_contest_delete', lang, "🗑️"),
-                reply_markup=InlineKeyboardMarkup(kb),
-                bot=context.bot); return
-        if data.startswith("admin_delete_contest:"):
-            contest_id = _coerce_int(data.split(":")[-1])
-            if await DB.delete_contest(contest_id, user_id):
+                    KeyboardFactory.get_text("back", lang),
+                    callback_data=CB.ADMIN)])
                 await safe_edit(query,
-                    await _trans('contest_deleted', lang, "✅"),
-                    bot=context.bot)
-            else:
+                    await _trans('choose_contest', lang, "🏆"),
+                    reply_markup=InlineKeyboardMarkup(kb),
+                    bot=context.bot); return
+
+            if data == CB.ADMIN_CREATE_CONTEST:
+                StateManager.set(user_id, UserState.WAIT_CONTEST_TITLE)
                 await safe_edit(query,
-                    await _trans('contest_deleted_failed', lang, "❌"),
-                    bot=context.bot)
-            return
-        try:
-            logger.debug(
-                f"⚠️ unhandled admin callback | user={user_id} "
-                f"data={data!r}")
-        except Exception: pass
-        await safe_edit(query,
-            await _trans('not_available', lang, "⚠️"),
-            bot=context.bot)
-    except BadRequest as e:
-        if "query is too old" not in str(e).lower():
-            logger.error(f"admin error: {e}", exc_info=True)
-    except Exception as e:
-        logger.error(f"admin error: {e}", exc_info=True)
-        try:
+                    await _trans('contest_title_prompt', lang, "🏆"),
+                    bot=context.bot); return
+            if data == CB.ADMIN_DEL_CONTEST:
+                contests = await DB.fetchall(
+                    "SELECT id, title FROM contests "
+                    "WHERE status='active' LIMIT 10")
+                if not contests:
+                    await safe_edit(query,
+                        await _trans('no_contests_admin', lang, "📭"),
+                        bot=context.bot); return
+                kb = []
+                for c in contests:
+                    cd = _row_to_dict(c) or {}
+                    kb.append([InlineKeyboardButton(
+                        f"🗑️ {_safe_str(cd.get('title'))[:20]}",
+                        callback_data=f"admin_delete_contest:{cd.get('id', 0)}")])
+                kb.append([InlineKeyboardButton(
+                    KeyboardFactory.get_text("back", lang),
+                    callback_data=CB.ADMIN)])
+                await safe_edit(query,
+                    await _trans('choose_contest_delete', lang, "🗑️"),
+                    reply_markup=InlineKeyboardMarkup(kb),
+                    bot=context.bot); return
+            if data.startswith("admin_delete_contest:"):
+                contest_id = _coerce_int(data.split(":")[-1])
+                if await DB.delete_contest(contest_id, user_id):
+                    await safe_edit(query,
+                        await _trans('contest_deleted', lang, "✅"),
+                        bot=context.bot)
+                else:
+                    await safe_edit(query,
+                        await _trans('contest_deleted_failed', lang, "❌"),
+                        bot=context.bot)
+                return
+            try:
+                logger.debug(
+                    f"⚠️ unhandled admin callback | user={user_id} "
+                    f"data={data!r}")
+            except Exception: pass
             await safe_edit(query,
-                await _trans('error_occurred', lang, "❌"),
+                await _trans('not_available', lang, "⚠️"),
                 bot=context.bot)
-        except Exception: pass
+        except BadRequest as e:
+            if "query is too old" not in str(e).lower():
+                logger.error(f"admin error: {e}", exc_info=True)
+        except Exception as e:
+            logger.error(f"admin error: {e}", exc_info=True)
+            try:
+                await safe_edit(query,
+                    await _trans('error_occurred', lang, "❌"),
+                    bot=context.bot)
+            except Exception: pass
