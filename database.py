@@ -1,8 +1,14 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-database.py - قاعدة البيانات المتكاملة (v7.7.65 — ANALYTICS-MIXIN-FIX)
+database.py - قاعدة البيانات المتكاملة (v7.7.66 — TIMEZONE-VACUUM-REMINDERS-FIX)
 ================================================================================
+🆕 v7.7.66 (TIMEZONE-VACUUM-REMINDERS-FIX):
+  🔴 FIX-DB1: _pg_pool_factory — server_settings["timezone"] = "UTC".
+  🔴 FIX-DB2: _do_bootstrap_inner — استدعاء migrate_reminders_columns.
+  🔴 FIX-DB3: vacuum() — تعطيل statement_timeout أثناء VACUUM.
+  🟡 FIX-DB4: _slow_query_log_threshold — توحيد 0.2 مع config.py.
+
 🆕 v7.7.65 (ANALYTICS-MIXIN-FIX):
   🔴 FIX-MIXIN-1: _load_mixin — التقاط كل الاستثناءات (كان ImportError فقط).
   🔴 FIX-MIXIN-2: _verify_analytics_methods() — فحص شامل بعد DB = Database().
@@ -69,6 +75,7 @@ database.py - قاعدة البيانات المتكاملة (v7.7.65 — ANALYT
 # [23] v7.7.64: placeholders موحّدة (?)
 # [24] v7.7.64: IN (...) chunking
 # [25] v7.7.65: _load_mixin BaseException + verify methods
+# [26] v7.7.66: timezone UTC + migrate_reminders + vacuum timeout
 # =====================================================================
 
 import os
@@ -2172,8 +2179,12 @@ class Database(
             self._overflow_user_lock_warned = False
 
             self._backup_lock = asyncio.Lock()
+            # 🟡 FIX-DB4 (v7.7.66): توحيد القيمة الافتراضية مع config.py.
+            # السبب: config.py يستخدم 0.2 (PERF-2)، لكن database.py
+            # كان يستخدم 1.0. بدون .env محمّل، السلوك غير متسق.
+            # القيمة الصحيحة 0.2 (متوافقة مع PERF-2 في config.py).
             self._slow_query_log_threshold = float(
-                os.getenv("SLOW_QUERY_LOG_THRESHOLD", "1.0"))
+                os.getenv("SLOW_QUERY_LOG_THRESHOLD", "0.2"))
             self._max_post_text_length = MAX_POST_TEXT_LENGTH
             self._posts_batch_size = POSTS_BATCH_SIZE
             self._explain_slow_queries = EXPLAIN_SLOW_QUERIES
@@ -2631,6 +2642,20 @@ class Database(
                 server_settings={
                     "application_name": "relax_bot",
                     "synchronous_commit": "off",
+                    # 🔴 FIX-DB1 (v7.7.66): ضبط timezone = UTC.
+                    # السبب: كل التواريخ في DB مخزّنة كـ naive UTC.
+                    # إذا كانت الجلسة غير UTC → NOW() يُعيد الوقت
+                    # المحلي → مقارنات end_time/created_at/next_publish
+                    # خاطئة.
+                    # الأثر قبل الإصلاح:
+                    #   • على VPS بـ TZ=Asia/Riyadh (UTC+3):
+                    #     NOW() = UTC+3 → فرق 3 ساعات في العقوبات
+                    #     والاشتراكات.
+                    #   • على Render/Railway (UTC افتراضياً):
+                    #     لا مشكلة.
+                    # ملاحظة: يُطبَّق على كل اتصال جديد في الـ pool
+                    # تلقائياً — لا حاجة لـ SET يدوي.
+                    "timezone": "UTC",
                     "tcp_keepalives_idle": str(PG_TCP_KEEPIDLE),
                     "tcp_keepalives_interval": str(PG_TCP_KEEPINTVL),
                     "tcp_keepalives_count": str(PG_TCP_KEEPCNT),
@@ -2718,10 +2743,47 @@ class Database(
         conn = await asyncio.wait_for(
             pool.acquire(), timeout=self._connection_timeout)
         try:
-            await asyncio.wait_for(
-                conn.execute(f"VACUUM (ANALYZE) {table}"),
-                timeout=vacuum_timeout)
-            logger.debug(f"🧹 PG VACUUM (ANALYZE) {table}")
+            # 🔴 FIX-DB3 (v7.7.66): تعطيل statement_timeout مؤقتاً.
+            # السبب: statement_timeout (60s بعد FIX-R12) يُطبَّق
+            # على VACUUM في PostgreSQL. على جدول كبير (>500K صف)
+            # VACUUM (ANALYZE) قد يستغرق 2-10 دقائق → يُقتل بعد
+            # 60s → dead tuples لا تُنظَّف.
+            #
+            # ⚠️ مهم: VACUUM لا يعمل داخل transaction block في PG،
+            # لذلك لا يمكن استخدام SET LOCAL. نستخدم SET
+            # (session-level) ونستعيد القيمة الأصلية يدوياً في
+            # finally — لأن asyncpg pool.release() **لا** يُعيد
+            # session settings تلقائياً.
+            _original_timeout: Optional[str] = None
+            try:
+                _original_timeout = await conn.fetchval(
+                    "SHOW statement_timeout")
+            except Exception as _sv_e:
+                logger.debug(
+                    "SHOW statement_timeout: %s", _sv_e)
+            _timeout_overridden = False
+            try:
+                await conn.execute(
+                    "SET statement_timeout = 0")
+                _timeout_overridden = True
+            except Exception as _st_e:
+                logger.debug(
+                    "SET statement_timeout=0: %s", _st_e)
+            try:
+                await asyncio.wait_for(
+                    conn.execute(f"VACUUM (ANALYZE) {table}"),
+                    timeout=vacuum_timeout)
+                logger.debug(f"🧹 PG VACUUM (ANALYZE) {table}")
+            finally:
+                if _timeout_overridden and _original_timeout is not None:
+                    try:
+                        await conn.execute(
+                            f"SET statement_timeout = "
+                            f"'{_original_timeout}'")
+                    except Exception as _rst_e:
+                        logger.debug(
+                            "restore statement_timeout: %s",
+                            _rst_e)
         finally:
             try:
                 await pool.release(conn)
@@ -5681,6 +5743,29 @@ class Database(
             if not ok:
                 logger.error("❌ فشل حفظ bootstrap_hash")
             logger.info(f"✅ ترحيل في {elapsed:.2f}s")
+
+        # 🔴 FIX-DB2 (v7.7.66): استدعاء migrate_reminders_columns.
+        # السبب: هذه الدالة تُضيف أعمدة user_reminder_settings الجديدة
+        # (last_daily_sent, last_weekly_sent, last_subscription_sent).
+        # بدون استدعائها، على DB قديمة (v1.1-)،
+        # get_users_for_daily_reminder يفشل بـ "no such column" →
+        # التذكيرات اليومية/الأسبوعية معطّلة.
+        #
+        # ملاحظة: bot.py يستدعيها أيضاً، لكن وجودها هنا يضمن أن
+        # أي استدعاء لـ pre_initialize يُنفّذ الترحيل تلقائياً.
+        # idempotent → لا ضرر من الاستدعاء المزدوج.
+        try:
+            if hasattr(self, "migrate_reminders_columns"):
+                await self.migrate_reminders_columns()
+                logger.info("✅ migrate_reminders_columns: تم")
+            else:
+                logger.debug(
+                    "ℹ️ migrate_reminders_columns غير متاحة "
+                    "(RemindersMixin لم يُحمَّل)")
+        except Exception as _mrc_e:
+            logger.warning(
+                "⚠️ migrate_reminders_columns: %s", _mrc_e)
+
         try:
             secondary_indexes = self._get_secondary_indexes()
             if secondary_indexes:
@@ -7756,21 +7841,23 @@ __all__ = [
 
 
 # =====================================================================
-# LOAD BEACON — v7.7.65
+# LOAD BEACON — v7.7.66
 # =====================================================================
 
 try:
     _analytics_status = (
         "✅" if hasattr(Database, "get_user_growth") else "❌")
     logger.info(
-        "🛡️ database.py v7.7.65 ANALYTICS-MIXIN-FIX loaded | "
+        "🛡️ database.py v7.7.66 TIMEZONE-VACUUM-REMINDERS-FIX loaded | "
         "DB=%s | Analytics=%s (available=%s) | "
         "Migrations=%s | Refactor=%s | Caches=%s | "
         "Idle-TX-Audit=%s (interval=%.0fs, threshold=%d) | "
         "PG-rollback-on-return=%.1fs | "
-        "Fixes: MIXIN-1 (_load_mixin BaseException), "
-        "MIXIN-2 (_verify_analytics_methods), "
-        "MIXIN-3 (get_user_growth pre-check), "
+        "Fixes: DB1 (timezone=UTC), "
+        "DB2 (migrate_reminders in bootstrap), "
+        "DB3 (vacuum statement_timeout=0), "
+        "DB4 (slow_query_log_threshold=0.2), "
+        "MIXIN-1/2/3 (v7.7.65), "
         "E1..E8 (v7.7.64) | IN chunking max=%d",
         DB_TYPE.upper(),
         _analytics_status,
