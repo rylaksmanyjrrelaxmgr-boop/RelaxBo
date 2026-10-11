@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-handlers_callback.py - معالج الأزرار (v9.7.20-FIX-H1-C5b-C7)
+handlers_callback.py - معالج الأزرار (v9.7.20-FIX-H1-C5b-C7.b)
 =====================================================================
-🆕 v9.7.20-FIX-H1-C5b-C7:
+🆕 v9.7.20-FIX-H1-C5b-C7.b:
     🔴 FIX-H1: _publish_single — إضافة _send_followup_text() لجميع فروع
               الوسائط. السبب: photo/video/document/audio/animation كان
               يُفقِد النص بعد 1024 حرفاً (caption limit). voice/sticker/
@@ -16,6 +16,10 @@ handlers_callback.py - معالج الأزرار (v9.7.20-FIX-H1-C5b-C7)
                    • slow  → slow_mode (ليس slow_mode_enabled)
     🟢 FIX-C7: توثيق معمارية فرع analytics_* في CallbackHandlers.handle
               (يبقى fallback إذا فشل تسجيل handlers_analytics).
+    🟢 FIX-C7.b (v9.7.20-FALLBACK-IMPL): تنفيذ فعلي للـ fallback:
+        إضافة _show_analytics_menu + _handle_analytics كـ static methods
+        تُفوِّض إلى handlers_analytics عبر استيراد كسول متعدد الأسماء
+        والتواقيع مع حماية كاملة من AttributeError.
 
 🆕 v9.7.19-ROUTING-FIX-INTEGRATED:
     🟢 ROUTE-FIX-1: _handle_parameterized لم يعد يبتلع الاستثناءات صامتاً.
@@ -1539,6 +1543,7 @@ class CallbackHandlers:
             # (show_analytics_menu + handle_analytics_callback) قبل
             # CallbackHandlers.handle. مع ذلك، هذا الفرع يبقى كـ
             # fallback إذا فشل تسجيل handlers_analytics في bot.py.
+            # 🟢 FIX-C7.b: تم تنفيذ الدالتين فعلياً أدناه.
             if data in ("admin_analytics", "refresh_btn"):
                 if not CONFIG.is_developer(user_id):
                     await safe_edit(query,
@@ -2673,6 +2678,138 @@ class CallbackHandlers:
                            error=str(e)[:100])
                 await safe_send(bot, user_id, msg)
             except Exception: pass
+
+    # ═══════════════════════════════════════════════════════════════════
+    # 🟢 FIX-C7.b (v9.7.20-FALLBACK-IMPL): تنفيذ فعلي للـ fallback
+    #    كان الكود يستدعي _show_analytics_menu / _handle_analytics
+    #    دون تعريفهما → AttributeError عند تعذّر تسجيل handlers_analytics
+    #    في bot.py. الآن يُفوَّضان إلى handlers_analytics مع حماية كاملة.
+    # ═══════════════════════════════════════════════════════════════════
+    @staticmethod
+    def _get_handlers_analytics_module():
+        """استيراد كسول لـ handlers_analytics مع دعم النسبي والمطلق."""
+        try:
+            return importlib.import_module("handlers_analytics")
+        except ImportError:
+            try:
+                return importlib.import_module(
+                    ".handlers_analytics", package=__package__)
+            except (ImportError, TypeError, ValueError):
+                return None
+
+    @staticmethod
+    async def _show_analytics_menu(query, context, user_id, lang):
+        """
+        Fallback: تفويض إلى handlers_analytics.show_analytics_menu.
+        يُستدعى فقط عند فشل تسجيل handlers_analytics في bot.py.
+        """
+        _ha = CallbackHandlers._get_handlers_analytics_module()
+        if _ha is None:
+            logger.error(
+                "❌ FIX-C7.b: handlers_analytics غير متاح — "
+                "تعذّر عرض قائمة التحليلات")
+            try:
+                await safe_edit(query,
+                    await _trans('not_available', lang, "⚠️"),
+                    bot=context.bot)
+            except Exception:
+                pass
+            return
+        # البحث عن أسماء محتملة للدالة
+        fn = None
+        for _name in ('show_analytics_menu', 'show_menu',
+                      'render_analytics_menu', 'analytics_menu'):
+            _cand = getattr(_ha, _name, None)
+            if callable(_cand):
+                fn = _cand
+                break
+        if fn is None:
+            logger.error(
+                "❌ FIX-C7.b: handlers_analytics لا يوفّر "
+                "show_analytics_menu")
+            try:
+                await safe_edit(query,
+                    await _trans('not_available', lang, "⚠️"),
+                    bot=context.bot)
+            except Exception:
+                pass
+            return
+        try:
+            # محاولة تمرير الوسائط كاملة ثم التراجع تدريجياً
+            try:
+                await fn(update=None, context=context, query=query,
+                         user_id=user_id, lang=lang)
+            except TypeError:
+                try:
+                    await fn(query, context, user_id, lang)
+                except TypeError:
+                    await fn(query, context, user_id)
+        except Exception as e:
+            logger.error(f"❌ _show_analytics_menu fallback: {e}",
+                         exc_info=True)
+            try:
+                await safe_edit(query,
+                    await _trans('error_occurred', lang, "❌"),
+                    bot=context.bot)
+            except Exception:
+                pass
+
+    @staticmethod
+    async def _handle_analytics(update, context, query, user_id, lang, data):
+        """
+        Fallback: تفويض إلى handlers_analytics.handle_analytics_callback.
+        يُستدعى فقط عند فشل تسجيل handlers_analytics في bot.py.
+        """
+        _ha = CallbackHandlers._get_handlers_analytics_module()
+        if _ha is None:
+            logger.error(
+                "❌ FIX-C7.b: handlers_analytics غير متاح — "
+                "تعذّر معالجة زر analytics")
+            try:
+                await safe_edit(query,
+                    await _trans('not_available', lang, "⚠️"),
+                    bot=context.bot)
+            except Exception:
+                pass
+            return
+        fn = None
+        for _name in ('handle_analytics_callback', 'handle_analytics',
+                      'analytics_callback', 'handle_callback'):
+            _cand = getattr(_ha, _name, None)
+            if callable(_cand):
+                fn = _cand
+                break
+        if fn is None:
+            logger.error(
+                "❌ FIX-C7.b: handlers_analytics لا يوفّر "
+                "handle_analytics_callback")
+            try:
+                await safe_edit(query,
+                    await _trans('not_available', lang, "⚠️"),
+                    bot=context.bot)
+            except Exception:
+                pass
+            return
+        try:
+            # المحاولة الأولى: كامل الوسائط (الأكثر شيوعاً)
+            try:
+                await fn(update, context, query, user_id, lang, data)
+            except TypeError:
+                # المحاولة الثانية: بدون lang
+                try:
+                    await fn(update, context, query, user_id, data)
+                except TypeError:
+                    # المحاولة الثالثة: بسيطة
+                    await fn(update, context)
+        except Exception as e:
+            logger.error(f"❌ _handle_analytics fallback: {e}",
+                         exc_info=True)
+            try:
+                await safe_edit(query,
+                    await _trans('error_occurred', lang, "❌"),
+                    bot=context.bot)
+            except Exception:
+                pass
 
     @staticmethod
     async def _show_channel_list(update, context, query, user_id, lang=None):
