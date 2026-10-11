@@ -1,8 +1,19 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-db_maintenance_commands.py - أوامر صيانة قاعدة البيانات (v1.1.0)
+db_maintenance_commands.py - أوامر صيانة قاعدة البيانات (v1.1.1)
 ================================================================================
+🆕 v1.1.1 — FIX-AM1 (توثيقي):
+    🟢 FIX-AM1: توثيق إلزامي في register_maintenance_commands يُذكّر
+                بضرورة استدعاء stop_auto_vacuum_task +
+                stop_weekly_diagnostic_task عند إغلاق التطبيق.
+                السبب: بدون هذا، المهمة تستمر بعد بدء الإغلاق →
+                deadlock محتمل على pool connection + "Task was
+                destroyed but it is pending" في السجل.
+                ✅ الإصلاح الفعلي مطبَّق في bot.py (FIX-AM1).
+                الحماية هنا: إذا حذف مطوّر لاحقًا الاستدعاء من bot.py
+                سهوًا، السجل يُنبّهه.
+
 🆕 v1.1.0 — التنظيف التلقائي الكامل:
     🟢 AUTO-1: مهمة خلفية auto_vacuum_dirty_mvs تعمل تلقائياً.
     🟢 AUTO-2: تُصلح dead tuples على MVs (mv_active_user_limits...).
@@ -22,6 +33,12 @@ db_maintenance_commands.py - أوامر صيانة قاعدة البيانات (
 
 ⚠️ الصلاحيات:
     كل الأوامر تتطلب PRIMARY_OWNER_ID أو is_developer.
+
+⚠️ FIX-AM1 (v1.1.1) — نقاط إيقاف إلزامية:
+    عند إغلاق التطبيق، يجب على bot.py استدعاء:
+      1) stop_weekly_diagnostic_task(timeout=3.0)
+      2) stop_auto_vacuum_task(timeout=3.0)
+    بدون ذلك → Task was destroyed but it is pending + deadlock محتمل.
 ================================================================================
 """
 
@@ -974,10 +991,27 @@ def register_maintenance_commands(application) -> bool:
     except Exception as e:
         logger.error(f"auto_vacuum startup: {e}", exc_info=True)
 
+    # ═══════════════════════════════════════════════════════════════════
+    # ⚠️ FIX-AM1 (v1.1.1): توثيق إلزامي — يجب على bot.py استدعاء
+    # stop_auto_vacuum_task() و stop_weekly_diagnostic_task() عند
+    # الإغلاق لضمان إغلاق نظيف.
+    #
+    # بدون هذا:
+    #   • المهمة تستمر بعد بدء إغلاق التطبيق.
+    #   • قد تُنفّذ VACUUM على جداول بينما DB.close() يعمل → deadlock
+    #     محتمل على pool connection.
+    #   • Task was destroyed but it is pending في السجل.
+    #
+    # ✅ تم تطبيق هذا في bot.py (FIX-AM1) — راجع bot.py عند إضافة
+    # مهام دورية جديدة، أضف أيضاً دالة إيقافها في finally.
+    # ═══════════════════════════════════════════════════════════════════
+
     if ok_all:
         logger.info(
             "✅ Maintenance commands registered: "
-            "/db_diag_quick, /db_maintenance, /db_weekly"
+            "/db_diag_quick, /db_maintenance, /db_weekly | "
+            "⚠️ تأكد من bot.py: stop_auto_vacuum_task + "
+            "stop_weekly_diagnostic_task عند الإغلاق"
         )
     else:
         logger.warning(
@@ -1033,9 +1067,10 @@ __all__ = [
 
 try:
     logger.info(
-        "🛡️ db_maintenance_commands.py v1.1.0 loaded | "
+        "🛡️ db_maintenance_commands.py v1.1.1 loaded | "
         "commands: /db_diag_quick, /db_maintenance, /db_weekly | "
         "auto-vacuum: ✅ every %d min | "
+        "FIX-AM1 shutdown docs ✅ | "
         "db_diagnostics=%s",
         _AUTO_VACUUM_INTERVAL_SEC // 60,
         _DB_DIAGNOSTICS_VERSION,
