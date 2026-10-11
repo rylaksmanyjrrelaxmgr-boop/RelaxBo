@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 """
-handlers/chat_member.py - معالج تحديثات المشرفين من Telegram (v1.3)
+handlers/chat_member.py - معالج تحديثات المشرفين من Telegram (v1.3.1)
 ================================================================================
 يحل مشكلة تأخر /start عبر:
 
@@ -10,6 +10,17 @@ handlers/chat_member.py - معالج تحديثات المشرفين من Telegr
 2. ✅ تحديث قاعدة البيانات عند كل تغيير في صلاحيات المشرفين
 3. ✅ تحديث الكاش في utils.py لمنع استدعاءات getChatAdministrators
 4. ✅ التعامل مع جميع أنواع التغييرات
+
+📌 الاعتماديات الخارجية (v1.3.1):
+    • database_groups.py v7.4.16+ (FIX-C4) — يوفّر:
+        - DB.add_group_admin(chat_id, user_id)
+        - DB.remove_group_admin(chat_id, user_id)
+      بدونها: كل تغيير مشرف → استدعاء Telegram API كامل (fallback).
+      راجع database_groups.py (FIX-C4) قبل أي تعديل.
+
+🆕 v1.3.1 (DOC-ONLY):
+    🟢 DOC-1: توثيق صريح لتبعية _update_admin_single على FIX-C4.
+    🟢 DOC-2: قسم الاعتماديات الخارجية في الترويسة.
 
 🆕 v1.3 (DIRECTION LABEL FIX):
     ✅ FIX-1: تمييز صحيح لـ creator↔administrator
@@ -375,6 +386,19 @@ async def _update_admin_single(
     """
     ✅ v1.1: تحديث حالة مشرف واحد في DB بدون استدعاء Telegram API.
 
+    📌 التبعية (v1.3.1):
+        يعتمد هذا التحديث على وجود:
+            • DB.add_group_admin(chat_id, user_id)
+            • DB.remove_group_admin(chat_id, user_id)
+        المُضافتان في database_groups.py v7.4.16 (FIX-C4).
+
+        يستخدم `hasattr()` كحماية — إن لم تكن الدوال متاحة،
+        يعود False فيُفعَّل fallback `_sync_admins_to_db_full`
+        (يستدعي Telegram API — بطيء لكن يعمل).
+
+        ⚠️ إذا حذفت هاتين الدالتين من database_groups.py،
+        سيتحوّل كل تغيير مشرف إلى استدعاء API كامل.
+
     Returns:
         True إذا تم التحديث
     """
@@ -384,6 +408,7 @@ async def _update_admin_single(
     try:
         if is_admin:
             # محاولة الإضافة عبر الدالة المخصصة
+            # (FIX-C4 في database_groups.py v7.4.16)
             if hasattr(DB, "add_group_admin"):
                 await DB.add_group_admin(chat_id, user_id)
                 logger.debug(f"✅ DB.add_group_admin({chat_id}, {user_id})")
@@ -392,7 +417,6 @@ async def _update_admin_single(
                 logger.debug("ℹ️ DB.add_group_admin غير متاحة")
                 return False
         else:
-            # محاولة الإزالة
             if hasattr(DB, "remove_group_admin"):
                 await DB.remove_group_admin(chat_id, user_id)
                 logger.debug(f"✅ DB.remove_group_admin({chat_id}, {user_id})")
@@ -877,5 +901,5 @@ def register(app) -> None:
     )
 
     logger.info(
-        "✅ تم تسجيل ChatMemberHandler (معالج المشرفين والأعضاء) — v1.3"
+        "✅ تم تسجيل ChatMemberHandler (معالج المشرفين والأعضاء) — v1.3.1"
     )
