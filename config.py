@@ -2,15 +2,26 @@
 # -*- coding: utf-8 -*-
 
 """
-config.py - إعدادات البوت الأساسية (v7.0.5 — PERF-FIXES)
+config.py - إعدادات البوت الأساسية (v7.0.6 — FIX-R12)
 ================================================================================
+🆕 v7.0.6 (FIX-R12):
+    🔴 FIX-R12: PG_STATEMENT_TIMEOUT_MS — من 3000 إلى 60000.
+               السبب: VACUUM على جداول كبيرة يستغرق 20-60s. مع 3000
+               كان يُقتل دائماً → dead tuples تتراكم → DB ينتفخ.
+               مع 60000: 60s سقف معقول يكشف الاستعلامات المتعثرة
+               الحقيقية ويمنح VACUUM فرصة كافية.
+    🟡 FIX-R12-VALIDATE: تحقق نطاق في validate() للقيمة الجديدة.
+    ⚠️ ملاحظة: IDLE_TX_AUDIT_APP_FILTER لم يُغيّر — قيمة "relax_bot"
+       صحيحة ومتطابقة مع database.py::_pg_pool_factory (المُستخدم
+       فعليًا بسبب MRO). التغيير سيكسر الفلتر.
+
 🆕 v7.0.5 (PERF-FIXES):
     🟢 PERF-1: MAX_CHANNELS_PER_CYCLE — من 20 إلى 5
                (يمنع إشباع DB Pool → /start سريع دائماً).
     🟢 PERF-2: SLOW_QUERY_LOG_THRESHOLD — من 1.0 إلى 0.2
                (يكشف الاستعلامات > 200ms).
     🟢 PERF-3: PG_STATEMENT_TIMEOUT_MS — من 8000 إلى 3000
-               (كشف أسرع للاستعلامات المتعثرة).
+               (⚠️ تم التراجع عنه في v7.0.6 عبر FIX-R12).
     🟢 PERF-4: تحذير في validate() عند MAX_CHANNELS_PER_CYCLE > 10.
     🟢 PERF-5: تحذير في validate() عند DB_POOL_SIZE > 20.
     🟢 PERF-6: سجل إقلاع إضافي (PERF Tuning).
@@ -667,9 +678,13 @@ class AppConfig:
     PG_TCP_KEEPINTVL: int = safe_int(os.getenv("PG_TCP_KEEPINTVL", "5"))
     PG_TCP_KEEPCNT: int = safe_int(os.getenv("PG_TCP_KEEPCNT", "3"))
 
-    # 🆕 PERF-3: من 8000 إلى 3000 — كشف أسرع للاستعلامات المتعثرة
+    # 🔴 FIX-R12 (v7.0.6): رفع القيمة الافتراضية من 3000 إلى 60000 (60s)
+    # السبب: VACUUM على جداول كبيرة يستغرق 20-60s. مع 3000، كان
+    # يُقتل دائماً → dead tuples تتراكم → DB ينتفخ. مع 60000:
+    # 60s سقف معقول يكشف الاستعلامات المتعثرة الحقيقية ويمنح
+    # VACUUM فرصة كافية.
     PG_STATEMENT_TIMEOUT_MS: int = safe_int(
-        os.getenv("PG_STATEMENT_TIMEOUT_MS", "3000")
+        os.getenv("PG_STATEMENT_TIMEOUT_MS", "60000")
     )
     PG_IDLE_TX_TIMEOUT_MS: int = safe_int(
         os.getenv("PG_IDLE_TX_TIMEOUT_MS", "30000")
@@ -1114,6 +1129,20 @@ class AppConfig:
                 f"PG_ROLLBACK_ON_RETURN_TIMEOUT "
                 f"({self.PG_ROLLBACK_ON_RETURN_TIMEOUT}s) مرتفع جداً — "
                 f"سيؤخر إعادة الاتصال للـ pool."
+            )
+
+        # 🔴 FIX-R12 (v7.0.6): تحقق من أن PG_STATEMENT_TIMEOUT_MS معقول
+        if self.PG_STATEMENT_TIMEOUT_MS < 5000:
+            warnings.append(
+                f"⚠️ PG_STATEMENT_TIMEOUT_MS="
+                f"{self.PG_STATEMENT_TIMEOUT_MS}ms — أقل من 5s. "
+                f"قد يُقتل VACUUM على جداول كبيرة → dead tuples تتراكم."
+            )
+        elif self.PG_STATEMENT_TIMEOUT_MS > 300000:
+            warnings.append(
+                f"⚠️ PG_STATEMENT_TIMEOUT_MS="
+                f"{self.PG_STATEMENT_TIMEOUT_MS}ms — أكبر من 5 دقائق. "
+                f"قد لا يكشف الاستعلامات المتعثرة بسرعة."
             )
 
         # 🆕 v7.0.4: idle-tx audit validation
