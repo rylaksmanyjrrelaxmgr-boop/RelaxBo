@@ -1,55 +1,39 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-utils.py - الأدوات المساعدة للبوت (v7.10.12 — CRITICAL-FIXES)
+utils.py - الأدوات المساعدة للبوت (v7.10.17 — FIX-BUG1)
 =================================================================================
-🆕 v7.10.12 (CRITICAL-FIXES-2026):
-    🔴 FIX-1: نقل _warmup_bg_tasks إلى أعلى الملف (قبل safe_send).
-              كان معرّفاً في السطر ~3710 → NameError عند ChatMigrated
-              داخل safe_send (السطر ~750). الآن يعمل بشكل صحيح.
-    🔴 FIX-2: invalidate_auth_cache — استخدام list() قبل iteration
-              لمنع RuntimeError عند تغيير حجم dict أثناء الحلقة.
-    🔴 FIX-3: get_security_settings — negative cache لا يستخدم
-              بيانات cached منتهية الصلاحية (كان يعطي قيماً قديمة).
-    🔴 FIX-4: _try_detector_call — لا يُعيد raise عند TypeError
-              غير متعلق بـ already_normalized، بل يُعيد False بأمان.
-    🟡 FIX-5: _flush_usage_updates — تحسين منطق _flush_in_progress
-              لمنع race condition عند الاستدعاء المتزامن.
-    🟢 FIX-6: heartbeat — دمج _check_telegram_latency (اختياري).
-    🟢 FIX-7: _send_caption_followup — parse_mode صريح.
+🆕 v7.10.17 (FIX-BUG1):
+    🔴 FIX-BUG1: _publish_post._send — إضافة استدعاء _send_followup_text
+                 بعد نجاح الإرسال في فروع: photo / video / document /
+                 audio / animation (كان فقط في voice/sticker/video_note).
+                 السبب: منشور بصورة + نص طويل (>1024) → يُرسل caption
+                 واحد فقط، والباقي يُهمَل. الإصلاح يُرسل النص المتبقي
+                 كرسالة follow-up.
+    📌 FIX-BUG8 (المرافق): mark_post_published_pending مُضافة في
+       database_channels_posts.py v7.5.30 — لا تغيير مطلوب في utils.py
+       (يستخدم hasattr + try/except الموجودة).
 
-🆕 v7.10.11 (TIMEOUT-DIAGNOSTICS-2026-R5):
-    🔴 TIMEOUT-FIX-1: safe_send — سياق كامل في تحذير TimedOut.
-    🔴 TIMEOUT-FIX-2: safe_send — backoff تصاعدي 1s, 2s.
-    🔴 TIMEOUT-FIX-3: safe_send — تسجيل ERROR نهائي عند الفشل.
-    🟡 TIMEOUT-FIX-4: safe_send — timeouts ديناميكية.
-    🟡 TIMEOUT-FIX-5: _send_media — timeouts ديناميكية للـ captions.
-    🟢 TIMEOUT-FIX-6: _send_media — تسجيل سياق عند TimedOut.
-    🟢 TIMEOUT-FIX-7: _check_telegram_latency — دالة تشخيصية.
-    🟢 TIMEOUT-FIX-8: get_telegram_latency_text — لتقرير المطور.
+🆕 v7.10.16 (FIX-B-FOLLOWUP):
+    🔴 FIX-B2: _format_security_text — audio يقرأ delete_audio.
+    🟢 FIX-A2: حذف delete_voice_notes من _DEFAULT_SECURITY_SETTINGS.
+    🟡 UX-1: إظهار sec_voice + sec_videonote في قائمة security.
 
-🆕 v7.10.10 (HTML-FIXES-2026-R4):
-    🔴 HTML-FIX-1: safe_send — parse_mode افتراضي "HTML" بدل None.
-    🔴 HTML-FIX-2: _send_media — parse_mode="HTML" افتراضي.
-    🔴 HTML-FIX-3: _send_media — تمرير parse_mode الصحيح لـ caption.
-    🟡 HTML-FIX-4: safe_send — fallback ثاني للـ media بدون HTML.
-    🟡 HTML-FIX-5: TextUtils.escape_html_safe — دالة مساعدة جديدة.
-    🟢 HTML-FIX-6: تحسين logging عند تحميل ar.json.
+🆕 v7.10.15 (SCHEMA-ALIGNED-FIXES):
+    🔴 FIX-A: _DEFAULT_SECURITY_SETTINGS — delete_audio بدل delete_voice_notes.
+    🔴 FIX-B: SECURITY_TOGGLE_MAP — audio→delete_audio, voice→delete_voice.
+    🔴 FIX-C: delete_audio مقروء من DB.
+    🔴 FIX-E: slow_mode_enabled → slow_mode.
 
-🆕 v7.10.9 (PERF-FIXES-2026-R3):
-    🔴 PERF-FIX-1: get_security_settings — TTL 300s + negative cache.
-    🔴 PERF-FIX-2: _get_security_stats — timeout 1.5s + cache 300s.
-    🔴 PERF-FIX-3: فهارس PostgreSQL موثّقة في التعليقات.
-    🟡 PERF-FIX-4: _do_auth_check — timeout 2s على كل UNION.
-    🟡 PERF-FIX-5: __all__ يصدّر _sec_settings_neg_cache للاختبارات.
+🆕 v7.10.14 (CRITICAL-FIXES-R3):
+    🔴 FIX-D..F: تفاصيل في الأسفل.
+    🟠 FIX-H: _publish_post._send_followup_text — تقسيم > 4096.
+    🟠 FIX-I: _sec_settings_neg_cache — MAX_SIZE + prune.
 
-🆕 v7.10.8 (REVIEW-FIXES-2026-R2):
-    🔴 FIX-MIG1: _CHAT_MIGRATION_TABLES — إضافة مزدوجة.
-    🔴 FIX-WH2: _NON_RETRYABLE_WEBHOOK_ERRORS — توسيع.
-    🟡 FIX-PUB1: _publish_post — تسجيل warn عند فشل caption.
-    🟡 FIX-AUTH1: _do_auth_check — UNION بدل UNION ALL.
-    🟡 FIX-MIG2: _handle_chat_migrated invocation — task tracking.
-    🟡 FIX-DEV1: apply_penalty — allow owner to test self-penalty.
+🆕 v7.10.13 (CRITICAL-FIXES-R2):
+    🔴 FIX-A: _log_mig_exc — exc_info=(type, value, tb).
+    🔴 FIX-B: get_security_settings — _DEFAULT_SECURITY_SETTINGS.
+    🔴 FIX-C: _get_security_stats — _row_to_dict helper.
 =================================================================================
 """
 
@@ -103,11 +87,8 @@ from database import DB
 logger = logging.getLogger(__name__)
 
 # ═══════════════════════════════════════════════════════════════════════════
-# 🔴 FIX-1: _warmup_bg_tasks معرّف مبكراً (قبل safe_send)
+# 🔴 FIX-1: _warmup_bg_tasks معرّف مبكراً
 # ═══════════════════════════════════════════════════════════════════════════
-# السبب: كان معرّفاً في السطر ~3710، لكن safe_send (السطر ~750) يستخدمه
-# داخل except ChatMigrated → NameError.
-# الآن معرّف في الأعلى → متاح لكل الدوال.
 _warmup_bg_tasks: set = set()
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -139,14 +120,15 @@ _TIMEOUT_SLOW = {
 _TEXT_LONG_THRESHOLD = 2000  # حرف — بعد هذا نستخدم slow timeouts
 
 # 🆕 FIX-SC2: monotonic + prune
-_security_settings_cache: Dict[int, Tuple[float, Dict[str, int]]] = {}
-_SEC_SETTINGS_TTL = 300.0                    # 🆕 PERF-FIX-1: 300s (كان 60)
-_SEC_SETTINGS_NEGATIVE_TTL = 30.0            # 🆕 PERF-FIX-1: negative cache
+_security_settings_cache: Dict[int, Tuple[float, Dict[str, Any]]] = {}
+_SEC_SETTINGS_TTL = 300.0
+_SEC_SETTINGS_NEGATIVE_TTL = 30.0
 _SEC_SETTINGS_MAX_SIZE = 5000
 _SEC_SETTINGS_STALE_MULT = 10.0
 
-# 🆕 PERF-FIX-1: cache للفشل — يمنع ضغط DB عند تعثّرها
+# 🆕 PERF-FIX-1: cache الفشل — مع حد أقصى 🆕 v7.10.14 FIX-I
 _sec_settings_neg_cache: Dict[int, float] = {}
+_SEC_SETTINGS_NEG_MAX_SIZE = 5000   # 🆕 FIX-I
 
 # 🆕 FIX-D14: نطاقات عربية موسّعة
 _ARABIC_TATWEEL = '\u0640'
@@ -169,6 +151,26 @@ def _normalize_unicode(text: str) -> str:
     if _ARABIC_TATWEEL in text:
         text = text.replace(_ARABIC_TATWEEL, '')
     return text
+
+
+# 🔴 FIX-C v7.10.13: helper لتحويل Row إلى dict بأمان
+def _row_to_dict(row: Any) -> Optional[Dict[str, Any]]:
+    """
+    🆕 v7.10.13 FIX-C: يحوّل Row (asyncpg.Record, aiosqlite.Row, ...)
+    إلى dict بأمان. يُعيد None للقيم الفارغة.
+    """
+    if row is None:
+        return None
+    if isinstance(row, dict):
+        return row
+    try:
+        return dict(row)
+    except (TypeError, ValueError):
+        pass
+    try:
+        return {k: row[k] for k in row.keys()}  # type: ignore[attr-defined]
+    except Exception:
+        return None
 
 
 _AVAILABLE_LANGUAGES: Dict[str, str] = {
@@ -279,6 +281,14 @@ class SmartCache:
                 del self._cache[k]
             return len(keys)
 
+    async def delete_suffix(self, suffix: str) -> int:
+        """🆕 v7.10.14 FIX-F: حذف المفاتيح التي تنتهي بـ suffix."""
+        async with self._lock:
+            keys = [k for k in self._cache if k.endswith(suffix)]
+            for k in keys:
+                del self._cache[k]
+            return len(keys)
+
     async def clear(self):
         async with self._lock:
             self._cache.clear()
@@ -290,7 +300,7 @@ class SmartCache:
 
 _auth_cache_smart = SmartCache(ttl=60, max_size=2000)
 _auth_neg_cache = SmartCache(ttl=15, max_size=1000)
-_security_stats_cache = SmartCache(ttl=300, max_size=500)   # 🆕 PERF-FIX-2: 300s
+_security_stats_cache = SmartCache(ttl=300, max_size=500)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -392,10 +402,6 @@ class TextUtils:
 
     @staticmethod
     def escape_html_safe(text: str) -> str:
-        """
-        🆕 HTML-FIX-5: escaping آمن للاستخدام داخل HTML.
-        يُهرّب فقط < > & (لا يلمس النص العادي).
-        """
         if not text:
             return ""
         return (text.replace("&", "&amp;")
@@ -423,7 +429,6 @@ class RateLimiter:
         self._429_count = 0
 
     def report_429(self):
-        """إشارة 429 حقيقية من Telegram — تخفض throttle_factor."""
         self._429_count += 1
         self._last_429 = time.time()
         self._throttle_factor = min(self._throttle_factor * 1.5, 5.0)
@@ -433,7 +438,6 @@ class RateLimiter:
         )
 
     def report_internal_timeout(self):
-        """🆕 FIX-D15: timeout داخلي — لا يخفض throttle_factor."""
         logger.warning(
             "⚠️ RateLimiter internal timeout — throttle_factor محفوظ "
             "(المشكلة داخلية، ليست 429)"
@@ -631,7 +635,6 @@ _COMMON_PHRASES: Dict[str, Dict[str, str]] = {
            "welcome": "Bem-vindo", "help": "Ajuda"},
 }
 
-# 🆕 FIX-D14: نطاقات موسّعة
 _ARABIC_TEXT_PATTERN = re.compile(
     r'[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF\uFB50-\uFDFF\uFE70-\uFEFF]'
 )
@@ -875,6 +878,11 @@ class UserState(Enum):
 
 
 class StateManager:
+    """
+    🆕 v7.10.14 FIX-J: توثيق واضح لدالة is_expired.
+
+    الـ cache هو TTLCache تلقائي (300s). أي مدخل يختفي بعد TTL.
+    """
     _cache: TTLCache = TTLCache(maxsize=10000, ttl=300)
     _lock = threading.Lock()
 
@@ -895,6 +903,16 @@ class StateManager:
 
     @classmethod
     def is_expired(cls, user_id: int, timeout: int = None) -> bool:
+        """
+        🆕 v7.10.14 FIX-J: مُعاد توثيقها بوضوح.
+
+        تعود True إذا:
+          • لا يوجد مدخل لهذا المستخدم (لم يضبط حالة أو انتهت).
+          • الـ TTL الأساسي (300s) مضى.
+
+        ملاحظة: `timeout` مُعامل للتوافق فقط. الـ TTL الفعلي
+        يُدار تلقائياً بواسطة TTLCache (300s).
+        """
         with cls._lock:
             return cls._cache.get(user_id) is None
 
@@ -1322,11 +1340,13 @@ class KeyboardFactory:
             "translation": [["trans_off"], ["back"]],
             "referral": [["ref_claim", "ref_list"], ["back"]],
             "contests": [["contest_winners"], ["back"]],
+            # 🟡 UX-1 v7.10.16: إظهار sec_voice + sec_videonote (كانا بلا زر).
             "security": [
                 ["sec_links", "sec_mentions", "sec_forward"],
-                ["sec_video", "sec_audio", "sec_anim"],
+                ["sec_video", "sec_audio", "sec_voice"],
+                ["sec_anim", "sec_videonote"],
                 ["sec_doc", "sec_sticker", "sec_service"],
-                ["sec_poll", "sec_game", "sec_videonote"],
+                ["sec_poll", "sec_game"],
                 ["sec_at_channel", "sec_tg_scheme"],
                 ["sec_button_links", "sec_emails"],
                 ["sec_protected_any", "sec_postbot"],
@@ -1485,9 +1505,6 @@ class KeyboardFactory:
 
     @classmethod
     async def _get_security_stats(cls, chat_id: int) -> dict:
-        """
-        🆕 PERF-FIX-2: timeout 1.5s + cache 300s.
-        """
         cache_key = f"sec_stats_{chat_id}"
         cached = await _security_stats_cache.get(cache_key)
         if cached is not None:
@@ -1551,6 +1568,13 @@ class KeyboardFactory:
                 return_exceptions=True,
             )
 
+            penalties_row = _row_to_dict(penalties_row)
+            deleted_row = _row_to_dict(deleted_row)
+            warns_row = _row_to_dict(warns_row)
+            words_row = _row_to_dict(words_row)
+            replies_row = _row_to_dict(replies_row)
+            viols_row = _row_to_dict(viols_row)
+
             if isinstance(penalties_row, dict):
                 stats['mutes_today'] = penalties_row.get('mutes', 0) or 0
                 stats['bans_today'] = penalties_row.get('bans', 0) or 0
@@ -1595,7 +1619,8 @@ class KeyboardFactory:
         links = d(settings.get('delete_links', 0))
         mentions = d(settings.get('mentions', 0))
         video = d(settings.get('delete_videos', 0))
-        audio = d(settings.get('delete_voice', 0))
+        # 🔴 FIX-B2 v7.10.16: كان يقرأ 'delete_voice' خطأً — الآن delete_audio
+        audio = d(settings.get('delete_audio', 0))
         stickers = d(settings.get('delete_stickers', 0))
         files = d(settings.get('delete_documents', 0))
         anim = d(settings.get('delete_animation', 0))
@@ -1898,9 +1923,6 @@ async def get_min_publish_interval() -> int:
 # ═══════════════════════════════════════════════════════════════════════════
 
 async def _do_auth_check(bot, chat_id: int, user_id: int) -> bool:
-    """
-    فحص صلاحيات في مجموعة.
-    """
     try:
         member = await bot.get_chat_member(chat_id, user_id)
         if member.status in ('administrator', 'creator'):
@@ -1964,9 +1986,7 @@ async def is_authorized_in_group(bot, chat_id: int, user_id: int) -> bool:
 def invalidate_auth_cache(chat_id: int = None, user_id: int = None) -> None:
     """
     🔴 FIX-2: تنفيذ آمن — list() قبل iteration.
-
-    المشكلة القديمة: حذف من dict أثناء iteration → RuntimeError.
-    الحل: أنشئ قائمة منفصلة أولاً، ثم احذف.
+    🔴 v7.10.14 FIX-F: دعم user_id وحده بدون مسح كامل.
     """
     try:
         if chat_id and user_id:
@@ -1975,13 +1995,23 @@ def invalidate_auth_cache(chat_id: int = None, user_id: int = None) -> None:
             _auth_neg_cache._cache.pop(key, None)
         elif chat_id:
             cid_prefix = f"auth_{int(chat_id)}_"
-            # ✅ FIX-2: list() قبل iteration
             to_del_pos = [k for k in list(_auth_cache_smart._cache)
                           if k.startswith(cid_prefix)]
             for k in to_del_pos:
                 _auth_cache_smart._cache.pop(k, None)
             to_del_neg = [k for k in list(_auth_neg_cache._cache)
                           if k.startswith(cid_prefix)]
+            for k in to_del_neg:
+                _auth_neg_cache._cache.pop(k, None)
+        elif user_id:
+            # 🔴 v7.10.14 FIX-F: حذف بـ suffix فقط، لا clear()
+            suffix = f"_{int(user_id)}"
+            to_del_pos = [k for k in list(_auth_cache_smart._cache)
+                          if k.startswith("auth_") and k.endswith(suffix)]
+            for k in to_del_pos:
+                _auth_cache_smart._cache.pop(k, None)
+            to_del_neg = [k for k in list(_auth_neg_cache._cache)
+                          if k.startswith("auth_") and k.endswith(suffix)]
             for k in to_del_neg:
                 _auth_neg_cache._cache.pop(k, None)
         else:
@@ -1995,6 +2025,9 @@ def invalidate_auth_cache(chat_id: int = None, user_id: int = None) -> None:
 
 async def invalidate_auth_cache_async(chat_id: int = None,
                                       user_id: int = None) -> None:
+    """
+    🔴 v7.10.14 FIX-F: دعم user_id وحده بدون مسح كامل الكاش.
+    """
     with suppress(Exception):
         if chat_id and user_id:
             await _auth_cache_smart.delete(f"auth_{chat_id}_{user_id}")
@@ -2002,6 +2035,11 @@ async def invalidate_auth_cache_async(chat_id: int = None,
         elif chat_id:
             await _auth_cache_smart.delete_prefix(f"auth_{chat_id}_")
             await _auth_neg_cache.delete_prefix(f"auth_{chat_id}_")
+        elif user_id:
+            # 🔴 v7.10.14 FIX-F: حذف بـ suffix فقط
+            suffix = f"_{int(user_id)}"
+            await _auth_cache_smart.delete_suffix(suffix)
+            await _auth_neg_cache.delete_suffix(suffix)
         else:
             await _auth_cache_smart.clear()
             await _auth_neg_cache.clear()
@@ -2031,13 +2069,18 @@ async def check_bot_permissions(bot, chat_id: int) -> dict:
 async def _check_telegram_latency(bot, timeout: float = 10.0) -> float:
     """
     🆕 TIMEOUT-FIX-7: قياس زمن الاستجابة لـ Telegram API.
+    🔴 v7.10.14 FIX-G: get_me لا يدعم write_timeout/connect_timeout
+    في PTB < 20.7 → نتدرّج بأمان.
     """
     if bot is None:
         return -1.0
     try:
         t0 = time.monotonic()
-        await bot.get_me(read_timeout=timeout, write_timeout=timeout,
-                         connect_timeout=timeout)
+        try:
+            await bot.get_me(read_timeout=timeout)
+        except TypeError:
+            # PTB قديم — بدون kwargs
+            await bot.get_me()
         return (time.monotonic() - t0) * 1000.0
     except Exception as e:
         logger.debug("Telegram latency check failed: %s", e)
@@ -2045,9 +2088,6 @@ async def _check_telegram_latency(bot, timeout: float = 10.0) -> float:
 
 
 async def get_telegram_latency_text(bot) -> str:
-    """
-    🆕 TIMEOUT-FIX-8: نص جاهز لعرض latency في تقرير المطور.
-    """
     latency = await _check_telegram_latency(bot)
     if latency < 0:
         return "🔴 Telegram: <b>فشل الاتصال</b>"
@@ -2088,9 +2128,6 @@ _CHAT_MIGRATION_TABLES: Tuple[Tuple[str, str, bool], ...] = (
 
 
 async def _handle_chat_migrated(chat_id: int, new_chat_id: int) -> None:
-    """
-    تحديث الأعمدة في الجداول المرتبطة بالمجموعة.
-    """
     try:
         logger.warning(
             "🔄 ChatMigrated: %s → %s — تحديث %d عمود",
@@ -2162,9 +2199,6 @@ async def _handle_chat_migrated(chat_id: int, new_chat_id: int) -> None:
 
 
 def _timeouts_for(text_len: int, is_media: bool = False) -> Dict[str, float]:
-    """
-    🆕 TIMEOUT-FIX-4: اختيار timeouts مناسبة حسب حجم النص/نوع media.
-    """
     if is_media or text_len > _TEXT_LONG_THRESHOLD:
         return dict(_TIMEOUT_SLOW)
     return dict(_TIMEOUT_FAST)
@@ -2174,18 +2208,9 @@ async def _send_media(bot, chat_id, media_type, media_file_id,
                       caption=None, reply_markup=None,
                       parse_mode: str = "HTML",
                       **kwargs):
-    """
-    🆕 HTML-FIX-2 + HTML-FIX-3:
-    - parse_mode="HTML" افتراضي.
-    - تمرير parse_mode الصحيح لـ caption في voice/sticker/video_note.
-    🆕 TIMEOUT-FIX-5: timeouts ديناميكية للـ captions.
-    🆕 TIMEOUT-FIX-6: تسجيل سياق عند TimedOut.
-    🟢 FIX-7: parse_mode صريح في _send_caption_followup.
-    """
     _reply_to = kwargs.get('reply_to_message_id')
 
     async def _send_caption_followup(extra_kwargs=None):
-        """🆕 HTML-FIX-3: إرسال caption منفصل مع parse_mode الصحيح."""
         if not caption:
             return
         caption_kwargs = {}
@@ -2263,11 +2288,6 @@ async def _send_media(bot, chat_id, media_type, media_file_id,
 async def safe_send(bot, chat_id: int, text: str, reply_markup=None,
                     parse_mode: str = "HTML",
                     **kwargs):
-    """
-    🆕 HTML-FIX-1: parse_mode افتراضي "HTML".
-    🆕 TIMEOUT-FIX-1..4: سياق كامل + backoff + ERROR نهائي + timeouts ديناميكية.
-    🔴 FIX-1: استخدام _warmup_bg_tasks المعرّف في أعلى الملف (لا NameError).
-    """
     if not text and not any(
         k in kwargs for k in ['photo', 'video', 'document', 'audio',
                               'voice', 'animation', 'sticker', 'video_note']
@@ -2317,7 +2337,6 @@ async def safe_send(bot, chat_id: int, text: str, reply_markup=None,
                     logger.debug("spawn ChatMigrated: %s", _te)
                     _mig_task = None
                 if _mig_task is not None:
-                    # 🔴 FIX-1: _warmup_bg_tasks متاح الآن (معرّف في الأعلى)
                     try:
                         _warmup_bg_tasks.add(_mig_task)
                     except Exception:
@@ -2331,7 +2350,12 @@ async def safe_send(bot, chat_id: int, text: str, reply_markup=None,
                                 if exc:
                                     logger.error(
                                         "❌ ChatMigrated task: %s",
-                                        exc, exc_info=exc)
+                                        exc,
+                                        exc_info=(
+                                            type(exc),
+                                            exc,
+                                            exc.__traceback__,
+                                        ))
                         except Exception:
                             pass
                     try:
@@ -2711,9 +2735,6 @@ async def apply_penalty(bot, chat_id, user_id, penalty_type,
                         duration=0, reason="", *, moderator=None,
                         username="", first_name="", chat_name="",
                         lang="ar"):
-    """
-    يسمح للمطور بمعاقبة نفسه (اختبار ذاتي).
-    """
     try:
         if penalty_type not in (
             "ban", "mute", "kick", "restrict", "warn", "unban"):
@@ -2810,18 +2831,9 @@ async def _increment_usage_async(chat_id: int, keyword: str):
 
 
 async def _flush_usage_updates():
-    """
-    🟡 FIX-5: تحسين منطق _flush_in_progress.
-
-    المشكلة القديمة: استدعاء ثانٍ أثناء flush يعود فوراً
-    بدون flush → تراكم أكثر من الحد.
-
-    الحل: ننتظر قليلاً ثم نحاول مرة أخرى.
-    """
     global _flush_in_progress
     async with _usage_lock:
         if _flush_in_progress:
-            # ✅ FIX-5: انتظر قليلاً ثم حاول مرة أخرى
             data = None
             should_retry = True
         elif not _usage_updates:
@@ -2833,7 +2845,6 @@ async def _flush_usage_updates():
             should_retry = False
 
     if should_retry:
-        # استدعاء متزامن آخر يعمل — انتظر ثم حاول
         await asyncio.sleep(0.5)
         async with _usage_lock:
             if _flush_in_progress or not _usage_updates:
@@ -3337,6 +3348,12 @@ class BackgroundTasks:
     async def _publish_post(bot, channel_id: int, post: dict) -> bool:
         """
         نشر منشور واحد.
+
+        🟠 v7.10.14 FIX-H: تقسيم النص > 4096 في follow-up text.
+        🔴 v7.10.17 FIX-BUG1: إضافة _send_followup_text() بعد كل نجاح
+           في فروع الوسائط (photo/video/document/audio/animation).
+           كان فقط في voice/sticker/video_note → منشور بصورة + نص
+           طويل كان يُرسل caption واحد فقط (≤1024) والباقي يُهمَل.
         """
         _SEND_KWARGS = {
             "read_timeout": 60.0, "write_timeout": 60.0,
@@ -3350,11 +3367,19 @@ class BackgroundTasks:
         caption = text[:1024] if text else None
 
         async def _send_followup_text():
-            """تسجيل الفشل بدل suppress الصامت."""
+            """🟠 v7.10.14 FIX-H: تقسيم النص > 4096."""
             if not text:
                 return
             try:
-                await bot.send_message(channel_id, text, **_SEND_KWARGS)
+                if len(text) > 4096:
+                    for i in range(0, len(text), 4096):
+                        chunk = text[i:i + 4096]
+                        await bot.send_message(
+                            channel_id, chunk, **_SEND_KWARGS)
+                        await asyncio.sleep(0.3)
+                else:
+                    await bot.send_message(
+                        channel_id, text, **_SEND_KWARGS)
             except Exception as _fex:
                 logger.warning(
                     "⚠️ Publish follow-up text فشل | ch=%s media=%s: %s",
@@ -3363,17 +3388,29 @@ class BackgroundTasks:
         async def _send(with_caption: bool = True):
             _cap = caption if with_caption else None
             if media_type == 'photo' and media_file_id:
-                return await bot.send_photo(
+                sent = await bot.send_photo(
                     channel_id, media_file_id, caption=_cap, **_SEND_KWARGS)
+                if with_caption:
+                    await _send_followup_text()
+                return sent
             elif media_type == 'video' and media_file_id:
-                return await bot.send_video(
+                sent = await bot.send_video(
                     channel_id, media_file_id, caption=_cap, **_SEND_KWARGS)
+                if with_caption:
+                    await _send_followup_text()
+                return sent
             elif media_type == 'document' and media_file_id:
-                return await bot.send_document(
+                sent = await bot.send_document(
                     channel_id, media_file_id, caption=_cap, **_SEND_KWARGS)
+                if with_caption:
+                    await _send_followup_text()
+                return sent
             elif media_type == 'audio' and media_file_id:
-                return await bot.send_audio(
+                sent = await bot.send_audio(
                     channel_id, media_file_id, caption=_cap, **_SEND_KWARGS)
+                if with_caption:
+                    await _send_followup_text()
+                return sent
             elif media_type == 'voice' and media_file_id:
                 sent = await bot.send_voice(
                     channel_id, media_file_id, **_SEND_KWARGS)
@@ -3381,8 +3418,11 @@ class BackgroundTasks:
                     await _send_followup_text()
                 return sent
             elif media_type == 'animation' and media_file_id:
-                return await bot.send_animation(
+                sent = await bot.send_animation(
                     channel_id, media_file_id, caption=_cap, **_SEND_KWARGS)
+                if with_caption:
+                    await _send_followup_text()
+                return sent
             elif media_type == 'sticker' and media_file_id:
                 sent = await bot.send_sticker(
                     channel_id, media_file_id, **_SEND_KWARGS)
@@ -3463,6 +3503,13 @@ class BackgroundTasks:
     @staticmethod
     async def _publish_single_channel(bot, ch, published_count,
                                        has_sub: bool = None) -> bool:
+        """
+        نشر في قناة واحدة.
+
+        🔴 v7.10.17 FIX-BUG8: mark_post_published_pending الآن موجودة
+           في database_channels_posts.py v7.5.30 — hasattr سيرجع True
+           تلقائياً. لا تغيير مطلوب هنا.
+        """
         user_id = None
         try:
             user_id = ch.get('user_id') if isinstance(ch, dict) else None
@@ -3880,9 +3927,6 @@ class BackgroundTasks:
 # 18. Warmup
 # ═══════════════════════════════════════════════════════════════════════════
 
-# 🔴 FIX-1: _warmup_bg_tasks معرّف في الأعلى (السطر ~130) — لا نكرره هنا.
-
-
 def _spawn_warmup_task(coro, label: str = "warmup"):
     try:
         task = asyncio.create_task(coro)
@@ -4084,17 +4128,28 @@ class ErrorHandler:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# 21. SECURITY_TOGGLE_MAP
+# 21. SECURITY_TOGGLE_MAP + NEW_SECURITY_DEFAULTS + _DEFAULT_SECURITY_SETTINGS
 # ═══════════════════════════════════════════════════════════════════════════
 
+# 🔴 v7.10.15 FIX-B: تصحيح دلالة "audio" و "voice":
+#   • "audio" (ملفات صوتية MP3) → delete_audio
+#   • "voice" (رسائل صوتية)      → delete_voice
+# 🟢 v7.10.15 FIX-E: "slow" → slow_mode (يطابق schema)
 SECURITY_TOGGLE_MAP: Dict[str, str] = {
-    "links": "delete_links", "mentions": "mentions",
-    "forward": "delete_forwarded", "video": "delete_videos",
-    "audio": "delete_voice", "anim": "delete_animation",
-    "doc": "delete_documents", "sticker": "delete_stickers",
-    "service": "delete_service", "poll": "delete_polls",
-    "game": "delete_games", "voice": "delete_voice_notes",
-    "videonote": "delete_video_note", "nsfw": "nsfw_enabled",
+    "links": "delete_links",
+    "mentions": "mentions",
+    "forward": "delete_forwarded",
+    "video": "delete_videos",
+    "audio": "delete_audio",         # 🔴 FIX-B: كان delete_voice
+    "anim": "delete_animation",
+    "doc": "delete_documents",
+    "sticker": "delete_stickers",
+    "service": "delete_service",
+    "poll": "delete_polls",
+    "game": "delete_games",
+    "voice": "delete_voice",         # 🔴 FIX-B: كان delete_voice_notes
+    "videonote": "delete_video_note",
+    "nsfw": "nsfw_enabled",
     "at_channel": "delete_at_channel",
     "tg_scheme": "delete_tg_scheme",
     "button_links": "delete_button_links",
@@ -4102,7 +4157,7 @@ SECURITY_TOGGLE_MAP: Dict[str, str] = {
     "protected_any": "delete_protected_any",
     "postbot": "delete_postbot_pattern",
     "flood": "antiflood_enabled",
-    "slow": "slow_mode_enabled",
+    "slow": "slow_mode",             # 🟢 FIX-E: كان slow_mode_enabled
     "night": "night_mode_enabled",
     "welcome": "welcome_enabled",
     "goodbye": "goodbye_enabled",
@@ -4119,6 +4174,88 @@ NEW_SECURITY_DEFAULTS: Dict[str, int] = {
     "delete_emails": 0,
     "delete_protected_any": 0,
     "delete_postbot_pattern": 0,
+}
+
+# 🔴 v7.10.15 FIX-D (schema-aligned): موسّع + متوافق مع group_security.
+# v7.10.16 FIX-A2: حُذف "delete_voice_notes" نهائياً — لا عمود في schema.
+_DEFAULT_SECURITY_SETTINGS: Dict[str, Any] = {
+    # ═══ NEW_SECURITY_DEFAULTS ═══
+    "delete_at_channel": 0,
+    "delete_tg_scheme": 1,
+    "delete_button_links": 1,
+    "delete_emails": 0,
+    "delete_protected_any": 0,
+    "delete_postbot_pattern": 0,
+    # ═══ Delete toggles (المحتوى) ═══
+    "delete_links": 0,
+    "mentions": 0,
+    "delete_forwarded": 0,
+    "delete_videos": 0,
+    "delete_audio": 0,               # 🔴 FIX-A: ملفات صوتية (MP3)
+    "delete_voice": 0,               # رسائل صوتية — موجود في schema
+    "delete_animation": 0,
+    "delete_documents": 0,
+    "delete_stickers": 0,
+    "delete_service": 0,
+    "delete_polls": 0,
+    "delete_games": 0,
+    "delete_video_note": 0,
+    "delete_photos": 0,
+    "delete_protected_forward": 0,
+    "delete_banned_words": 0,
+    # ═══ Slow mode ═══
+    "slow_mode": 0,                  # 🟢 FIX-E: كان slow_mode_enabled
+    "slow_mode_seconds": 5,
+    # ═══ Welcome / Goodbye ═══
+    "welcome_enabled": 0,
+    "welcome_text": "مرحباً {user} في {chat} 🤍",
+    "goodbye_enabled": 0,
+    "goodbye_text": "وداعاً {user} 👋",
+    # ═══ Join requests ═══
+    "auto_approve_join": 0,
+    "auto_reject_join": 0,
+    # ═══ Warnings ═══
+    "warn_enabled": 0,
+    "max_warnings": 3,
+    "warn_penalty": "ban",
+    "warn_penalty_duration": 3600,
+    "warn_default_duration": 0,      # 🟢 FIX-D: موجود مسبقاً، لا تغيير
+    # ═══ Violations ═══
+    "violation_strikes": 3,
+    "violation_duration": 60,
+    "violation_penalty": "none",
+    "violation_penalty_duration": 3600,
+    # ═══ Antiflood ═══
+    "antiflood_enabled": 0,
+    "antiflood_messages": 5,
+    "antiflood_seconds": 10,
+    "antiflood_penalty": "mute",
+    "antiflood_penalty_duration": 3600,
+    # ═══ Night mode ═══
+    "night_mode_enabled": 0,
+    "night_mode_start": "23:00",
+    "night_mode_end": "06:00",
+    "night_mode_action": "mute",
+    "night_mode_action_duration": 3600,
+    # ═══ NSFW ═══
+    "nsfw_enabled": 0,
+    "nsfw_threshold": 0.7,
+    "nsfw_filter": 0,
+    # ═══ Penalty durations ═══
+    "mute_default_duration": 3600,
+    "ban_default_duration": 0,
+    "restrict_default_duration": 1800,
+    "enable_timed_penalties": 1,
+    "auto_remove_penalties": 1,
+    # ═══ Auto penalty ═══
+    "auto_penalty": "none",
+    "auto_mute_duration": 3600,
+    # ═══ Delete penalty ═══
+    "delete_penalty": "none",
+    "delete_penalty_duration": 0,
+    "delete_penalty_messages": 0,
+    # ═══ Length ═══
+    "max_message_length": 0,
 }
 
 
@@ -4178,7 +4315,6 @@ def _do_import_detectors() -> Dict[str, Any]:
 
 
 def _lazy_import_detectors() -> Dict[str, Any]:
-    """Import مؤجل (sync)."""
     global _detector_imports
     if _detector_imports is not None:
         return _detector_imports
@@ -4190,7 +4326,6 @@ def _lazy_import_detectors() -> Dict[str, Any]:
 
 
 async def _lazy_import_detectors_async() -> Dict[str, Any]:
-    """🆕 FIX-LZ1: نسخة async (لا تحجب event loop)."""
     global _detector_imports, _detector_import_async_lock
     if _detector_imports is not None:
         return _detector_imports
@@ -4203,11 +4338,15 @@ async def _lazy_import_detectors_async() -> Dict[str, Any]:
         return _detector_imports
 
 
-async def get_security_settings(chat_id: int) -> Dict[str, int]:
+async def get_security_settings(chat_id: int) -> Dict[str, Any]:
     """
     جلب إعدادات الأمان.
 
-    🔴 FIX-3: negative cache لا يستخدم بيانات cached منتهية الصلاحية.
+    🔴 FIX-3: negative cache نظيف.
+    🔴 v7.10.14 FIX-D: ثابت موسّع (كل أعمدة group_security).
+    🔴 v7.10.14 FIX-E: حلقة القراءة تحافظ على النوع (int/float/str/bool).
+    🔴 v7.10.15: schema-aligned (delete_audio, slow_mode).
+    🔴 v7.10.16: إزالة delete_voice_notes من الـ defaults.
     """
     now = time.monotonic()
 
@@ -4216,24 +4355,13 @@ async def get_security_settings(chat_id: int) -> Dict[str, int]:
     if cached is not None and now - cached[0] < _SEC_SETTINGS_TTL:
         return dict(cached[1])
 
-    # 2) 🔴 FIX-3: negative cache — لا نستخدم cached منتهية
+    # 2) negative cache
     neg_at = _sec_settings_neg_cache.get(chat_id)
     if neg_at is not None and now - neg_at < _SEC_SETTINGS_NEGATIVE_TTL:
-        # لا تستخدم cached منتهية — استخدم defaults
-        return dict(NEW_SECURITY_DEFAULTS)
+        return dict(_DEFAULT_SECURITY_SETTINGS)
 
-    settings: Dict[str, int] = dict(NEW_SECURITY_DEFAULTS)
-    settings.update({
-        "delete_links": 0, "mentions": 0, "delete_forwarded": 0,
-        "delete_videos": 0, "delete_voice": 0, "delete_animation": 0,
-        "delete_documents": 0, "delete_stickers": 0, "delete_service": 0,
-        "delete_polls": 0, "delete_games": 0, "delete_voice_notes": 0,
-        "delete_video_note": 0, "nsfw_enabled": 0,
-        "welcome_enabled": 0, "goodbye_enabled": 0, "warn_enabled": 0,
-        "antiflood_enabled": 0, "slow_mode_enabled": 0,
-        "night_mode_enabled": 0, "delete_banned_words": 0,
-        "auto_approve_join": 0, "auto_reject_join": 0,
-    })
+    # 🔴 FIX-D: نبدأ من الثابت الكامل
+    settings: Dict[str, Any] = dict(_DEFAULT_SECURITY_SETTINGS)
 
     row_dict: Dict[str, Any] = {}
     db_ok = False
@@ -4266,13 +4394,7 @@ async def get_security_settings(chat_id: int) -> Dict[str, int]:
                     (chat_id,)),
                 timeout=3.0)
             if row is not None:
-                try:
-                    row_dict = dict(row)
-                except (TypeError, ValueError):
-                    try:
-                        row_dict = {k: row[k] for k in row.keys()}  # type: ignore
-                    except Exception:
-                        row_dict = {}
+                row_dict = _row_to_dict(row) or {}
                 db_ok = True
         except asyncio.TimeoutError:
             logger.warning(
@@ -4281,18 +4403,43 @@ async def get_security_settings(chat_id: int) -> Dict[str, int]:
             logger.debug(
                 "get_security_settings fallback(%s): %s", chat_id, e)
 
-    for key in settings.keys():
-        if key in row_dict and row_dict[key] is not None:
-            try:
-                settings[key] = int(row_dict[key])
-            except (ValueError, TypeError):
-                pass
+    # 🔴 FIX-E: حلقة القراءة — حافظ على النوع
+    for key, default_val in list(settings.items()):
+        if key not in row_dict:
+            continue
+        raw_val = row_dict[key]
+        if raw_val is None:
+            continue
+        try:
+            if isinstance(default_val, bool):
+                settings[key] = 1 if raw_val else 0
+            elif isinstance(default_val, int):
+                settings[key] = int(raw_val)
+            elif isinstance(default_val, float):
+                settings[key] = float(raw_val)
+            else:
+                # string أو non-typed
+                settings[key] = str(raw_val)
+        except (ValueError, TypeError):
+            # احتفظ بالقيمة الافتراضية
+            pass
 
     # 🆕 PERF-FIX-1: negative cache عند الفشل الكامل
     if not db_ok:
+        # 🟠 v7.10.14 FIX-I: prune قبل الإضافة
+        if len(_sec_settings_neg_cache) >= _SEC_SETTINGS_NEG_MAX_SIZE:
+            try:
+                sorted_neg = sorted(
+                    _sec_settings_neg_cache.items(),
+                    key=lambda kv: kv[1])
+                to_remove = max(1, len(sorted_neg) // 4)
+                for k, _ in sorted_neg[:to_remove]:
+                    _sec_settings_neg_cache.pop(k, None)
+            except Exception as _e:
+                logger.debug("neg_cache prune: %s", _e)
         _sec_settings_neg_cache[chat_id] = now
 
-    # prune
+    # prune main cache
     if len(_security_settings_cache) >= _SEC_SETTINGS_MAX_SIZE:
         try:
             sorted_items = sorted(
@@ -4320,27 +4467,16 @@ def invalidate_security_settings_cache(chat_id: Optional[int] = None) -> None:
 
 
 def _try_detector_call(fn, text: str, **extra_kwargs) -> Any:
-    """
-    🔴 FIX-4: helper آمن — لا يُعيد raise عند TypeError غير متعلق.
-
-    المشكلة القديمة: إذا رفع fn TypeError لا يتعلق بـ already_normalized،
-    فإن raise يُوقف should_delete_by_security → فشل صامت في الفحص الأمني.
-
-    الحل: نسجّل ونرجّع False بأمان.
-    """
     if fn is None or not text:
         return False
     try:
         return fn(text, already_normalized=True, **extra_kwargs)
     except TypeError as e:
         err_msg = str(e)
-        # ✅ FIX-4: تحقق أن الخطأ متعلق بالكلمة المفتاحية
         if ("already_normalized" not in err_msg
                 and "unexpected keyword" not in err_msg):
-            # خطأ TypeError حقيقي — سجّل وارجع False بأمان
             logger.debug("detector TypeError (not kwargs): %s", e)
             return False
-        # الخطأ متعلق بـ already_normalized → جرّب بدونها
         try:
             return fn(text, **extra_kwargs)
         except Exception as e2:
@@ -4501,7 +4637,7 @@ async def check_all_security(message: Any, bot: Any = None,
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# 23. ثوابت timeouts (قبل __all__)
+# 23. ثوابت timeouts
 # ═══════════════════════════════════════════════════════════════════════════
 
 _PUBLISH_TIMEOUTS = {
@@ -4527,7 +4663,6 @@ __all__ = [
     'is_authorized_in_group', 'invalidate_auth_cache',
     'invalidate_auth_cache_async', 'check_bot_permissions',
     'safe_send', 'get_ram_usage',
-    # 🆕 TIMEOUT-FIX-7/8
     '_check_telegram_latency', 'get_telegram_latency_text',
     'ban_user_by_id', 'unban_user_by_id',
     'PenaltyStrategy', 'BanPenalty', 'MutePenalty', 'KickPenalty',
@@ -4540,21 +4675,19 @@ __all__ = [
     'SmartCache', 'warmup_all',
     '_normalize_unicode', '_normalize_word',
     'SECURITY_TOGGLE_MAP', 'NEW_SECURITY_DEFAULTS',
+    '_DEFAULT_SECURITY_SETTINGS',
+    '_row_to_dict',
     'get_security_settings', 'invalidate_security_settings_cache',
     'should_delete_by_security', 'check_all_security',
     '_lazy_import_detectors', '_lazy_import_detectors_async',
     '_PUBLISH_TIMEOUTS',
     '_handle_chat_migrated',
     '_CHAT_MIGRATION_TABLES',
-    # 🆕 PERF-FIX-5: للاختبارات
     '_security_settings_cache', '_sec_settings_neg_cache',
     '_security_stats_cache',
-    # 🆕 HTML-FIX: للاختبارات
     '_send_media',
-    # 🆕 TIMEOUT-FIX-4/5: للاختبارات
     '_timeouts_for', '_TIMEOUT_FAST', '_TIMEOUT_SLOW',
     '_TEXT_LONG_THRESHOLD',
-    # 🆕 FIX-1: للاختبارات
     '_warmup_bg_tasks',
 ]
 
@@ -4565,17 +4698,28 @@ __all__ = [
 
 try:
     logger.info(
-        "🛡️ utils.py v7.10.12 CRITICAL-FIXES loaded | "
-        "warmup_bg_tasks=early | invalidate_auth=list-safe | "
-        "sec_neg_cache=fresh-only | detector_call=safe | "
-        "flush_usage=race-fixed | Latency-Check=✅ | "
-        "Detectors=lazy+async | Langs=%d | Buttons=✅ | "
-        "Security-Bridge=✅ | Penalty=✅ | "
+        "🛡️ utils.py v7.10.17 FIX-BUG1 loaded | "
+        "publish_followup=all-media-branches (photo/video/doc/audio/anim) | "
+        "sec_defaults=%d keys (schema-aligned) | "
+        "FIX-A2: delete_voice_notes removed from defaults | "
+        "FIX-B2: _format_security_text audio→delete_audio | "
+        "UX-1: sec_voice+sec_videonote shown in menu | "
+        "sec_neg_cache=MAX(%d) | "
+        "auth_cache=user_id-aware | "
+        "check_latency=PTB-safe | "
+        "publish_followup=split-4096 | "
+        "warmup_bg_tasks=early | "
+        "detector_call=safe | flush_usage=race-fixed | "
+        "row_to_dict=added | mig_exc_info=tuple | "
+        "Latency-Check=✅ | Detectors=lazy+async | Langs=%d | "
+        "Buttons=✅ | Security-Bridge=✅ | Penalty=✅ | "
         "ChatMigrated=✅(%d ops) | ToggleMap=%d | "
         "SecCache=✅(TTL=%ds, max=%d) | "
         "SecNegCache=✅(TTL=%ds) | SecStats=✅(TTL=300s) | "
         "AuthCache=✅ | AuthCheck=UNION+TO(2s) | "
         "RateLimit=✅ | Webhook=✅ | Publish=✅",
+        len(_DEFAULT_SECURITY_SETTINGS),
+        _SEC_SETTINGS_NEG_MAX_SIZE,
         len(_AVAILABLE_LANGUAGES),
         len(_CHAT_MIGRATION_TABLES),
         len(SECURITY_TOGGLE_MAP),
