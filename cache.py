@@ -2,21 +2,31 @@
 # -*- coding: utf-8 -*-
 
 """
-cache.py - نظام الكاش المتقدم للبوت (v7.6.6)
+cache.py - نظام الكاش المتقدم للبوت (v7.6.7)
 ================================================================================
+🟢 v7.6.7 (FIX-AE1-FOLLOWUP-NORMALIZE-STATS):
+    🟢 FIX-AE1-FOLLOWUP: توحيد get_stats() عبر أنواع الكاشات.
+        السبب: بعد FIX-AE1، internal_cache (من database_caches.py)
+        أصبح في _ALL_CACHES. واجهته مختلفة:
+          • TTLCache.get_stats()           → {size, maxsize, hits,
+                                                misses, expired,
+                                                hit_rate, usage,
+                                                stampede_locks}
+          • InternalQueryCache.get_stats() → {size, max_size, ttl}
+        health_snapshot() و get_detailed_stats() تقرأ 'hits'/'maxsize'
+        مباشرة → KeyError محتمل عند استدعائهما.
+        الحل: _normalize_stats() يوحّد الواجهة (dictionary واحد ثابت).
+        الأثر: 0% تغيير سلوكي للمستخدمين — يمنع خطأ كامن فقط.
+
 🔴 v7.6.6 (FIX-AE1-INTERNAL-CACHE-CLEANUP):
     🔴 AE1-A: استيراد internal_cache من database_caches.
     🔴 AE1-B: إضافة internal_cache إلى _ALL_CACHES.
     🟡 AE1-C: cache_cleanup_task يدعم cleanup_expired() (أسرع)
-       مع fallback إلى cleanup(force=False) + حصانة ضد
-       sync/async/None.
+       مع fallback إلى cleanup(force=False) + حصانة ضد sync/async/None.
 
 🆕 v7.6.5 (PERF-PARALLEL-LOAD):
     🟢 PERF-5: _load_user_full_data — تحويل الاستدعاءات من تسلسلي
-       إلى متوازي كامل.
-       - قبل: ~1050ms (700 + 350)
-       - بعد: ~700ms (max)
-       - الفائدة: ~350ms أقل في أول /start.
+       إلى متوازي كامل. الفائدة: ~350ms أقل في أول /start.
 
 🆕 v7.6.4 (FIX-CANCELLED-PROPAGATION):
     🔴 FIX: cache_cleanup_task — استبدال `break` بـ `raise`.
@@ -1053,8 +1063,28 @@ async def cache_cleanup_task():
 # 12. إحصائيات الكاش
 # =====================================================================
 
+# ═══════════════════════════════════════════════════════════════════════
+# 🟢 v7.6.7 FIX-AE1-FOLLOWUP: توحيد مخرجات get_stats
+# ═══════════════════════════════════════════════════════════════════════
+#
+# السبب: بعد FIX-AE1، internal_cache (من database_caches.py) أصبح
+# في _ALL_CACHES. لكن واجهته مختلفة:
+#   TTLCache.get_stats()           → {size, maxsize, hits, misses,
+#                                      expired, hit_rate, usage,
+#                                      stampede_locks}
+#   InternalQueryCache.get_stats() → {size, max_size, ttl}
+#   SimpleCache.get_stats()        → {size, max_size, ttl}
+#
+# health_snapshot() و get_detailed_stats() تقرأ 'hits'/'maxsize'
+# مباشرة → KeyError محتمل عند استدعائهما.
+#
+# الحل: _normalize_stats() يوحّد الواجهة (dictionary واحد ثابت).
+
 def _empty_stats() -> Dict:
-    """✅ v7.6.3: قالب فارغ متوافق مع get_stats()."""
+    """
+    🟢 v7.6.7: قالب فارغ موحّد — يُستخدم عند فشل get_stats()
+        أو عند type غير متوقع.
+    """
     return {
         'size': 0,
         'maxsize': 0,
@@ -1068,6 +1098,61 @@ def _empty_stats() -> Dict:
     }
 
 
+def _normalize_stats(raw: Optional[Dict]) -> Dict[str, Any]:
+    """
+    🟢 v7.6.7 FIX-AE1-FOLLOWUP: توحيد مخرجات get_stats من مختلف
+    أنواع الكاشات.
+
+    يدعم:
+      • TTLCache (cache.py):           maxsize / default_ttl / hits ...
+      • InternalQueryCache:            max_size / ttl
+      • SimpleCache:                   max_size / ttl
+
+    Args:
+        raw: dict (أو None).
+
+    Returns:
+        dict ثابت الأسماء:
+          {size, maxsize, default_ttl, hits, misses, expired,
+           hit_rate, usage, stampede_locks}
+    """
+    if not isinstance(raw, dict):
+        return _empty_stats()
+
+    size = int(raw.get('size', 0) or 0)
+    # دعم maxsize / max_size
+    maxsize = int(raw.get('maxsize', raw.get('max_size', 0)) or 0)
+    # دعم default_ttl / ttl
+    default_ttl = int(raw.get('default_ttl', raw.get('ttl', 0)) or 0)
+    hits = int(raw.get('hits', 0) or 0)
+    misses = int(raw.get('misses', 0) or 0)
+    expired = int(raw.get('expired', 0) or 0)
+    stampede_locks = int(raw.get('stampede_locks', 0) or 0)
+
+    # hit_rate / usage: استخدم القيمة إن وُجدت، وإلا احسب
+    total_req = hits + misses
+    hit_rate = raw.get('hit_rate')
+    if hit_rate is None:
+        hit_rate = round(
+            (hits / total_req * 100) if total_req > 0 else 0, 2)
+    usage = raw.get('usage')
+    if usage is None:
+        usage = round(
+            (size / maxsize * 100) if maxsize > 0 else 0, 2)
+
+    return {
+        'size': size,
+        'maxsize': maxsize,
+        'default_ttl': default_ttl,
+        'hits': hits,
+        'misses': misses,
+        'expired': expired,
+        'hit_rate': hit_rate,
+        'usage': usage,
+        'stampede_locks': stampede_locks,
+    }
+
+
 async def get_cache_stats() -> Dict:
     """
     جلب إحصائيات الكاش (للمطورين) — يستخدم API عام.
@@ -1075,10 +1160,15 @@ async def get_cache_stats() -> Dict:
     ✅ v7.6.1: يشمل _stampede_locks في الإحصائيات (توافق مع health_snapshot).
     ✅ v7.6.2: تحسين الأداء — تمرير واحد على _ALL_CACHES (بدل اثنين).
     ✅ v7.6.3: fallback كامل الحقول عند فشل أي cache.
+    🟢 v7.6.7: تطبيع كل النتائج عبر _normalize_stats() — يمنع
+        KeyError عند وجود InternalQueryCache في _ALL_CACHES.
     """
     # ✅ v7.6.2: تمرير واحد فقط لجمع كل الإحصائيات بالتوازي
     stats_results = await asyncio.gather(
-        *[c.get_stats() for c in _ALL_CACHES],
+        *[
+            c.get_stats() if hasattr(c, 'get_stats') else _empty_stats()
+            for c in _ALL_CACHES
+        ],
         return_exceptions=True,
     )
 
@@ -1092,7 +1182,8 @@ async def get_cache_stats() -> Dict:
         if isinstance(s, BaseException):
             # ✅ v7.6.3: fallback كامل بدل قالب جزئي
             return _empty_stats()
-        return s
+        # 🟢 v7.6.7: تطبيع موحّد
+        return _normalize_stats(s)
 
     sec_s = _next_stat()
     ar_s = _next_stat()
@@ -1172,45 +1263,58 @@ async def get_cache_stats() -> Dict:
 
 
 async def get_detailed_stats() -> Dict:
-    """جلب إحصائيات مفصلة."""
+    """
+    جلب إحصائيات مفصلة.
+
+    🟢 v7.6.7: كل النتائج تُطبَّع عبر _normalize_stats() — يمنع
+        KeyError عند وجود كاشات بأنواع مختلفة.
+    """
     stats = await get_cache_stats()
+
+    async def _safe_stats(obj) -> Dict:
+        """يستدعي get_stats إن وُجد، ويُطبّع الناتج."""
+        try:
+            fn = getattr(obj, 'get_stats', None)
+            if not callable(fn):
+                return _empty_stats()
+            r = fn()
+            if asyncio.iscoroutine(r):
+                r = await r
+            return _normalize_stats(r)
+        except Exception as _e:
+            logger.debug(
+                "get_detailed_stats: %s فشل — %s",
+                type(obj).__name__, _e)
+            return _empty_stats()
+
     details = {
         'settings_cache': {
-            'security': await settings_cache.security.get_stats(),
-            'auto_reply': await settings_cache.auto_reply.get_stats(),
-            'bot_settings': await settings_cache.bot_settings.get_stats(),
+            'security': await _safe_stats(settings_cache.security),
+            'auto_reply': await _safe_stats(settings_cache.auto_reply),
+            'bot_settings': await _safe_stats(settings_cache.bot_settings),
         },
-        'banned_words_cache': await banned_words_cache.cache.get_stats(),
+        'banned_words_cache': await _safe_stats(banned_words_cache.cache),
         'auth_cache': {
-            'permissions': await auth_cache.cache.get_stats(),
-            'admins': await auth_cache.admin_cache.get_stats(),
+            'permissions': await _safe_stats(auth_cache.cache),
+            'admins': await _safe_stats(auth_cache.admin_cache),
         },
         'channels_cache': {
-            'user_channels': await channels_cache.cache.get_stats(),
-            'channel_info': await channels_cache.channel_info.get_stats(),
+            'user_channels': await _safe_stats(channels_cache.cache),
+            'channel_info': await _safe_stats(channels_cache.channel_info),
         },
         'groups_cache': {
-            'user_groups': await groups_cache.cache.get_stats(),
-            'group_info': await groups_cache.group_info.get_stats(),
+            'user_groups': await _safe_stats(groups_cache.cache),
+            'group_info': await _safe_stats(groups_cache.group_info),
         },
-        'user_cache': await user_cache.cache.get_stats(),
+        'user_cache': await _safe_stats(user_cache.cache),
         'posts_cache': {
-            'posts': await posts_cache.cache.get_stats(),
-            'next_post': await posts_cache.next_post.get_stats(),
+            'posts': await _safe_stats(posts_cache.cache),
+            'next_post': await _safe_stats(posts_cache.next_post),
         },
     }
     # 🔴 FIX-AE1: internal_cache (إن كان متاحاً)
     if _INTERNAL_CACHE_AVAILABLE and _internal_cache_obj is not None:
-        try:
-            _internal_stats_fn = getattr(
-                _internal_cache_obj, 'get_stats', None)
-            if callable(_internal_stats_fn):
-                _r = _internal_stats_fn()
-                if asyncio.iscoroutine(_r):
-                    _r = await _r
-                details['internal_cache'] = _r
-        except Exception as _e:
-            details['internal_cache'] = {'error': str(_e)[:80]}
+        details['internal_cache'] = await _safe_stats(_internal_cache_obj)
     return {
         'total': stats['total'],
         'details': stats,
@@ -1221,6 +1325,9 @@ async def get_detailed_stats() -> Dict:
 async def health_snapshot() -> Dict:
     """
     ✅ v7.6.0: فحص صحة شامل — إحصائيات مجمّعة عبر كل الكاشات.
+
+    🟢 v7.6.7: كل النتائج تُطبَّع عبر _normalize_stats() — يمنع
+        KeyError عند وجود InternalQueryCache في _ALL_CACHES.
 
     يُستخدم للمراقبة السريعة (مثلاً في /health endpoint).
     """
@@ -1233,15 +1340,20 @@ async def health_snapshot() -> Dict:
 
     for cache_obj in _ALL_CACHES:
         try:
-            s = cache_obj.get_stats()
-            if asyncio.iscoroutine(s):
-                s = await s
-            total_hits += s.get('hits', 0)
-            total_misses += s.get('misses', 0)
-            total_expired += s.get('expired', 0)
-            total_size += s.get('size', 0)
-            total_max += s.get('maxsize', 0)
-            total_stampede_locks += s.get('stampede_locks', 0)
+            fn = getattr(cache_obj, 'get_stats', None)
+            if not callable(fn):
+                continue
+            s_raw = fn()
+            if asyncio.iscoroutine(s_raw):
+                s_raw = await s_raw
+            # 🟢 v7.6.7: تطبيع قبل القراءة
+            s = _normalize_stats(s_raw)
+            total_hits += s['hits']
+            total_misses += s['misses']
+            total_expired += s['expired']
+            total_size += s['size']
+            total_max += s['maxsize']
+            total_stampede_locks += s['stampede_locks']
         except Exception as _e:
             logger.debug(
                 "health_snapshot: %s فشل — %s",
@@ -1340,6 +1452,9 @@ __all__ = [
     # 🔴 FIX-AE1 (v7.6.6)
     '_INTERNAL_CACHE_AVAILABLE',
     '_internal_cache_obj',
+    # 🟢 FIX-AE1-FOLLOWUP (v7.6.7)
+    '_normalize_stats',
+    '_empty_stats',
 ]
 
 
@@ -1349,11 +1464,12 @@ __all__ = [
 
 try:
     logger.info(
-        "💾 cache.py v7.6.6 FIX-AE1 loaded | "
+        "💾 cache.py v7.6.7 FIX-AE1-FOLLOWUP loaded | "
         "get_or_set=stampede-safe | TTL_jitter=%.0f%% | "
         "_load_user_full_data=parallel(3 calls) | "
         "cache_cleanup_task=raise-on-cancel + cleanup_expired-aware | "
-        "internal_cache=%s (%d caches total)",
+        "internal_cache=%s (%d caches total) | "
+        "stats-normalized=yes",
         TTL_JITTER_RATIO * 100,
         "included" if _INTERNAL_CACHE_AVAILABLE else "NOT-included",
         len(_ALL_CACHES),
