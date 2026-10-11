@@ -1,25 +1,22 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-diagnose_all_dbs.py — فحص شامل لـ SQLite + PostgreSQL + MySQL في جلسة واحدة
+diagnose_all_dbs.py — فحص شامل لـ SQLite + PostgreSQL + MySQL (v2.0.0)
 ================================================================================
-يقرأ متغيرات البيئة التالية (كلها اختيارية):
-  • DATABASE_URL            ← يُكتشف نوعه تلقائياً
-  • SQLITE_PATH             ← مسار ملف SQLite (افتراضي: data/relax.db)
-  • POSTGRES_URL            ← postgres://user:pass@host:port/db
-  • MYSQL_URL               ← mysql://user:pass@host:port/db
+🆕 v2.0.0 (ALIGN-WITH-V7.9.5):
+  🔴 FIX-1: EXPECTED_MIGRATIONS["group_security"] محدَّث ليطابق v7.9.5
+            — delete_penalty: TEXT DEFAULT 'none' (بدل INTEGER)
+            — night_mode_end: '06:00' (بدل '07:00')
+            — إضافة 7 أعمدة v7.9.0/v7.9.4
+  🔴 FIX-2: EXPECTED_TABLES يشمل bot_addition_log + auto_blocked_sources
+  🔴 FIX-3: settings query — backticks لـ MySQL (key كلمة محجوزة)
+  🟡 FIX-4: CRITICAL_INDEXES — إزالة الفهارس المُهمَلة
+            (idx_posts_channel, idx_posts_channel_published)
+  🟡 FIX-5: delete_penalty MySQL — كشف النوع الحقيقي
+  🟡 FIX-6: GROUP_SECURITY_EXPECTED_COLS — إضافة 7 أعمدة v7.9.0
+  🟢 FIX-7: تنظيف تلقائي للتقرير من الرموز ANSI عند الحفظ
 
-يفحص كل نظام متوفر:
-  1. الاتصال والإصدار
-  2. قائمة الجداول
-  3. group_security.delete_penalty (الحاسم)
-  4. تناسق migrations
-  5. الفهارس الحرجية
-  6. التكامل المرجعي
-  7. settings الأساسية
-  8. مقارنة جانبية بين الأنظمة
-
-يعمل بدون تعديل على البوت. للقراءة فقط.
+🆕 v1.0.0: الإصدار الأول — فحص شامل 3 قواعد بيانات
 ================================================================================
 """
 
@@ -42,7 +39,6 @@ DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
 POSTGRES_URL = os.getenv("POSTGRES_URL", "").strip()
 MYSQL_URL = os.getenv("MYSQL_URL", "").strip()
 
-# استنتج الأنظمة المطلوب فحصها
 def detect_targets() -> Dict[str, str]:
     targets: Dict[str, str] = {}
 
@@ -96,22 +92,37 @@ if not sys.stdout.isatty() or os.getenv("NO_COLOR"):
 
 
 # =====================================================================
-# قوائم مرجعية (من database.py v7.7.32 و database_tables.py v7.6.15)
+# 🔴 FIX-1 + FIX-3 + FIX-6: قوائم مرجعية محدَّثة لـ v7.9.5
 # =====================================================================
 
 EXPECTED_MIGRATIONS: Dict[str, List[Tuple[str, str]]] = {
     "group_security": [
+        # ─── antiflood ───
+        ("antiflood_enabled", "INTEGER DEFAULT 0"),
+        ("antiflood_messages", "INTEGER DEFAULT 5"),
+        ("antiflood_seconds", "INTEGER DEFAULT 10"),
+        ("antiflood_penalty", "TEXT DEFAULT 'mute'"),
         ("antiflood_penalty_duration", "INTEGER DEFAULT 3600"),
+        # ─── night mode ───
+        ("night_mode_enabled", "INTEGER DEFAULT 0"),
+        ("night_mode_start", "TEXT DEFAULT '23:00'"),
+        # 🔴 FIX-1: v7.9.5 = '06:00' (ليس '07:00')
+        ("night_mode_end", "TEXT DEFAULT '06:00'"),
+        ("night_mode_action", "TEXT DEFAULT 'mute'"),
         ("night_mode_action_duration", "INTEGER DEFAULT 3600"),
-        ("warn_penalty_duration", "INTEGER DEFAULT 3600"),
+        # ─── durations ───
         ("mute_default_duration", "INTEGER DEFAULT 3600"),
         ("ban_default_duration", "INTEGER DEFAULT 0"),
         ("warn_default_duration", "INTEGER DEFAULT 0"),
         ("restrict_default_duration", "INTEGER DEFAULT 1800"),
         ("enable_timed_penalties", "INTEGER DEFAULT 1"),
         ("auto_remove_penalties", "INTEGER DEFAULT 1"),
+        # ─── violations ───
         ("violation_strikes", "INTEGER DEFAULT 3"),
         ("violation_duration", "INTEGER DEFAULT 60"),
+        ("violation_penalty", "TEXT DEFAULT 'none'"),
+        ("violation_penalty_duration", "INTEGER DEFAULT 3600"),
+        # ─── delete_* (boolean flags) ───
         ("delete_links", "INTEGER DEFAULT 0"),
         ("mentions", "INTEGER DEFAULT 0"),
         ("delete_videos", "INTEGER DEFAULT 0"),
@@ -127,61 +138,90 @@ EXPECTED_MIGRATIONS: Dict[str, List[Tuple[str, str]]] = {
         ("delete_video_note", "INTEGER DEFAULT 0"),
         ("delete_photos", "INTEGER DEFAULT 0"),
         ("delete_banned_words", "INTEGER DEFAULT 0"),
-        ("antiflood_enabled", "INTEGER DEFAULT 0"),
-        ("antiflood_messages", "INTEGER DEFAULT 5"),
-        ("antiflood_seconds", "INTEGER DEFAULT 10"),
-        ("antiflood_penalty", "TEXT DEFAULT 'mute'"),
-        ("night_mode_enabled", "INTEGER DEFAULT 0"),
-        ("night_mode_start", "TEXT DEFAULT '23:00'"),
-        ("night_mode_end", "TEXT DEFAULT '07:00'"),
-        ("night_mode_action", "TEXT DEFAULT 'mute'"),
+        # ─── warn ───
         ("warn_enabled", "INTEGER DEFAULT 0"),
         ("max_warnings", "INTEGER DEFAULT 3"),
-        ("warn_penalty", "TEXT DEFAULT 'mute'"),
+        ("warn_penalty", "TEXT DEFAULT 'ban'"),
+        ("warn_penalty_duration", "INTEGER DEFAULT 3600"),
+        # ─── welcome/goodbye ───
         ("welcome_enabled", "INTEGER DEFAULT 0"),
         ("welcome_text", "TEXT DEFAULT ''"),
         ("goodbye_enabled", "INTEGER DEFAULT 0"),
         ("goodbye_text", "TEXT DEFAULT ''"),
+        # ─── join ───
         ("auto_approve_join", "INTEGER DEFAULT 0"),
         ("auto_reject_join", "INTEGER DEFAULT 0"),
+        # ─── slow mode ───
         ("slow_mode", "INTEGER DEFAULT 0"),
         ("slow_mode_seconds", "INTEGER DEFAULT 0"),
+        # ─── max length ───
         ("max_message_length", "INTEGER DEFAULT 0"),
+        # ─── nsfw ───
         ("nsfw_enabled", "INTEGER DEFAULT 0"),
-        ("nsfw_threshold", "REAL DEFAULT 0.8"),
+        ("nsfw_threshold", "REAL DEFAULT 0.7"),
         ("nsfw_filter", "INTEGER DEFAULT 0"),
-        ("auto_penalty", "TEXT DEFAULT 'mute'"),
+        # ─── auto penalty ───
+        ("auto_penalty", "TEXT DEFAULT 'none'"),
         ("auto_mute_duration", "INTEGER DEFAULT 3600"),
-        ("delete_penalty", "INTEGER DEFAULT 0"),
-        ("delete_penalty_duration", "INTEGER DEFAULT 3600"),
+        # ─── delete penalty ───
+        # 🔴 FIX-1: v7.9.5 = TEXT DEFAULT 'none' (ليس INTEGER)
+        ("delete_penalty", "TEXT DEFAULT 'none'"),
+        ("delete_penalty_duration", "INTEGER DEFAULT 0"),
         ("delete_penalty_messages", "INTEGER DEFAULT 0"),
-        ("violation_penalty_duration", "INTEGER DEFAULT 3600"),
-        ("violation_penalty", "TEXT DEFAULT 'none'"),
+        # ─── 🆕 FIX-6: أعمدة v7.9.0/v7.9.4 ───
+        ("delete_at_channel", "INTEGER DEFAULT 0"),
+        ("delete_tg_scheme", "INTEGER DEFAULT 1"),
+        ("delete_button_links", "INTEGER DEFAULT 1"),
+        ("delete_emails", "INTEGER DEFAULT 0"),
+        ("delete_protected_any", "INTEGER DEFAULT 0"),
+        ("delete_postbot_pattern", "INTEGER DEFAULT 0"),
+        ("delete_protected_forward", "INTEGER DEFAULT 0"),
     ],
     "users": [("active_channel", "INTEGER DEFAULT NULL")],
     "bot_groups": [("log_channel_id", "BIGINT DEFAULT NULL")],
-    "auto_replies": [("usage_count", "INTEGER DEFAULT 0")],
+    "auto_replies": [
+        ("usage_count", "INTEGER DEFAULT 0"),
+        ("added_by", "BIGINT DEFAULT 0"),
+    ],
     "anonymous_admins": [("user_id", "BIGINT")],
     "posts": [
         ("text_hash", "TEXT DEFAULT ''"),
         ("published_at", "TIMESTAMP"),
         ("fail_count", "INTEGER DEFAULT 0"),
     ],
+    "user_channels": [
+        ("removed_at", "TIMESTAMP DEFAULT NULL"),
+        ("removal_reason", "TEXT DEFAULT NULL"),
+    ],
+    "banned_words": [("added_by", "BIGINT DEFAULT 0")],
+    "contests": [
+        ("contest_type", "TEXT DEFAULT 'raffle'"),
+        ("question", "TEXT DEFAULT ''"),
+        ("correct_answer", "TEXT DEFAULT ''"),
+    ],
 }
 
+# 🟡 FIX-4: إزالة الفهارس المُهمَلة (DEPRECATED_INDEXES في v7.9.5)
+#            idx_posts_channel              → مُهمَل
+#            idx_posts_channel_published    → مُهمَل
 CRITICAL_INDEXES = [
     "idx_bot_groups_log_channel",
-    "idx_posts_channel",
-    "idx_posts_channel_published",
+    # ✅ idx_posts_channel_pub_fail_created — موجود في v7.9.5
     "idx_posts_channel_pub_fail_created",
+    # ✅ idx_posts_channel_pub_at — موجود
     "idx_posts_channel_pub_at",
+    # ✅ idx_posts_channel_unpub_fresh_created — موجود
     "idx_posts_channel_unpub_fresh_created",
+    # ✅ الفهارس الجديدة v7.9.3
+    "idx_posts_channel_published_created",
     "idx_penalties_user_chat_status_end",
     "idx_penalties_status_end",
     "idx_penalties_active_id",
     "idx_user_channels_user_banned",
+    "idx_user_channels_user_id_only",
     "idx_subscriptions_user_status_end",
     "idx_schedule_channel_next",
+    "idx_schedule_channel_db_id",
     "idx_banned_words_chat",
     "idx_banned_words_chat_word",
     "idx_auto_replies_keyword_active",
@@ -189,15 +229,22 @@ CRITICAL_INDEXES = [
     "idx_user_violations_chat",
     "idx_user_warnings_chat",
     "idx_bot_groups_banned_cover",
+    # ✅ MV index
+    "idx_mv_active_user_limits_user_id",
 ]
 
+# 🔴 FIX-2: إضافة الجداول المفقودة
 EXPECTED_TABLES = [
     "schema_version", "users", "user_channels", "posts", "schedule",
     "last_publish", "bot_groups", "chat_locks", "user_groups_link",
     "group_admins", "hidden_owner_groups", "hidden_admins",
     "anonymous_admins", "group_security", "banned_words",
     "auto_replies", "auto_reply_settings", "support_tickets",
-    "bot_admins", "settings", "referrals", "referral_rewards",
+    "bot_admins",
+    # 🆕 FIX-2: v7.7.0
+    "bot_addition_log",
+    "auto_blocked_sources",
+    "settings", "referrals", "referral_rewards",
     "user_reminder_settings", "user_translation", "contests",
     "contest_participants", "contest_winners", "admin_logs",
     "user_warnings", "user_violations", "group_rules",
@@ -207,21 +254,32 @@ EXPECTED_TABLES = [
     "user_points", "penalty_archive",
 ]
 
-# الأعمدة المتوقعة في group_security (من database_tables.py)
+# 🔴 FIX-6: أعمدة v7.9.5 (محدَّثة)
 GROUP_SECURITY_EXPECTED_COLS = {
-    "chat_id", "delete_links", "mentions", "slow_mode",
-    "slow_mode_seconds", "welcome_enabled", "welcome_text",
-    "goodbye_enabled", "goodbye_text", "delete_banned_words",
-    "auto_penalty", "auto_mute_duration", "delete_videos",
-    "delete_audio", "delete_animation", "delete_service",
-    "delete_documents", "delete_stickers", "delete_forwarded",
-    "delete_polls", "delete_games", "delete_voice",
-    "delete_video_note", "delete_photos", "delete_penalty",
-    "delete_penalty_duration", "delete_penalty_messages",
+    "chat_id",
+    "delete_links", "mentions", "slow_mode", "slow_mode_seconds",
+    "welcome_enabled", "welcome_text",
+    "goodbye_enabled", "goodbye_text",
+    "delete_banned_words",
+    "auto_penalty", "auto_mute_duration",
+    "delete_videos", "delete_audio", "delete_animation",
+    "delete_service", "delete_documents", "delete_stickers",
+    "delete_forwarded", "delete_polls", "delete_games",
+    "delete_voice", "delete_video_note", "delete_photos",
+    # 🆕 v7.9.4
+    "delete_at_channel", "delete_tg_scheme", "delete_button_links",
+    "delete_emails", "delete_protected_any",
+    "delete_postbot_pattern", "delete_protected_forward",
+    # ─── delete penalty ───
+    "delete_penalty", "delete_penalty_duration", "delete_penalty_messages",
+    # ─── antiflood ───
     "antiflood_enabled", "antiflood_messages", "antiflood_seconds",
     "antiflood_penalty", "antiflood_penalty_duration",
+    # ─── warn ───
     "max_warnings", "warn_penalty", "warn_penalty_duration",
-    "warn_enabled", "max_message_length",
+    "warn_enabled",
+    # ─── other ───
+    "max_message_length",
     "night_mode_enabled", "night_mode_start", "night_mode_end",
     "night_mode_action", "night_mode_action_duration",
     "nsfw_enabled", "nsfw_threshold", "nsfw_filter",
@@ -232,6 +290,7 @@ GROUP_SECURITY_EXPECTED_COLS = {
     "violation_strikes", "violation_duration",
     "violation_penalty", "violation_penalty_duration",
 }
+
 
 # =====================================================================
 # طباعة
@@ -285,7 +344,6 @@ class DBEngine:
         try:
             if self.db_type == "sqlite":
                 import aiosqlite
-                # استخرج المسار
                 path = self.url.replace("sqlite:///", "").replace("sqlite://", "")
                 if not path:
                     path = SQLITE_PATH
@@ -491,7 +549,7 @@ class DBEngine:
 
 
 # =====================================================================
-# فحوصات (تُطبَّق على أي engine)
+# فحوصات
 # =====================================================================
 
 async def diagnose_engine(db: DBEngine) -> Dict[str, Any]:
@@ -556,9 +614,15 @@ async def diagnose_engine(db: DBEngine) -> Dict[str, Any]:
                 "GROUP BY delete_penalty, pg_typeof(delete_penalty)"
             )
         else:  # mysql
+            # 🟡 FIX-5: كشف النوع الحقيقي عبر JSON_TYPE/LENGTH
             rows = await db.fetchall(
                 "SELECT delete_penalty AS v, "
-                "COUNT(*) AS c "
+                "COUNT(*) AS c, "
+                "CASE "
+                "  WHEN MIN(delete_penalty) REGEXP '^[0-9]+$' THEN 'int-like' "
+                "  WHEN MIN(delete_penalty) IS NULL THEN 'null' "
+                "  ELSE 'string' "
+                "END AS t "
                 "FROM group_security GROUP BY delete_penalty"
             )
         result["delete_penalty_values"] = rows
@@ -625,9 +689,9 @@ async def diagnose_engine(db: DBEngine) -> Dict[str, Any]:
             expected = m.group(1) if m else ""
             actual_col = next(c for c in cols if c["name"] == col_name)
             actual = str(actual_col["type"]).upper()
-            # تطابق مرن
             eq = {
-                "INTEGER": ("INT", "INTEGER", "BIGINT", "SMALLINT", "TINYINT", "SERIAL"),
+                "INTEGER": ("INT", "INTEGER", "BIGINT", "SMALLINT",
+                            "TINYINT", "SERIAL"),
                 "INT": ("INT", "INTEGER", "BIGINT"),
                 "TEXT": ("TEXT", "VARCHAR", "CHAR", "CLOB", "STRING"),
                 "REAL": ("REAL", "FLOAT", "DOUBLE", "NUMERIC", "DECIMAL"),
@@ -650,14 +714,20 @@ async def diagnose_engine(db: DBEngine) -> Dict[str, Any]:
     ]
 
     # ── settings ──
+    # 🔴 FIX-3: backticks لـ MySQL (key كلمة محجوزة)
     try:
-        rows = await db.fetchall(
-            "SELECT key, value FROM settings ORDER BY key"
-        )
+        if db.db_type == "mysql":
+            sql = "SELECT `key`, `value` FROM settings ORDER BY `key`"
+        else:
+            sql = "SELECT key, value FROM settings ORDER BY key"
+        rows = await db.fetchall(sql)
         result["settings_count"] = len(rows)
-        result["settings_keys"] = [r["key"] for r in rows]
-    except Exception:
-        pass
+        result["settings_keys"] = [
+            r.get("key") or r.get("KEY") for r in rows if r
+        ]
+        result["settings_keys"] = [k for k in result["settings_keys"] if k]
+    except Exception as e:
+        result["settings_error"] = str(e)[:80]
 
     return result
 
@@ -723,19 +793,21 @@ async def print_engine_report(db: DBEngine, res: Dict[str, Any], index: int):
     kv("عدد الأعمدة", len(res["group_security_columns"]))
     if res["group_security_missing_cols"]:
         err(f"مفقود ({len(res['group_security_missing_cols'])}): "
-            f"{', '.join(res['group_security_missing_cols'])}")
+            f"{', '.join(res['group_security_missing_cols'][:10])}")
+        if len(res["group_security_missing_cols"]) > 10:
+            info(f"... و{len(res['group_security_missing_cols']) - 10} أكثر")
     else:
         ok("كل الأعمدة المتوقعة موجودة")
 
     if res["group_security_extra_cols"]:
-        info(f"إضافي: {', '.join(res['group_security_extra_cols'])}")
+        info(f"إضافي: {', '.join(res['group_security_extra_cols'][:8])}")
 
     # ─── 4. تناسق migrations ───
     header("4. تناسق migrations")
     kv("أعمدة مفقودة", res["migrations_missing"])
     kv("تناقضات النوع", res["migrations_mismatch"])
     if res["migrations_missing"] == 0 and res["migrations_mismatch"] == 0:
-        ok("متسق تماماً")
+        ok("متسق تماماً مع v7.9.5")
     else:
         warn("هناك تناقضات — راجع أعلاه")
 
@@ -752,15 +824,18 @@ async def print_engine_report(db: DBEngine, res: Dict[str, Any], index: int):
     # ─── 6. settings ───
     header("6. settings")
     kv("عدد الإعدادات", res["settings_count"])
-    keys_expected = [
-        "tables_hash", "bootstrap_hash", "banned_words_hash",
-        "auto_replies_hash", "publish_interval",
-    ]
-    for k in keys_expected:
-        if k in res["settings_keys"]:
-            ok(f"{k} موجود")
-        else:
-            warn(f"{k} مفقود")
+    if res.get("settings_error"):
+        err(f"فشل الاستعلام: {res['settings_error']}")
+    else:
+        keys_expected = [
+            "tables_hash", "bootstrap_hash", "banned_words_hash",
+            "auto_replies_hash", "publish_interval",
+        ]
+        for k in keys_expected:
+            if k in res["settings_keys"]:
+                ok(f"{k} موجود")
+            else:
+                warn(f"{k} مفقود")
 
 
 # =====================================================================
@@ -770,7 +845,6 @@ async def print_engine_report(db: DBEngine, res: Dict[str, Any], index: int):
 def print_comparison(all_results: List[Tuple[str, Dict[str, Any]]]):
     main_header("📊 المقارنة الجانبية بين الأنظمة")
 
-    # عناوين الأعمدة
     systems = [name for name, _ in all_results]
     col_w = 22
     header_row = f"{'المعيار':<32}" + "".join(
@@ -832,7 +906,7 @@ def print_comparison(all_results: List[Tuple[str, Dict[str, Any]]]):
 
     # ─── الحكم النهائي ───
     print(f"\n{C.BOLD}{'─' * 72}{C.END}")
-    print(f"{C.BOLD}🎯 التوصية النهائية للترقية إلى v7.7.33:{C.END}\n")
+    print(f"{C.BOLD}🎯 التوصية النهائية (v7.9.5):{C.END}\n")
 
     for name, r in all_results:
         if not r["connected"]:
@@ -861,6 +935,9 @@ async def main():
     print("║" + " " * 20 +
           f"التاريخ: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}" +
           " " * 18 + "║")
+    print("║" + " " * 20 +
+          "النسخة: v2.0.0 (ALIGN-WITH-V7.9.5)" +
+          " " * 16 + "║")
     print("╚" + "═" * 70 + "╝")
     print(C.END)
 
@@ -929,7 +1006,6 @@ async def main():
                 continue
             print(f"  {C.GREEN}✓ {name}: متصل{C.END}")
 
-            # أهم نقطة: delete_penalty
             v = r["delete_penalty_verdict"]
             if v.startswith("✅"):
                 print(f"      {C.GREEN}→ delete_penalty: {v}{C.END}")
