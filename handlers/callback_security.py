@@ -1,23 +1,39 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-callback_security.py - معالج أزرار الأمان (v9.7.24-STABLE)
+callback_security.py - معالج أزرار الأمان (v9.7.25-FIX-C3)
 =====================================================================
+🎯 v9.7.25-FIX-C3:
+    🔴 إضافة 'none' إلى أنواع العقوبات الصالحة في
+       _get_valid_penalty_types().
+       السبب: تُستخدم للتحقق من قيم الإعدادات (antiflood_penalty,
+       night_mode_action, violation_penalty, delete_penalty, ...)
+       حيث 'none' خيار مقصود (= تعطيل العقوبة).
+       DB.VALID_PENALTY_TYPES مُعرّفة لأغراض apply_penalty ولا
+       تحتوي 'none' — لذا نضيفها صراحةً.
+       الأثر: تفعيل زر "بدون عقوبة" في 7 مسارات:
+           • sec_set_antiflood_penalty:*:none
+           • sec_set_night_action:*:none
+           • sec_set_violation_penalty:*:none
+           • sec_set_del_penalty:none:*
+           • sec_penalty_none:*
+           • pen_none:*
+           • deactivate_all (prefix callback — لا علاقة)
+
 🎯 v9.7.24-STABLE: النسخة الموصى بها للإنتاج
     مبنية على v9.7.22-FULL-FIX (المستقرة والمُجرَّبة) +
     4 تحسينات منخفضة المخاطر من v9.7.23 مع إصلاح مخاطرها:
 
-    🟢 IMPROVE-1: helper _extract_chat_id (مع سلوك آمن عند البيانات الخاطئة).
-    🟢 IMPROVE-2: helper _invalid_data (رسائل خطأ موحّدة).
+    🟢 IMPROVE-1: helper _extract_chat_id.
+    🟢 IMPROVE-2: helper _invalid_data.
     🟢 IMPROVE-3: _check_sec_auth يميّز أخطاء الشبكة عن البرمجية.
-    🟢 IMPROVE-4: _metrics_inc يسجّل تحذيراً مرة واحدة بدل pass الصامت.
+    🟢 IMPROVE-4: _metrics_inc يسجّل تحذيراً مرة واحدة بدل pass.
 
     🆕 v9.7.24-LOAD-DIAGNOSTIC:
-    🟢 إضافة _log_module_load() لعرض معلومات التحميل في stderr مباشرة
-       (يعمل بغض النظر عن إعدادات logging في المشروع).
+    🟢 إضافة _log_module_load() لعرض معلومات التحميل في stderr.
 
     ⚠️ ملاحظات:
-    - لم يتم تقسيم _handle_parameterized_inner (يبقى كما هو).
+    - لم يتم تقسيم _handle_parameterized_inner.
     - لم يتم تمرير None بدل update في أي مكان.
     - لا يوجد كود ميت (dead code).
     - parts[-1] لم يُستخدم (يبقى parts[1] كما في الأصل).
@@ -197,11 +213,19 @@ _DURATION_COL_MAP: Dict[str, str] = {
 
 
 def _get_valid_penalty_types() -> FrozenSet[str]:
-    """v9.7.22: إرجاع أنواع العقوبات الصالحة من DB أو fallback."""
+    """
+    v9.7.25-FIX-C3: يُرجع قيم الإعدادات الصالحة (تشمل 'none').
+
+    السبب: تُستخدم هذه الدالة في callback_security للتحقق من قيم
+    الإعدادات (antiflood_penalty, night_mode_action, ...) حيث 'none'
+    خيار مقصود (= تعطيل العقوبة).
+    DB.VALID_PENALTY_TYPES مُعرّفة لأغراض apply_penalty ولا تحتوي
+    'none' — لذا نضيفها هنا صراحةً.
+    """
     try:
         vt = DB.VALID_PENALTY_TYPES
         if vt:
-            return frozenset(vt)
+            return frozenset(vt) | {'none'}    # ← FIX-C3
     except Exception as e:
         logger.debug(f"_get_valid_penalty_types DB access failed: {e}")
     return _FALLBACK_PENALTY_TYPES
@@ -394,15 +418,11 @@ async def _check_sec_auth(context, user_id, chat_id):
             _prune_sec_auth_cache(now)
 
         # v9.7.24 IMPROVE-3: تمييز أخطاء الشبكة عن الأخطاء البرمجية.
-        # ملاحظة: نستخدم (TimedOut, NetworkError) فقط لتجنّب مشاكل
-        # التوافق مع إصدارات Python/ptb المختلفة، ثم نُعالج TimeoutError
-        # ضمن Exception العام مع تسجيله بشكل خاص.
         try:
             result = await is_authorized_in_group(
                 context.bot, chat_id, user_id
             )
         except (TimedOut, NetworkError) as e:
-            # خطأ شبكة مؤقت → backoff أُسّي.
             logger.warning(f"auth network error for {key}: {e}")
             prev = _sec_auth_neg_cache.get(key)
             fails = 0
@@ -418,7 +438,6 @@ async def _check_sec_auth(context, user_id, chat_id):
             _metrics_inc('auth_api_failures')
             return False
         except asyncio.TimeoutError as e:
-            # timeout من asyncio (يُعالج منفصلاً لتوضيح السبب).
             logger.warning(f"auth asyncio timeout for {key}: {e}")
             prev = _sec_auth_neg_cache.get(key)
             fails = 0
@@ -434,7 +453,6 @@ async def _check_sec_auth(context, user_id, chat_id):
             _metrics_inc('auth_api_failures')
             return False
         except Exception as e:
-            # خطأ برمجي حقيقي → نسجّله بالكامل (لا backoff لأن السبب ليس الشبكة).
             logger.error(f"auth unexpected error for {key}: {e}",
                           exc_info=True)
             _metrics_inc('auth_api_errors')
@@ -507,7 +525,6 @@ def _extract_chat_id(data: str, context=None) -> Optional[int]:
         p = parts[1].strip()
         if p.lstrip('-').isdigit():
             return int(p)
-        # parts[1] موجود لكن ليس رقماً → بيانات خاطئة، نرفض.
         return None
     except Exception as e:
         logger.debug(f"_extract_chat_id parse: {e}")
@@ -1631,7 +1648,6 @@ class SecurityCallbacks:
 
         # ─── act_ban / act_mute / act_warn / act_kick / act_restrict /
         #     act_unban / act_pin ───────────────────────────────────
-        # v9.7.22: استخدام _ACT_USER_ACTIONS بدل البناء داخل الدالة
         for act_prefix, (state, prompt_key, prompt_default) in \
                 _ACT_USER_ACTIONS.items():
             if data.startswith(act_prefix + ":"):
@@ -1790,7 +1806,6 @@ class SecurityCallbacks:
             if not await _require_sec_auth(query, context, user_id,
                                             chat_id, lang):
                 return True
-            # v9.7.22 FIX: التحقق من نطاق المدة الزمنية (كان مفقوداً)
             if duration < 0 or duration > _MAX_DURATION_SECONDS:
                 await _safe_edit(query,
                     await _trans('invalid_number', lang, "❌"),
@@ -2273,7 +2288,7 @@ def _log_module_load():
         info = (
             "\n"
             "╔═══════════════════════════════════════════════════════════╗\n"
-            "║  🔐 callback_security.py — v9.7.24-STABLE                 ║\n"
+            "║  🔐 callback_security.py — v9.7.25-FIX-C3                 ║\n"
             "╠═══════════════════════════════════════════════════════════╣\n"
             f"║  📁 المسار: {__file__[-55:]:<55} ║\n"
             f"║  🔧 handlers_callback: {hc_status:<45} ║\n"
@@ -2282,7 +2297,7 @@ def _log_module_load():
             f"║  📊 ثوابت: TOGGLE_MAP={toggle_map_ok} | "
             f"PENALTIES={penalty_count} | ACTIONS={len(_ACT_USER_ACTIONS)}"
             f"{'':<17} ║\n"
-            "║  ✅ كل الأنظمة جاهزة                                      ║\n"
+            "║  ✅ كل الأنظمة جاهزة (+ 'none' في valid_types)            ║\n"
             "╚═══════════════════════════════════════════════════════════╝\n"
         )
         _sys.stderr.write(info)
@@ -2292,7 +2307,7 @@ def _log_module_load():
         try:
             import sys as _sys2
             _sys2.stderr.write(
-                f"🔐 callback_security.py v9.7.24-STABLE loaded "
+                f"🔐 callback_security.py v9.7.25-FIX-C3 loaded "
                 f"(diagnostic failed: {_e})\n"
             )
             _sys2.stderr.flush()
@@ -2303,4 +2318,4 @@ def _log_module_load():
 _log_module_load()
 
 # احتياطي: عبر logger (قد لا يظهر حسب إعدادات المشروع)
-logger.info("🔐 callback_security.py loaded (v9.7.24-STABLE)")
+logger.info("🔐 callback_security.py loaded (v9.7.25-FIX-C3)")
