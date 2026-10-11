@@ -4,6 +4,18 @@
 """
 database_channels_posts.py - دوال القنوات والمنشورات (Mixin)
 ================================================================================
+🆕 v7.5.29 (FIX-J1):
+    🔴 FIX-J1: get_channel_by_id — تصحيح العمود المستعلَم عنه.
+       كان يستعلم عن channel_id (تليجرام) بدل id (الداخلي).
+       المستدعون (handlers_channels_list._render_channel_info,
+       channel_delete_confirm_callback) يمرّرون ch_db_id (id
+       الداخلي) → الاستعلام كان يفشل دائماً.
+       الإصلاح:
+         • تغيير اسم المعامل من channel_id إلى channel_db_id.
+         • تصحيح العمود في WHERE إلى id.
+         • إضافة فلتر removed_at IS NULL (يحترم soft-delete).
+         • استخدام _has_removed_at_column() للتوافق مع DB قديمة.
+
 🆕 v7.5.28 (REVIEW-FIXES-2026):
     🔴 FIX-NEW-1: إضافة `add_post` (مفرد) — كانت مفقودة، وهذا سبب فشل
        حفظ منشور واحد من حالة ADDING_POSTS.
@@ -669,15 +681,29 @@ class ChannelsPostsMixin:
         )
 
     async def get_channel_by_id(
-        self, user_id: int, channel_id: int
+        self, user_id: int, channel_db_id: int
     ) -> Optional[Dict]:
         """
-        ✅ v7.5.25 FIX-7: alias فعلي لـ get_channel_by_user.
+        🔴 FIX-J1 (v7.5.29): جلب القناة عبر id الداخلي (user_channels.id).
+
+        السبب: هذه الدالة كانت نسخة عمياء من get_channel_by_user،
+        تستعلم عن channel_id (تليجرام) بدل id (الداخلي).
+        المستدعون (مثل handlers_channels_list._render_channel_info)
+        يمرّرون ch_db_id (id الداخلي) → الاستعلام يفشل دائماً.
+
+        ⚠️ للاستعلام عن Telegram channel_id استخدم
+        get_channel_by_user.
         """
+        if await self._has_removed_at_column():
+            return await self.fetchone(
+                "SELECT * FROM user_channels "
+                "WHERE id = ? AND user_id = ? AND removed_at IS NULL",
+                (channel_db_id, user_id),
+            )
         return await self.fetchone(
             "SELECT * FROM user_channels "
-            "WHERE user_id = ? AND channel_id = ?",
-            (user_id, channel_id),
+            "WHERE id = ? AND user_id = ?",
+            (channel_db_id, user_id),
         )
 
     async def delete_channel(
