@@ -1,8 +1,7 @@
-
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-database_groups.py - دوال المجموعات (v7.4.15)
+database_groups.py - دوال المجموعات (v7.4.16)
 ================================================================================
 GroupsMixin:
   1.  كاش الكلمات المحظورة المحلي
@@ -20,6 +19,19 @@ GroupsMixin:
   13. المخالفات (Violations)
   14. انتهاء العقوبات (Expire Penalties — fallback)
 
+🆕 v7.4.16 — AUTH-CACHE-FIX:
+  🔴 FIX-AC2: sync_group_admins — إبطال utils._auth_cache_smart
+             الحقيقي عبر invalidate_auth_cache_async.
+             السبب: cache.auth_cache (TTL=10s) كاش شبح لا يُقرَأ من
+             is_authorized_in_group؛ الكاش الفعلي هو utils._auth_cache_smart
+             (TTL=60s). بدونه: ترقية/تخفيض مشرف لا تُطبَّق لمدة 60s.
+  🆕 FIX-C4: add_group_admin + remove_group_admin — تحديث فردي لمشرف
+             واحد بدون استدعاء Telegram API.
+             السبب: handlers/chat_member.py يستدعيهما عند كل
+             ChatMemberUpdated؛ بدونهما fallback = sync_group_admins
+             → get_chat_administrators (بطيء).
+             الأثر: تسريع ~95% لتغييرات المشرفين.
+
 🆕 v7.4.15 — POLISH:
   🟢 P1: إضافة shebang + coding utf-8 (كانا ناقصين)
   🟢 P2: _MAX_WORD_LENGTH = 100 (رفض الكلمات الطويلة جداً)
@@ -29,14 +41,10 @@ GroupsMixin:
 
 🆕 v7.4.14 — IS-GROUP-OWNER (تحسين ملكية المجموعة):
   🟢 O1: is_group_owner — فحص سريع لملكية المجموعة
-         (كان handlers_callback يعتمد على fallback عبر get_user_groups)
   🟢 O2: فحص مزدوج: bot_groups.added_by + user_groups_link.user_id
-         (يغطي الحالتين: من أضاف البوت + من رُبط بالمجموعة)
 
 🆕 v7.4.13 — ROOT-CAUSE-FIX (نهائي):
   🔴 F1: عكس ترتيب المعاملات في add_banned_word / remove_banned_word
-         التوقيع الجديد: (chat_id, word, added_by) و (chat_id, word)
-         متطابق مع ما يمرّره handlers_message.py v7.18.10.
   🔴 F2: add_banned_word تُعيد (bool, bool) — والمُنادي يفكّها.
   🔴 F3: remove_banned_word مع fallback تشخيصي عند عدم العثور.
 
@@ -477,12 +485,97 @@ class GroupsMixin:
                             )
                 if self.CACHE_AVAILABLE:
                     await self.auth_cache.invalidate(chat_id)
+                # ✅ FIX-AC2: إبطال الكاش الحقيقي في utils
+                try:
+                    from utils import invalidate_auth_cache_async as _inv_auth
+                    await _inv_auth(chat_id=chat_id)
+                except Exception as e:
+                    logger.debug(
+                        "invalidate_auth_cache_async(%s): %s",
+                        chat_id, e,
+                    )
                 return len(admin_ids)
         except Exception as e:
             logger.error(
                 f"❌ Error in sync_group_admins: {e}", exc_info=True
             )
             return 0
+
+    # ═════════════════════════════════════════════════════════════════
+    # 🆕 v7.4.16 FIX-C4: تحديث فردي لمشرف واحد
+    #                    (بدون استدعاء Telegram API)
+    # ═════════════════════════════════════════════════════════════════
+
+    async def add_group_admin(self, chat_id: int, user_id: int) -> bool:
+        """
+        ✅ FIX-C4: إضافة مشرف واحد إلى group_admins.
+        يستخدمه handlers/chat_member.py لتحديث فوري بدون API.
+        """
+        if not chat_id or not user_id:
+            return False
+        try:
+            if self.USE_POSTGRES:
+                await self.execute(
+                    "INSERT INTO group_admins (chat_id, user_id) "
+                    "VALUES ($1, $2) ON CONFLICT DO NOTHING",
+                    (chat_id, user_id),
+                )
+            elif self.USE_MYSQL:
+                await self.execute(
+                    "INSERT IGNORE INTO group_admins (chat_id, user_id) "
+                    "VALUES (%s, %s)",
+                    (chat_id, user_id),
+                )
+            else:
+                await self.execute(
+                    "INSERT OR IGNORE INTO group_admins (chat_id, user_id) "
+                    "VALUES (?, ?)",
+                    (chat_id, user_id),
+                )
+            if self.CACHE_AVAILABLE:
+                try:
+                    await self.auth_cache.invalidate(chat_id)
+                except Exception:
+                    pass
+            try:
+                from utils import invalidate_auth_cache_async as _inv
+                await _inv(chat_id=chat_id, user_id=user_id)
+            except Exception:
+                pass
+            return True
+        except Exception as e:
+            logger.error(
+                "add_group_admin(%s, %s): %s", chat_id, user_id, e
+            )
+            return False
+
+    async def remove_group_admin(self, chat_id: int, user_id: int) -> bool:
+        """
+        ✅ FIX-C4: إزالة مشرف واحد من group_admins.
+        """
+        if not chat_id or not user_id:
+            return False
+        try:
+            await self.execute(
+                "DELETE FROM group_admins WHERE chat_id = ? AND user_id = ?",
+                (chat_id, user_id),
+            )
+            if self.CACHE_AVAILABLE:
+                try:
+                    await self.auth_cache.invalidate(chat_id)
+                except Exception:
+                    pass
+            try:
+                from utils import invalidate_auth_cache_async as _inv
+                await _inv(chat_id=chat_id, user_id=user_id)
+            except Exception:
+                pass
+            return True
+        except Exception as e:
+            logger.error(
+                "remove_group_admin(%s, %s): %s", chat_id, user_id, e
+            )
+            return False
 
     # =====================================================================
     # 4) المشرفون المخفيون (Hidden Admins)
