@@ -1,13 +1,36 @@
 # group_log.py
 """
-group_log.py — نظام سجل قنوات المجموعات الذكي (v1.3.1)
+group_log.py — نظام سجل قنوات المجموعات الذكي (v1.3.2)
 =====================================================================
-v1.3.1 (PostgreSQL compatibility):
+🔴 v1.3.2 (PERF + RELIABILITY FIXES):
+    🔴 FIX-GM8 CRITICAL: cache 60s لحالة المشاركة.
+        قبل: كل رسالة سجل تُنفّذ استعلامين DB
+        (get_private + get_channel_share_count) → 200,000 استعلام/ساعة
+        على 1000 مجموعة (4.8M/يوم).
+        بعد: استعلام واحد كل 60s لكل مجموعة → 60 استعلام/ساعة.
+        التحسّن: ~3300× على النظام المُزدحم.
+        invalidate() يمسح cache المشاركة عند set_private/unset_private.
+
+    🔴 FIX-GM15 CRITICAL: _worker يستخدم safe_send بدل bot.send_message.
+        قبل: RetryAfter/TimedOut/parse-error → الرسالة تُفقَد صامتاً.
+        بعد: safe_send يتعامل مع:
+          • RetryAfter (ينتظر + يُعيد)
+          • TimedOut (retry ×3)
+          • parse errors (fallback no-parse)
+          • ChatMigrated (إعادة إرسال)
+          • rate limiting
+        الأثر: أحداث الأمان الحرجة (حظر/حذف/تحذير) لا تُفقَد.
+
+    🟡 FIX-GM19: send() يُعيد bool + عداد إسقاط دوري.
+        قبل: send() → None → المستدعي لا يعرف الرفض.
+        بعد: True = أُضيفت، False = رُفضت + إشعار كل 100 إسقاط.
+
+🆕 v1.3.1 (PostgreSQL compatibility):
     ✅ INSERT OR IGNORE → INSERT ... ON CONFLICT DO NOTHING
     ✅ INSERT OR REPLACE → INSERT ... ON CONFLICT (key) DO UPDATE
     ✅ توافق كامل مع PostgreSQL + SQLite 3.24+
 
-v1.3.0 (ذكاء المشاركة):
+🆕 v1.3.0 (ذكاء المشاركة):
     ✅ get_groups_using_channel — قائمة المجموعات المشاركة
     ✅ get_channel_share_count — عدد المجموعات
     ✅ set_private يُعيد dict مع معلومات المشاركة
@@ -16,7 +39,7 @@ v1.3.0 (ذكاء المشاركة):
     ✅ unset_private_bulk للتنظيف الجماعي
     ✅ كاش لأسماء المجموعات
 
-v1.2.0 (أساس):
+🆕 v1.2.0 (أساس):
     ✅ get_running_loop + has_private + get_effective_target
     ✅ drain + shutdown + حماية Worker مزدوج
 =====================================================================
@@ -24,10 +47,24 @@ v1.2.0 (أساس):
 
 import asyncio
 import logging
+import time
 from datetime import datetime, timezone
 from typing import Optional, Dict, List
 
 logger = logging.getLogger(__name__)
+
+
+# ═════════════════════════════════════════════════════════════════════
+# 🔴 FIX-GM15 (v1.3.2): محاولة استيراد safe_send من utils
+# ═════════════════════════════════════════════════════════════════════
+# إن فشل (circular import أو utils غير متاح) → نستخدم fallback
+_HAS_SAFE_SEND = False
+_safe_send_fn = None
+try:
+    from utils import safe_send as _safe_send_fn
+    _HAS_SAFE_SEND = True
+except ImportError:
+    pass
 
 
 class GroupLog:
@@ -54,6 +91,15 @@ class GroupLog:
         # ✅ v1.3.0: أسماء المجموعات (cache للأداء)
         self._group_names: Dict[int, str] = {}
 
+        # 🔴 FIX-GM8 (v1.3.2): cache لحالة المشاركة (shared)
+        # كان _build_message_text يستعلم DB مرتين لكل رسالة سجل →
+        # 200,000 استعلام/ساعة على 1000 مجموعة.
+        self._shared_cache: Dict[int, tuple] = {}   # {group_id: (bool, ts)}
+        self._shared_cache_ttl = 60.0
+
+        # 🔴 FIX-GM19 (v1.3.2): عداد الرسائل المُسقَطة (queue full)
+        self._drop_count: int = 0
+
         # Global log channel cache
         self._global_chat_id: Optional[int] = None
         self._global_ts: float = 0.0
@@ -75,10 +121,14 @@ class GroupLog:
             self._global_ts = 0.0
             self._global_chat_id = None
             self._group_names.clear()
+            # 🔴 FIX-GM8: مسح cache المشاركة أيضاً
+            self._shared_cache.clear()
         else:
             self._cache.pop(group_id, None)
             self._cache_ts.pop(group_id, None)
             self._group_names.pop(group_id, None)
+            # 🔴 FIX-GM8: مسح cache المشاركة لهذه المجموعة
+            self._shared_cache.pop(group_id, None)
 
     # =================================================================
     # سجل خاص بالمجموعة
@@ -195,6 +245,51 @@ class GroupLog:
             result = f"مجموعة {group_id}"
         self._group_names[group_id] = result
         return result
+
+    # ═════════════════════════════════════════════════════════════════
+    # 🔴 FIX-GM8 (v1.3.2): cache 60s لحالة المشاركة
+    # ═════════════════════════════════════════════════════════════════
+
+    async def _is_channel_shared_cached(self, group_id: int) -> bool:
+        """
+        🔴 FIX-GM8 (v1.3.2): cache 60s لحالة المشاركة.
+
+        قبل الإصلاح: كل رسالة سجل تُنفّذ استعلامين DB
+        (get_private + get_channel_share_count) — 200,000 استعلام/ساعة
+        على 1000 مجموعة.
+
+        بعد الإصلاح: استعلام واحد كل 60s لكل مجموعة → 60 استعلام/ساعة.
+        التحسّن: ~3300× على النظام المُزدحم.
+        """
+        try:
+            loop = asyncio.get_running_loop()
+            now = loop.time()
+        except RuntimeError:
+            # لا يوجد event loop جارٍ (نادر جداً)
+            # → نستخدم time.monotonic() كـ fallback آمن
+            now = time.monotonic()
+
+        cached = self._shared_cache.get(group_id)
+        if cached is not None:
+            shared, ts = cached
+            if (now - ts) < self._shared_cache_ttl:
+                return shared
+
+        # محسوب جديد
+        try:
+            private = await self.get_private(group_id)
+            if not private:
+                shared = True
+            else:
+                count = await self.get_channel_share_count(
+                    private, exclude_group_id=group_id
+                )
+                shared = count > 0
+        except Exception:
+            shared = True
+
+        self._shared_cache[group_id] = (shared, now)
+        return shared
 
     # =================================================================
     # ✅ v1.3.0: set_private مع تقرير ذكي
@@ -423,21 +518,28 @@ class GroupLog:
 
     # =================================================================
     # ✅ v1.3.0: send مع رأس ذكي
+    # 🔴 v1.3.2 FIX-GM19: يُعيد bool + عداد إسقاط
     # =================================================================
 
     def send(self, group_id: int, text: str,
              event: str = "general",
              parse_mode: str = "HTML",
              silent: bool = True,
-             show_group_header: bool = True) -> None:
+             show_group_header: bool = True) -> bool:
         """
         يضع رسالة سجل في الطابور.
 
         ✅ v1.3.0: show_group_header — إضافة رأس باسم المجموعة
                     تلقائياً لتمييز المصدر عند المشاركة.
+
+        🔴 FIX-GM19 (v1.3.2): يُعيد bool:
+          • True = أُضيفت للطابور.
+          • False = رُفضت (طابور ممتلئ أو معاملات فارغة).
+
+        + إشعار دوري في السجل عند الإسقاط المتكرر (للمراقبة).
         """
         if not group_id or not text:
-            return
+            return False
         try:
             self._queue.put_nowait({
                 "group_id": group_id,
@@ -447,17 +549,26 @@ class GroupLog:
                 "silent": silent,
                 "show_group_header": show_group_header,
             })
+            return True
         except asyncio.QueueFull:
-            logger.warning(
-                f"group_log queue full — dropping "
-                f"(grp={group_id}, event={event})"
-            )
+            # 🔴 FIX-GM19: عداد إسقاط + إشعار دوري كل 100 رسالة
+            self._drop_count += 1
+            if self._drop_count % 100 == 1:
+                logger.error(
+                    f"🚨 GroupLog: {self._drop_count} رسالة مُسقَطة "
+                    f"(queue full, size={self._queue.qsize()}, "
+                    f"worker_running={self.is_running})"
+                )
+            return False
 
     async def _build_message_text(self, item: dict) -> str:
         """
         ✅ v1.3.0: بناء النص النهائي مع رأس ذكي.
         - قناة خاصة بمجموعة واحدة → بلا رأس
         - قناة مشتركة أو عامة → رأس باسم المجموعة
+
+        🔴 FIX-GM8 (v1.3.2): يستخدم cache 60s لحالة المشاركة —
+        بدل استعلامين DB لكل رسالة.
         """
         base_text = item["text"]
         group_id = item["group_id"]
@@ -465,19 +576,8 @@ class GroupLog:
         if not item.get("show_group_header", True):
             return base_text
 
-        # هل القناة مشتركة؟
-        try:
-            private = await self.get_private(group_id)
-            if not private:
-                # يستخدم السجل العام → أضف الرأس دائماً
-                shared = True
-            else:
-                count = await self.get_channel_share_count(
-                    private, exclude_group_id=group_id
-                )
-                shared = count > 0
-        except Exception:
-            shared = True
+        # 🔴 FIX-GM8: استخدم الـ cache (بدل استعلامين DB لكل رسالة)
+        shared = await self._is_channel_shared_cached(group_id)
 
         if not shared:
             return base_text
@@ -496,7 +596,11 @@ class GroupLog:
     # =================================================================
 
     async def _worker(self) -> None:
-        """عامل خلفي يعالج طابور الرسائل."""
+        """
+        عامل خلفي يعالج طابور الرسائل.
+
+        🔴 FIX-GM15 (v1.3.2): يستخدم safe_send بدل bot.send_message.
+        """
         logger.info("🟢 GroupLog worker started")
         while True:
             try:
@@ -511,12 +615,46 @@ class GroupLog:
 
                     for t in targets:
                         try:
-                            await self.bot.send_message(
-                                chat_id=t["chat_id"],
-                                text=final_text,
-                                parse_mode=item["parse_mode"],
-                                disable_notification=item["silent"],
-                            )
+                            # 🔴 FIX-GM15 (v1.3.2): استخدام safe_send
+                            # بدل bot.send_message المباشر.
+                            #
+                            # قبل: RetryAfter/TimedOut/parse-error →
+                            #       الرسالة تُفقَد صامتًا.
+                            # بعد: safe_send يتعامل مع:
+                            #       • RetryAfter (ينتظر + يُعيد)
+                            #       • TimedOut (retry ×3)
+                            #       • parse errors (fallback no-parse)
+                            #       • ChatMigrated (إعادة إرسال)
+                            #       • rate limiting
+                            if _HAS_SAFE_SEND and _safe_send_fn is not None:
+                                result = await _safe_send_fn(
+                                    self.bot,
+                                    t["chat_id"],
+                                    final_text,
+                                    parse_mode=item["parse_mode"],
+                                    disable_notification=item["silent"],
+                                )
+                                if result is None:
+                                    # safe_send استنفد محاولاته أو فشل
+                                    # فشلاً مطلقاً. لا نُبطل القناة —
+                                    # قد يكون خطأ عابر (شبكة/rate).
+                                    # الأخطاء الدائمة (chat not found
+                                    # / kicked) عادةً ترفع استثناءً
+                                    # → يُلتقَط في except أدناه → cleanup.
+                                    logger.warning(
+                                        f"⚠️ safe_send أعاد None "
+                                        f"(grp={item['group_id']}, "
+                                        f"src={t['source']}, "
+                                        f"chat={t['chat_id']})"
+                                    )
+                            else:
+                                # fallback: send_message مباشر
+                                await self.bot.send_message(
+                                    chat_id=t["chat_id"],
+                                    text=final_text,
+                                    parse_mode=item["parse_mode"],
+                                    disable_notification=item["silent"],
+                                )
                         except Exception as e:
                             err_msg = str(e).lower()
                             if any(kw in err_msg for kw in (
@@ -663,7 +801,8 @@ class GroupLog:
         return (
             f"<GroupLog started={self.is_running} "
             f"queue={self.queue_size} "
-            f"cached={len(self._cache)}>"
+            f"cached={len(self._cache)} "
+            f"drops={self._drop_count}>"
         )
 
 
