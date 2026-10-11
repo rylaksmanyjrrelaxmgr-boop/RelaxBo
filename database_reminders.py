@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 """
-database_reminders.py - دوال التذكيرات (Mixin) — v1.2
+database_reminders.py - دوال التذكيرات (Mixin) — v1.3
 ================================================================================
 Mixin يُضاف إلى فئة Database في database.py
 
@@ -21,6 +21,14 @@ Mixin يُضاف إلى فئة Database في database.py
   - self.connection, self.transaction
   - self._fetchval_with_conn, self._fetchone_with_conn, self._fetchall_with_conn
   - self._execute_with_conn, self._executemany_with_conn
+
+🆕 v1.3 (FIX-U26-doc + 2 optional quality):
+  🟢 FIX-U26-doc: docstring migrate_reminders_columns — يُشير صراحةً
+                  للاستدعاء من bot.py (تم فعلياً في الملف 4).
+  🟡 FIX-PG-SCHEMA: migrate_reminders_columns — إضافة فلتر
+                    table_schema = current_schema() لمنع false-positive.
+  🟡 FIX-AWAITABLE: _invalidate_user_reminder_cache — حماية isawaitable
+                    ضد sync invalidate_user_cache (توافق مع إصدارات).
 
 🆕 v1.2 (تحسينات جودة — لا تغيير سلوك):
   ✅ _invalidate_user_reminder_cache يستخدم cache.invalidate_user_cache
@@ -49,6 +57,7 @@ Mixin يُضاف إلى فئة Database في database.py
 """
 
 import logging
+import inspect as _inspect_mod
 from datetime import datetime, timezone, timedelta
 from typing import Dict, List, Optional, Any, Callable, Awaitable
 
@@ -154,7 +163,7 @@ class RemindersMixin:
     async def _invalidate_user_reminder_cache(self, user_id: int):
         """
         ✅ v1.2: إبطال كل الكاشات المتعلقة بالمستخدم.
-        يحاول استخدام cache.invalidate_user_cache أولاً (Async).
+        🟡 FIX-AWAITABLE (v1.3): حماية isawaitable ضد sync invalidate.
         """
         # 1) الكاش الداخلي
         try:
@@ -165,11 +174,16 @@ class RemindersMixin:
         except Exception as e:
             logger.debug(f"internal_cache invalidation: {e}")
 
-        # 2) cache.py (Async)
+        # 2) cache.py
+        # 🟡 FIX-AWAITABLE (v1.3): فحص isawaitable قبل await.
         try:
             from cache import invalidate_user_cache
-            await invalidate_user_cache(user_id)
-        except (ImportError, Exception) as e:
+            result = invalidate_user_cache(user_id)
+            if _inspect_mod.isawaitable(result):
+                await result
+        except ImportError:
+            pass
+        except Exception as e:
             logger.debug(f"cache.invalidate_user_cache: {e}")
 
     # =================================================================
@@ -913,6 +927,16 @@ class RemindersMixin:
 
         ملاحظة: database.py._migrate_schema يُضيف نفس الأعمدة.
         هذه الدالة هي **طبقة حماية إضافية**.
+
+        🔴 FIX-U26-doc (v1.3): تُستدعى من bot.py::main() بعد
+        pre_initialize(). السبب: على قواعد البيانات القديمة (v1.1-)
+        لا توجد أعمدة last_daily_sent / last_weekly_sent /
+        last_subscription_sent. بدون استدعائها،
+        get_users_for_daily_reminder يفشل بـ "no such column" →
+        التذكيرات معطّلة.
+
+        ⚠️ إذا حذفت الاستدعاء من bot.py، ستفشل التذكيرات على
+        الترقيات. راجع bot.py (FIX-U26).
         """
         # الأعمدة التي يجب أن تكون موجودة
         required_columns = [
@@ -931,10 +955,13 @@ class RemindersMixin:
                 for col_name, col_type in required_columns:
                     try:
                         if self._is_postgres_reminders():
+                            # 🟡 FIX-PG-SCHEMA (v1.3): فلتر table_schema
+                            # لمنع false-positive من schema آخر.
                             exists = await self._fetchval_with_conn(
                                 conn,
                                 "SELECT 1 FROM information_schema.columns "
-                                "WHERE table_name = 'user_reminder_settings' "
+                                "WHERE table_schema = current_schema() "
+                                "AND table_name = 'user_reminder_settings' "
                                 "AND column_name = $1",
                                 col_name,
                             )
