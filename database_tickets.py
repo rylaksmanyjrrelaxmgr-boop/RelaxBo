@@ -1,11 +1,19 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-database_tickets.py - دوال التذاكر (v7.4.2)
+database_tickets.py - دوال التذاكر (v7.4.3)
 ================================================================================
+🆕 v7.4.3 (SUPPORT-MODE-ALIAS):
+  🔴 SUPPORT-ALIAS-1: إضافة create_support_ticket كـ alias لـ create_ticket.
+      السبب: handlers_message.py v7.18.29 (_handle_support_mode_text)
+      يبحث عن create_support_ticket — لم يكن موجوداً → كان يستخدم
+      fallback INSERT مباشر (بدون ترقيم تلقائي).
+  🔴 SUPPORT-ALIAS-2: إضافة add_support_ticket كـ alias بديل.
+  🟢 SUPPORT-ALIAS-3: إنشاء التذكرة الآن يسجّل ticket_number + username
+      بشكل صحيح عبر المسار الرسمي.
+
 🆕 v7.4.2 (إصلاح MySQL):
     ✅ create_ticket: backticks حول `key` و `value` لـ MySQL
-       (كان يفشل على MySQL — كلمات محجوزة)
     ✅ معالجة آمنة لـ next_num (int/None/غائب)
     ✅ parameterized query بدل 'last_ticket_number' كـliteral
 
@@ -20,7 +28,7 @@ database_tickets.py - دوال التذاكر (v7.4.2)
 """
 
 import logging
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -50,12 +58,23 @@ class TicketsMixin:
     async def create_ticket(
         self,
         user_id: int,
-        username: str,
-        content: str,
-        media_type: str = None,
-        media_file_id: str = None,
+        username: str = "",
+        content: str = "",
+        media_type: Optional[str] = None,
+        media_file_id: Optional[str] = None,
+        message: Optional[str] = None,  # 🆕 v7.4.3: alias للتوافق
     ) -> int:
-        """ينشئ تذكرة جديدة بترقيم تلقائي. يُرجع رقم التذكرة أو 0 عند الفشل."""
+        """
+        ينشئ تذكرة جديدة بترقيم تلقائي.
+        يُرجع رقم التذكرة (ticket_number) أو 0 عند الفشل.
+
+        🆕 v7.4.3: يقبل `message` كـ alias لـ `content` للتوافق مع
+        استدعاءات SUPPORT_MODE التي تستخدم `message=...`.
+        """
+        # 🆕 v7.4.3: alias — إذا أُرسل `message` ولم يُرسل `content`
+        if not content and message:
+            content = message
+
         try:
             async with self._lock:
                 async with self.transaction() as conn:
@@ -63,10 +82,11 @@ class TicketsMixin:
                     key_col = self._tq("key")
                     value_col = self._tq("value")
 
-                    # ✅ v7.4.2: parameterized query بدل 'last_ticket_number' literal
+                    # ✅ v7.4.2: parameterized query
                     next_num_str = await self._fetchval_with_conn(
                         conn,
-                        f"SELECT {value_col} FROM settings WHERE {key_col} = ?",
+                        f"SELECT {value_col} FROM settings "
+                        f"WHERE {key_col} = ?",
                         "last_ticket_number",
                         default="0",
                     )
@@ -79,23 +99,92 @@ class TicketsMixin:
                     except (ValueError, TypeError):
                         next_num = 1
 
+                    # تحديث العدّاد
                     await self._execute_with_conn(
                         conn,
-                        f"UPDATE settings SET {value_col} = ? WHERE {key_col} = ?",
+                        f"UPDATE settings SET {value_col} = ? "
+                        f"WHERE {key_col} = ?",
                         str(next_num), "last_ticket_number",
                     )
+
+                    # إدراج التذكرة
                     await self._execute_with_conn(
                         conn,
                         "INSERT INTO support_tickets "
-                        "(user_id, username, message, media_type, media_file_id, ticket_number, created_at) "
-                        "VALUES (?,?,?,?,?,?,?)",
-                        user_id, username, content, media_type, media_file_id,
-                        next_num, self.TimeUtils.utc_now(),
+                        "(user_id, username, message, media_type, "
+                        " media_file_id, ticket_number, status, created_at) "
+                        "VALUES (?,?,?,?,?,?,?,?)",
+                        user_id,
+                        username or "",
+                        content or "",
+                        media_type,
+                        media_file_id,
+                        next_num,
+                        'pending',
+                        self.TimeUtils.utc_now(),
                     )
                 return next_num
         except Exception as e:
-            logger.error(f"❌ Error in create_ticket: {e}", exc_info=True)
+            logger.error(
+                f"❌ Error in create_ticket: {e}", exc_info=True)
             return 0
+
+    # ═════════════════════════════════════════════════════════════════
+    # 🆕 v7.4.3 SUPPORT-ALIAS-1/2: aliases للتوافق مع handlers_message
+    # ═════════════════════════════════════════════════════════════════
+
+    async def create_support_ticket(
+        self,
+        user_id: int,
+        username: str = "",
+        message: str = "",
+        media_type: Optional[str] = None,
+        media_file_id: Optional[str] = None,
+        **kwargs,
+    ) -> int:
+        """
+        🆕 v7.4.3: alias لـ create_ticket للتوافق مع
+        handlers_message.py v7.18.29 (_handle_support_mode_text).
+
+        يقبل:
+          - user_id:     معرّف المستخدم
+          - username:    اسم المستخدم (اختياري)
+          - message:     نص الرسالة
+          - media_type:  نوع الوسائط (photo/video/voice/...)
+          - media_file_id: معرّف الملف
+
+        يُرجع رقم التذكرة أو 0 عند الفشل.
+        """
+        return await self.create_ticket(
+            user_id=user_id,
+            username=username or "",
+            content=message or "",
+            media_type=media_type,
+            media_file_id=media_file_id,
+        )
+
+    async def add_support_ticket(
+        self,
+        user_id: int,
+        username: str = "",
+        message: str = "",
+        media_type: Optional[str] = None,
+        media_file_id: Optional[str] = None,
+        **kwargs,
+    ) -> int:
+        """
+        🆕 v7.4.3 SUPPORT-ALIAS-2: اسم بديل ثانٍ لـ create_ticket.
+
+        بعض الإصدارات القديمة من handlers_message تستخدم
+        add_support_ticket بدلاً من create_support_ticket.
+        """
+        return await self.create_ticket(
+            user_id=user_id,
+            username=username or "",
+            content=message or "",
+            media_type=media_type,
+            media_file_id=media_file_id,
+        )
 
     # =====================================================================
     # 2) جلب كل التذاكر المعلّقة
@@ -132,3 +221,10 @@ class TicketsMixin:
         يُرجع True فقط إذا حُذف صف واحد على الأقل (مطابق للسلوك الأصلي).
         """
         return await self.execute("DELETE FROM support_tickets") > 0
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# التصدير
+# ═══════════════════════════════════════════════════════════════════════
+
+__all__ = ["TicketsMixin"]
