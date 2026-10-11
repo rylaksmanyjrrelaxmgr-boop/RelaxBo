@@ -1,63 +1,48 @@
 # handlers/handlers_group_log.py
 r"""
-handlers_group_log.py — MessageHandler لاستقبال معرّف قناة السجل (v1.6.5)
+handlers_group_log.py — MessageHandler لاستقبال معرّف قناة السجل (v1.6.6)
 =====================================================================
+🆕 v1.6.6 (PY312-COMPAT + TELEGRAM.DOG):
+    🔴 F12  asyncio.iscoroutine → inspect.isawaitable
+            (iscoroutine مهجور في Python 3.12+, ويفشل مع بعض الـ awaitables)
+    🟡 F13  دعم telegram.dog في _TME_LINK_RE + _TME_INVITE_RE + _URL_PREFIXES
+            (توافق مع handlers_message_detectors v4.1.0)
+    🟡 F14  getattr(chat_obj, "title"/"username", None) — أمان ضد None
+    🟢 F15  _GROUP_LOG_IMPORT_ERROR = None مبدئياً (منع NameError محتمل)
+    🟢 F16  logger % بدل f-string في بعض المواضع الحساسة
+
 🆕 v1.6.5 (TITLE-FALLBACK + TOTAL-TIMEOUT):
     🟡 G1  Title fallback عند فشل جلب العنوان: "قناة <id>"
-           (كانت رسالة النجاح تظهر بدون عنوان عند فشل get_chat)
-    🟡 G2  _resolve_username_with_retry: total_timeout خارجي
-           (10.5s أسوأ حالة → محدود بـ 12s ضمانًا)
+    🟡 G2  _resolve_username_with_retry: total_timeout خارجي (12s)
     🟡 G3  Get_chat for title: total_timeout=6.0s صريح
-           (منع تراكم مع الحل السابق)
 
 🆕 v1.6.4 (SYNTAX-WARNING-FIX):
     ✅ إضافة r prefix لـdocstring الرئيسي
-       (يحتوي \+ في وصف F4 → كان يسبب SyntaxWarning في Python 3.12)
 
 🆕 v1.6.3 (SECURITY + UX FIXES):
     🔴 F1  رفض الرسائل المُعاد توجيهها من مستخدم صراحةً
-           (كان نصها يُفسَّر كمدخل → يمكن تعيين قناة خاطئة بخطأ)
     🔴 F2  _passes_initial_validation: قبول صريح لصيغ URL
-           (كان _is_valid_channel_ref قد يرفض روابط t.me الصالحة
-            قبل أن يصل المدخل إلى _normalize_channel_input)
-    🟠 F3  حماية context.user_data من None (6 مواضع)
+    🟠 F3  حماية context.user_data من None
     🟠 F4  حذف (?:\+)? المُضلِّل من _TME_LINK_RE
-           (كان يوهم بدعم invites — معالَج أصلاً بـ _TME_INVITE_RE)
     🟠 F5  _resolve_username_with_retry: asyncio.wait_for timeout=5s
-           (كان يعلّق حتى PTB default timeout عند شبكة سيئة)
     🟡 F6  _TG_USERNAME_RE: {4,31} بدل {3,31}
-           (Telegram يتطلب 5 أحرف — لكن نقبل 4 للبوتات القديمة)
-    🟡 F7  title من username يُضاف @ (تناسق بصري)
+    🟡 F7  title من username يُضاف @
     🟡 F8  _extract_forward_channel: log عند origin غير معروف
-           (كان يُعاد (None, "") بصمت — يفيد عند ترقية PTB)
-    ⚪ F9  حذف prefix "v1.6.2:" من رسائل السجل (ضجيج)
+    ⚪ F9  حذف prefix "v1.6.2:" من رسائل السجل
     ⚪ F10 except:pass → logger.debug
-    ⚪ F11 gl.send: فحص iscoroutine (دفاع لـ async مستقبلي)
+    ⚪ F11 gl.send: فحص iscoroutine
 
-🆕 v1.6.2:
-    ✅ استخدام _is_valid_channel_ref كطبقة تحقق أولى
-    ✅ استخدام _is_forwarded للكشف الموحّد
-
-🆕 v1.6.1:
-    ✅ _is_valid_channel_ref كطبقة تحقق
-    ✅ _is_forwarded للكشف الموحّد
-    ✅ retry خفيف عند get_chat
-    ✅ معالجة "المجموعة نفسها"
-
-🆕 v1.6.0:
-    ✅ يقبل @username و t.me/username و https://t.me/...
-    ✅ يحلّ @username/رابط إلى chat_id عبر bot.get_chat
-    ✅ يكشف رابط دعوة (t.me/+abc) — يرفضه
-
+🆕 v1.6.2: استخدام _is_valid_channel_ref كطبقة تحقق أولى
+🆕 v1.6.1: retry خفيف + كشف موحّد + معالجة "المجموعة نفسها"
+🆕 v1.6.0: يقبل @username و t.me/username و https://t.me/...
+           يحلّ @username إلى chat_id، يرفض invite links
 🆕 v1.5.0: إبطال كاش قائمة قناة السجل
 🆕 v1.4.0: PTB v20+ fix (forward_origin)
-🆕 v1.3.0: تقرير المشاركة الذكي
-🆕 v1.2.0: إصلاح import binding + Queue-based send
-🆕 v1.1.0: StateManager + WAIT_LOG_CH
 =====================================================================
 """
 
 import asyncio
+import inspect
 import logging
 import re
 from html import escape as _html_escape
@@ -70,6 +55,7 @@ from telegram.ext import (
 )
 
 # ✅ استيراد الوحدة (لا المتغير) — لتجنب import binding
+_GROUP_LOG_IMPORT_ERROR: Optional[str] = None  # 🆕 F15: مُعرَّف مبدئياً
 try:
     import group_log as _group_log_module
     _GROUP_LOG_MODULE_AVAILABLE = True
@@ -88,7 +74,7 @@ except ImportError:
     _internal_cache = None
     _INTERNAL_CACHE_AVAILABLE = False
 
-# ✅ v1.6.0: استيراد أداة التحقق + Regex لـ Telegram
+# ✅ v1.6.0: استيراد أداة التحقق
 try:
     from database_settings import _is_valid_channel_ref
 except ImportError:
@@ -101,44 +87,50 @@ logger = logging.getLogger(__name__)
 # 🆕 v1.6.5: ثوابت المهلات الزمنية
 # =====================================================================
 
-_RESOLVE_TOTAL_TIMEOUT = 12.0   # G2: سقف زمني شامل لـ_resolve_username_with_retry
-_GET_CHAT_TITLE_TIMEOUT = 6.0   # G3: سقف زمني لجلب العنوان
-_USERNAME_RESOLVE_ATTEMPT_TIMEOUT = 5.0  # F5: timeout لكل محاولة
+_RESOLVE_TOTAL_TIMEOUT = 12.0
+_GET_CHAT_TITLE_TIMEOUT = 6.0
+_USERNAME_RESOLVE_ATTEMPT_TIMEOUT = 5.0
 _USERNAME_RESOLVE_ATTEMPTS = 2
 _USERNAME_RESOLVE_DELAY = 0.5
 
 
 # =====================================================================
-# ✅ v1.6.0 + v1.6.3: Regex للمساعدة في استخراج username من المدخلات
+# ✅ v1.6.0 + v1.6.3 + v1.6.6: Regex للمساعدة في استخراج username
 # =====================================================================
 
 # ✅ F6 (v1.6.3): Telegram يتطلب 5 أحرف — نقبل 4 للبوتات القديمة
 _TG_USERNAME_RE = re.compile(r'^[a-zA-Z][a-zA-Z0-9_]{4,31}$')
 
 # ✅ F4 (v1.6.3): نمط رابط t.me/username — بدون (?:\+)?
-#        (invites تُعالَج بـ _TME_INVITE_RE قبل هذا)
+# ✅ F13 (v1.6.6): دعم telegram.dog
 _TME_LINK_RE = re.compile(
     r'^(?:https?://)?(?:www\.)?'
-    r'(?:t\.me|telegram\.me)/'
+    r'(?:t\.me|telegram\.me|telegram\.dog)/'
     r'([A-Za-z][A-Za-z0-9_]{4,31})'
     r'(?:[/?#].*)?$',
     re.IGNORECASE,
 )
 
 # رابط دعوة (invite link) — لا يمكن حلّه إلى chat_id بدون join
+# ✅ F13 (v1.6.6): دعم telegram.dog
 _TME_INVITE_RE = re.compile(
     r'^(?:https?://)?(?:www\.)?'
-    r'(?:t\.me|telegram\.me)/'
+    r'(?:t\.me|telegram\.me|telegram\.dog)/'
     r'(?:\+|joinchat/)',
     re.IGNORECASE,
 )
 
 # ✅ F2 (v1.6.3): كشف صيغ URL للقبول الصريح
-_URL_PREFIXES = ('https://', 'http://', 't.me/', 'telegram.me/', 'www.t.me/')
+# ✅ F13 (v1.6.6): دعم telegram.dog
+_URL_PREFIXES = (
+    'https://', 'http://',
+    't.me/', 'telegram.me/', 'telegram.dog/',
+    'www.t.me/', 'www.telegram.me/', 'www.telegram.dog/',
+)
 
 
 def _looks_like_url(text: str) -> bool:
-    """✅ F2 (v1.6.3): فحص سريع لصيغ URL."""
+    """✅ F2 (v1.6.3) + F13 (v1.6.6): فحص سريع لصيغ URL."""
     if not text:
         return False
     low = text.lower()
@@ -155,11 +147,6 @@ def _normalize_channel_input(text: str) -> Tuple[Optional[int], Optional[str]]:
       - (chat_id_int, None) إذا كان رقماً
       - (None, username) إذا كان @username أو username
       - (None, None) إذا كان رابط invite أو غير صالح
-
-    القيم المرجعة:
-      (int, None)  → جاهز للاستخدام مباشرة
-      (None, str)  → يحتاج bot.get_chat() للحل
-      (None, None) → مرفوض
     """
     if not text:
         return None, None
@@ -205,7 +192,6 @@ def _normalize_channel_input(text: str) -> Tuple[Optional[int], Optional[str]]:
 # =====================================================================
 
 try:
-    # PTB v20+
     from telegram import (
         MessageOriginChannel,
         MessageOriginChat,
@@ -214,7 +200,6 @@ try:
     )
     _PTB_V20_PLUS = True
 except ImportError:
-    # PTB v13.x
     MessageOriginChannel = None
     MessageOriginChat = None
     MessageOriginUser = None
@@ -239,9 +224,7 @@ def _safe_html(text) -> str:
 
 
 def _safe_pop_user_data(context, *keys) -> None:
-    """
-    ✅ F3 (v1.6.3): حماية context.user_data من None.
-    """
+    """✅ F3 (v1.6.3): حماية context.user_data من None."""
     if context is None:
         return
     ud = getattr(context, 'user_data', None)
@@ -254,21 +237,25 @@ def _safe_pop_user_data(context, *keys) -> None:
             pass
 
 
+def _is_awaitable(obj) -> bool:
+    """
+    ✅ F12 (v1.6.6): فحص عام للـ awaitable.
+
+    أكثر أماناً من asyncio.iscoroutine (مهجور في Python 3.12+).
+    """
+    return inspect.isawaitable(obj)
+
+
 # =====================================================================
 # ✅ v1.6.1: كشف موحّد للرسائل المُعاد توجيهها
 # =====================================================================
 
 def _is_forwarded(msg) -> bool:
-    """
-    ✅ v1.6.1: كشف شامل لرسالة معاد توجيهها.
-    يتوافق مع PTB v20+ و v13.x.
-    """
+    """✅ v1.6.1: كشف شامل لرسالة معاد توجيهها."""
     if msg is None:
         return False
-    # PTB v20+
     if getattr(msg, "forward_origin", None) is not None:
         return True
-    # PTB v13.x
     if getattr(msg, "forward_date", None) is not None:
         return True
     if getattr(msg, "forward_from", None) is not None:
@@ -285,16 +272,15 @@ def _is_forwarded(msg) -> bool:
 # =====================================================================
 
 async def _invalidate_log_channel_menu_cache(chat_id: int) -> None:
-    """
-    إبطال كاش قائمة قناة السجل بعد تغيير حالة القناة.
-    نفس المفتاح المستخدم في handlers_callback.py (v9.4.0).
-    """
+    """إبطال كاش قائمة قناة السجل بعد تغيير حالة القناة."""
     if not _INTERNAL_CACHE_AVAILABLE or _internal_cache is None:
         return
     try:
         await _internal_cache.invalidate(f"log_ch_menu_{chat_id}")
     except Exception as e:
-        logger.debug(f"_invalidate_log_channel_menu_cache({chat_id}): {e}")
+        logger.debug(
+            "_invalidate_log_channel_menu_cache(%s): %s", chat_id, e
+        )
 
 
 # =====================================================================
@@ -305,38 +291,32 @@ def _extract_forward_channel(msg) -> Tuple[Optional[int], str]:
     """
     يستخرج (chat_id, title) للقناة المُعاد توجيه رسالة منها.
     متوافق مع PTB v20+ (forward_origin) و v13.x (forward_from_chat).
-
-    Returns:
-        (chat_id, title) — chat_id=None إذا لم تكن الرسالة من قناة.
     """
     # ─── PTB v20+ ───
     origin = getattr(msg, "forward_origin", None)
     if origin is not None:
-        # قناة
         if _PTB_V20_PLUS and isinstance(origin, MessageOriginChannel):
             chat = getattr(origin, "chat", None)
             if chat is not None:
                 cid = getattr(chat, "id", None)
-                title = getattr(chat, "title", "") or ""
+                title = getattr(chat, "title", None) or ""
                 return cid, title
-        # محادثة (قد تكون قناة أو مجموعة)
         if _PTB_V20_PLUS and isinstance(origin, MessageOriginChat):
             chat = getattr(origin, "sender_chat", None)
             if chat is not None:
                 ctype = getattr(chat, "type", None)
                 if ctype == "channel":
                     cid = getattr(chat, "id", None)
-                    title = getattr(chat, "title", "") or ""
+                    title = getattr(chat, "title", None) or ""
                     return cid, title
-        # مستخدم / مخفي — ليست قناة
         if _PTB_V20_PLUS and isinstance(
             origin, (MessageOriginUser, MessageOriginHiddenUser)
         ):
             return None, ""
         # ✅ F8 (v1.6.3): log عند origin غير معروف
         logger.debug(
-            f"_extract_forward_channel: unknown origin type: "
-            f"{type(origin).__name__}"
+            "_extract_forward_channel: unknown origin type: %s",
+            type(origin).__name__,
         )
         return None, ""
 
@@ -346,7 +326,7 @@ def _extract_forward_channel(msg) -> Tuple[Optional[int], str]:
         ctype = getattr(fwd_chat, "type", None)
         if ctype == "channel":
             cid = getattr(fwd_chat, "id", None)
-            title = getattr(fwd_chat, "title", "") or ""
+            title = getattr(fwd_chat, "title", None) or ""
             return cid, title
 
     return None, ""
@@ -365,14 +345,11 @@ async def _resolve_username_with_retry(
     total_timeout: float = _RESOLVE_TOTAL_TIMEOUT,
 ) -> Tuple[Optional[int], str]:
     """
-    ✅ v1.6.1: يحلّ @username إلى (chat_id, title) مع retry خفيف.
-    ✅ F5 (v1.6.3): asyncio.wait_for بـ timeout=5s لمنع التعليق.
+    ✅ v1.6.1: يحلّ @username إلى (chat_id, title) مع retry.
+    ✅ F5 (v1.6.3): asyncio.wait_for بـ timeout=5s.
     ✅ F7 (v1.6.3): title من username يُضاف @.
-    ✅ G2 (v1.6.5): total_timeout خارجي شامل (default 12s).
-
-    الاستراتيجية:
-        • كل محاولة محدودة بـ timeout.
-        • المجموع الكلي محدود بـ total_timeout — إن انتهى، نتوقف.
+    ✅ G2 (v1.6.5): total_timeout خارجي شامل (12s).
+    ✅ F14 (v1.6.6): getattr لـ title/username.
     """
     async def _do_attempts():
         for attempt in range(max_attempts):
@@ -383,9 +360,11 @@ async def _resolve_username_with_retry(
                 )
                 if chat_obj is not None:
                     cid = getattr(chat_obj, "id", None)
-                    # ✅ F7: أضف @ للـ username
-                    chat_title = getattr(chat_obj, "title", "") or ""
-                    chat_username = getattr(chat_obj, "username", "") or ""
+                    # ✅ F14: getattr للسلامة
+                    chat_title = getattr(chat_obj, "title", None) or ""
+                    chat_username = (
+                        getattr(chat_obj, "username", None) or ""
+                    )
                     if chat_title:
                         title = chat_title
                     elif chat_username:
@@ -395,9 +374,9 @@ async def _resolve_username_with_retry(
                     return cid, title
             except asyncio.TimeoutError:
                 logger.debug(
-                    f"_resolve_username_with_retry "
-                    f"(@{username}) attempt {attempt+1}/{max_attempts}: "
-                    f"timeout"
+                    "_resolve_username_with_retry (@%s) "
+                    "attempt %d/%d: timeout",
+                    username, attempt + 1, max_attempts,
                 )
                 if attempt < max_attempts - 1:
                     try:
@@ -406,8 +385,9 @@ async def _resolve_username_with_retry(
                         pass
             except Exception as e:
                 logger.debug(
-                    f"_resolve_username_with_retry "
-                    f"(@{username}) attempt {attempt+1}/{max_attempts}: {e}"
+                    "_resolve_username_with_retry (@%s) "
+                    "attempt %d/%d: %s",
+                    username, attempt + 1, max_attempts, e,
                 )
                 if attempt < max_attempts - 1:
                     try:
@@ -416,36 +396,29 @@ async def _resolve_username_with_retry(
                         pass
         return None, ""
 
-    # ✅ G2 (v1.6.5): سقف زمني شامل
+    # ✅ G2: سقف زمني شامل
     try:
         return await asyncio.wait_for(
             _do_attempts(), timeout=total_timeout,
         )
     except asyncio.TimeoutError:
         logger.warning(
-            f"_resolve_username_with_retry(@{username}): "
-            f"total_timeout ({total_timeout}s) reached"
+            "_resolve_username_with_retry(@%s): "
+            "total_timeout (%ss) reached",
+            username, total_timeout,
         )
         return None, ""
 
 
 # =====================================================================
-# ✅ v1.6.2 + v1.6.3: طبقة تحقق أولى عبر _is_valid_channel_ref
+# ✅ v1.6.2 + v1.6.3: طبقة تحقق أولى
 # =====================================================================
 
 def _passes_initial_validation(text: str) -> bool:
     """
     ✅ v1.6.2: طبقة تحقق أولى (fail-open).
-    ✅ F2 (v1.6.3): قبول صريح لصيغ URL قبل consult _is_valid_channel_ref.
-
-    تستخدم _is_valid_channel_ref إن توفرت. إن لم تتوفر أو رمت خطأ
-    → تُعيد True (لا نحجب المستخدم بسبب أداة تحقق خارجية).
-
-    Returns:
-        True  → النص مقبول مبدئياً (أو لا يمكن التحقق)
-        False → النص مرفوض صراحةً
+    ✅ F2 (v1.6.3): قبول صريح لصيغ URL.
     """
-    # ✅ F2: قبول صريح للروابط — _normalize_channel_input يتولاها
     if _looks_like_url(text):
         return True
 
@@ -454,7 +427,7 @@ def _passes_initial_validation(text: str) -> bool:
     try:
         return bool(_is_valid_channel_ref(text))
     except Exception as e:
-        logger.debug(f"_passes_initial_validation exception: {e}")
+        logger.debug("_passes_initial_validation exception: %s", e)
         return True
 
 
@@ -467,11 +440,6 @@ async def receive_log_channel(
 ) -> None:
     """
     يستقبل معرّف القناة أو رسالة موجّهة، ويحفظها كقناة سجل.
-
-    ✅ v1.6.1: retry + كشف موحّد + رسائل خطأ أوضح.
-    ✅ v1.6.2: يستخدم _is_valid_channel_ref و _is_forwarded فعلاً.
-    ✅ v1.6.3: F1-F3 أمن + guards.
-    ✅ v1.6.5: G1 (title fallback) + G3 (total_timeout على get_chat).
     """
     user = update.effective_user
     if not user:
@@ -496,7 +464,7 @@ async def receive_log_channel(
         try:
             await msg.reply_text("❌ تم إلغاء العملية.")
         except Exception as e:
-            logger.debug(f"reply_text (cancel) failed: {e}")
+            logger.debug("reply_text (cancel) failed: %s", e)
         return
 
     # ─── استرجاع group_id ───
@@ -507,7 +475,7 @@ async def receive_log_channel(
     )
     if not group_id:
         logger.warning(
-            f"⚠️ WAIT_LOG_CH بدون log_group_id للمستخدم {user.id}"
+            "⚠️ WAIT_LOG_CH بدون log_group_id للمستخدم %s", user.id
         )
         StateManager.clear(user.id)
         try:
@@ -515,7 +483,7 @@ async def receive_log_channel(
                 "❌ انتهت الجلسة. ابدأ من جديد من لوحة الأمان."
             )
         except Exception as e:
-            logger.debug(f"reply_text (no group_id) failed: {e}")
+            logger.debug("reply_text (no group_id) failed: %s", e)
         return
 
     # ─── فحص توفّر group_log ───
@@ -535,14 +503,14 @@ async def receive_log_channel(
                 "تواصل مع المطور."
             )
         except Exception as e:
-            logger.debug(f"reply_text (no gl) failed: {e}")
+            logger.debug("reply_text (no gl) failed: %s", e)
         return
 
     # ─── ✅ v1.6.2: استخراج/حلّ chat_id ───
     chat_id: Optional[int] = None
     title: str = ""
 
-    # 1) من رسالة معاد توجيهها (الأولوية القصوى)
+    # 1) من رسالة معاد توجيهها
     is_fwd = _is_forwarded(msg)
     if is_fwd:
         forwarded_id, forwarded_title = _extract_forward_channel(msg)
@@ -550,10 +518,11 @@ async def receive_log_channel(
             chat_id = forwarded_id
             title = forwarded_title
             logger.info(
-                f"✅ chat_id من forwarded: {chat_id} ({title!r})"
+                "✅ chat_id من forwarded: %s (%r)",
+                chat_id, title,
             )
         else:
-            # ✅ F1 (v1.6.3): رسالة موجّهة من مستخدم/غير قناة → رفض
+            # ✅ F1: رسالة موجّهة من مستخدم/غير قناة → رفض
             logger.info(
                 "⛔ F1: رسالة موجّهة من مستخدم/غير قناة — مرفوضة"
             )
@@ -568,16 +537,15 @@ async def receive_log_channel(
                     parse_mode="HTML",
                 )
             except Exception as e:
-                logger.debug(f"reply_text (user-forward) failed: {e}")
+                logger.debug("reply_text (user-forward) failed: %s", e)
             return
 
-    # 2) من النص (رقم / @username / username / t.me link)
+    # 2) من النص
     if chat_id is None and text:
-        # ✅ v1.6.2 + F2: طبقة تحقق أولى (fail-open، تقبل URL)
         if not _passes_initial_validation(text):
             logger.info(
-                f"⛔ رفض النص عبر _is_valid_channel_ref: "
-                f"{text[:50]!r}"
+                "⛔ رفض النص عبر _is_valid_channel_ref: %r",
+                text[:50],
             )
             try:
                 await msg.reply_text(
@@ -593,17 +561,15 @@ async def receive_log_channel(
                     parse_mode="HTML",
                 )
             except Exception as e:
-                logger.debug(f"reply_text (invalid) failed: {e}")
+                logger.debug("reply_text (invalid) failed: %s", e)
             return
 
         parsed_id, parsed_username = _normalize_channel_input(text)
 
         if parsed_id is not None:
-            # رقم مباشر
             chat_id = parsed_id
-            logger.debug(f"📍 chat_id من نص رقمي: {chat_id}")
+            logger.debug("📍 chat_id من نص رقمي: %s", chat_id)
         elif parsed_username is not None:
-            # @username أو username أو رابط — نحاول حلّه
             resolved_id, resolved_title = (
                 await _resolve_username_with_retry(
                     context.bot, parsed_username,
@@ -617,11 +583,10 @@ async def receive_log_channel(
                 chat_id = resolved_id
                 title = resolved_title
                 logger.debug(
-                    f"📍 chat_id من @{parsed_username}: "
-                    f"{chat_id} ({title})"
+                    "📍 chat_id من @%s: %s (%s)",
+                    parsed_username, chat_id, title,
                 )
             else:
-                # فشل الحلّ
                 try:
                     await msg.reply_text(
                         f"❌ لم أتمكن من الوصول إلى "
@@ -635,7 +600,9 @@ async def receive_log_channel(
                         parse_mode="HTML",
                     )
                 except Exception as e:
-                    logger.debug(f"reply_text (resolve fail) failed: {e}")
+                    logger.debug(
+                        "reply_text (resolve fail) failed: %s", e
+                    )
                 return
 
     # 3) إذا لم نجد أياً من ذلك
@@ -654,10 +621,10 @@ async def receive_log_channel(
                 parse_mode="HTML",
             )
         except Exception as e:
-            logger.debug(f"reply_text (no chat_id) failed: {e}")
+            logger.debug("reply_text (no chat_id) failed: %s", e)
         return
 
-    # ✅ v1.6.1: فحص "المجموعة نفسها" مع رسالة أوضح
+    # ✅ v1.6.1: فحص "المجموعة نفسها"
     if chat_id == group_id:
         try:
             await msg.reply_text(
@@ -669,7 +636,7 @@ async def receive_log_channel(
                 parse_mode="HTML",
             )
         except Exception as e:
-            logger.debug(f"reply_text (same group) failed: {e}")
+            logger.debug("reply_text (same group) failed: %s", e)
         return
 
     # ─── التحقق: البوت مشرف في القناة؟ ───
@@ -686,11 +653,11 @@ async def receive_log_channel(
                     parse_mode="HTML",
                 )
             except Exception as e:
-                logger.debug(f"reply_text (not admin) failed: {e}")
+                logger.debug("reply_text (not admin) failed: %s", e)
             return
     except Exception as e:
         logger.warning(
-            f"⚠️ فشل فحص صلاحيات البوت في {chat_id}: {e}"
+            "⚠️ فشل فحص صلاحيات البوت في %s: %s", chat_id, e
         )
         try:
             await msg.reply_text(
@@ -702,7 +669,7 @@ async def receive_log_channel(
                 parse_mode="HTML",
             )
         except Exception as e2:
-            logger.debug(f"reply_text (access fail) failed: {e2}")
+            logger.debug("reply_text (access fail) failed: %s", e2)
         return
 
     # ─── فحص صلاحية النشر ───
@@ -717,32 +684,36 @@ async def receive_log_channel(
                     parse_mode="HTML",
                 )
             except Exception as e:
-                logger.debug(f"reply_text (no post perm) failed: {e}")
+                logger.debug("reply_text (no post perm) failed: %s", e)
             return
     except Exception:
         pass
 
-    # ─── محاولة استخراج عنوان القناة (إن لم نكن نملكه) ───
-    # ✅ G3 (v1.6.5): total_timeout صريح
+    # ─── محاولة استخراج عنوان القناة ───
+    # ✅ G3: total_timeout صريح
+    # ✅ F14: getattr للسلامة
     if not title:
         try:
             chat_obj = await asyncio.wait_for(
                 context.bot.get_chat(chat_id),
                 timeout=_GET_CHAT_TITLE_TIMEOUT,
             )
-            if chat_obj and chat_obj.title:
-                title = chat_obj.title
-            elif chat_obj and chat_obj.username:
-                title = f"@{chat_obj.username}"
+            if chat_obj:
+                _t = getattr(chat_obj, "title", None)
+                _u = getattr(chat_obj, "username", None)
+                if _t:
+                    title = _t
+                elif _u:
+                    title = f"@{_u}"
         except asyncio.TimeoutError:
             logger.debug(
-                f"get_chat for title ({chat_id}): "
-                f"timeout ({_GET_CHAT_TITLE_TIMEOUT}s)"
+                "get_chat for title (%s): timeout (%ss)",
+                chat_id, _GET_CHAT_TITLE_TIMEOUT,
             )
         except Exception as e:
-            logger.debug(f"get_chat for title ({chat_id}): {e}")
+            logger.debug("get_chat for title (%s): %s", chat_id, e)
 
-    # ✅ G1 (v1.6.5): title fallback — لا تترك العنوان فارغًا
+    # ✅ G1: title fallback
     if not title:
         title = f"قناة {chat_id}"
 
@@ -750,9 +721,7 @@ async def receive_log_channel(
     try:
         result = await gl.set_private(group_id, chat_id)
     except Exception as e:
-        logger.error(
-            f"❌ gl.set_private فشل: {e}", exc_info=True
-        )
+        logger.error("❌ gl.set_private فشل: %s", e, exc_info=True)
         result = {'ok': False}
 
     # ✅ تنظيف الحالة
@@ -774,7 +743,7 @@ async def receive_log_channel(
             await _invalidate_log_channel_menu_cache(group_id)
         except Exception as e:
             logger.debug(
-                f"invalidate log_channel_menu cache failed: {e}"
+                "invalidate log_channel_menu cache failed: %s", e
             )
 
         # ✅ v1.3.0: عرض حالة المشاركة
@@ -805,9 +774,9 @@ async def receive_log_channel(
                 parse_mode="HTML",
             )
         except Exception as e:
-            logger.warning(f"فشل إرسال تأكيد التعيين: {e}")
+            logger.warning("فشل إرسال تأكيد التعيين: %s", e)
 
-        # ✅ F11 (v1.6.3): إرسال رسالة اختبار — دعم sync/async
+        # ✅ F11 + F12 (v1.6.6): إرسال رسالة اختبار — isawaitable
         try:
             send_result = gl.send(
                 group_id,
@@ -817,10 +786,10 @@ async def receive_log_channel(
                 event="general",
                 silent=False,
             )
-            if asyncio.iscoroutine(send_result):
+            if _is_awaitable(send_result):
                 await send_result
         except Exception as e:
-            logger.warning(f"⚠️ اختبار الإرسال فشل: {e}")
+            logger.warning("⚠️ اختبار الإرسال فشل: %s", e)
     else:
         try:
             await msg.reply_text(
@@ -828,7 +797,7 @@ async def receive_log_channel(
                 "تحقق من السجلات (Logs) لمعرفة السبب."
             )
         except Exception as e:
-            logger.warning(f"فشل إرسال رسالة الخطأ: {e}")
+            logger.warning("فشل إرسال رسالة الخطأ: %s", e)
 
 
 # =====================================================================
@@ -855,7 +824,7 @@ async def cancel_log_channel_wait(
             "❌ تم إلغاء انتظار قناة السجل."
         )
     except Exception as e:
-        logger.debug(f"cancel_log_channel_wait reply failed: {e}")
+        logger.debug("cancel_log_channel_wait reply failed: %s", e)
 
 
 # =====================================================================
@@ -863,16 +832,12 @@ async def cancel_log_channel_wait(
 # =====================================================================
 
 def register_group_log_handlers(app: Application) -> None:
-    """
-    يُسجّل MessageHandler في Application.
-
-    ✅ v1.6.1: تسجيل في group=1 — يعمل بعد handlers_callback (group=0).
-    """
+    """يُسجّل MessageHandler في Application."""
     if app is None:
         logger.error("❌ register_group_log_handlers: app=None")
         return
 
-    # 1) معالج الرسائل الرئيسي (يستقبل FORWARDED أو TEXT)
+    # 1) معالج الرسائل الرئيسي (FORWARDED أو TEXT)
     try:
         app.add_handler(
             MessageHandler(
@@ -886,8 +851,8 @@ def register_group_log_handlers(app: Application) -> None:
         )
     except Exception as e:
         logger.error(
-            f"❌ فشل تسجيل MessageHandler(receive_log_channel): {e}",
-            exc_info=True,
+            "❌ فشل تسجيل MessageHandler(receive_log_channel): %s",
+            e, exc_info=True,
         )
         return
 
@@ -903,11 +868,9 @@ def register_group_log_handlers(app: Application) -> None:
             "✅ CommandHandler(/cancel_group_log) مُسجَّل في group=1"
         )
     except Exception as e:
-        logger.debug(f"cancel_group_log handler: {e}")
+        logger.debug("cancel_group_log handler: %s", e)
 
-    logger.info(
-        "✅ handlers قناة السجل مُسجَّل (group=1)"
-    )
+    logger.info("✅ handlers قناة السجل مُسجَّل (group=1)")
 
 
 __all__ = [
@@ -925,10 +888,17 @@ __all__ = [
     "_passes_initial_validation",
     "_safe_pop_user_data",
     "_looks_like_url",
-    # 🆕 v1.6.5: ثوابت المهلات الزمنية
+    "_is_awaitable",
+    # ✅ v1.6.5: ثوابت المهلات الزمنية
     "_RESOLVE_TOTAL_TIMEOUT",
     "_GET_CHAT_TITLE_TIMEOUT",
     "_USERNAME_RESOLVE_ATTEMPT_TIMEOUT",
     "_USERNAME_RESOLVE_ATTEMPTS",
     "_USERNAME_RESOLVE_DELAY",
+    # 🆕 v1.6.6
+    "_GROUP_LOG_IMPORT_ERROR",
+    "_URL_PREFIXES",
+    "_TME_LINK_RE",
+    "_TME_INVITE_RE",
+    "_TG_USERNAME_RE",
 ]
