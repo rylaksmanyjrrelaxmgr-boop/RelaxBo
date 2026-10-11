@@ -2,9 +2,24 @@
 # -*- coding: utf-8 -*-
 
 """
-handlers/handlers_nav_fix.py - v3.2.1 (delegating dispatcher, hardened)
-=====================================================================
-🎯 v3.2.1 (توثيق):
+handlers/handlers_nav_fix.py - v3.3.0 (tracing dispatcher, non-blocking)
+========================================================================
+🎯 v3.3.0 (FIX-AN1):
+    ✅ إزالة raise ApplicationHandlerStop من نهاية log_and_delegate.
+       السبب: كان يُبيد كل CallbackQueryHandler آخر في group ≥ -99،
+       مما يعطّل:
+           • handlers_channels_list.py  (~11 معالج)
+           • handlers_analytics.py      (~2 معالج)
+           • handlers_channels_delete.py (~3 معالج)
+           • أي CallbackQueryHandler مُسجَّل في group=0 بلا group صريح.
+       الأثر الجديد:
+           • NAV_FIX يسجّل الضغطة ثم يُفوّض إلى CallbackHandlers.handle.
+           • بعد التفويض، يستمر PTB في استدعاء بقية المعالجات.
+           • ⚠️ إذا كان CallbackHandlers.handle يرفع
+             ApplicationHandlerStop بنفسه → سيُمرَّر ويوقف البقية
+             (سلوك مقصود).
+
+🎯 v3.2.1:
     📝 إضافة توضيح في docstring log_and_delegate حول التفاعل
        مع handlers_channels_list.py وبقية CallbackQueryHandlers
        في group > -99.
@@ -12,28 +27,23 @@ handlers/handlers_nav_fix.py - v3.2.1 (delegating dispatcher, hardened)
 🎯 v3.2:
     🔴 FIX-A: حلّ صحيح لـ CallbackHandlers.handle — يدعم
               staticmethod / classmethod / instance method.
-              قبل: كان يفترض staticmethod دائماً → إن كان instance
-                    method، كل الأزرار تصبح ميتة بصمت.
     🟠 FIX-B: عند استثناء غير ApplicationHandlerStop → logger.critical
-              + data مُقتطَعة (لتشخيص أوضح).
-    🟡 FIX-C: مستوى logging لضغطات الأزرار قابل للضبط عبر البيئة
-              NAV_FIX_LOG_LEVEL (افتراضي: DEBUG بدل INFO).
-    🟡 FIX-D: تقييد طول data في اللوج إلى NAV_FIX_LOG_DATA_MAX
-              (افتراضي 150) لمنع سطور logs ضخمة.
-    🟡 FIX-E: توضيح رسالة ImportError بـ logger.critical عند فشل
-              كلا مساري الاستيراد (كان error).
+              + data مُقتطَعة.
+    🟡 FIX-C: مستوى logging قابل للضبط عبر NAV_FIX_LOG_LEVEL.
+    🟡 FIX-D: تقييد طول data في اللوج إلى NAV_FIX_LOG_DATA_MAX.
+    🟡 FIX-E: logger.critical عند فشل كلا مساري الاستيراد.
 
 🎯 v3.1:
-    ✅ FIX-1: فصل ApplicationHandlerStop عن Exception العام
-              (يمنع logging مضلِّل ويحترم قرار CallbackHandlers)
-    ✅ FIX-2: حماية من None في query.from_user
-    ✅ FIX-3: توثيق دور NAV_FIX كمُوزّع وحيد (single dispatcher)
+    ✅ FIX-1: فصل ApplicationHandlerStop عن Exception العام.
+    ✅ FIX-2: حماية من None في query.from_user.
+    ✅ FIX-3: توثيق دور NAV_FIX كمُوزّع.
 
 🎯 v3.0:
     - v1.x : كان يلتقط كل الأزرار ويرد عليها (يكسر كل شيء)
-    - v2.0 : كان يسجّل فقط ويترك البقية (يسمح لمعالجات أخرى بالتدخل)
+    - v2.0 : كان يسجّل فقط ويترك البقية
     - v3.0 : يسجّل + يُفوّض CallbackHandlers.handle() + يوقف البقية
-=====================================================================
+    - v3.3 : يسجّل + يُفوّض + لا يوقف البقية (FIX-AN1)
+========================================================================
 """
 
 import inspect
@@ -238,46 +248,37 @@ async def log_and_delegate(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> None:
     """
-    🎯 المُوزّع الرئيسي للأزرار.
+    🎯 المُوزّع الرئيسي للأزرار (tracing + delegation).
 
-    الدور:
+    الدور (v3.3.0):
         1. تسجيل كل ضغطة زر (traceability)
         2. تفويض صريح إلى CallbackHandlers.handle()
-        3. منع باقي المعالجات من التشغيل (ApplicationHandlerStop)
+        3. ❌ لا يمنع باقي المعالجات — FIX-AN1
 
-    ⚠️ ملاحظة معمارية مهمة (v3.2.1):
+    ⚠️ ملاحظة معمارية مهمة (v3.3.0):
         ─────────────────────────────────────────────────────────
         هذا المُوزّع مُسجَّل في group=-99 (أول مجموعة).
-        بعد تنفيذه، يرفع ApplicationHandlerStop فيتوقف PTB عن
-        استدعاء أي CallbackQueryHandler آخر في group ≥ -99.
+        بعد تنفيذه:
+            • يُسجّل الضغطة.
+            • يُفوّض إلى CallbackHandlers.handle().
+            • ⚠️ لا يرفع ApplicationHandlerStop — يسمح لبقية
+              CallbackQueryHandlers في group ≥ -99 بالتنفيذ.
 
-        الأثر العملي:
-            • أي CallbackQueryHandler في bot.py يُسجَّل بدون group
-              صريح (أي group=0) → **لن يُنفَّذ**.
-            • أي CallbackQueryHandler في handlers_channels_list.py
-              (مثل ch_list, ch_info:, ch_select:, ch_schedule:, ...)
-              → **لن يُنفَّذ أيضاً**.
-            • كل الأزرار تُفوَّض إلى CallbackHandlers.handle() الذي
-              يجب أن يعرف هذه الـ prefixes.
+        الأثر العملي (مقصود):
+            • CallbackHandlers.handle() يعمل كـ first handler.
+            • handlers_channels_list.py / handlers_analytics.py /
+              handlers_channels_delete.py تُستدعى أيضاً.
+            • إذا أراد CallbackHandlers.handle إيقاف البقية،
+              يرفع ApplicationHandlerStop بنفسه وسيُمرَّر.
 
-        ✅ هذا مقصود (delegation mode):
-            CallbackHandlers.handle() هو الـ single source of truth
-            لتوجيه الأزرار. أي prefix غير معروف سيتجاهله، وأي handler
-            آخر كان سيعالجه يصبح غير فعّال.
+        ✅ إذا لاحظت تكرار معالجة: راجع CallbackHandlers.handle
+           وتأكد أن كل prefix يُعالَج في مكان واحد فقط.
 
-        ⚠️ إذا أردت تشغيل handlers معينة قبل NAV_FIX:
-            سجّلها في group=-100 (أصغر من -99)، مثال:
-
-                application.add_handler(
-                    CallbackQueryHandler(ch_list_handler),
-                    group=-100,  # ← يسبق NAV_FIX
-                )
-
-        📌 تشخيص سريع:
-            لو ضغطة زر لا تفعل شيئاً، فالمشكلة في:
-              (أ) CallbackHandlers.handle() لا يعرف الـ prefix
-              (ب) أو handler آخر في group=-100 يعترض قبل NAV_FIX
-            وليس في NAV_FIX نفسه.
+        📌 ترتيب التنفيذ الموصى به:
+            - group=-99 : NAV_FIX (هذا الملف) — تسجيل + تفويض
+            - group=0   : CallbackHandlers.handle
+            - group=0   : handlers_channels_list, handlers_analytics, ...
+            - group=1   : fallback handlers (إن وُجدت)
         ─────────────────────────────────────────────────────────
     """
     query = update.callback_query
@@ -331,8 +332,8 @@ async def log_and_delegate(
         )
         # لا نُعيد الرفع — نتوقف بالأسفل بأنفسنا
 
-    # ── منع أي معالج آخر ──────────────────────────────────────
-    raise ApplicationHandlerStop
+    # ✅ FIX-AN1: لا raise ApplicationHandlerStop هنا.
+    # السماح لبقية CallbackQueryHandlers في group=0 أو group=-1 بالتنفيذ.
 
 
 # ═════════════════════════════════════════════════════════════════════
@@ -357,7 +358,7 @@ def register_nav_fix(application) -> bool:
         )
         logger.info(
             "✅ NAV_FIX: مُوزّع الأزرار مُسجّل "
-            "(v3.2.1 — delegation mode + stop-safe + handler-resolve)"
+            "(v3.3.0 — delegation mode + FIX-AN1 non-blocking)"
         )
         return True
     except Exception as e:
