@@ -2,49 +2,40 @@
 # -*- coding: utf-8 -*-
 
 """
-database_tables.py — إنشاء الجداول والفهارس لكل قواعد البيانات (v7.9.3)
+database_tables.py — إنشاء الجداول والفهارس لكل قواعد البيانات (v7.9.5)
 ================================================================================
-🆕 v7.9.3 (PERF-INDEXES-LOG-TABLES):
-  🟢 PERF-6: 5 فهارس جديدة لتحسين الاستعلامات البطيئة المكتشفة:
-      • idx_mv_active_user_limits_user_id  — على MV
-      • idx_schedule_channel_db_id         — على schedule
-      • idx_schedule_next_publish          — على schedule
-      • idx_posts_channel_published_created — تسريع نشر التلقائي
-      • idx_user_channels_user_id_only     — تسريع get_user_channels
-  🟢 PERF-7: EXPECTED_INDEX_COUNT 78 → 83
-  🟢 PERF-8: CURRENT_SCHEMA_VERSION 27 → 28
-  🟢 PERF-9: توسيع CRITICAL_INDEX_NAMES للفهارس الجديدة
-  🟡 PERF-10: تحديث __all__
+🆕 v7.9.5 (CONCURRENT-INDEX-FOR-LARGE-TABLES):
+  🟢 CC-1: تفعيل CONCURRENT_INDEX_MIN_ROWS في _create_index_postgres_smart
+      — الفهارس على الجداول ≥ 10000 صف تُبنى بـ CREATE INDEX CONCURRENTLY
+        لتجنّب قفل الكتابة.
+  🟢 CC-2: fallback تلقائي إلى CREATE INDEX العادي عند:
+      • "cannot run inside a transaction block"
+      • "CONCURRENTLY not supported" (نسخ PG قديمة)
+  🟢 CC-3: cache لعدد صفوف الجداول (تفادي 82 استعلام مكرر).
+  🟢 CC-4: _drop_invalid_indexes_postgres — تنظيف الفهارس INVALID
+      الناتجة عن فشل سابق لـ CONCURRENTLY.
+  🟢 CC-5: _safe_drop_index_postgres — حذف بأمان مع fallback من CONCURRENTLY.
+  🟢 CC-6: _ensure_all_indexes_exist_postgres يستخدم الآن smart creation
+      بعد حذف الفهارس INVALID.
+  🟢 CC-7: _verify_critical_indexes_postgres يستخدم smart creation.
+  🟢 CC-8: _create_indexes_postgres يستخدم smart creation
+      (بدل _create_indexes_generic).
+  🟢 CC-9: استدعاء _drop_invalid_indexes_postgres في fast-path أيضاً.
+  🟡 CC-10: CURRENT_SCHEMA_VERSION يبقى 29 (لا تغيير بنيوي).
 
-🆕 v7.9.2 (MV-AUTO-VACUUM):
-  🔴 MV-FIX-1 CRITICAL: MAINTENANCE_TABLES يشمل الآن:
-      • mv_active_user_limits (Materialized View)
-      • penalty_archive, user_violations, user_warnings
-      • sentiment_history, payment_logs, user_messages
-      • bot_addition_log
-  🔴 MV-FIX-2 CRITICAL: _run_maintenance_postgres يجمع الآن
-      كل MVs من pg_class تلقائياً.
-  🟢 MV-FIX-3: دالة جديدة _vacuum_dirty_mvs_postgres.
-  🟡 MV-FIX-4: توسيع SMALL_TABLES_FOR_AGGRESSIVE_AUTOVACUUM.
-  🟡 MV-FIX-5: __all__ يشمل _vacuum_dirty_mvs_postgres.
+🆕 v7.9.4 (CRITICAL-FIXES-MV-VACUUM):
+  🔴 FIX-1: CURRENT_SCHEMA_VERSION 28 → 29
+  🔴 FIX-2: _vacuum_dirty_mvs_postgres يستخدم pg_stat_all_tables.
+  🔴 FIX-3: حذف الشرط المعطوب في _vacuum_dirty_mvs_postgres.
+  🔴 FIX-5: حذف idx_schedule_channel_lookup المكرر.
+  🔴 FIX-6: _tune_autovacuum_postgres يستخدم pg_class (يشمل MVs).
+  🔴 FIX-7: VACUUM على MVs فقط في PG 14+.
+  🔴 FIX-8: EXPECTED_INDEX_COUNT 83 → 82.
+  🔴 FIX-10: فحص تلقائي لأسماء الفهارس المكررة.
+  🟡 FIX-11: عدّاد analyzed منفصل.
+  🟡 FIX-12: تصحيح تعليق MySQL.
+  🟡 FIX-13: حذف set comprehension زائد في MySQL.
 
-🆕 v7.9.1 (BANNED-WORDS-ADDED-BY-MIGRATION):
-  🔴 BW-MIG-1: migration لعمود added_by في banned_words
-  🔴 BW-MIG-2: migration لعمود added_by في auto_replies
-  🟡 BW-MIG-3: CURRENT_SCHEMA_VERSION 26 → 27
-
-🆕 v7.9.0 (SECURITY-V7.10.0-COLUMNS):
-  ✅ CURRENT_SCHEMA_VERSION: 25 → 26
-  ✅ _GROUP_SECURITY_NEW_COLUMNS: +7 أعمدة
-  ✅ EXPECTED_INDEX_COUNT: 77 → 78
-
-🆕 v7.8.0 (FULL-AUTOVACUUM-COVERAGE):
-  ✅ توسيع SMALL_TABLES_FOR_AGGRESSIVE_AUTOVACUUM 23 → 33
-  ✅ SCHEMA_VERSION: 24 → 25
-
-🆕 v7.7.0 (AUTO-BLOCKED-SOURCES): جدول auto_blocked_sources
-🆕 v7.6.28 (MAINTENANCE-USERS-FIX)
-🆕 v7.6.27 (VACUUM-OUTSIDE-TX-FIX)
 🚀 v7.6.25 (MIGRATION-ORDER-FIX)
 ================================================================================
 """
@@ -58,8 +49,8 @@ from datetime import datetime, timezone, timedelta
 # 0. ثوابت
 # =====================================================================
 
-# ✅ v7.9.3 PERF-8: 27 → 28 (إضافة 5 فهارس أداء)
-CURRENT_SCHEMA_VERSION = 28
+# ✅ v7.9.5 CC-10: يبقى 29 (لا تغيير بنيوي — فقط تحسين سلوك)
+CURRENT_SCHEMA_VERSION = 29
 
 CLEANUP_ANONYMOUS_BOT_IDS = (1087968824, 136817688)
 
@@ -73,11 +64,14 @@ ADMIN_LOGS_MAX_ROWS = 5000
 
 REMOVED_CHANNELS_GRACE_DAYS = 30
 
+# ✅ v7.9.4 FIX-5: عتبة استخدام CREATE INDEX CONCURRENTLY
+# الجداول التي ≥ هذا العدد من الصفوف يُبنى عليها الفهرس بـ CONCURRENTLY
+CONCURRENT_INDEX_MIN_ROWS = 10000
+
 # ═══════════════════════════════════════════════════════════════════════
-# ✅ v7.9.2: MAINTENANCE_TABLES موسّع — يشمل MVs وجداول سجلات
+# ✅ v7.9.2: MAINTENANCE_TABLES موسّع
 # ═══════════════════════════════════════════════════════════════════════
 MAINTENANCE_TABLES = (
-    # ── الأساسية (منذ v7.6.28) ──
     "posts",
     "users",
     "auto_replies",
@@ -88,14 +82,7 @@ MAINTENANCE_TABLES = (
     "schedule",
     "admin_logs",
     "auto_blocked_sources",
-    # ═══════════════════════════════════════════════════════════════
-    # 🆕 v7.9.2 MV-FIX-1: Materialized Views
-    # autovacuum لا يعمل عليها — يجب تضمينها يدوياً
-    # ═══════════════════════════════════════════════════════════════
     "mv_active_user_limits",
-    # ═══════════════════════════════════════════════════════════════
-    # 🆕 v7.9.2 MV-FIX-1: جداول سجلات متراكمة
-    # ═══════════════════════════════════════════════════════════════
     "penalty_archive",
     "user_violations",
     "user_warnings",
@@ -105,9 +92,6 @@ MAINTENANCE_TABLES = (
     "bot_addition_log",
 )
 
-# ═══════════════════════════════════════════════════════════════════════
-# ✅ v7.8.0 + v7.9.2: توسيع autovacuum على الجداول الصغيرة
-# ═══════════════════════════════════════════════════════════════════════
 SMALL_TABLES_FOR_AGGRESSIVE_AUTOVACUUM = (
     "auto_replies",
     "auto_reply_settings",
@@ -132,7 +116,6 @@ SMALL_TABLES_FOR_AGGRESSIVE_AUTOVACUUM = (
     "support_tickets",
     "bot_addition_log",
     "auto_blocked_sources",
-    # ✅ v7.8.0: 10 جداول
     "admin_logs",
     "banned_words",
     "penalty_archive",
@@ -143,7 +126,6 @@ SMALL_TABLES_FOR_AGGRESSIVE_AUTOVACUUM = (
     "sentiment_history",
     "payment_logs",
     "referrals",
-    # 🆕 v7.9.2 MV-FIX-4: جداول إضافية
     "user_translation",
     "user_reminder_settings",
     "contests",
@@ -161,8 +143,8 @@ DEFAULT_SETTINGS = (
     ("last_backup", ""),
 )
 
-# ✅ v7.9.3 PERF-7: 78 → 83 (إضافة 5 فهارس أداء)
-EXPECTED_INDEX_COUNT = 83
+# ✅ v7.9.4 FIX-8: 83 → 82 (بعد حذف idx_schedule_channel_lookup المكرر)
+EXPECTED_INDEX_COUNT = 82
 
 MYSQL_SKIP_INDEXES = frozenset({
     "idx_penalties_active_id",
@@ -333,34 +315,21 @@ COMMON_INDEXES = [
     ("user_channels", "idx_user_channels_removed_at",
      "user_channels(removed_at) WHERE removed_at IS NOT NULL"),
 
-    # ✅ v7.7.0: فهارس auto_blocked_sources
     ("auto_blocked_sources", "idx_auto_blocked_hit_count",
      "auto_blocked_sources(hit_count DESC)"),
     ("auto_blocked_sources", "idx_auto_blocked_last_seen",
      "auto_blocked_sources(last_seen DESC)"),
 
-    # ✅ v7.9.0: فهرس new للـ postbot
     ("group_security", "idx_group_security_postbot",
      "group_security(delete_postbot_pattern) "
      "WHERE delete_postbot_pattern = 1"),
 
-    # ═══════════════════════════════════════════════════════════════
-    # 🆕 v7.9.3 PERF-6: فهارس الأداء الجديدة
-    # (معالجة الاستعلامات البطيئة المكتشفة في السجل)
-    # ═══════════════════════════════════════════════════════════════
-    # 🟢 للـ Materialized View (SELECT 1 FROM mv_active_user_limits ...)
     ("mv_active_user_limits", "idx_mv_active_user_limits_user_id",
      "mv_active_user_limits(user_id)"),
-    # 🟢 للـ schedule (SELECT schedule_type, ... FROM schedule WHERE channel_db_id = $1)
     ("schedule", "idx_schedule_channel_db_id",
      "schedule(channel_db_id)"),
-    # 🟢 للـ schedule (INSERT/UPSERT على channel_db_id)
-    ("schedule", "idx_schedule_channel_lookup",
-     "schedule(channel_db_id, next_publish_date)"),
-    # 🟢 للنشر التلقائي (SELECT posts للقنوات)
     ("posts", "idx_posts_channel_published_created",
      "posts(channel_db_id, published, created_at DESC)"),
-    # 🟢 للـ get_user_channels
     ("user_channels", "idx_user_channels_user_id_only",
      "user_channels(user_id) WHERE banned = 0"),
 ]
@@ -435,7 +404,6 @@ DEPRECATED_INDEXES = [
     "idx_ugl_user",
 ]
 
-# ✅ v7.9.3 PERF-9: توسيع CRITICAL_INDEX_NAMES للفهارس الجديدة
 CRITICAL_INDEX_NAMES = frozenset({
     "idx_bot_groups_log_channel",
     "idx_posts_channel_pub_fail_created",
@@ -457,10 +425,8 @@ CRITICAL_INDEX_NAMES = frozenset({
     "idx_bot_addition_log_chat",
     "idx_user_channels_removed_at",
     "idx_group_security_postbot",
-    # 🆕 v7.9.3 PERF-9: الفهارس الجديدة
     "idx_mv_active_user_limits_user_id",
     "idx_schedule_channel_db_id",
-    "idx_schedule_channel_lookup",
     "idx_posts_channel_published_created",
     "idx_user_channels_user_id_only",
 })
@@ -469,6 +435,13 @@ if len(COMMON_INDEXES) != EXPECTED_INDEX_COUNT:
     raise RuntimeError(
         f"❌ عدد الفهارس غير مطابق: "
         f"متوقع {EXPECTED_INDEX_COUNT}، وُجد {len(COMMON_INDEXES)}."
+    )
+
+_index_names = [n for _, n, _ in COMMON_INDEXES]
+_duplicates = [n for n in set(_index_names) if _index_names.count(n) > 1]
+if _duplicates:
+    raise RuntimeError(
+        f"❌ أسماء فهارس مكررة في COMMON_INDEXES: {_duplicates}"
     )
 
 
@@ -572,6 +545,228 @@ def _is_advanced_index(cols: str) -> bool:
         return False
     s = cols.upper()
     return " WHERE " in s or " INCLUDE " in s
+
+
+# =====================================================================
+# 🆕 v7.9.5 CC-1/CC-3: أدوات CONCURRENTLY للفهارس على الجداول الكبيرة
+# =====================================================================
+
+async def _get_table_row_count_postgres(conn, table_name: str) -> int:
+    """
+    🆕 v7.9.5 CC-1: تقدير سريع لعدد صفوف الجدول.
+
+    يستخدم pg_stat_all_tables.n_live_tup (تقدير إحصائي فوري)
+    مع fallback إلى pg_class.reltuples.
+    لا يستخدم COUNT(*) لأنه مكلف على الجداول الكبيرة.
+    """
+    if not _is_valid_index_name(table_name):
+        return 0
+    try:
+        count = await conn.fetchval("""
+            SELECT COALESCE(s.n_live_tup, 0)
+            FROM pg_stat_all_tables s
+            JOIN pg_class c ON c.oid = s.relid
+            JOIN pg_namespace n ON n.oid = c.relnamespace
+            WHERE c.relname = $1
+              AND n.nspname = current_schema()
+        """, table_name)
+        if count and int(count) > 0:
+            return int(count)
+
+        reltuples = await conn.fetchval("""
+            SELECT c.reltuples::bigint
+            FROM pg_class c
+            JOIN pg_namespace n ON n.oid = c.relnamespace
+            WHERE c.relname = $1
+              AND n.nspname = current_schema()
+              AND c.relkind IN ('r', 'm')
+        """, table_name)
+        return max(int(reltuples or 0), 0)
+    except Exception:
+        return 0
+
+
+async def _safe_drop_index_postgres(conn, logger, idx_name: str) -> bool:
+    """
+    🆕 v7.9.5 CC-5: حذف فهرس بأمان.
+
+    يجرّب DROP INDEX CONCURRENTLY أولاً (لا يقفل الكتابة)،
+    وإذا فشل بسبب transaction block، يتراجع إلى DROP INDEX عادي.
+    """
+    if not _is_valid_index_name(idx_name):
+        return False
+    try:
+        await conn.execute(f"DROP INDEX CONCURRENTLY IF EXISTS {idx_name}")
+        return True
+    except Exception as e:
+        err = str(e).lower()
+        if "cannot run inside a transaction" in err:
+            try:
+                await conn.execute(f"DROP INDEX IF EXISTS {idx_name}")
+                return True
+            except Exception as e2:
+                if logger:
+                    logger.debug(f"⚠️ فشل حذف {idx_name} (fallback): {e2}")
+                return False
+        if logger:
+            logger.debug(f"⚠️ فشل حذف {idx_name}: {e}")
+        return False
+
+
+async def _drop_invalid_indexes_postgres(conn, logger) -> int:
+    """
+    🆕 v7.9.5 CC-4: حذف الفهارس INVALID الناتجة عن فشل CONCURRENTLY.
+
+    عندما يفشل CREATE INDEX CONCURRENTLY، يترك PostgreSQL فهرساً
+    بحالة INVALID يشغل مساحة ولا يعمل. ننظّفه هنا.
+
+    مقيّد بـ COMMON_INDEXES فقط — لا يلمس فهارس أخرى.
+    """
+    try:
+        rows = await conn.fetch("""
+            SELECT c.relname AS index_name
+            FROM pg_index i
+            JOIN pg_class c ON c.oid = i.indexrelid
+            JOIN pg_namespace n ON n.oid = c.relnamespace
+            WHERE NOT i.indisvalid
+              AND n.nspname = current_schema()
+              AND c.relname = ANY($1::text[])
+        """, [n for _, n, _ in COMMON_INDEXES])
+
+        if not rows:
+            return 0
+
+        if logger:
+            logger.warning(
+                f"🧹 PG: وُجد {len(rows)} فهرس INVALID — بدء التنظيف"
+            )
+
+        dropped = 0
+        for r in rows:
+            idx = r["index_name"]
+            if await _safe_drop_index_postgres(conn, logger, idx):
+                dropped += 1
+                if logger:
+                    logger.info(f"🧹 PG: حُذف فهرس INVALID {idx}")
+
+        return dropped
+    except Exception as e:
+        if logger:
+            logger.debug(f"_drop_invalid_indexes_postgres: {e}")
+        return 0
+
+
+async def _create_index_postgres_smart(
+    conn, logger, idx_name: str, cols: str,
+    table_row_cache=None,
+) -> str:
+    """
+    🆕 v7.9.5 CC-1/CC-2: إنشاء فهرس مع قرار CONCURRENTLY التلقائي.
+
+    القرار:
+      - إذا كان الجدول ≥ CONCURRENT_INDEX_MIN_ROWS → CONCURRENTLY
+      - وإلا → CREATE INDEX عادي
+
+    Fallback تلقائي:
+      - "cannot run inside a transaction" → CREATE INDEX عادي
+      - "already exists" / "duplicate" → duplicate
+
+    Returns:
+        "created"      — نجح بـ CREATE INDEX عادي
+        "created_cc"   — نجح بـ CREATE INDEX CONCURRENTLY
+        "duplicate"    — موجود مسبقاً
+        "failed"       — فشل
+    """
+    if not _is_valid_index_name(idx_name):
+        return "failed"
+
+    # استخراج اسم الجدول من تعريف الفهرس "table_name(...)"
+    table_match = re.match(r"^(\w+)\s*\(", cols.strip())
+    if not table_match:
+        return "failed"
+    table_name = table_match.group(1)
+
+    # قرار CONCURRENTLY (مع cache)
+    use_concurrently = False
+    if CONCURRENT_INDEX_MIN_ROWS > 0:
+        if table_row_cache is not None and table_name in table_row_cache:
+            row_count = table_row_cache[table_name]
+        else:
+            row_count = await _get_table_row_count_postgres(conn, table_name)
+            if table_row_cache is not None:
+                table_row_cache[table_name] = row_count
+        if row_count >= CONCURRENT_INDEX_MIN_ROWS:
+            use_concurrently = True
+
+    # البناء والتنفيذ
+    if use_concurrently:
+        # ملاحظة: CONCURRENTLY لا يدعم IF NOT EXISTS في بعض نسخ PG
+        # لكننا تحققنا من الوجود مسبقاً، فلا نحتاجه
+        stmt = f"CREATE INDEX CONCURRENTLY {idx_name} ON {cols}"
+    else:
+        stmt = f"CREATE INDEX IF NOT EXISTS {idx_name} ON {cols}"
+
+    try:
+        await conn.execute(stmt)
+        if use_concurrently and logger:
+            logger.info(
+                f"✅ PG: أُنشئ {idx_name} بـ CONCURRENTLY "
+                f"(جدول {table_name} ≥ {CONCURRENT_INDEX_MIN_ROWS} صف)"
+            )
+        return "created_cc" if use_concurrently else "created"
+    except Exception as e:
+        err = str(e).lower()
+
+        if "already exists" in err or "duplicate" in err:
+            return "duplicate"
+
+        # 🆕 CC-2: fallback من CONCURRENTLY إلى CREATE INDEX عادي
+        if use_concurrently and "cannot run inside a transaction" in err:
+            if logger:
+                logger.debug(
+                    f"⚠️ PG: {idx_name} — CONCURRENTLY داخل tx، تراجع"
+                )
+            try:
+                await conn.execute(
+                    f"CREATE INDEX IF NOT EXISTS {idx_name} ON {cols}"
+                )
+                return "created"
+            except Exception as e2:
+                err2 = str(e2).lower()
+                if "already exists" in err2 or "duplicate" in err2:
+                    return "duplicate"
+                if logger:
+                    logger.warning(
+                        f"⚠️ PG: فشل الفهرس {idx_name} (fallback): {e2}"
+                    )
+                return "failed"
+
+        # fallback آخر: CONCURRENTLY غير مدعوم (نسخ PG قديمة جداً)
+        if use_concurrently and (
+            "concurrently" in err and "not supported" in err
+        ):
+            if logger:
+                logger.debug(
+                    f"⚠️ PG: {idx_name} — CONCURRENTLY غير مدعوم، تراجع"
+                )
+            try:
+                await conn.execute(
+                    f"CREATE INDEX IF NOT EXISTS {idx_name} ON {cols}"
+                )
+                return "created"
+            except Exception as e2:
+                err2 = str(e2).lower()
+                if "already exists" in err2 or "duplicate" in err2:
+                    return "duplicate"
+                if logger:
+                    logger.warning(
+                        f"⚠️ PG: فشل الفهرس {idx_name}: {e2}"
+                    )
+                return "failed"
+
+        if logger:
+            logger.warning(f"⚠️ PG: فشل الفهرس {idx_name}: {e}")
+        return "failed"
 
 
 # =====================================================================
@@ -877,9 +1072,11 @@ async def _tune_autovacuum_postgres(conn, logger):
             continue
         try:
             exists = await conn.fetchval(
-                "SELECT 1 FROM information_schema.tables "
-                "WHERE table_name = $1 "
-                "AND table_schema = current_schema()",
+                "SELECT 1 FROM pg_class c "
+                "JOIN pg_namespace n ON n.oid = c.relnamespace "
+                "WHERE c.relname = $1 "
+                "  AND c.relkind IN ('r', 'm') "
+                "  AND n.nspname = current_schema()",
                 tbl,
             )
             if not exists:
@@ -906,11 +1103,14 @@ async def _tune_autovacuum_postgres(conn, logger):
 
 
 # =====================================================================
-# فحص جماعي للفهارس
+# 🆕 v7.9.5 CC-6: فحص جماعي — يستخدم smart creation
 # =====================================================================
 
 async def _ensure_all_indexes_exist_postgres(conn, logger):
     try:
+        # 🆕 CC-4: تنظيف الفهارس INVALID أولاً
+        await _drop_invalid_indexes_postgres(conn, logger)
+
         all_names = [n for _, n, _ in COMMON_INDEXES]
         rows = await conn.fetch(
             "SELECT indexname FROM pg_indexes "
@@ -929,31 +1129,35 @@ async def _ensure_all_indexes_exist_postgres(conn, logger):
                 f"— إعادة إنشاء"
             )
 
+        # 🆕 CC-3: cache لعدد صفوف الجداول
+        row_cache = {}
         created = 0
+        created_cc = 0
+        duplicate = 0
         failed = 0
+
         for idx_name in missing:
-            if not _is_valid_index_name(idx_name):
-                failed += 1
-                continue
             cols = _get_expected_cols_for_index(idx_name, "postgres")
             if not cols:
                 failed += 1
                 continue
-            try:
-                await conn.execute(
-                    f"CREATE INDEX IF NOT EXISTS {idx_name} ON {cols}"
-                )
+            result = await _create_index_postgres_smart(
+                conn, logger, idx_name, cols, row_cache
+            )
+            if result == "created":
                 created += 1
-            except Exception as e:
+            elif result == "created_cc":
+                created += 1
+                created_cc += 1
+            elif result == "duplicate":
+                duplicate += 1
+            else:
                 failed += 1
-                if logger:
-                    logger.warning(
-                        f"⚠️ PG fast-path فهرس {idx_name}: {e}"
-                    )
+
         if logger and created:
             logger.info(
                 f"✅ PG fast-path: أُعيد إنشاء {created} فهرس "
-                f"({failed} فشل)"
+                f"({created_cc} بـ CONCURRENTLY، {failed} فشل)"
             )
         return created
     except Exception as e:
@@ -1039,7 +1243,7 @@ async def _ensure_all_indexes_exist_mysql(conn, logger):
                 logger.warning(f"⚠️ MySQL fetch indexes: {e}")
             return 0
 
-        existing = {(t, idx) for (t, idx) in existing_pairs}
+        existing = existing_pairs
         missing = [
             (t, n, c) for t, n, c in COMMON_INDEXES
             if (t, n) not in existing and n not in MYSQL_SKIP_INDEXES
@@ -1136,40 +1340,34 @@ async def _quick_analyze_mysql(conn, logger):
 
 
 # =====================================================================
-# 🆕 v7.9.2 MV-FIX-3: VACUUM ذكي على الـ Materialized Views المتسخة
+# VACUUM ذكي على MVs المتسخة
 # =====================================================================
 
 async def _vacuum_dirty_mvs_postgres(conn, logger, min_dead: int = 10):
-    """
-    🆕 v7.9.2 MV-FIX-3: تنظيف MVs المتسخة.
-
-    autovacuum لا يعمل على Materialized Views إطلاقاً.
-    هذه الدالة تجد كل MVs التي فيها dead_tuples >= min_dead
-    وتشغّل عليها VACUUM (ANALYZE) فقط عند الحاجة.
-
-    Args:
-        conn:     اتصال PostgreSQL
-        logger:   logger
-        min_dead: الحد الأدنى لـ dead_tuples قبل التنظيف (افتراضي 10)
-
-    Returns:
-        int: عدد MVs التي نُظّفت
-    """
-    if not _is_valid_index_name:
-        return 0
-
     try:
-        rows = await conn.fetch("""
-            SELECT c.relname AS name,
-                   s.n_dead_tup AS dead,
-                   s.n_live_tup AS live
-            FROM pg_stat_user_tables s
-            JOIN pg_class c ON c.oid = s.relid
-            WHERE s.schemaname = current_schema()
-              AND c.relkind = 'm'
-              AND s.n_dead_tup >= $1
-            ORDER BY s.n_dead_tup DESC
-        """, min_dead)
+        try:
+            pg_ver_raw = await conn.fetchval("SHOW server_version_num")
+            pg_version = int(pg_ver_raw) // 10000 if pg_ver_raw else 0
+        except Exception:
+            pg_version = 0
+
+        try:
+            rows = await conn.fetch("""
+                SELECT c.relname AS name,
+                       COALESCE(s.n_dead_tup, 0) AS dead,
+                       COALESCE(s.n_live_tup, 0) AS live
+                FROM pg_class c
+                JOIN pg_namespace n ON n.oid = c.relnamespace
+                LEFT JOIN pg_stat_all_tables s ON s.relid = c.oid
+                WHERE n.nspname = current_schema()
+                  AND c.relkind = 'm'
+                  AND COALESCE(s.n_dead_tup, 0) >= $1
+                ORDER BY COALESCE(s.n_dead_tup, 0) DESC
+            """, min_dead)
+        except Exception as e:
+            if logger:
+                logger.debug(f"⚠️ PG: فشل جلب MVs المتسخة: {e}")
+            rows = []
 
         if not rows:
             if logger:
@@ -1184,13 +1382,14 @@ async def _vacuum_dirty_mvs_postgres(conn, logger, min_dead: int = 10):
             )
 
         cleaned = 0
+        analyzed = 0
         failed = 0
+
         for r in rows:
             name = r["name"]
             dead = r["dead"]
             live = r["live"]
 
-            # تحقق أمني: لا VACUUM على أسماء غير صالحة
             if not _is_valid_index_name(name):
                 failed += 1
                 if logger:
@@ -1199,18 +1398,34 @@ async def _vacuum_dirty_mvs_postgres(conn, logger, min_dead: int = 10):
                     )
                 continue
 
-            try:
-                await conn.execute(f'VACUUM (ANALYZE) "{name}"')
-                cleaned += 1
-                if logger:
-                    logger.info(
-                        f"✅ PG: VACUUM على MV {name} "
-                        f"(dead={dead}, live={live})"
-                    )
-            except Exception as e:
-                failed += 1
-                if logger:
-                    logger.debug(f"⚠️ VACUUM MV {name}: {e}")
+            if pg_version >= 14:
+                try:
+                    await conn.execute(f'VACUUM (ANALYZE) "{name}"')
+                    cleaned += 1
+                    if logger:
+                        logger.info(
+                            f"✅ PG: VACUUM على MV {name} "
+                            f"(dead={dead}, live={live})"
+                        )
+                except Exception as e:
+                    err = str(e).lower()
+                    if "cannot run inside a transaction" in err:
+                        if logger:
+                            logger.debug(
+                                f"⚠️ VACUUM MV {name}: داخل tx — تخطي"
+                            )
+                    else:
+                        failed += 1
+                        if logger:
+                            logger.debug(f"⚠️ VACUUM MV {name}: {e}")
+            else:
+                try:
+                    await conn.execute(f'ANALYZE "{name}"')
+                    analyzed += 1
+                except Exception as e:
+                    failed += 1
+                    if logger:
+                        logger.debug(f"⚠️ ANALYZE MV {name}: {e}")
 
             try:
                 await asyncio.sleep(VACUUM_INTER_TABLE_DELAY_SECONDS)
@@ -1219,12 +1434,12 @@ async def _vacuum_dirty_mvs_postgres(conn, logger, min_dead: int = 10):
             except Exception:
                 pass
 
-        if logger and cleaned:
+        if logger and (cleaned or analyzed):
             logger.info(
-                f"✅ PG: نُظّف {cleaned} MV "
-                f"({failed} فشل)"
+                f"✅ PG: MVs — VACUUM={cleaned}, ANALYZE={analyzed}, "
+                f"فشل={failed} (PG {pg_version})"
             )
-        return cleaned
+        return cleaned + analyzed
     except asyncio.CancelledError:
         raise
     except Exception as e:
@@ -1234,15 +1449,17 @@ async def _vacuum_dirty_mvs_postgres(conn, logger, min_dead: int = 10):
 
 
 # =====================================================================
-# VACUUM ANALYZE الدوري — 🆕 v7.9.2: يشمل MVs تلقائياً
+# VACUUM ANALYZE الدوري
 # =====================================================================
 
 async def _run_maintenance_postgres(conn, logger):
-    """
-    🆕 v7.9.2 MV-FIX-2: يجمع الآن كل الجداول و MVs تلقائياً من
-    pg_class بدلاً من الاعتماد على MAINTENANCE_TABLES فقط.
-    """
     try:
+        try:
+            pg_ver_raw = await conn.fetchval("SHOW server_version_num")
+            pg_version = int(pg_ver_raw) // 10000 if pg_ver_raw else 0
+        except Exception:
+            pg_version = 0
+
         try:
             last_val = await conn.fetchval(
                 "SELECT value FROM settings WHERE key = 'last_maintenance_at'"
@@ -1266,9 +1483,6 @@ async def _run_maintenance_postgres(conn, logger):
             except (ValueError, TypeError):
                 pass
 
-        # ═══════════════════════════════════════════════════════════
-        # 🆕 v7.9.2 MV-FIX-2: اجمع كل relations (tables + MVs)
-        # ═══════════════════════════════════════════════════════════
         all_objects: list = []
         try:
             rows = await conn.fetch("""
@@ -1286,7 +1500,6 @@ async def _run_maintenance_postgres(conn, logger):
                 logger.debug(f"⚠️ PG fetch relations: {e}")
             all_objects = list(MAINTENANCE_TABLES)
 
-        # ادمج MAINTENANCE_TABLES + كل relations (dict يحافظ على الترتيب)
         merged_targets = list(dict.fromkeys(
             list(MAINTENANCE_TABLES) + all_objects
         ))
@@ -1298,20 +1511,42 @@ async def _run_maintenance_postgres(conn, logger):
             )
 
         done = 0
+        analyzed = 0
         failed = 0
+
         for tbl in merged_targets:
             if not _is_valid_index_name(tbl):
                 failed += 1
                 continue
+
             try:
-                await conn.execute(
-                    f"VACUUM (ANALYZE, SKIP_LOCKED) {tbl}"
+                is_mv = await conn.fetchval(
+                    "SELECT c.relkind = 'm' FROM pg_class c "
+                    "JOIN pg_namespace n ON n.oid = c.relnamespace "
+                    "WHERE c.relname = $1 "
+                    "  AND n.nspname = current_schema()",
+                    tbl,
                 )
-                done += 1
+            except Exception:
+                is_mv = False
+
+            try:
+                if is_mv and pg_version < 14:
+                    await conn.execute(f'ANALYZE "{tbl}"')
+                    analyzed += 1
+                elif is_mv:
+                    await conn.execute(f'VACUUM (ANALYZE) "{tbl}"')
+                    done += 1
+                else:
+                    await conn.execute(
+                        f"VACUUM (ANALYZE, SKIP_LOCKED) {tbl}"
+                    )
+                    done += 1
             except Exception as e:
                 failed += 1
                 if logger:
                     logger.debug(f"⚠️ VACUUM {tbl}: {e}")
+
             try:
                 await asyncio.sleep(VACUUM_INTER_TABLE_DELAY_SECONDS)
             except asyncio.CancelledError:
@@ -1319,10 +1554,6 @@ async def _run_maintenance_postgres(conn, logger):
             except Exception:
                 pass
 
-        # ═══════════════════════════════════════════════════════════
-        # 🆕 v7.9.2 MV-FIX-3: تنظيف ذكي إضافي للـ MVs المتسخة
-        # (ضمان مزدوج — لو فشل VACUUM في القائمة الرئيسية)
-        # ═══════════════════════════════════════════════════════════
         mvs_cleaned = 0
         try:
             mvs_cleaned = await _vacuum_dirty_mvs_postgres(
@@ -1345,12 +1576,12 @@ async def _run_maintenance_postgres(conn, logger):
             if logger:
                 logger.debug(f"⚠️ record maintenance time: {e}")
 
-        if logger and done:
+        if logger and (done or analyzed):
             logger.info(
-                f"✅ PG: VACUUM (ANALYZE, SKIP_LOCKED) على {done} كائن "
-                f"({failed} فشل، {mvs_cleaned} MV إضافي)"
+                f"✅ PG: VACUUM={done}, ANALYZE={analyzed}, "
+                f"فشل={failed}, MVs إضافي={mvs_cleaned} (PG {pg_version})"
             )
-        return done
+        return done + analyzed
     except asyncio.CancelledError:
         raise
     except Exception as e:
@@ -1452,7 +1683,7 @@ async def _run_maintenance_mysql(conn, logger):
                 pass
 
         if logger:
-            logger.info("🧹 MySQL: بدء ANALYZE + OPTIMIZE...")
+            logger.info("🧹 MySQL: بدء ANALYZE...")
 
         done = 0
         for tbl in MAINTENANCE_TABLES:
@@ -1505,7 +1736,6 @@ async def _run_maintenance_mysql(conn, logger):
 _GROUP_SECURITY_NEW_COLUMNS = [
     ("violation_penalty", "TEXT DEFAULT 'none'"),
     ("violation_penalty_duration", "INTEGER DEFAULT 3600"),
-    # 🆕 v7.9.0
     ("delete_at_channel", "INTEGER DEFAULT 0"),
     ("delete_tg_scheme", "INTEGER DEFAULT 1"),
     ("delete_button_links", "INTEGER DEFAULT 1"),
@@ -1526,12 +1756,10 @@ _USER_CHANNELS_NEW_COLUMNS = [
     ("removal_reason", "TEXT DEFAULT NULL"),
 ]
 
-# ✅ v7.9.1 BW-MIG-1
 _BANNED_WORDS_NEW_COLUMNS = [
     ("added_by", "BIGINT DEFAULT 0"),
 ]
 
-# ✅ v7.9.1 BW-MIG-2
 _AUTO_REPLIES_NEW_COLUMNS = [
     ("added_by", "BIGINT DEFAULT 0"),
 ]
@@ -1605,7 +1833,6 @@ async def _migrate_missing_columns_sqlite(conn, logger):
                     f"⚠️ SQLite migration user_channels.{col_name}: {e}"
                 )
 
-    # ✅ v7.9.1 BW-MIG-1
     for col_name, col_def in _BANNED_WORDS_NEW_COLUMNS:
         checked += 1
         try:
@@ -1627,7 +1854,6 @@ async def _migrate_missing_columns_sqlite(conn, logger):
                     f"⚠️ SQLite migration banned_words.{col_name}: {e}"
                 )
 
-    # ✅ v7.9.1 BW-MIG-2
     for col_name, col_def in _AUTO_REPLIES_NEW_COLUMNS:
         checked += 1
         try:
@@ -1751,7 +1977,6 @@ async def _migrate_missing_columns_postgres(conn, logger):
                     f"⚠️ PG migration user_channels.{col_name}: {e}"
                 )
 
-    # ✅ v7.9.1 BW-MIG-1
     for col_name, col_def in _BANNED_WORDS_NEW_COLUMNS:
         try:
             exists = await conn.fetchval(
@@ -1782,7 +2007,6 @@ async def _migrate_missing_columns_postgres(conn, logger):
                     f"⚠️ PG migration banned_words.{col_name}: {e}"
                 )
 
-    # ✅ v7.9.1 BW-MIG-2
     for col_name, col_def in _AUTO_REPLIES_NEW_COLUMNS:
         try:
             exists = await conn.fetchval(
@@ -1960,7 +2184,6 @@ async def _migrate_missing_columns_mysql(conn, logger):
                     f"⚠️ MySQL migration user_channels.{col_name}: {e}"
                 )
 
-    # ✅ v7.9.1 BW-MIG-1
     _mysql_banned_words_cols = [
         ("added_by", "BIGINT DEFAULT 0"),
     ]
@@ -2004,7 +2227,6 @@ async def _migrate_missing_columns_mysql(conn, logger):
                     f"⚠️ MySQL migration banned_words.{col_name}: {e}"
                 )
 
-    # ✅ v7.9.1 BW-MIG-2
     _mysql_auto_replies_cols = [
         ("added_by", "BIGINT DEFAULT 0"),
     ]
@@ -2247,11 +2469,14 @@ async def _cleanup_stale_links_mysql(conn, logger):
 
 
 # =====================================================================
-# فحص الفهارس الحرجة
+# 🆕 v7.9.5 CC-7: فحص الفهارس الحرجة — يستخدم smart creation
 # =====================================================================
 
 async def _verify_critical_indexes_postgres(conn, logger):
     try:
+        # 🆕 CC-4: تنظيف INVALID أولاً
+        await _drop_invalid_indexes_postgres(conn, logger)
+
         rows = await conn.fetch(
             "SELECT indexname FROM pg_indexes "
             "WHERE indexname = ANY($1::text[]) "
@@ -2266,23 +2491,29 @@ async def _verify_critical_indexes_postgres(conn, logger):
             logger.warning(
                 f"⚠️ PG: {len(missing)} فهرس حرج مفقود — إعادة إنشاء"
             )
+
+        # 🆕 CC-3: cache لعدد صفوف الجداول
+        row_cache = {}
         created = 0
+        created_cc = 0
         for idx_name in missing:
-            if not _is_valid_index_name(idx_name):
-                continue
             cols = _get_expected_cols_for_index(idx_name, "postgres")
             if not cols:
                 continue
-            try:
-                await conn.execute(
-                    f"CREATE INDEX IF NOT EXISTS {idx_name} ON {cols}"
-                )
+            result = await _create_index_postgres_smart(
+                conn, logger, idx_name, cols, row_cache
+            )
+            if result == "created":
                 created += 1
                 if logger:
                     logger.info(f"✅ PG: أُنشئ {idx_name}")
-            except Exception as e:
-                if logger:
-                    logger.warning(f"⚠️ PG فشل إنشاء {idx_name}: {e}")
+            elif result == "created_cc":
+                created += 1
+                created_cc += 1
+        if logger and created_cc:
+            logger.info(
+                f"✅ PG critical: {created_cc} فهرس حرج بـ CONCURRENTLY"
+            )
         return created
     except Exception as e:
         if logger:
@@ -2506,11 +2737,9 @@ async def _ensure_index_definitions_match_postgres(conn, logger):
                     f"⚠️ PG: {idx_name} تعريف مختلف "
                     f"(فعلي={actual_cols[:60]}, متوقع={expected_cols[:60]}) — يُحذف"
                 )
-                try:
-                    await conn.execute(f"DROP INDEX IF EXISTS {idx_name}")
+                # 🆕 CC-5: استخدام الحذف الآمن
+                if await _safe_drop_index_postgres(conn, logger, idx_name):
                     dropped += 1
-                except Exception as e:
-                    logger.warning(f"⚠️ فشل حذف {idx_name}: {e}")
             checked += 1
         if logger and dropped > 0:
             logger.info(
@@ -2671,15 +2900,11 @@ async def _drop_deprecated_indexes_postgres(conn, logger):
                 logger.debug("🧹 PG: 0 فهرس قديم للحذف")
             return 0
         for idx_name in existing:
-            if not _is_valid_index_name(idx_name):
-                continue
-            try:
-                await conn.execute(f"DROP INDEX IF EXISTS {idx_name}")
+            # 🆕 CC-5: استخدام الحذف الآمن
+            if await _safe_drop_index_postgres(conn, logger, idx_name):
                 dropped += 1
                 if logger:
                     logger.info(f"🧹 PG: حُذف فهرس قديم {idx_name}")
-            except Exception as e:
-                logger.warning(f"⚠️ فشل حذف فهرس {idx_name}: {e}")
         if dropped > 0:
             logger.info(f"🧹 PG: حُذف إجمالي {dropped} فهرس قديم")
     except Exception as e:
@@ -2753,7 +2978,7 @@ async def _drop_deprecated_indexes_mysql(conn, logger):
 
 
 # =====================================================================
-# إنشاء الفهارس
+# إنشاء الفهارس — عام (SQLite/MySQL)
 # =====================================================================
 
 async def _create_indexes_generic(
@@ -2815,15 +3040,69 @@ async def _create_indexes_sqlite(conn, logger):
     )
 
 
+# =====================================================================
+# 🆕 v7.9.5 CC-8: إنشاء فهارس PostgreSQL — يستخدم smart creation
+# =====================================================================
+
 async def _create_indexes_postgres(conn, logger):
     index_names = [idx_name for _, idx_name, _ in COMMON_INDEXES]
+    try:
+        existing = await _fetch_existing_indexes_postgres(
+            conn, index_names
+        )
+    except Exception as e:
+        if logger:
+            logger.warning(f"⚠️ PG فشل جلب الفهارس: {e}")
+        return
 
-    async def _fetch(c):
-        return await _fetch_existing_indexes_postgres(c, index_names)
+    # 🆕 CC-4: تنظيف INVALID أولاً
+    await _drop_invalid_indexes_postgres(conn, logger)
 
-    await _create_indexes_generic(
-        conn, logger, "PostgreSQL", _fetch, "postgres"
-    )
+    to_create = [
+        (t, n, _adapt_cols_for_db(c, "postgres"))
+        for t, n, c in COMMON_INDEXES
+        if n not in existing
+    ]
+
+    if not to_create:
+        if logger:
+            logger.info(
+                f"✅ PostgreSQL: 0 فهرس جديد، "
+                f"{len(COMMON_INDEXES)} موجود، 0 فشل"
+            )
+        return
+
+    # 🆕 CC-3: cache لعدد صفوف الجداول
+    row_cache = {}
+    created = 0
+    created_cc = 0
+    duplicate = 0
+    failed = 0
+
+    for _table, idx_name, cols in to_create:
+        if not cols:
+            failed += 1
+            continue
+        result = await _create_index_postgres_smart(
+            conn, logger, idx_name, cols, row_cache
+        )
+        if result == "created":
+            created += 1
+        elif result == "created_cc":
+            created += 1
+            created_cc += 1
+        elif result == "duplicate":
+            duplicate += 1
+        else:
+            failed += 1
+
+    skipped = len(COMMON_INDEXES) - len(to_create) + duplicate
+    if logger:
+        logger.info(
+            f"✅ PostgreSQL: {created} فهرس جديد "
+            f"({created_cc} بـ CONCURRENTLY)، "
+            f"{skipped} موجود، {failed} فشل"
+        )
 
 
 async def _create_indexes_mysql(conn, logger):
@@ -3535,7 +3814,7 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
             "(version, applied_at, description) "
             "VALUES (?, ?, ?) ON CONFLICT(version) DO NOTHING",
             (CURRENT_SCHEMA_VERSION, _safe_now_iso(TimeUtils),
-             "v7.9.3-perf-indexes"),
+             "v7.9.5-concurrent-index-large-tables"),
         )
         await conn.commit()
     except Exception as e:
@@ -3545,7 +3824,7 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
     if logger:
         logger.info(
             "✅ تم إنشاء جميع جداول SQLite مع الفهارس المحسنة "
-            "(v7.9.3 — PERF-INDEXES)"
+            "(v7.9.5 — CONCURRENT-INDEX)"
         )
 
 
@@ -3562,6 +3841,8 @@ async def create_tables_postgres(conn, logger, TimeUtils):
             )
         await _ensure_auto_blocked_table_postgres(conn, logger)
         await _migrate_missing_columns_postgres(conn, logger)
+        # 🆕 CC-9: _drop_invalid_indexes_postgres يُستدعى داخل
+        # _verify_critical_indexes_postgres و _ensure_all_indexes_exist_postgres
         await _verify_critical_indexes_postgres(conn, logger)
         await _ensure_all_indexes_exist_postgres(conn, logger)
         await _ensure_index_definitions_match_postgres(conn, logger)
@@ -3570,7 +3851,6 @@ async def create_tables_postgres(conn, logger, TimeUtils):
         await _cleanup_old_admin_logs_postgres(conn, logger)
         await _tune_autovacuum_postgres(conn, logger)
         await _quick_analyze_postgres(conn, logger)
-        # 🆕 v7.9.2 MV-FIX-2/3: VACUUM يشمل MVs تلقائياً
         await _run_maintenance_postgres(conn, logger)
         if logger:
             logger.info(
@@ -4209,12 +4489,12 @@ async def create_tables_postgres(conn, logger, TimeUtils):
     await _migrate_missing_columns_postgres(conn, logger)
     await _drop_deprecated_indexes_postgres(conn, logger)
     await _ensure_index_definitions_match_postgres(conn, logger)
+    # 🆕 CC-8: يستخدم smart creation
     await _create_indexes_postgres(conn, logger)
     await _cleanup_stale_links_postgres(conn, logger)
     await _cleanup_old_admin_logs_postgres(conn, logger)
     await _tune_autovacuum_postgres(conn, logger)
     await _quick_analyze_postgres(conn, logger)
-    # 🆕 v7.9.2 MV-FIX-2/3: VACUUM يشمل MVs
     await _run_maintenance_postgres(conn, logger)
 
     try:
@@ -4224,7 +4504,7 @@ async def create_tables_postgres(conn, logger, TimeUtils):
             "VALUES ($1, $2, $3) ON CONFLICT (version) DO NOTHING",
             CURRENT_SCHEMA_VERSION,
             _safe_now_dt(TimeUtils),
-            "v7.9.3-perf-indexes",
+            "v7.9.5-concurrent-index-large-tables",
         )
     except Exception as e:
         if logger:
@@ -4233,7 +4513,7 @@ async def create_tables_postgres(conn, logger, TimeUtils):
     if logger:
         logger.info(
             "✅ تم إنشاء جميع جداول PostgreSQL مع الفهارس المحسنة "
-            "(v7.9.3 — PERF-INDEXES)"
+            "(v7.9.5 — CONCURRENT-INDEX)"
         )
 
 
@@ -4913,7 +5193,7 @@ async def create_tables_mysql(conn, logger, TimeUtils):
                 (
                     CURRENT_SCHEMA_VERSION,
                     _safe_now_iso(TimeUtils),
-                    "v7.9.3-perf-indexes",
+                    "v7.9.5-concurrent-index-large-tables",
                 ),
             )
         except Exception as e:
@@ -4923,7 +5203,7 @@ async def create_tables_mysql(conn, logger, TimeUtils):
         if logger:
             logger.info(
                 "✅ تم إنشاء جميع جداول MySQL مع الفهارس المحسنة "
-                "(v7.9.3 — PERF-INDEXES)"
+                "(v7.9.5 — CONCURRENT-INDEX)"
             )
 
     finally:
@@ -4956,6 +5236,7 @@ __all__ = [
     "ADMIN_LOGS_RETENTION_DAYS",
     "ADMIN_LOGS_MAX_ROWS",
     "REMOVED_CHANNELS_GRACE_DAYS",
+    "CONCURRENT_INDEX_MIN_ROWS",
     "SMALL_TABLES_FOR_AGGRESSIVE_AUTOVACUUM",
     "_adapt_cols_for_db",
     "_cleanup_old_admin_logs_postgres",
@@ -4965,12 +5246,15 @@ __all__ = [
     "_run_maintenance_postgres",
     "_run_maintenance_sqlite",
     "_run_maintenance_mysql",
-    # 🆕 v7.9.2 MV-FIX-3
     "_vacuum_dirty_mvs_postgres",
+    # 🆕 v7.9.5 CC-1..CC-5: أدوات CONCURRENTLY
+    "_get_table_row_count_postgres",
+    "_create_index_postgres_smart",
+    "_safe_drop_index_postgres",
+    "_drop_invalid_indexes_postgres",
     "_ensure_auto_blocked_table_postgres",
     "_ensure_auto_blocked_table_sqlite",
     "_ensure_auto_blocked_table_mysql",
-    # ✅ v7.9.1 BW-MIG
     "_BANNED_WORDS_NEW_COLUMNS",
     "_AUTO_REPLIES_NEW_COLUMNS",
 ]
