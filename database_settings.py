@@ -1,8 +1,27 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-database_settings.py - دوال الإعدادات العامة (v7.7.32)
+database_settings.py - دوال الإعدادات العامة (v7.7.33)
 ================================================================================
+🔴 v7.7.33 (FIX-Y1-MYSQL-UPSERT-IDEMPOTENT):
+    🔴 FIX-Y1: set_setting — `result >= 0` بدل `result > 0`.
+        السبب: MySQL يُعيد rowcount=0 عند ON DUPLICATE KEY UPDATE
+        على قيمة مطابقة (no-op ناجح)، وليس فشلاً.
+        قبل: rowcount=0 → fallback → UPDATE(0) → INSERT(duplicate)
+             → return False → "❌ فشل الحفظ" كاذب.
+        بعد: rowcount >= 0 = نجاح. الفشل الحقيقي = None فقط.
+        الأثر:
+          • remove_log_channel() (لو القيمة فارغة مسبقاً) → True
+          • set_setting(key, same_value) على MySQL → True
+          • set_log_channel(chat_id) عند التكرار → True
+        ملاحظة: PostgreSQL/SQLite لا يتأثران (يُعيدان 1 دائماً).
+
+    🟡 FIX-Y1-FOLLOWUP: _set_setting_fallback — INSERT idempotent.
+        استخدام ON DUPLICATE KEY UPDATE (MySQL) بدل INSERT عادي
+        لمنع duplicate key error عند سباق نادر.
+        ⚠️ لم نستخدم INSERT IGNORE لأنه يكتم أخطاء حقيقية
+           (type mismatch، permission، NOT NULL ...).
+
 🆕 v7.7.32 (LOG-CHANNEL-HARDENING):
     ✅ _is_valid_channel_ref: يقبل كل الأنواع
        - معرّف رقمي (قد يكون سالباً)
@@ -433,7 +452,7 @@ class SettingsMixin:
         return result
 
     # =====================================================================
-    # 2) ✅ v7.7.32: حفظ إعداد مع تحقق مسبق
+    # 2) ✅ v7.7.32 + 🔴 v7.7.33: حفظ إعداد مع تحقق + idempotent
     # =====================================================================
 
     async def set_setting(self, key: str, value: str) -> bool:
@@ -444,6 +463,8 @@ class SettingsMixin:
           - log_channel_id
           - force_subscribe_channel
           - updates_channel
+
+        🔴 v7.7.33 FIX-Y1: يُقبل rowcount=0 (no-op ناجح على MySQL).
         """
         # 🆕 v7.7.32: تحقق مسبق
         is_valid, reason = _validate_setting_value(key, value)
@@ -487,7 +508,22 @@ class SettingsMixin:
                 )
                 result = await self.execute(query, (key, value))
 
-            if result is not None and result > 0:
+            # 🔴 FIX-Y1 (v7.7.33): MySQL يُعيد rowcount=0 عندما لا
+            # تتغيّر القيمة (ON DUPLICATE KEY UPDATE على قيمة مطابقة).
+            # هذا يعني "نجاح بدون تغيير" — وليس فشلاً.
+            #
+            # قبل الإصلاح:
+            #   result = 0 → fallback → UPDATE يرجع 0 →
+            #   INSERT يفشل بـ duplicate → return False
+            #   → المستخدم يرى "❌ فشل الحفظ" رغم أن العملية نجحت.
+            #
+            # الأثر:
+            #   • remove_log_channel() → "❌ فشل الحذف"
+            #   • set_setting(key, same_value) → False
+            #
+            # الآن: rowcount >= 0 = نجاح (بما فيه 0 = no-op).
+            # الفشل الحقيقي = None فقط.
+            if result is not None and result >= 0:
                 if self.CACHE_AVAILABLE:
                     try:
                         await self.settings_cache.invalidate_bot_settings(
@@ -499,6 +535,7 @@ class SettingsMixin:
                         )
                 return True
 
+            # لا نصل هنا إلا إذا كان result = None (فشل حقيقي).
             logger.debug(
                 f"⚠️ set_setting({key}): UPSERT returned {result} — fallback"
             )
@@ -519,10 +556,20 @@ class SettingsMixin:
             return False
 
     async def _set_setting_fallback(self, key: str, value: str) -> bool:
-        """fallback آمن — UPDATE ثم INSERT."""
+        """
+        fallback آمن — UPDATE ثم INSERT (idempotent).
+
+        🟡 FIX-Y1-FOLLOWUP (v7.7.33): INSERT idempotent حسب المحرك
+            لمنع duplicate key error عند no-op.
+
+        ⚠️ ملاحظة: نستخدم ON DUPLICATE KEY UPDATE (MySQL) بدل
+            INSERT IGNORE — لتفادي كتم أخطاء حقيقية (type mismatch،
+            permission، NOT NULL ...).
+        """
         try:
             key_col = _q("key")
             value_col = _q("value")
+            db_type = _get_db_type()
 
             updated = await self.execute(
                 f"UPDATE settings SET {value_col} = ? "
@@ -531,11 +578,27 @@ class SettingsMixin:
             )
 
             if not updated:
-                await self.execute(
-                    f"INSERT INTO settings ({key_col}, {value_col}) "
-                    f"VALUES (?, ?)",
-                    (key, value),
-                )
+                # 🟡 FIX-Y1-FOLLOWUP: INSERT idempotent — لا يكتم
+                #    أخطاء غير duplicate.
+                if db_type == "mysql":
+                    insert_sql = (
+                        f"INSERT INTO settings ({key_col}, {value_col}) "
+                        f"VALUES (?, ?) "
+                        f"ON DUPLICATE KEY UPDATE "
+                        f"{value_col} = VALUES({value_col})"
+                    )
+                elif db_type == "postgres":
+                    insert_sql = (
+                        f"INSERT INTO settings ({key_col}, {value_col}) "
+                        f"VALUES (?, ?) "
+                        f"ON CONFLICT ({key_col}) DO NOTHING"
+                    )
+                else:  # SQLite
+                    insert_sql = (
+                        f"INSERT OR IGNORE INTO settings "
+                        f"({key_col}, {value_col}) VALUES (?, ?)"
+                    )
+                await self.execute(insert_sql, (key, value))
 
             if self.CACHE_AVAILABLE:
                 try:
@@ -642,6 +705,8 @@ class SettingsMixin:
         - int: -1001234567890
         - str: @username، username، https://t.me/username
         - None أو '': إزالة
+
+        🔴 v7.7.33: يستفيد من FIX-Y1 (no-op ناجح = True).
         """
         if channel_id is None:
             return await self.remove_log_channel()
@@ -653,7 +718,12 @@ class SettingsMixin:
         return await self.set_setting("log_channel_id", value)
 
     async def remove_log_channel(self) -> bool:
-        """✅ إزالة قناة السجل."""
+        """
+        ✅ إزالة قناة السجل.
+
+        🔴 v7.7.33 FIX-Y1: يُعيد True حتى لو كانت القيمة فارغة
+        مسبقاً (no-op ناجح على MySQL).
+        """
         return await self.set_setting("log_channel_id", "")
 
     # =====================================================================
