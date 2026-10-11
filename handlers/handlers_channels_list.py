@@ -2,25 +2,32 @@
 # -*- coding: utf-8 -*-
 
 """
-handlers_channels_list.py - واجهة قائمة القنوات مع حالتها (v2.1.1)
+handlers_channels_list.py - واجهة قائمة القنوات مع حالتها (v2.1.2)
 ================================================================================
+🆕 v2.1.2 (FIX-AL1 + Delete-Bug + removed_at):
+    🔴 FIX-AL1: حذف "WAIT_LOG_CH" من _CHANNEL_ADD_STATES.
+               السبب: كان يُسرق من handlers_group_log.receive_log_channel
+               عبر _user_has_pending_state → add_channel_from_message
+               يعالج مدخلات المستخدم في WAIT_LOG_CH كإضافة قناة عادية.
+    🔴 FIX-AL1-FOLLOWUP: إزالة FIX-2 (v2.1.1) من
+               channel_delete_execute_callback.
+               السبب: DB.delete_channel يتعامل مع active_channel بشكل
+               صحيح (يعيّن أحدث قناة أخرى أو NULL). FIX-2 كان يمحو
+               التعيين التلقائي → المستخدم بلا قناة نشطة.
+    🟡 FIX-AL1-FOLLOWUP-2: _get_channels_with_stats يفلتر
+               removed_at IS NULL عند وجود العمود (اتساقاً مع
+               DB.get_user_channels).
+
 🆕 v2.1.1 (REVIEW-FIXES):
     🔴 FIX-1 CRITICAL: ربط صريح بين add_channel_from_message و
        handlers_message._handle_wait_channel_text عبر علم
-       context.user_data["_channel_add_handled"] — بدل الاعتماد
-       الهشّ على مسح الحالة فقط.
-    🔴 FIX-2 CRITICAL: بعد حذف القناة النشطة، يُمسح users.active_channel
-       (كان يُشير إلى channel_db_id غير موجود).
-    🟡 FIX-3: _row_to_dict موحّد — يستورد من handlers_callback_base
-       عند التوفّر (نفس السلوك)، وإلا fallback محلي.
-    🟡 FIX-4: _get_active_channel_id — تحويل صريح إلى int (توافق PG
-       Decimal / SQLite).
-    🟡 FIX-5: _user_has_pending_state — فحص NONE ثلاثي (متوافق مع
-       handlers_message.handle_private).
-    🟡 FIX-6: القفل في add_channel_from_message قبل كل الفحوص
-       (أمان مستقبلي ضد async).
-    🟡 FIX-7: _get_channels_with_stats — LEFT JOIN بدل subqueries
-       متعددة (أداء أفضل مع كبر الحجم).
+       context.user_data["_channel_add_handled"].
+    🔴 FIX-2 CRITICAL: (مُلغى في v2.1.2 — كان خطأً).
+    🟡 FIX-3: _row_to_dict موحّد.
+    🟡 FIX-4: _get_active_channel_id — تحويل صريح إلى int.
+    🟡 FIX-5: _user_has_pending_state — فحص NONE ثلاثي.
+    🟡 FIX-6: القفل في add_channel_from_message.
+    🟡 FIX-7: _get_channels_with_stats — LEFT JOIN بدل subqueries.
     🟢 FIX-8: _CHANNEL_ADD_STATES — توثيق substring match.
 
 🆕 v2.1.0 (WAIT-CHANNEL-ROUTING-FIX):
@@ -102,12 +109,27 @@ except ImportError:
 
 # 🆕 v2.1.1 FIX-8: substring match مقصود لدعم الحالات المُشتقّة
 # (مثل "WAIT_CHANNEL_V2" أو "WAIT_CHANNEL_PENDING").
+#
+# 🔴 FIX-AL1 (v2.1.2): حذف "WAIT_LOG_CH" — لا ينتمي إلى حالات
+# إضافة القنوات. هو مُدار بواسطة handlers_group_log.receive_log_channel.
+#
+# السبب: _user_has_pending_state كان يستثني WAIT_LOG_CH من "الحالات
+# المعلقة" → add_channel_from_message (group=-1) يقبل مدخلات
+# المستخدم في WAIT_LOG_CH ويعالجها كإضافة قناة عادية!
+#
+# الأثر قبل الإصلاح:
+#   1. مشرف يفتح "تعيين قناة سجل" → WAIT_LOG_CH + log_group_id=X.
+#   2. يرسل @mychannel (أو رابطاً) في الخاص.
+#   3. add_channel_from_message يلتقطها (يعتقد أن الحالة مسموحة).
+#   4. يُنشئ قناة مستخدم جديدة (بدلاً من تعيين قناة سجل).
+#   5. يرفع ApplicationHandlerStop → receive_log_channel لا يُنفَّذ.
+#   6. ميزة قناة السجل معطّلة، وقنوات المستخدم تنمو بلا داعٍ.
 _CHANNEL_ADD_STATES = (
     "WAIT_CHANNEL",
     "WAIT_ADD_CHANNEL",
     "WAIT_UPDATE_CH",
     "WAIT_UPDATE_CHANNEL",
-    "WAIT_LOG_CH",
+    # ✅ FIX-AL1: حُذف WAIT_LOG_CH
 )
 
 
@@ -339,8 +361,21 @@ async def _get_channels_with_stats(user_id: int):
 
     🆕 v2.1.1 FIX-7: LEFT JOIN مجمّع بدل subqueries متعددة
     (أداء أفضل مع كبر الحجم: >20 قناة أو >10k منشور).
+
+    🟡 FIX-AL1-FOLLOWUP-2 (v2.1.2): احترام soft-delete
+    (removed_at IS NULL) — اتساقاً مع DB.get_user_channels.
     """
-    query = """
+    # 🟡 FIX-AL1-FOLLOWUP-2: فحص وجود عمود removed_at
+    _has_removed = False
+    try:
+        if DB is not None and hasattr(DB, "_has_removed_at_column"):
+            _has_removed = await DB._has_removed_at_column()
+    except Exception as e:
+        logger.debug(f"_get_channels_with_stats: _has_removed_at_column: {e}")
+
+    _where_removed = "AND uc.removed_at IS NULL" if _has_removed else ""
+
+    query = f"""
         SELECT
             uc.id AS channel_db_id,
             uc.channel_id,
@@ -362,6 +397,7 @@ async def _get_channels_with_stats(user_id: int):
         ) pc ON pc.channel_db_id = uc.id
         LEFT JOIN schedule s ON s.channel_db_id = uc.id
         WHERE uc.user_id = ?
+          {_where_removed}
         ORDER BY uc.created_at DESC
     """
     try:
@@ -371,7 +407,7 @@ async def _get_channels_with_stats(user_id: int):
         logger.error(f"❌ _get_channels_with_stats: {e}", exc_info=True)
         # 🆕 FIX-7: fallback للاستعلام القديم إن فشل LEFT JOIN
         try:
-            fallback_query = """
+            fallback_query = f"""
                 SELECT
                     uc.id AS channel_db_id,
                     uc.channel_id,
@@ -389,6 +425,7 @@ async def _get_channels_with_stats(user_id: int):
                     ) AS next_publish
                 FROM user_channels uc
                 WHERE uc.user_id = ?
+                  {_where_removed}
                 ORDER BY uc.created_at DESC
             """
             rows = await DB.fetchall(fallback_query, (user_id,))
@@ -763,9 +800,14 @@ async def channel_delete_execute_callback(
     """
     تنفيذ الحذف.
 
-    🆕 v2.1.1 FIX-2: إذا كانت القناة المحذوفة هي النشطة،
-    يُمسح users.active_channel (كان يُشير إلى channel_db_id
-    غير موجود).
+    🔴 FIX-AL1-FOLLOWUP (v2.1.2): إزالة FIX-2 v2.1.1 الخاطئ.
+
+    السبب: DB.delete_channel (في database_channels_posts.py) يتعامل
+    بالفعل مع active_channel بشكل صحيح:
+      • إذا كانت القناة المحذوفة نشطة → يعيّن أحدث قناة أخرى نشطة.
+      • إذا كانت آخر قناة → يعيّن NULL.
+    لذا إعادة تعيين active_channel = NULL من هنا تُلغي هذا السلوك
+    وتترك المستخدم بلا قناة نشطة رغم وجود قنوات أخرى!
     """
     if not _db_ready():
         return
@@ -780,35 +822,20 @@ async def channel_delete_execute_callback(
         return
 
     try:
-        # 🆕 FIX-2: احفظ active_channel قبل الحذف
-        active_id = await _get_active_channel_id(user_id)
-
+        # ✅ FIX-AL1-FOLLOWUP: DB.delete_channel يتعامل مع active_channel
+        # بشكل صحيح — لا حاجة لأي تدخّل إضافي هنا.
         success = await DB.delete_channel(user_id, ch_db_id)
 
         if not success:
             await _safe_answer(query, "⚠️ فشل الحذف", show_alert=True)
             return
 
-        # 🆕 FIX-2: امسح active_channel إذا كانت القناة النشطة
-        if active_id is not None and ch_db_id == active_id:
-            try:
-                await DB.execute(
-                    "UPDATE users SET active_channel = NULL "
-                    "WHERE user_id = ?",
-                    (user_id,))
-                logger.info(
-                    f"✅ مسح active_channel للمستخدم {user_id} "
-                    f"(القناة {ch_db_id} حُذفت)")
-            except Exception as e:
-                logger.warning(
-                    f"⚠️ فشل مسح active_channel: {e} — "
-                    f"قد يُشير إلى قناة محذوفة")
-            # إبطال كاش المستخدم
-            try:
-                from cache import invalidate_user_cache
-                await invalidate_user_cache(user_id)
-            except Exception:
-                pass
+        # ✅ إبطال كاش المستخدم (للانعكاس الفوري في القوائم)
+        try:
+            from cache import invalidate_user_cache
+            await invalidate_user_cache(user_id)
+        except Exception:
+            pass
 
         await _safe_answer(query, "✅ تم الحذف", show_alert=True)
         logger.info(f"✅ حُذفت القناة {ch_db_id} بواسطة {user_id}")
@@ -1149,6 +1176,9 @@ async def add_channel_from_message(
       - علم صريح "_channel_add_handled" في context.user_data
         لمنع المسار الثاني حتى لو فشل raise.
       - القفل قبل كل الفحوص (أمان مستقبلي ضد async).
+
+    🔴 FIX-AL1 (v2.1.2): WAIT_LOG_CH لم يعد ضمن _CHANNEL_ADD_STATES
+    → لا يُسرق من handlers_group_log.receive_log_channel.
     """
     if not _db_ready():
         return
@@ -1174,6 +1204,7 @@ async def add_channel_from_message(
         # ═══════════════════════════════════════════════════════════
         # ✅ v2.1.0: لا تعترض إذا كان المستخدم في حالة معلقة
         #          (لكن حالات إضافة القناة مسموحة الآن)
+        # 🔴 FIX-AL1: WAIT_LOG_CH الآن يُعتبر "معلق" ويُتجاهل هنا
         # ═══════════════════════════════════════════════════════════
         state_str = _get_state_str(user_id)
         is_channel_add_ctx = _is_channel_add_state(state_str)
@@ -1646,8 +1677,8 @@ def register_channels_list_handlers(application):
 
         # ═══ معالج الرسائل النصية لإضافة قناة ═══
         # ✅ v2.1.0: يعمل حتى في حالة WAIT_CHANNEL.
-        # 🆕 v2.1.1 FIX-1: يرفع ApplicationHandlerStop + علم صريح
-        #                  لمنع handlers_message من إظهار رسالة مكررة.
+        # 🆕 v2.1.1 FIX-1: يرفع ApplicationHandlerStop + علم صريح.
+        # 🔴 FIX-AL1 (v2.1.2): WAIT_LOG_CH لم يعد يُسرق — يُتجاهل هنا.
         application.add_handler(
             MessageHandler(
                 filters.TEXT
@@ -1660,8 +1691,8 @@ def register_channels_list_handlers(application):
         )
 
         logger.info(
-            "✅ تم تسجيل handlers قائمة القنوات (v2.1.1 — "
-            "WAIT-CHANNEL-ROUTING-FIX + REVIEW-FIXES)"
+            "✅ تم تسجيل handlers قائمة القنوات (v2.1.2 — "
+            "FIX-AL1 + Delete-Bug + removed_at)"
         )
         return True
     except Exception as e:
@@ -1690,6 +1721,7 @@ __all__ = [
     "register_channels_list_handlers",
     "_extract_channel_username",
     "_mark_channel_add_handled",
+    "_CHANNEL_ADD_STATES",
 ]
 
 
@@ -1699,9 +1731,10 @@ __all__ = [
 
 try:
     logger.debug(
-        "✅ handlers_channels_list v2.1.1 loaded | "
-        "fixes=(FIX-1..FIX-8) | "
-        "WAIT-CHANNEL=handled-with-flag | "
+        "✅ handlers_channels_list v2.1.2 loaded | "
+        "fixes=(FIX-AL1 + Delete-Bug + removed_at) | "
+        "WAIT-LOG-CH=excluded-from-add-states | "
+        "active-channel=DB-native-handling | "
         "row_to_dict=%s",
         "shared" if _HAS_SHARED_ROW_TO_DICT else "fallback",
     )
