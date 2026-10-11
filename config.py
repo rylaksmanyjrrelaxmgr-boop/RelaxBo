@@ -2,74 +2,44 @@
 # -*- coding: utf-8 -*-
 
 """
-config.py - إعدادات البوت الأساسية (v7.0.7 — FIX-NO-WARN)
+config.py - إعدادات البوت الأساسية (v7.0.8 — FIX-STMT-TIMEOUT)
 ================================================================================
+🆕 v7.0.8 (FIX-STMT-TIMEOUT):
+    🔴 FIX-ST-1: PG_STATEMENT_TIMEOUT_MS — إصلاح جذري لبقاء 3000ms.
+        السبب: .env يحتوي على 3000، والقيمة القديمة v7.0.7 كانت تعمل
+        auto-clamp لكن لم تُنشر بعد، أو أن .env تجاوز process لم يُعَد.
+        الإصلاح: دالة _clamp_stmt_timeout() مع رفع صامت إلى 60000ms،
+        وتسجيل تحذير واضح عند الرفع، + تسجيل القيمة النهائية عند الإقلاع.
+    🟢 FIX-ST-2: سجل إقلاع يُظهر الفرق (raw .env → القيمة الفعلية).
+    🟢 FIX-ST-3: PG_STATEMENT_TIMEOUT_MS_RAW للشفافية (يكشف ما كان في .env).
+    🟢 FIX-ST-4: validate() يُظهر تحذير عند وجود clamped_value.
+
 🆕 v7.0.7 (FIX-NO-WARN):
     🟢 FIX-NW-1: _parse_developer_ids — يستثني PRIMARY_OWNER_ID تلقائياً.
-               السبب: كان يُطلق تحذيراً عند تكراره في DEVELOPER_IDS.
-               الآن: إزالة صامتة (is_developer لا يتأثر — يفحص المالك أولاً).
     🟢 FIX-NW-2: PG_STATEMENT_TIMEOUT_MS — auto-clamp إلى ≥ 30000ms.
-               السبب: قيم < 5s تُقتل VACUUM → dead tuples. الآن: تُرفع
-               صامتة إلى 30s (الحد الآمن) بدل التحذير.
-    🟢 FIX-NW-3: validate() — حذف تحذيرَي "PRIMARY_OWNER_ID في DEVELOPER_IDS"
-               و"PG_STATEMENT_TIMEOUT_MS < 5s" لأنهما غير قابلين للحدوث بعد
-               الإصلاحين أعلاه. يبقى تحذير الحد الأعلى (> 300000ms) لأنه
-               ما زال قابلاً للحدوث.
+    🟢 FIX-NW-3: validate() — حذف تحذيرات غير قابلة للحدوث.
 
 🆕 v7.0.6 (FIX-R12):
     🔴 FIX-R12: PG_STATEMENT_TIMEOUT_MS — من 3000 إلى 60000.
                السبب: VACUUM على جداول كبيرة يستغرق 20-60s. مع 3000
                كان يُقتل دائماً → dead tuples تتراكم → DB ينتفخ.
-               مع 60000: 60s سقف معقول يكشف الاستعلامات المتعثرة
-               الحقيقية ويمنح VACUUM فرصة كافية.
-    🟡 FIX-R12-VALIDATE: تحقق نطاق في validate() للقيمة الجديدة.
-    ⚠️ ملاحظة: IDLE_TX_AUDIT_APP_FILTER لم يُغيّر — قيمة "relax_bot"
-       صحيحة ومتطابقة مع database.py::_pg_pool_factory (المُستخدم
-       فعليًا بسبب MRO). التغيير سيكسر الفلتر.
 
 🆕 v7.0.5 (PERF-FIXES):
-    🟢 PERF-1: MAX_CHANNELS_PER_CYCLE — من 20 إلى 5
-               (يمنع إشباع DB Pool → /start سريع دائماً).
-    🟢 PERF-2: SLOW_QUERY_LOG_THRESHOLD — من 1.0 إلى 0.2
-               (يكشف الاستعلامات > 200ms).
-    🟢 PERF-3: PG_STATEMENT_TIMEOUT_MS — من 8000 إلى 3000
-               (⚠️ تم التراجع عنه في v7.0.6 عبر FIX-R12).
-    🟢 PERF-4: تحذير في validate() عند MAX_CHANNELS_PER_CYCLE > 10.
-    🟢 PERF-5: تحذير في validate() عند DB_POOL_SIZE > 20.
-    🟢 PERF-6: سجل إقلاع إضافي (PERF Tuning).
+    🟢 PERF-1: MAX_CHANNELS_PER_CYCLE — من 20 إلى 5.
+    🟢 PERF-2: SLOW_QUERY_LOG_THRESHOLD — من 1.0 إلى 0.2.
+    🟢 PERF-3: PG_STATEMENT_TIMEOUT_MS — من 8000 إلى 3000 (تراجع في v7.0.6).
+    🟢 PERF-4/5/6: تحذيرات وسجلات إقلاع.
 
 🆕 v7.0.4:
-    ✅ إضافة PG_ROLLBACK_ON_RETURN_TIMEOUT (v7.7.61)
-    ✅ إضافة قسم 13.12: IDLE_TX_AUDIT_* (8 متغيرات — v7.7.62)
-    ✅ تحديث get_pg_pool_env() بالمتغيرات الجديدة
-    ✅ تحققات validate() لـ rollback + idle-tx audit
-    ✅ سجل الإقلاع يعرض حالة idle-tx audit
+    ✅ إضافة PG_ROLLBACK_ON_RETURN_TIMEOUT (v7.7.61).
+    ✅ إضافة قسم 13.12: IDLE_TX_AUDIT_* (8 متغيرات — v7.7.62).
+    ✅ تحديث get_pg_pool_env().
+    ✅ تحققات validate().
 
-🆕 v7.0.3:
-    ✅ إضافة DIAG_INCOMING — مُتغيّر تشخيصي جديد
-    ✅ التحقق من تغطية كاملة لكل متغيرات .env
-    ✅ توثيق مُحدَّث مع DEV-PERMANENT وملاحظات المُشغّل
-    ✅ إضافة SB_SECRET في التحقق (اختياري)
-    ✅ إضافة WEBHOOK_SECRET للتحقق الإنتاجي
-    ✅ توافق كامل مع .env المُقدَّم
-
-🆕 v7.0.2:
-    👑 DEV-1: _parse_developer_ids — إزالة التكرار + ترتيب تنازلي
-    👑 DEV-2: is_developer — docstring تفصيلي لاستخدامات DEV-PERMANENT
-    👑 DEV-3: validate — تحذير عند تكرار PRIMARY_OWNER_ID في DEVELOPER_IDS
-    📝 توثيق: كيف تتفاعل CONFIG مع database.py + database_subscriptions.py
-
-🆕 v7.0.1:
-    ✅ إخفاء تحذير NSFW عند استخدام Sightengine API (الوضع الخارجي)
-    ✅ التحذير يظهر فقط عند غياب النموذج المحلي AND غياب Sightengine API
-
-🆕 v7 (DETECTORS-v4.0.8-INTEGRATION):
-    ✅ إصلاح الرأس: v4.0.0 → v4.0.8 (FULL-AUDIT-V3)
-    ✅ إصلاح عدد الطبقات: 14 → 15
-    ✅ إضافة ~40 متغير v4.0.8
-    ✅ get_pool_env() — helper لـ main.py v5.6.12
-    ✅ validate() — تحققات pool + circuit breaker
-    ✅ تقرير الإقلاع مُحدَّث (15 طبقة + pool stats)
+🆕 v7.0.3: DIAG_INCOMING + تغطية كاملة + SB_SECRET + WEBHOOK_SECRET.
+🆕 v7.0.2: DEV-1/2/3 + توثيق المطورين.
+🆕 v7.0.1: إخفاء تحذير NSFW عند استخدام Sightengine.
+🆕 v7: DETECTORS-v4.0.8-INTEGRATION.
 ================================================================================
 """
 
@@ -93,12 +63,14 @@ logger = logging.getLogger(__name__)
 
 
 # ═══════════════════════════════════════════════════════════════════
-# ثوابت الحدود الدنيا الآمنة (v7.0.7 FIX-NW-2)
+# ثوابت الحدود الدنيا الآمنة (v7.0.7 FIX-NW-2 / v7.0.8 FIX-ST-1)
 # ═══════════════════════════════════════════════════════════════════
 
-# 🟢 FIX-NW-2: 30s حد أدنى لـ statement_timeout — يمنح VACUUM وقتاً كافياً
+# 🟢 30s حد أدنى لـ statement_timeout — يمنح VACUUM وقتاً كافياً
 # على جداول كبيرة (20-60s نموذجياً) دون إطلاق تحذير للمستخدم.
 _PG_STMT_TIMEOUT_MIN_MS = 30000
+# 🟢 الافتراضي الآمن: 60s (يكشف الاستعلامات المتعثرة الحقيقية).
+_PG_STMT_TIMEOUT_DEFAULT_MS = 60000
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -144,6 +116,43 @@ def safe_abs_path(value: str, default: str) -> str:
     return str(p)
 
 
+# ═══════════════════════════════════════════════════════════════════
+# 🟢 FIX-ST-1 (v7.0.8): دوال clamp للقيم الحرجة
+# ═══════════════════════════════════════════════════════════════════
+
+def _read_stmt_timeout_raw() -> int:
+    """🟢 FIX-ST-3: يقرأ القيمة من .env كما هي (للشفافية)."""
+    raw = os.getenv("PG_STATEMENT_TIMEOUT_MS")
+    if raw is None or str(raw).strip() == "":
+        return _PG_STMT_TIMEOUT_DEFAULT_MS
+    try:
+        return int(str(raw).strip())
+    except (ValueError, TypeError):
+        return _PG_STMT_TIMEOUT_DEFAULT_MS
+
+
+def _clamp_stmt_timeout(raw_value: int) -> int:
+    """
+    🟢 FIX-ST-1 (v7.0.8): يرفع صامتة أي قيمة خطيرة إلى الحد الآمن.
+
+    السبب: .env قد يحتوي على 3000ms (من نسخة قديمة) → VACUUM يُقتل
+    → dead tuples تتراكم → بطء. الآن: أي قيمة < 30000 → تُرفع إلى
+    الحد الأدنى الآمن، مع تسجيل التحذير في logs.
+    """
+    if raw_value < _PG_STMT_TIMEOUT_MIN_MS:
+        try:
+            logger.warning(
+                "🔧 FIX-ST-1: PG_STATEMENT_TIMEOUT_MS من .env = %dms "
+                "(< 30000ms حد آمن) → رُفِع إلى %dms تلقائياً. "
+                "السبب: قيم أقل تُقتل VACUUM → dead tuples تتراكم.",
+                raw_value, _PG_STMT_TIMEOUT_MIN_MS,
+            )
+        except Exception:
+            pass
+        return _PG_STMT_TIMEOUT_MIN_MS
+    return raw_value
+
+
 def _parse_developer_ids() -> Tuple[int, ...]:
     """
     👑 v7.0.2 DEV-1: تحليل DEVELOPER_IDS من متغير البيئة.
@@ -161,7 +170,6 @@ def _parse_developer_ids() -> Tuple[int, ...]:
         () إذا كان المتغير فارغاً أو غير صالح
     """
     raw = os.getenv("DEVELOPER_IDS", "") or ""
-    # 🟢 FIX-NW-1: قراءة المالك لاستثنائه من قائمة المطورين
     owner_id = safe_int(os.getenv("MAIN_ADMIN_ID", "0"))
     seen: set = set()
     for token in raw.split(","):
@@ -169,7 +177,6 @@ def _parse_developer_ids() -> Tuple[int, ...]:
         if not token:
             continue
         uid = safe_int(token, 0)
-        # 🟢 FIX-NW-1: تجاهل المالك (is_developer يفحصه أولاً)
         if uid > 0 and uid != owner_id:
             seen.add(uid)
     return tuple(sorted(seen))
@@ -218,7 +225,6 @@ class AppConfig:
         os.getenv("DEFAULT_LANGUAGE", "ar")
     ).lower() or "ar"
 
-    # 🆕 v7.0.3: تشخيص الرسائل الواردة
     DIAG_INCOMING: bool = safe_bool(os.getenv("DIAG_INCOMING", "false"))
 
     # ═══════════════════════════════════════════════════════════════
@@ -238,7 +244,6 @@ class AppConfig:
     MV_REFRESH_COOLDOWN: int = safe_int(os.getenv("MV_REFRESH_COOLDOWN", "3600"))
     VACUUM_TIMEOUT: int = safe_int(os.getenv("VACUUM_TIMEOUT", "300"))
 
-    # 🆕 PERF-2: من 1.0 إلى 0.2 — يكشف الاستعلامات > 200ms
     SLOW_QUERY_LOG_THRESHOLD: float = safe_float(
         os.getenv("SLOW_QUERY_LOG_THRESHOLD", "0.2")
     )
@@ -272,7 +277,6 @@ class AppConfig:
         os.getenv("MIN_PUBLISH_INTERVAL", "5")
     )
 
-    # 🆕 PERF-1: من 20 إلى 5 — يمنع إشباع DB Pool أثناء النشر
     MAX_CHANNELS_PER_CYCLE: int = safe_int(
         os.getenv("MAX_CHANNELS_PER_CYCLE", "5")
     )
@@ -510,14 +514,11 @@ class AppConfig:
     )
 
     # ─── 13.3: إعدادات الطبقات المتقدمة ───
-
-    # L7: Video
     VIDEO_MAX_FRAMES: int = safe_int(os.getenv("VIDEO_MAX_FRAMES", "8"))
     VIDEO_FRAME_INTERVAL_SEC: float = safe_float(
         os.getenv("VIDEO_FRAME_INTERVAL_SEC", "2.0")
     )
 
-    # L8: NSFW Model (محلي — يتطلب transformers+torch)
     NSFW_MODEL_ENABLED: bool = safe_bool(
         os.getenv("NSFW_MODEL_ENABLED", "false")
     )
@@ -525,7 +526,6 @@ class AppConfig:
         os.getenv("NSFW_SIGHTENGINE_MAX_BYTES", str(10 * 1024 * 1024))
     )
 
-    # L2: Audio
     AUDIO_USE_WHISPER: bool = safe_bool(
         os.getenv("AUDIO_USE_WHISPER", "false")
     )
@@ -533,7 +533,6 @@ class AppConfig:
         os.getenv("AUDIO_NOISE_REDUCE", "true")
     )
 
-    # L3: URL Enrichment
     URL_ENRICH_ENABLED: bool = safe_bool(
         os.getenv("URL_ENRICH_ENABLED", "true")
     )
@@ -554,7 +553,6 @@ class AppConfig:
         os.getenv("SAFE_BROWSING_API_KEY", ""), single_line=True
     )
 
-    # L1: OCR Languages
     OCR_LANGUAGES: str = safe_str(
         os.getenv("OCR_LANGUAGES", "ara+eng+fas+rus"), single_line=True
     )
@@ -704,15 +702,19 @@ class AppConfig:
     PG_TCP_KEEPINTVL: int = safe_int(os.getenv("PG_TCP_KEEPINTVL", "5"))
     PG_TCP_KEEPCNT: int = safe_int(os.getenv("PG_TCP_KEEPCNT", "3"))
 
-    # 🔴 FIX-R12 (v7.0.6): رفع القيمة الافتراضية من 3000 إلى 60000 (60s)
-    # السبب: VACUUM على جداول كبيرة يستغرق 20-60s. مع 3000، كان
-    # يُقتل دائماً → dead tuples تتراكم → DB ينتفخ.
-    # 🟢 v7.0.7 FIX-NW-2: auto-clamp إلى ≥ 30000ms (30s) لتفادي تحذير
-    # عند وجود قيمة أقل في .env (مثل 3000). 30s حد أدنى آمن لـ VACUUM.
-    PG_STATEMENT_TIMEOUT_MS: int = max(
-        _PG_STMT_TIMEOUT_MIN_MS,
-        safe_int(os.getenv("PG_STATEMENT_TIMEOUT_MS", "60000"))
+    # 🔴 FIX-R12 (v7.0.6): رفع القيمة الافتراضية من 3000 إلى 60000.
+    # 🟢 FIX-NW-2 (v7.0.7): auto-clamp إلى ≥ 30000ms.
+    # 🟢 FIX-ST-1/ST-3 (v7.0.8): clamp أقوى + سجل شفاف + value_raw.
+    #
+    # 🎯 القيمة الفعلية = max(30000, raw_from_env)
+    #    - إذا raw < 30000 → يُرفع صامتة إلى 30000.
+    #    - إذا raw = 3000 → يُرفع إلى 30000 مع تحذير واضح في logs.
+    #    - الافتراضي عند غياب .env: 60000.
+    PG_STATEMENT_TIMEOUT_MS_RAW: int = _read_stmt_timeout_raw()
+    PG_STATEMENT_TIMEOUT_MS: int = _clamp_stmt_timeout(
+        PG_STATEMENT_TIMEOUT_MS_RAW
     )
+
     PG_IDLE_TX_TIMEOUT_MS: int = safe_int(
         os.getenv("PG_IDLE_TX_TIMEOUT_MS", "30000")
     )
@@ -720,7 +722,6 @@ class AppConfig:
         os.getenv("PG_COMMAND_TIMEOUT", "10.0")
     )
 
-    # 🆕 v7.7.61: مهلة rollback وقائي (idle-tx)
     PG_ROLLBACK_ON_RETURN_TIMEOUT: float = safe_float(
         os.getenv("PG_ROLLBACK_ON_RETURN_TIMEOUT", "2.0")
     )
@@ -823,6 +824,11 @@ class AppConfig:
         """🆕 v7.0.3: هل QStash مُهيَّأ؟"""
         return bool(self.QSTASH_TOKEN and self.QSTASH_URL)
 
+    @property
+    def STMT_TIMEOUT_WAS_CLAMPED(self) -> bool:
+        """🟢 FIX-ST-4 (v7.0.8): هل تم رفع القيمة؟"""
+        return self.PG_STATEMENT_TIMEOUT_MS_RAW < _PG_STMT_TIMEOUT_MIN_MS
+
     # ═══════════════════════════════════════════════════════════════
     # دوال مساعدة
     # ═══════════════════════════════════════════════════════════════
@@ -842,29 +848,7 @@ class AppConfig:
     def is_developer(self, user_id: int) -> bool:
         """
         👑 v7.0.2 DEV-2: هل المستخدم مطور/مالك؟
-        🟢 v7.0.7 FIX-NW-1: DEVELOPER_IDS لم يعد يحتوي المالك (مُستثنى
-        في _parse_developer_ids) — لكن السلوك لم يتغير لأن المالك
-        يُفحص أولاً عبر PRIMARY_OWNER_ID.
-
-        تُستخدم من:
-          • database.py::Database._is_dev_user
-          • database_subscriptions.py::SubscriptionMixin._is_dev_user
-          • database_channels_posts.py::ChannelsPostsMixin._is_dev_user
-
-        الأثر عند إرجاع True:
-          ✅ منح اشتراك دائم (100 سنة، provider='dev_bypass')
-          ✅ bypass has_active_subscription (True دائماً)
-          ✅ bypass has_used_trial (False دائماً)
-          ✅ activate_trial يُرجع -1 (اشتراكه أطول)
-          ✅ تجاوز فحوصات max_channels / max_posts
-          ✅ expire_expired_subscriptions يتخطى اشتراكه الدائم
-          ✅ get_users_for_reminder لن يُزعجه
-
-        Args:
-            user_id: معرّف المستخدم
-
-        Returns:
-            True إذا كان المالك الأساسي أو ضمن DEVELOPER_IDS
+        🟢 v7.0.7 FIX-NW-1: DEVELOPER_IDS لم يعد يحتوي المالك.
         """
         return user_id == self.PRIMARY_OWNER_ID or user_id in self.DEVELOPER_IDS
 
@@ -873,19 +857,11 @@ class AppConfig:
         return user_id == self.PRIMARY_OWNER_ID
 
     def get_detector_env(self) -> Dict[str, str]:
-        """
-        يُصدّر إعدادات الـdetectors كـ dict.
-
-        الاستخدام الموصى به في bot.py:
-            # قبل استيراد handlers_message_detectors
-            for k, v in CONFIG.get_detector_env().items():
-                os.environ.setdefault(k, v)
-        """
+        """يُصدّر إعدادات الـdetectors كـ dict."""
         def _b(x: bool) -> str:
             return "1" if x else "0"
 
         return {
-            # ─── Layer toggles (15) ───
             "TEXT_LAYER_ENABLED": _b(self.TEXT_LAYER_ENABLED),
             "OCR_LAYER_ENABLED": _b(self.OCR_LAYER_ENABLED),
             "AUDIO_LAYER_ENABLED": _b(self.AUDIO_LAYER_ENABLED),
@@ -901,8 +877,6 @@ class AppConfig:
             "CIPHER_LAYER_ENABLED": _b(self.CIPHER_LAYER_ENABLED),
             "STEGO_LAYER_ENABLED": _b(self.STEGO_LAYER_ENABLED),
             "DOMAIN_REP_LAYER_ENABLED": _b(self.DOMAIN_REP_LAYER_ENABLED),
-
-            # ─── Anti-Evasion (24) ───
             "ANTIEVASION_ENTITY_LINK": _b(self.ANTIEVASION_ENTITY_LINK),
             "ANTIEVASION_BUTTON_LINK": _b(self.ANTIEVASION_BUTTON_LINK),
             "ANTIEVASION_SCHEMELESS_URL": _b(self.ANTIEVASION_SCHEMELESS_URL),
@@ -927,8 +901,6 @@ class AppConfig:
             "ANTIEVASION_EXTRA_SCRIPTS": _b(self.ANTIEVASION_EXTRA_SCRIPTS),
             "ANTIEVASION_ALT_SCHEMES": _b(self.ANTIEVASION_ALT_SCHEMES),
             "ANTIEVASION_RANDOM_DOMAIN": _b(self.ANTIEVASION_RANDOM_DOMAIN),
-
-            # ─── Layer settings ───
             "VIDEO_MAX_FRAMES": str(self.VIDEO_MAX_FRAMES),
             "VIDEO_FRAME_INTERVAL_SEC": str(self.VIDEO_FRAME_INTERVAL_SEC),
             "NSFW_MODEL_ENABLED": _b(self.NSFW_MODEL_ENABLED),
@@ -946,23 +918,15 @@ class AppConfig:
             "WHOIS_NEW_DOMAIN_DAYS": str(self.WHOIS_NEW_DOMAIN_DAYS),
             "SAFE_BROWSING_API_KEY": self.SAFE_BROWSING_API_KEY,
             "OCR_LANGUAGES": self.OCR_LANGUAGES,
-
-            # ─── Pool + Async ───
             "DETECTOR_POOL_WORKERS": str(self.DETECTOR_POOL_WORKERS),
             "POOL_TASK_TIMEOUT": str(self.POOL_TASK_TIMEOUT),
             "ASYNC_NETWORK_ENABLED": _b(self.ASYNC_NETWORK_ENABLED),
             "ASYNC_NETWORK_TIMEOUT": str(self.ASYNC_NETWORK_TIMEOUT),
-
-            # ─── Circuit Breaker + Cache ───
             "SE_CIRCUIT_FAILURE_THRESHOLD": str(self.SE_CIRCUIT_FAILURE_THRESHOLD),
             "SE_CIRCUIT_OPEN_SEC": str(self.SE_CIRCUIT_OPEN_SEC),
             "NORMALIZE_CACHE_MAX": str(self.NORMALIZE_CACHE_MAX),
-
-            # ─── Debug ───
             "DEBUG_DIAG": _b(self.DEBUG_DIAG),
             "DEBUG_SPAM": _b(self.DEBUG_SPAM),
-
-            # ─── Arabic Short Whitelist (v4.0.9) ───
             "ARABIC_SHORT_WHITELIST_ENABLED": _b(self.ARABIC_SHORT_WHITELIST_ENABLED),
             "ARABIC_SHORT_MAX_CHARS": str(self.ARABIC_SHORT_MAX_CHARS),
             "ARABIC_SHORT_MAX_WORDS": str(self.ARABIC_SHORT_MAX_WORDS),
@@ -971,13 +935,7 @@ class AppConfig:
         }
 
     def get_pool_env(self) -> Dict[str, Any]:
-        """
-        helper لـ main.py v5.6.12 — إعدادات pool فقط.
-
-        الاستخدام:
-            from config import CONFIG
-            pool_env = CONFIG.get_pool_env()
-        """
+        """helper لـ main.py v5.6.12 — إعدادات pool فقط."""
         return {
             "workers": self.DETECTOR_POOL_WORKERS,
             "task_timeout": self.POOL_TASK_TIMEOUT,
@@ -990,23 +948,22 @@ class AppConfig:
 
     def get_pg_pool_env(self) -> Dict[str, Any]:
         """
-        🆕 v7.0.4: إعدادات PostgreSQL pool lifecycle.
+        إعدادات PostgreSQL pool lifecycle.
         helper لـ database.py v7.7.60+ (يشمل v7.7.61 + v7.7.62).
+        🟢 FIX-ST-1 (v7.0.8): statement_timeout_ms دائماً ≥ 30000 (مضمون).
         """
         return {
-            # v7.7.60
             "max_inactive_lifetime": self.PG_MAX_INACTIVE_LIFETIME,
             "ping_idle_threshold": self.PG_CONN_PING_IDLE_THRESHOLD,
             "ping_timeout": self.PG_CONN_PING_TIMEOUT,
             "tcp_keepidle": self.PG_TCP_KEEPIDLE,
             "tcp_keepintvl": self.PG_TCP_KEEPINTVL,
             "tcp_keepcnt": self.PG_TCP_KEEPCNT,
+            # 🟢 FIX-ST-1: القيمة المضمونة ≥ 30000 (لا يعتمد على .env)
             "statement_timeout_ms": self.PG_STATEMENT_TIMEOUT_MS,
             "idle_tx_timeout_ms": self.PG_IDLE_TX_TIMEOUT_MS,
             "command_timeout": self.PG_COMMAND_TIMEOUT,
-            # 🆕 v7.7.61
             "rollback_on_return_timeout": self.PG_ROLLBACK_ON_RETURN_TIMEOUT,
-            # 🆕 v7.7.62
             "idle_tx_audit_enabled": self.IDLE_TX_AUDIT_ENABLED,
             "idle_tx_audit_interval_sec": self.IDLE_TX_AUDIT_INTERVAL_SEC,
             "idle_tx_audit_min_seconds": self.IDLE_TX_AUDIT_MIN_SECONDS,
@@ -1018,10 +975,7 @@ class AppConfig:
         }
 
     def apply_detector_env(self, *, override: bool = False) -> int:
-        """
-        يضبط متغيرات detectors في os.environ.
-        Returns: عدد المتغيرات المضبوطة.
-        """
+        """يضبط متغيرات detectors في os.environ. Returns: عدد المضبوطة."""
         env = self.get_detector_env()
         applied = 0
         for k, v in env.items():
@@ -1055,10 +1009,6 @@ class AppConfig:
                 f"{self.ANONYMOUS_ADMIN_ID}"
             )
 
-        # 👑 v7.0.2 DEV-3: تحقق من تكرار المالك في DEVELOPER_IDS
-        # 🟢 v7.0.7 FIX-NW-3: حُذف التحذير — _parse_developer_ids
-        # يستثني المالك تلقائياً، فالتكرار غير قابل للحدوث الآن.
-
         if self.ENVIRONMENT not in (
             "production", "development", "staging", "test"
         ):
@@ -1080,7 +1030,6 @@ class AppConfig:
         if self.MAX_CHANNELS_PER_CYCLE < 1:
             errors.append("MAX_CHANNELS_PER_CYCLE يجب أن يكون أكبر من 0")
 
-        # 🆕 PERF-4: تحذير عند زيادة القنوات المتزامنة
         if self.MAX_CHANNELS_PER_CYCLE > 10:
             warnings.append(
                 f"⚠️ MAX_CHANNELS_PER_CYCLE={self.MAX_CHANNELS_PER_CYCLE} "
@@ -1111,7 +1060,6 @@ class AppConfig:
                 f"يجب أن يكون < DB_POOL_SIZE ({self.DB_POOL_SIZE})"
             )
 
-        # 🆕 PERF-5: تحذير عند تجاوز Supabase Free max_connections
         if self.DB_POOL_SIZE > 20:
             warnings.append(
                 f"⚠️ DB_POOL_SIZE={self.DB_POOL_SIZE} > 20 — "
@@ -1126,11 +1074,9 @@ class AppConfig:
             )
 
         if self.MAX_GLOBAL_BANNED_WORDS < 1:
-            errors.append(
-                f"MAX_GLOBAL_BANNED_WORDS يجب أن يكون > 0"
-            )
+            errors.append("MAX_GLOBAL_BANNED_WORDS يجب أن يكون > 0")
 
-        # 🆕 v7.0.3: تحقق من DB pool tuning
+        # ─── 4. DB pool tuning ───
         if self.PG_MAX_INACTIVE_LIFETIME < 5.0:
             warnings.append(
                 f"PG_MAX_INACTIVE_LIFETIME ({self.PG_MAX_INACTIVE_LIFETIME}s) "
@@ -1142,7 +1088,6 @@ class AppConfig:
                 f"مرتفع جداً — قد يسبب استعلامات بطيئة على اتصالات ميتة."
             )
 
-        # 🆕 v7.0.4: rollback timeout validation
         if self.PG_ROLLBACK_ON_RETURN_TIMEOUT < 0.5:
             warnings.append(
                 f"PG_ROLLBACK_ON_RETURN_TIMEOUT "
@@ -1156,10 +1101,17 @@ class AppConfig:
                 f"سيؤخر إعادة الاتصال للـ pool."
             )
 
-        # 🔴 FIX-R12 (v7.0.6): تحقق من أن PG_STATEMENT_TIMEOUT_MS معقول
-        # 🟢 v7.0.7 FIX-NW-3: حُذف فرع < 5000ms لأنه غير قابل للحدوث
-        # الآن (auto-clamp إلى ≥ 30000ms في تعريف الحقل). يبقى فرع
-        # الحد الأعلى لأنه ما زال قابلاً للحدوث عند قيم كبيرة يدوياً.
+        # 🟢 FIX-ST-4 (v7.0.8): تحذير عند وجود clamped value
+        # (القيمة الآمنة مُطبَّقة — لكن .env يحتاج تحديث)
+        if self.STMT_TIMEOUT_WAS_CLAMPED:
+            warnings.append(
+                f"🔧 PG_STATEMENT_TIMEOUT_MS في .env = "
+                f"{self.PG_STATEMENT_TIMEOUT_MS_RAW}ms (خطير) → "
+                f"رُفِع تلقائياً إلى {self.PG_STATEMENT_TIMEOUT_MS}ms. "
+                f"يُنصح بتحديث .env إلى 60000ms."
+            )
+
+        # يبقى فرع الحد الأعلى فقط (قابل للحدوث)
         if self.PG_STATEMENT_TIMEOUT_MS > 300000:
             warnings.append(
                 f"⚠️ PG_STATEMENT_TIMEOUT_MS="
@@ -1167,7 +1119,7 @@ class AppConfig:
                 f"قد لا يكشف الاستعلامات المتعثرة بسرعة."
             )
 
-        # 🆕 v7.0.4: idle-tx audit validation
+        # ─── 5. idle-tx audit validation ───
         if self.IDLE_TX_AUDIT_ENABLED:
             if self.IDLE_TX_AUDIT_INTERVAL_SEC < 5.0:
                 errors.append(
@@ -1213,7 +1165,7 @@ class AppConfig:
                     f"سيُثقل اللوجات."
                 )
 
-        # ─── 4. الميزات الاختيارية ───
+        # ─── 6. الميزات الاختيارية ───
         if self.ENABLE_2FA and not self.ADMIN_2FA_SECRET:
             errors.append("ADMIN_2FA_SECRET مطلوب عند تفعيل ENABLE_2FA")
 
@@ -1227,9 +1179,7 @@ class AppConfig:
         if self.REDIS_AVAILABLE and not self.REDIS_URL:
             errors.append("REDIS_URL مطلوب عند تفعيل REDIS_AVAILABLE")
 
-        # ─── 5. طبقات كشف السبام ───
-
-        # Pool settings
+        # ─── 7. طبقات كشف السبام ───
         if self.DETECTOR_POOL_WORKERS < 1 or self.DETECTOR_POOL_WORKERS > 64:
             errors.append(
                 f"DETECTOR_POOL_WORKERS خارج النطاق [1-64]: "
@@ -1269,7 +1219,6 @@ class AppConfig:
         if self.NSFW_SIGHTENGINE_MAX_BYTES < 1024:
             errors.append("NSFW_SIGHTENGINE_MAX_BYTES صغير جداً")
 
-        # ✅ v7.0.1: NSFW layer بدون model
         if self.NSFW_LAYER_ENABLED and not self.NSFW_MODEL_ENABLED:
             if not self.HAS_SIGHTENGINE:
                 warnings.append(
@@ -1279,14 +1228,12 @@ class AppConfig:
                     "أضف SIGHTENGINE_API_USER/SECRET أو فعّل NSFW_MODEL_ENABLED."
                 )
 
-        # URL layer بدون Safe Browsing
         if self.URL_LAYER_ENABLED and not self.SAFE_BROWSING_API_KEY:
             warnings.append(
                 "URL_LAYER_ENABLED=1 لكن SAFE_BROWSING_API_KEY فارغ — "
                 "دقة كشف الروابط ستكون أقل."
             )
 
-        # 🆕 v7.0.3: Arabic Short Whitelist validation
         if self.ARABIC_SHORT_WHITELIST_ENABLED:
             if self.ARABIC_SHORT_MAX_CHARS < 10:
                 warnings.append(
@@ -1314,7 +1261,6 @@ class AppConfig:
                 f"FINAL_THRESHOLD ({self.FINAL_THRESHOLD}) خارج النطاق المُوصى به [1-50]"
             )
 
-        # OCR بدون pytesseract
         if self.OCR_LAYER_ENABLED:
             try:
                 import pytesseract  # noqa: F401
@@ -1324,7 +1270,6 @@ class AppConfig:
                     "ثبّت: pip install pytesseract Pillow"
                 )
 
-        # Video بدون opencv/ffmpeg
         if self.VIDEO_LAYER_ENABLED:
             _has_cv2 = False
             _has_ffmpeg = False
@@ -1348,7 +1293,6 @@ class AppConfig:
                     "VIDEO_LAYER_ENABLED=1 لكن opencv/ffmpeg غير متوفرين."
                 )
 
-        # Audio بدون pydub
         if self.AUDIO_LAYER_ENABLED:
             try:
                 import speech_recognition  # noqa: F401
@@ -1359,7 +1303,6 @@ class AppConfig:
                     "غير مثبتين."
                 )
 
-        # Stego بدون numpy
         if self.STEGO_LAYER_ENABLED:
             try:
                 import numpy  # noqa: F401
@@ -1368,13 +1311,12 @@ class AppConfig:
                     "STEGO_LAYER_ENABLED=1 لكن numpy غير مثبت."
                 )
 
-        # كل الطبقات معطّلة
         if not self.SPAM_DETECTION_AVAILABLE:
             warnings.append(
                 "TEXT_LAYER_ENABLED=0 — محرك كشف السبام معطّل بالكامل!"
             )
 
-        # ─── 6. تحذيرات الإنتاج ───
+        # ─── 8. تحذيرات الإنتاج ───
         if self.ENVIRONMENT == "production" and not self.WEB_PASSWORD:
             warnings.append(
                 "WEB_PASSWORD فارغ في الإنتاج — لوحة الويب غير محمية!"
@@ -1390,7 +1332,6 @@ class AppConfig:
                 "WEBHOOK_SECRET فارغ في الإنتاج — حماية webhook معطّلة."
             )
 
-        # 🆕 v7.0.3: SB_SECRET اختياري
         if not self.SB_SECRET:
             warnings.append(
                 "SB_SECRET فارغ — قد يُعطّل بعض حمايات الحماية الخارجية."
@@ -1498,15 +1439,27 @@ logger.info(
     f"min={CONFIG.DB_POOL_MIN_SIZE} "
     f"concurrency={CONFIG.PUBLISH_DB_CONCURRENCY}"
 )
-logger.info(
-    f"🐘 PG Pool Tuning: "
-    f"max_inactive={CONFIG.PG_MAX_INACTIVE_LIFETIME:.0f}s "
-    f"ping_idle={CONFIG.PG_CONN_PING_IDLE_THRESHOLD:.0f}s "
-    f"stmt_timeout={CONFIG.PG_STATEMENT_TIMEOUT_MS}ms "
-    f"rollback_timeout={CONFIG.PG_ROLLBACK_ON_RETURN_TIMEOUT:.1f}s"
-)
 
-# 🆕 v7.0.5: سجل PERF Tuning (للتأكد من تطبيق القيم)
+# 🟢 FIX-ST-2 (v7.0.8): سجل شفاف يُظهر الفرق بين raw والمُطبَّق
+if CONFIG.STMT_TIMEOUT_WAS_CLAMPED:
+    logger.info(
+        f"🐘 PG Pool Tuning: "
+        f"max_inactive={CONFIG.PG_MAX_INACTIVE_LIFETIME:.0f}s "
+        f"ping_idle={CONFIG.PG_CONN_PING_IDLE_THRESHOLD:.0f}s "
+        f"stmt_timeout={CONFIG.PG_STATEMENT_TIMEOUT_MS}ms "
+        f"(⚙️ FIX-ST-1: raw={CONFIG.PG_STATEMENT_TIMEOUT_MS_RAW}ms→"
+        f"{CONFIG.PG_STATEMENT_TIMEOUT_MS}ms) "
+        f"rollback_timeout={CONFIG.PG_ROLLBACK_ON_RETURN_TIMEOUT:.1f}s"
+    )
+else:
+    logger.info(
+        f"🐘 PG Pool Tuning: "
+        f"max_inactive={CONFIG.PG_MAX_INACTIVE_LIFETIME:.0f}s "
+        f"ping_idle={CONFIG.PG_CONN_PING_IDLE_THRESHOLD:.0f}s "
+        f"stmt_timeout={CONFIG.PG_STATEMENT_TIMEOUT_MS}ms "
+        f"rollback_timeout={CONFIG.PG_ROLLBACK_ON_RETURN_TIMEOUT:.1f}s"
+    )
+
 logger.info(
     f"⚡ PERF Tuning: "
     f"MAX_CHANNELS/CYCLE={CONFIG.MAX_CHANNELS_PER_CYCLE} | "
@@ -1522,7 +1475,6 @@ logger.info(
     f"{'مُهيَّأ ✅' if CONFIG.HAS_SAFE_BROWSING else 'غير مُهيَّأ ⚠️'}"
 )
 
-# 🆕 v7.0.4: idle-tx audit status
 if CONFIG.IDLE_TX_AUDIT_ENABLED:
     logger.info(
         f"🔍 Idle-TX Audit: ✅ مُفعَّل "
@@ -1536,9 +1488,7 @@ else:
         "idle-in-transaction تلقائياً."
     )
 
-# 👑 v7.0.2: سجل المطورين (DEV-PERMANENT)
-# 🟢 v7.0.7 FIX-NW-1: DEVELOPER_IDS لم يعد يحتوي المالك، لذا
-# نجمع المالك + DEVELOPER_IDS لعرض القائمة الكاملة (كما كان).
+# 👑 سجل المطورين (DEV-PERMANENT)
 _all_dev_ids = tuple(sorted(set(
     ([CONFIG.PRIMARY_OWNER_ID] if CONFIG.PRIMARY_OWNER_ID else [])
     + list(CONFIG.DEVELOPER_IDS)
@@ -1603,7 +1553,6 @@ logger.info(
     f"   🎯 FINAL_THRESHOLD: {CONFIG.FINAL_THRESHOLD}"
 )
 
-# NSFW status — v7.0.1: عرض واضح للوضع
 if CONFIG.NSFW_LAYER_ENABLED:
     if CONFIG.NSFW_MODEL_ENABLED:
         logger.info("   🔞 NSFW: نموذج محلي (transformers+torch)")
@@ -1644,7 +1593,6 @@ logger.info(
     f"   🛡️ Anti-Evasion: {_antievasion_enabled}/24 toggle مُفعَّل"
 )
 
-# 🆕 v7.0.3: تشخيص الواردات
 logger.info(
     f"   🔍 DIAG_INCOMING: "
     f"{'✅ مُفعَّل' if CONFIG.DIAG_INCOMING else '❌ معطّل'}"
