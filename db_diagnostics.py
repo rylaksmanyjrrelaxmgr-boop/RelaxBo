@@ -1,8 +1,20 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-db_diagnostics.py — واجهة تشخيص وصيانة قاعدة البيانات (v7.0.0 — CACHE-LAYER)
+db_diagnostics.py — واجهة تشخيص وصيانة قاعدة البيانات (v7.0.1 — FIX-BUNDLE)
 ================================================================================
+🆕 v7.0.1 — FIX-BUNDLE (AF1 + AF2 + AF3 + AF4):
+    🔴 FIX-AF1: bot_addition_log.date_column — من created_at إلى added_at.
+               السبب: الجدول لا يحتوي created_at → preview_maintenance
+               و run_maintenance كانا يفشلان بصمت → الجدول ينمو بلا حدود.
+    🔴 FIX-AF2: user_messages.date_column — من created_at إلى message_time.
+               السبب: نفس مشكلة AF1.
+    🔴 FIX-AF3: vacuum_analyze_tables — فحص SQLite قبل حلقة VACUUM.
+               السبب: db.vacuum(table) على SQLite يتجاهل table ويُنفّذ
+               VACUUM كاملاً. مع 20 جدولاً = 20 VACUUMs كاملة
+               (10-40 دقيقة) بدل VACUUM واحد (~1-2 دقيقة).
+    🔴 FIX-AF4: run_maintenance — نفس منطق AF3 في قسم VACUUM.
+
 🆕 v7.0.0 — CACHE-LAYER + PARALLEL-REPORT:
     🟢 PERF-1: طبقة cache مركزية بـ TTL لكل دالة تشخيصية:
         • _get_all_tables_health → 60s   (الأهم — 0.45s → ~0ms بعد أول استدعاء)
@@ -59,7 +71,7 @@ logger = logging.getLogger(__name__)
 # الإصدار
 # ═══════════════════════════════════════════════════════════════════════
 
-VERSION = "7.0.0"
+VERSION = "7.0.1"
 
 # 🆕 v6.9.4: حدود الدقة — تمنع الإنذارات الكاذبة
 _MIN_DEAD_FOR_CRITICAL = 50   # أقل من هذا → لا يُصنَّف حرجاً مهما كانت النسبة
@@ -161,7 +173,9 @@ _CLEANUP_POLICY: Dict[str, Dict[str, Any]] = {
         "extra_where": None,
     },
     "bot_addition_log": {
-        "date_column": "created_at",
+        # 🔴 FIX-AF1 (v7.0.1): العمود الصحيح هو added_at (حسب database_tables.py)
+        # الجدول لا يحتوي created_at — الاستعلام كان يفشل بصمت.
+        "date_column": "added_at",
         "retention":   90,
         "max_mb":      20,
         "extra_where": None,
@@ -177,7 +191,9 @@ _CLEANUP_POLICY: Dict[str, Dict[str, Any]] = {
 
     # رسائل المستخدمين — 🔒 لا تحذف رسائل مشترك نشط
     "user_messages": {
-        "date_column": "created_at",
+        # 🔴 FIX-AF2 (v7.0.1): العمود الصحيح هو message_time (حسب database_tables.py)
+        # الجدول لا يحتوي created_at — الاستعلام كان يفشل بصمت.
+        "date_column": "message_time",
         "retention":   30,
         "max_mb":      20,
         "extra_where": (
@@ -952,6 +968,7 @@ async def run_maintenance() -> Dict[str, Any]:
     """
     🆕 v6.9.4: تنفيذ آمن — المشتركون النشطون محميون.
     🆕 v7.0.0: يُبطل الكاش بعد الانتهاء.
+    🔴 FIX-AF4 (v7.0.1): فرع SQLite خاص في قسم VACUUM.
     """
     db = _get_db()
     start = time.monotonic()
@@ -1027,28 +1044,46 @@ async def run_maintenance() -> Dict[str, Any]:
                 result['deletion_errors'][tbl] = str(e)[:100]
 
     # 3) VACUUM على كل الجداول + MVs
-    tables = await _get_all_table_names()
-    for t in tables:
+    # 🔴 FIX-AF4 (v7.0.1): على SQLite، VACUUM واحد كافٍ (نفس منطق AF3).
+    if _get_db_type() == "SQLITE":
         try:
-            if hasattr(db, "vacuum") and callable(db.vacuum):
-                await db.vacuum(t)
-            else:
-                await db.execute(f"VACUUM ANALYZE {t}")
-            result['vacuum']['success'] += 1
-            result['vacuum']['details'].append((t, True, None))
+            await db.execute("VACUUM")
+            try:
+                await db.execute("ANALYZE")
+            except Exception:
+                pass
+            result['vacuum']['success'] = 1
+            result['vacuum']['details'].append(
+                ("__sqlite_full__", True, None)
+            )
         except Exception as e:
-            err = str(e).lower()
-            if "does not exist" in err or "no such" in err:
-                result['vacuum']['details'].append((t, True, "skip"))
-            else:
-                result['vacuum']['failed'] += 1
-                result['vacuum']['details'].append(
-                    (t, False, str(e)[:80])
-                )
-        try:
-            await asyncio.sleep(0.05)
-        except Exception:
-            pass
+            result['vacuum']['failed'] = 1
+            result['vacuum']['details'].append(
+                ("__sqlite_full__", False, str(e)[:80])
+            )
+    else:
+        tables = await _get_all_table_names()
+        for t in tables:
+            try:
+                if hasattr(db, "vacuum") and callable(db.vacuum):
+                    await db.vacuum(t)
+                else:
+                    await db.execute(f"VACUUM ANALYZE {t}")
+                result['vacuum']['success'] += 1
+                result['vacuum']['details'].append((t, True, None))
+            except Exception as e:
+                err = str(e).lower()
+                if "does not exist" in err or "no such" in err:
+                    result['vacuum']['details'].append((t, True, "skip"))
+                else:
+                    result['vacuum']['failed'] += 1
+                    result['vacuum']['details'].append(
+                        (t, False, str(e)[:80])
+                    )
+            try:
+                await asyncio.sleep(0.05)
+            except Exception:
+                pass
 
     result['duration_sec'] = round(time.monotonic() - start, 2)
 
@@ -1214,11 +1249,48 @@ async def run_db_maintenance() -> str:
 
 
 async def vacuum_analyze_tables() -> str:
+    """
+    🔴 FIX-AF3 (v7.0.1): على SQLite، VACUUM واحد فقط بدل N مرة.
+
+    السبب: db.vacuum(table) على SQLite يتجاهل table ويُنفّذ
+    VACUUM كاملاً. مع 20 جدولاً = 20 VACUUMs كاملة (10-40 دقيقة)
+    بدل VACUUM واحد (~1-2 دقيقة).
+    """
     db = _get_db()
     if db is None:
         return "❌ DB غير مستورد"
 
     start = time.monotonic()
+
+    # 🔴 FIX-AF3: SQLite — VACUUM واحد فقط
+    if _get_db_type() == "SQLITE":
+        lines = ["🧹 <b>VACUUM (SQLite)</b>",
+                 "━━━━━━━━━━━━━━━━━━━━━━", ""]
+        try:
+            await db.execute("VACUUM")
+            try:
+                await db.execute("ANALYZE")
+            except Exception as _e:
+                logger.debug(f"SQLite ANALYZE: {_e}")
+            lines.append("  ✅ VACUUM + ANALYZE كامل")
+            success = 1
+            fail = 0
+        except Exception as e:
+            lines.append(f"  ❌ فشل: <code>{_esc(str(e)[:80])}</code>")
+            success = 0
+            fail = 1
+
+        elapsed = time.monotonic() - start
+        lines.append("")
+        lines.append("━━━━━━━━━━━━━━━━━━━━━━")
+        lines.append(f"⏱️ المدة: {elapsed:.2f}s | "
+                     f"✅ نجح: {success} | ❌ فشل: {fail}")
+        _invalidate_cache()
+        return "\n".join(lines)
+
+    # ═══════════════════════════════════════════════════════════════
+    # PostgreSQL / MySQL — VACUUM per-table (صحيح)
+    # ═══════════════════════════════════════════════════════════════
     tables = await _get_all_table_names()
     lines = ["🧹 <b>VACUUM ANALYZE</b>", "━━━━━━━━━━━━━━━━━━━━━━", ""]
 
@@ -1818,6 +1890,7 @@ try:
         "abs-threshold=%d dead | "
         "auto-vacuum API ✅ | "
         "user_violations.last_violation_time ✅ | "
+        "AF1+AF2+AF3+AF4 ✅ | "
         "cache_keys=%d | exports=%d",
         VERSION,
         _MIN_DEAD_FOR_CRITICAL,
