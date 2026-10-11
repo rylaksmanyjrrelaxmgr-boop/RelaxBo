@@ -2,37 +2,41 @@
 # -*- coding: utf-8 -*-
 
 """
-🌿 Relax Manager – البوت الرئيسي (bot.py v5.6.20-PERF-POOL-CACHE)
+🌿 Relax Manager – البوت الرئيسي (bot.py v5.6.21-FIX-BUNDLE)
 ================================================================================
 📌 نقطة الدخول الرسمية للتطبيق (entrypoint).
 
+🆕 v5.6.21 (FIX-BUNDLE):
+    🔴 FIX-AN1-FOLLOWUP: منع تنفيذ CallbackHandlers.handle مرتين
+              (NAV_FIX v3.3.0 يستدعيه داخليًا — لا نُسجّله في bot.py
+              إلا إذا كان NAV_FIX غير متاح).
+    🔴 FIX-C8/B1: _PM_QUERY_TTL = 290.0 (كان 240 — كاش ميت).
+    🔴 FIX-C9/B13: keep_alive — while True عند غياب URL
+              (منع log spam 51840 سطر/يوم).
+    🔴 FIX-AM1: stop_auto_vacuum_task — متغير + استرجاع + استدعاء
+              (إغلاق نظيف لمهمة VACUUM).
+    🟡 FIX-5: _NAV_FIX_AVAILABLE — import آمن لـ register_nav_fix.
+    🟡 FIX-U26: migrate_reminders_columns بعد pre_initialize.
+
 🆕 v5.6.20 (PERF-POOL-CACHE):
-    🟢 PERF-5: cache 240s لاستعلام pg_stat_activity في pool_health_monitor
-               (0.27s → ~0ms بعد أول استدعاء خلال النافذة).
-    🟢 PERF-6: تتبع تلقائي للاستعلامات البطيئة — يُميّز بين cold-start
-               والبطء الحقيقي، ويُسجّل التعافي.
+    🟢 PERF-5: cache 240s لاستعلام pg_stat_activity في pool_health_monitor.
+    🟢 PERF-6: تتبع تلقائي للاستعلامات البطيئة.
     🟡 PERF-7: تحديث Load Beacon + سجل الإقلاع.
 
 🆕 v5.6.19 (PERF-WARMUP):
-    🟢 PERF-4: Warmup Telegram API — await app.bot.get_me() بعد
-               app.initialize() لتحمية الاتصال HTTPS مع api.telegram.org.
-               الفائدة: أول send_message ينخفض من ~900ms إلى ~250ms.
+    🟢 PERF-4: Warmup Telegram API — await app.bot.get_me().
 
 🆕 v5.6.18 (PERF-FIXES):
-    🟢 PERF-1: keep_alive — الفاصل من 300s إلى 180s (3 دقائق)
-               + دعم KEEP_ALIVE_URL المخصص.
-    🟢 PERF-2: سجل تشخيصي يعرض PERF Tuning (MAX_CHANNELS + SLOW_QUERY).
-    🟢 PERF-3: رسالة توضيحية عن Cron-job.org عند غياب RENDER_EXTERNAL_URL.
+    🟢 PERF-1: keep_alive — الفاصل 180s + KEEP_ALIVE_URL.
+    🟢 PERF-2: سجل تشخيصي لقيم الأداء.
+    🟢 PERF-3: رسالة Cron-job.org.
 
 🆕 v5.6.17 (ROBUST-MAINT-IMPORT):
-    🟢 PATCH-1: تحسين استيراد db_maintenance_commands — يدعم 5 أسماء.
-    🟢 PATCH-2: رسالة خطأ مُفصَّلة عند الفشل.
+    🟢 PATCH-1: استيراد مرن لـ db_maintenance_commands (5 أسماء).
+    🟢 PATCH-2: رسالة خطأ مُفصَّلة.
 
 🆕 v5.6.16 (ANALYTICS-HANDLERS-FIX):
-    🟢 PATCH-1: استيراد آمن لـ handle_analytics_callback + show_analytics_menu
-    🟢 PATCH-2: تسجيل 2 CallbackQueryHandler BEFORE العام
-    🟢 PATCH-3: إشعار حالة handlers_analytics في diagnostics
-    🟢 PATCH-4: تحديث Load Beacon إلى v5.6.16
+    🟢 PATCH-1..4: استيراد analytics + تسجيل 2 CallbackQueryHandler.
 ================================================================================
 """
 
@@ -314,7 +318,19 @@ except ImportError as _e1:
         _CH_DELETE_IMPORT_ERROR = f"{_e1} | {_e2}"
 
 from handlers.handlers_channels_list import register_channels_list_handlers
-from handlers.handlers_nav_fix import register_nav_fix
+
+# ✅ FIX-5 (v5.6.21): import آمن لـ register_nav_fix + متغير _NAV_FIX_AVAILABLE
+try:
+    from handlers.handlers_nav_fix import register_nav_fix
+    _NAV_FIX_AVAILABLE = True
+except ImportError:
+    try:
+        from handlers_nav_fix import register_nav_fix
+        _NAV_FIX_AVAILABLE = True
+    except ImportError:
+        register_nav_fix = None
+        _NAV_FIX_AVAILABLE = False
+
 from handlers.handlers_message import (
     GroupRateLimiterManager,
     register_shutdown_handlers as _register_message_shutdown,
@@ -377,6 +393,8 @@ except ImportError as _e_cs1:
 register_maintenance_commands = None
 start_weekly_diagnostic_task = None
 stop_weekly_diagnostic_task = None
+# ✅ FIX-AM1 (v5.6.21): متغيّر جديد لإيقاف مهمة VACUUM التلقائية
+stop_auto_vacuum_task = None
 _MAINT_CMDS_AVAILABLE = False
 _MAINT_CMDS_IMPORT_ERROR = None
 
@@ -414,6 +432,14 @@ if _mod_import_ok:
         )
     except Exception:
         stop_weekly_diagnostic_task = None
+
+    # ✅ FIX-AM1 (v5.6.21): استرجاع stop_auto_vacuum_task
+    try:
+        stop_auto_vacuum_task = getattr(
+            _maint_mod, "stop_auto_vacuum_task", None
+        )
+    except Exception:
+        stop_auto_vacuum_task = None
 
     for _name in _MAINT_REGISTER_NAMES:
         _fn = getattr(_maint_mod, _name, None)
@@ -547,10 +573,10 @@ _KEEP_ALIVE_INITIAL_DELAY = 30.0
 # 🆕 PERF-4: Warmup Telegram API timeout
 _TG_WARMUP_TIMEOUT = 10.0
 
-# 🆕 v5.6.20 PERF-5: TTL cache لاستعلام pg_stat_activity
-# الفاصل 240s أقل من دورة pool_health_monitor (300s)
-# الهدف: 0.27s → ~0ms بعد أول استدعاء
-_PM_QUERY_TTL = 240.0
+# ✅ FIX-C8/B1 (v5.6.21): TTL يجب أن يكون أكبر من الفاصل بين الاستدعاءات
+# (pool_health_monitor يستدعي كل 300s) — وإلا الكاش لا يعمل أبدًا.
+# مع 240 → الكاش ميت. مع 290 → الكاش يعمل ويوفّر ~0.27s كل دورة.
+_PM_QUERY_TTL = 290.0  # 300 - 10s هامش أمان
 _pm_last_query_ts = 0.0
 _pm_last_query_result: Optional[Dict[str, Any]] = None
 _pm_slow_query_warned = False  # 🆕 PERF-6
@@ -609,7 +635,6 @@ async def _warmup_telegram_api(app: Application) -> bool:
     """
     t_warm = time.monotonic()
     try:
-        # get_me هو أخف استدعاء لـ Telegram API — يعيد معلومات البوت
         me = await asyncio.wait_for(
             app.bot.get_me(),
             timeout=_TG_WARMUP_TIMEOUT,
@@ -635,7 +660,6 @@ async def _warmup_telegram_api(app: Application) -> bool:
         )
         return False
     except Exception as _e:
-        # لا نُفشل الإقلاع — فقط نُسجّل
         logger.warning(
             "⚠️ Telegram API warmup: %s: %s",
             type(_e).__name__, str(_e)[:100],
@@ -1009,6 +1033,17 @@ else:
         "⚠️ handlers_channels_delete غير متاح: %s — "
         "سيتم استخدام الحذف الفوري (بدون تأكيد)",
         _CH_DELETE_IMPORT_ERROR or "unknown",
+    )
+
+# ✅ FIX-5: إشعار حالة NAV_FIX
+if _NAV_FIX_AVAILABLE:
+    logger.info(
+        "✅ handlers_nav_fix متاح — delegation mode مُفعّل"
+    )
+else:
+    logger.warning(
+        "⚠️ handlers_nav_fix غير متاح — "
+        "سيُسجَّل CallbackHandlers.handle مباشرة (fallback)"
     )
 
 if _MAINT_CMDS_AVAILABLE:
@@ -1909,14 +1944,8 @@ async def health_check(request):
 async def keep_alive():
     """
     🆕 v5.6.18 PERF-1: keep_alive محسّن.
-    🆕 v5.6.19: يبقى كما هو (PERF-4 لا يغيّره).
-    🆕 v5.6.20: يبقى كما هو.
-
-    التغييرات:
-      - الفاصل: 180s (3 دقائق) بدل 300s (5 دقائق).
-      - تأخير أولي: 30s بدل 60s.
-      - دعم KEEP_ALIVE_URL المخصص (بأولوية).
-      - رسائل توضيحية عن Cron-job.org.
+    ✅ FIX-C9/B13 (v5.6.21): عند غياب URL — ننام إلى الأبد بدل return
+       (منع run_task_with_retry من إعادة التشغيل كل 5s → log spam).
     """
     try:
         await asyncio.sleep(_KEEP_ALIVE_INITIAL_DELAY)
@@ -1938,7 +1967,14 @@ async def keep_alive():
             "💡 الحل الموصى به: استخدم Cron-job.org (خارجي) "
             "على https://<your-app>.onrender.com/health كل 5 دقائق."
         )
-        return
+        # ✅ FIX-C9/B13: لا نخرج — ننام إلى الأبد لتجنّب
+        # run_task_with_retry إعادة التشغيل كل 5s (log spam).
+        while True:
+            try:
+                await asyncio.sleep(86400)  # 24 ساعة
+            except asyncio.CancelledError:
+                logger.info("🛑 keep_alive (disabled) أُلغي")
+                raise
 
     url = url.rstrip('/')
     health_url = f"{url}/health"
@@ -2065,13 +2101,9 @@ async def _fetch_pool_data(total: int, active: int) -> Optional[Dict[str, Any]]:
 # 🆕 v5.6.20 PERF-5: cache + قياس تلقائي
 async def _fetch_pg_activity_cached() -> Dict[str, Any]:
     """
-    🆕 PERF-5: كاش 240s لاستعلام pg_stat_activity.
-
-    الفائدة:
-      • 0.27s → ~0ms بعد أول استدعاء خلال النافذة.
-      • يتفادى إعادة الاستعلام كل 300s في pool_health_monitor.
-
-    🆕 PERF-6: تتبع تلقائي للاستعلامات البطيئة.
+    🆕 PERF-5: كاش 290s لاستعلام pg_stat_activity.
+       ✅ FIX-C8/B1 (v5.6.21): TTL=290 أكبر من دورة الاستدعاء (300s)
+       — وإلا الكاش لا يعمل أبدًا.
     """
     global _pm_last_query_ts, _pm_last_query_result, _pm_slow_query_warned
 
@@ -2102,7 +2134,6 @@ async def _fetch_pg_activity_cached() -> Dict[str, Any]:
     )
     elapsed_ms = (time.monotonic() - t0) * 1000
 
-    # 🆕 PERF-6: تتبع الاستعلامات البطيئة (cold-start detection)
     if elapsed_ms > 100 and not _pm_slow_query_warned:
         logger.warning(
             "⚠️ pool_health_monitor: استعلام بطيء (%.0fms) — "
@@ -2133,7 +2164,7 @@ async def _fetch_pg_activity_cached() -> Dict[str, Any]:
 
 async def pool_health_monitor() -> None:
     """
-    🆕 v5.6.20 PERF-5: يستخدم _fetch_pg_activity_cached (كاش 240s).
+    🆕 v5.6.20 PERF-5: يستخدم _fetch_pg_activity_cached (كاش 290s).
     """
     _task_start_mono = time.monotonic()
     _idle_tx_streak = 0
@@ -2156,7 +2187,6 @@ async def pool_health_monitor() -> None:
                     raise
                 continue
 
-            # 🆕 PERF-5: استخدام الكاش
             data = await _fetch_pg_activity_cached()
 
             total = int(data.get("total") or 0)
@@ -2676,10 +2706,10 @@ async def main():
     logger.info("👨‍💼 المالك: %s", CONFIG.PRIMARY_OWNER_ID)
 
     logger.info(
-        "📦 bot.py: v5.6.20 | "
+        "📦 bot.py: v5.6.21 | "
         "detectors=%s | layers=%d | helpers=%s | "
         "db_idle=%s | cache_stats=%s | analytics=%s | maint_cmds=%s | "
-        "pool_cache_ttl=%ds",
+        "pool_cache_ttl=%ds | nav_fix=%s",
         _SPAM_DETECTOR_VERSION or "N/A",
         _SPAM_DETECTOR_LAYERS_COUNT,
         (
@@ -2695,6 +2725,7 @@ async def main():
         "yes" if _ANALYTICS_HANDLERS_AVAILABLE else "no",
         "yes" if _MAINT_CMDS_AVAILABLE else "no",
         int(_PM_QUERY_TTL),
+        "yes" if _NAV_FIX_AVAILABLE else "no",
     )
 
     try:
@@ -2729,6 +2760,16 @@ async def main():
         "⏱️ قاعدة البيانات تمت تهيئتها في %.2f ثانية",
         time.monotonic() - t0,
     )
+
+    # ✅ FIX-U26 (v5.6.21): استدعاء migrate_reminders_columns بعد pre_initialize
+    # لضمان وجود أعمدة last_daily_sent/last_weekly_sent/last_subscription_sent
+    # على قواعد البيانات القديمة (v1.1-).
+    try:
+        if hasattr(DB, "migrate_reminders_columns"):
+            await DB.migrate_reminders_columns()
+            logger.info("✅ migrate_reminders_columns: تم")
+    except Exception as _e:
+        logger.warning("⚠️ migrate_reminders_columns: %s", _e)
 
     for dev_id in CONFIG.DEVELOPER_IDS:
         try:
@@ -2774,7 +2815,6 @@ async def main():
         time.monotonic() - t_app,
     )
 
-    # 🆕 PERF-4: Warmup Telegram API — يقصّر أول /start بـ ~600ms
     _tg_warm_ok = await _warmup_telegram_api(app)
     if not _tg_warm_ok:
         logger.info(
@@ -3072,11 +3112,16 @@ async def main():
     app.add_handler(PreCheckoutQueryHandler(pre_checkout))
     app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, successful_payment))
 
-    try:
-        register_nav_fix(app)
-        logger.info("✅ NAV_FIX: معالج الإغلاق/الرجوع مُسجّل")
-    except Exception as e:
-        logger.error("❌ فشل تسجيل NAV_FIX: %s", e, exc_info=True)
+    if _NAV_FIX_AVAILABLE and callable(register_nav_fix):
+        try:
+            register_nav_fix(app)
+            logger.info("✅ NAV_FIX: معالج الإغلاق/الرجوع مُسجّل")
+        except Exception as e:
+            logger.error("❌ فشل تسجيل NAV_FIX: %s", e, exc_info=True)
+    else:
+        logger.info(
+            "ℹ️ NAV_FIX غير متاح — سيُسجَّل CallbackHandlers.handle مباشرة"
+        )
 
     try:
         register_channels_list_handlers(app)
@@ -3148,7 +3193,18 @@ async def main():
             _ANALYTICS_HANDLERS_IMPORT_ERROR or "unknown",
         )
 
-    app.add_handler(CallbackQueryHandler(CallbackHandlers.handle))
+    # ✅ FIX-AN1-FOLLOWUP (v5.6.21): لا نُسجّل CallbackHandlers.handle هنا —
+    # NAV_FIX (group=-99) يستدعيه داخليًا. تسجيله هنا يُسبب تنفيذًا مزدوجًا
+    # لكل ضغطة زر (double execution).
+    #
+    # ملاحظة: NAV_FIX مُسجَّل في bot.py بترتيب يضمن استدعاءه أولًا:
+    #   register_nav_fix(app)  ← يُسجّل group=-99
+    # إذا فشل استيراد handlers_nav_fix، يجب تفعيل التسجيل الاحتياطي:
+    if not _NAV_FIX_AVAILABLE:
+        app.add_handler(CallbackQueryHandler(CallbackHandlers.handle))
+        logger.warning(
+            "⚠️ NAV_FIX غير متاح — تسجيل CallbackHandlers.handle مباشرة"
+        )
 
     app.add_handler(MessageHandler(
         (filters.TEXT | filters.PHOTO | filters.VIDEO | filters.Document.ALL |
@@ -3451,6 +3507,13 @@ async def main():
                 await stop_weekly_diagnostic_task(timeout=3.0)
             except Exception as _e:
                 logger.debug("stop_weekly_diagnostic_task: %s", _e)
+
+        # ✅ FIX-AM1 (v5.6.21): إيقاف مهمة VACUUM التلقائية
+        if _MAINT_CMDS_AVAILABLE and callable(stop_auto_vacuum_task):
+            try:
+                await stop_auto_vacuum_task(timeout=3.0)
+            except Exception as _e:
+                logger.debug("stop_auto_vacuum_task: %s", _e)
 
         try:
             await _shutdown_detector_tasks(timeout=3.0)
