@@ -1,14 +1,26 @@
 # handlers/handlers_group_log.py
 r"""
-handlers_group_log.py — MessageHandler لاستقبال معرّف قناة السجل (v1.6.6)
+handlers_group_log.py — MessageHandler لاستقبال معرّف قناة السجل (v1.6.7)
 =====================================================================
+🆕 v1.6.7 (FIX-AL2):
+    🔴 AL2  register_group_log_handlers — إضافة filters.ChatType.PRIVATE
+            على MessageHandler(receive_log_channel).
+            السبب: بدون هذا الفلتر، receive_log_channel يُستدعى على
+            أي رسالة (TEXT أو FORWARDED) في أي chat. سيناريو خطأ:
+              1. مشرف يدير مجموعتين A و B.
+              2. يبدأ تعيين قناة سجل لـ B من لوحة أمان B → WAIT_LOG_CH.
+              3. قبل الإكمال، يرسل رسالة مُعاد توجيهها من قناة في A
+                 داخل المجموعة A.
+              4. receive_log_channel يلتقطها → يستخرج chat_id من الـ
+                 forward → يعيّن قناة سجل لـ B بقناة من A.
+            الإصلاح: قصر التعيين على الرسائل الخاصة فقط — لأن اللوحة
+            الإدارية تُفتح في الخاص فقط.
+
 🆕 v1.6.6 (PY312-COMPAT + TELEGRAM.DOG):
     🔴 F12  asyncio.iscoroutine → inspect.isawaitable
-            (iscoroutine مهجور في Python 3.12+, ويفشل مع بعض الـ awaitables)
     🟡 F13  دعم telegram.dog في _TME_LINK_RE + _TME_INVITE_RE + _URL_PREFIXES
-            (توافق مع handlers_message_detectors v4.1.0)
     🟡 F14  getattr(chat_obj, "title"/"username", None) — أمان ضد None
-    🟢 F15  _GROUP_LOG_IMPORT_ERROR = None مبدئياً (منع NameError محتمل)
+    🟢 F15  _GROUP_LOG_IMPORT_ERROR = None مبدئياً
     🟢 F16  logger % بدل f-string في بعض المواضع الحساسة
 
 🆕 v1.6.5 (TITLE-FALLBACK + TOTAL-TIMEOUT):
@@ -837,17 +849,33 @@ def register_group_log_handlers(app: Application) -> None:
         logger.error("❌ register_group_log_handlers: app=None")
         return
 
-    # 1) معالج الرسائل الرئيسي (FORWARDED أو TEXT)
+    # 🔴 FIX-AL2 (v1.6.7): إضافة filters.ChatType.PRIVATE
+    # السبب: بدون هذا الفلتر، receive_log_channel يُستدعى عند
+    # أي رسالة (نصية أو مُعاد توجيهها) من أي chat — بما فيه المجموعات.
+    #
+    # السيناريو الخطأ:
+    #   1. مشرف يدير مجموعتين A و B.
+    #   2. يبدأ تعيين قناة سجل لـ B من لوحة أمان B → WAIT_LOG_CH.
+    #   3. قبل الإكمال، يرسل رسالة مُعاد توجيهها من قناة في A
+    #      داخل المجموعة A.
+    #   4. receive_log_channel يلتقطها → يستخرج chat_id من الـ
+    #      forward → يعيّن قناة سجل لـ B بقناة من A.
+    #
+    # الإصلاح: قصر التعيين على الرسائل الخاصة فقط — لأن اللوحة
+    # الإدارية تُفتح في الخاص فقط.
     try:
         app.add_handler(
             MessageHandler(
-                (filters.FORWARDED | filters.TEXT) & ~filters.COMMAND,
+                (filters.FORWARDED | filters.TEXT)
+                & filters.ChatType.PRIVATE       # ← FIX-AL2
+                & ~filters.COMMAND,
                 receive_log_channel,
             ),
             group=1,
         )
         logger.debug(
-            "✅ MessageHandler(receive_log_channel) مُسجَّل في group=1"
+            "✅ MessageHandler(receive_log_channel) مُسجَّل في group=1 "
+            "(PRIVATE فقط)"
         )
     except Exception as e:
         logger.error(
@@ -870,7 +898,9 @@ def register_group_log_handlers(app: Application) -> None:
     except Exception as e:
         logger.debug("cancel_group_log handler: %s", e)
 
-    logger.info("✅ handlers قناة السجل مُسجَّل (group=1)")
+    logger.info(
+        "✅ handlers قناة السجل مُسجَّل (group=1 — PRIVATE only)"
+    )
 
 
 __all__ = [
