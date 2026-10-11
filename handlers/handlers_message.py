@@ -1,9 +1,19 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-handlers_message.py - v7.18.28 (ADDING-POSTS-HANDLER-FIX)
+handlers_message.py - v7.18.29 (SUPPORT-MODE-HANDLER-FIX)
 (متوافق مع detectors v4.1.0 + banned_words_manager v1.2.0)
 =============================================================================
+🆕 v7.18.29 (SUPPORT-MODE-HANDLER-FIX):
+    🔴 FIX-SUPPORT-1 CRITICAL: إضافة "SUPPORT_MODE" →
+       "_handle_support_mode_text" في _PRIVATE_HANDLERS_MAP.
+       يحل مشكلة "❌ لم أتعرف على العملية" للمستخدم 7716972029
+       عند إرسال رسائل الدعم الفني.
+    🔴 FIX-SUPPORT-2: إضافة دالة _handle_support_mode_text
+       لمعالجة رسائل الدعم الفني + إنشاء تذكرة + إشعار المطور.
+    🟡 FIX-SUPPORT-3: تحسين رسالة UNHANDLED STATE مع تلميح
+       تشخيصي واضح + إرسال للقناة Dev Log.
+
 🆕 v7.18.28 (ADDING-POSTS-HANDLER-FIX):
     🔴 FIX-ADDING-1 CRITICAL: حل جذري لمشكلة "❌ لم أتعرف على العملية"
        عند إرسال منشور من حالة ADDING_POSTS:
@@ -945,7 +955,7 @@ async def _lazy_init_columns(bot=None):
         _columns_last_attempt_ts = now
 
         db_type = getattr(DB, "DB_TYPE", "sqlite")
-        logger.info("🔧 v7.18.28: Auto-migration (DB_TYPE=%s)", db_type)
+        logger.info("🔧 v7.18.29: Auto-migration (DB_TYPE=%s)", db_type)
 
         cols = [
             ("delete_protected_any", "INTEGER DEFAULT 0",
@@ -3018,7 +3028,7 @@ def _accepts_state_arg(handler, handler_name: str) -> bool:
 class MessageHandlers:
 
     # ═══════════════════════════════════════════════════════════════════
-    # 🆕 v7.18.28 FIX-ADDING-1: _PRIVATE_HANDLERS_MAP مُوسَّعة
+    # 🆕 v7.18.29 FIX-SUPPORT-1: إضافة SUPPORT_MODE
     # ═══════════════════════════════════════════════════════════════════
     _PRIVATE_HANDLERS_MAP: Dict[Any, str] = {
         # ─── معالجات محلية ───
@@ -3039,6 +3049,8 @@ class MessageHandlers:
         # 🆕 v7.18.28 FIX-ADDING-1: حالات إضافة المنشورات
         "ADDING_POSTS": "_handle_adding_posts_text",
         "WAIT_POST": "_handle_adding_posts_text",
+        # 🆕 v7.18.29 FIX-SUPPORT-1: حالة الدعم الفني
+        "SUPPORT_MODE": "_handle_support_mode_text",
     }
 
     @staticmethod
@@ -4308,6 +4320,254 @@ class MessageHandlers:
                 user_id, active_db_id)
 
     # ═══════════════════════════════════════════════════════════════════
+    # 🆕 v7.18.29 FIX-SUPPORT-2: معالج الدعم الفني
+    # ═══════════════════════════════════════════════════════════════════
+    @staticmethod
+    async def _handle_support_mode_text(update, context, state=None):
+        """
+        🆕 v7.18.29 FIX-SUPPORT-2: معالجة رسائل الدعم الفني.
+
+        يُستدعى عندما يكون المستخدم في حالة SUPPORT_MODE ويرسل رسالة
+        نصية (أو وسائط + caption). السلوك:
+          1. التحقق من وجود نص/وسائط.
+          2. محاولة إنشاء تذكرة دعم عبر عدة طرق (DB + دوال مساعدة).
+          3. إشعار المطور (PRIMARY_OWNER_ID) بملخص التذكرة.
+          4. الرد على المستخدم برقم التذكرة + شكر.
+          5. البقاء في حالة SUPPORT_MODE (يمكن للمستخدم إرسال عدة
+             رسائل)، مع خيار الخروج عبر /cancel.
+
+        ملاحظة: هذا الإصلاح يستهدف المستخدم 7716972029 الذي كان يحصل
+        على "❌ لم أتعرف على العملية" عند إرسال رسالة دعم.
+        """
+        user_id = (
+            update.effective_user.id if update.effective_user else None)
+        if not user_id:
+            return
+        message = update.effective_message
+        if not message:
+            return
+
+        lang = await _ensure_lang(update, context)
+
+        # ─── استخراج النص + معلومات المستخدم ───
+        text = (message.text or message.caption or "").strip()
+        first_name = ""
+        username = None
+        try:
+            if update.effective_user:
+                first_name = update.effective_user.first_name or ""
+                username = update.effective_user.username
+        except Exception:
+            pass
+        first_name = first_name or "User"
+
+        # ─── وسائط مرفقة (اختياري) ───
+        media_type = None
+        try:
+            if message.photo:
+                media_type = "photo"
+            elif message.video:
+                media_type = "video"
+            elif message.document:
+                media_type = "document"
+            elif message.voice:
+                media_type = "voice"
+            elif message.audio:
+                media_type = "audio"
+            elif message.animation:
+                media_type = "animation"
+            elif message.video_note:
+                media_type = "video_note"
+            elif message.sticker:
+                media_type = "sticker"
+        except Exception:
+            media_type = None
+
+        if not text and not media_type:
+            try:
+                await safe_send(
+                    context.bot, user_id,
+                    "⚠️ الرسالة فارغة — أرسل وصف مشكلتك نصياً.")
+            except Exception:
+                pass
+            return
+
+        if not text and media_type:
+            text = f"[{media_type} بدون وصف]"
+
+        # ─── التحقق من الطول ───
+        if len(text) > 4000:
+            text = text[:4000] + "…"
+
+        # ─── محاولة إنشاء التذكرة ───
+        ticket_id = None
+        ticket_error = None
+
+        # المسار 1: DB.create_support_ticket (إن وُجد)
+        try:
+            create_fn = getattr(DB, "create_support_ticket", None)
+            if callable(create_fn):
+                result = create_fn(
+                    user_id=user_id,
+                    message=text,
+                    media_type=media_type,
+                )
+                if asyncio.iscoroutine(result):
+                    result = await result
+                if isinstance(result, dict):
+                    ticket_id = result.get("id") or result.get("ticket_id")
+                elif isinstance(result, int):
+                    ticket_id = result
+                elif result:
+                    ticket_id = result
+        except Exception as e:
+            ticket_error = str(e)[:120]
+            logger.debug(
+                "_handle_support_mode: create_support_ticket: %s", e)
+
+        # المسار 2: DB.add_support_ticket
+        if ticket_id is None:
+            try:
+                add_fn = getattr(DB, "add_support_ticket", None)
+                if callable(add_fn):
+                    result = add_fn(
+                        user_id=user_id,
+                        message=text,
+                        media_type=media_type,
+                    )
+                    if asyncio.iscoroutine(result):
+                        result = await result
+                    if isinstance(result, dict):
+                        ticket_id = (
+                            result.get("id") or result.get("ticket_id"))
+                    elif isinstance(result, int):
+                        ticket_id = result
+                    elif result:
+                        ticket_id = result
+            except Exception as e:
+                ticket_error = ticket_error or str(e)[:120]
+                logger.debug(
+                    "_handle_support_mode: add_support_ticket: %s", e)
+
+        # المسار 3: DB.execute مباشر (بدون تذكرة رسمية)
+        if ticket_id is None:
+            try:
+                insert_fn = getattr(DB, "execute", None)
+                if callable(insert_fn):
+                    sql = (
+                        "INSERT INTO support_tickets "
+                        "(user_id, message, media_type, created_at) "
+                        "VALUES (?, ?, ?, ?)")
+                    try:
+                        res = insert_fn(
+                            sql,
+                            (user_id, text, media_type,
+                             datetime.utcnow().isoformat()))
+                        if asyncio.iscoroutine(res):
+                            res = await res
+                        last_id_fn = getattr(DB, "fetchval", None)
+                        if callable(last_id_fn):
+                            lid = last_id_fn(
+                                "SELECT last_insert_rowid()")
+                            if asyncio.iscoroutine(lid):
+                                lid = await lid
+                            if lid:
+                                ticket_id = int(lid)
+                        if ticket_id is None and res:
+                            ticket_id = res if isinstance(res, int) else None
+                    except Exception as _ie:
+                        logger.debug(
+                            "_handle_support_mode: raw insert: %s", _ie)
+            except Exception as e:
+                logger.debug(
+                    "_handle_support_mode: raw insert outer: %s", e)
+
+        # ─── إشعار المطور ───
+        try:
+            owner_id = int(getattr(CONFIG, 'PRIMARY_OWNER_ID', 0) or 0)
+            if owner_id and owner_id != user_id:
+                user_display = escape(first_name)
+                if username:
+                    user_lnk = (
+                        f"<a href='tg://user?id={user_id}'>"
+                        f"{user_display}</a> (@{escape(username)})")
+                else:
+                    user_lnk = (
+                        f"<a href='tg://user?id={user_id}'>"
+                        f"{user_display}</a>")
+                lines = [
+                    "🆘 <b>رسالة دعم فني جديدة</b>",
+                    "━━━━━━━━━━━━━━━━━━━━",
+                    f"👤 من: {user_lnk}",
+                    f"🆔 المعرّف: <code>{user_id}</code>",
+                ]
+                if ticket_id is not None:
+                    lines.append(
+                        f"🎫 التذكرة: <code>#{ticket_id}</code>")
+                else:
+                    lines.append(
+                        "🎫 التذكرة: <i>غير مُسجّلة في DB</i>")
+                if media_type:
+                    lines.append(f"📎 الوسائط: <b>{media_type}</b>")
+                lines.append("")
+                lines.append("📝 <b>النص:</b>")
+                lines.append(f"<i>{escape(text)}</i>")
+                lines.append("")
+                try:
+                    now_str = TimeUtils.mecca_now().strftime(
+                        '%Y-%m-%d %H:%M:%S')
+                except Exception:
+                    now_str = datetime.utcnow().strftime(
+                        '%Y-%m-%d %H:%M:%S')
+                lines.append(f"🕐 {now_str}")
+                if ticket_error:
+                    lines.append(
+                        f"⚠️ <code>{escape(ticket_error)}</code>")
+                await safe_send(
+                    context.bot, owner_id,
+                    "\n".join(lines),
+                    parse_mode='HTML')
+        except Exception as e:
+            logger.warning(
+                "_handle_support_mode: notify owner: %s", e)
+
+        # ─── إشعار قناة Dev Log (إن متاحة) ───
+        try:
+            dev_log_text = (
+                f"🆘 <b>Support ticket</b>\n"
+                f"👤 <code>{user_id}</code>\n"
+                f"🎫 <code>#{ticket_id if ticket_id else 'N/A'}</code>\n"
+                f"📝 {escape(text[:200])}")
+            await _notify_dev_log(context, dev_log_text)
+        except Exception:
+            pass
+
+        # ─── الرد على المستخدم ───
+        try:
+            if ticket_id is not None:
+                reply_msg = (
+                    f"✅ <b>تم استلام رسالتك</b>\n"
+                    f"🎫 رقم التذكرة: <code>#{ticket_id}</code>\n\n"
+                    f"سيتم الرد عليك في أقرب وقت.\n"
+                    f"💡 استخدم /cancel للخروج من وضع الدعم.")
+            else:
+                reply_msg = (
+                    f"✅ <b>تم استلام رسالتك</b>\n\n"
+                    f"سيتم الرد عليك في أقرب وقت.\n"
+                    f"💡 استخدم /cancel للخروج من وضع الدعم.")
+            await safe_send(
+                context.bot, user_id, reply_msg, parse_mode='HTML')
+        except Exception as e:
+            logger.debug(
+                "_handle_support_mode: send ack: %s", e)
+
+        logger.info(
+            "🆘 SUPPORT_MODE: user=%s ticket=%s media=%s "
+            "len=%d error=%s",
+            user_id, ticket_id, media_type or "text",
+            len(text), ticket_error or "—")
+
+    # ═══════════════════════════════════════════════════════════════════
     # 🆕 v7.18.21 FIX-ROUTE-2: handle_private مع 7 مسارات fallback
     # ═══════════════════════════════════════════════════════════════════
     @staticmethod
@@ -4438,10 +4698,15 @@ class MessageHandlers:
                 user_id, state, _tried)
             try:
                 lang = await _ensure_lang(update, context)
+                # 🆕 v7.18.29 FIX-SUPPORT-3: رسالة أوضح + تلميح
                 msg = await _trans(
                     "state_not_handled", lang,
-                    "❌ لم أتعرف على العملية.\n"
-                    "استخدم /cancel ثم أعد المحاولة من القائمة.")
+                    "❌ لم أتعرف على العملية.\n\n"
+                    "🔍 <b>تشخيص:</b>\n"
+                    f"• الحالة الحالية: <code>{escape(str(state))}</code>\n\n"
+                    "💡 <b>الحل:</b>\n"
+                    "• استخدم /cancel ثم أعد المحاولة من القائمة.\n"
+                    "• أو استخدم /start لإعادة التشغيل.")
                 await safe_send(context.bot, user_id, msg)
                 try:
                     owner_id = int(getattr(
@@ -4454,6 +4719,16 @@ class MessageHandlers:
                             f"📊 state=<code>{escape(str(state))}</code>\n"
                             f"🔎 tried=<code>{escape(','.join(_tried))}</code>",
                             parse_mode='HTML')
+                except Exception:
+                    pass
+                # 🆕 v7.18.29 FIX-SUPPORT-3: إرسال أيضاً لقناة Dev Log
+                try:
+                    await _notify_dev_log(
+                        context,
+                        f"🚨 <b>UNHANDLED STATE</b>\n"
+                        f"👤 <code>{user_id}</code>\n"
+                        f"📊 <code>{escape(str(state))}</code>\n"
+                        f"🔎 <code>{escape(','.join(_tried))}</code>")
                 except Exception:
                     pass
             except Exception:
@@ -5793,15 +6068,16 @@ __all__ = [
 
 try:
     logger.info(
-        "✅ handlers_message v7.18.28 loaded | "
+        "✅ handlers_message v7.18.29 loaded | "
         "BWM=%s | PRIVATE_HANDLERS=%d | "
         "routing-fallback=7-paths | "
         "WAIT_CHANNEL=direct-handler | "
         "ADDING_POSTS=direct-handler | "
+        "SUPPORT_MODE=direct-handler | "
         "detectors-compat=v4.1.0 | "
         "commands=(cache_stats, db_idle, autoblocked) | "
-        "fixes=(ADDING-1, ROUTE-1, ROUTE-2, BWM-3, COL-1, EDIT-1, "
-        "STATE-1, BUG-1..BUG-12)",
+        "fixes=(SUPPORT-1..3, ADDING-1, ROUTE-1, ROUTE-2, "
+        "BWM-3, COL-1, EDIT-1, STATE-1, BUG-1..BUG-12)",
         "yes" if _HAS_BWM else "no",
         len(MessageHandlers._PRIVATE_HANDLERS_MAP),
     )
