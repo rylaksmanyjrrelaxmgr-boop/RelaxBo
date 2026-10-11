@@ -1,11 +1,21 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-database_refactor_mixin.py - استخراج الدوال الكبيرة من database.py (v1.2.0)
+database_refactor_mixin.py - استخراج الدوال الكبيرة من database.py (v1.2.1-FIX-R1)
 ================================================================================
 🎯 الهدف:
     تقليل حجم database.py عبر نقل الدوال الضخمة إلى ملف منفصل، مع
     الحفاظ على نفس السلوك 100% عبر نمط Mixin.
+
+🆕 v1.2.1 (FIX-R1):
+  🔴 FIX-R1: _expire_penalties_pg — حذف *id_list الزائدة.
+            السبب: في PostgreSQL، نفس $1..$N تشير إلى نفس المعاملات
+            حتى لو تكررت في CTE. الكود كان يمرّر *id_list مرتين
+            (6 قيم لـ 3 placeholders) → bind error:
+            "bind message supplies 6 parameters, but prepared
+             statement requires 3".
+            الأثر قبل الإصلاح: expire_penalties معطّل تمامًا على PG →
+            العقوبات المنتهية تبقى status='active' → تُطبَّق خطأً.
 
 🆕 v1.2.0 (PERF-FIXES-2026):
   🔴 PERF-1: CHANNELS_TO_PUBLISH_SQL_PG — إزالة LATERAL وتحويلها إلى
@@ -851,6 +861,7 @@ class RefactorMixin:
         🧹 دفعة واحدة من انتهاء العقوبات في PostgreSQL.
 
         🔴 v1.2.0 PERF-5: 2 round-trips بدل 3.
+        🔴 v1.2.1 FIX-R1: تصحيح عدد المعاملات (id_list مرة واحدة).
 
         Args:
             conn: PG connection (داخل transaction).
@@ -884,6 +895,8 @@ class RefactorMixin:
         )
 
         # ✅ استعلام 2: INSERT + UPDATE في CTE واحد
+        # FIX-R1: في PostgreSQL، نفس الـ $1..$N تشير إلى نفس المعاملات
+        # حتى لو تكررت في أجزاء مختلفة من الاستعلام. لذا نمرّر id_list مرة واحدة.
         result = await self._fetchall_with_conn(
             conn,
             f"""
@@ -905,7 +918,7 @@ class RefactorMixin:
             WHERE id IN ({placeholders})
             RETURNING 1
             """,
-            *id_list, *id_list,
+            *id_list,               # ← FIX-R1: مرة واحدة فقط
         )
         batch_expired = len(result) if result else 0
 
