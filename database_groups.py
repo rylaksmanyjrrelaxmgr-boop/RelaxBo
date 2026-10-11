@@ -1,7 +1,8 @@
+
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-database_groups.py - دوال المجموعات (v7.4.14)
+database_groups.py - دوال المجموعات (v7.4.15)
 ================================================================================
 GroupsMixin:
   1.  كاش الكلمات المحظورة المحلي
@@ -18,6 +19,13 @@ GroupsMixin:
   12. قناة السجل للمجموعة (Group Log Channel)
   13. المخالفات (Violations)
   14. انتهاء العقوبات (Expire Penalties — fallback)
+
+🆕 v7.4.15 — POLISH:
+  🟢 P1: إضافة shebang + coding utf-8 (كانا ناقصين)
+  🟢 P2: _MAX_WORD_LENGTH = 100 (رفض الكلمات الطويلة جداً)
+  🟢 P3: _MAX_KEYWORD_LENGTH = 255 (رفض الـ keywords الطويلة)
+  🟢 P4: get_auto_reply_settings — return آمن عند فشل DB
+  🟢 P5: get_auto_reply — return آمن (dict فارغ عند فشل DB)
 
 🆕 v7.4.14 — IS-GROUP-OWNER (تحسين ملكية المجموعة):
   🟢 O1: is_group_owner — فحص سريع لملكية المجموعة
@@ -74,21 +82,31 @@ logger = logging.getLogger(__name__)
 # ✅ v7.4.10: القيمة الافتراضية للحد الأقصى للكلمات المحظورة العالمية
 _DEFAULT_MAX_GLOBAL_BANNED_WORDS = 10000
 
+# 🆕 v7.4.15: حدود الطول
+_MAX_WORD_LENGTH = 100      # الحد الأقصى لطول الكلمة المحظورة
+_MAX_KEYWORD_LENGTH = 255   # الحد الأقصى لطول keyword الرد التلقائي
+
 
 def _safe_normalize_word(word: Any) -> Optional[str]:
     """
     🆕 v7.4.12: تطبيع آمن لكلمة محظورة مع كشف انعكاس المعاملات.
+    🆕 v7.4.15: رفض الكلمات الطويلة جداً (> _MAX_WORD_LENGTH).
 
     يُرجع:
       - النص المُطبَّع (str) إذا كان word نصاً صالحاً
       - None إذا كان word غير نصي (int/None/...) → يعني خطأ في المُنادي
+      - None إذا تجاوز الحد الأقصى للطول
     """
     if word is None:
         return None
     if not isinstance(word, str):
         return None
     normalized = word.strip().lower()
-    return normalized if normalized else None
+    if not normalized:
+        return None
+    if len(normalized) > _MAX_WORD_LENGTH:
+        return None
+    return normalized
 
 
 class GroupsMixin:
@@ -1063,6 +1081,7 @@ class GroupsMixin:
             await self.settings_cache.set_auto_reply_settings(
                 chat_id, settings
             )
+        # 🆕 P4 (v7.4.15): return آمن عند فشل DB
         return settings if settings else {
             "enabled": 0, "only_admins": 0, "ignore_bots": 1
         }
@@ -1103,7 +1122,17 @@ class GroupsMixin:
         reply_type: str = "text", media_id: str = None,
         buttons: str = None,
     ) -> bool:
+        # 🆕 P3 (v7.4.15): رفض الـ keywords الطويلة
         keyword = keyword.lower().strip()
+        if not keyword:
+            logger.error("❌ Empty keyword")
+            return False
+        if len(keyword) > _MAX_KEYWORD_LENGTH:
+            logger.error(
+                f"❌ Keyword too long ({len(keyword)} > "
+                f"{_MAX_KEYWORD_LENGTH}): {keyword[:50]!r}..."
+            )
+            return False
         if reply_type not in self.VALID_REPLY_TYPES:
             logger.error(f"❌ Invalid reply_type: {reply_type}")
             return False
@@ -1194,20 +1223,28 @@ class GroupsMixin:
     ) -> Optional[Dict]:
         """
         🟠 v7.4.11: استخدام _spawn_bg_task بدل create_task اليدوي.
+        🆕 P5 (v7.4.15): return آمن عند فشل DB.
         """
         keyword = keyword.lower().strip()
         if not keyword:
             return None
-        row = await self.fetchone(
-            """SELECT reply, reply_type, reply_media_id,
-                      reply_buttons
-               FROM auto_replies
-               WHERE keyword = ? AND is_active = 1
-                 AND (chat_id = ? OR chat_id = -1)
-               ORDER BY CASE WHEN chat_id = ? THEN 0 ELSE 1 END
-               LIMIT 1""",
-            (keyword, chat_id, chat_id),
-        )
+        try:
+            row = await self.fetchone(
+                """SELECT reply, reply_type, reply_media_id,
+                          reply_buttons
+                   FROM auto_replies
+                   WHERE keyword = ? AND is_active = 1
+                     AND (chat_id = ? OR chat_id = -1)
+                   ORDER BY CASE WHEN chat_id = ? THEN 0 ELSE 1 END
+                   LIMIT 1""",
+                (keyword, chat_id, chat_id),
+            )
+        except Exception as e:
+            logger.debug(
+                f"get_auto_reply({keyword!r}, {chat_id}): {e}"
+            )
+            return None
+
         if row:
             try:
                 coro = self._increment_usage_count(chat_id, keyword)
@@ -1469,9 +1506,9 @@ class GroupsMixin:
         normalized = _safe_normalize_word(word)
         if not normalized:
             logger.warning(
-                f"⚠️ add_banned_word: word فارغة بعد التطبيع "
+                f"⚠️ add_banned_word: word فارغة/طويلة بعد التطبيع "
                 f"(chat_id={chat_id}, added_by={added_by}, "
-                f"raw={word!r})"
+                f"raw={word!r}, len={len(word) if isinstance(word, str) else '?'})"
             )
             return False, False
 
@@ -1602,7 +1639,7 @@ class GroupsMixin:
         normalized = _safe_normalize_word(word)
         if not normalized:
             logger.warning(
-                f"⚠️ remove_banned_word: word فارغة بعد التطبيع "
+                f"⚠️ remove_banned_word: word فارغة/طويلة بعد التطبيع "
                 f"(chat_id={chat_id}, raw={word!r})"
             )
             return False
@@ -1685,7 +1722,7 @@ class GroupsMixin:
                 )
                 for word in BANNED_WORDS:
                     word = str(word).strip().lower()
-                    if len(word) >= 2:
+                    if 2 <= len(word) <= _MAX_WORD_LENGTH:
                         words_to_insert.append((
                             word, -1, owner_id,
                             self.TimeUtils.utc_now(),
