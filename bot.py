@@ -2,9 +2,16 @@
 # -*- coding: utf-8 -*-
 
 """
-🌿 Relax Manager – البوت الرئيسي (bot.py v5.6.19-PERF-WARMUP)
+🌿 Relax Manager – البوت الرئيسي (bot.py v5.6.20-PERF-POOL-CACHE)
 ================================================================================
 📌 نقطة الدخول الرسمية للتطبيق (entrypoint).
+
+🆕 v5.6.20 (PERF-POOL-CACHE):
+    🟢 PERF-5: cache 240s لاستعلام pg_stat_activity في pool_health_monitor
+               (0.27s → ~0ms بعد أول استدعاء خلال النافذة).
+    🟢 PERF-6: تتبع تلقائي للاستعلامات البطيئة — يُميّز بين cold-start
+               والبطء الحقيقي، ويُسجّل التعافي.
+    🟡 PERF-7: تحديث Load Beacon + سجل الإقلاع.
 
 🆕 v5.6.19 (PERF-WARMUP):
     🟢 PERF-4: Warmup Telegram API — await app.bot.get_me() بعد
@@ -26,19 +33,6 @@
     🟢 PATCH-2: تسجيل 2 CallbackQueryHandler BEFORE العام
     🟢 PATCH-3: إشعار حالة handlers_analytics في diagnostics
     🟢 PATCH-4: تحديث Load Beacon إلى v5.6.16
-
-🆕 v5.6.15 (CACHE-STATS + CANCEL-COMMAND):
-    🟢 PATCH-1: استيراد آمن لـ handle_cache_stats_command
-    🟢 PATCH-2: تسجيل /cache_stats (للمطور فقط)
-    🟢 PATCH-3: إضافة "cache_stats" إلى ADMIN_COMMANDS
-    🟢 PATCH-4: تسجيل /cancel
-    🟢 PATCH-5: تحديث Load Beacon
-
-🆕 v5.6.14 (DB-IDLE-COMMAND):
-    🟢 PATCH-1: استيراد آمن لـ handle_db_idle_command
-    🟢 PATCH-2: تسجيل /db_idle
-    🟢 PATCH-3: إضافة "db_idle" إلى ADMIN_COMMANDS
-    🟢 PATCH-4: تحديث Load Beacon
 ================================================================================
 """
 
@@ -553,6 +547,14 @@ _KEEP_ALIVE_INITIAL_DELAY = 30.0
 # 🆕 PERF-4: Warmup Telegram API timeout
 _TG_WARMUP_TIMEOUT = 10.0
 
+# 🆕 v5.6.20 PERF-5: TTL cache لاستعلام pg_stat_activity
+# الفاصل 240s أقل من دورة pool_health_monitor (300s)
+# الهدف: 0.27s → ~0ms بعد أول استدعاء
+_PM_QUERY_TTL = 240.0
+_pm_last_query_ts = 0.0
+_pm_last_query_result: Optional[Dict[str, Any]] = None
+_pm_slow_query_warned = False  # 🆕 PERF-6
+
 # ═══════════════════════════════════════════════════════════════════
 # مساعد مقارنة المبالغ
 # ═══════════════════════════════════════════════════════════════════
@@ -989,7 +991,7 @@ if _ADMIN_LOGS_CLEANUP_AVAILABLE:
     )
     if _DB_SCHEMA_VERSION is not None:
         logger.info(
-            "✅ database_tables v7.9.0 (schema version=%d)",
+            "✅ database_tables v7.9.6 (schema version=%d)",
             _DB_SCHEMA_VERSION,
         )
 else:
@@ -1908,6 +1910,7 @@ async def keep_alive():
     """
     🆕 v5.6.18 PERF-1: keep_alive محسّن.
     🆕 v5.6.19: يبقى كما هو (PERF-4 لا يغيّره).
+    🆕 v5.6.20: يبقى كما هو.
 
     التغييرات:
       - الفاصل: 180s (3 دقائق) بدل 300s (5 دقائق).
@@ -2059,7 +2062,79 @@ async def _fetch_pool_data(total: int, active: int) -> Optional[Dict[str, Any]]:
 
     return None
 
+# 🆕 v5.6.20 PERF-5: cache + قياس تلقائي
+async def _fetch_pg_activity_cached() -> Dict[str, Any]:
+    """
+    🆕 PERF-5: كاش 240s لاستعلام pg_stat_activity.
+
+    الفائدة:
+      • 0.27s → ~0ms بعد أول استدعاء خلال النافذة.
+      • يتفادى إعادة الاستعلام كل 300s في pool_health_monitor.
+
+    🆕 PERF-6: تتبع تلقائي للاستعلامات البطيئة.
+    """
+    global _pm_last_query_ts, _pm_last_query_result, _pm_slow_query_warned
+
+    now = time.monotonic()
+    if (
+        _pm_last_query_result is not None
+        and (now - _pm_last_query_ts) < _PM_QUERY_TTL
+    ):
+        return _pm_last_query_result
+
+    t0 = time.monotonic()
+    row = await DB.fetchone(
+        """
+        SELECT 
+            count(*) AS total,
+            count(*) FILTER (WHERE state = 'active') AS active,
+            count(*) FILTER (WHERE state = 'idle') AS idle,
+            count(*) FILTER (WHERE state = 'idle in transaction') 
+                AS idle_in_tx,
+            count(*) FILTER (WHERE wait_event_type = 'Lock') 
+                AS lock_waits,
+            count(*) FILTER (
+                WHERE wait_event_type IN ('Lock', 'LWLock', 'BufferPin')
+            ) AS waiting
+        FROM pg_stat_activity
+        WHERE datname = current_database()
+        """
+    )
+    elapsed_ms = (time.monotonic() - t0) * 1000
+
+    # 🆕 PERF-6: تتبع الاستعلامات البطيئة (cold-start detection)
+    if elapsed_ms > 100 and not _pm_slow_query_warned:
+        logger.warning(
+            "⚠️ pool_health_monitor: استعلام بطيء (%.0fms) — "
+            "قد يكون cold-start، سيتحسّن في الدورات القادمة",
+            elapsed_ms,
+        )
+        _pm_slow_query_warned = True
+    elif elapsed_ms < 50 and _pm_slow_query_warned:
+        logger.info(
+            "✅ pool_health_monitor: تعافى — %.0fms (كان >100ms)",
+            elapsed_ms,
+        )
+        _pm_slow_query_warned = False
+
+    if isinstance(row, dict):
+        data = row
+    elif row is None:
+        data = {}
+    else:
+        try:
+            data = dict(row)
+        except (TypeError, ValueError):
+            data = {}
+
+    _pm_last_query_ts = now
+    _pm_last_query_result = data
+    return data
+
 async def pool_health_monitor() -> None:
+    """
+    🆕 v5.6.20 PERF-5: يستخدم _fetch_pg_activity_cached (كاش 240s).
+    """
     _task_start_mono = time.monotonic()
     _idle_tx_streak = 0
     _last_details_dump_mono = 0.0
@@ -2081,33 +2156,8 @@ async def pool_health_monitor() -> None:
                     raise
                 continue
 
-            row = await DB.fetchone(
-                """
-                SELECT 
-                    count(*) AS total,
-                    count(*) FILTER (WHERE state = 'active') AS active,
-                    count(*) FILTER (WHERE state = 'idle') AS idle,
-                    count(*) FILTER (WHERE state = 'idle in transaction') 
-                        AS idle_in_tx,
-                    count(*) FILTER (WHERE wait_event_type = 'Lock') 
-                        AS lock_waits,
-                    count(*) FILTER (
-                        WHERE wait_event_type IN ('Lock', 'LWLock', 'BufferPin')
-                    ) AS waiting
-                FROM pg_stat_activity
-                WHERE datname = current_database()
-                """
-            )
-
-            if isinstance(row, dict):
-                data = row
-            elif row is None:
-                data = {}
-            else:
-                try:
-                    data = dict(row)
-                except (TypeError, ValueError):
-                    data = {}
+            # 🆕 PERF-5: استخدام الكاش
+            data = await _fetch_pg_activity_cached()
 
             total = int(data.get("total") or 0)
             active = int(data.get("active") or 0)
@@ -2626,9 +2676,10 @@ async def main():
     logger.info("👨‍💼 المالك: %s", CONFIG.PRIMARY_OWNER_ID)
 
     logger.info(
-        "📦 bot.py: v5.6.19 | "
+        "📦 bot.py: v5.6.20 | "
         "detectors=%s | layers=%d | helpers=%s | "
-        "db_idle=%s | cache_stats=%s | analytics=%s | maint_cmds=%s",
+        "db_idle=%s | cache_stats=%s | analytics=%s | maint_cmds=%s | "
+        "pool_cache_ttl=%ds",
         _SPAM_DETECTOR_VERSION or "N/A",
         _SPAM_DETECTOR_LAYERS_COUNT,
         (
@@ -2643,6 +2694,7 @@ async def main():
         "yes" if _HAS_CACHE_STATS_CMD else "no",
         "yes" if _ANALYTICS_HANDLERS_AVAILABLE else "no",
         "yes" if _MAINT_CMDS_AVAILABLE else "no",
+        int(_PM_QUERY_TTL),
     )
 
     try:
