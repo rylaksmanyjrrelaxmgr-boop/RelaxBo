@@ -1,43 +1,36 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-handlers_message.py - v7.18.29 (SUPPORT-MODE-HANDLER-FIX)
+handlers_message.py - v7.18.30 (C11-D3-D4-FIXES)
 (متوافق مع detectors v4.1.0 + banned_words_manager v1.2.0)
 =============================================================================
+🆕 v7.18.30 (C11-D3-D4-FIXES):
+    🔴 FIX-C11: _handle_support_mode_text — المسار 3
+       استبدال last_insert_rowid() (SQLite فقط) بـ 3 مسارات:
+       • PG: RETURNING id عبر DB.fetchone
+       • MySQL: SELECT LAST_INSERT_ID()
+       • SQLite: SELECT last_insert_rowid()
+    🟡 FIX-D3: _MULTILAYER_ENABLED — or بين _HAS_MULTILAYER
+       و _HAS_ASYNC_DETECTORS لتجنّب تعطيل مسار async عند غياب
+       sync فقط.
+    🟡 FIX-D4: _trans — توثيق صريح للسلوك الحقيقي (بلا تغيير
+       سلوكي).
+
 🆕 v7.18.29 (SUPPORT-MODE-HANDLER-FIX):
     🔴 FIX-SUPPORT-1 CRITICAL: إضافة "SUPPORT_MODE" →
        "_handle_support_mode_text" في _PRIVATE_HANDLERS_MAP.
-       يحل مشكلة "❌ لم أتعرف على العملية" للمستخدم 7716972029
-       عند إرسال رسائل الدعم الفني.
-    🔴 FIX-SUPPORT-2: إضافة دالة _handle_support_mode_text
-       لمعالجة رسائل الدعم الفني + إنشاء تذكرة + إشعار المطور.
-    🟡 FIX-SUPPORT-3: تحسين رسالة UNHANDLED STATE مع تلميح
-       تشخيصي واضح + إرسال للقناة Dev Log.
+    🔴 FIX-SUPPORT-2: إضافة دالة _handle_support_mode_text.
+    🟡 FIX-SUPPORT-3: تحسين رسالة UNHANDLED STATE.
 
 🆕 v7.18.28 (ADDING-POSTS-HANDLER-FIX):
-    🔴 FIX-ADDING-1 CRITICAL: حل جذري لمشكلة "❌ لم أتعرف على العملية"
-       عند إرسال منشور من حالة ADDING_POSTS:
-       • إضافة "ADDING_POSTS" → "_handle_adding_posts_text" في
-         _PRIVATE_HANDLERS_MAP.
-       • إضافة الدالة _handle_adding_posts_text التي تستدعي
-         DB.add_post() (دالة جديدة في database_channels_posts v7.5.28).
-       • دعم النص + الوسائط (photo/video/document/voice/audio/animation).
-       • رسائل واضحة عند النجاح/الفشل.
+    🔴 FIX-ADDING-1 CRITICAL: "ADDING_POSTS" → direct handler.
 
 🆕 v7.18.21 (ROUTING-FIX-2026-R3):
     🔴 FIX-ROUTE-2 CRITICAL: WAIT_CHANNEL direct handler +
-       7 مسارات fallback + _parse_channel_ref + إشعار المطور.
+       7 مسارات fallback + _parse_channel_ref.
 
-🆕 v7.18.20 (ROUTING-FIX-2026-R2):
-    🔴 FIX-BUG-1: _get_dev_log_channel_cached — get_dev_log_channel().
-    🔴 FIX-BUG-2: UserState.NONE آمن.
-    🟡 FIX-BUG-3..12: تفاصيل في الأسفل.
-
-🆕 v7.18.19 (ROUTING-FIX-2026):
-    🔴 FIX-ROUTE-1: fallback إلى CommandHandlers.handle_text.
-    🔴 FIX-BWM-3: fallback صحيح عند فشل BannedWordsManager.
-    🟡 FIX-COL-1, FIX-EDIT-1, FIX-STATE-1.
-
+🆕 v7.18.20 (ROUTING-FIX-2026-R2)
+🆕 v7.18.19 (ROUTING-FIX-2026)
 🆕 v7.18.18 (CACHE-STATS-INTEGRATION)
 🆕 v7.18.17 (DETECTORS-v4.1.0-COMPAT)
 🆕 v7.18.16 (FULL-REWRITE-FIXES)
@@ -427,8 +420,16 @@ _ANTIFLOOD_ENABLED = _env_flag("ANTIFLOOD_ENABLED", True)
 _SLOW_MODE_AUTO = _env_flag("SLOW_MODE_AUTO", True)
 _SLOW_MODE_UNSUPPORTED = False
 
+# 🔴 FIX-D3 (v7.18.30): توحيد الفحص مع async detectors
+# المشكلة: _HAS_MULTILAYER يعتمد على analyze_message_full (sync)
+#          بينما المسار الساخن يستخدم analyze_message_full_async.
+#          إذا كان async متاحاً و sync غير متاح (نظرياً) →
+#          _MULTILAYER_ENABLED=False → يُتخطّى مسار async أيضاً.
+# الإصلاح: OR بين الاثنين.
 _MULTILAYER_ENABLED = (
-    _env_flag("MULTILAYER_ENABLED", True) and _HAS_MULTILAYER)
+    _env_flag("MULTILAYER_ENABLED", True)
+    and (_HAS_MULTILAYER or _HAS_ASYNC_DETECTORS)
+)
 
 _FORCE_DELETE_BUTTON_LINKS = _env_flag("FORCE_DELETE_BUTTON_LINKS", True)
 _FORCE_DELETE_POSTBOT_FORWARDS = _env_flag(
@@ -955,7 +956,7 @@ async def _lazy_init_columns(bot=None):
         _columns_last_attempt_ts = now
 
         db_type = getattr(DB, "DB_TYPE", "sqlite")
-        logger.info("🔧 v7.18.29: Auto-migration (DB_TYPE=%s)", db_type)
+        logger.info("🔧 v7.18.30: Auto-migration (DB_TYPE=%s)", db_type)
 
         cols = [
             ("delete_protected_any", "INTEGER DEFAULT 0",
@@ -2468,6 +2469,16 @@ async def _release_group_limiter(limiter, acquired):
 
 
 async def _trans(key, lang, default=""):
+    """
+    ترجمة آمنة مع fallback.
+
+    🟡 FIX-D4 (v7.18.30): توثيق صريح للسلوك الحقيقي.
+
+    ملاحظة: TranslationManager.get_text هو sync + cache (JSON محمّل
+    مسبقاً). إذا أعاد قيمة صالحة، نستخدمها. الـ await get_text (async)
+    fallback نادراً ما يُستدعى — فقط عند فشل الأول أو إعادة المفتاح
+    كما هو.
+    """
     if not key:
         return default or ""
     try:
@@ -2477,6 +2488,7 @@ async def _trans(key, lang, default=""):
                 return text
     except Exception:
         pass
+    # 🟡 fallback: يُستدعى فقط إذا فشل TranslationManager
     try:
         if lang and lang != 'off':
             text = await get_text(lang, key)
@@ -4336,8 +4348,11 @@ class MessageHandlers:
           5. البقاء في حالة SUPPORT_MODE (يمكن للمستخدم إرسال عدة
              رسائل)، مع خيار الخروج عبر /cancel.
 
-        ملاحظة: هذا الإصلاح يستهدف المستخدم 7716972029 الذي كان يحصل
-        على "❌ لم أتعرف على العملية" عند إرسال رسالة دعم.
+        🔴 FIX-C11 (v7.18.30): المسار 3 يستخدم الآن:
+          • PG:    RETURNING id عبر DB.fetchone
+          • MySQL: SELECT LAST_INSERT_ID()
+          • SQLite: SELECT last_insert_rowid()
+        بدل last_insert_rowid() فقط.
         """
         user_id = (
             update.effective_user.id if update.effective_user else None)
@@ -4449,35 +4464,76 @@ class MessageHandlers:
                 logger.debug(
                     "_handle_support_mode: add_support_ticket: %s", e)
 
+        # ═══════════════════════════════════════════════════════════════
         # المسار 3: DB.execute مباشر (بدون تذكرة رسمية)
+        # 🔴 FIX-C11 (v7.18.30): استخدام RETURNING id (PG) /
+        #     LAST_INSERT_ID (MySQL) بدل last_insert_rowid() (SQLite).
+        # ═══════════════════════════════════════════════════════════════
         if ticket_id is None:
             try:
                 insert_fn = getattr(DB, "execute", None)
+                fetchone_fn = getattr(DB, "fetchone", None)
+                fetchval_fn = getattr(DB, "fetchval", None)
+
                 if callable(insert_fn):
-                    sql = (
-                        "INSERT INTO support_tickets "
-                        "(user_id, message, media_type, created_at) "
-                        "VALUES (?, ?, ?, ?)")
-                    try:
-                        res = insert_fn(
-                            sql,
-                            (user_id, text, media_type,
-                             datetime.utcnow().isoformat()))
+                    # ── تحديد نوع DB ──
+                    _is_pg = bool(getattr(DB, "USE_POSTGRES", False))
+                    _is_mysql = bool(getattr(DB, "USE_MYSQL", False))
+
+                    now_str = datetime.utcnow().isoformat()
+
+                    if _is_pg and callable(fetchone_fn):
+                        # ✅ FIX-C11: PG يدعم RETURNING
+                        sql_pg = (
+                            "INSERT INTO support_tickets "
+                            "(user_id, message, media_type, created_at) "
+                            "VALUES (?, ?, ?, ?) RETURNING id")
+                        res = fetchone_fn(
+                            sql_pg,
+                            (user_id, text, media_type, now_str))
                         if asyncio.iscoroutine(res):
                             res = await res
-                        last_id_fn = getattr(DB, "fetchval", None)
-                        if callable(last_id_fn):
-                            lid = last_id_fn(
-                                "SELECT last_insert_rowid()")
+                        if isinstance(res, dict):
+                            lid = res.get("id")
+                        elif isinstance(res, (tuple, list)) and res:
+                            lid = res[0]
+                        else:
+                            lid = None
+                        if lid:
+                            try:
+                                ticket_id = int(lid)
+                            except (TypeError, ValueError):
+                                ticket_id = None
+                    else:
+                        # MySQL / SQLite: INSERT عادي
+                        sql = (
+                            "INSERT INTO support_tickets "
+                            "(user_id, message, media_type, created_at) "
+                            "VALUES (?, ?, ?, ?)")
+                        res = insert_fn(
+                            sql, (user_id, text, media_type, now_str))
+                        if asyncio.iscoroutine(res):
+                            res = await res
+
+                        # ── جلب ID المُدرج ──
+                        if callable(fetchval_fn):
+                            if _is_mysql:
+                                # ✅ FIX-C11: MySQL يدعم LAST_INSERT_ID()
+                                lid = fetchval_fn(
+                                    "SELECT LAST_INSERT_ID()")
+                            else:
+                                # SQLite
+                                lid = fetchval_fn(
+                                    "SELECT last_insert_rowid()")
                             if asyncio.iscoroutine(lid):
                                 lid = await lid
                             if lid:
-                                ticket_id = int(lid)
-                        if ticket_id is None and res:
-                            ticket_id = res if isinstance(res, int) else None
-                    except Exception as _ie:
-                        logger.debug(
-                            "_handle_support_mode: raw insert: %s", _ie)
+                                try:
+                                    ticket_id = int(lid)
+                                except (TypeError, ValueError):
+                                    ticket_id = None
+                        # ملاحظة: لا نستخدم `res` كـ ticket_id لأنه
+                        # غالباً rowcount (int) وليس آخر ID فعلياً.
             except Exception as e:
                 logger.debug(
                     "_handle_support_mode: raw insert outer: %s", e)
@@ -4514,12 +4570,12 @@ class MessageHandlers:
                 lines.append(f"<i>{escape(text)}</i>")
                 lines.append("")
                 try:
-                    now_str = TimeUtils.mecca_now().strftime(
+                    now_str_log = TimeUtils.mecca_now().strftime(
                         '%Y-%m-%d %H:%M:%S')
                 except Exception:
-                    now_str = datetime.utcnow().strftime(
+                    now_str_log = datetime.utcnow().strftime(
                         '%Y-%m-%d %H:%M:%S')
-                lines.append(f"🕐 {now_str}")
+                lines.append(f"🕐 {now_str_log}")
                 if ticket_error:
                     lines.append(
                         f"⚠️ <code>{escape(ticket_error)}</code>")
@@ -6068,7 +6124,7 @@ __all__ = [
 
 try:
     logger.info(
-        "✅ handlers_message v7.18.29 loaded | "
+        "✅ handlers_message v7.18.30 loaded | "
         "BWM=%s | PRIVATE_HANDLERS=%d | "
         "routing-fallback=7-paths | "
         "WAIT_CHANNEL=direct-handler | "
@@ -6076,8 +6132,9 @@ try:
         "SUPPORT_MODE=direct-handler | "
         "detectors-compat=v4.1.0 | "
         "commands=(cache_stats, db_idle, autoblocked) | "
-        "fixes=(SUPPORT-1..3, ADDING-1, ROUTE-1, ROUTE-2, "
-        "BWM-3, COL-1, EDIT-1, STATE-1, BUG-1..BUG-12)",
+        "fixes=(C11, D3, D4, SUPPORT-1..3, ADDING-1, "
+        "ROUTE-1, ROUTE-2, BWM-3, COL-1, EDIT-1, STATE-1, "
+        "BUG-1..BUG-12)",
         "yes" if _HAS_BWM else "no",
         len(MessageHandlers._PRIVATE_HANDLERS_MAP),
     )
