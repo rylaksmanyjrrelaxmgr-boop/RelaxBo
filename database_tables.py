@@ -2,8 +2,20 @@
 # -*- coding: utf-8 -*-
 
 """
-database_tables.py — إنشاء الجداول والفهارس لكل قواعد البيانات (v7.9.5)
+database_tables.py — إنشاء الجداول والفهارس لكل قواعد البيانات (v7.9.6)
 ================================================================================
+🆕 v7.9.6 (PERF-STARTUP-COOLDOWN):
+  🟢 PERF-1: STARTUP_MAINTENANCE_COOLDOWN_SECONDS = 6h
+      — الفحوصات الثقيلة (autovacuum tune, analyze, maintenance,
+        migrations) تعمل مرة كل 6 ساعات بدل كل إقلاع.
+  🟢 PERF-2: _should_run_startup_maintenance + _mark_startup_maintenance_done
+      — تخزين وقت آخر فحوصات ناجحة في جدول settings.
+  🟢 PERF-3: _run_combined_index_checks_postgres
+      — استعلام pg_indexes واحد بدل 4 استعلامات منفصلة.
+  🟢 PERF-4: fast-path لـ PG/SQLite/MySQL يستخدم فترة التهدئة.
+      الأثر: من ~145 استعلام إلى ~5 استعلامات في الإقلاع العادي.
+  🟡 PERF-5: CURRENT_SCHEMA_VERSION يبقى 29 (لا تغيير بنيوي).
+
 🆕 v7.9.5 (CONCURRENT-INDEX-FOR-LARGE-TABLES):
   🟢 CC-1: تفعيل CONCURRENT_INDEX_MIN_ROWS في _create_index_postgres_smart
       — الفهارس على الجداول ≥ 10000 صف تُبنى بـ CREATE INDEX CONCURRENTLY
@@ -35,8 +47,6 @@ database_tables.py — إنشاء الجداول والفهارس لكل قوا�
   🟡 FIX-11: عدّاد analyzed منفصل.
   🟡 FIX-12: تصحيح تعليق MySQL.
   🟡 FIX-13: حذف set comprehension زائد في MySQL.
-
-🚀 v7.6.25 (MIGRATION-ORDER-FIX)
 ================================================================================
 """
 
@@ -49,7 +59,7 @@ from datetime import datetime, timezone, timedelta
 # 0. ثوابت
 # =====================================================================
 
-# ✅ v7.9.5 CC-10: يبقى 29 (لا تغيير بنيوي — فقط تحسين سلوك)
+# ✅ v7.9.6 PERF-5: يبقى 29 (لا تغيير بنيوي)
 CURRENT_SCHEMA_VERSION = 29
 
 CLEANUP_ANONYMOUS_BOT_IDS = (1087968824, 136817688)
@@ -67,6 +77,12 @@ REMOVED_CHANNELS_GRACE_DAYS = 30
 # ✅ v7.9.4 FIX-5: عتبة استخدام CREATE INDEX CONCURRENTLY
 # الجداول التي ≥ هذا العدد من الصفوف يُبنى عليها الفهرس بـ CONCURRENTLY
 CONCURRENT_INDEX_MIN_ROWS = 10000
+
+# 🆕 v7.9.6 PERF-1: فترة تهدئة فحوصات الإقلاع الثقيلة
+# الفحوصات الثقيلة (autovacuum tune, analyze, maintenance, migrations)
+# تعمل مرة واحدة كل 6 ساعات — وليس في كل إقلاع.
+# الأثر: من ~145 استعلام إلى ~5 استعلامات في الإقلاع العادي.
+STARTUP_MAINTENANCE_COOLDOWN_SECONDS = 6 * 3600  # 6 ساعات
 
 # ═══════════════════════════════════════════════════════════════════════
 # ✅ v7.9.2: MAINTENANCE_TABLES موسّع
@@ -467,6 +483,115 @@ def _safe_now_dt(TimeUtils):
     return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
+# ═══════════════════════════════════════════════════════════════════════
+# 🆕 v7.9.6 PERF: فترة تهدئة الإقلاع
+# ═══════════════════════════════════════════════════════════════════════
+
+async def _should_run_startup_maintenance(
+    conn, db_type: str, logger=None,
+) -> bool:
+    """
+    🆕 v7.9.6: يقرر إن كانت الفحوصات الثقيلة مطلوبة.
+
+    تعود True إذا:
+      • لم يُسجّل أي وقت سابق (أول تشغيل بعد الترقية)
+      • مرّ أكثر من STARTUP_MAINTENANCE_COOLDOWN_SECONDS
+    تعود False إذا كانت الفحوصات حديثة (يجب تخطيها).
+    """
+    try:
+        if db_type == "postgres":
+            val = await conn.fetchval(
+                "SELECT value FROM settings "
+                "WHERE key = 'last_startup_checks_at'"
+            )
+        elif db_type == "sqlite":
+            cursor = await conn.execute(
+                "SELECT value FROM settings "
+                "WHERE key = 'last_startup_checks_at'"
+            )
+            try:
+                row = await cursor.fetchone()
+            finally:
+                try:
+                    await cursor.close()
+                except Exception:
+                    pass
+            val = row[0] if row else None
+        else:  # mysql
+            cursor = await conn.cursor()
+            try:
+                await cursor.execute(
+                    "SELECT `value` FROM settings "
+                    "WHERE `key` = 'last_startup_checks_at'"
+                )
+                row = await cursor.fetchone()
+            finally:
+                try:
+                    await cursor.close()
+                except Exception:
+                    pass
+            val = row[0] if row else None
+
+        if not val:
+            return True
+
+        last_dt = datetime.fromisoformat(str(val))
+        if last_dt.tzinfo is None:
+            last_dt = last_dt.replace(tzinfo=timezone.utc)
+        age = (datetime.now(timezone.utc) - last_dt).total_seconds()
+        return age >= STARTUP_MAINTENANCE_COOLDOWN_SECONDS
+
+    except Exception as e:
+        if logger:
+            logger.debug(f"_should_run_startup_maintenance: {e}")
+        return True  # عند الشك — نفّذ (آمن)
+
+
+async def _mark_startup_maintenance_done(
+    conn, db_type: str, logger=None,
+) -> None:
+    """🆕 v7.9.6: يسجل وقت آخر فحوصات إقلاع ناجحة."""
+    now_iso = datetime.now(timezone.utc).isoformat()
+    try:
+        if db_type == "postgres":
+            await conn.execute(
+                "INSERT INTO settings (key, value) VALUES ($1, $2) "
+                "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
+                "last_startup_checks_at", now_iso,
+            )
+        elif db_type == "sqlite":
+            await conn.execute(
+                "INSERT INTO settings (key, value) VALUES (?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                ("last_startup_checks_at", now_iso),
+            )
+            try:
+                await conn.commit()
+            except Exception:
+                pass
+        else:  # mysql
+            cursor = await conn.cursor()
+            try:
+                await cursor.execute(
+                    "INSERT INTO settings (`key`, `value`) "
+                    "VALUES (%s, %s) "
+                    "ON DUPLICATE KEY UPDATE `value` = VALUES(`value`)",
+                    ("last_startup_checks_at", now_iso),
+                )
+            finally:
+                try:
+                    await cursor.close()
+                except Exception:
+                    pass
+            try:
+                await conn.commit()
+            except Exception:
+                pass
+    except Exception as e:
+        if logger:
+            logger.debug(f"_mark_startup_maintenance_done: {e}")
+
+
 def _is_valid_index_name(name: str) -> bool:
     if not name or not isinstance(name, str):
         return False
@@ -767,6 +892,132 @@ async def _create_index_postgres_smart(
         if logger:
             logger.warning(f"⚠️ PG: فشل الفهرس {idx_name}: {e}")
         return "failed"
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# 🆕 v7.9.6 PERF-3: دمج فحوصات الفهارس في استعلام واحد
+# ═══════════════════════════════════════════════════════════════════════
+
+async def _run_combined_index_checks_postgres(conn, logger) -> None:
+    """
+    🆕 v7.9.6: بدلاً من 4 استعلامات pg_indexes منفصلة،
+    استعلام واحد يجلب كل شيء ثم يوزّع الفحوصات على الذاكرة.
+
+    يستبدل:
+      • _verify_critical_indexes_postgres
+      • _ensure_all_indexes_exist_postgres
+      • _ensure_index_definitions_match_postgres
+      • _drop_deprecated_indexes_postgres
+
+    الأثر: من 4 استعلامات pg_indexes → استعلام واحد + استعلام INVALID.
+    """
+    try:
+        # 1) تنظيف INVALID أولاً (يحتاج استعلاماً مستقلاً)
+        await _drop_invalid_indexes_postgres(conn, logger)
+
+        # 2) استعلام واحد يجلب كل الفهارس المعنية
+        all_names = [n for _, n, _ in COMMON_INDEXES]
+        rows = await conn.fetch(
+            "SELECT indexname, indexdef FROM pg_indexes "
+            "WHERE indexname = ANY($1::text[]) "
+            "  AND schemaname = ANY(current_schemas(false))",
+            all_names,
+        )
+        existing_defs = {r["indexname"]: (r["indexdef"] or "") for r in rows}
+        existing_names = set(existing_defs.keys())
+
+        # 3) فحص الفهارس الحرجة
+        missing_critical = CRITICAL_INDEX_NAMES - existing_names
+        if missing_critical and logger:
+            logger.warning(
+                f"⚠️ PG: {len(missing_critical)} فهرس حرج مفقود: "
+                f"{sorted(missing_critical)[:5]}..."
+            )
+
+        # 4) تحديد ما يجب إنشاؤه / حذفه (في مرور واحد)
+        to_create: list = []
+        to_drop_def_mismatch: list = []
+
+        for _table, idx_name, cols in COMMON_INDEXES:
+            if not _is_valid_index_name(idx_name):
+                continue
+
+            if idx_name not in existing_names:
+                to_create.append((idx_name, cols))
+                continue
+
+            # فحص التعريف — للفهارس غير المتقدمة فقط
+            if _is_advanced_index(cols):
+                continue
+
+            actual_def = existing_defs.get(idx_name, "")
+            m = re.search(
+                r"USING\s+\w+\s+\(([^)]+)\)",
+                actual_def, re.IGNORECASE,
+            )
+            if not m:
+                continue
+
+            actual_cols = _normalize_columns(m.group(1))
+            expected_cols = _normalize_columns(
+                _parse_expected_columns(cols)
+            )
+            if actual_cols != expected_cols:
+                to_drop_def_mismatch.append((idx_name, cols))
+
+        # 5) حذف الفهارس ذات التعريف الخاطئ
+        dropped = 0
+        for idx_name, _cols in to_drop_def_mismatch:
+            if await _safe_drop_index_postgres(conn, logger, idx_name):
+                dropped += 1
+
+        # 6) إنشاء المفقودة + المُعاد بناؤها
+        created = 0
+        created_cc = 0
+        row_cache: dict = {}
+
+        all_to_create = to_create + [
+            (n, c) for n, c in to_drop_def_mismatch
+        ]
+        for idx_name, cols in all_to_create:
+            cols_adapted = _adapt_cols_for_db(cols, "postgres")
+            if not cols_adapted:
+                continue
+            result = await _create_index_postgres_smart(
+                conn, logger, idx_name, cols_adapted, row_cache,
+            )
+            if result in ("created", "created_cc"):
+                created += 1
+                if result == "created_cc":
+                    created_cc += 1
+
+        # 7) حذف الفهارس القديمة (DEPRECATED)
+        dropped_dep = 0
+        try:
+            dep_rows = await conn.fetch(
+                "SELECT indexname FROM pg_indexes "
+                "WHERE indexname = ANY($1::text[]) "
+                "  AND schemaname = ANY(current_schemas(false))",
+                list(DEPRECATED_INDEXES),
+            )
+            for r in dep_rows:
+                dep_name = r["indexname"]
+                if await _safe_drop_index_postgres(conn, logger, dep_name):
+                    dropped_dep += 1
+        except Exception as _e:
+            if logger:
+                logger.debug(f"drop deprecated: {_e}")
+
+        # 8) سجل موحّد
+        if logger and (created or dropped or dropped_dep):
+            logger.info(
+                f"✅ PG combined-index-check: "
+                f"أُنشئ={created} (CONCURRENTLY={created_cc})، "
+                f"تعريف خاطئ={dropped}، قديم={dropped_dep}"
+            )
+    except Exception as e:
+        if logger:
+            logger.warning(f"⚠️ _run_combined_index_checks_postgres: {e}")
 
 
 # =====================================================================
@@ -3163,17 +3414,49 @@ async def _create_indexes_mysql(conn, logger):
 async def create_tables_sqlite(conn, logger, TimeUtils):
     current = await _get_current_schema_version_sqlite(conn)
     if current >= CURRENT_SCHEMA_VERSION:
+        # 🆕 v7.9.6 PERF-4: فحص فترة التهدئة
+        do_heavy = await _should_run_startup_maintenance(
+            conn, "sqlite", logger,
+        )
+
+        # ────────────────────────────────────────────
+        # ✅ فحوصات خفيفة — تعمل دائماً
+        # ────────────────────────────────────────────
         await _ensure_auto_blocked_table_sqlite(conn, logger)
-        await _migrate_missing_columns_sqlite(conn, logger)
-        await _verify_critical_indexes_sqlite(conn, logger)
-        await _ensure_all_indexes_exist_sqlite(conn, logger)
-        await _drop_deprecated_indexes_sqlite(conn, logger)
-        await _cleanup_stale_links_sqlite(conn, logger)
-        await _cleanup_old_admin_logs_sqlite(conn, logger)
-        await _run_maintenance_sqlite(conn, logger)
+
+        # ────────────────────────────────────────────
+        # 🔴 فحوصات ثقيلة — فقط كل 6 ساعات
+        # ────────────────────────────────────────────
+        if do_heavy:
+            if logger:
+                logger.info(
+                    "🔍 SQLite: بدء فحوصات الإقلاع الشاملة"
+                )
+            await _migrate_missing_columns_sqlite(conn, logger)
+            await _verify_critical_indexes_sqlite(conn, logger)
+            await _ensure_all_indexes_exist_sqlite(conn, logger)
+            await _drop_deprecated_indexes_sqlite(conn, logger)
+            await _cleanup_stale_links_sqlite(conn, logger)
+            await _cleanup_old_admin_logs_sqlite(conn, logger)
+            await _run_maintenance_sqlite(conn, logger)
+            await _mark_startup_maintenance_done(
+                conn, "sqlite", logger,
+            )
+            if logger:
+                logger.info(
+                    "✅ SQLite: اكتملت الفحوصات الشاملة — "
+                    "لن تُعاد لمدة 6 ساعات"
+                )
+        else:
+            if logger:
+                logger.info(
+                    "⚡ SQLite: فحوصات الإقلاع حديثة — "
+                    "تخطي الفحوصات الثقيلة"
+                )
+
         if logger:
             logger.info(
-                f"⏩ SQLite: schema v{current} محدّث — تخطي (fast-path)"
+                f"✅ SQLite: schema v{current} — جاهز للعمل"
             )
         return
 
@@ -3814,17 +4097,20 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
             "(version, applied_at, description) "
             "VALUES (?, ?, ?) ON CONFLICT(version) DO NOTHING",
             (CURRENT_SCHEMA_VERSION, _safe_now_iso(TimeUtils),
-             "v7.9.5-concurrent-index-large-tables"),
+             "v7.9.6-startup-cooldown"),
         )
         await conn.commit()
     except Exception as e:
         if logger:
             logger.warning(f"⚠️ schema_version SQLite: {e}")
 
+    # 🆕 v7.9.6: سجّل بصمة الإقلاع
+    await _mark_startup_maintenance_done(conn, "sqlite", logger)
+
     if logger:
         logger.info(
             "✅ تم إنشاء جميع جداول SQLite مع الفهارس المحسنة "
-            "(v7.9.5 — CONCURRENT-INDEX)"
+            "(v7.9.6 — STARTUP-COOLDOWN)"
         )
 
 
@@ -3835,26 +4121,61 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
 async def create_tables_postgres(conn, logger, TimeUtils):
     current = await _get_current_schema_version_postgres(conn)
     if current >= CURRENT_SCHEMA_VERSION:
-        if logger:
-            logger.info(
-                f"⏩ PG fast-path: schema v{current} — بدء الفحوصات"
-            )
+        # 🆕 v7.9.6 PERF-4: فحص فترة التهدئة
+        do_heavy = await _should_run_startup_maintenance(
+            conn, "postgres", logger,
+        )
+
+        # ────────────────────────────────────────────
+        # ✅ فحوصات خفيفة — تعمل دائماً (سريعة، حرجة)
+        # ────────────────────────────────────────────
         await _ensure_auto_blocked_table_postgres(conn, logger)
-        await _migrate_missing_columns_postgres(conn, logger)
-        # 🆕 CC-9: _drop_invalid_indexes_postgres يُستدعى داخل
-        # _verify_critical_indexes_postgres و _ensure_all_indexes_exist_postgres
-        await _verify_critical_indexes_postgres(conn, logger)
-        await _ensure_all_indexes_exist_postgres(conn, logger)
-        await _ensure_index_definitions_match_postgres(conn, logger)
-        await _drop_deprecated_indexes_postgres(conn, logger)
-        await _cleanup_stale_links_postgres(conn, logger)
-        await _cleanup_old_admin_logs_postgres(conn, logger)
-        await _tune_autovacuum_postgres(conn, logger)
-        await _quick_analyze_postgres(conn, logger)
-        await _run_maintenance_postgres(conn, logger)
+
+        # ────────────────────────────────────────────
+        # 🔴 فحوصات ثقيلة — فقط كل 6 ساعات
+        # ────────────────────────────────────────────
+        if do_heavy:
+            if logger:
+                logger.info(
+                    "🔍 PG: بدء فحوصات الإقلاع الشاملة "
+                    "(توفير ~140 استعلام في الإقلاعات المتكررة)"
+                )
+
+            # 🆕 PERF-3: استعلام pg_indexes واحد بدل أربعة
+            await _run_combined_index_checks_postgres(conn, logger)
+
+            # ترحيلات الأعمدة
+            await _migrate_missing_columns_postgres(conn, logger)
+
+            # تنظيفات
+            await _cleanup_stale_links_postgres(conn, logger)
+            await _cleanup_old_admin_logs_postgres(conn, logger)
+
+            # عمليات ثقيلة — مرة كل 6 ساعات
+            await _tune_autovacuum_postgres(conn, logger)
+            await _quick_analyze_postgres(conn, logger)
+            await _run_maintenance_postgres(conn, logger)
+
+            # سجّل وقت آخر فحوصات ناجحة
+            await _mark_startup_maintenance_done(
+                conn, "postgres", logger,
+            )
+
+            if logger:
+                logger.info(
+                    "✅ PG: اكتملت الفحوصات الشاملة — "
+                    "لن تُعاد لمدة 6 ساعات"
+                )
+        else:
+            if logger:
+                logger.info(
+                    "⚡ PG: فحوصات الإقلاع حديثة — تخطي الفحوصات الثقيلة "
+                    "(~140 استعلام مُوفَّر)"
+                )
+
         if logger:
             logger.info(
-                f"⏩ PG: schema v{current} محدّث — تخطي (fast-path)"
+                f"✅ PG: schema v{current} — جاهز للعمل"
             )
         return
 
@@ -4504,16 +4825,19 @@ async def create_tables_postgres(conn, logger, TimeUtils):
             "VALUES ($1, $2, $3) ON CONFLICT (version) DO NOTHING",
             CURRENT_SCHEMA_VERSION,
             _safe_now_dt(TimeUtils),
-            "v7.9.5-concurrent-index-large-tables",
+            "v7.9.6-startup-cooldown",
         )
     except Exception as e:
         if logger:
             logger.warning(f"⚠️ schema_version PG: {e}")
 
+    # 🆕 v7.9.6: سجّل بصمة الإقلاع
+    await _mark_startup_maintenance_done(conn, "postgres", logger)
+
     if logger:
         logger.info(
             "✅ تم إنشاء جميع جداول PostgreSQL مع الفهارس المحسنة "
-            "(v7.9.5 — CONCURRENT-INDEX)"
+            "(v7.9.6 — STARTUP-COOLDOWN)"
         )
 
 
@@ -4524,20 +4848,43 @@ async def create_tables_postgres(conn, logger, TimeUtils):
 async def create_tables_mysql(conn, logger, TimeUtils):
     current = await _get_current_schema_version_mysql(conn)
     if current >= CURRENT_SCHEMA_VERSION:
+        # 🆕 v7.9.6 PERF-4: فحص فترة التهدئة
+        do_heavy = await _should_run_startup_maintenance(
+            conn, "mysql", logger,
+        )
+
+        # فحوصات خفيفة دائماً
         await _ensure_auto_blocked_table_mysql(conn, logger)
-        await _migrate_missing_columns_mysql(conn, logger)
-        await _verify_critical_indexes_mysql(conn, logger)
-        await _ensure_all_indexes_exist_mysql(conn, logger)
-        await _ensure_index_definitions_match_mysql(conn, logger)
-        await _drop_deprecated_indexes_mysql(conn, logger)
-        await _cleanup_stale_links_mysql(conn, logger)
-        await _cleanup_old_admin_logs_mysql(conn, logger)
-        await _quick_analyze_mysql(conn, logger)
-        await _run_maintenance_mysql(conn, logger)
-        if logger:
-            logger.info(
-                f"⏩ MySQL: schema v{current} محدّث — تخطي (fast-path)"
+
+        if do_heavy:
+            if logger:
+                logger.info("🔍 MySQL: بدء فحوصات الإقلاع الشاملة")
+            await _migrate_missing_columns_mysql(conn, logger)
+            await _verify_critical_indexes_mysql(conn, logger)
+            await _ensure_all_indexes_exist_mysql(conn, logger)
+            await _ensure_index_definitions_match_mysql(conn, logger)
+            await _drop_deprecated_indexes_mysql(conn, logger)
+            await _cleanup_stale_links_mysql(conn, logger)
+            await _cleanup_old_admin_logs_mysql(conn, logger)
+            await _quick_analyze_mysql(conn, logger)
+            await _run_maintenance_mysql(conn, logger)
+            await _mark_startup_maintenance_done(
+                conn, "mysql", logger,
             )
+            if logger:
+                logger.info(
+                    "✅ MySQL: اكتملت الفحوصات الشاملة — "
+                    "لن تُعاد لمدة 6 ساعات"
+                )
+        else:
+            if logger:
+                logger.info(
+                    "⚡ MySQL: فحوصات الإقلاع حديثة — "
+                    "تخطي الفحوصات الثقيلة"
+                )
+
+        if logger:
+            logger.info(f"✅ MySQL: schema v{current} — جاهز للعمل")
         return
 
     await conn.execute("SET FOREIGN_KEY_CHECKS=0")
@@ -5193,17 +5540,20 @@ async def create_tables_mysql(conn, logger, TimeUtils):
                 (
                     CURRENT_SCHEMA_VERSION,
                     _safe_now_iso(TimeUtils),
-                    "v7.9.5-concurrent-index-large-tables",
+                    "v7.9.6-startup-cooldown",
                 ),
             )
         except Exception as e:
             if logger:
                 logger.warning(f"⚠️ schema_version MySQL: {e}")
 
+        # 🆕 v7.9.6: سجّل بصمة الإقلاع
+        await _mark_startup_maintenance_done(conn, "mysql", logger)
+
         if logger:
             logger.info(
                 "✅ تم إنشاء جميع جداول MySQL مع الفهارس المحسنة "
-                "(v7.9.5 — CONCURRENT-INDEX)"
+                "(v7.9.6 — STARTUP-COOLDOWN)"
             )
 
     finally:
@@ -5238,6 +5588,11 @@ __all__ = [
     "REMOVED_CHANNELS_GRACE_DAYS",
     "CONCURRENT_INDEX_MIN_ROWS",
     "SMALL_TABLES_FOR_AGGRESSIVE_AUTOVACUUM",
+    # 🆕 v7.9.6 PERF: فترة التهدئة
+    "STARTUP_MAINTENANCE_COOLDOWN_SECONDS",
+    "_should_run_startup_maintenance",
+    "_mark_startup_maintenance_done",
+    "_run_combined_index_checks_postgres",
     "_adapt_cols_for_db",
     "_cleanup_old_admin_logs_postgres",
     "_cleanup_old_admin_logs_sqlite",
