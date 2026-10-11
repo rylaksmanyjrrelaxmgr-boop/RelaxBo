@@ -1,16 +1,28 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-database_tickets.py - دوال التذاكر (v7.4.3)
+database_tickets.py - دوال التذاكر (v7.4.4)
 ================================================================================
+🆕 v7.4.4 (FIX-T4 + FIX-T5):
+  🔴 FIX-T4 (CRITICAL): create_ticket — استخدام UPSERT ذرّي بدل UPDATE فقط.
+      السبب: إذا كان صف 'last_ticket_number' مفقوداً في جدول settings
+      (بعد migration سيئة أو حذف يدوي)، فإن UPDATE يُرجع rowcount=0
+      ولا يُدرج الصف → العدّاد يبقى مفقوداً → كل تذكرة تحصل على #1.
+      الأثر قبل الإصلاح: فوضى كاملة في نظام الدعم (كل التذاكر #1).
+      الإصلاح: UPSERT ذرّي (INSERT ... ON CONFLICT DO UPDATE لـ PG/SQLite
+      أو ON DUPLICATE KEY UPDATE لـ MySQL) يضمن وجود الصف + تحديثه.
+  🟡 FIX-T5 (MEDIUM): create_ticket — _get_user_lock(user_id) بدل
+      self._lock العام.
+      السبب: self._lock قفل عالمي واحد → كل إنشاء تذكرة من أي مستخدم
+      ينتظر الآخر. مع 100 مستخدم متزامن → تسلسل كامل.
+      الإصلاح: قفل per-user → عمليات المستخدمين المختلفين متوازية،
+      وعمليات نفس المستخدم متسلسلة.
+
 🆕 v7.4.3 (SUPPORT-MODE-ALIAS):
-  🔴 SUPPORT-ALIAS-1: إضافة create_support_ticket كـ alias لـ create_ticket.
-      السبب: handlers_message.py v7.18.29 (_handle_support_mode_text)
-      يبحث عن create_support_ticket — لم يكن موجوداً → كان يستخدم
-      fallback INSERT مباشر (بدون ترقيم تلقائي).
+  🔴 SUPPORT-ALIAS-1: إضافة create_support_ticket كـ alias.
   🔴 SUPPORT-ALIAS-2: إضافة add_support_ticket كـ alias بديل.
-  🟢 SUPPORT-ALIAS-3: إنشاء التذكرة الآن يسجّل ticket_number + username
-      بشكل صحيح عبر المسار الرسمي.
+  🟢 SUPPORT-ALIAS-3: التذكرة تُسجّل ticket_number + username عبر
+      المسار الرسمي.
 
 🆕 v7.4.2 (إصلاح MySQL):
     ✅ create_ticket: backticks حول `key` و `value` لـ MySQL
@@ -70,13 +82,38 @@ class TicketsMixin:
 
         🆕 v7.4.3: يقبل `message` كـ alias لـ `content` للتوافق مع
         استدعاءات SUPPORT_MODE التي تستخدم `message=...`.
+
+        🔴 FIX-T4 (v7.4.4): يستخدم UPSERT ذرّي لتحديث العدّاد.
+        🟡 FIX-T5 (v7.4.4): يستخدم قفل per-user بدل العام.
         """
         # 🆕 v7.4.3: alias — إذا أُرسل `message` ولم يُرسل `content`
         if not content and message:
             content = message
 
         try:
-            async with self._lock:
+            # 🔴 FIX-T5 (v7.4.4): قفل per-user بدل self._lock العام.
+            #
+            # السبب: self._lock قفل عالمي واحد → كل إنشاء تذكرة من أي
+            # مستخدم ينتظر الآخر. مع 100 مستخدم في نفس اللحظة →
+            # تسلسل كامل (بدل معالجة متوازية).
+            #
+            # _get_user_lock(user_id) يُنشئ قفل مستقل لكل مستخدم →
+            # عمليات المستخدمين المختلفين متوازية، وعمليات نفس
+            # المستخدم متسلسلة (وهو المطلوب).
+            #
+            # ⚠️ مع fallback آمن إذا لم تكن _get_user_lock متاحة.
+            _lock = self._lock
+            if hasattr(self, "_get_user_lock"):
+                try:
+                    _lock = await self._get_user_lock(user_id)
+                except Exception as _lock_e:
+                    logger.debug(
+                        f"create_ticket: _get_user_lock فشل — "
+                        f"fallback لـ self._lock: {_lock_e}"
+                    )
+                    _lock = self._lock
+
+            async with _lock:
                 async with self.transaction() as conn:
                     # ✅ v7.4.2: backticks لـ MySQL
                     key_col = self._tq("key")
@@ -99,13 +136,44 @@ class TicketsMixin:
                     except (ValueError, TypeError):
                         next_num = 1
 
-                    # تحديث العدّاد
-                    await self._execute_with_conn(
-                        conn,
-                        f"UPDATE settings SET {value_col} = ? "
-                        f"WHERE {key_col} = ?",
-                        str(next_num), "last_ticket_number",
-                    )
+                    # 🔴 FIX-T4 (v7.4.4): استخدام UPSERT بدل UPDATE فقط.
+                    #
+                    # السبب: إذا كان صف 'last_ticket_number' مفقوداً
+                    # في جدول settings (بعد migration سيئة أو حذف يدوي)،
+                    # فإن UPDATE يُرجع rowcount=0 ولا يُدرج الصف →
+                    # العدّاد يبقى مفقوداً → كل تذكرة تحصل على #1.
+                    #
+                    # الاستخدام الصحيح: UPSERT ذرّي حسب المحرك.
+                    if getattr(self, "USE_POSTGRES", False):
+                        await self._execute_with_conn(
+                            conn,
+                            f"INSERT INTO settings "
+                            f"({key_col}, {value_col}) "
+                            f"VALUES ($1, $2) "
+                            f"ON CONFLICT ({key_col}) DO UPDATE "
+                            f"SET {value_col} = EXCLUDED.{value_col}",
+                            "last_ticket_number", str(next_num),
+                        )
+                    elif getattr(self, "USE_MYSQL", False):
+                        await self._execute_with_conn(
+                            conn,
+                            f"INSERT INTO settings "
+                            f"({key_col}, {value_col}) "
+                            f"VALUES (%s, %s) "
+                            f"ON DUPLICATE KEY UPDATE "
+                            f"{value_col} = VALUES({value_col})",
+                            "last_ticket_number", str(next_num),
+                        )
+                    else:  # SQLite
+                        await self._execute_with_conn(
+                            conn,
+                            f"INSERT INTO settings "
+                            f"({key_col}, {value_col}) "
+                            f"VALUES (?, ?) "
+                            f"ON CONFLICT({key_col}) DO UPDATE "
+                            f"SET {value_col} = excluded.{value_col}",
+                            "last_ticket_number", str(next_num),
+                        )
 
                     # إدراج التذكرة
                     await self._execute_with_conn(
