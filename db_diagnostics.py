@@ -1,8 +1,17 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-db_diagnostics.py — واجهة تشخيص وصيانة قاعدة البيانات (v6.9.4 — SAFE CLEANUP)
+db_diagnostics.py — واجهة تشخيص وصيانة قاعدة البيانات (v6.9.5 — MV-AWARE-HEALTH)
 ================================================================================
+🆕 v6.9.5 — إصلاح جذري لفحص MVs في _get_all_tables_health():
+    🔴 FIX-MV-1: _get_all_tables_health() يستخدم pg_class + pg_stat_all_tables
+       بدل pg_stat_user_tables (الأخير لا يحتوي MVs إطلاقاً).
+       الفائدة: mv_active_user_limits يظهر الآن في التقارير + auto_vacuum_dirty_mvs
+       يعمل عليه فعلياً.
+    🔴 FIX-MV-2: COALESCE لكل إحصاءات (MVs قد لا تحتوي n_live_tup).
+    🟡 FIX-MV-3: WHERE c.relkind IN ('r', 'm') لتشمل الجداول + MVs.
+    🟡 FIX-MV-4: الترتيب يستخدم COALESCE (للتعامل مع NULL).
+
 🆕 v6.9.4 — سياسة تنظيف آمنة + حماية المشتركين:
     🔒 SAFE-1: سياسة تنظيف هيكلية (dict) لكل جدول.
     🔒 SAFE-2: جداول المستخدمين/المشتركين/المالية محمية تماماً.
@@ -34,7 +43,7 @@ logger = logging.getLogger(__name__)
 # الإصدار
 # ═══════════════════════════════════════════════════════════════════════
 
-VERSION = "6.9.4"
+VERSION = "6.9.5"
 
 # 🆕 v6.9.4: حدود الدقة — تمنع الإنذارات الكاذبة
 _MIN_DEAD_FOR_CRITICAL = 50   # أقل من هذا → لا يُصنَّف حرجاً مهما كانت النسبة
@@ -328,10 +337,18 @@ async def _get_db_metadata() -> Dict[str, Any]:
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# 2) Dead Tuples + Clean Tables — 🆕 مع تمييز MV
+# 2) Dead Tuples + Clean Tables — 🆕 v6.9.5 FIX-MV-1/2/3/4
 # ═══════════════════════════════════════════════════════════════════════
 
 async def _get_all_tables_health() -> Tuple[List[Dict], List[Dict]]:
+    """
+    🆕 v6.9.5 FIX-MV-1..4: يشمل MVs فعلياً.
+
+    المشكلة القديمة: كان يستخدم pg_stat_user_tables الذي لا يحتوي MVs
+    → is_matview كان دائماً False → auto_vacuum_dirty_mvs لا تنظف MVs.
+
+    الحل: pg_class + pg_stat_all_tables + relkind IN ('r', 'm').
+    """
     db = _get_db()
     if db is None or not _is_postgres():
         return [], []
@@ -341,18 +358,21 @@ async def _get_all_tables_health() -> Tuple[List[Dict], List[Dict]]:
             SELECT
                 c.relname AS table_name,
                 c.relkind AS relkind,
-                s.n_live_tup AS live_tuples,
-                s.n_dead_tup AS dead_tuples,
-                s.n_mod_since_analyze,
+                COALESCE(s.n_live_tup, 0) AS live_tuples,
+                COALESCE(s.n_dead_tup, 0) AS dead_tuples,
+                COALESCE(s.n_mod_since_analyze, 0) AS n_mod_since_analyze,
                 s.last_vacuum,
                 s.last_autovacuum,
                 s.last_analyze,
                 s.last_autoanalyze,
                 c.reloptions
-            FROM pg_stat_user_tables s
-            JOIN pg_class c ON c.oid = s.relid
-            WHERE s.schemaname = current_schema()
-            ORDER BY s.n_dead_tup DESC, s.n_live_tup DESC
+            FROM pg_class c
+            JOIN pg_namespace n ON n.oid = c.relnamespace
+            LEFT JOIN pg_stat_all_tables s ON s.relid = c.oid
+            WHERE n.nspname = current_schema()
+              AND c.relkind IN ('r', 'm')
+            ORDER BY COALESCE(s.n_dead_tup, 0) DESC,
+                     COALESCE(s.n_live_tup, 0) DESC
         """) or []
     except Exception as e:
         logger.warning(f"_get_all_tables_health: {e}")
@@ -1108,7 +1128,9 @@ async def vacuum_analyze_tables() -> str:
 
 async def auto_vacuum_dirty_mvs(min_dead: int = 10) -> Dict[str, Any]:
     """
-    🧹 v6.9.3: تنظيف تلقائي للجداول/MVs التي فيها dead tuples ≥ min_dead.
+    🧹 v6.9.5: تنظيف تلقائي للجداول/MVs التي فيها dead tuples ≥ min_dead.
+
+    يعتمد على _get_all_tables_health() (v6.9.5) الذي يشمل MVs.
     """
     db = _get_db()
     result: Dict[str, Any] = {
@@ -1604,6 +1626,7 @@ __all__ = [
 try:
     logger.info(
         "🛡️ db_diagnostics.py v%s loaded | "
+        "MV-AWARE-HEALTH ✅ | "
         "SAFE CLEANUP ✅ | "
         "subscribers protected 🔒 | "
         "MVs in VACUUM ✅ | "
