@@ -2,8 +2,18 @@
 # -*- coding: utf-8 -*-
 """
 database_subscriptions.py - وحدة الباقات والاشتراكات والفواتير والإحالات
-v7.7.31 — دعم كامل لـ SQLite + PostgreSQL + MySQL
+v7.7.32 — دعم كامل لـ SQLite + PostgreSQL + MySQL
 =====================================================================
+🆕 v7.7.32 (FIX-U13):
+    🔴 FIX-U13: ensure_dev_subscription يفشل عند أول تشغيل (FK violation).
+        السبب: bot.py يستدعي pre_initialize() قبل register_user().
+        ensure_all_dev_subscriptions() تُستدعى داخل bootstrap
+        (قبل register_user) → المستخدم غير موجود في users →
+        INSERT subscriptions يفشل بـ FK violation.
+        الأثر: على أول تشغيل، لا يُنشَأ الاشتراك الدائم.
+        الإصلاح: فحص وجود المستخدم قبل INSERT؛ إن لم يوجد →
+        تسجيله تلقائياً عبر self.register_user(user_id).
+
 🆕 v7.7.31 (DEV-PERMANENT-SUBSCRIPTION):
     👑 DEV-1: _is_dev_user + _get_dev_ids — كشف المطور/المالك
     👑 DEV-2: has_active_subscription — bypass فوري للمطور (True دائماً)
@@ -12,10 +22,8 @@ v7.7.31 — دعم كامل لـ SQLite + PostgreSQL + MySQL
     👑 DEV-5: ensure_dev_subscription(user_id) — دالة جديدة تُنشئ
               اشتراكاً دائماً في DB (100 سنة) للمطور عند أول استدعاء.
               idempotent — لا تُنشئ مرتين.
-    👑 DEV-6: ensure_all_dev_subscriptions() — حلقة على كل المطورين،
-              تُستدعى عند بدء البوت من main.py / bot initialization.
-    👑 DEV-7: expire_expired_subscriptions — استثناء provider='dev_bypass'
-              من الإنهاء (حتى لو انتهى end_date لأي سبب).
+    👑 DEV-6: ensure_all_dev_subscriptions() — حلقة على كل المطورين.
+    👑 DEV-7: expire_expired_subscriptions — استثناء provider='dev_bypass'.
 
 ✅ v7.7.30 — إصلاحات ما بعد التدقيق الدقيق:
   1) activate_trial: إزالة default=1 الخطير لـ trial_plan_id
@@ -486,12 +494,47 @@ class SubscriptionMixin:
         - المدة: 36500 يوم (100 سنة).
         - لو لا توجد خطط نشطة → يفشل بهدوء (يرجع False).
 
+        🔴 FIX-U13 (v7.7.32):
+            يُستدعى هذا من bootstrap قبل تسجيل المطورين في users.
+            بدون تأمين وجود المستخدم، يفشل INSERT subscriptions
+            بـ FK violation (subscriptions.user_id REFERENCES users).
+            الأثر: على أول تشغيل، لا يُنشَأ الاشتراك الدائم.
+
         Returns:
             True: الاشتراك الدائم موجود (سواء أنشأه الآن أو مسبقاً)
             False: المستخدم ليس مطوراً، أو لا توجد خطط، أو خطأ
         """
         if not self._is_dev_user(user_id):
             return False
+
+        # 🔴 FIX-U13: تأكد من وجود المستخدم في users قبل أي INSERT
+        # على subscriptions (FK constraint).
+        # السبب: bot.py يستدعي pre_initialize() قبل register_user().
+        # ensure_all_dev_subscriptions() تُستدعى داخل bootstrap
+        # (قبل register_user) → المستخدم غير موجود → FK violation.
+        try:
+            user_exists = await self.fetchval(
+                "SELECT 1 FROM users WHERE user_id = ?",
+                (user_id,),
+            )
+            if not user_exists:
+                logger.info(
+                    "ℹ️ ensure_dev_subscription: "
+                    "تسجيل المطور %s تلقائياً (كان مفقوداً)",
+                    user_id,
+                )
+                try:
+                    await self.register_user(user_id)
+                except Exception as _reg_e:
+                    logger.warning(
+                        "⚠️ فشل register_user(%s): %s",
+                        user_id, _reg_e,
+                    )
+                    return False
+        except Exception as _e:
+            logger.debug(
+                "ensure_dev_subscription: user check failed: %s", _e,
+            )
 
         try:
             async with await self._get_user_lock(user_id):
