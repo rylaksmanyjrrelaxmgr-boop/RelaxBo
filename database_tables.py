@@ -2,51 +2,32 @@
 # -*- coding: utf-8 -*-
 
 """
-database_tables.py — إنشاء الجداول والفهارس لكل قواعد البيانات (v7.9.6)
+database_tables.py — إنشاء الجداول والفهارس لكل قواعد البيانات (v7.9.7)
 ================================================================================
+🔴 v7.9.7 (FIX-C10-CONCURRENTLY-IN-TX):
+  🔴 C10-A: _create_index_postgres_smart — معامل force_non_concurrent
+      لتجنّب CREATE INDEX CONCURRENTLY داخل transaction (bootstrap).
+  🔴 C10-B: _run_combined_index_checks_postgres — تمرير in_transaction.
+  🔴 C10-C: create_tables_postgres — استقبال in_transaction وتمريره.
+  🔴 C10-E: _verify_critical_indexes_postgres،
+      _ensure_all_indexes_exist_postgres، _create_indexes_postgres
+      — استقبال in_transaction وتمريره.
+  🟡 C10-F: حذف "user_reminder_settings" المكرر من
+      SMALL_TABLES_FOR_AGGRESSIVE_AUTOVACUUM.
+  🔴 C10-G (إضافي): _safe_drop_index_postgres و
+      _drop_invalid_indexes_postgres و _drop_deprecated_indexes_postgres
+      — معامل force_non_concurrent لتجنّب DROP INDEX CONCURRENTLY
+      داخل tx (نفس المشكلة الجذرية).
+
 🆕 v7.9.6 (PERF-STARTUP-COOLDOWN):
   🟢 PERF-1: STARTUP_MAINTENANCE_COOLDOWN_SECONDS = 6h
-      — الفحوصات الثقيلة (autovacuum tune, analyze, maintenance,
-        migrations) تعمل مرة كل 6 ساعات بدل كل إقلاع.
   🟢 PERF-2: _should_run_startup_maintenance + _mark_startup_maintenance_done
-      — تخزين وقت آخر فحوصات ناجحة في جدول settings.
   🟢 PERF-3: _run_combined_index_checks_postgres
-      — استعلام pg_indexes واحد بدل 4 استعلامات منفصلة.
   🟢 PERF-4: fast-path لـ PG/SQLite/MySQL يستخدم فترة التهدئة.
-      الأثر: من ~145 استعلام إلى ~5 استعلامات في الإقلاع العادي.
-  🟡 PERF-5: CURRENT_SCHEMA_VERSION يبقى 29 (لا تغيير بنيوي).
+  🟡 PERF-5: CURRENT_SCHEMA_VERSION يبقى 29.
 
-🆕 v7.9.5 (CONCURRENT-INDEX-FOR-LARGE-TABLES):
-  🟢 CC-1: تفعيل CONCURRENT_INDEX_MIN_ROWS في _create_index_postgres_smart
-      — الفهارس على الجداول ≥ 10000 صف تُبنى بـ CREATE INDEX CONCURRENTLY
-        لتجنّب قفل الكتابة.
-  🟢 CC-2: fallback تلقائي إلى CREATE INDEX العادي عند:
-      • "cannot run inside a transaction block"
-      • "CONCURRENTLY not supported" (نسخ PG قديمة)
-  🟢 CC-3: cache لعدد صفوف الجداول (تفادي 82 استعلام مكرر).
-  🟢 CC-4: _drop_invalid_indexes_postgres — تنظيف الفهارس INVALID
-      الناتجة عن فشل سابق لـ CONCURRENTLY.
-  🟢 CC-5: _safe_drop_index_postgres — حذف بأمان مع fallback من CONCURRENTLY.
-  🟢 CC-6: _ensure_all_indexes_exist_postgres يستخدم الآن smart creation
-      بعد حذف الفهارس INVALID.
-  🟢 CC-7: _verify_critical_indexes_postgres يستخدم smart creation.
-  🟢 CC-8: _create_indexes_postgres يستخدم smart creation
-      (بدل _create_indexes_generic).
-  🟢 CC-9: استدعاء _drop_invalid_indexes_postgres في fast-path أيضاً.
-  🟡 CC-10: CURRENT_SCHEMA_VERSION يبقى 29 (لا تغيير بنيوي).
-
-🆕 v7.9.4 (CRITICAL-FIXES-MV-VACUUM):
-  🔴 FIX-1: CURRENT_SCHEMA_VERSION 28 → 29
-  🔴 FIX-2: _vacuum_dirty_mvs_postgres يستخدم pg_stat_all_tables.
-  🔴 FIX-3: حذف الشرط المعطوب في _vacuum_dirty_mvs_postgres.
-  🔴 FIX-5: حذف idx_schedule_channel_lookup المكرر.
-  🔴 FIX-6: _tune_autovacuum_postgres يستخدم pg_class (يشمل MVs).
-  🔴 FIX-7: VACUUM على MVs فقط في PG 14+.
-  🔴 FIX-8: EXPECTED_INDEX_COUNT 83 → 82.
-  🔴 FIX-10: فحص تلقائي لأسماء الفهارس المكررة.
-  🟡 FIX-11: عدّاد analyzed منفصل.
-  🟡 FIX-12: تصحيح تعليق MySQL.
-  🟡 FIX-13: حذف set comprehension زائد في MySQL.
+🆕 v7.9.5 (CONCURRENT-INDEX-FOR-LARGE-TABLES): CC-1..CC-10
+🆕 v7.9.4 (CRITICAL-FIXES-MV-VACUUM): FIX-1..FIX-13
 ================================================================================
 """
 
@@ -75,13 +56,9 @@ ADMIN_LOGS_MAX_ROWS = 5000
 REMOVED_CHANNELS_GRACE_DAYS = 30
 
 # ✅ v7.9.4 FIX-5: عتبة استخدام CREATE INDEX CONCURRENTLY
-# الجداول التي ≥ هذا العدد من الصفوف يُبنى عليها الفهرس بـ CONCURRENTLY
 CONCURRENT_INDEX_MIN_ROWS = 10000
 
 # 🆕 v7.9.6 PERF-1: فترة تهدئة فحوصات الإقلاع الثقيلة
-# الفحوصات الثقيلة (autovacuum tune, analyze, maintenance, migrations)
-# تعمل مرة واحدة كل 6 ساعات — وليس في كل إقلاع.
-# الأثر: من ~145 استعلام إلى ~5 استعلامات في الإقلاع العادي.
 STARTUP_MAINTENANCE_COOLDOWN_SECONDS = 6 * 3600  # 6 ساعات
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -108,6 +85,7 @@ MAINTENANCE_TABLES = (
     "bot_addition_log",
 )
 
+# ✅ v7.9.7 C10-F: حُذف "user_reminder_settings" المكرر
 SMALL_TABLES_FOR_AGGRESSIVE_AUTOVACUUM = (
     "auto_replies",
     "auto_reply_settings",
@@ -143,7 +121,6 @@ SMALL_TABLES_FOR_AGGRESSIVE_AUTOVACUUM = (
     "payment_logs",
     "referrals",
     "user_translation",
-    "user_reminder_settings",
     "contests",
     "contest_participants",
     "contest_winners",
@@ -490,14 +467,7 @@ def _safe_now_dt(TimeUtils):
 async def _should_run_startup_maintenance(
     conn, db_type: str, logger=None,
 ) -> bool:
-    """
-    🆕 v7.9.6: يقرر إن كانت الفحوصات الثقيلة مطلوبة.
-
-    تعود True إذا:
-      • لم يُسجّل أي وقت سابق (أول تشغيل بعد الترقية)
-      • مرّ أكثر من STARTUP_MAINTENANCE_COOLDOWN_SECONDS
-    تعود False إذا كانت الفحوصات حديثة (يجب تخطيها).
-    """
+    """🆕 v7.9.6: يقرر إن كانت الفحوصات الثقيلة مطلوبة."""
     try:
         if db_type == "postgres":
             val = await conn.fetchval(
@@ -677,13 +647,7 @@ def _is_advanced_index(cols: str) -> bool:
 # =====================================================================
 
 async def _get_table_row_count_postgres(conn, table_name: str) -> int:
-    """
-    🆕 v7.9.5 CC-1: تقدير سريع لعدد صفوف الجدول.
-
-    يستخدم pg_stat_all_tables.n_live_tup (تقدير إحصائي فوري)
-    مع fallback إلى pg_class.reltuples.
-    لا يستخدم COUNT(*) لأنه مكلف على الجداول الكبيرة.
-    """
+    """🆕 v7.9.5 CC-1: تقدير سريع لعدد صفوف الجدول."""
     if not _is_valid_index_name(table_name):
         return 0
     try:
@@ -711,15 +675,33 @@ async def _get_table_row_count_postgres(conn, table_name: str) -> int:
         return 0
 
 
-async def _safe_drop_index_postgres(conn, logger, idx_name: str) -> bool:
+async def _safe_drop_index_postgres(
+    conn, logger, idx_name: str,
+    force_non_concurrent: bool = False,     # ← 🆕 v7.9.7 C10-G
+) -> bool:
     """
     🆕 v7.9.5 CC-5: حذف فهرس بأمان.
 
-    يجرّب DROP INDEX CONCURRENTLY أولاً (لا يقفل الكتابة)،
-    وإذا فشل بسبب transaction block، يتراجع إلى DROP INDEX عادي.
+    🔴 v7.9.7 C10-G: معامل force_non_concurrent لتجنّب
+        DROP INDEX CONCURRENTLY داخل transaction (نفس مشكلة
+        CREATE INDEX CONCURRENTLY). DROP CONCURRENTLY يفشل داخل
+        tx ويُسبّب ABORTED tx → حتى fallback العادي يفشل.
     """
     if not _is_valid_index_name(idx_name):
         return False
+
+    # 🆕 C10-G: إذا كنا داخل tx، تخطَّ CONCURRENTLY نهائياً
+    if force_non_concurrent:
+        try:
+            await conn.execute(f"DROP INDEX IF EXISTS {idx_name}")
+            return True
+        except Exception as e:
+            if logger:
+                logger.debug(
+                    f"⚠️ فشل حذف {idx_name} (non-concurrent): {e}"
+                )
+            return False
+
     try:
         await conn.execute(f"DROP INDEX CONCURRENTLY IF EXISTS {idx_name}")
         return True
@@ -738,14 +720,12 @@ async def _safe_drop_index_postgres(conn, logger, idx_name: str) -> bool:
         return False
 
 
-async def _drop_invalid_indexes_postgres(conn, logger) -> int:
+async def _drop_invalid_indexes_postgres(
+    conn, logger, force_non_concurrent: bool = False,   # ← 🆕 C10-G
+) -> int:
     """
     🆕 v7.9.5 CC-4: حذف الفهارس INVALID الناتجة عن فشل CONCURRENTLY.
-
-    عندما يفشل CREATE INDEX CONCURRENTLY، يترك PostgreSQL فهرساً
-    بحالة INVALID يشغل مساحة ولا يعمل. ننظّفه هنا.
-
-    مقيّد بـ COMMON_INDEXES فقط — لا يلمس فهارس أخرى.
+    🔴 v7.9.7 C10-G: تمرير force_non_concurrent.
     """
     try:
         rows = await conn.fetch("""
@@ -769,7 +749,10 @@ async def _drop_invalid_indexes_postgres(conn, logger) -> int:
         dropped = 0
         for r in rows:
             idx = r["index_name"]
-            if await _safe_drop_index_postgres(conn, logger, idx):
+            if await _safe_drop_index_postgres(
+                conn, logger, idx,
+                force_non_concurrent=force_non_concurrent,
+            ):
                 dropped += 1
                 if logger:
                     logger.info(f"🧹 PG: حُذف فهرس INVALID {idx}")
@@ -784,17 +767,14 @@ async def _drop_invalid_indexes_postgres(conn, logger) -> int:
 async def _create_index_postgres_smart(
     conn, logger, idx_name: str, cols: str,
     table_row_cache=None,
+    force_non_concurrent: bool = False,     # ← 🆕 v7.9.7 C10-A
 ) -> str:
     """
     🆕 v7.9.5 CC-1/CC-2: إنشاء فهرس مع قرار CONCURRENTLY التلقائي.
 
-    القرار:
-      - إذا كان الجدول ≥ CONCURRENT_INDEX_MIN_ROWS → CONCURRENTLY
-      - وإلا → CREATE INDEX عادي
-
-    Fallback تلقائي:
-      - "cannot run inside a transaction" → CREATE INDEX عادي
-      - "already exists" / "duplicate" → duplicate
+    🔴 v7.9.7 C10-A: معامل force_non_concurrent لتجنّب CONCURRENTLY
+        داخل transaction (bootstrap). CONCURRENTLY داخل tx يفشل
+        ويُسبّب transaction ABORTED → حتى fallback يفشل.
 
     Returns:
         "created"      — نجح بـ CREATE INDEX عادي
@@ -805,15 +785,14 @@ async def _create_index_postgres_smart(
     if not _is_valid_index_name(idx_name):
         return "failed"
 
-    # استخراج اسم الجدول من تعريف الفهرس "table_name(...)"
     table_match = re.match(r"^(\w+)\s*\(", cols.strip())
     if not table_match:
         return "failed"
     table_name = table_match.group(1)
 
-    # قرار CONCURRENTLY (مع cache)
+    # ✅ FIX-C10: force_non_concurrent يُلغي قرار CONCURRENTLY
     use_concurrently = False
-    if CONCURRENT_INDEX_MIN_ROWS > 0:
+    if not force_non_concurrent and CONCURRENT_INDEX_MIN_ROWS > 0:
         if table_row_cache is not None and table_name in table_row_cache:
             row_count = table_row_cache[table_name]
         else:
@@ -823,10 +802,7 @@ async def _create_index_postgres_smart(
         if row_count >= CONCURRENT_INDEX_MIN_ROWS:
             use_concurrently = True
 
-    # البناء والتنفيذ
     if use_concurrently:
-        # ملاحظة: CONCURRENTLY لا يدعم IF NOT EXISTS في بعض نسخ PG
-        # لكننا تحققنا من الوجود مسبقاً، فلا نحتاجه
         stmt = f"CREATE INDEX CONCURRENTLY {idx_name} ON {cols}"
     else:
         stmt = f"CREATE INDEX IF NOT EXISTS {idx_name} ON {cols}"
@@ -845,7 +821,6 @@ async def _create_index_postgres_smart(
         if "already exists" in err or "duplicate" in err:
             return "duplicate"
 
-        # 🆕 CC-2: fallback من CONCURRENTLY إلى CREATE INDEX عادي
         if use_concurrently and "cannot run inside a transaction" in err:
             if logger:
                 logger.debug(
@@ -866,7 +841,6 @@ async def _create_index_postgres_smart(
                     )
                 return "failed"
 
-        # fallback آخر: CONCURRENTLY غير مدعوم (نسخ PG قديمة جداً)
         if use_concurrently and (
             "concurrently" in err and "not supported" in err
         ):
@@ -898,22 +872,27 @@ async def _create_index_postgres_smart(
 # 🆕 v7.9.6 PERF-3: دمج فحوصات الفهارس في استعلام واحد
 # ═══════════════════════════════════════════════════════════════════════
 
-async def _run_combined_index_checks_postgres(conn, logger) -> None:
+async def _run_combined_index_checks_postgres(
+    conn, logger,
+    in_transaction: bool = False,           # ← 🆕 v7.9.7 C10-B
+) -> None:
     """
-    🆕 v7.9.6: بدلاً من 4 استعلامات pg_indexes منفصلة،
-    استعلام واحد يجلب كل شيء ثم يوزّع الفحوصات على الذاكرة.
-
-    يستبدل:
-      • _verify_critical_indexes_postgres
-      • _ensure_all_indexes_exist_postgres
-      • _ensure_index_definitions_match_postgres
-      • _drop_deprecated_indexes_postgres
-
-    الأثر: من 4 استعلامات pg_indexes → استعلام واحد + استعلام INVALID.
+    🆕 v7.9.6: استعلام واحد يجلب كل شيء ثم يوزّع الفحوصات على الذاكرة.
+    🔴 v7.9.7 C10-B: in_transaction لتجنّب CONCURRENTLY داخل bootstrap tx.
     """
     try:
-        # 1) تنظيف INVALID أولاً (يحتاج استعلاماً مستقلاً)
-        await _drop_invalid_indexes_postgres(conn, logger)
+        # ✅ FIX-C10: إذا داخل transaction، نمنع CONCURRENTLY
+        _force_nc = bool(in_transaction)
+        if _force_nc and logger:
+            logger.debug(
+                "⚙️ FIX-C10: CONCURRENTLY معطّل (داخل transaction)"
+            )
+
+        # 1) تنظيف INVALID أولاً (مع تمرير force_non_concurrent)
+        await _drop_invalid_indexes_postgres(
+            conn, logger,
+            force_non_concurrent=_force_nc,     # ← 🆕 C10-G
+        )
 
         # 2) استعلام واحد يجلب كل الفهارس المعنية
         all_names = [n for _, n, _ in COMMON_INDEXES]
@@ -934,7 +913,7 @@ async def _run_combined_index_checks_postgres(conn, logger) -> None:
                 f"{sorted(missing_critical)[:5]}..."
             )
 
-        # 4) تحديد ما يجب إنشاؤه / حذفه (في مرور واحد)
+        # 4) تحديد ما يجب إنشاؤه / حذفه
         to_create: list = []
         to_drop_def_mismatch: list = []
 
@@ -946,7 +925,6 @@ async def _run_combined_index_checks_postgres(conn, logger) -> None:
                 to_create.append((idx_name, cols))
                 continue
 
-            # فحص التعريف — للفهارس غير المتقدمة فقط
             if _is_advanced_index(cols):
                 continue
 
@@ -968,7 +946,11 @@ async def _run_combined_index_checks_postgres(conn, logger) -> None:
         # 5) حذف الفهارس ذات التعريف الخاطئ
         dropped = 0
         for idx_name, _cols in to_drop_def_mismatch:
-            if await _safe_drop_index_postgres(conn, logger, idx_name):
+            # 🆕 C10-G: تمرير force_non_concurrent
+            if await _safe_drop_index_postgres(
+                conn, logger, idx_name,
+                force_non_concurrent=_force_nc,
+            ):
                 dropped += 1
 
         # 6) إنشاء المفقودة + المُعاد بناؤها
@@ -985,6 +967,7 @@ async def _run_combined_index_checks_postgres(conn, logger) -> None:
                 continue
             result = await _create_index_postgres_smart(
                 conn, logger, idx_name, cols_adapted, row_cache,
+                force_non_concurrent=_force_nc,     # ← 🆕 C10-B
             )
             if result in ("created", "created_cc"):
                 created += 1
@@ -1002,7 +985,11 @@ async def _run_combined_index_checks_postgres(conn, logger) -> None:
             )
             for r in dep_rows:
                 dep_name = r["indexname"]
-                if await _safe_drop_index_postgres(conn, logger, dep_name):
+                # 🆕 C10-G: تمرير force_non_concurrent
+                if await _safe_drop_index_postgres(
+                    conn, logger, dep_name,
+                    force_non_concurrent=_force_nc,
+                ):
                     dropped_dep += 1
         except Exception as _e:
             if logger:
@@ -1357,10 +1344,17 @@ async def _tune_autovacuum_postgres(conn, logger):
 # 🆕 v7.9.5 CC-6: فحص جماعي — يستخدم smart creation
 # =====================================================================
 
-async def _ensure_all_indexes_exist_postgres(conn, logger):
+async def _ensure_all_indexes_exist_postgres(
+    conn, logger,
+    in_transaction: bool = False,           # ← 🆕 v7.9.7 C10-E
+):
+    """🔴 v7.9.7 C10-E: دعم in_transaction لتجنّب CONCURRENTLY داخل tx."""
     try:
         # 🆕 CC-4: تنظيف الفهارس INVALID أولاً
-        await _drop_invalid_indexes_postgres(conn, logger)
+        await _drop_invalid_indexes_postgres(
+            conn, logger,
+            force_non_concurrent=in_transaction,    # ← 🆕 C10-G
+        )
 
         all_names = [n for _, n, _ in COMMON_INDEXES]
         rows = await conn.fetch(
@@ -1380,7 +1374,6 @@ async def _ensure_all_indexes_exist_postgres(conn, logger):
                 f"— إعادة إنشاء"
             )
 
-        # 🆕 CC-3: cache لعدد صفوف الجداول
         row_cache = {}
         created = 0
         created_cc = 0
@@ -1393,7 +1386,8 @@ async def _ensure_all_indexes_exist_postgres(conn, logger):
                 failed += 1
                 continue
             result = await _create_index_postgres_smart(
-                conn, logger, idx_name, cols, row_cache
+                conn, logger, idx_name, cols, row_cache,
+                force_non_concurrent=in_transaction,   # ← 🆕 C10-E
             )
             if result == "created":
                 created += 1
@@ -2723,10 +2717,17 @@ async def _cleanup_stale_links_mysql(conn, logger):
 # 🆕 v7.9.5 CC-7: فحص الفهارس الحرجة — يستخدم smart creation
 # =====================================================================
 
-async def _verify_critical_indexes_postgres(conn, logger):
+async def _verify_critical_indexes_postgres(
+    conn, logger,
+    in_transaction: bool = False,           # ← 🆕 v7.9.7 C10-E
+):
+    """🔴 v7.9.7 C10-E: دعم in_transaction لتجنّب CONCURRENTLY داخل tx."""
     try:
         # 🆕 CC-4: تنظيف INVALID أولاً
-        await _drop_invalid_indexes_postgres(conn, logger)
+        await _drop_invalid_indexes_postgres(
+            conn, logger,
+            force_non_concurrent=in_transaction,    # ← 🆕 C10-G
+        )
 
         rows = await conn.fetch(
             "SELECT indexname FROM pg_indexes "
@@ -2743,7 +2744,6 @@ async def _verify_critical_indexes_postgres(conn, logger):
                 f"⚠️ PG: {len(missing)} فهرس حرج مفقود — إعادة إنشاء"
             )
 
-        # 🆕 CC-3: cache لعدد صفوف الجداول
         row_cache = {}
         created = 0
         created_cc = 0
@@ -2752,7 +2752,8 @@ async def _verify_critical_indexes_postgres(conn, logger):
             if not cols:
                 continue
             result = await _create_index_postgres_smart(
-                conn, logger, idx_name, cols, row_cache
+                conn, logger, idx_name, cols, row_cache,
+                force_non_concurrent=in_transaction,   # ← 🆕 C10-E
             )
             if result == "created":
                 created += 1
@@ -2950,7 +2951,11 @@ async def _fetch_existing_indexes_mysql(conn, tables):
 # فحص تعريفات الفهارس
 # =====================================================================
 
-async def _ensure_index_definitions_match_postgres(conn, logger):
+async def _ensure_index_definitions_match_postgres(
+    conn, logger,
+    in_transaction: bool = False,           # ← 🆕 v7.9.7 C10-G
+):
+    """🔴 v7.9.7 C10-G: دعم in_transaction لتفادي DROP CONCURRENTLY في tx."""
     checked = 0
     dropped = 0
     missing = 0
@@ -2988,8 +2993,10 @@ async def _ensure_index_definitions_match_postgres(conn, logger):
                     f"⚠️ PG: {idx_name} تعريف مختلف "
                     f"(فعلي={actual_cols[:60]}, متوقع={expected_cols[:60]}) — يُحذف"
                 )
-                # 🆕 CC-5: استخدام الحذف الآمن
-                if await _safe_drop_index_postgres(conn, logger, idx_name):
+                if await _safe_drop_index_postgres(
+                    conn, logger, idx_name,
+                    force_non_concurrent=in_transaction,   # ← 🆕 C10-G
+                ):
                     dropped += 1
             checked += 1
         if logger and dropped > 0:
@@ -3134,7 +3141,11 @@ async def _ensure_index_definitions_match_mysql(conn, logger):
 # حذف الفهارس القديمة
 # =====================================================================
 
-async def _drop_deprecated_indexes_postgres(conn, logger):
+async def _drop_deprecated_indexes_postgres(
+    conn, logger,
+    force_non_concurrent: bool = False,     # ← 🆕 v7.9.7 C10-G
+):
+    """🔴 v7.9.7 C10-G: دعم force_non_concurrent لتفادي DROP CONCURRENTLY في tx."""
     if not DEPRECATED_INDEXES:
         return 0
     dropped = 0
@@ -3151,8 +3162,10 @@ async def _drop_deprecated_indexes_postgres(conn, logger):
                 logger.debug("🧹 PG: 0 فهرس قديم للحذف")
             return 0
         for idx_name in existing:
-            # 🆕 CC-5: استخدام الحذف الآمن
-            if await _safe_drop_index_postgres(conn, logger, idx_name):
+            if await _safe_drop_index_postgres(
+                conn, logger, idx_name,
+                force_non_concurrent=force_non_concurrent,   # ← 🆕 C10-G
+            ):
                 dropped += 1
                 if logger:
                     logger.info(f"🧹 PG: حُذف فهرس قديم {idx_name}")
@@ -3295,7 +3308,11 @@ async def _create_indexes_sqlite(conn, logger):
 # 🆕 v7.9.5 CC-8: إنشاء فهارس PostgreSQL — يستخدم smart creation
 # =====================================================================
 
-async def _create_indexes_postgres(conn, logger):
+async def _create_indexes_postgres(
+    conn, logger,
+    in_transaction: bool = False,           # ← 🆕 v7.9.7 C10-E
+):
+    """🔴 v7.9.7 C10-E: دعم in_transaction لتجنّب CONCURRENTLY داخل tx."""
     index_names = [idx_name for _, idx_name, _ in COMMON_INDEXES]
     try:
         existing = await _fetch_existing_indexes_postgres(
@@ -3307,7 +3324,10 @@ async def _create_indexes_postgres(conn, logger):
         return
 
     # 🆕 CC-4: تنظيف INVALID أولاً
-    await _drop_invalid_indexes_postgres(conn, logger)
+    await _drop_invalid_indexes_postgres(
+        conn, logger,
+        force_non_concurrent=in_transaction,    # ← 🆕 C10-G
+    )
 
     to_create = [
         (t, n, _adapt_cols_for_db(c, "postgres"))
@@ -3323,7 +3343,6 @@ async def _create_indexes_postgres(conn, logger):
             )
         return
 
-    # 🆕 CC-3: cache لعدد صفوف الجداول
     row_cache = {}
     created = 0
     created_cc = 0
@@ -3335,7 +3354,8 @@ async def _create_indexes_postgres(conn, logger):
             failed += 1
             continue
         result = await _create_index_postgres_smart(
-            conn, logger, idx_name, cols, row_cache
+            conn, logger, idx_name, cols, row_cache,
+            force_non_concurrent=in_transaction,   # ← 🆕 C10-E
         )
         if result == "created":
             created += 1
@@ -3414,19 +3434,12 @@ async def _create_indexes_mysql(conn, logger):
 async def create_tables_sqlite(conn, logger, TimeUtils):
     current = await _get_current_schema_version_sqlite(conn)
     if current >= CURRENT_SCHEMA_VERSION:
-        # 🆕 v7.9.6 PERF-4: فحص فترة التهدئة
         do_heavy = await _should_run_startup_maintenance(
             conn, "sqlite", logger,
         )
 
-        # ────────────────────────────────────────────
-        # ✅ فحوصات خفيفة — تعمل دائماً
-        # ────────────────────────────────────────────
         await _ensure_auto_blocked_table_sqlite(conn, logger)
 
-        # ────────────────────────────────────────────
-        # 🔴 فحوصات ثقيلة — فقط كل 6 ساعات
-        # ────────────────────────────────────────────
         if do_heavy:
             if logger:
                 logger.info(
@@ -4097,20 +4110,19 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
             "(version, applied_at, description) "
             "VALUES (?, ?, ?) ON CONFLICT(version) DO NOTHING",
             (CURRENT_SCHEMA_VERSION, _safe_now_iso(TimeUtils),
-             "v7.9.6-startup-cooldown"),
+             "v7.9.7-fix-c10"),
         )
         await conn.commit()
     except Exception as e:
         if logger:
             logger.warning(f"⚠️ schema_version SQLite: {e}")
 
-    # 🆕 v7.9.6: سجّل بصمة الإقلاع
     await _mark_startup_maintenance_done(conn, "sqlite", logger)
 
     if logger:
         logger.info(
             "✅ تم إنشاء جميع جداول SQLite مع الفهارس المحسنة "
-            "(v7.9.6 — STARTUP-COOLDOWN)"
+            "(v7.9.7 — FIX-C10)"
         )
 
 
@@ -4118,45 +4130,48 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
 # 2. جداول PostgreSQL
 # =====================================================================
 
-async def create_tables_postgres(conn, logger, TimeUtils):
+async def create_tables_postgres(
+    conn, logger, TimeUtils,
+    in_transaction: bool = False,           # ← 🆕 v7.9.7 C10-C
+):
+    """
+    🔴 v7.9.7 C10-C: قبول in_transaction لتجنّب CREATE/DROP INDEX
+        CONCURRENTLY داخل bootstrap tx (الذي يفشل ويُسبّب ABORTED tx).
+    """
     current = await _get_current_schema_version_postgres(conn)
     if current >= CURRENT_SCHEMA_VERSION:
-        # 🆕 v7.9.6 PERF-4: فحص فترة التهدئة
         do_heavy = await _should_run_startup_maintenance(
             conn, "postgres", logger,
         )
 
-        # ────────────────────────────────────────────
-        # ✅ فحوصات خفيفة — تعمل دائماً (سريعة، حرجة)
-        # ────────────────────────────────────────────
         await _ensure_auto_blocked_table_postgres(conn, logger)
 
-        # ────────────────────────────────────────────
-        # 🔴 فحوصات ثقيلة — فقط كل 6 ساعات
-        # ────────────────────────────────────────────
         if do_heavy:
             if logger:
                 logger.info(
                     "🔍 PG: بدء فحوصات الإقلاع الشاملة "
                     "(توفير ~140 استعلام في الإقلاعات المتكررة)"
                 )
+                if in_transaction:
+                    logger.info(
+                        "⚙️ FIX-C10: CONCURRENTLY سيُعطَّل "
+                        "(نحن داخل transaction)"
+                    )
 
             # 🆕 PERF-3: استعلام pg_indexes واحد بدل أربعة
-            await _run_combined_index_checks_postgres(conn, logger)
+            # 🔴 FIX-C10: تمرير in_transaction
+            await _run_combined_index_checks_postgres(
+                conn, logger,
+                in_transaction=in_transaction,      # ← 🆕 C10-C
+            )
 
-            # ترحيلات الأعمدة
             await _migrate_missing_columns_postgres(conn, logger)
-
-            # تنظيفات
             await _cleanup_stale_links_postgres(conn, logger)
             await _cleanup_old_admin_logs_postgres(conn, logger)
-
-            # عمليات ثقيلة — مرة كل 6 ساعات
             await _tune_autovacuum_postgres(conn, logger)
             await _quick_analyze_postgres(conn, logger)
             await _run_maintenance_postgres(conn, logger)
 
-            # سجّل وقت آخر فحوصات ناجحة
             await _mark_startup_maintenance_done(
                 conn, "postgres", logger,
             )
@@ -4808,10 +4823,21 @@ async def create_tables_postgres(conn, logger, TimeUtils):
     await _ensure_auto_blocked_table_postgres(conn, logger)
 
     await _migrate_missing_columns_postgres(conn, logger)
-    await _drop_deprecated_indexes_postgres(conn, logger)
-    await _ensure_index_definitions_match_postgres(conn, logger)
-    # 🆕 CC-8: يستخدم smart creation
-    await _create_indexes_postgres(conn, logger)
+    # 🔴 FIX-C10: تمرير in_transaction للحذف الآمن
+    await _drop_deprecated_indexes_postgres(
+        conn, logger,
+        force_non_concurrent=in_transaction,        # ← 🆕 C10-G
+    )
+    # 🔴 FIX-C10: تمرير in_transaction لفحص التعريفات
+    await _ensure_index_definitions_match_postgres(
+        conn, logger,
+        in_transaction=in_transaction,              # ← 🆕 C10-G
+    )
+    # 🔴 FIX-C10: تمرير in_transaction لإنشاء الفهارس
+    await _create_indexes_postgres(
+        conn, logger,
+        in_transaction=in_transaction,              # ← 🆕 C10-C
+    )
     await _cleanup_stale_links_postgres(conn, logger)
     await _cleanup_old_admin_logs_postgres(conn, logger)
     await _tune_autovacuum_postgres(conn, logger)
@@ -4825,19 +4851,18 @@ async def create_tables_postgres(conn, logger, TimeUtils):
             "VALUES ($1, $2, $3) ON CONFLICT (version) DO NOTHING",
             CURRENT_SCHEMA_VERSION,
             _safe_now_dt(TimeUtils),
-            "v7.9.6-startup-cooldown",
+            "v7.9.7-fix-c10",
         )
     except Exception as e:
         if logger:
             logger.warning(f"⚠️ schema_version PG: {e}")
 
-    # 🆕 v7.9.6: سجّل بصمة الإقلاع
     await _mark_startup_maintenance_done(conn, "postgres", logger)
 
     if logger:
         logger.info(
             "✅ تم إنشاء جميع جداول PostgreSQL مع الفهارس المحسنة "
-            "(v7.9.6 — STARTUP-COOLDOWN)"
+            "(v7.9.7 — FIX-C10)"
         )
 
 
@@ -4848,12 +4873,10 @@ async def create_tables_postgres(conn, logger, TimeUtils):
 async def create_tables_mysql(conn, logger, TimeUtils):
     current = await _get_current_schema_version_mysql(conn)
     if current >= CURRENT_SCHEMA_VERSION:
-        # 🆕 v7.9.6 PERF-4: فحص فترة التهدئة
         do_heavy = await _should_run_startup_maintenance(
             conn, "mysql", logger,
         )
 
-        # فحوصات خفيفة دائماً
         await _ensure_auto_blocked_table_mysql(conn, logger)
 
         if do_heavy:
@@ -5540,20 +5563,19 @@ async def create_tables_mysql(conn, logger, TimeUtils):
                 (
                     CURRENT_SCHEMA_VERSION,
                     _safe_now_iso(TimeUtils),
-                    "v7.9.6-startup-cooldown",
+                    "v7.9.7-fix-c10",
                 ),
             )
         except Exception as e:
             if logger:
                 logger.warning(f"⚠️ schema_version MySQL: {e}")
 
-        # 🆕 v7.9.6: سجّل بصمة الإقلاع
         await _mark_startup_maintenance_done(conn, "mysql", logger)
 
         if logger:
             logger.info(
                 "✅ تم إنشاء جميع جداول MySQL مع الفهارس المحسنة "
-                "(v7.9.6 — STARTUP-COOLDOWN)"
+                "(v7.9.7 — FIX-C10)"
             )
 
     finally:
@@ -5588,7 +5610,6 @@ __all__ = [
     "REMOVED_CHANNELS_GRACE_DAYS",
     "CONCURRENT_INDEX_MIN_ROWS",
     "SMALL_TABLES_FOR_AGGRESSIVE_AUTOVACUUM",
-    # 🆕 v7.9.6 PERF: فترة التهدئة
     "STARTUP_MAINTENANCE_COOLDOWN_SECONDS",
     "_should_run_startup_maintenance",
     "_mark_startup_maintenance_done",
@@ -5602,7 +5623,6 @@ __all__ = [
     "_run_maintenance_sqlite",
     "_run_maintenance_mysql",
     "_vacuum_dirty_mvs_postgres",
-    # 🆕 v7.9.5 CC-1..CC-5: أدوات CONCURRENTLY
     "_get_table_row_count_postgres",
     "_create_index_postgres_smart",
     "_safe_drop_index_postgres",
