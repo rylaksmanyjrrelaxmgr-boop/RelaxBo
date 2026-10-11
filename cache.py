@@ -2,28 +2,24 @@
 # -*- coding: utf-8 -*-
 
 """
-cache.py - نظام الكاش المتقدم للبوت (v7.6.5)
+cache.py - نظام الكاش المتقدم للبوت (v7.6.6)
 ================================================================================
+🔴 v7.6.6 (FIX-AE1-INTERNAL-CACHE-CLEANUP):
+    🔴 AE1-A: استيراد internal_cache من database_caches.
+    🔴 AE1-B: إضافة internal_cache إلى _ALL_CACHES.
+    🟡 AE1-C: cache_cleanup_task يدعم cleanup_expired() (أسرع)
+       مع fallback إلى cleanup(force=False) + حصانة ضد
+       sync/async/None.
+
 🆕 v7.6.5 (PERF-PARALLEL-LOAD):
     🟢 PERF-5: _load_user_full_data — تحويل الاستدعاءات من تسلسلي
        إلى متوازي كامل.
-       - قبل: get_start_data() ثم (channels+groups بالتوازي)
-              = 700ms + 350ms = 1050ms (تقريباً)
-       - بعد: (get_start_data + channels + groups) الثلاثة متوازية
-              = max(700, 350, 350) = ~700ms
+       - قبل: ~1050ms (700 + 350)
+       - بعد: ~700ms (max)
        - الفائدة: ~350ms أقل في أول /start.
-       - الأثر: لا تغيير في السلوك — نفس البيانات تُحمَّل.
 
 🆕 v7.6.4 (FIX-CANCELLED-PROPAGATION):
-    🔴 FIX: cache_cleanup_task — استبدال `break` بـ `raise`
-       - المشكلة: عند SIGTERM، `break` يحوّل CancelledError إلى
-         return نظيف → `run_task_with_retry` في main.py يعتبره
-         "انهيار صامت" → يعيد جدولة المهمة (تحذير: "عادت بدون
-         استثناء — إعادة بعد 5s").
-       - الأثر: مهمة تنظيف إضافية تُشغَّل أثناء الإغلاق، ضوضاء
-         في السجلات، تأخير الإغلاق.
-       - الإصلاح: `raise` يُمرّر CancelledError لأعلى بشكل صحيح
-         → `run_task_with_retry` يعالجه كإلغاء طبيعي.
+    🔴 FIX: cache_cleanup_task — استبدال `break` بـ `raise`.
 
 🆕 v7.6.3 (تحسينات وقائية):
     ✅ UserDataCache.get_or_load: finally block محصّن
@@ -86,6 +82,35 @@ def _apply_jitter(ttl: float) -> float:
     delta = ttl * TTL_JITTER_RATIO
     jittered = ttl + random.uniform(-delta, delta)
     return max(TTL_JITTER_MIN, jittered)
+
+
+# ═════════════════════════════════════════════════════════════════════
+# 🔴 FIX-AE1 (v7.6.6): استيراد internal_cache من database_caches
+# ═════════════════════════════════════════════════════════════════════
+# internal_cache كان يُستخدَم في:
+#   • database.py::_invalidate_user_cache_keys
+#   • database.py::get_start_data / get_user / get_user_language
+#   • handlers_message._lazy_init_columns
+#   • utils._user_cache_invalidate_wrapper
+# لكنه لم يكن مُدرَجاً في _ALL_CACHES → لا تنظيف دوري.
+#
+# الأثر قبل الإصلاح:
+#   - مفاتيح منتهية تتراكم حتى max_size=10000.
+#   - عند set() جديد → eviction عنيف (2500 مفتاح دفعة واحدة).
+#   - ذاكرة مهدورة تدريجياً.
+#
+# الاستيراد داخل try/except ImportError:
+#   - آمن ضد circular import إن حدث.
+#   - آمن إن لم يكن database_caches متاحاً بعد.
+try:
+    from database_caches import internal_cache as _internal_cache_obj
+    _INTERNAL_CACHE_AVAILABLE = True
+except ImportError as _e_ae1:
+    _internal_cache_obj = None
+    _INTERNAL_CACHE_AVAILABLE = False
+    logger.warning(
+        "⚠️ FIX-AE1: internal_cache غير متاح (%s) — "
+        "لن يُنظَّف دوريًا", _e_ae1)
 
 
 # =====================================================================
@@ -920,7 +945,9 @@ async def clear_all_caches() -> Dict:
 # =====================================================================
 
 # ✅ v7.6.0: قائمة كل الكاشات (تُحدَّث مرة واحدة)
-_ALL_CACHES: List[TTLCache] = [
+# 🔴 v7.6.6: النوع List[Any] بدل List[TTLCache] — لأننا نُضيف
+# InternalQueryCache (نوع مختلف، API مختلف).
+_ALL_CACHES: List[Any] = [
     settings_cache.security,
     settings_cache.auto_reply,
     settings_cache.bot_settings,
@@ -936,6 +963,19 @@ _ALL_CACHES: List[TTLCache] = [
     posts_cache.next_post,
 ]
 
+# 🔴 FIX-AE1 (v7.6.6): إضافة internal_cache للتنظيف الدوري.
+# InternalQueryCache يدعم cleanup_expired() — أسرع من
+# get_keys + has() (lock واحد + scan داخلي بدل n lock/unlock).
+if _INTERNAL_CACHE_AVAILABLE and _internal_cache_obj is not None:
+    _ALL_CACHES.append(_internal_cache_obj)
+    logger.info(
+        "✅ FIX-AE1: internal_cache مُدرَج في _ALL_CACHES "
+        "(إجمالي: %d)", len(_ALL_CACHES))
+else:
+    logger.warning(
+        "⚠️ FIX-AE1: internal_cache غير مُدرَج — "
+        "لن يُنظَّف دورياً")
+
 
 async def cache_cleanup_task():
     """
@@ -949,15 +989,58 @@ async def cache_cleanup_task():
          `run_task_with_retry` في main.py → يعيد جدولة المهمة
          (تحذير: "عادت بدون استثناء — إعادة بعد 5s") أثناء الإغلاق.
        - الإصلاح: `raise` يُمرِّر الإلغاء لأعلى بشكل صحيح.
+
+    🔴 v7.6.6 FIX-AE1: دعم cleanup_expired() للكاشات التي
+        توفّره (مثل internal_cache من database_caches.py).
+        cleanup_expired() أسرع بكثير من get_keys + has()
+        (O(1) lock + O(n) scan داخلي، بدل O(n) lock/unlock).
+
+        الحصانة:
+          - يدعم sync + async (asyncio.iscoroutine check).
+          - يتحقق أن الناتج int قبل الإضافة إلى total.
+          - fallback إلى cleanup(force=False) عند أي فشل.
+          - try/except منفصل لكل cache.
     """
     while True:
         try:
             await asyncio.sleep(300)
             total = 0
+
             for cache_obj in _ALL_CACHES:
-                total += await cache_obj.cleanup(force=False)
+                # ✅ FIX-AE1: مسار سريع — cleanup_expired()
+                if hasattr(cache_obj, "cleanup_expired"):
+                    try:
+                        _result = cache_obj.cleanup_expired()
+                        # دعم sync + async
+                        if asyncio.iscoroutine(_result):
+                            _result = await _result
+                        if isinstance(_result, int) and _result > 0:
+                            total += _result
+                        continue
+                    except Exception as _e:
+                        logger.debug(
+                            "cleanup_expired فشل (%s): %s — "
+                            "fallback إلى cleanup()",
+                            type(cache_obj).__name__, _e,
+                        )
+
+                # fallback: TTLCache.cleanup(force=False)
+                if hasattr(cache_obj, "cleanup"):
+                    try:
+                        _n = cache_obj.cleanup(force=False)
+                        if asyncio.iscoroutine(_n):
+                            _n = await _n
+                        if isinstance(_n, int) and _n > 0:
+                            total += _n
+                    except Exception as _e:
+                        logger.debug(
+                            "cleanup فشل (%s): %s",
+                            type(cache_obj).__name__, _e,
+                        )
+
             if total > 0:
                 logger.debug(f"🧹 تنظيف الكاش: {total} عنصر")
+
         except asyncio.CancelledError:
             logger.info("🛑 cache_cleanup_task تم إلغاؤه")
             # ✅ v7.6.4: raise بدل break — يُمرِّر الإلغاء لأعلى
@@ -1024,6 +1107,8 @@ async def get_cache_stats() -> Dict:
     user_s = _next_stat()
     posts_s = _next_stat()
     next_s = _next_stat()
+    # 🔴 FIX-AE1: internal_cache (إن كان مُدرجاً)
+    _internal_s = _next_stat() if _INTERNAL_CACHE_AVAILABLE else None
 
     sec_size = sec_s['size']
     ar_size = ar_s['size']
@@ -1038,6 +1123,8 @@ async def get_cache_stats() -> Dict:
     user_size = user_s['size']
     posts_size = posts_s['size']
     next_size = next_s['size']
+    # 🔴 FIX-AE1
+    internal_size = _internal_s['size'] if _internal_s else 0
 
     # ✅ v7.6.2: جمع _stampede_locks من نفس النتائج (بلا استدعاء ثانٍ)
     total_stampede_locks = sum(
@@ -1050,7 +1137,7 @@ async def get_cache_stats() -> Dict:
         sec_size + ar_size + bot_size + bw_size +
         auth_size + admin_size + ch_size + cinfo_size +
         gr_size + ginfo_size + user_size +
-        posts_size + next_size
+        posts_size + next_size + internal_size
     )
 
     return {
@@ -1077,6 +1164,8 @@ async def get_cache_stats() -> Dict:
             'posts': posts_size,
             'next_post': next_size,
         },
+        # 🔴 FIX-AE1: internal_cache (database_caches.py)
+        'internal': internal_size,
         'total': total,
         'active_stampede_locks': total_stampede_locks,
     }
@@ -1085,34 +1174,47 @@ async def get_cache_stats() -> Dict:
 async def get_detailed_stats() -> Dict:
     """جلب إحصائيات مفصلة."""
     stats = await get_cache_stats()
+    details = {
+        'settings_cache': {
+            'security': await settings_cache.security.get_stats(),
+            'auto_reply': await settings_cache.auto_reply.get_stats(),
+            'bot_settings': await settings_cache.bot_settings.get_stats(),
+        },
+        'banned_words_cache': await banned_words_cache.cache.get_stats(),
+        'auth_cache': {
+            'permissions': await auth_cache.cache.get_stats(),
+            'admins': await auth_cache.admin_cache.get_stats(),
+        },
+        'channels_cache': {
+            'user_channels': await channels_cache.cache.get_stats(),
+            'channel_info': await channels_cache.channel_info.get_stats(),
+        },
+        'groups_cache': {
+            'user_groups': await groups_cache.cache.get_stats(),
+            'group_info': await groups_cache.group_info.get_stats(),
+        },
+        'user_cache': await user_cache.cache.get_stats(),
+        'posts_cache': {
+            'posts': await posts_cache.cache.get_stats(),
+            'next_post': await posts_cache.next_post.get_stats(),
+        },
+    }
+    # 🔴 FIX-AE1: internal_cache (إن كان متاحاً)
+    if _INTERNAL_CACHE_AVAILABLE and _internal_cache_obj is not None:
+        try:
+            _internal_stats_fn = getattr(
+                _internal_cache_obj, 'get_stats', None)
+            if callable(_internal_stats_fn):
+                _r = _internal_stats_fn()
+                if asyncio.iscoroutine(_r):
+                    _r = await _r
+                details['internal_cache'] = _r
+        except Exception as _e:
+            details['internal_cache'] = {'error': str(_e)[:80]}
     return {
         'total': stats['total'],
         'details': stats,
-        'cache_objects': {
-            'settings_cache': {
-                'security': await settings_cache.security.get_stats(),
-                'auto_reply': await settings_cache.auto_reply.get_stats(),
-                'bot_settings': await settings_cache.bot_settings.get_stats(),
-            },
-            'banned_words_cache': await banned_words_cache.cache.get_stats(),
-            'auth_cache': {
-                'permissions': await auth_cache.cache.get_stats(),
-                'admins': await auth_cache.admin_cache.get_stats(),
-            },
-            'channels_cache': {
-                'user_channels': await channels_cache.cache.get_stats(),
-                'channel_info': await channels_cache.channel_info.get_stats(),
-            },
-            'groups_cache': {
-                'user_groups': await groups_cache.cache.get_stats(),
-                'group_info': await groups_cache.group_info.get_stats(),
-            },
-            'user_cache': await user_cache.cache.get_stats(),
-            'posts_cache': {
-                'posts': await posts_cache.cache.get_stats(),
-                'next_post': await posts_cache.next_post.get_stats(),
-            },
-        }
+        'cache_objects': details,
     }
 
 
@@ -1130,13 +1232,20 @@ async def health_snapshot() -> Dict:
     total_stampede_locks = 0
 
     for cache_obj in _ALL_CACHES:
-        s = await cache_obj.get_stats()
-        total_hits += s['hits']
-        total_misses += s['misses']
-        total_expired += s['expired']
-        total_size += s['size']
-        total_max += s['maxsize']
-        total_stampede_locks += s.get('stampede_locks', 0)
+        try:
+            s = cache_obj.get_stats()
+            if asyncio.iscoroutine(s):
+                s = await s
+            total_hits += s.get('hits', 0)
+            total_misses += s.get('misses', 0)
+            total_expired += s.get('expired', 0)
+            total_size += s.get('size', 0)
+            total_max += s.get('maxsize', 0)
+            total_stampede_locks += s.get('stampede_locks', 0)
+        except Exception as _e:
+            logger.debug(
+                "health_snapshot: %s فشل — %s",
+                type(cache_obj).__name__, _e)
 
     total_requests = total_hits + total_misses
     hit_rate = round(
@@ -1160,6 +1269,9 @@ async def health_snapshot() -> Dict:
         'hit_rate_percent': hit_rate,
         'active_stampede_locks': total_stampede_locks,
         'user_cache_generation': user_cache._generation,
+        # 🔴 FIX-AE1
+        'internal_cache_included': bool(
+            _INTERNAL_CACHE_AVAILABLE and _internal_cache_obj is not None),
     }
 
 
@@ -1225,6 +1337,9 @@ __all__ = [
     'get_detailed_stats',
     'health_snapshot',
     'cache_key',
+    # 🔴 FIX-AE1 (v7.6.6)
+    '_INTERNAL_CACHE_AVAILABLE',
+    '_internal_cache_obj',
 ]
 
 
@@ -1234,11 +1349,14 @@ __all__ = [
 
 try:
     logger.info(
-        "💾 cache.py v7.6.5 PERF-PARALLEL-LOAD loaded | "
+        "💾 cache.py v7.6.6 FIX-AE1 loaded | "
         "get_or_set=stampede-safe | TTL_jitter=%.0f%% | "
         "_load_user_full_data=parallel(3 calls) | "
-        "cache_cleanup_task=raise-on-cancel",
+        "cache_cleanup_task=raise-on-cancel + cleanup_expired-aware | "
+        "internal_cache=%s (%d caches total)",
         TTL_JITTER_RATIO * 100,
+        "included" if _INTERNAL_CACHE_AVAILABLE else "NOT-included",
+        len(_ALL_CACHES),
     )
 except Exception:
     pass
