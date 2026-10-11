@@ -2,8 +2,20 @@
 # -*- coding: utf-8 -*-
 
 """
-config.py - إعدادات البوت الأساسية (v7.0.6 — FIX-R12)
+config.py - إعدادات البوت الأساسية (v7.0.7 — FIX-NO-WARN)
 ================================================================================
+🆕 v7.0.7 (FIX-NO-WARN):
+    🟢 FIX-NW-1: _parse_developer_ids — يستثني PRIMARY_OWNER_ID تلقائياً.
+               السبب: كان يُطلق تحذيراً عند تكراره في DEVELOPER_IDS.
+               الآن: إزالة صامتة (is_developer لا يتأثر — يفحص المالك أولاً).
+    🟢 FIX-NW-2: PG_STATEMENT_TIMEOUT_MS — auto-clamp إلى ≥ 30000ms.
+               السبب: قيم < 5s تُقتل VACUUM → dead tuples. الآن: تُرفع
+               صامتة إلى 30s (الحد الآمن) بدل التحذير.
+    🟢 FIX-NW-3: validate() — حذف تحذيرَي "PRIMARY_OWNER_ID في DEVELOPER_IDS"
+               و"PG_STATEMENT_TIMEOUT_MS < 5s" لأنهما غير قابلين للحدوث بعد
+               الإصلاحين أعلاه. يبقى تحذير الحد الأعلى (> 300000ms) لأنه
+               ما زال قابلاً للحدوث.
+
 🆕 v7.0.6 (FIX-R12):
     🔴 FIX-R12: PG_STATEMENT_TIMEOUT_MS — من 3000 إلى 60000.
                السبب: VACUUM على جداول كبيرة يستغرق 20-60s. مع 3000
@@ -81,6 +93,15 @@ logger = logging.getLogger(__name__)
 
 
 # ═══════════════════════════════════════════════════════════════════
+# ثوابت الحدود الدنيا الآمنة (v7.0.7 FIX-NW-2)
+# ═══════════════════════════════════════════════════════════════════
+
+# 🟢 FIX-NW-2: 30s حد أدنى لـ statement_timeout — يمنح VACUUM وقتاً كافياً
+# على جداول كبيرة (20-60s نموذجياً) دون إطلاق تحذير للمستخدم.
+_PG_STMT_TIMEOUT_MIN_MS = 30000
+
+
+# ═══════════════════════════════════════════════════════════════════
 # دوال التحويل الآمن
 # ═══════════════════════════════════════════════════════════════════
 
@@ -126,25 +147,30 @@ def safe_abs_path(value: str, default: str) -> str:
 def _parse_developer_ids() -> Tuple[int, ...]:
     """
     👑 v7.0.2 DEV-1: تحليل DEVELOPER_IDS من متغير البيئة.
+    🟢 v7.0.7 FIX-NW-1: يستثني PRIMARY_OWNER_ID تلقائياً.
 
     - يقبل صيغة comma-separated: "111,222,333"
     - يتجاهل الفراغات والقيم غير الصحيحة
     - يقبل فقط الأرقام الموجبة (> 0)
     - يزيل التكرار تلقائياً (set)
+    - يستثني MAIN_ADMIN_ID (مُغطّى أصلاً بـ is_developer)
     - يُرجع tuple مُرتَّب تصاعدياً (سلوك متوقّع ومستقر)
 
     Returns:
-        Tuple[int, ...]: مثال (111, 222, 333)
+        Tuple[int, ...]: مثال (222, 333)
         () إذا كان المتغير فارغاً أو غير صالح
     """
     raw = os.getenv("DEVELOPER_IDS", "") or ""
+    # 🟢 FIX-NW-1: قراءة المالك لاستثنائه من قائمة المطورين
+    owner_id = safe_int(os.getenv("MAIN_ADMIN_ID", "0"))
     seen: set = set()
     for token in raw.split(","):
         token = token.strip()
         if not token:
             continue
         uid = safe_int(token, 0)
-        if uid > 0:
+        # 🟢 FIX-NW-1: تجاهل المالك (is_developer يفحصه أولاً)
+        if uid > 0 and uid != owner_id:
             seen.add(uid)
     return tuple(sorted(seen))
 
@@ -680,11 +706,12 @@ class AppConfig:
 
     # 🔴 FIX-R12 (v7.0.6): رفع القيمة الافتراضية من 3000 إلى 60000 (60s)
     # السبب: VACUUM على جداول كبيرة يستغرق 20-60s. مع 3000، كان
-    # يُقتل دائماً → dead tuples تتراكم → DB ينتفخ. مع 60000:
-    # 60s سقف معقول يكشف الاستعلامات المتعثرة الحقيقية ويمنح
-    # VACUUM فرصة كافية.
-    PG_STATEMENT_TIMEOUT_MS: int = safe_int(
-        os.getenv("PG_STATEMENT_TIMEOUT_MS", "60000")
+    # يُقتل دائماً → dead tuples تتراكم → DB ينتفخ.
+    # 🟢 v7.0.7 FIX-NW-2: auto-clamp إلى ≥ 30000ms (30s) لتفادي تحذير
+    # عند وجود قيمة أقل في .env (مثل 3000). 30s حد أدنى آمن لـ VACUUM.
+    PG_STATEMENT_TIMEOUT_MS: int = max(
+        _PG_STMT_TIMEOUT_MIN_MS,
+        safe_int(os.getenv("PG_STATEMENT_TIMEOUT_MS", "60000"))
     )
     PG_IDLE_TX_TIMEOUT_MS: int = safe_int(
         os.getenv("PG_IDLE_TX_TIMEOUT_MS", "30000")
@@ -815,6 +842,9 @@ class AppConfig:
     def is_developer(self, user_id: int) -> bool:
         """
         👑 v7.0.2 DEV-2: هل المستخدم مطور/مالك؟
+        🟢 v7.0.7 FIX-NW-1: DEVELOPER_IDS لم يعد يحتوي المالك (مُستثنى
+        في _parse_developer_ids) — لكن السلوك لم يتغير لأن المالك
+        يُفحص أولاً عبر PRIMARY_OWNER_ID.
 
         تُستخدم من:
           • database.py::Database._is_dev_user
@@ -1026,13 +1056,8 @@ class AppConfig:
             )
 
         # 👑 v7.0.2 DEV-3: تحقق من تكرار المالك في DEVELOPER_IDS
-        if (self.PRIMARY_OWNER_ID > 0
-                and self.PRIMARY_OWNER_ID in self.DEVELOPER_IDS):
-            warnings.append(
-                f"PRIMARY_OWNER_ID ({self.PRIMARY_OWNER_ID}) موجود أيضاً "
-                f"في DEVELOPER_IDS — تكرار غير مؤذٍ لكن زائد. "
-                f"يُفضَّل إزالته من DEVELOPER_IDS."
-            )
+        # 🟢 v7.0.7 FIX-NW-3: حُذف التحذير — _parse_developer_ids
+        # يستثني المالك تلقائياً، فالتكرار غير قابل للحدوث الآن.
 
         if self.ENVIRONMENT not in (
             "production", "development", "staging", "test"
@@ -1132,13 +1157,10 @@ class AppConfig:
             )
 
         # 🔴 FIX-R12 (v7.0.6): تحقق من أن PG_STATEMENT_TIMEOUT_MS معقول
-        if self.PG_STATEMENT_TIMEOUT_MS < 5000:
-            warnings.append(
-                f"⚠️ PG_STATEMENT_TIMEOUT_MS="
-                f"{self.PG_STATEMENT_TIMEOUT_MS}ms — أقل من 5s. "
-                f"قد يُقتل VACUUM على جداول كبيرة → dead tuples تتراكم."
-            )
-        elif self.PG_STATEMENT_TIMEOUT_MS > 300000:
+        # 🟢 v7.0.7 FIX-NW-3: حُذف فرع < 5000ms لأنه غير قابل للحدوث
+        # الآن (auto-clamp إلى ≥ 30000ms في تعريف الحقل). يبقى فرع
+        # الحد الأعلى لأنه ما زال قابلاً للحدوث عند قيم كبيرة يدوياً.
+        if self.PG_STATEMENT_TIMEOUT_MS > 300000:
             warnings.append(
                 f"⚠️ PG_STATEMENT_TIMEOUT_MS="
                 f"{self.PG_STATEMENT_TIMEOUT_MS}ms — أكبر من 5 دقائق. "
@@ -1515,6 +1537,8 @@ else:
     )
 
 # 👑 v7.0.2: سجل المطورين (DEV-PERMANENT)
+# 🟢 v7.0.7 FIX-NW-1: DEVELOPER_IDS لم يعد يحتوي المالك، لذا
+# نجمع المالك + DEVELOPER_IDS لعرض القائمة الكاملة (كما كان).
 _all_dev_ids = tuple(sorted(set(
     ([CONFIG.PRIMARY_OWNER_ID] if CONFIG.PRIMARY_OWNER_ID else [])
     + list(CONFIG.DEVELOPER_IDS)
