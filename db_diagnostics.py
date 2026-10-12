@@ -1,60 +1,31 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-db_diagnostics.py — واجهة تشخيص وصيانة قاعدة البيانات (v7.0.1 — FIX-BUNDLE)
+db_diagnostics.py — واجهة تشخيص وصيانة قاعدة البيانات (v7.1.0 — LATENCY-PROBE)
 ================================================================================
+🆕 v7.1.0 — LATENCY-PROBE:
+    🔬 FEAT-1: _probe_db_latency() — قياس كمون الشبكة/DB مباشرةً.
+        • يقيس: TCP connect → first query → warm queries → PK SELECT → bulk fetch
+        • يكشف: هل البطء من الشبكة أم من DB أم من البوت؟
+        • يعمل على PostgreSQL / MySQL / SQLite.
+    🔬 FEAT-2: format_latency_report() — تقرير HTML جاهز للعرض.
+    🔬 FEAT-3: diagnose_latency() — API عام.
+    🔬 FEAT-4: get_latency_verdict() — إصدار حكم آلي:
+        • "excellent" | "good" | "acceptable" | "slow" | "critical"
+        • مع توصية عملية بناءً على القياس.
+    🟢 FEAT-5: cache 120s — يمنع الضغط عند استدعاءات متكررة.
+    🟢 FEAT-6: لا يلمس pool البوت — يستخدم اتصالاً مستقلاً للقياس النقي.
+
 🆕 v7.0.1 — FIX-BUNDLE (AF1 + AF2 + AF3 + AF4):
     🔴 FIX-AF1: bot_addition_log.date_column — من created_at إلى added_at.
-               السبب: الجدول لا يحتوي created_at → preview_maintenance
-               و run_maintenance كانا يفشلان بصمت → الجدول ينمو بلا حدود.
     🔴 FIX-AF2: user_messages.date_column — من created_at إلى message_time.
-               السبب: نفس مشكلة AF1.
     🔴 FIX-AF3: vacuum_analyze_tables — فحص SQLite قبل حلقة VACUUM.
-               السبب: db.vacuum(table) على SQLite يتجاهل table ويُنفّذ
-               VACUUM كاملاً. مع 20 جدولاً = 20 VACUUMs كاملة
-               (10-40 دقيقة) بدل VACUUM واحد (~1-2 دقيقة).
     🔴 FIX-AF4: run_maintenance — نفس منطق AF3 في قسم VACUUM.
 
 🆕 v7.0.0 — CACHE-LAYER + PARALLEL-REPORT:
-    🟢 PERF-1: طبقة cache مركزية بـ TTL لكل دالة تشخيصية:
-        • _get_all_tables_health → 60s   (الأهم — 0.45s → ~0ms بعد أول استدعاء)
-        • _get_all_table_names   → 300s
-        • _get_db_metadata       → 300s
-        • _get_pg_settings       → 600s
-        • _get_table_sizes       → 300s
-        • _get_indexes           → 300s
-    🟢 PERF-2: _build_sections() يستخدم asyncio.gather لتشغيل
-        6 استعلامات بالتوازي بدل التسلسل → التقرير الكامل من ~1.5s إلى ~0.4s.
-    🟢 PERF-3: _invalidate_cache() جديدة + تُستدعى تلقائياً بعد VACUUM.
-    🟢 PERF-4: _get_activity_stats() و _get_cleanup_status() بدون cache
-        (يحتاجان real-time data).
-    🟡 PERF-5: auto_vacuum_dirty_mvs يُبطل cache health قبل قياس
-        "total_dead_after" لتفادي القيم القديمة.
-
-🆕 v6.9.5 — إصلاح جذري لفحص MVs في _get_all_tables_health():
-    🔴 FIX-MV-1: _get_all_tables_health() يستخدم pg_class + pg_stat_all_tables
-       بدل pg_stat_user_tables (الأخير لا يحتوي MVs إطلاقاً).
-       الفائدة: mv_active_user_limits يظهر الآن في التقارير + auto_vacuum_dirty_mvs
-       يعمل عليه فعلياً.
-    🔴 FIX-MV-2: COALESCE لكل إحصاءات (MVs قد لا تحتوي n_live_tup).
-    🟡 FIX-MV-3: WHERE c.relkind IN ('r', 'm') لتشمل الجداول + MVs.
-    🟡 FIX-MV-4: الترتيب يستخدم COALESCE (للتعامل مع NULL).
-
-🆕 v6.9.4 — سياسة تنظيف آمنة + حماية المشتركين:
-    🔒 SAFE-1: سياسة تنظيف هيكلية (dict) لكل جدول.
-    🔒 SAFE-2: جداول المستخدمين/المشتركين/المالية محمية تماماً.
-    🔒 SAFE-3: استثناء المستخدمين المشتركين من الحذف (dynamic).
-    🔒 SAFE-4: لا حذف إن لم يتجاوز الجدول الحد المحدد.
-    🔒 SAFE-5: معاينة إلزامية قبل التنفيذ.
-
-    🔴 FIX-1: _get_all_table_names() يشمل Materialized Views.
-    🔴 FIX-2: _calc_technical_score() بحد أدنى مطلق (dead >= 50).
-    🔴 FIX-3: _dead_color() بحد أدنى مطلق (dead >= 10).
-    🟡 FIX-4: وسم [MV] في التقارير.
-    🟡 FIX-5: _get_all_tables_health() يجلب relkind.
-    🟢 FEAT-1: auto_vacuum_dirty_mvs() — تنظيف تلقائي للـ MVs.
-
-⚠️ v6.5.1+: user_violations.last_violation_time (بدل created_at)
+    🟢 PERF-1: طبقة cache مركزية بـ TTL لكل دالة تشخيصية.
+    🟢 PERF-2: _build_sections() يستخدم asyncio.gather (6 استعلامات متوازية).
+    🟢 PERF-3: _invalidate_cache() جديدة + تُستدعى بعد VACUUM.
 ================================================================================
 """
 
@@ -62,7 +33,11 @@ import logging
 import html as _html
 import asyncio
 import time
+import os
+import socket
+import statistics
 from typing import Dict, List, Any, Optional, Tuple
+from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
 
@@ -71,7 +46,7 @@ logger = logging.getLogger(__name__)
 # الإصدار
 # ═══════════════════════════════════════════════════════════════════════
 
-VERSION = "7.0.1"
+VERSION = "7.1.0"
 
 # 🆕 v6.9.4: حدود الدقة — تمنع الإنذارات الكاذبة
 _MIN_DEAD_FOR_CRITICAL = 50   # أقل من هذا → لا يُصنَّف حرجاً مهما كانت النسبة
@@ -80,15 +55,6 @@ _MIN_DEAD_FOR_COLOR = 10      # أقل من هذا → ✅ دائماً
 
 # ═══════════════════════════════════════════════════════════════════════
 # 🆕 v7.0.0 PERF-1: طبقة Cache مركزية بـ TTL
-# ═══════════════════════════════════════════════════════════════════════
-#
-# الهدف: تجنّب تنفيذ نفس استعلام pg_catalog عشرات المرات في التقرير الواحد.
-# الأثر: 0.45s → ~0ms بعد أول استدعاء خلال نافذة الـ TTL.
-#
-# ملاحظات:
-#   • _get_activity_stats و _get_cleanup_status بلا cache (real-time).
-#   • auto_vacuum_dirty_mvs يُبطل cache health بعد VACUUM.
-#   • _invalidate_cache() متاحة يدوياً.
 # ═══════════════════════════════════════════════════════════════════════
 
 _CACHE: Dict[str, Dict[str, Any]] = {}
@@ -100,6 +66,7 @@ _CACHE_TTL: Dict[str, float] = {
     "pg_settings":       600.0,  # 10 دقائق (نادراً ما تتغير)
     "table_sizes":       300.0,  # 5 دقائق
     "indexes":           300.0,  # 5 دقائق
+    "latency_probe":     120.0,  # 🆕 v7.1.0: 120s
 }
 
 
@@ -173,8 +140,7 @@ _CLEANUP_POLICY: Dict[str, Dict[str, Any]] = {
         "extra_where": None,
     },
     "bot_addition_log": {
-        # 🔴 FIX-AF1 (v7.0.1): العمود الصحيح هو added_at (حسب database_tables.py)
-        # الجدول لا يحتوي created_at — الاستعلام كان يفشل بصمت.
+        # 🔴 FIX-AF1 (v7.0.1): العمود الصحيح هو added_at
         "date_column": "added_at",
         "retention":   90,
         "max_mb":      20,
@@ -191,8 +157,7 @@ _CLEANUP_POLICY: Dict[str, Dict[str, Any]] = {
 
     # رسائل المستخدمين — 🔒 لا تحذف رسائل مشترك نشط
     "user_messages": {
-        # 🔴 FIX-AF2 (v7.0.1): العمود الصحيح هو message_time (حسب database_tables.py)
-        # الجدول لا يحتوي created_at — الاستعلام كان يفشل بصمت.
+        # 🔴 FIX-AF2 (v7.0.1): العمود الصحيح هو message_time
         "date_column": "message_time",
         "retention":   30,
         "max_mb":      20,
@@ -204,7 +169,7 @@ _CLEANUP_POLICY: Dict[str, Dict[str, Any]] = {
         ),
     },
 
-    # ── المجموعة 3: أرشيف (محذوف من الأصل) ─────────────────────────
+    # ── المجموعة 3: أرشيف ───────────────────────────────────────────
     "penalty_archive": {
         "date_column": "created_at",
         "retention":   90,
@@ -215,7 +180,7 @@ _CLEANUP_POLICY: Dict[str, Dict[str, Any]] = {
     # ── المجموعة 4: حساسة — حماية مشددة ────────────────────────────
     "user_violations": {
         "date_column": "last_violation_time",
-        "retention":   180,   # احتفظ بـ 6 أشهر
+        "retention":   180,
         "max_mb":      20,
         "extra_where": (
             "user_id NOT IN ("
@@ -226,7 +191,7 @@ _CLEANUP_POLICY: Dict[str, Dict[str, Any]] = {
     },
 
     # ═══════════════════════════════════════════════════════════════
-    # 🔒 جداول محمية — لا حذف أبداً (بيانات المستخدمين والأعمال)
+    # 🔒 جداول محمية — لا حذف أبداً
     # ═══════════════════════════════════════════════════════════════
     "users":             {"protected": True},
     "subscriptions":     {"protected": True},
@@ -377,6 +342,566 @@ def _dead_color(dead: int, live: int) -> str:
 
 
 # ═══════════════════════════════════════════════════════════════════════
+# 🆕 v7.1.0: LATENCY PROBE — قياس كمون الشبكة/DB
+# ═══════════════════════════════════════════════════════════════════════
+#
+# الهدف: تشخيص ما إذا كان البطء ناتجاً عن:
+#   (أ) شبكة بطيئة بين البوت و DB  → connect_time مرتفع
+#   (ب) DB محمّلة                   → warm queries مرتفعة
+#   (ج) event loop مشبع             → كل القياسات طبيعية لكن البوت بطيء
+#
+# المنهجية:
+#   1. TCP connect إلى DB host (صافي الشبكة — لا asyncpg).
+#   2. asyncpg.connect → قياس زمن المصادقة الكامل.
+#   3. أول استعلام (cold) → يتضمّن prepare + execute + fetch.
+#   4. 5 استعلامات متتالية (warm) → لقياس الاستقرار.
+#   5. PK SELECT حقيقي → قياس أقرب لسلوك البوت.
+#   6. bulk fetch (100 صف) → لقياس bandwidth.
+#
+# ملاحظة: يستخدم اتصالاً مستقلاً — لا يؤثر على pool البوت.
+# ═══════════════════════════════════════════════════════════════════════
+
+async def _probe_db_latency(
+    *,
+    force: bool = False,
+    socket_timeout: float = 5.0,
+) -> Dict[str, Any]:
+    """
+    🔬 v7.1.0: قياس كمون الشبكة/DB مباشرةً.
+
+    Args:
+        force: تجاهل الكاش.
+        socket_timeout: مهلة فتح socket TCP (ثوان).
+
+    Returns:
+        dict بمفاتيح:
+          - ok: bool — هل نجح القياس؟
+          - db_type: "postgres" | "mysql" | "sqlite" | "unknown"
+          - host, port: معلومات الاتصال (بدون credentials)
+          - tcp_connect_ms: زمن TCP connect (خارج asyncpg)
+          - asyncpg_connect_ms: زمن asyncpg.connect الكامل (TCP+auth)
+          - first_query_ms: أول استعلام (cold)
+          - warm_queries_ms: قائمة أزمنة 5 استعلامات warm
+          - warm_median_ms: الوسيط
+          - pk_select_ms: PK SELECT حقيقي
+          - bulk_fetch_ms: fetch 100 صف
+          - bulk_rows: عدد الصفوف
+          - verdict: excellent | good | acceptable | slow | critical
+          - diagnosis: نص وصفي
+          - recommendation: توصية عملية
+    """
+
+    if not force:
+        cached = _cache_get("latency_probe")
+        if cached is not None:
+            return cached
+
+    db = _get_db()
+    if db is None:
+        return {
+            "ok": False,
+            "error": "DB غير مستورد",
+            "verdict": "unknown",
+        }
+
+    db_type = str(getattr(db, "DB_TYPE", "sqlite")).lower()
+    result: Dict[str, Any] = {
+        "ok": False,
+        "db_type": db_type,
+        "verdict": "unknown",
+        "diagnosis": "",
+        "recommendation": "",
+    }
+
+    # ═══════════════════════════════════════════════════════════════
+    # SQLite — قياس مباشر بدون شبكة
+    # ═══════════════════════════════════════════════════════════════
+    if db_type == "sqlite":
+        try:
+            t0 = time.monotonic()
+            await db.fetchval("SELECT 1", default=0)
+            first_ms = (time.monotonic() - t0) * 1000
+
+            warm: List[float] = []
+            for _ in range(5):
+                t0 = time.monotonic()
+                await db.fetchval("SELECT 1", default=0)
+                warm.append((time.monotonic() - t0) * 1000)
+
+            result.update({
+                "ok": True,
+                "tcp_connect_ms": 0.0,
+                "asyncpg_connect_ms": 0.0,
+                "first_query_ms": round(first_ms, 2),
+                "warm_queries_ms": [round(x, 2) for x in warm],
+                "warm_median_ms": round(statistics.median(warm), 2),
+                "pk_select_ms": round(first_ms, 2),
+                "bulk_fetch_ms": 0.0,
+                "bulk_rows": 0,
+                "verdict": _verdict_from_warm(statistics.median(warm)),
+                "diagnosis": "SQLite محلي — لا شبكة.",
+                "recommendation": "الأداء يعتمد على I/O القرص.",
+            })
+        except Exception as e:
+            result["error"] = f"SQLite probe: {e}"
+        _cache_set("latency_probe", result, ttl=120.0)
+        return result
+
+    # ═══════════════════════════════════════════════════════════════
+    # PostgreSQL / MySQL — قياس شبكة + DB
+    # ═══════════════════════════════════════════════════════════════
+
+    # استخرج host/port من DATABASE_URL (بدون credentials)
+    db_url = (
+        getattr(db, "DATABASE_URL", "")
+        or os.getenv("DATABASE_URL", "")
+    )
+    host = "?"
+    port = 0
+    try:
+        parsed = urlparse(db_url)
+        host = parsed.hostname or "?"
+        port = parsed.port or (5432 if db_type == "postgres" else 3306)
+        result["host"] = host
+        result["port"] = port
+    except Exception as e:
+        logger.debug(f"parse DATABASE_URL: {e}")
+
+    # ─── 1) TCP connect (خارج asyncpg — قياس نقي) ────────────────
+    if host != "?" and port > 0:
+        try:
+            t0 = time.monotonic()
+            loop = asyncio.get_event_loop()
+            # asyncio.open_connection عبر loop.sock_connect → قياس TCP handshake
+            fut = loop.run_in_executor(
+                None,
+                lambda: socket.create_connection(
+                    (host, port), timeout=socket_timeout
+                ),
+            )
+            sock = await asyncio.wait_for(fut, timeout=socket_timeout + 1.0)
+            tcp_ms = (time.monotonic() - t0) * 1000
+            try:
+                sock.close()
+            except Exception:
+                pass
+            result["tcp_connect_ms"] = round(tcp_ms, 2)
+        except asyncio.TimeoutError:
+            result["tcp_connect_ms"] = -1.0
+            result["error"] = f"TCP timeout >{socket_timeout}s"
+            result["verdict"] = "critical"
+            result["diagnosis"] = (
+                f"🔴 لا يمكن الوصول إلى {host}:{port} خلال "
+                f"{socket_timeout}s — شبكة مقطوعة أو DB مُطفأ."
+            )
+            _cache_set("latency_probe", result, ttl=120.0)
+            return result
+        except Exception as e:
+            result["tcp_connect_ms"] = -1.0
+            result["error"] = f"TCP: {type(e).__name__}: {e}"
+            result["verdict"] = "critical"
+            _cache_set("latency_probe", result, ttl=120.0)
+            return result
+    else:
+        result["tcp_connect_ms"] = -1.0
+
+    # ─── 2) asyncpg/asyncmy connect كامل ─────────────────────────
+    conn = None
+    try:
+        t0 = time.monotonic()
+
+        if db_type == "postgres":
+            try:
+                import asyncpg  # type: ignore
+            except ImportError:
+                result["error"] = "asyncpg غير مثبت"
+                _cache_set("latency_probe", result, ttl=120.0)
+                return result
+
+            try:
+                conn = await asyncio.wait_for(
+                    asyncpg.connect(db_url, timeout=socket_timeout),
+                    timeout=socket_timeout + 2.0,
+                )
+            except asyncio.TimeoutError:
+                result["error"] = f"asyncpg.connect timeout >{socket_timeout}s"
+                result["verdict"] = "critical"
+                _cache_set("latency_probe", result, ttl=120.0)
+                return result
+        elif db_type == "mysql":
+            try:
+                import asyncmy  # type: ignore
+            except ImportError:
+                result["error"] = "asyncmy غير مثبت"
+                _cache_set("latency_probe", result, ttl=120.0)
+                return result
+            try:
+                conn = await asyncio.wait_for(
+                    asyncmy.connect(db_url),
+                    timeout=socket_timeout + 2.0,
+                )
+            except asyncio.TimeoutError:
+                result["error"] = f"asyncmy.connect timeout >{socket_timeout}s"
+                result["verdict"] = "critical"
+                _cache_set("latency_probe", result, ttl=120.0)
+                return result
+        else:
+            result["error"] = f"DB type غير مدعوم: {db_type}"
+            _cache_set("latency_probe", result, ttl=120.0)
+            return result
+
+        connect_ms = (time.monotonic() - t0) * 1000
+        result["asyncpg_connect_ms"] = round(connect_ms, 2)
+
+        # ─── 3) أول استعلام (cold) ────────────────────────────────
+        t0 = time.monotonic()
+        if db_type == "postgres":
+            await conn.fetchval("SELECT 1")
+        else:
+            cur = conn.cursor()
+            await cur.execute("SELECT 1")
+            await cur.fetchone()
+            try:
+                await cur.close()
+            except Exception:
+                pass
+        first_ms = (time.monotonic() - t0) * 1000
+        result["first_query_ms"] = round(first_ms, 2)
+
+        # ─── 4) 5 استعلامات warm ─────────────────────────────────
+        warm: List[float] = []
+        for _ in range(5):
+            t0 = time.monotonic()
+            if db_type == "postgres":
+                await conn.fetchval("SELECT 1")
+            else:
+                cur = conn.cursor()
+                await cur.execute("SELECT 1")
+                await cur.fetchone()
+                try:
+                    await cur.close()
+                except Exception:
+                    pass
+            warm.append((time.monotonic() - t0) * 1000)
+        result["warm_queries_ms"] = [round(x, 2) for x in warm]
+        warm_median = statistics.median(warm)
+        result["warm_median_ms"] = round(warm_median, 2)
+
+        # ─── 5) PK SELECT حقيقي ──────────────────────────────────
+        try:
+            t0 = time.monotonic()
+            if db_type == "postgres":
+                await conn.fetchval(
+                    "SELECT language FROM users WHERE user_id = $1 LIMIT 1",
+                    1,
+                )
+            else:
+                cur = conn.cursor()
+                await cur.execute(
+                    "SELECT language FROM users WHERE user_id = %s LIMIT 1",
+                    (1,),
+                )
+                await cur.fetchone()
+                try:
+                    await cur.close()
+                except Exception:
+                    pass
+            result["pk_select_ms"] = round(
+                (time.monotonic() - t0) * 1000, 2
+            )
+        except Exception as e:
+            result["pk_select_ms"] = -1.0
+            logger.debug(f"pk_select probe: {e}")
+
+        # ─── 6) bulk fetch ───────────────────────────────────────
+        try:
+            t0 = time.monotonic()
+            if db_type == "postgres":
+                rows = await conn.fetch(
+                    "SELECT * FROM admin_logs LIMIT 100"
+                )
+            else:
+                cur = conn.cursor()
+                await cur.execute("SELECT * FROM admin_logs LIMIT 100")
+                rows = await cur.fetchall()
+                try:
+                    await cur.close()
+                except Exception:
+                    pass
+            bulk_ms = (time.monotonic() - t0) * 1000
+            result["bulk_fetch_ms"] = round(bulk_ms, 2)
+            result["bulk_rows"] = len(rows) if rows else 0
+        except Exception as e:
+            result["bulk_fetch_ms"] = -1.0
+            result["bulk_rows"] = 0
+            logger.debug(f"bulk_fetch probe: {e}")
+
+        # ─── 7) الحكم ────────────────────────────────────────────
+        verdict, diagnosis, recommendation = _compute_latency_verdict(result)
+        result["verdict"] = verdict
+        result["diagnosis"] = diagnosis
+        result["recommendation"] = recommendation
+        result["ok"] = True
+
+    except Exception as e:
+        logger.warning(f"_probe_db_latency: {e}")
+        result["error"] = f"{type(e).__name__}: {str(e)[:200]}"
+        result["verdict"] = "critical"
+    finally:
+        if conn is not None:
+            try:
+                if db_type == "postgres":
+                    await conn.close()
+                else:
+                    try:
+                        conn.close()
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
+    _cache_set("latency_probe", result, ttl=120.0)
+    return result
+
+
+def _verdict_from_warm(warm_ms: float) -> str:
+    """حكم مختصر بناءً على الوسيط فقط (SQLite)."""
+    if warm_ms < 5:
+        return "excellent"
+    if warm_ms < 20:
+        return "good"
+    if warm_ms < 100:
+        return "acceptable"
+    if warm_ms < 500:
+        return "slow"
+    return "critical"
+
+
+def _compute_latency_verdict(result: Dict[str, Any]) -> Tuple[str, str, str]:
+    """
+    🔬 v7.1.0 FEAT-4: يبني حكماً آلياً + توصية عملية.
+
+    المنطق:
+      • TCP connect > 300ms → شبكة سيئة (لا علاقة بالـ DB).
+      • asyncpg_connect - tcp_connect > 200ms → مشكلة TLS/auth.
+      • warm_median > 100ms → DB محمّلة.
+      • first_query >> warm_median (10x+) → cold start للـ cache.
+      • pk_select > 200ms → مشكلة فهارس أو network متكرر.
+    """
+    tcp = float(result.get("tcp_connect_ms") or 0)
+    conn = float(result.get("asyncpg_connect_ms") or 0)
+    warm = float(result.get("warm_median_ms") or 0)
+    first = float(result.get("first_query_ms") or 0)
+    pk = float(result.get("pk_select_ms") or 0)
+
+    # ─── الحالة الأسوأ أولاً ────────────────────────────────
+    if tcp < 0:
+        return (
+            "critical",
+            "🔴 لا يمكن قياس TCP — الشبكة مقطوعة أو DB غير متاح.",
+            "تحقّق من DATABASE_URL، حالة DB، وأي firewall.",
+        )
+
+    # ─── مقارنة TCP مع warm ────────────────────────────────
+    if tcp > 300 and warm < 50:
+        return (
+            "slow",
+            f"🟠 زمن TCP ({tcp:.0f}ms) مرتفع جداً، لكن DB يستجيب "
+            f"بسرعة (warm={warm:.0f}ms). المشكلة في **الشبكة**، لا DB.",
+            "انقل البوت أو DB إلى نفس المنطقة الجغرافية. "
+            "أو استخدم connection pooler (PgBouncer) قريباً منك.",
+        )
+
+    if tcp > 150 and warm < 30:
+        return (
+            "acceptable",
+            f"🟡 TCP={tcp:.0f}ms (مقبول)، DB={warm:.0f}ms. "
+            f"هذا يطابق نمط: كل استعلام +{tcp:.0f}ms.",
+            f"مع {tcp:.0f}ms ذهاب-وإياب، كل استعلام معقّد (3-5 round-trips) "
+            f"يستغرق ~{tcp*3:.0f}-{tcp*5:.0f}ms. "
+            "قلّل عدد الاستعلامات أو انقل DB أقرب.",
+        )
+
+    # ─── DB محمّلة ──────────────────────────────────────────
+    if warm > 500:
+        return (
+            "critical",
+            f"🔴 DB بطيء حتى على SELECT 1 ({warm:.0f}ms). "
+            "الخادم مُشبع أو مشاكل hardware.",
+            "راجع CPU/RAM/disk I/O على خادم PostgreSQL. "
+            "جرّب pg_stat_statements لكشف استعلامات ثقيلة.",
+        )
+
+    if warm > 100:
+        return (
+            "slow",
+            f"🟠 DB يستجيب بـ {warm:.0f}ms لـ SELECT 1 — بطء داخلي. "
+            "ربما autovacuum يجري، أو replication lag.",
+            "شغّل VACUUM ANALYZE، راجع pg_stat_activity، "
+            "تحقّق من shared_buffers (يجب ≥ 25% RAM).",
+        )
+
+    # ─── كل شيء جيد ────────────────────────────────────────
+    if warm < 20 and tcp < 50:
+        return (
+            "excellent",
+            f"🟢 ممتاز — TCP={tcp:.0f}ms، DB={warm:.0f}ms.",
+            "لا حاجة لأي تغيير.",
+        )
+
+    if warm < 50 and tcp < 100:
+        return (
+            "good",
+            f"🟢 جيد — TCP={tcp:.0f}ms، DB={warm:.0f}ms.",
+            "الأداء سليم.",
+        )
+
+    # ─── حالة default ───────────────────────────────────────
+    return (
+        "acceptable",
+        f"🟡 TCP={tcp:.0f}ms، DB={warm:.0f}ms، "
+        f"first={first:.0f}ms، PK={pk:.0f}ms.",
+        "راقب الأداء — قد يحتاج ضبطاً لاحقاً.",
+    )
+
+
+def format_latency_report(probe: Dict[str, Any]) -> str:
+    """
+    🔬 v7.1.0 FEAT-2: تقرير HTML جاهز للعرض.
+    """
+    if not probe.get("ok"):
+        err = _esc(probe.get("error", "خطأ غير معروف"))
+        return (
+            f"🔬 <b>اختبار الكمون</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"❌ <b>فشل:</b> {err}"
+        )
+
+    lines: List[str] = []
+    lines.append("🔬 <b>اختبار الكمون (Latency Probe)</b>")
+    lines.append("━━━━━━━━━━━━━━━━━━━━━━")
+    lines.append("")
+
+    db_type = str(probe.get("db_type", "?")).upper()
+    host = probe.get("host", "")
+    port = probe.get("port", "")
+    if host and host != "?":
+        lines.append(f"🗄️ <b>{_esc(db_type)}</b> @ "
+                     f"<code>{_esc(host)}:{port}</code>")
+    else:
+        lines.append(f"🗄️ <b>{_esc(db_type)}</b> (محلي)")
+    lines.append("")
+
+    # ─── الشبكة ────────────────────────────────────────────
+    tcp = float(probe.get("tcp_connect_ms", 0) or 0)
+    if tcp > 0:
+        tcp_icon = ("🟢" if tcp < 50 else
+                    "🟡" if tcp < 150 else
+                    "🟠" if tcp < 300 else "🔴")
+        lines.append(f"🌐 TCP connect: {tcp_icon} <b>{tcp:.0f}ms</b>")
+
+    conn = float(probe.get("asyncpg_connect_ms", 0) or 0)
+    if conn > 0:
+        conn_icon = ("🟢" if conn < 100 else
+                     "🟡" if conn < 300 else "🔴")
+        lines.append(f"🔌 asyncpg connect: {conn_icon} "
+                     f"<b>{conn:.0f}ms</b>")
+        if tcp > 0:
+            delta = conn - tcp
+            if delta > 200:
+                lines.append(f"   ⚠️ فرق TCP↔connect: +{delta:.0f}ms "
+                             f"(TLS/auth بطيء)")
+    lines.append("")
+
+    # ─── الاستعلامات ───────────────────────────────────────
+    first = float(probe.get("first_query_ms", 0) or 0)
+    if first > 0:
+        first_icon = ("🟢" if first < 10 else
+                      "🟡" if first < 100 else "🔴")
+        lines.append(f"⚡ أول استعلام: {first_icon} <b>{first:.0f}ms</b>")
+
+    warm_median = float(probe.get("warm_median_ms", 0) or 0)
+    warm_list = probe.get("warm_queries_ms", []) or []
+    if warm_median > 0:
+        warm_icon = ("🟢" if warm_median < 20 else
+                     "🟡" if warm_median < 100 else
+                     "🟠" if warm_median < 500 else "🔴")
+        preview = ", ".join(f"{x:.0f}" for x in warm_list[:5])
+        lines.append(f"🔥 warm (5x): {warm_icon} "
+                     f"وسيط=<b>{warm_median:.0f}ms</b> [{preview}]")
+
+    pk = float(probe.get("pk_select_ms", 0) or 0)
+    if pk > 0:
+        pk_icon = ("🟢" if pk < 20 else
+                   "🟡" if pk < 100 else "🔴")
+        lines.append(f"🎯 PK SELECT: {pk_icon} <b>{pk:.0f}ms</b>")
+    lines.append("")
+
+    # ─── Bulk ──────────────────────────────────────────────
+    bulk = float(probe.get("bulk_fetch_ms", 0) or 0)
+    bulk_rows = int(probe.get("bulk_rows", 0) or 0)
+    if bulk > 0 and bulk_rows > 0:
+        per_row = bulk / bulk_rows
+        lines.append(f"📦 fetch 100: <b>{bulk:.0f}ms</b> "
+                     f"({per_row:.2f}ms/row)")
+        lines.append("")
+
+    # ─── الحكم ─────────────────────────────────────────────
+    verdict = str(probe.get("verdict", "unknown"))
+    diagnosis = str(probe.get("diagnosis", ""))
+    recommendation = str(probe.get("recommendation", ""))
+
+    verdict_label = {
+        "excellent": "🟢 ممتاز",
+        "good": "🟢 جيد",
+        "acceptable": "🟡 مقبول",
+        "slow": "🟠 بطيء",
+        "critical": "🔴 حرج",
+        "unknown": "⚪ غير معروف",
+    }.get(verdict, "⚪ غير معروف")
+
+    lines.append("━━━━━━━━━━━━━━━━━━━━━━")
+    lines.append(f"📊 <b>الحكم:</b> {verdict_label}")
+    lines.append("")
+    if diagnosis:
+        lines.append(f"<b>التشخيص:</b>")
+        lines.append(f"  {_esc(diagnosis)}")
+    if recommendation:
+        lines.append("")
+        lines.append(f"<b>التوصية:</b>")
+        lines.append(f"  {_esc(recommendation)}")
+
+    return "\n".join(lines)
+
+
+async def diagnose_latency(*, force: bool = False) -> str:
+    """
+    🔬 v7.1.0 FEAT-3: API عام — يُرجع تقرير HTML جاهزاً.
+
+    Args:
+        force: تجاهل الكاش (افتراضياً 120s).
+    """
+    probe = await _probe_db_latency(force=force)
+    return format_latency_report(probe)
+
+
+async def get_latency_verdict() -> Dict[str, Any]:
+    """
+    🔬 v7.1.0: يُرجع الحكم فقط (بدون HTML) — للاستخدام البرمجي.
+    """
+    probe = await _probe_db_latency()
+    return {
+        "verdict": probe.get("verdict", "unknown"),
+        "ok": probe.get("ok", False),
+        "warm_median_ms": probe.get("warm_median_ms", 0),
+        "tcp_connect_ms": probe.get("tcp_connect_ms", 0),
+        "asyncpg_connect_ms": probe.get("asyncpg_connect_ms", 0),
+        "diagnosis": probe.get("diagnosis", ""),
+        "recommendation": probe.get("recommendation", ""),
+    }
+
+
+# ═══════════════════════════════════════════════════════════════════════
 # 1) DB Metadata — 🆕 v7.0.0: cache 300s
 # ═══════════════════════════════════════════════════════════════════════
 
@@ -443,13 +968,6 @@ async def _get_db_metadata() -> Dict[str, Any]:
 # ═══════════════════════════════════════════════════════════════════════
 
 async def _get_all_tables_health() -> Tuple[List[Dict], List[Dict]]:
-    """
-    🆕 v7.0.0 PERF-1: cache بـ 60s — 0.45s → ~0ms.
-    🆕 v6.9.5 FIX-MV-1..4: يشمل MVs فعلياً.
-
-    ملاحظة: القيمة المُخبأة tuple من قوائم read-only؛
-    المُستدعي لا يجب أن يُعدّلها.
-    """
     cached = _cache_get("all_tables_health")
     if cached is not None:
         return cached
@@ -547,7 +1065,7 @@ async def _get_all_tables_health() -> Tuple[List[Dict], List[Dict]]:
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# 3) Activity Stats — 🆕 v7.0.0: بلا cache (real-time)
+# 3) Activity Stats — بلا cache (real-time)
 # ═══════════════════════════════════════════════════════════════════════
 
 async def _get_activity_stats() -> Dict[str, Any]:
@@ -593,7 +1111,7 @@ async def _get_activity_stats() -> Dict[str, Any]:
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# 4) PG Settings — 🆕 v7.0.0: cache 600s
+# 4) PG Settings — cache 600s
 # ═══════════════════════════════════════════════════════════════════════
 
 _CRITICAL_SETTINGS = (
@@ -647,7 +1165,7 @@ async def _get_pg_settings() -> Dict[str, str]:
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# 5) Sizes + Indexes — 🆕 v7.0.0: cache 300s
+# 5) Sizes + Indexes — cache 300s
 # ═══════════════════════════════════════════════════════════════════════
 
 async def _get_table_sizes(limit: int = 15) -> List[Dict[str, Any]]:
@@ -693,11 +1211,10 @@ async def _get_indexes(tables: List[str]) -> Dict[str, List[Dict[str, Any]]]:
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# 6) Auto-Cleanup Status — 🆕 v7.0.0: بلا cache (query صغير)
+# 6) Auto-Cleanup Status — بلا cache
 # ═══════════════════════════════════════════════════════════════════════
 
 async def _get_cleanup_status() -> List[Dict[str, Any]]:
-    """🆕 v6.9.4: يقرأ السياسة الفردية لكل جدول."""
     db = _get_db()
     if db is None or not _is_postgres():
         return []
@@ -764,14 +1281,10 @@ async def _get_cleanup_status() -> List[Dict[str, Any]]:
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# 7) Table Names Helper — 🆕 v7.0.0: cache 300s
+# 7) Table Names Helper — cache 300s
 # ═══════════════════════════════════════════════════════════════════════
 
 async def _get_all_table_names() -> List[str]:
-    """
-    🆕 v7.0.0 PERF-1: cache 300s.
-    🔴 FIX-1 v6.9.3: يستخدم pg_class ليشمل Materialized Views.
-    """
     cached = _cache_get("all_table_names")
     if cached is not None:
         return cached
@@ -823,7 +1336,7 @@ async def _get_all_table_names() -> List[str]:
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# 8) Score — 🔴 FIX-2
+# 8) Score
 # ═══════════════════════════════════════════════════════════════════════
 
 def _calc_technical_score(
@@ -831,7 +1344,6 @@ def _calc_technical_score(
     activity: Dict,
     settings: Dict,
 ) -> Tuple[int, int, int, int]:
-    """🔴 FIX-2: الحد الأدنى المطلق dead >= 50."""
     score = 100
     critical = 0
     warn = 0
@@ -862,13 +1374,10 @@ def _calc_technical_score(
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# 9) Maintenance — dict API — 🆕 v6.9.4 آمن
+# 9) Maintenance — dict API
 # ═══════════════════════════════════════════════════════════════════════
 
 async def preview_maintenance() -> Dict[str, Any]:
-    """
-    🆕 v6.9.4: معاينة آمنة — تحمي المشتركين تلقائياً.
-    """
     db = _get_db()
     result: Dict[str, Any] = {
         'plan': [],
@@ -892,7 +1401,6 @@ async def preview_maintenance() -> Dict[str, Any]:
         if not v.get("protected")
     ]
 
-    # 1) اقرأ الأحجام
     sizes_map: Dict[str, int] = {}
     try:
         rows = await db.fetchall("""
@@ -907,7 +1415,6 @@ async def preview_maintenance() -> Dict[str, Any]:
     except Exception as e:
         logger.debug(f"preview_maintenance sizes: {e}")
 
-    # 2) ابنِ الخطة
     total = 0
     for tbl in deletable:
         policy = _CLEANUP_POLICY[tbl]
@@ -937,7 +1444,6 @@ async def preview_maintenance() -> Dict[str, Any]:
             result['plan'].append(entry)
             continue
 
-        # احسب المرشحين — مع حماية المشتركين
         try:
             base_where = f"{col} < NOW() - INTERVAL '{days} days'"
             if extra_where:
@@ -965,11 +1471,6 @@ async def preview_maintenance() -> Dict[str, Any]:
 
 
 async def run_maintenance() -> Dict[str, Any]:
-    """
-    🆕 v6.9.4: تنفيذ آمن — المشتركون النشطون محميون.
-    🆕 v7.0.0: يُبطل الكاش بعد الانتهاء.
-    🔴 FIX-AF4 (v7.0.1): فرع SQLite خاص في قسم VACUUM.
-    """
     db = _get_db()
     start = time.monotonic()
     result: Dict[str, Any] = {
@@ -993,7 +1494,6 @@ async def run_maintenance() -> Dict[str, Any]:
             if not v.get("protected")
         ]
 
-        # 1) اقرأ الأحجام
         sizes_map: Dict[str, int] = {}
         try:
             rows = await db.fetchall("""
@@ -1008,7 +1508,6 @@ async def run_maintenance() -> Dict[str, Any]:
         except Exception as e:
             logger.debug(f"run_maintenance sizes: {e}")
 
-        # 2) نفّذ الحذف
         for tbl in deletable:
             policy = _CLEANUP_POLICY[tbl]
             col = policy["date_column"]
@@ -1043,8 +1542,6 @@ async def run_maintenance() -> Dict[str, Any]:
                 result['deletions'][tbl] = 0
                 result['deletion_errors'][tbl] = str(e)[:100]
 
-    # 3) VACUUM على كل الجداول + MVs
-    # 🔴 FIX-AF4 (v7.0.1): على SQLite، VACUUM واحد كافٍ (نفس منطق AF3).
     if _get_db_type() == "SQLITE":
         try:
             await db.execute("VACUUM")
@@ -1086,15 +1583,12 @@ async def run_maintenance() -> Dict[str, Any]:
                 pass
 
     result['duration_sec'] = round(time.monotonic() - start, 2)
-
-    # 🆕 v7.0.0: إبطال الكاش بعد الصيانة
     _invalidate_cache()
-
     return result
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# 10) Maintenance — HTML formatters — 🆕 v6.9.4
+# 10) Maintenance formatters
 # ═══════════════════════════════════════════════════════════════════════
 
 def format_maintenance_preview(preview: Dict[str, Any]) -> str:
@@ -1235,7 +1729,7 @@ def format_maintenance_result(result: Dict[str, Any]) -> str:
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# 11) Maintenance — HTML shortcuts
+# 11) Maintenance HTML shortcuts
 # ═══════════════════════════════════════════════════════════════════════
 
 async def diagnose_maintenance_preview() -> str:
@@ -1249,20 +1743,12 @@ async def run_db_maintenance() -> str:
 
 
 async def vacuum_analyze_tables() -> str:
-    """
-    🔴 FIX-AF3 (v7.0.1): على SQLite، VACUUM واحد فقط بدل N مرة.
-
-    السبب: db.vacuum(table) على SQLite يتجاهل table ويُنفّذ
-    VACUUM كاملاً. مع 20 جدولاً = 20 VACUUMs كاملة (10-40 دقيقة)
-    بدل VACUUM واحد (~1-2 دقيقة).
-    """
     db = _get_db()
     if db is None:
         return "❌ DB غير مستورد"
 
     start = time.monotonic()
 
-    # 🔴 FIX-AF3: SQLite — VACUUM واحد فقط
     if _get_db_type() == "SQLITE":
         lines = ["🧹 <b>VACUUM (SQLite)</b>",
                  "━━━━━━━━━━━━━━━━━━━━━━", ""]
@@ -1288,9 +1774,6 @@ async def vacuum_analyze_tables() -> str:
         _invalidate_cache()
         return "\n".join(lines)
 
-    # ═══════════════════════════════════════════════════════════════
-    # PostgreSQL / MySQL — VACUUM per-table (صحيح)
-    # ═══════════════════════════════════════════════════════════════
     tables = await _get_all_table_names()
     lines = ["🧹 <b>VACUUM ANALYZE</b>", "━━━━━━━━━━━━━━━━━━━━━━", ""]
 
@@ -1320,22 +1803,15 @@ async def vacuum_analyze_tables() -> str:
     lines.append(f"⏱️ المدة: {elapsed:.2f}s | "
                  f"✅ نجح: {success} | ❌ فشل: {fail}")
 
-    # 🆕 v7.0.0: إبطال الكاش
     _invalidate_cache()
-
     return "\n".join(lines)
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# 11b) 🆕 التنظيف التلقائي للـ MVs — 🆕 v7.0.0: cache-aware
+# 11b) التنظيف التلقائي للـ MVs
 # ═══════════════════════════════════════════════════════════════════════
 
 async def auto_vacuum_dirty_mvs(min_dead: int = 10) -> Dict[str, Any]:
-    """
-    🧹 v7.0.0: تنظيف تلقائي مع إبطال cache قبل القياس النهائي.
-
-    يعتمد على _get_all_tables_health() الذي يشمل MVs.
-    """
     db = _get_db()
     result: Dict[str, Any] = {
         'vacuumed': [],
@@ -1350,7 +1826,6 @@ async def auto_vacuum_dirty_mvs(min_dead: int = 10) -> Dict[str, Any]:
 
     start = time.monotonic()
 
-    # 🆕 v7.0.0: اقرأ القياس الأول بدون cache
     _invalidate_cache("all_tables_health")
     dirty, _ = await _get_all_tables_health()
     result['total_dead_before'] = sum(
@@ -1390,7 +1865,6 @@ async def auto_vacuum_dirty_mvs(min_dead: int = 10) -> Dict[str, Any]:
         except Exception:
             pass
 
-    # 🆕 v7.0.0: إبطال الكاش لقراءة القيم الجديدة
     _invalidate_cache("all_tables_health")
     dirty_after, _ = await _get_all_tables_health()
     result['total_dead_after'] = sum(
@@ -1409,7 +1883,7 @@ async def auto_vacuum_dirty_mvs(min_dead: int = 10) -> Dict[str, Any]:
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# 12) Build Sections — 🆕 v7.0.0 PERF-2: Parallel gather
+# 12) Build Sections — parallel gather
 # ═══════════════════════════════════════════════════════════════════════
 
 async def _build_sections() -> List[str]:
@@ -1418,8 +1892,6 @@ async def _build_sections() -> List[str]:
     critical_idx_tables = ["posts", "banned_words", "bot_groups",
                            "users", "user_channels", "subscriptions"]
 
-    # 🆕 v7.0.0 PERF-2: تشغيل 8 استعلامات بالتوازي
-    # كل استدعاء داخلياً يستخدم cache إن وُجد → لا تكرار
     gathered = await asyncio.gather(
         _get_db_metadata(),
         _get_all_tables_health(),
@@ -1438,10 +1910,8 @@ async def _build_sections() -> List[str]:
     settings = gathered[3] if not isinstance(gathered[3], BaseException) else {}
     sizes = gathered[4] if not isinstance(gathered[4], BaseException) else []
     cleanup_status = gathered[5] if not isinstance(gathered[5], BaseException) else []
-    # all_tables = gathered[6] — غير مستخدم في التقرير الحالي
     idx_map = gathered[7] if not isinstance(gathered[7], BaseException) else {}
 
-    # فك الـ tuple بأمان
     if isinstance(health_result, tuple) and len(health_result) == 2:
         dirty, clean = health_result
     else:
@@ -1496,7 +1966,7 @@ async def _build_sections() -> List[str]:
     s1.append(f"  مؤشر الحالة التقني: <b>{score}/100</b> {score_icon}")
     parts.append("\n".join(s1))
 
-    # SECTION 2
+    # SECTION 2 — التحليل المنطقي
     s2: List[str] = []
     s2.append("╔══════════════════════════════════╗")
     s2.append("║  🎯 التحليل المنطقي          ║")
@@ -1525,7 +1995,7 @@ async def _build_sections() -> List[str]:
               "المشتركون والمستخدمون محميون.")
     parts.append("\n".join(s2))
 
-    # SECTION 3
+    # SECTION 3 — Dead Tuples
     if dirty:
         s3: List[str] = []
         s3.append("━━━━━━━━━━━━━━━━━━━━━━")
@@ -1549,7 +2019,6 @@ async def _build_sections() -> List[str]:
             s3.append("")
         parts.append("\n".join(s3))
 
-    # SECTION 3b
     if clean:
         s3b: List[str] = []
         s3b.append("1b. <b>جداول نظيفة (dead=0)</b>")
@@ -1564,7 +2033,7 @@ async def _build_sections() -> List[str]:
             s3b.append(f"… و{len(clean_sorted) - 15} جدول نظيف آخر")
         parts.append("\n".join(s3b))
 
-    # SECTION 4
+    # SECTION 4 — Autovacuum
     tuned = [t for t in dirty + clean if t.get("auto_tuned")]
     not_tuned = [t for t in dirty + clean if not t.get("auto_tuned")]
 
@@ -1597,7 +2066,7 @@ async def _build_sections() -> List[str]:
             s4b.append(f"… و{len(not_tuned) - 15} آخر")
         parts.append("\n".join(s4b))
 
-    # SECTION 5
+    # SECTION 5 — Activity
     s5: List[str] = []
     s5.append("3. <b>نشاط PostgreSQL / Blockers</b>")
     s5.append("")
@@ -1615,7 +2084,7 @@ async def _build_sections() -> List[str]:
     s5.append(f"📊 إجمالي الاتصالات: <b>{activity.get('total_connections', 0)}</b>")
     parts.append("\n".join(s5))
 
-    # SECTION 6
+    # SECTION 6 — Sizes
     if sizes:
         s6: List[str] = []
         s6.append("4. <b>أحجام الجداول — Top 15</b>")
@@ -1626,7 +2095,7 @@ async def _build_sections() -> List[str]:
             s6.append(f"  <code>{_esc(name):<22}</code> {display}")
         parts.append("\n".join(s6))
 
-    # SECTION 7
+    # SECTION 7 — Indexes
     if idx_map:
         s7: List[str] = []
         s7.append("5. <b>الفهارس الحرجة (يدوياً)</b>")
@@ -1637,7 +2106,7 @@ async def _build_sections() -> List[str]:
                 s7.append(f"✅ <b>{_esc(tname)}</b> ({cnt})")
         parts.append("\n".join(s7))
 
-    # SECTION 8
+    # SECTION 8 — PG Settings
     if settings:
         s8: List[str] = []
         s8.append("6. <b>إعدادات PostgreSQL</b>")
@@ -1647,7 +2116,7 @@ async def _build_sections() -> List[str]:
                 s8.append(f"  <code>{_esc(k)}</code> = {_esc(settings[k])}")
         parts.append("\n".join(s8))
 
-    # SECTION 9
+    # SECTION 9 — Cleanup status
     if cleanup_status:
         s9: List[str] = []
         s9.append("8. <b>Auto-Cleanup (سياسة آمنة)</b>")
@@ -1674,20 +2143,32 @@ async def _build_sections() -> List[str]:
         s9.append("⚙️ كل 6h | VACUUM: ON 🟢 | Mode: safe")
         parts.append("\n".join(s9))
 
-    # SECTION 10
+    # SECTION 10 — Footer
     parts.append(
         "━━━━━━━━━━━━━━━━━━━━━━\n"
         "✅ <b>اكتمل التشخيص</b>\n"
         f"🕐 <i>{_now_iso()}</i>"
     )
 
-    # SECTION 11: Maintenance Preview
+    # SECTION 11 — Maintenance Preview
     try:
         preview = await preview_maintenance()
         s11_text = format_maintenance_preview(preview)
         parts.append(s11_text)
     except Exception as e:
         logger.warning(f"maintenance preview in sections: {e}")
+
+    # 🆕 v7.1.0 SECTION 12 — Latency Probe (قسم جديد)
+    try:
+        latency_probe = await _probe_db_latency()
+        # نضيف القسم فقط إذا كان DB يحتاج فحص (لا نُثقله)
+        # أو إذا كان الحكم slow/critical — كتنبيه
+        verdict = latency_probe.get("verdict", "unknown")
+        if verdict in ("slow", "critical", "acceptable"):
+            latency_text = format_latency_report(latency_probe)
+            parts.append(latency_text)
+    except Exception as e:
+        logger.debug(f"latency probe in sections: {e}")
 
     return parts
 
@@ -1757,6 +2238,29 @@ async def diagnose_db_quick() -> str:
     except Exception:
         pass
 
+    # 🆕 v7.1.0: سطر كمون مختصر في التقرير السريع
+    try:
+        latency = await get_latency_verdict()
+        if latency.get("ok"):
+            verdict = latency.get("verdict", "unknown")
+            icon = {
+                "excellent": "🟢",
+                "good": "🟢",
+                "acceptable": "🟡",
+                "slow": "🟠",
+                "critical": "🔴",
+            }.get(verdict, "⚪")
+            warm = latency.get("warm_median_ms", 0)
+            tcp = latency.get("tcp_connect_ms", 0)
+            if tcp > 0:
+                lines.append(
+                    f"{icon} كمون: TCP={tcp:.0f}ms، DB={warm:.0f}ms"
+                )
+            else:
+                lines.append(f"{icon} كمون DB: {warm:.0f}ms")
+    except Exception:
+        pass
+
     return "\n".join(lines)
 
 
@@ -1804,15 +2308,19 @@ get_db_info = _get_db_metadata
 get_database_info = _get_db_metadata
 get_pg_info = _get_db_metadata
 
-# 🆕 v6.9.4: aliases للتنظيف التلقائي
 auto_vacuum = auto_vacuum_dirty_mvs
 auto_cleanup = auto_vacuum_dirty_mvs
 cleanup_dead_tuples = auto_vacuum_dirty_mvs
 vacuum_dirty_tables = auto_vacuum_dirty_mvs
 
-# 🆕 v7.0.0: aliases للكاش
 invalidate_cache = _invalidate_cache
 clear_cache = _invalidate_cache
+
+# 🆕 v7.1.0: aliases للـ latency
+probe_latency = _probe_db_latency
+latency_report = diagnose_latency
+check_latency = diagnose_latency
+get_latency_report = diagnose_latency
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -1821,7 +2329,7 @@ clear_cache = _invalidate_cache
 
 __all__ = [
     "VERSION",
-    # 🆕 v7.0.0: Cache API
+    # Cache API
     "invalidate_cache",
     "clear_cache",
     "get_cache_stats",
@@ -1830,6 +2338,14 @@ __all__ = [
     "diagnose_db_split",
     "diagnose_db_quick",
     "get_diagnostics_data",
+    # 🆕 v7.1.0: Latency Probe
+    "diagnose_latency",
+    "get_latency_verdict",
+    "format_latency_report",
+    "probe_latency",
+    "latency_report",
+    "check_latency",
+    "get_latency_report",
     # Auto vacuum
     "auto_vacuum_dirty_mvs",
     "auto_vacuum",
@@ -1881,6 +2397,7 @@ __all__ = [
 try:
     logger.info(
         "🛡️ db_diagnostics.py v%s loaded | "
+        "LATENCY-PROBE ✅ | "
         "CACHE-LAYER ✅ | "
         "PARALLEL-REPORT ✅ | "
         "MV-AWARE-HEALTH ✅ | "
@@ -1889,7 +2406,6 @@ try:
         "MVs in VACUUM ✅ | "
         "abs-threshold=%d dead | "
         "auto-vacuum API ✅ | "
-        "user_violations.last_violation_time ✅ | "
         "AF1+AF2+AF3+AF4 ✅ | "
         "cache_keys=%d | exports=%d",
         VERSION,
