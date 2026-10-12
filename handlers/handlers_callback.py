@@ -1,39 +1,31 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-handlers_callback.py - معالج الأزرار (v9.7.26-CLEANUP-DEAD-DELEGATE)
+handlers_callback.py - معالج الأزرار (v9.7.27-POST-AUDIT-FIXES)
 =====================================================================
-🆕 v9.7.26-CLEANUP-DEAD-DELEGATE:
+🆕 v9.7.27-POST-AUDIT-FIXES:
+    🔴 FIX-1: _show_post_list — HTML escape للـ preview.
+       كان يُرسل النص الخام بـ parse_mode='HTML' → يفشل عند
+       وجود <, >, & في المنشور.
+    🔴 FIX-2: datetime.utcfromtimestamp → datetime.fromtimestamp(
+       tz=timezone.utc). Deprecated في 3.12+، ويُصلح مقارنة
+       tz-aware مع TimeUtils.utc_to_mecca.
+    🔴 FIX-3: _handle_schedule — إعادة فحص _is_channel_owner
+       لمسارات sched_min/hour/day/time (كان يثق بـ sched_ch
+       المخزّن فقط). ثغرة تفويض جزئية.
+    🔴 FIX-4: admin_toggle_gr — استخدام _is_banned() بدل
+       row_d.get('banned') truthy (كان يُخطئ عند None).
+    🟠 FIX-5: _handle_buy_subscription — parsing أقوى لـ
+       data[len('buy_sub_'):].split(':', 1)[0].
+    🟠 FIX-6: admin_toggle_ch — استخدام _is_banned للاتساق.
+
+🆕 v9.7.26-CLEANUP-DEAD-DELEGATE (محفوظ):
     🧹 REMOVE-1: حذف كتلة استيراد `_channels_list_module`.
-    🧹 REMOVE-2: حذف دوال `_delegate_*` الستة (ميتة بعد v2.1.4).
+    🧹 REMOVE-2: حذف دوال `_delegate_*` الستة.
     🧹 REMOVE-3: حذف كتلة DELEGATE-FIRST الستة `if` في `handle()`.
-    ✅ KEPT: كل الدوال المحلية كما هي (fallback):
-       - _show_channel_list
-       - _handle_channel_select
-       - _handle_channel_delete
-       - _handle_channel_stats
-       - ch_page_prev / ch_page_next
-       - fallback routes في `_handle_parameterized`
-       - fallback routes في `handle()` لـ CB.CH_ADD/CB.CH_LIST
+    ✅ KEPT: كل الدوال المحلية كما هي (fallback).
 
-    ℹ️ السبب:
-       منذ handlers_channels_list v2.1.4، كل callback في هذا الملف
-       (ch_list, ch_add, ch_sel, ch_stats, ch_del, ch_del_confirm,
-       ch_recycle, ch_schedule, ch_sched_set, ch_del_menu, post_add,
-       main_menu) مُغلَّف بـ `_stop_after` الذي يرفع
-       ApplicationHandlerStop. لذا:
-           • CallbackHandlers.handle لا يُستدعى أصلاً لهذه الأزرار.
-           • كتلة DELEGATE-FIRST كانت dead code.
-           • دوال _delegate_* كانت dead code.
-
-    ⚠️ ملاحظة: fallback routes (CB.CH_LIST/CB.CH_ADD/CB.CH_SEL/
-       CB.CH_DEL/CB.CH_STATS/ch_del_confirm) تبقى في الملف كضمانة
-       لو حذف المستخدم handlers_channels_list مستقبلاً.
-
-🆕 v9.7.25-CONFLICT-FREE-FULL (محفوظ كمرجع للتراجع):
-    🔗 DELEGATE-1..3: تفويض إلى handlers_channels_list — أُزيل في
-       v9.7.26 لأنه أصبح dead code (انظر أعلاه).
-
+🆕 v9.7.25-CONFLICT-FREE-FULL (محفوظ كمرجع للتراجع).
 🆕 v9.7.23-CRITICAL-FIXES (محفوظة بالكامل):
     🔴 C-1: _show_channel_list + _show_groups_list — banned رقمي
             + escape + control-chars.
@@ -66,7 +58,7 @@ handlers_callback.py - معالج الأزرار (v9.7.26-CLEANUP-DEAD-DELEGATE)
 """
 import asyncio, importlib, logging, json, time, shutil, os, re
 import html as _html, sys, inspect
-from datetime import timedelta, datetime
+from datetime import timedelta, datetime, timezone
 from pathlib import Path
 from typing import Dict, Tuple, Set, List, Optional
 
@@ -238,12 +230,6 @@ except Exception:
 # السبب: منذ handlers_channels_list v2.1.4 (decorator `_stop_after`)
 # كل callback في قائمة القنوات يرفع ApplicationHandlerStop قبل
 # الوصول إلى CallbackHandlers.handle. لذا التفويض أصبح dead code.
-#
-# الدوال المحلية (fallback) تبقى للطوارئ عند عدم تسجيل channels_list:
-#   • _show_channel_list
-#   • _handle_channel_select / _handle_channel_delete / _handle_channel_stats
-#   • ch_page_prev / ch_page_next (داخل handle())
-#   • fallback routes في _handle_parameterized
 
 # ═══════════════════════════════════════════════════════════════════
 # SecurityCallbacks
@@ -1402,15 +1388,6 @@ def _format_channel_rate_line(ch):
 # السبب: منذ handlers_channels_list v2.1.4، كل callback لهذا الملف
 # يرفع ApplicationHandlerStop قبل الوصول إلى `CallbackHandlers.handle`.
 # فكانت هذه الدوال dead code.
-#
-# ملاحظة للتوثيق:
-#   _delegate_show_channel_list
-#   _delegate_add_channel
-#   _delegate_channel_select
-#   _delegate_channel_delete_confirm
-#   _delegate_channel_delete_execute
-#   _delegate_channel_info
-# جميعها كانت تعتمد على `_channels_list_module` (أُزيل أيضاً).
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -1473,26 +1450,6 @@ class CallbackHandlers:
         # ═══════════════════════════════════════════════════════════
         # 🧹 v9.7.26-CLEANUP: كتلة DELEGATE-FIRST أُزيلت
         # ═══════════════════════════════════════════════════════════
-        # السبب: أصبحت dead code بعد _stop_after في channels_list
-        # v2.1.4. الأزرار المسجَّلة هناك لا تصل هنا أبداً.
-        #
-        # للتوثيق، كانت الكتلة:
-        #   if data in (CB.CH_LIST, "ch_list"):
-        #       if await _delegate_show_channel_list(...): return
-        #   if data in (CB.CH_ADD, "add_channel"):
-        #       if await _delegate_add_channel(...): return
-        #   if data.startswith(f"{CB.CH_SEL}:"):
-        #       if await _delegate_channel_select(...): return
-        #   if data.startswith("ch_del_confirm:"):
-        #       if await _delegate_channel_delete_confirm(...): return
-        #   if data.startswith(f"{CB.CH_DEL}:"):
-        #       if await _delegate_channel_delete_execute(...): return
-        #   if data.startswith(f"{CB.CH_STATS}:"):
-        #       if await _delegate_channel_info(...): return
-        #
-        # ⚠️ ملاحظة: fallback routes للقنوات ما زالت موجودة في:
-        #   • _handle_parameterized (CB.CH_SEL/CH_DEL/CH_STATS/ch_del_confirm)
-        #   • handle() (CB.CH_LIST/CB.CH_ADD + ch_page_prev/next)
 
         try:
             handled = await CallbackHandlers._handle_parameterized(
@@ -1717,7 +1674,6 @@ class CallbackHandlers:
                     await _trans('send_support_message', lang, "📞")); return
 
             # ⚠️ CB.CH_ADD و CB.CH_LIST: fallback محلي
-            # (يصل هنا فقط عند عدم تسجيل handlers_channels_list)
             if base_data == CB.CH_ADD or data == "add_channel":
                 has_sub = (_is_primary_owner(user_id)
                            or await DB.has_active_subscription(user_id))
@@ -2174,8 +2130,7 @@ class CallbackHandlers:
                     'delete_post_confirm', lang, "⚠️"), post_id=post_id)
                 await safe_edit(query, text, reply_markup=kb,
                     parse_mode='HTML', bot=context.bot); return True
-            # ⚠️ fallback محلي لـ ch_del_confirm (يُستدعى فقط عند عدم
-            # تسجيل handlers_channels_list)
+            # ⚠️ fallback محلي لـ ch_del_confirm
             if data.startswith("ch_del_confirm:"):
                 ch_id = _coerce_int(data.split(":")[-1])
                 kb = InlineKeyboardMarkup([
@@ -2456,8 +2411,19 @@ class CallbackHandlers:
     @staticmethod
     async def _handle_buy_subscription(update, context, query, user_id,
                                         data, lang):
-        try: days = int(data.split("_")[-1])
-        except (ValueError, IndexError):
+        # 🟠 FIX-5: parsing أقوى — تأخذ فقط الجزء الرقمي بعد buy_sub_
+        # وتتجاهل أي ':' أو لاحقة.
+        try:
+            raw = data[len("buy_sub_"):] if data.startswith("buy_sub_") else ""
+            # اقتطع عند أول ':' إن وُجد
+            if ':' in raw:
+                raw = raw.split(':', 1)[0]
+            days = int(raw)
+        except (ValueError, IndexError, TypeError):
+            await safe_edit(query,
+                await _trans('invalid_data', lang, "❌"),
+                bot=context.bot); return
+        if days <= 0:
             await safe_edit(query,
                 await _trans('invalid_data', lang, "❌"),
                 bot=context.bot); return
@@ -3408,7 +3374,9 @@ class CallbackHandlers:
             pid = pd.get('id')
             if pid is None: continue
             raw_preview = str(pd.get('text') or '')
-            preview = raw_preview.translate(_CONTROL_CHARS_MAP)[:30]
+            # 🆕 v9.7.27 FIX-1: HTML escape بعد إزالة control chars
+            preview = _html.escape(
+                raw_preview.translate(_CONTROL_CHARS_MAP)[:30])
             text += f"🆔 {pid}: {preview}\n"
             kb.append([InlineKeyboardButton(f"🗑️ {pid}",
                 callback_data=f"post_del_confirm:{pid}")])
@@ -3793,7 +3761,10 @@ class CallbackHandlers:
                 try:
                     st = b.stat()
                     size_kb = st.st_size / 1024
-                    dt_utc = datetime.utcfromtimestamp(st.st_mtime)
+                    # 🆕 v9.7.27 FIX-2: fromtimestamp مع tz=utc
+                    # بدل utcfromtimestamp (Deprecated + tz-aware).
+                    dt_utc = datetime.fromtimestamp(
+                        st.st_mtime, tz=timezone.utc)
                     mtime = TimeUtils.utc_to_mecca(dt_utc).strftime(
                         '%Y-%m-%d %H:%M')
                 except Exception as _e:
@@ -4040,6 +4011,14 @@ class CallbackHandlers:
                 await safe_edit(query,
                     await _trans('no_active_channel', lang, "❌"),
                     bot=context.bot); return
+            # 🆕 v9.7.27 FIX-3: إعادة فحص الملكية لكل مسار جدولة
+            # (كان يثق بـ sched_ch المخزّن فقط).
+            if not await _is_channel_owner(user_id, ch_id):
+                await safe_edit(query,
+                    await _trans('not_owner', lang, "❌"),
+                    bot=context.bot)
+                context.user_data.pop('sched_ch', None)
+                return
             state_map = {
                 "sched_min": UserState.WAIT_MIN,
                 "sched_hour": UserState.WAIT_HOUR,
@@ -4515,11 +4494,19 @@ class CallbackHandlers:
                     await safe_edit(query,
                         await _trans('invalid_data', lang, "❌"),
                         bot=context.bot); return
-                await DB.execute(
-                    "UPDATE user_channels SET banned = "
-                    "  CASE WHEN COALESCE(banned, 0) = 1 THEN 0 "
-                    "  ELSE 1 END WHERE id=?",
+                # 🆕 v9.7.27 FIX-6: استخدام _is_banned للاتساق
+                row = await DB.fetchone(
+                    "SELECT banned FROM user_channels WHERE id=?",
                     (ch_db_id,))
+                row_d = _row_to_dict(row) or {}
+                if not row_d:
+                    await safe_edit(query,
+                        await _trans('not_found', lang, "❌"),
+                        bot=context.bot); return
+                new_val = 0 if _is_banned(row_d) else 1
+                await DB.execute(
+                    "UPDATE user_channels SET banned=? WHERE id=?",
+                    (new_val, ch_db_id))
                 await CallbackHandlers._show_admin_channels(
                     update, context, query, user_id, lang); return
             if data == CB.ADMIN_GROUPS:
@@ -4537,7 +4524,8 @@ class CallbackHandlers:
                     (chat_id,))
                 row_d = _row_to_dict(row) or {}
                 if row_d:
-                    new_val = 0 if row_d.get('banned') else 1
+                    # 🆕 v9.7.27 FIX-4: استخدام _is_banned
+                    new_val = 0 if _is_banned(row_d) else 1
                     db_ok = False
                     try:
                         await DB.execute(
@@ -5239,28 +5227,21 @@ try:
             _missing_check.append(_name)
     if _missing_check:
         logger.critical(
-            f"🚨 v9.7.26: دوال مفقودة: {_missing_check}")
+            f"🚨 v9.7.27: دوال مفقودة: {_missing_check}")
     else:
         logger.info(
-            "🛡️ handlers_callback.py v9.7.26-CLEANUP-DEAD-DELEGATE | "
+            "🛡️ handlers_callback.py v9.7.27-POST-AUDIT-FIXES | "
             "REMOVED: _channels_list_module + 6 _delegate_* + "
             "DELEGATE-FIRST block | "
-            "KEPT: 16/16 methods (fallbacks for "
-            "CB.CH_LIST/CB.CH_ADD/CB.CH_SEL/CB.CH_DEL/CB.CH_STATS/"
-            "ch_del_confirm + ch_page_prev/next + "
-            "_show_channel_list + _handle_channel_*) | "
+            "KEPT: 16/16 methods (fallbacks) | "
+            "NEW: FIX-1 (post_list escape) + FIX-2 (tz-aware "
+            "fromtimestamp) + FIX-3 (sched ownership recheck) + "
+            "FIX-4 (toggle_gr _is_banned) + FIX-5 (buy_sub "
+            "parse) + FIX-6 (toggle_ch _is_banned) | "
             "C-1: channels+groups banned+escape | "
-            "C-5: group_security try/except | "
             "H-1: _is_banned() unified | "
-            "H-2: auto_reply chat_id split | "
             "H-3: safe_edit parse warn | "
-            "H-6: referral code None | "
             "H-9: publish_all list+zip | "
-            "H-10: backup bool(success) | "
-            "M-4: fragment strip | "
-            "M-5: health cache key norm | "
-            "M-7: membership save log | "
-            "M-14: unwrap tuple>2 | "
             "max_tasks_per_user=%d",
             _MAX_TASKS_PER_USER)
 except Exception as _be:
