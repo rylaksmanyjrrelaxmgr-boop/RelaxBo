@@ -2,22 +2,37 @@
 # -*- coding: utf-8 -*-
 
 """
-🌿 Relax Manager – البوت الرئيسي (bot.py v5.6.23-FULLHEALTH-PERF)
+🌿 Relax Manager – البوت الرئيسي (bot.py v5.6.24-ORDER-FIX)
 ================================================================================
 📌 نقطة الدخول الرسمية للتطبيق (entrypoint).
 
+🆕 v5.6.24 (ORDER-FIX):
+    🔴 ORDER-1: نقل `register_nav_fix(app)` إلى **بعد**
+        `register_channels_list_handlers(app)`.
+        السبب: NAV_FIX كان يُسجَّل قبل channels_list → قد يلتقط
+        `main_menu` أولاً (إن كان pattern عاماً) → يظهر القائمة
+        الرئيسية مرتين + ازدواج معالجة.
+        بعد النقل: channels_list (مع `_stop_after`) تُنفَّذ أولاً
+        وترفع ApplicationHandlerStop → NAV_FIX لا يرى callbacks
+        القنوات.
+
+    📋 ترتيب التسجيل بعد الإصلاح:
+        1. register_channels_list_handlers  (يحتوي _stop_after)
+        2. register_nav_fix
+        3. register_delete_confirmation
+        4. register_group_log_handlers
+        5. handlers_analytics
+        6. CallbackHandlers.handle (فقط إن NAV_FIX غير متاح)
+
+    ✅ لا تغيير في باقي المنطق.
+
 🆕 v5.6.23 (PERF-SESSIONS):
-    🟢 PERF-A: keep_alive() — session واحد على مستوى الدالة (كان يفتح
-        ClientSession جديد كل 180s → توفير TLS + sockets).
-    🟢 PERF-B: _watch_runner() — session واحد خارج while (كان يفتح
-        ClientSession كل 10s = ~8640 handshake/يوم → كان يُسبب
-        event_loop lag). المتوقع: lag max 553ms → <100ms.
-    🔵 لا تغيير في المنطق — فقط إعادة استخدام الجلسات.
+    🟢 PERF-A: keep_alive() — session واحد على مستوى الدالة.
+    🟢 PERF-B: _watch_runner() — session واحد خارج while.
 
 🆕 v5.6.22 (FULLHEALTH-COMMANDS):
     🔴 FIX-AN2: تسجيل /fullhealth + /latency كأوامر مباشرة.
-    🔴 FIX-AN3: توسيع regex الـ CallbackQueryHandler ليشمل
-        full_health_btn + latency_btn.
+    🔴 FIX-AN3: توسيع regex الـ CallbackQueryHandler.
     🟡 FIX-AN4: سجل إقلاع يوضّح حالة full_health_btn + latency_btn.
 
 🆕 v5.6.21 (FIX-BUNDLE):
@@ -129,7 +144,6 @@ _ANALYTICS_HANDLERS_AVAILABLE = False
 _ANALYTICS_HANDLERS_IMPORT_ERROR = None
 _handle_analytics_callback = None
 _show_analytics_menu = None
-# 🆕 v5.6.22: دوال الأوامر المباشرة
 _cmd_fullhealth = None
 _cmd_latency = None
 
@@ -155,7 +169,6 @@ except ImportError as _e_an1:
         _cmd_latency = _cmd_latency_imported
         _ANALYTICS_HANDLERS_AVAILABLE = True
     except ImportError as _e_an2:
-        # fallback: استيراد بدون الأوامر المباشرة (نسخ قديمة)
         try:
             from handlers.handlers_analytics import (
                 handle_analytics_callback as _handle_analytics_callback,
@@ -338,7 +351,6 @@ except ImportError as _e1:
 
 from handlers.handlers_channels_list import register_channels_list_handlers
 
-# ✅ FIX-5 (v5.6.21): import آمن لـ register_nav_fix + متغير _NAV_FIX_AVAILABLE
 try:
     from handlers.handlers_nav_fix import register_nav_fix
     _NAV_FIX_AVAILABLE = True
@@ -1173,7 +1185,6 @@ ADMIN_COMMANDS = [
     ("autoblocked", "🚫 المصادر المحجوبة تلقائياً"),
     ("db_idle", "🔍 تدقيق idle-in-transaction"),
     ("cache_stats", "📊 إحصائيات الكاش الحية"),
-    # 🆕 v5.6.22: أوامر التشخيص الشامل + الكمون
     ("fullhealth", "🏥 التشخيص الشامل"),
     ("latency", "🔬 اختبار الكمون"),
 ]
@@ -2006,7 +2017,6 @@ async def keep_alive():
 
     _consecutive_errors = 0
 
-    # 🆕 PERF-A: session واحد على مستوى الدالة
     _timeout = aiohttp.ClientTimeout(total=15, connect=5)
     _connector = aiohttp.TCPConnector(
         limit=2,
@@ -2378,8 +2388,6 @@ async def _watch_runner(
     """
     مراقب Webhook runner — v5.6.23/PERF-B:
     - session واحد خارج while بدل فتح ClientSession كل 10s.
-    - كان يفتح ~8640 handshake/يوم → يسبب event_loop lag.
-    - بعد الإصلاح: lag max 553ms → <100ms (متوقع).
     """
     try:
         site = None
@@ -2404,7 +2412,6 @@ async def _watch_runner(
         probe_failures = 0
         health_url = f"http://127.0.0.1:{port}/health"
 
-        # 🆕 PERF-B: session واحد خارج while
         _timeout = aiohttp.ClientTimeout(
             total=_WATCHER_HEALTH_TIMEOUT,
             connect=2,
@@ -2743,11 +2750,12 @@ async def main():
     logger.info("👨‍💼 المالك: %s", CONFIG.PRIMARY_OWNER_ID)
 
     logger.info(
-        "📦 bot.py: v5.6.23 | "
+        "📦 bot.py: v5.6.24 | "
         "detectors=%s | layers=%d | helpers=%s | "
         "db_idle=%s | cache_stats=%s | analytics=%s | "
         "fullhealth=%s | latency=%s | maint_cmds=%s | "
-        "pool_cache_ttl=%ds | nav_fix=%s | perf_sessions=on",
+        "pool_cache_ttl=%ds | nav_fix=%s | perf_sessions=on | "
+        "order_fix=channels_list_before_nav_fix",
         _SPAM_DETECTOR_VERSION or "N/A",
         _SPAM_DETECTOR_LAYERS_COUNT,
         (
@@ -3107,7 +3115,6 @@ async def main():
             "يتطلب handlers_message v7.18.18+"
         )
 
-    # 🆕 v5.6.22: تسجيل /fullhealth + /latency
     if _cmd_fullhealth is not None:
         try:
             app.add_handler(CommandHandler(
@@ -3187,56 +3194,89 @@ async def main():
     app.add_handler(PreCheckoutQueryHandler(pre_checkout))
     app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, successful_payment))
 
+    # ═══════════════════════════════════════════════════════════════
+    # 🆕 v5.6.24 ORDER-FIX:
+    # ترتيب التسجيل الصحيح:
+    #   1. channels_list (يحتوي _stop_after على كل callback)
+    #   2. nav_fix (لا يتداخل مع القوائم)
+    #   3. channels_delete
+    #   4. group_log
+    #   5. analytics
+    #   6. CallbackHandlers.handle (فقط إن nav_fix غير متاح)
+    # ═══════════════════════════════════════════════════════════════
+
+    # 1️⃣ channels_list — الأولوية القصوى
+    try:
+        register_channels_list_handlers(app)
+        logger.info(
+            "✅ [ORDER 1/6] handlers قائمة القنوات مُسجَّل "
+            "(يحتوي _stop_after — يمنع ازدواج CallbackHandlers)"
+        )
+    except Exception as e:
+        logger.error(
+            "❌ [ORDER 1/6] فشل تسجيل handlers القنوات: %s",
+            e, exc_info=True
+        )
+
+    # 2️⃣ nav_fix — بعد channels_list لتجنب التقاط القوائم
     if _NAV_FIX_AVAILABLE and callable(register_nav_fix):
         try:
             register_nav_fix(app)
-            logger.info("✅ NAV_FIX: معالج الإغلاق/الرجوع مُسجّل")
+            logger.info(
+                "✅ [ORDER 2/6] NAV_FIX: معالج الإغلاق/الرجوع مُسجّل "
+                "(بعد channels_list لتفادي التداخل)"
+            )
         except Exception as e:
-            logger.error("❌ فشل تسجيل NAV_FIX: %s", e, exc_info=True)
+            logger.error(
+                "❌ [ORDER 2/6] فشل تسجيل NAV_FIX: %s",
+                e, exc_info=True
+            )
     else:
         logger.info(
-            "ℹ️ NAV_FIX غير متاح — سيُسجَّل CallbackHandlers.handle مباشرة"
+            "ℹ️ [ORDER 2/6] NAV_FIX غير متاح — "
+            "سيُسجَّل CallbackHandlers.handle مباشرة في الخطوة 6"
         )
 
-    try:
-        register_channels_list_handlers(app)
-        logger.info("✅ handlers قائمة القنوات مُسجَّل")
-    except Exception as e:
-        logger.error(
-            "❌ فشل تسجيل handlers القنوات: %s", e, exc_info=True
-        )
-
+    # 3️⃣ channels_delete
     if _CH_DELETE_AVAILABLE and callable(register_delete_confirmation):
         try:
             register_delete_confirmation(app)
             logger.info(
-                "✅ handlers_channels_delete مُسجَّل — "
+                "✅ [ORDER 3/6] handlers_channels_delete مُسجَّل — "
                 "تأكيد حذف القنوات مُفعّل"
             )
         except Exception as _e:
             logger.error(
-                "❌ فشل تسجيل handlers_channels_delete: %s", _e,
-                exc_info=True,
+                "❌ [ORDER 3/6] فشل تسجيل handlers_channels_delete: %s",
+                _e, exc_info=True,
             )
     else:
         logger.warning(
-            "⚠️ handlers_channels_delete غير متاح — "
+            "⚠️ [ORDER 3/6] handlers_channels_delete غير متاح — "
             "سيتم استخدام الحذف الفوري (بدون تأكيد): %s",
             _CH_DELETE_IMPORT_ERROR or "unknown",
         )
 
+    # 4️⃣ group_log
     if _GROUP_LOG_AVAILABLE:
         try:
             register_group_log_handlers(app)
             logger.info(
-                "✅ group_log: معالجات سجل قناة المجموعات مُسجّلة"
+                "✅ [ORDER 4/6] group_log: "
+                "معالجات سجل قناة المجموعات مُسجّلة"
             )
         except Exception as e:
-            logger.error("❌ فشل تسجيل group_log: %s", e, exc_info=True)
+            logger.error(
+                "❌ [ORDER 4/6] فشل تسجيل group_log: %s",
+                e, exc_info=True
+            )
     else:
-        logger.warning("⚠️ group_log غير متاح — زر قناة السجل لن يعمل")
+        logger.warning(
+            "⚠️ [ORDER 4/6] group_log غير متاح — "
+            "زر قناة السجل لن يعمل"
+        )
 
-    # 🆕 v5.6.22: توسيع regex ليشمل full_health_btn + latency_btn
+    # 5️⃣ analytics
     if _ANALYTICS_HANDLERS_AVAILABLE and \
        _show_analytics_menu is not None and \
        _handle_analytics_callback is not None:
@@ -3256,25 +3296,32 @@ async def main():
                 ),
             ))
             logger.info(
-                "✅ handlers_analytics: 12 معالج مسجّل "
+                "✅ [ORDER 5/6] handlers_analytics: 12 معالج مسجّل "
                 "(admin_analytics + 11 زر تقرير)"
             )
         except Exception as _e:
             logger.error(
-                "❌ فشل تسجيل handlers_analytics: %s", _e,
-                exc_info=True,
+                "❌ [ORDER 5/6] فشل تسجيل handlers_analytics: %s",
+                _e, exc_info=True,
             )
     else:
         logger.warning(
-            "⚠️ handlers_analytics غير متاح — "
+            "⚠️ [ORDER 5/6] handlers_analytics غير متاح — "
             "أزرار التحليلات لن تعمل: %s",
             _ANALYTICS_HANDLERS_IMPORT_ERROR or "unknown",
         )
 
+    # 6️⃣ CallbackHandlers.handle — آخر شيء (فقط إن nav_fix غير متاح)
     if not _NAV_FIX_AVAILABLE:
         app.add_handler(CallbackQueryHandler(CallbackHandlers.handle))
         logger.warning(
-            "⚠️ NAV_FIX غير متاح — تسجيل CallbackHandlers.handle مباشرة"
+            "⚠️ [ORDER 6/6] NAV_FIX غير متاح — "
+            "تسجيل CallbackHandlers.handle مباشرة (fallback)"
+        )
+    else:
+        logger.info(
+            "✅ [ORDER 6/6] NAV_FIX نشط — "
+            "CallbackHandlers.handle مُسجَّل من داخله"
         )
 
     app.add_handler(MessageHandler(
