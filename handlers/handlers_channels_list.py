@@ -2,59 +2,74 @@
 # -*- coding: utf-8 -*-
 
 """
-handlers_channels_list.py - واجهة قائمة القنوات مع حالتها (v2.1.3)
+handlers_channels_list.py - واجهة قائمة القنوات مع حالتها (v2.1.5)
 ================================================================================
-🆕 v2.1.3 (UI-DEDUP + BANNED-TRUTHY + REGEX-FIX):
-    🔴 FIX-N1: _is_banned() موحّد — يتعامل مع "0"/None/int بشكل صحيح.
-               (كان `if ch.get("banned", 0)` يُخطئ مع "0" النصية من PG/MySQL).
-    🔴 FIX-N2: badge معرّف فريد (#XXXX) في النص والأزرار — لحل
-               تطابق أسماء القنوات المتشابهة (الصورة تُظهر 3 قنوات
-               بنفس الاسم "منسقه سهرات بنات مساج" لا يمكن التمييز بينها).
-    🔴 FIX-N3: _USERNAME_RE / _URL_RE — حد أدنى 5 أحرف (قاعدة Telegram
-               الفعلية) بدل 4 (كان `{3,31}`، الصحيح `{4,31}`).
-    🟠 FIX-N4: توحيد طول اسم القناة بين النص (22 حرف) والزر (18 حرف)
-               → الآن 22 لكلاهما (مع "…").
-    🟠 FIX-N5: _URL_RE — دعم معاملات الاستعلام (?start=, #fragment).
-    🟠 FIX-N6: filters.Regex مع re.IGNORECASE → T.ME الآن يعمل.
-    🟠 FIX-N7: _render_channel_info — فحص ملكية صريح (دفاع بعمق).
+🆕 v2.1.5 (UNIFIED-PREFIXES):
+    🔗 UNIFY-1: توحيد كل callback_data مع ثوابت CB في utils.py.
+    🔗 UNIFY-2: الحفاظ على القديم كـ backward-compat (رسائل سابقة
+               في محادثات المستخدمين تحتوي الأزرار القديمة).
+    🔗 UNIFY-3: لم تتغيّر بنية البيانات (فقط البادئات).
+
+    📋 خريطة التوحيد:
+
+        القديم (v2.1.4)         الجديد (v2.1.5)       CB Constant
+        ─────────────────       ────────────────       ─────────────
+        ch_list                 ch_list               CB.CH_LIST
+        add_channel             ch_add                CB.CH_ADD
+        ch_select:N             ch_sel:N              CB.CH_SEL
+        ch_info:N               ch_stats:N            CB.CH_STATS
+        ch_delete_execute:N     ch_del:N              CB.CH_DEL
+        ch_delete_confirm:N     ch_del_confirm:N      (محلي)
+        ch_delete_menu          ch_del_menu           (محلي)
+        ch_recycle:N            ch_recycle:N          (بدون تغيير)
+        ch_schedule:N           ch_schedule:N         (بدون تغيير)
+        ch_sched_set:N:M        ch_sched_set:N:M      (بدون تغيير)
+
+    ⚠️ الأزرار القديمة في الرسائل السابقة تعمل — كل patterns تقبل
+        القديم والجديد (Regex `(old|new):`).
+
+    🎯 الفائدة: عند فشل استيراد handlers_channels_list أو انهياره،
+        fallback في handlers_callback.py يعمل لكل الأزرار (لأن
+        البادئات الآن تطابق CB.CH_*).
+
+🆕 v2.1.4 (PTB-V20-MULTI-HANDLER-FIX) — محفوظ:
+    🔴 FIX-CB1 (CRITICAL): PTB v20+ لا يطبّق "أول handler يفوز" — بل
+        ينفّذ **كل** الـ handlers المطابقة في نفس الـ group بالترتيب.
+        → decorator `_stop_after` يرفع ApplicationHandlerStop بعد
+          كل callback → يمنع CallbackHandlers.handle من التنفيذ
+          على نفس الـ update.
+
+🆕 v2.1.3 (UI-DEDUP + BANNED-TRUTHY + REGEX-FIX) — محفوظ:
+    🔴 FIX-N1: _is_banned() موحّد — يتعامل مع "0"/None/int.
+    🔴 FIX-N2: badge معرّف فريد (#XXXX) في النص والأزرار.
+    🔴 FIX-N3: _USERNAME_RE / _URL_RE — حد أدنى 5 أحرف.
+    🟠 FIX-N4: توحيد طول اسم القناة (22 حرف) في النص والزر.
+    🟠 FIX-N5: _URL_RE — دعم ?query و #fragment.
+    🟠 FIX-N6: filters.Regex مع re.IGNORECASE → T.ME يعمل.
+    🟠 FIX-N7: _render_channel_info — فحص ملكية صريح.
     🟢 FIX-N8: تنبيه في logs عند clamped page.
-    🟢 FIX-N9: توثيق أن handlers_callback.py::_show_channel_list قد
-               يتعارض — راجع register_channels_list_handlers.
+    🟢 FIX-N9: توثيق التعارض (حُلَّ في v2.1.4).
 
-🆕 v2.1.2 (FIX-AL1 + Delete-Bug + removed_at):
+🆕 v2.1.2 (FIX-AL1 + Delete-Bug + removed_at) — محفوظ:
     🔴 FIX-AL1: حذف "WAIT_LOG_CH" من _CHANNEL_ADD_STATES.
-    🔴 FIX-AL1-FOLLOWUP: إزالة FIX-2 (v2.1.1) من
-               channel_delete_execute_callback.
+    🔴 FIX-AL1-FOLLOWUP: إزالة FIX-2 الخاطئ.
     🟡 FIX-AL1-FOLLOWUP-2: _get_channels_with_stats يفلتر
-               removed_at IS NULL عند وجود العمود.
+        removed_at IS NULL عند وجود العمود.
 
-🆕 v2.1.1 (REVIEW-FIXES):
-    🔴 FIX-1 CRITICAL: ربط صريح بين add_channel_from_message و
-       handlers_message._handle_wait_channel_text عبر علم
-       context.user_data["_channel_add_handled"].
-    🔴 FIX-2 CRITICAL: (مُلغى في v2.1.2 — كان خطأً).
+🆕 v2.1.1 (REVIEW-FIXES) — محفوظ:
+    🔴 FIX-1: علم "_channel_add_handled".
     🟡 FIX-3: _row_to_dict موحّد.
-    🟡 FIX-4: _get_active_channel_id — تحويل صريح إلى int.
-    🟡 FIX-5: _user_has_pending_state — فحص NONE ثلاثي.
+    🟡 FIX-4: _get_active_channel_id — int صريح.
+    🟡 FIX-5: _user_has_pending_state — NONE ثلاثي.
     🟡 FIX-6: القفل في add_channel_from_message.
-    🟡 FIX-7: _get_channels_with_stats — LEFT JOIN بدل subqueries.
-    🟢 FIX-8: _CHANNEL_ADD_STATES — توثيق substring match.
+    🟡 FIX-7: _get_channels_with_stats — LEFT JOIN.
 
-🆕 v2.1.0 (WAIT-CHANNEL-ROUTING-FIX):
-    🔴 FIX-1: _user_has_pending_state تقبل حالات إضافة القناة.
-    🟠 FIX-2: استيراد ApplicationHandlerStop من telegram.ext.
-    🟡 FIX-3: helper موحّد لمسح الحالة.
-
-🆕 v2.0.3 (POLISH-FIXES):
-    🔴 FIX-A: _USERNAME_RE / _URL_RE — قواعد Telegram الفعلية.
-    🟠 FIX-B: _user_has_pending_state — تعامل مع NONE.
-    🟠 FIX-C: show_channels_list — حماية message من None.
-    🟡 FIX-D: _row_to_dict helper موحّد.
-    🟡 FIX-E: _edit_or_send — فحص processing_msg.message_id.
-    🟡 FIX-F: تسجيل version موحّد.
+🆕 v2.1.0 (WAIT-CHANNEL-ROUTING-FIX) — محفوظ.
+🆕 v2.0.3 (POLISH-FIXES) — محفوظ.
 ================================================================================
 """
 
+import functools
 import logging
 import re
 from datetime import timedelta
@@ -67,6 +82,42 @@ from telegram.ext import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+# =====================================================================
+# 🆕 v2.1.4 — FIX-CB1: إيقاف PTB v20+ بعد أول handler مطابق
+# =====================================================================
+
+def _stop_after(fn):
+    """
+    🔴 FIX-CB1 (v2.1.4): يضمن أن PTB v20+ لا ينفّذ handlers لاحقة
+    على نفس الـ update.
+
+    السبب: PTB v20+ لا يطبّق "أول handler يفوز" — ينفّذ كل الـ
+    handlers المطابقة في نفس الـ group. بدون هذا decorator،
+    CallbackHandlers.handle (في handlers_callback.py) سيُنفَّذ بعد
+    أي callback من هذا الملف، مُسبِّباً:
+        • query.answer() مزدوج (BadRequest صامت).
+        • edit_message_text مزدوج ("message is not modified").
+        • رسائل خاطئة مثل "⚠️ غير متوفر" أو "⚠️ فشل عرض تفاصيل القناة".
+
+    ملاحظة: الـ decorator يُغلِّف الدالة فقط وقت التسجيل
+    (داخل register_channels_list_handlers)، لذا الاستدعاءات
+    الداخلية مثل show_channels_list(update, context) تبقى تعمل
+    بدون رفع Stop (لأنها تستدعي الدالة الأصلية، لا المُغلَّفة).
+    """
+    @functools.wraps(fn)
+    async def _wrapped(update, context):
+        try:
+            await fn(update, context)
+        except ApplicationHandlerStop:
+            raise
+        except Exception:
+            logger.exception(
+                f"❌ {fn.__name__} فشل — سيتم إيقاف المعالجات اللاحقة")
+            raise ApplicationHandlerStop
+        raise ApplicationHandlerStop
+    return _wrapped
 
 
 # =====================================================================
@@ -114,6 +165,17 @@ except ImportError:
 
 
 # =====================================================================
+# 🆕 v2.1.5: محاولة استيراد CB (اختياري — فقط للتوثيق والتحقق)
+# =====================================================================
+try:
+    from utils import CB as _CB_REF
+    _CB_AVAILABLE = True
+except ImportError:
+    _CB_REF = None
+    _CB_AVAILABLE = False
+
+
+# =====================================================================
 # 🔴 FIX-N1: _is_banned() موحّد
 # =====================================================================
 
@@ -131,11 +193,9 @@ def _is_banned(ch_row: dict) -> bool:
     """
     🔴 FIX-N1: فحص موحّد لحقل 'banned'.
 
-    السبب: بعض الـ drivers (PostgreSQL psycopg2, MySQL) قد تُعيد '0' كنص
-    (خاصة عند استخدام عمود CHAR أو BOOLEAN قديم). `if "0":` في Python
-    = True → القناة تظهر 🚫 رغم أنها غير محظورة.
-
-    الاستخدام الموحّد: `_is_banned(ch)` بدل `ch.get("banned", 0)`.
+    السبب: بعض الـ drivers (PostgreSQL psycopg2, MySQL) قد تُعيد '0'
+    كنص (خاصة عند استخدام عمود CHAR أو BOOLEAN قديم). `if "0":` في
+    Python = True → القناة تظهر 🚫 رغم أنها غير محظورة.
     """
     if not ch_row:
         return False
@@ -146,23 +206,10 @@ def _is_banned(ch_row: dict) -> bool:
 # 🆕 v2.1.0: حالات إضافة القناة المسموح بها
 # =====================================================================
 
-# 🆕 v2.1.1 FIX-8: substring match مقصود لدعم الحالات المُشتقّة
-# (مثل "WAIT_CHANNEL_V2" أو "WAIT_CHANNEL_PENDING").
+# 🆕 v2.1.1 FIX-8: substring match مقصود لدعم الحالات المُشتقّة.
 #
 # 🔴 FIX-AL1 (v2.1.2): حذف "WAIT_LOG_CH" — لا ينتمي إلى حالات
 # إضافة القنوات. هو مُدار بواسطة handlers_group_log.receive_log_channel.
-#
-# السبب: _user_has_pending_state كان يستثني WAIT_LOG_CH من "الحالات
-# المعلقة" → add_channel_from_message (group=-1) يقبل مدخلات
-# المستخدم في WAIT_LOG_CH ويعالجها كإضافة قناة عادية!
-#
-# الأثر قبل الإصلاح:
-#   1. مشرف يفتح "تعيين قناة سجل" → WAIT_LOG_CH + log_group_id=X.
-#   2. يرسل @mychannel (أو رابطاً) في الخاص.
-#   3. add_channel_from_message يلتقطها (يعتقد أن الحالة مسموحة).
-#   4. يُنشئ قناة مستخدم جديدة (بدلاً من تعيين قناة سجل).
-#   5. يرفع ApplicationHandlerStop → receive_log_channel لا يُنفَّذ.
-#   6. ميزة قناة السجل معطّلة، وقنوات المستخدم تنمو بلا داعٍ.
 _CHANNEL_ADD_STATES = (
     "WAIT_CHANNEL",
     "WAIT_ADD_CHANNEL",
@@ -194,11 +241,9 @@ def _row_to_dict(row) -> dict:
     """
     if _HAS_SHARED_ROW_TO_DICT and _row_to_dict_shared is not None:
         result = _row_to_dict_shared(row)
-        # _row_to_dict_shared قد تُعيد None عند الفشل
         if result is None:
             return {}
         return result
-    # ─── Fallback محلي ───
     if row is None:
         return {}
     if isinstance(row, dict):
@@ -215,9 +260,7 @@ def _row_to_dict(row) -> dict:
 
 
 def _get_state_str(user_id: int) -> str:
-    """
-    🆕 v2.1.0: جلب الحالة الحالية كنص (آمن).
-    """
+    """🆕 v2.1.0: جلب الحالة الحالية كنص (آمن)."""
     if not _STATE_AVAILABLE or StateManager is None:
         return ""
     try:
@@ -231,25 +274,19 @@ def _get_state_str(user_id: int) -> str:
 
 
 def _is_channel_add_state(state_str: str) -> bool:
-    """
-    🆕 v2.1.0: هل الحالة الحالية من حالات إضافة القناة؟
-    """
+    """🆕 v2.1.0: هل الحالة الحالية من حالات إضافة القناة؟"""
     if not state_str:
         return False
     return any(s in state_str for s in _CHANNEL_ADD_STATES)
 
 
 def _clear_user_state(user_id: int) -> None:
-    """
-    🆕 v2.1.0: مسح حالة المستخدم بأمان.
-    """
+    """🆕 v2.1.0: مسح حالة المستخدم بأمان."""
     if not _STATE_AVAILABLE or StateManager is None:
         return
     try:
         StateManager.clear(user_id)
-        logger.debug(
-            f"🔄 state cleared for user {user_id}"
-        )
+        logger.debug(f"🔄 state cleared for user {user_id}")
     except Exception as e:
         logger.debug(f"_clear_user_state({user_id}): {e}")
 
@@ -257,10 +294,10 @@ def _clear_user_state(user_id: int) -> None:
 def _user_has_pending_state(user_id: int) -> bool:
     """
     ✅ v2.0.2 + v2.1.0 FIX-1 + 🆕 v2.1.1 FIX-5:
-      - StateManager.get قد تُعيد None
-      - UserState.NONE قد لا تكون موجودة
-      - 🆕 حالات إضافة القناة (WAIT_CHANNEL*) لا تُعتبر "معلقة"
-      - 🆕 فحص NONE ثلاثي (متوافق مع handlers_message.handle_private)
+      - StateManager.get قد تُعيد None.
+      - UserState.NONE قد لا تكون موجودة.
+      - 🆕 حالات إضافة القناة (WAIT_CHANNEL*) لا تُعتبر "معلقة".
+      - 🆕 فحص NONE ثلاثي.
     """
     if not _STATE_AVAILABLE or StateManager is None:
         return False
@@ -339,7 +376,7 @@ async def _get_active_channel_id(user_id: int) -> Optional[int]:
 
 
 # =====================================================================
-# 🔴 FIX-N2: استخراج معرّف فريد قصير للتمييز بين الأسماء المتشابهة
+# 🔴 FIX-N2: استخراج معرّف فريد قصير
 # =====================================================================
 
 def _short_channel_badge(ch: dict) -> str:
@@ -347,9 +384,9 @@ def _short_channel_badge(ch: dict) -> str:
     🔴 FIX-N2: يُرجع badge قصير يميّز القناة.
 
     الأولوية:
-      1. آخر 4 أرقام من channel_id (Telegram ID) — مثالي للتمييز.
-      2. آخر 3 أرقام من channel_db_id — fallback.
-      3. "?" — إذا لم يتوفر أي معرّف.
+      1. آخر 4 أرقام من channel_id (Telegram ID).
+      2. آخر 3 أرقام من channel_db_id.
+      3. "" — إذا لم يتوفر أي معرّف.
     """
     try:
         ch_tele = ch.get("channel_id")
@@ -372,10 +409,7 @@ def _short_channel_badge(ch: dict) -> str:
 
 
 def _truncate_name(name: str, max_len: int = 22) -> str:
-    """
-    🟠 FIX-N4: تقطيع موحّد للاسم — يُستخدم في النص والزر معاً
-    لتفادي التناقض البصري.
-    """
+    """🟠 FIX-N4: تقطيع موحّد للاسم — يُستخدم في النص والزر معاً."""
     if not name:
         return "قناة بدون اسم"
     s = str(name).strip()
@@ -402,7 +436,7 @@ async def show_channels_list(update: Update, context: ContextTypes.DEFAULT_TYPE)
             "أضف أول قناة لك بالنقر على زر <b>➕ إضافة قناة</b>"
         )
         keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("➕ إضافة قناة", callback_data="add_channel")],
+            [InlineKeyboardButton("➕ إضافة قناة", callback_data="ch_add")],
             [InlineKeyboardButton("↩️ رجوع للقائمة الرئيسية", callback_data="main_menu")],
         ])
     else:
@@ -444,13 +478,9 @@ async def _get_channels_with_stats(user_id: int):
     """
     جلب كل قنوات المستخدم مع إحصائياتها.
 
-    🆕 v2.1.1 FIX-7: LEFT JOIN مجمّع بدل subqueries متعددة
-    (أداء أفضل مع كبر الحجم: >20 قناة أو >10k منشور).
-
-    🟡 FIX-AL1-FOLLOWUP-2 (v2.1.2): احترام soft-delete
-    (removed_at IS NULL) — اتساقاً مع DB.get_user_channels.
+    🆕 v2.1.1 FIX-7: LEFT JOIN مجمّع بدل subqueries متعددة.
+    🟡 FIX-AL1-FOLLOWUP-2 (v2.1.2): احترام soft-delete.
     """
-    # 🟡 FIX-AL1-FOLLOWUP-2: فحص وجود عمود removed_at
     _has_removed = False
     try:
         if DB is not None and hasattr(DB, "_has_removed_at_column"):
@@ -490,7 +520,6 @@ async def _get_channels_with_stats(user_id: int):
         return [_row_to_dict(r) for r in (rows or [])]
     except Exception as e:
         logger.error(f"❌ _get_channels_with_stats: {e}", exc_info=True)
-        # 🆕 FIX-7: fallback للاستعلام القديم إن فشل LEFT JOIN
         try:
             fallback_query = f"""
                 SELECT
@@ -529,8 +558,8 @@ def _build_channels_text(channels, active_channel_id) -> str:
     """
     بناء نص قائمة القنوات.
 
-    🔴 FIX-N2: يضيف badge معرّف فريد (#XXXX) بجانب كل اسم قناة.
-    🟠 FIX-N4: توحيد طول الاسم (22 حرف) ليتطابق مع الزر.
+    🔴 FIX-N2: badge معرّف فريد (#XXXX).
+    🟠 FIX-N4: توحيد طول الاسم (22 حرف).
     🔴 FIX-N1: فحص banned رقمي.
     """
     lines = [f"📡 <b>قنواتك ({len(channels)})</b>\n"]
@@ -548,7 +577,6 @@ def _build_channels_text(channels, active_channel_id) -> str:
         unpublished = _safe_int(ch.get("unpublished"), 0)
         published = _safe_int(ch.get("published"), 0)
 
-        # 🔴 FIX-N1: فحص banned رقمي
         banned = _is_banned(ch)
 
         if banned:
@@ -561,11 +589,9 @@ def _build_channels_text(channels, active_channel_id) -> str:
             icon = "⚪"
             status = ""
 
-        # 🔴 FIX-N2: badge معرّف فريد
         badge = _short_channel_badge(ch)
         badge_txt = f" <code>{badge}</code>" if badge else ""
 
-        # 🟠 FIX-N4: تقطيع موحّد
         safe_name = _truncate_name(name, max_len=22)
 
         lines.append(
@@ -580,9 +606,11 @@ def _build_channels_keyboard(channels, active_channel_id):
     """
     بناء لوحة الأزرار.
 
-    🔴 FIX-N2: badge فريد على كل زر لتمييز الأسماء المتشابهة.
-    🔴 FIX-N1: فحص banned رقمي.
-    🟠 FIX-N4: توحيد طول الاسم مع النص (22 حرف).
+    🆕 v2.1.5: البادئات موحّدة مع CB:
+        ch_sel:N      ← CB.CH_SEL
+        ch_stats:N    ← CB.CH_STATS
+        ch_add        ← CB.CH_ADD
+        ch_del_menu   ← محلي
     """
     keyboard = []
 
@@ -590,7 +618,6 @@ def _build_channels_keyboard(channels, active_channel_id):
         ch_db_id = ch.get("channel_db_id")
         name = ch.get("channel_name") or "قناة"
 
-        # 🔴 FIX-N1: فحص banned رقمي
         if _is_banned(ch):
             select_icon = "🚫"
         elif ch_db_id == active_channel_id:
@@ -598,14 +625,9 @@ def _build_channels_keyboard(channels, active_channel_id):
         else:
             select_icon = "⚪"
 
-        # 🔴 FIX-N2: badge فريد
         badge = _short_channel_badge(ch)
-
-        # 🟠 FIX-N4: تقطيع موحّد — الآن 22 حرف مثل النص
         safe_name = _truncate_name(name, max_len=22)
 
-        # 🔴 FIX-N2: تنسيق الزر: [icon] [i]. [name] [badge]
-        # مثال: "⚪ 1. منسقه سهرات بنات مسا… #1234"
         label = f"{select_icon} {i}. {safe_name}"
         if badge:
             label = f"{label} {badge}"
@@ -613,19 +635,19 @@ def _build_channels_keyboard(channels, active_channel_id):
         keyboard.append([
             InlineKeyboardButton(
                 label,
-                callback_data=f"ch_select:{ch_db_id}"
+                callback_data=f"ch_sel:{ch_db_id}"
             ),
             InlineKeyboardButton(
                 "ℹ️",
-                callback_data=f"ch_info:{ch_db_id}"
+                callback_data=f"ch_stats:{ch_db_id}"
             ),
         ])
 
     keyboard.append([
-        InlineKeyboardButton("➕ إضافة قناة", callback_data="add_channel"),
+        InlineKeyboardButton("➕ إضافة قناة", callback_data="ch_add"),
     ])
     keyboard.append([
-        InlineKeyboardButton("🗑️ حذف قناة", callback_data="ch_delete_menu"),
+        InlineKeyboardButton("🗑️ حذف قناة", callback_data="ch_del_menu"),
     ])
     keyboard.append([
         InlineKeyboardButton("↩️ رجوع للقائمة الرئيسية", callback_data="main_menu"),
@@ -641,7 +663,10 @@ def _build_channels_keyboard(channels, active_channel_id):
 async def channel_select_callback(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ):
-    """عند الضغط على قناة لتعيينها نشطة."""
+    """
+    عند الضغط على قناة لتعيينها نشطة.
+    🆕 v2.1.5: يستقبل ch_sel:N (الحديث) و ch_select:N (القديم).
+    """
     if not _db_ready():
         return
 
@@ -672,7 +697,7 @@ async def channel_select_callback(
 
 
 # =====================================================================
-# 3. تفاصيل قناة (helper مشترك)
+# 3. تفاصيل قناة
 # =====================================================================
 
 async def _render_channel_info(query, user_id: int, ch_db_id: int) -> None:
@@ -680,9 +705,9 @@ async def _render_channel_info(query, user_id: int, ch_db_id: int) -> None:
     ✅ v2.0.0: helper مشترك لعرض تفاصيل القناة.
     🟠 FIX-N7: فحص ملكية صريح (دفاع بعمق).
     🔴 FIX-N1: banned رقمي.
+    🆕 v2.1.5: بادئات موحّدة.
     """
     try:
-        # 🟠 FIX-N7: فحص ملكية صريح
         try:
             owns = await DB.is_channel_owner(user_id, ch_db_id)
             if not owns:
@@ -715,14 +740,12 @@ async def _render_channel_info(query, user_id: int, ch_db_id: int) -> None:
         name = ch.get("channel_name") or "قناة بدون اسم"
         ch_telegram_id = ch.get("channel_id") or "غير معروف"
 
-        # 🔴 FIX-N1: banned رقمي
         banned = _is_banned(ch)
 
         status_icon = "🚫 محظورة" if banned else (
             "🟢 نشطة" if ch_db_id == active_channel_id else "⚪ غير نشطة"
         )
 
-        # 🔴 FIX-N2: عرض badge في التفاصيل
         badge = _short_channel_badge(ch)
         badge_line = f"<b>البادج:</b> <code>{badge}</code>\n" if badge else ""
 
@@ -746,7 +769,7 @@ async def _render_channel_info(query, user_id: int, ch_db_id: int) -> None:
             buttons.append([
                 InlineKeyboardButton(
                     "✅ تعيين نشطة",
-                    callback_data=f"ch_select:{ch_db_id}"
+                    callback_data=f"ch_sel:{ch_db_id}"
                 )
             ])
 
@@ -765,7 +788,7 @@ async def _render_channel_info(query, user_id: int, ch_db_id: int) -> None:
         buttons.append([
             InlineKeyboardButton(
                 "🗑️ حذف القناة",
-                callback_data=f"ch_delete_confirm:{ch_db_id}"
+                callback_data=f"ch_del_confirm:{ch_db_id}"
             ),
         ])
         buttons.append([
@@ -795,7 +818,10 @@ async def _render_channel_info(query, user_id: int, ch_db_id: int) -> None:
 async def channel_info_callback(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ):
-    """عند الضغط على ℹ️ - عرض تفاصيل القناة."""
+    """
+    عند الضغط على ℹ️ - عرض تفاصيل القناة.
+    🆕 v2.1.5: يستقبل ch_stats:N (الحديث) و ch_info:N (القديم).
+    """
     if not _db_ready():
         return
 
@@ -821,9 +847,7 @@ async def channel_delete_menu_callback(
 ):
     """
     عرض قائمة القنوات للحذف.
-
-    🔴 FIX-N2: badge فريد على كل زر لتمييز الأسماء المتشابهة.
-    🟠 FIX-N4: تقطيع موحّد 22 حرف.
+    🆕 v2.1.5: يستقبل ch_del_menu (الحديث) و ch_delete_menu (القديم).
     """
     if not _db_ready():
         return
@@ -849,10 +873,7 @@ async def channel_delete_menu_callback(
         ch_db_id = ch.get("channel_db_id")
         name = ch.get("channel_name") or "قناة"
 
-        # 🔴 FIX-N2: badge فريد
         badge = _short_channel_badge(ch)
-
-        # 🟠 FIX-N4: تقطيع موحّد 22
         safe_name = _truncate_name(name, max_len=22)
 
         label = f"🗑️ {i}. {safe_name}"
@@ -862,7 +883,7 @@ async def channel_delete_menu_callback(
         buttons.append([
             InlineKeyboardButton(
                 label,
-                callback_data=f"ch_delete_confirm:{ch_db_id}"
+                callback_data=f"ch_del_confirm:{ch_db_id}"
             )
         ])
 
@@ -883,7 +904,10 @@ async def channel_delete_menu_callback(
 async def channel_delete_confirm_callback(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ):
-    """تأكيد الحذف."""
+    """
+    تأكيد الحذف.
+    🆕 v2.1.5: يستقبل ch_del_confirm:N (الحديث) و ch_delete_confirm:N (القديم).
+    """
     if not _db_ready():
         return
 
@@ -909,7 +933,6 @@ async def channel_delete_confirm_callback(
         stats_raw = await DB.get_channel_stats(user_id, ch_db_id) or {}
         stats = _row_to_dict(stats_raw)
 
-        # 🔴 FIX-N2: badge للسياق
         badge = _short_channel_badge(ch)
         badge_line = f"  <code>{badge}</code>\n" if badge else ""
 
@@ -929,13 +952,13 @@ async def channel_delete_confirm_callback(
             [
                 InlineKeyboardButton(
                     "🗑️ نعم، احذف",
-                    callback_data=f"ch_delete_execute:{ch_db_id}"
+                    callback_data=f"ch_del:{ch_db_id}"
                 ),
             ],
             [
                 InlineKeyboardButton(
                     "❌ إلغاء",
-                    callback_data=f"ch_info:{ch_db_id}"
+                    callback_data=f"ch_stats:{ch_db_id}"
                 ),
             ],
         ]
@@ -954,15 +977,10 @@ async def channel_delete_execute_callback(
 ):
     """
     تنفيذ الحذف.
+    🆕 v2.1.5: يستقبل ch_del:N (الحديث) و ch_delete_execute:N (القديم).
 
-    🔴 FIX-AL1-FOLLOWUP (v2.1.2): إزالة FIX-2 v2.1.1 الخاطئ.
-
-    السبب: DB.delete_channel (في database_channels_posts.py) يتعامل
-    بالفعل مع active_channel بشكل صحيح:
-      • إذا كانت القناة المحذوفة نشطة → يعيّن أحدث قناة أخرى نشطة.
-      • إذا كانت آخر قناة → يعيّن NULL.
-    لذا إعادة تعيين active_channel = NULL من هنا تُلغي هذا السلوك
-    وتترك المستخدم بلا قناة نشطة رغم وجود قنوات أخرى!
+    🔴 FIX-AL1-FOLLOWUP (v2.1.2): DB.delete_channel يتعامل مع
+    active_channel بشكل صحيح.
     """
     if not _db_ready():
         return
@@ -977,15 +995,12 @@ async def channel_delete_execute_callback(
         return
 
     try:
-        # ✅ FIX-AL1-FOLLOWUP: DB.delete_channel يتعامل مع active_channel
-        # بشكل صحيح — لا حاجة لأي تدخّل إضافي هنا.
         success = await DB.delete_channel(user_id, ch_db_id)
 
         if not success:
             await _safe_answer(query, "⚠️ فشل الحذف", show_alert=True)
             return
 
-        # ✅ إبطال كاش المستخدم (للانعكاس الفوري في القوائم)
         try:
             from cache import invalidate_user_cache
             await invalidate_user_cache(user_id)
@@ -1008,7 +1023,7 @@ async def channel_delete_execute_callback(
 async def channel_recycle_callback(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ):
-    """إعادة تدوير المنشورات لقناة محددة."""
+    """إعادة تدوير المنشورات لقناة محددة. (لا تغيير في البادئة)"""
     if not _db_ready():
         return
 
@@ -1048,7 +1063,10 @@ async def channel_recycle_callback(
 async def channel_schedule_callback(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ):
-    """عرض خيارات الجدولة لقناة."""
+    """
+    عرض خيارات الجدولة لقناة. (لا تغيير في بادئتها)
+    🆕 v2.1.5: زر الرجوع الآن ch_stats:N (كان ch_info:N).
+    """
     if not _db_ready():
         return
 
@@ -1108,7 +1126,7 @@ async def channel_schedule_callback(
             buttons.append(row)
 
         buttons.append([
-            InlineKeyboardButton("↩️ رجوع", callback_data=f"ch_info:{ch_db_id}")
+            InlineKeyboardButton("↩️ رجوع", callback_data=f"ch_stats:{ch_db_id}")
         ])
 
         await query.edit_message_text(
@@ -1123,7 +1141,7 @@ async def channel_schedule_callback(
 async def channel_schedule_set_callback(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ):
-    """تعيين التردد الجديد."""
+    """تعيين التردد الجديد. (لا تغيير في البادئة)"""
     if not _db_ready():
         return
 
@@ -1178,7 +1196,10 @@ async def channel_schedule_set_callback(
 async def back_to_main_menu_callback(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ):
-    """الرجوع للقائمة الرئيسية."""
+    """
+    الرجوع للقائمة الرئيسية.
+    🆕 v2.1.4: مغلَّف بـ _stop_after (يمنع ازدواج القائمة الرئيسية).
+    """
     query = update.callback_query
     await _safe_answer(query)
 
@@ -1237,6 +1258,7 @@ async def add_channel_redirect_callback(
     """
     عرض تعليمات إضافة قناة.
     ✅ v2.0.2: يصفّر الحالة لتفادي تعارضات مع عمليات سابقة.
+    🆕 v2.1.5: يستقبل ch_add (الحديث) و add_channel (القديم).
     """
     query = update.callback_query
     await _safe_answer(query)
@@ -1278,12 +1300,10 @@ async def add_channel_redirect_callback(
 # 9. معالج الرسائل النصية لإضافة قناة
 # =====================================================================
 
-# ✅ v2.0.3 FIX-A + 🔴 FIX-N3 (v2.1.3): قواعد Telegram الفعلية
-# Telegram: 5-32 حرفاً، يبدأ بحرف، يقبل [a-zA-Z0-9_]
-# → [a-zA-Z] (1) + [a-zA-Z0-9_]{4,31} (4-31) = 5-32 إجمالي
+# ✅ v2.0.3 FIX-A + 🔴 FIX-N3: قواعد Telegram الفعلية (5-32 حرفاً)
 _USERNAME_RE = re.compile(r"^@([a-zA-Z][a-zA-Z0-9_]{4,31})$")
 
-# 🟠 FIX-N5: دعم ?query و #fragment في نهاية الرابط
+# 🟠 FIX-N5: دعم ?query و #fragment
 _URL_RE = re.compile(
     r"^(?:https?://)?(?:www\.)?t\.me/"
     r"([a-zA-Z][a-zA-Z0-9_]{4,31})"
@@ -1313,8 +1333,8 @@ def _extract_channel_username(text: str) -> Optional[str]:
 def _mark_channel_add_handled(context) -> None:
     """
     🆕 v2.1.1 FIX-1: علم صريح لـ handlers_message
-    (_handle_wait_channel_text) بأن add_channel_from_message
-    عالج الرسالة — بدل الاعتماد الهشّ على مسح الحالة.
+    (_handle_wait_channel_text) بأن add_channel_from_message عالج
+    الرسالة — بدل الاعتماد الهشّ على مسح الحالة.
     """
     try:
         if context is not None and context.user_data is not None:
@@ -1575,7 +1595,6 @@ async def add_channel_from_message(
                 posts_count = _safe_int(
                     (result_d.get("posts_count") if result_d else 0), 0)
 
-                # 🔴 FIX-N2: badge في رسالة النجاح
                 success_text = (
                     f"✅ <b>تم إضافة القناة بنجاح!</b>\n\n"
                     f"📡 <b>{channel_name}</b>\n"
@@ -1629,7 +1648,6 @@ async def add_channel_from_message(
                     f"قد تكون مسجلة مسبقاً."
                 )
 
-            # 🆕 v2.1.1: مسح الحالة + منع المسار الثاني
             _mark_channel_add_handled(context)
             _clear_user_state(user_id)
             if context.user_data:
@@ -1693,7 +1711,7 @@ async def _reply_or_edit(processing_msg, message, text: str):
 async def posts_add_callback(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ):
-    """معالج سريع لزر إضافة منشورات."""
+    """معالج سريع لزر إضافة منشورات. (لا تغيير)"""
     if not _db_ready():
         return
 
@@ -1763,97 +1781,126 @@ def register_channels_list_handlers(application):
     """
     تسجيل كل handlers قائمة القنوات.
 
-    ⚠️ FIX-N9: هذا الملف يُسجّل نفس callbacks التي يعالجها
-    handlers_callback.py::CallbackHandlers._handle_parameterized
-    (ch_select:, ch_info:, ch_list, ...). PTB يستخدم block=True
-    افتراضياً → أول handler مسجَّل يفوز. تأكد من أن
-    register_channels_list_handlers() تُستدعى قبل
-    CallbackHandlers، أو احذف المعالجات المكرّرة من handlers_callback.py.
+    🆕 v2.1.5 — UNIFIED-PREFIXES:
+        Patterns تقبل البادئات القديمة والجديدة للتوافق مع الأزرار
+        المرسلة سابقاً في محادثات المستخدمين.
+
+    🆕 v2.1.4 — FIX-CB1:
+        كل CallbackQueryHandler مُغلَّف بـ _stop_after لمنع
+        handlers_callback.py::CallbackHandlers.handle من التنفيذ
+        على نفس الـ update.
+
+    ⚠️ يجب استدعاء هذه الدالة **قبل** تسجيل CallbackHandlers.handle.
     """
     try:
         # ═══ الرجوع للقائمة الرئيسية ═══
         application.add_handler(
             CallbackQueryHandler(
-                back_to_main_menu_callback,
+                _stop_after(back_to_main_menu_callback),
                 pattern=r"^(main_menu|back_to_main|back_to_main_menu|home)$"
             )
         )
 
         # ═══ إضافة قناة (زر) ═══
+        # 🆕 v2.1.5: ch_add (حديث) + add_channel (قديم)
         application.add_handler(
             CallbackQueryHandler(
-                add_channel_redirect_callback,
-                pattern=r"^add_channel$"
+                _stop_after(add_channel_redirect_callback),
+                pattern=r"^(add_channel|ch_add)$"
             )
         )
 
         # ═══ إضافة منشورات (سريع) ═══
         application.add_handler(
             CallbackQueryHandler(
-                posts_add_callback,
+                _stop_after(posts_add_callback),
                 pattern=r"^(post_add|posts_add)$"
             )
         )
 
         # ═══ قائمة القنوات ═══
         application.add_handler(
-            CallbackQueryHandler(show_channels_list, pattern=r"^ch_list$")
-        )
-
-        # ═══ اختيار/تفاصيل ═══
-        application.add_handler(
             CallbackQueryHandler(
-                channel_select_callback, pattern=r"^ch_select:"
-            )
-        )
-        application.add_handler(
-            CallbackQueryHandler(
-                channel_info_callback, pattern=r"^ch_info:"
+                _stop_after(show_channels_list),
+                pattern=r"^ch_list$"
             )
         )
 
-        # ═══ الحذف ═══
+        # ═══ اختيار قناة نشطة ═══
+        # 🆕 v2.1.5: ch_sel:N (حديث) + ch_select:N (قديم)
         application.add_handler(
             CallbackQueryHandler(
-                channel_delete_menu_callback, pattern=r"^ch_delete_menu$"
+                _stop_after(channel_select_callback),
+                pattern=r"^(ch_sel|ch_select):"
             )
         )
+
+        # ═══ تفاصيل قناة (ℹ️) ═══
+        # 🆕 v2.1.5: ch_stats:N (حديث) + ch_info:N (قديم)
         application.add_handler(
             CallbackQueryHandler(
-                channel_delete_confirm_callback,
-                pattern=r"^ch_delete_confirm:"
+                _stop_after(channel_info_callback),
+                pattern=r"^(ch_stats|ch_info):"
             )
         )
+
+        # ═══ قائمة الحذف ═══
+        # 🆕 v2.1.5: ch_del_menu (حديث) + ch_delete_menu (قديم)
         application.add_handler(
             CallbackQueryHandler(
-                channel_delete_execute_callback,
-                pattern=r"^ch_delete_execute:"
+                _stop_after(channel_delete_menu_callback),
+                pattern=r"^(ch_del_menu|ch_delete_menu)$"
+            )
+        )
+
+        # ═══ تأكيد الحذف ═══
+        # 🆕 v2.1.5: ch_del_confirm:N (حديث) + ch_delete_confirm:N (قديم)
+        # ⚠️ يجب أن يُسجَّل قبل ch_del: (وإلا ch_del: قد يلتقطه إن
+        #    كان regex غير مقيد بـ ":")
+        application.add_handler(
+            CallbackQueryHandler(
+                _stop_after(channel_delete_confirm_callback),
+                pattern=r"^(ch_del_confirm|ch_delete_confirm):"
+            )
+        )
+
+        # ═══ تنفيذ الحذف ═══
+        # 🆕 v2.1.5: ch_del:N (حديث) + ch_delete_execute:N (قديم)
+        # ⚠️ pattern "ch_del:" لا يطابق "ch_del_confirm:" بسبب ":"
+        #    الفاصل — لذا الترتيب آمن.
+        application.add_handler(
+            CallbackQueryHandler(
+                _stop_after(channel_delete_execute_callback),
+                pattern=r"^(ch_del|ch_delete_execute):"
             )
         )
 
         # ═══ إعادة التدوير ═══
         application.add_handler(
             CallbackQueryHandler(
-                channel_recycle_callback, pattern=r"^ch_recycle:"
+                _stop_after(channel_recycle_callback),
+                pattern=r"^ch_recycle:"
             )
         )
 
         # ═══ الجدولة ═══
         application.add_handler(
             CallbackQueryHandler(
-                channel_schedule_callback, pattern=r"^ch_schedule:"
+                _stop_after(channel_schedule_callback),
+                pattern=r"^ch_schedule:"
             )
         )
         application.add_handler(
             CallbackQueryHandler(
-                channel_schedule_set_callback, pattern=r"^ch_sched_set:"
+                _stop_after(channel_schedule_set_callback),
+                pattern=r"^ch_sched_set:"
             )
         )
 
         # ═══ معالج الرسائل النصية لإضافة قناة ═══
-        # ✅ v2.1.0: يعمل حتى في حالة WAIT_CHANNEL.
-        # 🆕 v2.1.1 FIX-1: يرفع ApplicationHandlerStop + علم صريح.
-        # 🔴 FIX-AL1 (v2.1.2): WAIT_LOG_CH لم يعد يُسرق — يُتجاهل هنا.
+        # ✅ v2.1.0: يعمل حتى في WAIT_CHANNEL.
+        # 🆕 v2.1.1 FIX-1: ApplicationHandlerStop + علم صريح.
+        # 🔴 FIX-AL1 (v2.1.2): WAIT_LOG_CH لم يعد يُسرق.
         # 🟠 FIX-N6: filters.Regex مع IGNORECASE لدعم T.ME/T.me
         application.add_handler(
             MessageHandler(
@@ -1867,8 +1914,9 @@ def register_channels_list_handlers(application):
         )
 
         logger.info(
-            "✅ تم تسجيل handlers قائمة القنوات (v2.1.3 — "
-            "UI-DEDUP + BANNED-TRUTHY + REGEX-FIX)"
+            "✅ تم تسجيل handlers قائمة القنوات (v2.1.5 — "
+            "UNIFIED-PREFIXES + PTB-V20-MULTI-HANDLER-FIX + "
+            "UI-DEDUP + BANNED-TRUTHY)"
         )
         return True
     except Exception as e:
@@ -1900,6 +1948,7 @@ __all__ = [
     "_is_banned",
     "_short_channel_badge",
     "_truncate_name",
+    "_stop_after",
     "_CHANNEL_ADD_STATES",
 ]
 
@@ -1910,14 +1959,17 @@ __all__ = [
 
 try:
     logger.debug(
-        "✅ handlers_channels_list v2.1.3 loaded | "
-        "fixes=(UI-DEDUP + BANNED-TRUTHY + REGEX-FIX + "
-        "URL-QUERY-SUPPORT) | "
+        "✅ handlers_channels_list v2.1.5 loaded | "
+        "fixes=(UNIFIED-PREFIXES + PTB-V20-MULTI-HANDLER-FIX + "
+        "UI-DEDUP + BANNED-TRUTHY + REGEX-FIX + URL-QUERY-SUPPORT) | "
+        "unified=(ch_sel|ch_stats|ch_del|ch_del_confirm|ch_del_menu|ch_add) | "
+        "backward-compat=old-prefixes-accepted | "
+        "stop_after=wraps-all-callbacks | "
         "WAIT-LOG-CH=excluded-from-add-states | "
-        "active-channel=DB-native-handling | "
         "banned-check=_is_banned() numeric | "
         "button-badge=#last4-of-channel_id | "
-        "row_to_dict=%s",
+        "CB_module=%s | row_to_dict=%s",
+        "available" if _CB_AVAILABLE else "unavailable",
         "shared" if _HAS_SHARED_ROW_TO_DICT else "fallback",
     )
 except Exception:
