@@ -2,46 +2,46 @@
 # -*- coding: utf-8 -*-
 
 """
-🌿 Relax Manager – البوت الرئيسي (bot.py v5.6.24-ORDER-FIX)
+🌿 Relax Manager – البوت الرئيسي (bot.py v5.6.25-NAV-FIX-COMPAT)
 ================================================================================
 📌 نقطة الدخول الرسمية للتطبيق (entrypoint).
 
-🆕 v5.6.24 (ORDER-FIX):
-    🔴 ORDER-1: نقل `register_nav_fix(app)` إلى **بعد**
-        `register_channels_list_handlers(app)`.
-        السبب: NAV_FIX كان يُسجَّل قبل channels_list → قد يلتقط
-        `main_menu` أولاً (إن كان pattern عاماً) → يظهر القائمة
-        الرئيسية مرتين + ازدواج معالجة.
-        بعد النقل: channels_list (مع `_stop_after`) تُنفَّذ أولاً
-        وترفع ApplicationHandlerStop → NAV_FIX لا يرى callbacks
-        القنوات.
+🆕 v5.6.25 (NAV-FIX-COMPAT):
+    🔴 CRITICAL — FIX-ORDER6:
+        `handlers_nav_fix.py` v3.4.0 أصبح **trace-only** (لا تفويض).
+        v5.6.24 كان يفترض خطأً أن NAV_FIX يُسجّل CallbackHandlers.handle
+        من داخله → عند توفّر NAV_FIX، لم يُسجَّل handle أصلاً.
+        النتيجة: أزرار generic (toggle_auto, settings, referral,
+        admin_*, auto_reply_*, sched_*, pub_all, ...) معطّلة بصمت.
 
-    📋 ترتيب التسجيل بعد الإصلاح:
-        1. register_channels_list_handlers  (يحتوي _stop_after)
-        2. register_nav_fix
-        3. register_delete_confirmation
-        4. register_group_log_handlers
-        5. handlers_analytics
-        6. CallbackHandlers.handle (فقط إن NAV_FIX غير متاح)
+        ✅ الإصلاح:
+            `CallbackHandlers.handle` يُسجَّل **دائماً** في ORDER 6/6،
+            بغض النظر عن توفّر NAV_FIX.
+            ترتيب group=0 (channels_list → handle) يضمن أن
+            `_stop_after` يمنع التكرار عندما تُطابق channels_list.
 
-    ✅ لا تغيير في باقي المنطق.
+    🟠 FIX-COMMENT-1: تصحيح تعليقات NAV_FIX (trace-only، ليس
+        delegation). التعليقات القديمة كانت من زمن v3.3.0.
 
-🆕 v5.6.23 (PERF-SESSIONS):
-    🟢 PERF-A: keep_alive() — session واحد على مستوى الدالة.
-    🟢 PERF-B: _watch_runner() — session واحد خارج while.
+    🟠 FIX-PM-1: عتبة تحذير الاستعلام البطيء في pool_health_monitor
+        قابلة للضبط عبر `PM_SLOW_QUERY_WARN_MS` (افتراضي 250ms
+        بدل 100ms المُزعج، مع فترة سماح cold-start).
 
-🆕 v5.6.22 (FULLHEALTH-COMMANDS):
-    🔴 FIX-AN2: تسجيل /fullhealth + /latency كأوامر مباشرة.
-    🔴 FIX-AN3: توسيع regex الـ CallbackQueryHandler.
-    🟡 FIX-AN4: سجل إقلاع يوضّح حالة full_health_btn + latency_btn.
+    🟠 FIX-KA-1: keep_alive عند غياب URL يعود بدل انتظار لا نهائي
+        (لا يحتفظ بمهمة خلفية بلا داعٍ).
 
-🆕 v5.6.21 (FIX-BUNDLE):
-    🔴 FIX-AN1-FOLLOWUP: منع تنفيذ CallbackHandlers.handle مرتين.
-    🔴 FIX-C8/B1: _PM_QUERY_TTL = 290.0.
-    🔴 FIX-C9/B13: keep_alive — while True عند غياب URL.
-    🔴 FIX-AM1: stop_auto_vacuum_task.
-    🟡 FIX-5: _NAV_FIX_AVAILABLE.
-    🟡 FIX-U26: migrate_reminders_columns بعد pre_initialize.
+    🟠 FIX-PAY-1: successful_payment يتحقق أن payment_id غير None
+        قبل تمريره إلى DB (منع تخزين NULL).
+
+    🟠 FIX-PAY-2: pre_checkout يتحقق من العملة (currency) إن أمكن.
+
+    🟠 FIX-MAINT-1: start_weekly_diagnostic_task — يتعامل مع
+        الحالة التي تُعيد فيها coroutine.
+
+🆕 v5.6.24 (ORDER-FIX) — محفوظ كمرجع.
+🆕 v5.6.23 (PERF-SESSIONS) — محفوظ.
+🆕 v5.6.22 (FULLHEALTH-COMMANDS) — محفوظ.
+🆕 v5.6.21 (FIX-BUNDLE) — محفوظ.
 ================================================================================
 """
 
@@ -138,7 +138,7 @@ except ImportError as _e1:
                 )
 
 # ═════════════════════════════════════════════════════════════════════
-# handlers_analytics — استيراد آمن + v5.6.22: cmd_fullhealth + cmd_latency
+# handlers_analytics
 # ═════════════════════════════════════════════════════════════════════
 _ANALYTICS_HANDLERS_AVAILABLE = False
 _ANALYTICS_HANDLERS_IMPORT_ERROR = None
@@ -371,7 +371,7 @@ from handlers.handlers_message import (
 )
 
 # ═════════════════════════════════════════════════════════════════════
-# /db_idle — استيراد آمن
+# /db_idle
 # ═════════════════════════════════════════════════════════════════════
 _HAS_DB_IDLE_CMD = False
 _handle_db_idle_command = None
@@ -395,7 +395,7 @@ except ImportError as _e_dbidle1:
         _DB_IDLE_IMPORT_ERROR = f"{_e_dbidle1} | {_e_dbidle2}"
 
 # ═════════════════════════════════════════════════════════════════════
-# /cache_stats — استيراد آمن
+# /cache_stats
 # ═════════════════════════════════════════════════════════════════════
 _HAS_CACHE_STATS_CMD = False
 _handle_cache_stats_command = None
@@ -419,7 +419,7 @@ except ImportError as _e_cs1:
         _CACHE_STATS_IMPORT_ERROR = f"{_e_cs1} | {_e_cs2}"
 
 # ═════════════════════════════════════════════════════════════════════
-# db_maintenance_commands — استيراد مرن
+# db_maintenance_commands
 # ═════════════════════════════════════════════════════════════════════
 register_maintenance_commands = None
 start_weekly_diagnostic_task = None
@@ -589,6 +589,16 @@ _PM_LOCK_WAIT_WARN = 1
 _PM_WAITING_WARN = 3
 _PM_ALERT_COOLDOWN_SEC = 600.0
 
+# 🆕 v5.6.25 FIX-PM-1: عتبة تحذير الاستعلام البطيء قابلة للضبط
+try:
+    _PM_SLOW_QUERY_WARN_MS = float(
+        os.getenv("PM_SLOW_QUERY_WARN_MS", "250")
+    )
+    if _PM_SLOW_QUERY_WARN_MS < 50:
+        _PM_SLOW_QUERY_WARN_MS = 250.0
+except (TypeError, ValueError):
+    _PM_SLOW_QUERY_WARN_MS = 250.0
+
 _PAYMENT_AMOUNT_EPSILON = 0.01
 
 _DIAG_INCOMING = os.getenv("DIAG_INCOMING", "0").strip().lower() in (
@@ -643,11 +653,10 @@ def _spawn_notify_dev_log(context, text: str) -> None:
         logger.debug("_spawn_notify_dev_log: %s", _e)
 
 # ═══════════════════════════════════════════════════════════════════
-# 🆕 PERF-4: Warmup Telegram API
+# Warmup Telegram API
 # ═══════════════════════════════════════════════════════════════════
 
 async def _warmup_telegram_api(app: Application) -> bool:
-    """تحمية اتصال Telegram API بعد app.initialize()."""
     t_warm = time.monotonic()
     try:
         me = await asyncio.wait_for(
@@ -686,8 +695,6 @@ async def _warmup_telegram_api(app: Application) -> bool:
 # ═══════════════════════════════════════════════════════════════════
 
 def _log_spam_detector_status() -> None:
-    """يطبع حالة محرك كشف السبام + التبعيات (v4.0.8-aware)."""
-
     if _SPAM_DETECTOR_AVAILABLE:
         _helpers_ok = []
         if _DETECTORS_HAS_INSTALL_HELPER:
@@ -881,11 +888,10 @@ def _log_security_bridge_status() -> None:
         )
 
 # ═══════════════════════════════════════════════════════════════════
-# 🆕 PERF-2: سجل تشخيصي لقيم الأداء
+# سجل تشخيصي لقيم الأداء
 # ═══════════════════════════════════════════════════════════════════
 
 def _log_perf_tuning_status() -> None:
-    """🆕 PERF-2: يعرض قيم الأداء المهمة عند الإقلاع."""
     try:
         _max_ch = getattr(CONFIG, "MAX_CHANNELS_PER_CYCLE", "?")
         _slow_q = getattr(CONFIG, "SLOW_QUERY_LOG_THRESHOLD", "?")
@@ -897,8 +903,10 @@ def _log_perf_tuning_status() -> None:
             "MAX_CHANNELS/CYCLE=%s | "
             "SLOW_QUERY_THRESHOLD=%ss | "
             "PG_STMT_TIMEOUT=%sms | "
-            "DB_POOL_SIZE=%s",
+            "DB_POOL_SIZE=%s | "
+            "PM_SLOW_WARN=%sms",
             _max_ch, _slow_q, _stmt_to, _pool_size,
+            int(_PM_SLOW_QUERY_WARN_MS),
         )
 
         try:
@@ -1050,14 +1058,16 @@ else:
         _CH_DELETE_IMPORT_ERROR or "unknown",
     )
 
+# 🆕 v5.6.25: تصحيح وصف NAV_FIX (trace-only، ليس delegation)
 if _NAV_FIX_AVAILABLE:
     logger.info(
-        "✅ handlers_nav_fix متاح — delegation mode مُفعّل"
+        "✅ handlers_nav_fix متاح — trace-only mode "
+        "(لا يُسجّل CallbackHandlers.handle — يُسجَّل بشكل منفصل)"
     )
 else:
-    logger.warning(
-        "⚠️ handlers_nav_fix غير متاح — "
-        "سيُسجَّل CallbackHandlers.handle مباشرة (fallback)"
+    logger.info(
+        "ℹ️ handlers_nav_fix غير متاح — "
+        "CallbackHandlers.handle سيُسجَّل مباشرة"
     )
 
 if _MAINT_CMDS_AVAILABLE:
@@ -1092,7 +1102,6 @@ else:
         "يتطلب handlers_message.py v7.18.18+"
     )
 
-# 🆕 v5.6.22: سجل أوسع لحالة handlers_analytics
 if _ANALYTICS_HANDLERS_AVAILABLE:
     _an_extras = []
     if _cmd_fullhealth is not None:
@@ -1794,6 +1803,25 @@ async def pre_checkout(update, context):
             logger.error("❌ Failed to answer pre-checkout rejection: %s", e)
         return
 
+    # 🆕 v5.6.25 FIX-PAY-2: فحص العملة إن كانت متاحة
+    try:
+        q_currency = getattr(query, 'currency', None)
+        if q_currency and q_currency != "XTR":
+            logger.warning(
+                "❌ Currency mismatch for user %s: got %r (expected XTR)",
+                user_id, q_currency,
+            )
+            try:
+                await query.answer(
+                    ok=False,
+                    error_message="العملة غير مدعومة (المطلوب: Telegram Stars).",
+                )
+            except Exception as e:
+                logger.error("❌ Failed to answer currency mismatch: %s", e)
+            return
+    except Exception as _e:
+        logger.debug("pre_checkout currency check: %s", _e)
+
     if hasattr(query, 'total_amount'):
         expected_amount = plan.get('price')
         if (
@@ -1850,6 +1878,22 @@ async def successful_payment(update, context):
 
     payment_type = data.get('type')
     payment_id = telegram_payment_charge_id or provider_payment_charge_id
+
+    # 🆕 v5.6.25 FIX-PAY-1: payment_id إلزامي
+    if not payment_id:
+        logger.error(
+            "❌ payment_id كلاهما None | user=%s invoice=%s type=%s",
+            user_id, invoice.get('number'), payment_type,
+        )
+        await safe_send(
+            context.bot, user_id,
+            "❌ <b>مشكلة في بيانات الدفع</b>\n\n"
+            "لم يصل مُعرّف الدفع من Telegram. تواصل مع الدعم مع رقم "
+            f"الفاتورة: <code>{invoice.get('number') or '?'}</code>",
+            parse_mode='HTML',
+        )
+        return
+
     plan_name = plan.get('name', 'الخطة')
 
     if payment_type == 'subscription':
@@ -1972,10 +2016,9 @@ async def health_check(request):
 
 async def keep_alive():
     """
-    keep_alive محسّن — v5.6.23/PREF-A:
-    - يستخدم aiohttp.ClientSession واحد على مستوى الدالة بدل فتح
-      session جديد كل 180s.
-    - يوفّر TLS handshake + sockets مكررة.
+    keep_alive محسّن — v5.6.25:
+    - session واحد على مستوى الدالة (v5.6.23/PERF-A).
+    - 🆕 FIX-KA-1: عند غياب URL → يعود بدل انتظار لا نهائي.
     """
     try:
         await asyncio.sleep(_KEEP_ALIVE_INITIAL_DELAY)
@@ -1991,18 +2034,14 @@ async def keep_alive():
     if not url:
         logger.info(
             "ℹ️ keep_alive: RENDER_EXTERNAL_URL/KEEP_ALIVE_URL غير موجود "
-            "— معطّل داخلياً."
+            "— المهمة تتوقف الآن (لا حاجة لمهمة خلفية)."
         )
         logger.info(
             "💡 الحل الموصى به: استخدم Cron-job.org (خارجي) "
             "على https://<your-app>.onrender.com/health كل 5 دقائق."
         )
-        while True:
-            try:
-                await asyncio.sleep(86400)
-            except asyncio.CancelledError:
-                logger.info("🛑 keep_alive (disabled) أُلغي")
-                raise
+        # 🆕 FIX-KA-1: العودة بدل while True: sleep(86400)
+        return
 
     url = url.rstrip('/')
     health_url = f"{url}/health"
@@ -2136,7 +2175,6 @@ async def _fetch_pool_data(total: int, active: int) -> Optional[Dict[str, Any]]:
     return None
 
 async def _fetch_pg_activity_cached() -> Dict[str, Any]:
-    """كاش 290s لاستعلام pg_stat_activity."""
     global _pm_last_query_ts, _pm_last_query_result, _pm_slow_query_warned
 
     now = time.monotonic()
@@ -2166,17 +2204,21 @@ async def _fetch_pg_activity_cached() -> Dict[str, Any]:
     )
     elapsed_ms = (time.monotonic() - t0) * 1000
 
-    if elapsed_ms > 100 and not _pm_slow_query_warned:
+    # 🆕 v5.6.25 FIX-PM-1: عتبة قابلة للضبط + cold-start grace
+    if (
+        elapsed_ms > _PM_SLOW_QUERY_WARN_MS
+        and not _pm_slow_query_warned
+    ):
         logger.warning(
-            "⚠️ pool_health_monitor: استعلام بطيء (%.0fms) — "
+            "⚠️ pool_health_monitor: استعلام بطيء (%.0fms > %.0fms) — "
             "قد يكون cold-start، سيتحسّن في الدورات القادمة",
-            elapsed_ms,
+            elapsed_ms, _PM_SLOW_QUERY_WARN_MS,
         )
         _pm_slow_query_warned = True
     elif elapsed_ms < 50 and _pm_slow_query_warned:
         logger.info(
-            "✅ pool_health_monitor: تعافى — %.0fms (كان >100ms)",
-            elapsed_ms,
+            "✅ pool_health_monitor: تعافى — %.0fms (كان >%.0fms)",
+            elapsed_ms, _PM_SLOW_QUERY_WARN_MS,
         )
         _pm_slow_query_warned = False
 
@@ -2195,7 +2237,6 @@ async def _fetch_pg_activity_cached() -> Dict[str, Any]:
     return data
 
 async def pool_health_monitor() -> None:
-    """مراقب Pool."""
     _task_start_mono = time.monotonic()
     _idle_tx_streak = 0
     _last_details_dump_mono = 0.0
@@ -2385,10 +2426,6 @@ async def _watch_runner(
     shutdown_event: asyncio.Event,
     port: int,
 ) -> None:
-    """
-    مراقب Webhook runner — v5.6.23/PERF-B:
-    - session واحد خارج while بدل فتح ClientSession كل 10s.
-    """
     try:
         site = None
         if hasattr(runner, "site"):
@@ -2750,12 +2787,12 @@ async def main():
     logger.info("👨‍💼 المالك: %s", CONFIG.PRIMARY_OWNER_ID)
 
     logger.info(
-        "📦 bot.py: v5.6.24 | "
+        "📦 bot.py: v5.6.25 | "
         "detectors=%s | layers=%d | helpers=%s | "
         "db_idle=%s | cache_stats=%s | analytics=%s | "
         "fullhealth=%s | latency=%s | maint_cmds=%s | "
         "pool_cache_ttl=%ds | nav_fix=%s | perf_sessions=on | "
-        "order_fix=channels_list_before_nav_fix",
+        "nav_fix_mode=trace-only | handle_reg=always",
         _SPAM_DETECTOR_VERSION or "N/A",
         _SPAM_DETECTOR_LAYERS_COUNT,
         (
@@ -3195,14 +3232,15 @@ async def main():
     app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, successful_payment))
 
     # ═══════════════════════════════════════════════════════════════
-    # 🆕 v5.6.24 ORDER-FIX:
-    # ترتيب التسجيل الصحيح:
-    #   1. channels_list (يحتوي _stop_after على كل callback)
-    #   2. nav_fix (لا يتداخل مع القوائم)
+    # 🆕 v5.6.25 ORDER-FIX-COMPAT:
+    # ترتيب التسجيل الصحيح (NAV_FIX v3.4.0 = trace-only):
+    #   1. channels_list   (يحتوي _stop_after على كل callback)
+    #   2. nav_fix         (trace-only، لا يتداخل)
     #   3. channels_delete
     #   4. group_log
     #   5. analytics
-    #   6. CallbackHandlers.handle (فقط إن nav_fix غير متاح)
+    #   6. CallbackHandlers.handle — 🔴 دائماً!
+    #      (NAV_FIX v3.4.0 لا يُسجّله، فنتسجله هنا)
     # ═══════════════════════════════════════════════════════════════
 
     # 1️⃣ channels_list — الأولوية القصوى
@@ -3218,13 +3256,13 @@ async def main():
             e, exc_info=True
         )
 
-    # 2️⃣ nav_fix — بعد channels_list لتجنب التقاط القوائم
+    # 2️⃣ nav_fix — trace-only (v3.4.0)
     if _NAV_FIX_AVAILABLE and callable(register_nav_fix):
         try:
             register_nav_fix(app)
             logger.info(
-                "✅ [ORDER 2/6] NAV_FIX: معالج الإغلاق/الرجوع مُسجّل "
-                "(بعد channels_list لتفادي التداخل)"
+                "✅ [ORDER 2/6] NAV_FIX: trace-only مُسجّل "
+                "(group=-99، يسجّل الضغطات فقط — لا تفويض)"
             )
         except Exception as e:
             logger.error(
@@ -3233,8 +3271,7 @@ async def main():
             )
     else:
         logger.info(
-            "ℹ️ [ORDER 2/6] NAV_FIX غير متاح — "
-            "سيُسجَّل CallbackHandlers.handle مباشرة في الخطوة 6"
+            "ℹ️ [ORDER 2/6] NAV_FIX غير متاح — تخطي"
         )
 
     # 3️⃣ channels_delete
@@ -3311,17 +3348,18 @@ async def main():
             _ANALYTICS_HANDLERS_IMPORT_ERROR or "unknown",
         )
 
-    # 6️⃣ CallbackHandlers.handle — آخر شيء (فقط إن nav_fix غير متاح)
-    if not _NAV_FIX_AVAILABLE:
+    # 6️⃣ CallbackHandlers.handle — 🔴 دائماً (v5.6.25 CRITICAL FIX)
+    try:
         app.add_handler(CallbackQueryHandler(CallbackHandlers.handle))
-        logger.warning(
-            "⚠️ [ORDER 6/6] NAV_FIX غير متاح — "
-            "تسجيل CallbackHandlers.handle مباشرة (fallback)"
-        )
-    else:
         logger.info(
-            "✅ [ORDER 6/6] NAV_FIX نشط — "
-            "CallbackHandlers.handle مُسجَّل من داخله"
+            "✅ [ORDER 6/6] CallbackHandlers.handle مُسجَّل — "
+            "يُغطّي كل الأزرار غير المُلتقطة من channels_list "
+            "(NAV_FIX v3.4.0 = trace-only، لا يُسجّله)"
+        )
+    except Exception as _e:
+        logger.error(
+            "❌ [ORDER 6/6] فشل تسجيل CallbackHandlers.handle: %s",
+            _e, exc_info=True,
         )
 
     app.add_handler(MessageHandler(
@@ -3423,9 +3461,19 @@ async def main():
             _MAINTENANCE_IMPORT_ERROR or "module missing",
         )
 
+    # 🆕 v5.6.25 FIX-MAINT-1: تعامل مع coroutine
     if _MAINT_CMDS_AVAILABLE and callable(start_weekly_diagnostic_task):
         try:
-            if start_weekly_diagnostic_task(app):
+            _weekly_result = start_weekly_diagnostic_task(app)
+            if asyncio.iscoroutine(_weekly_result):
+                # دالة async — شغّلها كمهمة خلفية
+                _weekly_task = asyncio.create_task(_weekly_result)
+                tasks.append(_weekly_task)
+                logger.info(
+                    "✅ weekly diagnostic task بدأت (coroutine) "
+                    "(تُرسل التقرير كل 7 أيام إن كان مُفعّلاً)"
+                )
+            elif _weekly_result:
                 logger.info(
                     "✅ weekly diagnostic task بدأت "
                     "(تُرسل التقرير كل 7 أيام إن كان مُفعّلاً)"
