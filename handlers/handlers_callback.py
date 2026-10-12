@@ -1,21 +1,38 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-handlers_callback.py - معالج الأزرار (v9.7.25-CONFLICT-FREE-FULL)
+handlers_callback.py - معالج الأزرار (v9.7.26-CLEANUP-DEAD-DELEGATE)
 =====================================================================
-🆕 v9.7.25-CONFLICT-FREE-FULL:
-    🔗 DELEGATE-1: تفويض CB.CH_LIST → handlers_channels_list أولاً.
-    🔗 DELEGATE-2: تفويض CB.CH_ADD → handlers_channels_list أولاً.
-    🔗 DELEGATE-3: تفويض CB.CH_SEL: / CB.CH_DEL: / CB.CH_STATS: /
-                   ch_del_confirm: → channels_list إن توفّر.
-    ✅ FALLBACK-KEPT: كل الدوال الأصلية محفوظة (لا حذف):
+🆕 v9.7.26-CLEANUP-DEAD-DELEGATE:
+    🧹 REMOVE-1: حذف كتلة استيراد `_channels_list_module`.
+    🧹 REMOVE-2: حذف دوال `_delegate_*` الستة (ميتة بعد v2.1.4).
+    🧹 REMOVE-3: حذف كتلة DELEGATE-FIRST الستة `if` في `handle()`.
+    ✅ KEPT: كل الدوال المحلية كما هي (fallback):
        - _show_channel_list
        - _handle_channel_select
        - _handle_channel_delete
        - _handle_channel_stats
        - ch_page_prev / ch_page_next
-    ℹ️ المنطق: PTB أول handler يفوز → channels_list مسجَّل أولاً
-       سيتفوّق تلقائياً؛ التفويض ضمانة إضافية.
+       - fallback routes في `_handle_parameterized`
+       - fallback routes في `handle()` لـ CB.CH_ADD/CB.CH_LIST
+
+    ℹ️ السبب:
+       منذ handlers_channels_list v2.1.4، كل callback في هذا الملف
+       (ch_list, ch_add, ch_sel, ch_stats, ch_del, ch_del_confirm,
+       ch_recycle, ch_schedule, ch_sched_set, ch_del_menu, post_add,
+       main_menu) مُغلَّف بـ `_stop_after` الذي يرفع
+       ApplicationHandlerStop. لذا:
+           • CallbackHandlers.handle لا يُستدعى أصلاً لهذه الأزرار.
+           • كتلة DELEGATE-FIRST كانت dead code.
+           • دوال _delegate_* كانت dead code.
+
+    ⚠️ ملاحظة: fallback routes (CB.CH_LIST/CB.CH_ADD/CB.CH_SEL/
+       CB.CH_DEL/CB.CH_STATS/ch_del_confirm) تبقى في الملف كضمانة
+       لو حذف المستخدم handlers_channels_list مستقبلاً.
+
+🆕 v9.7.25-CONFLICT-FREE-FULL (محفوظ كمرجع للتراجع):
+    🔗 DELEGATE-1..3: تفويض إلى handlers_channels_list — أُزيل في
+       v9.7.26 لأنه أصبح dead code (انظر أعلاه).
 
 🆕 v9.7.23-CRITICAL-FIXES (محفوظة بالكامل):
     🔴 C-1: _show_channel_list + _show_groups_list — banned رقمي
@@ -37,18 +54,14 @@ handlers_callback.py - معالج الأزرار (v9.7.25-CONFLICT-FREE-FULL)
     🔴 FIX-1..7 كما في الإصدار الأصلي.
 
 ═══════════════════════════════════════════════════════════════════════
-⚠️ CONFLICT AVOIDANCE (v9.7.25)
+📋 ترتيب التسجيل المطلوب في bot.py / main.py:
 ═══════════════════════════════════════════════════════════════════════
-هذا الملف يحتفظ بكل الدوال الأصلية، لكن:
-  • عند CB.CH_LIST / CB.CH_ADD → يُجرّب channels_list أولاً (delegation).
-  • عند CB.CH_SEL: / CB.CH_DEL: / CB.CH_STATS: / ch_del_confirm:
-    → نفس الشيء.
-  • عند فشل الاستيراد → fallback محلي كامل.
-
-ترتيب التسجيل المطلوب:
     ✅ register_channels_list_handlers(application)   # أولاً
     ✅ application.add_handler(CallbackQueryHandler(
            CallbackHandlers.handle))                    # ثانياً
+
+مع هذا الترتيب: channels_list يتفوّق على handle() تلقائياً (بسبب
+`_stop_after`)، وهذا الملف يعمل كـ fallback عند عدم التسجيل.
 ═══════════════════════════════════════════════════════════════════════
 """
 import asyncio, importlib, logging, json, time, shutil, os, re
@@ -220,23 +233,17 @@ except Exception:
     pass
 
 # ═══════════════════════════════════════════════════════════════════
-# 🔗 DELEGATE-1/2/3: استيراد handlers_channels_list للتفويض
+# 🧹 v9.7.26-CLEANUP: كتلة استيراد `_channels_list_module` أُزيلت
 # ═══════════════════════════════════════════════════════════════════
-_channels_list_module = None
-try:
-    from . import handlers_channels_list as _channels_list_module  # type: ignore
-except ImportError:
-    try:
-        import handlers_channels_list as _channels_list_module  # type: ignore
-    except ImportError:
-        _channels_list_module = None
-
-if _channels_list_module is not None:
-    logger.info(
-        "🔗 v9.7.25: handlers_channels_list متاح — التفويض مُفعَّل")
-else:
-    logger.info(
-        "ℹ️ v9.7.25: handlers_channels_list غير متاح — fallback محلي")
+# السبب: منذ handlers_channels_list v2.1.4 (decorator `_stop_after`)
+# كل callback في قائمة القنوات يرفع ApplicationHandlerStop قبل
+# الوصول إلى CallbackHandlers.handle. لذا التفويض أصبح dead code.
+#
+# الدوال المحلية (fallback) تبقى للطوارئ عند عدم تسجيل channels_list:
+#   • _show_channel_list
+#   • _handle_channel_select / _handle_channel_delete / _handle_channel_stats
+#   • ch_page_prev / ch_page_next (داخل handle())
+#   • fallback routes في _handle_parameterized
 
 # ═══════════════════════════════════════════════════════════════════
 # SecurityCallbacks
@@ -1390,97 +1397,20 @@ def _format_channel_rate_line(ch):
 
 
 # ═══════════════════════════════════════════════════════════════════
-# 🔗 DELEGATE helpers
+# 🧹 v9.7.26-CLEANUP: دوال `_delegate_*` الستة أُزيلت
 # ═══════════════════════════════════════════════════════════════════
-
-async def _delegate_show_channel_list(update, context) -> bool:
-    """تفويض CB.CH_LIST إلى handlers_channels_list إن توفّر."""
-    if _channels_list_module is None:
-        return False
-    try:
-        fn = getattr(_channels_list_module, 'show_channels_list', None)
-        if callable(fn):
-            await fn(update, context)
-            return True
-    except Exception as e:
-        logger.warning("🔀 delegate show_channels_list: %s", e)
-    return False
-
-
-async def _delegate_add_channel(update, context) -> bool:
-    """تفويض CB.CH_ADD إلى handlers_channels_list إن توفّر."""
-    if _channels_list_module is None:
-        return False
-    try:
-        fn = getattr(_channels_list_module,
-                     'add_channel_redirect_callback', None)
-        if callable(fn):
-            await fn(update, context)
-            return True
-    except Exception as e:
-        logger.warning("🔀 delegate add_channel: %s", e)
-    return False
-
-
-async def _delegate_channel_select(update, context) -> bool:
-    """تفويض CB.CH_SEL: إلى channels_list إن توفّر."""
-    if _channels_list_module is None:
-        return False
-    try:
-        fn = getattr(_channels_list_module,
-                     'channel_select_callback', None)
-        if callable(fn):
-            await fn(update, context)
-            return True
-    except Exception as e:
-        logger.warning("🔀 delegate channel_select: %s", e)
-    return False
-
-
-async def _delegate_channel_delete_confirm(update, context) -> bool:
-    """تفويض ch_del_confirm: إلى channels_list إن توفّر."""
-    if _channels_list_module is None:
-        return False
-    try:
-        fn = getattr(_channels_list_module,
-                     'channel_delete_confirm_callback', None)
-        if callable(fn):
-            await fn(update, context)
-            return True
-    except Exception as e:
-        logger.warning("🔀 delegate ch_del_confirm: %s", e)
-    return False
-
-
-async def _delegate_channel_delete_execute(update, context) -> bool:
-    """تفويض CB.CH_DEL: إلى channels_list إن توفّر."""
-    if _channels_list_module is None:
-        return False
-    try:
-        fn = getattr(_channels_list_module,
-                     'channel_delete_execute_callback', None)
-        if callable(fn):
-            await fn(update, context)
-            return True
-    except Exception as e:
-        logger.warning("🔀 delegate ch_delete_execute: %s", e)
-    return False
-
-
-async def _delegate_channel_info(update, context) -> bool:
-    """تفويض CB.CH_STATS: → channel_info_callback إن توفّر."""
-    if _channels_list_module is None:
-        return False
-    try:
-        # channels_list يستخدم ch_info: بدل ch_stats:
-        fn = getattr(_channels_list_module,
-                     'channel_info_callback', None)
-        if callable(fn):
-            await fn(update, context)
-            return True
-    except Exception as e:
-        logger.warning("🔀 delegate channel_info: %s", e)
-    return False
+# السبب: منذ handlers_channels_list v2.1.4، كل callback لهذا الملف
+# يرفع ApplicationHandlerStop قبل الوصول إلى `CallbackHandlers.handle`.
+# فكانت هذه الدوال dead code.
+#
+# ملاحظة للتوثيق:
+#   _delegate_show_channel_list
+#   _delegate_add_channel
+#   _delegate_channel_select
+#   _delegate_channel_delete_confirm
+#   _delegate_channel_delete_execute
+#   _delegate_channel_info
+# جميعها كانت تعتمد على `_channels_list_module` (أُزيل أيضاً).
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -1541,26 +1471,28 @@ class CallbackHandlers:
         except Exception: lang = 'ar'
 
         # ═══════════════════════════════════════════════════════════
-        # 🔗 DELEGATE-FIRST: قنوات المستخدم
+        # 🧹 v9.7.26-CLEANUP: كتلة DELEGATE-FIRST أُزيلت
         # ═══════════════════════════════════════════════════════════
-        if data in (CB.CH_LIST, "ch_list"):
-            if await _delegate_show_channel_list(update, context):
-                return
-        if data in (CB.CH_ADD, "add_channel"):
-            if await _delegate_add_channel(update, context):
-                return
-        if data.startswith(f"{CB.CH_SEL}:"):
-            if await _delegate_channel_select(update, context):
-                return
-        if data.startswith("ch_del_confirm:"):
-            if await _delegate_channel_delete_confirm(update, context):
-                return
-        if data.startswith(f"{CB.CH_DEL}:"):
-            if await _delegate_channel_delete_execute(update, context):
-                return
-        if data.startswith(f"{CB.CH_STATS}:"):
-            if await _delegate_channel_info(update, context):
-                return
+        # السبب: أصبحت dead code بعد _stop_after في channels_list
+        # v2.1.4. الأزرار المسجَّلة هناك لا تصل هنا أبداً.
+        #
+        # للتوثيق، كانت الكتلة:
+        #   if data in (CB.CH_LIST, "ch_list"):
+        #       if await _delegate_show_channel_list(...): return
+        #   if data in (CB.CH_ADD, "add_channel"):
+        #       if await _delegate_add_channel(...): return
+        #   if data.startswith(f"{CB.CH_SEL}:"):
+        #       if await _delegate_channel_select(...): return
+        #   if data.startswith("ch_del_confirm:"):
+        #       if await _delegate_channel_delete_confirm(...): return
+        #   if data.startswith(f"{CB.CH_DEL}:"):
+        #       if await _delegate_channel_delete_execute(...): return
+        #   if data.startswith(f"{CB.CH_STATS}:"):
+        #       if await _delegate_channel_info(...): return
+        #
+        # ⚠️ ملاحظة: fallback routes للقنوات ما زالت موجودة في:
+        #   • _handle_parameterized (CB.CH_SEL/CH_DEL/CH_STATS/ch_del_confirm)
+        #   • handle() (CB.CH_LIST/CB.CH_ADD + ch_page_prev/next)
 
         try:
             handled = await CallbackHandlers._handle_parameterized(
@@ -1784,10 +1716,9 @@ class CallbackHandlers:
                 await safe_send(context.bot, user_id,
                     await _trans('send_support_message', lang, "📞")); return
 
-            # ⚠️ CB.CH_ADD و CB.CH_LIST أُزيلا — يعالجهما delegation
-            # لكن نُبقي fallback للطوارئ:
+            # ⚠️ CB.CH_ADD و CB.CH_LIST: fallback محلي
+            # (يصل هنا فقط عند عدم تسجيل handlers_channels_list)
             if base_data == CB.CH_ADD or data == "add_channel":
-                # fallback إذا فشل التفويض (يصل هنا فقط عند عدم توفّر channels_list)
                 has_sub = (_is_primary_owner(user_id)
                            or await DB.has_active_subscription(user_id))
                 if not has_sub:
@@ -2033,8 +1964,7 @@ class CallbackHandlers:
                 await CallbackHandlers._handle_language_change(
                     update, context, query, user_id); return
 
-            # ⚠️ ch_page_prev / ch_page_next — fallback (يُستخدم فقط إذا
-            # channels_list غير متاح، لكن يبقى للتوافق):
+            # ⚠️ ch_page_prev / ch_page_next — fallback محلي
             if data == "ch_page_prev":
                 context.user_data['channel_page'] = max(0, _coerce_int(
                     context.user_data.get('channel_page'), 0) - 1)
@@ -2244,7 +2174,8 @@ class CallbackHandlers:
                     'delete_post_confirm', lang, "⚠️"), post_id=post_id)
                 await safe_edit(query, text, reply_markup=kb,
                     parse_mode='HTML', bot=context.bot); return True
-            # ⚠️ ch_del_confirm: delegated in handle() — fallback here:
+            # ⚠️ fallback محلي لـ ch_del_confirm (يُستدعى فقط عند عدم
+            # تسجيل handlers_channels_list)
             if data.startswith("ch_del_confirm:"):
                 ch_id = _coerce_int(data.split(":")[-1])
                 kb = InlineKeyboardMarkup([
@@ -2292,8 +2223,7 @@ class CallbackHandlers:
                 await CallbackHandlers._handle_group_delete(
                     update, context, query, user_id, data, lang)
                 return True
-            # ⚠️ CB.CH_SEL: / CB.CH_DEL: / CB.CH_STATS: — delegated in handle()
-            # fallback here:
+            # ⚠️ fallback محلي لـ CB.CH_SEL/CH_DEL/CH_STATS
             if data.startswith(CB.CH_SEL + ":"):
                 await CallbackHandlers._handle_channel_select(
                     update, context, query, user_id, data, lang)
@@ -2653,13 +2583,13 @@ class CallbackHandlers:
                 bot=context.bot)
 
     # ═══════════════════════════════════════════════════════════════
-    # FALLBACK-KEPT: دوال القنوات (تبقى للتوافق والطوارئ)
+    # FALLBACK-KEPT: دوال القنوات (تبقى للطوارئ)
     # ═══════════════════════════════════════════════════════════════
 
     @staticmethod
     async def _handle_channel_select(update, context, query, user_id,
                                       data, lang):
-        """Fallback — يُستدعى فقط إذا فشل التفويض."""
+        """Fallback محلي — يُستدعى فقط عند عدم تسجيل channels_list."""
         try: ch_id = int(data.split(":")[-1])
         except (ValueError, IndexError):
             await safe_edit(query,
@@ -2678,7 +2608,7 @@ class CallbackHandlers:
     @staticmethod
     async def _handle_channel_delete(update, context, query, user_id,
                                       lang, data):
-        """Fallback — يُستدعى فقط إذا فشل التفويض."""
+        """Fallback محلي — يُستدعى فقط عند عدم تسجيل channels_list."""
         try: ch_id = int(data.split(":")[-1])
         except (ValueError, IndexError):
             await safe_edit(query,
@@ -2697,7 +2627,7 @@ class CallbackHandlers:
     @staticmethod
     async def _handle_channel_stats(update, context, query, user_id,
                                      data, lang):
-        """Fallback — يُستدعى فقط إذا فشل التفويض."""
+        """Fallback محلي — يُستدعى فقط عند عدم تسجيل channels_list."""
         try: ch_id = int(data.split(":")[-1])
         except (ValueError, IndexError):
             await safe_edit(query,
@@ -2724,8 +2654,8 @@ class CallbackHandlers:
     async def _show_channel_list(update, context, query, user_id,
                                   lang=None):
         """
-        Fallback — يُستدعى فقط إذا فشل التفويض
-        (_delegate_show_channel_list رجع False).
+        Fallback محلي — يُستدعى فقط عند عدم تسجيل channels_list.
+        (بعد v2.1.4، أزرار ch_list يتولاها channels_list مباشرة).
         """
         if not lang: lang = await DB.get_user_language(user_id) or 'ar'
         channels = await DB.get_user_channels(user_id)
@@ -5309,12 +5239,16 @@ try:
             _missing_check.append(_name)
     if _missing_check:
         logger.critical(
-            f"🚨 v9.7.25: دوال مفقودة: {_missing_check}")
+            f"🚨 v9.7.26: دوال مفقودة: {_missing_check}")
     else:
         logger.info(
-            "🛡️ handlers_callback.py v9.7.25-CONFLICT-FREE-FULL | "
-            "DELEGATE-1/2/3: CB.CH_LIST/CH_ADD/CH_SEL/CH_DEL/CH_STATS → "
-            "handlers_channels_list (fallback=local) | "
+            "🛡️ handlers_callback.py v9.7.26-CLEANUP-DEAD-DELEGATE | "
+            "REMOVED: _channels_list_module + 6 _delegate_* + "
+            "DELEGATE-FIRST block | "
+            "KEPT: 16/16 methods (fallbacks for "
+            "CB.CH_LIST/CB.CH_ADD/CB.CH_SEL/CB.CH_DEL/CB.CH_STATS/"
+            "ch_del_confirm + ch_page_prev/next + "
+            "_show_channel_list + _handle_channel_*) | "
             "C-1: channels+groups banned+escape | "
             "C-5: group_security try/except | "
             "H-1: _is_banned() unified | "
@@ -5327,10 +5261,7 @@ try:
             "M-5: health cache key norm | "
             "M-7: membership save log | "
             "M-14: unwrap tuple>2 | "
-            "16/16 methods ✅ (4 fallbacks kept) | "
-            "channels_list_module=%s | "
             "max_tasks_per_user=%d",
-            "available" if _channels_list_module else "unavailable",
             _MAX_TASKS_PER_USER)
 except Exception as _be:
     logger.debug(f"load beacon: {_be}")
