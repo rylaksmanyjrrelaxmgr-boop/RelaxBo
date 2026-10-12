@@ -1,8 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-handlers_analytics.py — واجهة التحليلات المتقدمة (v1.1.1-DIAGNOSTIC)
+handlers_analytics.py — واجهة التحليلات المتقدمة (v1.2.0-FULL-HEALTH)
 ================================================================================
+v1.2.0: تكامل التشخيص الشامل + اختبار الكمون
+    🔬 /fullhealth — تشخيص كامل (شبكة، DB، CPU، RAM، event loop، قرص)
+    🔬 /latency — اختبار كمون الشبكة/DB فقط
+    🎯 زر "🏥 التشخيص الشامل" + "🔬 اختبار الكمون" في القائمة
 v1.1.1: كشف تلقائي للفروقات + عرض الخطأ الكامل في Telegram.
 ================================================================================
 """
@@ -39,6 +43,9 @@ ANALYTICS_BUTTONS = (
     "slow_queries_btn",
     "export_excel_btn",
     "refresh_btn",
+    # 🆕 v1.2.0
+    "full_health_btn",
+    "latency_btn",
 )
 
 
@@ -106,6 +113,50 @@ async def _safe_edit(query, text: str, keyboard=None,
         return False
 
 
+async def _safe_send_long(bot, chat_id: int, text: str,
+                          parse_mode: str = "HTML") -> None:
+    """
+    🆕 v1.2.0: إرسال نص طويل مع تقسيم إلى 3800 حرف/رسالة.
+    (يستخدمه التشخيص الشامل الذي قد يتجاوز 4096).
+    """
+    if not text:
+        return
+    MAX = 3800
+    if len(text) <= MAX:
+        try:
+            await bot.send_message(
+                chat_id, text, parse_mode=parse_mode,
+                disable_web_page_preview=True,
+            )
+        except Exception as e:
+            logger.warning(f"_safe_send_long: {e}")
+        return
+
+    # تقسيم ذكي — نحاول القطع عند \n
+    chunks: List[str] = []
+    remaining = text
+    while len(remaining) > MAX:
+        cut = remaining.rfind("\n", 0, MAX)
+        if cut < MAX // 2:
+            cut = MAX
+        chunks.append(remaining[:cut])
+        remaining = remaining[cut:].lstrip("\n")
+    if remaining:
+        chunks.append(remaining)
+
+    for i, chunk in enumerate(chunks, 1):
+        try:
+            header = ""
+            if len(chunks) > 1:
+                header = f"<i>({i}/{len(chunks)})</i>\n"
+            await bot.send_message(
+                chat_id, header + chunk, parse_mode=parse_mode,
+                disable_web_page_preview=True,
+            )
+        except Exception as e:
+            logger.warning(f"_safe_send_long part {i}: {e}")
+
+
 def _back_keyboard(target: str = "admin_analytics") -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([[
         InlineKeyboardButton(
@@ -155,7 +206,6 @@ def _err_detail(e: Exception) -> str:
     """
     try:
         tb_lines = _tb.format_exc().strip().split("\n")
-        # آخر 3 أسطر — مكان الخطأ الفعلي
         loc = " | ".join(
             l.strip() for l in tb_lines[-3:-1] if l.strip()
         )[:200]
@@ -174,6 +224,12 @@ def _err_detail(e: Exception) -> str:
         f"<b>الرسالة:</b> <code>{err_msg}</code>\n"
         f"<b>الموقع:</b> <code>{loc}</code>"
     )
+
+
+def _strip_html(text: str) -> str:
+    """🆕 v1.2.0: إزالة وسوم HTML للعرض في console."""
+    import re
+    return re.sub(r"<[^>]+>", "", text or "")
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -226,7 +282,7 @@ async def show_analytics_menu(update: Update,
             text = (
                 "⚠️ <b>تحذير — دوال مفقودة</b>\n"
                 "━━━━━━━━━━━━━━━━━━━━━━\n\n"
-                f"<b>Dوال غير موجودة في DB:</b>\n"
+                f"<b>دوال غير موجودة في DB:</b>\n"
                 + "\n".join(f"  ❌ <code>{m}</code>" for m in missing)
                 + "\n\n💡 <b>السبب:</b> "
                 "<code>database.py</code> لا يرث من "
@@ -271,6 +327,9 @@ def _default_analytics_keyboard() -> InlineKeyboardMarkup:
          InlineKeyboardButton("🚀 Pool مباشر", callback_data="pool_live_btn")],
         [InlineKeyboardButton("🐌 استعلامات بطيئة", callback_data="slow_queries_btn"),
          InlineKeyboardButton("📤 تصدير Excel", callback_data="export_excel_btn")],
+        # 🆕 v1.2.0
+        [InlineKeyboardButton("🏥 التشخيص الشامل", callback_data="full_health_btn")],
+        [InlineKeyboardButton("🔬 اختبار الكمون", callback_data="latency_btn")],
         [InlineKeyboardButton("🔄 تحديث", callback_data="refresh_btn")],
         [InlineKeyboardButton("🔙 رجوع", callback_data="admin")],
     ])
@@ -806,7 +865,185 @@ async def export_excel(update: Update,
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# 10) التوجيه المركزي
+# 🆕 v1.2.0: 9) التشخيص الشامل (Full Health Probe)
+# ═══════════════════════════════════════════════════════════════════════
+
+async def show_full_health(update: Update,
+                           context: ContextTypes.DEFAULT_TYPE) -> None:
+    """🏥 تشخيص شامل — 6 أبعاد + حكم آلي."""
+    query = update.callback_query
+    chat_id = None
+
+    if query:
+        try:
+            await query.answer("⏳ جاري التشخيص الشامل... (5-10s)")
+        except Exception:
+            pass
+        chat_id = query.message.chat_id if query.message else None
+    else:
+        chat_id = update.effective_chat.id
+
+    if not _check_developer(update.effective_user.id):
+        if query:
+            await query.answer("❌ للمطور فقط", show_alert=True)
+        return
+
+    if chat_id is None:
+        return
+
+    # ─── أرسل رسالة انتظار ──────────────────────────────────
+    try:
+        if query:
+            await _safe_edit(
+                query,
+                "🏥 <b>التشخيص الشامل جارٍ...</b>\n"
+                "━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                "🔬 يقيس 6 أبعاد:\n"
+                "  🌐 الشبكة → DB\n"
+                "  📨 الشبكة → Telegram\n"
+                "  🗄️ DB Internal\n"
+                "  🔄 Event Loop\n"
+                "  💾 القرص\n"
+                "  ⚙️ CPU/RAM\n\n"
+                "⏳ يرجى الانتظار 5-10 ثواني...",
+                None,
+            )
+    except Exception as e:
+        logger.debug(f"show_full_health progress edit: {e}")
+
+    try:
+        from db_diagnostics import diagnose_full
+    except ImportError as ie:
+        err = (
+            "❌ <b>db_diagnostics غير محدَّث</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"<code>{ie}</code>\n\n"
+            "💡 تأكد من وجود <code>diagnose_full</code> في "
+            "<code>db_diagnostics.py</code> v7.2.0+."
+        )
+        if query:
+            await _safe_edit(query, err, _back_keyboard("admin_analytics"))
+        else:
+            await safe_send(context.bot, chat_id, err)
+        return
+
+    try:
+        report = await diagnose_full(force=True)
+        if not report:
+            report = "⚠️ لا توجد بيانات."
+
+        # إرسال كرسالة جديدة (قد تكون طويلة)
+        # نرسل التقرير ثم نُعدّل رسالة القائمة القديمة برسالة قصيرة
+        await _safe_send_long(context.bot, chat_id, report)
+
+        # أضف زر الرجوع
+        try:
+            await context.bot.send_message(
+                chat_id,
+                "↩️ استخدم الأزرار أدناه:",
+                reply_markup=_back_refresh_keyboard(
+                    target="admin_analytics",
+                    refresh="full_health_btn",
+                ),
+                parse_mode="HTML",
+            )
+        except Exception as _e:
+            logger.debug(f"show_full_health back keyboard: {_e}")
+
+    except Exception as e:
+        logger.error("show_full_health: %s", e, exc_info=True)
+        err_html = _err_detail(e)
+        await _safe_edit(
+            query,
+            f"❌ <b>فشل التشخيص الشامل</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━\n{err_html}",
+            _back_keyboard("admin_analytics"),
+        ) if query else await safe_send(
+            context.bot, chat_id,
+            f"❌ فشل التشخيص الشامل:\n{err_html}",
+        )
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# 🆕 v1.2.0: 10) اختبار الكمون (Latency Probe)
+# ═══════════════════════════════════════════════════════════════════════
+
+async def show_latency(update: Update,
+                       context: ContextTypes.DEFAULT_TYPE) -> None:
+    """🔬 اختبار كمون الشبكة/DB — أسرع من التشخيص الشامل."""
+    query = update.callback_query
+    chat_id = None
+
+    if query:
+        try:
+            await query.answer("⏳ جاري اختبار الكمون...")
+        except Exception:
+            pass
+        chat_id = query.message.chat_id if query.message else None
+    else:
+        chat_id = update.effective_chat.id
+
+    if not _check_developer(update.effective_user.id):
+        if query:
+            await query.answer("❌ للمطور فقط", show_alert=True)
+        return
+
+    if chat_id is None:
+        return
+
+    try:
+        from db_diagnostics import diagnose_latency
+    except ImportError as ie:
+        err = (
+            "❌ <b>db_diagnostics غير محدَّث</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"<code>{ie}</code>\n\n"
+            "💡 تأكد من وجود <code>diagnose_latency</code> في "
+            "<code>db_diagnostics.py</code> v7.1.0+."
+        )
+        if query:
+            await _safe_edit(query, err, _back_keyboard("admin_analytics"))
+        else:
+            await safe_send(context.bot, chat_id, err)
+        return
+
+    try:
+        report = await diagnose_latency(force=True)
+        if not report:
+            report = "⚠️ لا توجد بيانات."
+        await _safe_edit(
+            query, report,
+            _back_refresh_keyboard(
+                target="admin_analytics",
+                refresh="latency_btn",
+            ),
+        ) if query else await safe_send(
+            context.bot, chat_id, report,
+            reply_markup=_back_refresh_keyboard(
+                target="admin_analytics",
+                refresh="latency_btn",
+            ),
+        )
+
+    except Exception as e:
+        logger.error("show_latency: %s", e, exc_info=True)
+        err_html = _err_detail(e)
+        if query:
+            await _safe_edit(
+                query,
+                f"❌ <b>فشل اختبار الكمون</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━\n{err_html}",
+                _back_keyboard("admin_analytics"),
+            )
+        else:
+            await safe_send(
+                context.bot, chat_id,
+                f"❌ فشل اختبار الكمون:\n{err_html}",
+            )
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# 11) التوجيه المركزي
 # ═══════════════════════════════════════════════════════════════════════
 
 _ANALYTICS_HANDLERS = {
@@ -819,6 +1056,9 @@ _ANALYTICS_HANDLERS = {
     "pool_live_btn": show_pool_live,
     "slow_queries_btn": show_slow_queries,
     "export_excel_btn": export_excel,
+    # 🆕 v1.2.0
+    "full_health_btn": show_full_health,
+    "latency_btn": show_latency,
 }
 
 
@@ -866,7 +1106,7 @@ async def handle_analytics_callback(
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# 11) /analytics
+# 12) /analytics
 # ═══════════════════════════════════════════════════════════════════════
 
 async def cmd_analytics(update: Update,
@@ -881,7 +1121,23 @@ async def cmd_analytics(update: Update,
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# 12) التسجيل
+# 🆕 v1.2.0: 13) أوامر مباشرة — /fullhealth + /latency
+# ═══════════════════════════════════════════════════════════════════════
+
+async def cmd_fullhealth(update: Update,
+                         context: ContextTypes.DEFAULT_TYPE) -> None:
+    """🏥 أمر مباشر للتشخيص الشامل."""
+    await show_full_health(update, context)
+
+
+async def cmd_latency(update: Update,
+                      context: ContextTypes.DEFAULT_TYPE) -> None:
+    """🔬 أمر مباشر لاختبار الكمون."""
+    await show_latency(update, context)
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# 14) التسجيل
 # ═══════════════════════════════════════════════════════════════════════
 
 def register_handlers(application) -> None:
@@ -893,9 +1149,13 @@ def register_handlers(application) -> None:
         )
     )
     application.add_handler(CommandHandler("analytics", cmd_analytics))
+    # 🆕 v1.2.0: أوامر مباشرة
+    application.add_handler(CommandHandler("fullhealth", cmd_fullhealth))
+    application.add_handler(CommandHandler("latency", cmd_latency))
 
     logger.info(
-        "✅ handlers_analytics: تم تسجيل %d زر + /analytics",
+        "✅ handlers_analytics: تم تسجيل %d زر + /analytics "
+        "+ /fullhealth + /latency",
         len(ANALYTICS_BUTTONS),
     )
 
@@ -915,7 +1175,12 @@ __all__ = [
     "show_pool_live",
     "show_slow_queries",
     "export_excel",
+    # 🆕 v1.2.0
+    "show_full_health",
+    "show_latency",
     "cmd_analytics",
+    "cmd_fullhealth",
+    "cmd_latency",
     "register_handlers",
     "register",
 ]
