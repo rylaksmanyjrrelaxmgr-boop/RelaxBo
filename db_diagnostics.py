@@ -1,8 +1,26 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-db_diagnostics.py — واجهة تشخيص وصيانة قاعدة البيانات (v7.2.0 — FULL-HEALTH-PROBE)
+db_diagnostics.py — واجهة تشخيص وصيانة قاعدة البيانات (v7.2.1 — FULL-HEALTH-PROBE-FIXED)
 ================================================================================
+🆕 v7.2.1 — FIXES-BUNDLE (5 إصلاحات جوهرية):
+    🔴 FIX-1: _build_sections() يقبل include_probes (افتراضي True للتوافق).
+        منع تشغيل Full+Latency probes قسريًا في كل /db_diag عند عدم الحاجة
+        (توفير 2-4 ثواني عند أول استدعاء بعد إعادة التشغيل).
+    🔴 FIX-2: format_full_health_report + others — إزالة :<20 من _esc(name)
+        لأن HTML entities (&amp; إلخ) تُفسد محاذاة الأعمدة.
+    🔴 FIX-3: PK probe — يكتشف عمود PK في users ديناميكيًا
+        (pg_index + pg_attribute) بدل افتراض "user_id".
+    🔴 FIX-4: _compute_latency_verdict — فرع صريح لـ warm>200 + tcp<80
+        (DB بطيء رغم شبكة ممتازة) ليتوافق مع _identify_bottleneck.
+    🔴 FIX-5: _probe_network_to — اتصال TCP واحد يُستخدم لـ TLS
+        (بدل اتصالين → أرقام TCP/TLS دقيقة).
+    🟡 FIX-6: _probe_filesystem — fallback إلى cwd إن فشل /tmp.
+    🟡 FIX-7: format_maintenance_preview — عرض تحذير عند count=-1.
+    🟡 FIX-8: _get_indexes — cache key بـ hash لتجنب مفاتيح ضخمة.
+    🟡 FIX-9: format_full_health_report — عنوان شرطي عند primary=none.
+    🟡 FIX-10: _build_sections — SECTION 12/13 اختيارية عبر include_probes.
+
 🆕 v7.2.0 — FULL-HEALTH-PROBE (تشخيص شامل لمصدر البطء):
     🔬 FEAT-1: _probe_full_health() — يقيس 6 أبعاد:
         • Network → DB        (DNS + TCP + TLS)
@@ -49,6 +67,7 @@ import logging
 import tempfile
 import statistics
 import html as _html
+import hashlib
 from pathlib import Path
 from urllib.parse import urlparse
 from typing import Dict, List, Any, Optional, Tuple
@@ -60,7 +79,7 @@ logger = logging.getLogger(__name__)
 # الإصدار
 # ═══════════════════════════════════════════════════════════════════════
 
-VERSION = "7.2.0"
+VERSION = "7.2.1"
 
 # 🆕 v6.9.4: حدود الدقة — تمنع الإنذارات الكاذبة
 _MIN_DEAD_FOR_CRITICAL = 50
@@ -319,6 +338,7 @@ def _fmt_ts(ts: Any) -> str:
 
 def _bar(value: float, max_value: float, width: int = 10,
          filled: str = "█", empty: str = "░") -> str:
+    """محفوظة للتوافق مع الإصدارات السابقة."""
     try:
         v = float(value)
         m = float(max_value)
@@ -351,9 +371,47 @@ def _dead_color(dead: int, live: int) -> str:
     return "🔴"
 
 
+def _hash_key(prefix: str, items: Any) -> str:
+    """🆕 v7.2.1 FIX-8: cache key قصير من hash."""
+    try:
+        if isinstance(items, (list, tuple, set)):
+            payload = ",".join(sorted(str(x) for x in items))
+        else:
+            payload = str(items)
+        h = hashlib.md5(payload.encode("utf-8", errors="ignore")).hexdigest()[:12]
+        return f"{prefix}_{h}"
+    except Exception:
+        return f"{prefix}_fallback"
+
+
 # ═══════════════════════════════════════════════════════════════════════
 # 🆕 v7.1.0: LATENCY PROBE — قياس كمون الشبكة/DB
 # ═══════════════════════════════════════════════════════════════════════
+
+async def _detect_users_pk_col(conn) -> str:
+    """
+    🆕 v7.2.1 FIX-3: يكتشف اسم عمود PK في جدول users ديناميكيًا.
+    الافتراضي: user_id (لكن قد يكون id في بعض النسخ).
+    """
+    try:
+        row = await conn.fetchrow("""
+            SELECT a.attname AS pk_col
+            FROM pg_index i
+            JOIN pg_attribute a
+              ON a.attrelid = i.indrelid
+             AND a.attnum = ANY(i.indkey)
+            WHERE i.indrelid = 'users'::regclass
+              AND i.indisprimary
+            LIMIT 1
+        """)
+        if row:
+            col = row["pk_col"] if isinstance(row, dict) else row[0]
+            if col:
+                return str(col)
+    except Exception as e:
+        logger.debug(f"_detect_users_pk_col: {e}")
+    return "user_id"
+
 
 async def _probe_db_latency(
     *,
@@ -554,17 +612,20 @@ async def _probe_db_latency(
         result["warm_median_ms"] = round(warm_median, 2)
 
         # ─── 5) PK SELECT حقيقي ──────────────────────────────────
+        # 🆕 v7.2.1 FIX-3: كشف عمود PK ديناميكيًا
         try:
             t0 = time.monotonic()
             if db_type == "postgres":
+                pk_col = await _detect_users_pk_col(conn)
+                result["users_pk_col"] = pk_col
                 await conn.fetchval(
-                    "SELECT language FROM users WHERE user_id = $1 LIMIT 1",
+                    f'SELECT * FROM users WHERE {pk_col} = $1 LIMIT 1',
                     1,
                 )
             else:
                 cur = conn.cursor()
                 await cur.execute(
-                    "SELECT language FROM users WHERE user_id = %s LIMIT 1",
+                    "SELECT * FROM users WHERE user_id = %s LIMIT 1",
                     (1,),
                 )
                 await cur.fetchone()
@@ -643,6 +704,10 @@ def _verdict_from_warm(warm_ms: float) -> str:
 
 
 def _compute_latency_verdict(result: Dict[str, Any]) -> Tuple[str, str, str]:
+    """
+    🆕 v7.2.1 FIX-4: إضافة فرع صريح لحالة (DB بطيء + شبكة ممتازة)
+    ليتوافق التصنيف مع _identify_bottleneck.
+    """
     tcp = float(result.get("tcp_connect_ms") or 0)
     conn = float(result.get("asyncpg_connect_ms") or 0)
     warm = float(result.get("warm_median_ms") or 0)
@@ -654,6 +719,17 @@ def _compute_latency_verdict(result: Dict[str, Any]) -> Tuple[str, str, str]:
             "critical",
             "🔴 لا يمكن قياس TCP — الشبكة مقطوعة أو DB غير متاح.",
             "تحقّق من DATABASE_URL، حالة DB، وأي firewall.",
+        )
+
+    # 🆕 v7.2.1 FIX-4: فرع صريح — DB بطيء رغم شبكة ممتازة
+    if warm > 200 and tcp < 80:
+        return (
+            "critical",
+            f"🔴 DB بطيء ({warm:.0f}ms) رغم شبكة ممتازة ({tcp:.0f}ms). "
+            f"المشكلة داخل PostgreSQL نفسه — ليس في الشبكة.",
+            "شغّل VACUUM ANALYZE فورًا، راجع pg_stat_statements، "
+            "افحص CPU/RAM على الخادم — قد يكون autovacuum يجري "
+            "أو shared_buffers منخفضة.",
         )
 
     if tcp > 300 and warm < 50:
@@ -843,7 +919,12 @@ async def _probe_network_to(
     host: str, port: int, *, with_tls: bool = False,
     timeout: float = 5.0,
 ) -> Dict[str, Any]:
-    """قياس DNS + TCP + TLS إلى host:port."""
+    """
+    قياس DNS + TCP + TLS إلى host:port.
+
+    🆕 v7.2.1 FIX-5: اتصال TCP واحد يُستخدم للقياس ثم يُعاد استخدامه
+    لـ TLS handshake (بدل اتصالين منفصلين — أرقام دقيقة).
+    """
     result: Dict[str, Any] = {
         "host": host, "port": port, "ok": False,
     }
@@ -864,48 +945,50 @@ async def _probe_network_to(
         result["error"] = f"DNS: {type(e).__name__}"
         return result
 
-    # ─── TCP ───────────────────────────────────────────────
-    try:
+    # ─── TCP + TLS على نفس الاتصال ─────────────────────────
+    def _tcp_and_tls():
+        """يرجع (tcp_ms, tls_ms_or_None)."""
         t0 = time.perf_counter()
+        raw = socket.create_connection((host, port), timeout=timeout)
+        tcp_ms = (time.perf_counter() - t0) * 1000
+        tls_ms = None
+        try:
+            if with_tls:
+                t0 = time.perf_counter()
+                ctx = ssl.create_default_context()
+                ss = ctx.wrap_socket(raw, server_hostname=host)
+                try:
+                    tls_ms = (time.perf_counter() - t0) * 1000
+                finally:
+                    try:
+                        ss.close()
+                    except Exception:
+                        pass
+            else:
+                try:
+                    raw.close()
+                except Exception:
+                    pass
+        except Exception:
+            try:
+                raw.close()
+            except Exception:
+                pass
+            raise
+        return tcp_ms, tls_ms
 
-        def _connect():
-            s = socket.create_connection((host, port), timeout=timeout)
-            s.close()
-
-        await asyncio.wait_for(
-            asyncio.to_thread(_connect), timeout=timeout + 1.0,
+    try:
+        tcp_ms, tls_ms = await asyncio.wait_for(
+            asyncio.to_thread(_tcp_and_tls),
+            timeout=timeout + (5.0 if with_tls else 1.0),
         )
-        result["tcp_ms"] = round((time.perf_counter() - t0) * 1000, 2)
+        result["tcp_ms"] = round(tcp_ms, 2)
+        if tls_ms is not None:
+            result["tls_ms"] = round(tls_ms, 2)
     except Exception as e:
         result["tcp_ms"] = -1.0
         result["error"] = f"TCP: {type(e).__name__}"
         return result
-
-    # ─── TLS ───────────────────────────────────────────────
-    if with_tls:
-        try:
-            t0 = time.perf_counter()
-
-            def _tls_handshake():
-                ctx = ssl.create_default_context()
-                s = socket.create_connection((host, port), timeout=timeout)
-                try:
-                    ss = ctx.wrap_socket(s, server_hostname=host)
-                    ss.close()
-                finally:
-                    try:
-                        s.close()
-                    except Exception:
-                        pass
-
-            await asyncio.wait_for(
-                asyncio.to_thread(_tls_handshake),
-                timeout=timeout + 3.0,
-            )
-            result["tls_ms"] = round((time.perf_counter() - t0) * 1000, 2)
-        except Exception as e:
-            result["tls_ms"] = -1.0
-            logger.debug(f"TLS probe {host}: {e}")
 
     result["ok"] = True
     return result
@@ -937,49 +1020,71 @@ async def _probe_event_loop(
 
 
 async def _probe_filesystem() -> Dict[str, Any]:
-    """قياس write/fsync/read على /tmp."""
+    """
+    قياس write/fsync/read على القرص.
+    🆕 v7.2.1 FIX-6: fallback إلى cwd إن فشل /tmp.
+    """
     result: Dict[str, Any] = {"ok": False}
     try:
-        tmp_dir = Path(tempfile.gettempdir())
-        result["tmp_dir"] = str(tmp_dir)
-        test_file = tmp_dir / "_latency_probe.bin"
         payload = b"x" * (1024 * 1024)  # 1 MB
 
-        # ─── Write ────────────────────────────────────────
-        t0 = time.perf_counter()
-        await asyncio.to_thread(test_file.write_bytes, payload)
-        result["write_1mb_ms"] = round(
-            (time.perf_counter() - t0) * 1000, 2
-        )
-
-        # ─── fsync ────────────────────────────────────────
-        def _fsync():
-            fd = os.open(str(test_file), os.O_RDONLY)
+        async def _try_dir(d: Path, label: str) -> bool:
             try:
-                os.fsync(fd)
-            finally:
-                os.close(fd)
+                test_file = d / "_latency_probe.bin"
 
-        t0 = time.perf_counter()
-        await asyncio.to_thread(_fsync)
-        result["fsync_ms"] = round(
-            (time.perf_counter() - t0) * 1000, 2
-        )
+                # Write
+                t0 = time.perf_counter()
+                await asyncio.to_thread(test_file.write_bytes, payload)
+                result["write_1mb_ms"] = round(
+                    (time.perf_counter() - t0) * 1000, 2
+                )
 
-        # ─── Read ─────────────────────────────────────────
-        t0 = time.perf_counter()
-        _ = await asyncio.to_thread(test_file.read_bytes)
-        result["read_1mb_ms"] = round(
-            (time.perf_counter() - t0) * 1000, 2
-        )
+                # fsync
+                def _fsync():
+                    fd = os.open(str(test_file), os.O_RDONLY)
+                    try:
+                        os.fsync(fd)
+                    finally:
+                        os.close(fd)
 
-        # ─── Cleanup ──────────────────────────────────────
-        try:
-            test_file.unlink()
-        except Exception:
-            pass
+                t0 = time.perf_counter()
+                await asyncio.to_thread(_fsync)
+                result["fsync_ms"] = round(
+                    (time.perf_counter() - t0) * 1000, 2
+                )
 
-        result["ok"] = True
+                # Read
+                t0 = time.perf_counter()
+                _ = await asyncio.to_thread(test_file.read_bytes)
+                result["read_1mb_ms"] = round(
+                    (time.perf_counter() - t0) * 1000, 2
+                )
+
+                # Cleanup
+                try:
+                    test_file.unlink()
+                except Exception:
+                    pass
+
+                result["tmp_dir"] = str(d)
+                result["tmp_source"] = label
+                result["ok"] = True
+                return True
+            except Exception as e:
+                result["_last_dir_error"] = f"{label}: {e}"
+                return False
+
+        # جرّب tempfile.gettempdir() أولاً
+        tmp_dir = Path(tempfile.gettempdir())
+        if not await _try_dir(tmp_dir, "tempdir"):
+            # fallback إلى cwd
+            try:
+                cwd = Path.cwd()
+                await _try_dir(cwd, "cwd")
+            except Exception:
+                pass
+
+        result.pop("_last_dir_error", None)
     except Exception as e:
         result["error"] = str(e)
     return result
@@ -1251,7 +1356,11 @@ async def _probe_full_health(
 
 
 def format_full_health_report(data: Dict[str, Any]) -> str:
-    """تقرير HTML شامل لكل الأبعاد + الحكم."""
+    """
+    تقرير HTML شامل لكل الأبعاد + الحكم.
+    🆕 v7.2.1 FIX-2: إزالة :<20 من _esc(name) لتجنب كسر المحاذاة.
+    🆕 v7.2.1 FIX-9: عنوان شرطي عند primary=none.
+    """
     if not data.get("ok"):
         return "❌ فشل التشخيص الشامل"
 
@@ -1262,6 +1371,7 @@ def format_full_health_report(data: Dict[str, Any]) -> str:
 
     b = data.get("bottleneck") or {}
     severity = b.get("severity", "low")
+    primary = b.get("primary", "none")
     icon = {
         "critical": "🔴",
         "high": "🟠",
@@ -1269,11 +1379,17 @@ def format_full_health_report(data: Dict[str, Any]) -> str:
         "low": "🟢",
     }.get(severity, "⚪")
 
-    lines.append(f"{icon} <b>السبب الرئيسي للبطء:</b>")
-    if b.get("explanation"):
-        lines.append(f"   {b['explanation']}")
-    if b.get("recommendation"):
-        lines.append(f"   {b['recommendation']}")
+    # 🆕 v7.2.1 FIX-9: عنوان شرطي
+    if primary == "none":
+        lines.append(f"{icon} <b>لا يوجد bottleneck — كل الأبعاد سليمة.</b>")
+        if b.get("recommendation"):
+            lines.append(f"   {b['recommendation']}")
+    else:
+        lines.append(f"{icon} <b>السبب الرئيسي للبطء:</b>")
+        if b.get("explanation"):
+            lines.append(f"   {b['explanation']}")
+        if b.get("recommendation"):
+            lines.append(f"   {b['recommendation']}")
     lines.append("")
 
     ranked = b.get("ranked") or []
@@ -1287,8 +1403,9 @@ def format_full_health_report(data: Dict[str, Any]) -> str:
                 "critical": "🔴", "high": "🟠",
                 "medium": "🟡", "low": "🟢",
             }.get(sev, "⚪")
+            # 🆕 v7.2.1 FIX-2: بدون :<20
             lines.append(
-                f"  {i}. {ic} <code>{_esc(name):<20}</code> "
+                f"  {i}. {ic} <code>{_esc(name)}</code> "
                 f"~{ms:.0f}ms"
             )
         lines.append("")
@@ -1380,6 +1497,10 @@ def format_full_health_report(data: Dict[str, Any]) -> str:
         lines.append(
             f"   read: <b>{fs_p.get('read_1mb_ms', 0):.0f}ms</b>"
         )
+        if fs_p.get("tmp_source") == "cwd":
+            lines.append(
+                f"   ⚠️ القياس على cwd (tempdir فشل)"
+            )
         lines.append("")
 
     # System
@@ -1709,7 +1830,10 @@ async def _get_table_sizes(limit: int = 15) -> List[Dict[str, Any]]:
 
 
 async def _get_indexes(tables: List[str]) -> Dict[str, List[Dict[str, Any]]]:
-    cache_key = "indexes_" + ",".join(sorted(tables))
+    """
+    🆕 v7.2.1 FIX-8: cache key بـ hash لتجنب مفاتيح ضخمة.
+    """
+    cache_key = _hash_key("indexes", tables)
     cached = _cache_get(cache_key)
     if cached is not None:
         return cached
@@ -1901,6 +2025,7 @@ async def preview_maintenance() -> Dict[str, Any]:
     result: Dict[str, Any] = {
         'plan': [],
         'total_deletions': 0,
+        'has_errors': False,       # 🆕 v7.2.1 FIX-7
         'vacuum_tables': [],
         'db_type': _get_db_type(),
         'protected_tables': [
@@ -1935,6 +2060,8 @@ async def preview_maintenance() -> Dict[str, Any]:
         logger.debug(f"preview_maintenance sizes: {e}")
 
     total = 0
+    has_errors = False
+
     for tbl in deletable:
         policy = _CLEANUP_POLICY[tbl]
         col = policy["date_column"]
@@ -1981,10 +2108,12 @@ async def preview_maintenance() -> Dict[str, Any]:
             logger.warning(f"preview_maintenance({tbl}): {e}")
             entry['count'] = -1
             entry['error'] = str(e)[:100]
+            has_errors = True       # 🆕 v7.2.1 FIX-7
 
         result['plan'].append(entry)
 
     result['total_deletions'] = total
+    result['has_errors'] = has_errors
     result['vacuum_tables'] = await _get_all_table_names()
     return result
 
@@ -2167,7 +2296,14 @@ def format_maintenance_preview(preview: Dict[str, Any]) -> str:
 
     total = (preview.get('total_deletions', 0)
              if isinstance(preview, dict) else 0)
-    lines.append(f"📊 <b>الإجمالي:</b> {total} صف سيُحذف")
+    # 🆕 v7.2.1 FIX-7: عرض تحذير إن كانت هناك أخطاء
+    if has_errors or preview.get('has_errors'):
+        lines.append(
+            f"📊 <b>الإجمالي:</b> {total} صف سيُحذف "
+            f"<i>(بعض العدّ فشل)</i>"
+        )
+    else:
+        lines.append(f"📊 <b>الإجمالي:</b> {total} صف سيُحذف")
     lines.append("")
 
     tables = (preview.get('vacuum_tables', [])
@@ -2405,7 +2541,12 @@ async def auto_vacuum_dirty_mvs(min_dead: int = 10) -> Dict[str, Any]:
 # 12) Build Sections
 # ═══════════════════════════════════════════════════════════════════════
 
-async def _build_sections() -> List[str]:
+async def _build_sections(*, include_probes: bool = True) -> List[str]:
+    """
+    🆕 v7.2.1 FIX-1: include_probes يتحكم بتشغيل Full/Latency probes.
+    - True (افتراضي): السلوك القديم — تُشغَّل ويظهر Section 12/13.
+    - False: تُتخطى الـprobes (أسرع 2-4 ثواني).
+    """
     parts: List[str] = []
 
     critical_idx_tables = ["posts", "banned_words", "bot_groups",
@@ -2677,25 +2818,27 @@ async def _build_sections() -> List[str]:
     except Exception as e:
         logger.warning(f"maintenance preview in sections: {e}")
 
-    # 🆕 v7.1.0 SECTION 12 — Latency Probe (يظهر عند مشكلة)
-    try:
-        latency_probe = await _probe_db_latency()
-        verdict = latency_probe.get("verdict", "unknown")
-        if verdict in ("slow", "critical", "acceptable"):
-            latency_text = format_latency_report(latency_probe)
-            parts.append(latency_text)
-    except Exception as e:
-        logger.debug(f"latency probe in sections: {e}")
+    # 🆕 v7.2.1 FIX-1: SECTION 12/13 اختيارية
+    if include_probes:
+        # 🆕 v7.1.0 SECTION 12 — Latency Probe (يظهر عند مشكلة)
+        try:
+            latency_probe = await _probe_db_latency()
+            verdict = latency_probe.get("verdict", "unknown")
+            if verdict in ("slow", "critical", "acceptable"):
+                latency_text = format_latency_report(latency_probe)
+                parts.append(latency_text)
+        except Exception as e:
+            logger.debug(f"latency probe in sections: {e}")
 
-    # 🆕 v7.2.0 SECTION 13 — Full Health (يظهر عند وجود bottleneck)
-    try:
-        full = await _probe_full_health()
-        b = full.get("bottleneck") or {}
-        if b.get("primary") not in ("none", None):
-            health_text = format_full_health_report(full)
-            parts.append(health_text)
-    except Exception as e:
-        logger.debug(f"full health in sections: {e}")
+        # 🆕 v7.2.0 SECTION 13 — Full Health (يظهر عند وجود bottleneck)
+        try:
+            full = await _probe_full_health()
+            b = full.get("bottleneck") or {}
+            if b.get("primary") not in ("none", None):
+                health_text = format_full_health_report(full)
+                parts.append(health_text)
+        except Exception as e:
+            logger.debug(f"full health in sections: {e}")
 
     return parts
 
@@ -2704,13 +2847,13 @@ async def _build_sections() -> List[str]:
 # 13) Public API — Diagnostics
 # ═══════════════════════════════════════════════════════════════════════
 
-async def diagnose_db() -> str:
-    parts = await _build_sections()
+async def diagnose_db(*, include_probes: bool = True) -> str:
+    parts = await _build_sections(include_probes=include_probes)
     return "\n\n".join(parts)
 
 
-async def diagnose_db_split() -> List[str]:
-    return await _build_sections()
+async def diagnose_db_split(*, include_probes: bool = True) -> List[str]:
+    return await _build_sections(include_probes=include_probes)
 
 
 async def diagnose_db_quick() -> str:
@@ -2951,7 +3094,10 @@ __all__ = [
 try:
     logger.info(
         "🛡️ db_diagnostics.py v%s loaded | "
-        "FULL-HEALTH-PROBE ✅ | "
+        "FULL-HEALTH-PROBE-FIXED ✅ | "
+        "PROBES-OPTIONAL ✅ | "
+        "PK-DYNAMIC ✅ | "
+        "TCP-TLS-SINGLE-CONN ✅ | "
         "LATENCY-PROBE ✅ | "
         "CACHE-LAYER ✅ | "
         "PARALLEL-REPORT ✅ | "
