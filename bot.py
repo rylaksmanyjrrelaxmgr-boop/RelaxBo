@@ -2,13 +2,20 @@
 # -*- coding: utf-8 -*-
 
 """
-🌿 Relax Manager – البوت الرئيسي (bot.py v5.6.22-FULLHEALTH)
+🌿 Relax Manager – البوت الرئيسي (bot.py v5.6.23-FULLHEALTH-PERF)
 ================================================================================
 📌 نقطة الدخول الرسمية للتطبيق (entrypoint).
 
+🆕 v5.6.23 (PERF-SESSIONS):
+    🟢 PERF-A: keep_alive() — session واحد على مستوى الدالة (كان يفتح
+        ClientSession جديد كل 180s → توفير TLS + sockets).
+    🟢 PERF-B: _watch_runner() — session واحد خارج while (كان يفتح
+        ClientSession كل 10s = ~8640 handshake/يوم → كان يُسبب
+        event_loop lag). المتوقع: lag max 553ms → <100ms.
+    🔵 لا تغيير في المنطق — فقط إعادة استخدام الجلسات.
+
 🆕 v5.6.22 (FULLHEALTH-COMMANDS):
-    🔴 FIX-AN2: تسجيل /fullhealth + /latency كأوامر مباشرة
-        (كانت معرّفة في handlers_analytics لكن غير مُسجَّلة هنا).
+    🔴 FIX-AN2: تسجيل /fullhealth + /latency كأوامر مباشرة.
     🔴 FIX-AN3: توسيع regex الـ CallbackQueryHandler ليشمل
         full_health_btn + latency_btn.
     🟡 FIX-AN4: سجل إقلاع يوضّح حالة full_health_btn + latency_btn.
@@ -1953,7 +1960,12 @@ async def health_check(request):
     return web.Response(text="OK", status=200)
 
 async def keep_alive():
-    """keep_alive محسّن."""
+    """
+    keep_alive محسّن — v5.6.23/PREF-A:
+    - يستخدم aiohttp.ClientSession واحد على مستوى الدالة بدل فتح
+      session جديد كل 180s.
+    - يوفّر TLS handshake + sockets مكررة.
+    """
     try:
         await asyncio.sleep(_KEEP_ALIVE_INITIAL_DELAY)
     except asyncio.CancelledError:
@@ -1994,11 +2006,21 @@ async def keep_alive():
 
     _consecutive_errors = 0
 
-    while True:
-        try:
-            await asyncio.sleep(_KEEP_ALIVE_INTERVAL_SEC)
-            timeout = aiohttp.ClientTimeout(total=15)
-            async with aiohttp.ClientSession(timeout=timeout) as session:
+    # 🆕 PERF-A: session واحد على مستوى الدالة
+    _timeout = aiohttp.ClientTimeout(total=15, connect=5)
+    _connector = aiohttp.TCPConnector(
+        limit=2,
+        ttl_dns_cache=300,
+        keepalive_timeout=60,
+    )
+
+    async with aiohttp.ClientSession(
+        timeout=_timeout,
+        connector=_connector,
+    ) as session:
+        while True:
+            try:
+                await asyncio.sleep(_KEEP_ALIVE_INTERVAL_SEC)
                 async with session.get(health_url) as response:
                     await response.read()
                     if response.status == 200:
@@ -2016,18 +2038,18 @@ async def keep_alive():
                             "💓 Keep-alive: status=%s (errors=%d)",
                             response.status, _consecutive_errors,
                         )
-        except asyncio.CancelledError:
-            logger.info("🛑 keep_alive تم إلغاؤه")
-            raise
-        except Exception as e:
-            _consecutive_errors += 1
-            if _consecutive_errors >= 3:
-                logger.warning(
-                    "💓 keep-alive: %d أخطاء متتالية — آخرها: %s",
-                    _consecutive_errors, e,
-                )
-            else:
-                logger.debug("💓 keep-alive: %s", e)
+            except asyncio.CancelledError:
+                logger.info("🛑 keep_alive تم إلغاؤه")
+                raise
+            except Exception as e:
+                _consecutive_errors += 1
+                if _consecutive_errors >= 3:
+                    logger.warning(
+                        "💓 keep-alive: %d أخطاء متتالية — آخرها: %s",
+                        _consecutive_errors, e,
+                    )
+                else:
+                    logger.debug("💓 keep-alive: %s", e)
 
 # ═══════════════════════════════════════════════════════════════════
 # Pool health monitor
@@ -2353,6 +2375,12 @@ async def _watch_runner(
     shutdown_event: asyncio.Event,
     port: int,
 ) -> None:
+    """
+    مراقب Webhook runner — v5.6.23/PERF-B:
+    - session واحد خارج while بدل فتح ClientSession كل 10s.
+    - كان يفتح ~8640 handshake/يوم → يسبب event_loop lag.
+    - بعد الإصلاح: lag max 553ms → <100ms (متوقع).
+    """
     try:
         site = None
         if hasattr(runner, "site"):
@@ -2376,60 +2404,71 @@ async def _watch_runner(
         probe_failures = 0
         health_url = f"http://127.0.0.1:{port}/health"
 
-        while not shutdown_event.is_set():
-            try:
-                server = getattr(site, "_server", None)
-                if server is None:
-                    await asyncio.sleep(2.0)
-                    continue
+        # 🆕 PERF-B: session واحد خارج while
+        _timeout = aiohttp.ClientTimeout(
+            total=_WATCHER_HEALTH_TIMEOUT,
+            connect=2,
+        )
+        _connector = aiohttp.TCPConnector(
+            limit=2,
+            ttl_dns_cache=60,
+            keepalive_timeout=30,
+        )
 
-                if server.sockets is None or len(server.sockets) == 0:
-                    logger.error(
-                        "❌ _watch_runner: خادم Webhook أُغلق بشكل "
-                        "غير متوقع — إيقاف البوت بلطف"
-                    )
-                    shutdown_event.set()
-                    return
-
+        async with aiohttp.ClientSession(
+            timeout=_timeout,
+            connector=_connector,
+        ) as session:
+            while not shutdown_event.is_set():
                 try:
-                    timeout = aiohttp.ClientTimeout(
-                        total=_WATCHER_HEALTH_TIMEOUT
-                    )
-                    async with aiohttp.ClientSession(timeout=timeout) as session:
+                    server = getattr(site, "_server", None)
+                    if server is None:
+                        await asyncio.sleep(2.0)
+                        continue
+
+                    if server.sockets is None or len(server.sockets) == 0:
+                        logger.error(
+                            "❌ _watch_runner: خادم Webhook أُغلق بشكل "
+                            "غير متوقع — إيقاف البوت بلطف"
+                        )
+                        shutdown_event.set()
+                        return
+
+                    try:
                         async with session.get(health_url) as resp:
                             await resp.read()
                             if resp.status != 200:
                                 raise RuntimeError(
                                     f"health status={resp.status}"
                                 )
-                    if probe_failures > 0:
-                        probe_failures -= 1
+                        if probe_failures > 0:
+                            probe_failures -= 1
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as probe_e:
+                        probe_failures += 1
+                        logger.debug(
+                            "_watch_runner: health probe فشل "
+                            "(%d/%d): %s",
+                            probe_failures, _WATCHER_MAX_PROBE_FAILURES,
+                            probe_e,
+                        )
+                        if probe_failures >= _WATCHER_MAX_PROBE_FAILURES:
+                            logger.error(
+                                "❌ _watch_runner: خادم Webhook لا يستجيب "
+                                "(%d مرات متتالية) — إيقاف البوت بلطف",
+                                probe_failures,
+                            )
+                            shutdown_event.set()
+                            return
+
+                    await asyncio.sleep(_WATCHER_INTERVAL)
+
                 except asyncio.CancelledError:
                     raise
-                except Exception as probe_e:
-                    probe_failures += 1
-                    logger.debug(
-                        "_watch_runner: health probe فشل "
-                        "(%d/%d): %s",
-                        probe_failures, _WATCHER_MAX_PROBE_FAILURES,
-                        probe_e,
-                    )
-                    if probe_failures >= _WATCHER_MAX_PROBE_FAILURES:
-                        logger.error(
-                            "❌ _watch_runner: خادم Webhook لا يستجيب "
-                            "(%d مرات متتالية) — إيقاف البوت بلطف",
-                            probe_failures,
-                        )
-                        shutdown_event.set()
-                        return
-
-                await asyncio.sleep(_WATCHER_INTERVAL)
-
-            except asyncio.CancelledError:
-                raise
-            except Exception as _e:
-                logger.debug("_watch_runner loop: %s", _e)
-                await asyncio.sleep(_WATCHER_INTERVAL)
+                except Exception as _e:
+                    logger.debug("_watch_runner loop: %s", _e)
+                    await asyncio.sleep(_WATCHER_INTERVAL)
 
     except asyncio.CancelledError:
         raise
@@ -2704,11 +2743,11 @@ async def main():
     logger.info("👨‍💼 المالك: %s", CONFIG.PRIMARY_OWNER_ID)
 
     logger.info(
-        "📦 bot.py: v5.6.22 | "
+        "📦 bot.py: v5.6.23 | "
         "detectors=%s | layers=%d | helpers=%s | "
         "db_idle=%s | cache_stats=%s | analytics=%s | "
         "fullhealth=%s | latency=%s | maint_cmds=%s | "
-        "pool_cache_ttl=%ds | nav_fix=%s",
+        "pool_cache_ttl=%ds | nav_fix=%s | perf_sessions=on",
         _SPAM_DETECTOR_VERSION or "N/A",
         _SPAM_DETECTOR_LAYERS_COUNT,
         (
