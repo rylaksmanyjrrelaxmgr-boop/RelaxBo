@@ -1,43 +1,57 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-db_diagnostics.py — واجهة تشخيص وصيانة قاعدة البيانات (v7.1.0 — LATENCY-PROBE)
+db_diagnostics.py — واجهة تشخيص وصيانة قاعدة البيانات (v7.2.0 — FULL-HEALTH-PROBE)
 ================================================================================
+🆕 v7.2.0 — FULL-HEALTH-PROBE (تشخيص شامل لمصدر البطء):
+    🔬 FEAT-1: _probe_full_health() — يقيس 6 أبعاد:
+        • Network → DB        (DNS + TCP + TLS)
+        • Network → Telegram  (TCP + TLS)
+        • DB Internal         (connect + warm + PK + bulk)
+        • Event Loop          (lag median + max)
+        • Filesystem          (write + fsync + read 1MB)
+        • System              (CPU + RAM + Load + CPUs)
+    🎯 FEAT-2: _identify_bottleneck() — يحلل كل القياسات ويحدد
+        السبب الرئيسي للبطء آلياً + توصية عملية.
+    🔬 FEAT-3: format_full_health_report() — تقرير HTML شامل.
+    🔬 FEAT-4: diagnose_full() + get_full_health() — APIs عامة.
+    🟢 FEAT-5: cache 120s.
+    🟢 FEAT-6: SECTION 13 في _build_sections() يظهر فقط عند
+        وجود bottleneck حقيقي (تفادي الإطالة).
+
 🆕 v7.1.0 — LATENCY-PROBE:
     🔬 FEAT-1: _probe_db_latency() — قياس كمون الشبكة/DB مباشرةً.
-        • يقيس: TCP connect → first query → warm queries → PK SELECT → bulk fetch
-        • يكشف: هل البطء من الشبكة أم من DB أم من البوت؟
-        • يعمل على PostgreSQL / MySQL / SQLite.
-    🔬 FEAT-2: format_latency_report() — تقرير HTML جاهز للعرض.
+    🔬 FEAT-2: format_latency_report() — تقرير HTML جاهز.
     🔬 FEAT-3: diagnose_latency() — API عام.
-    🔬 FEAT-4: get_latency_verdict() — إصدار حكم آلي:
-        • "excellent" | "good" | "acceptable" | "slow" | "critical"
-        • مع توصية عملية بناءً على القياس.
-    🟢 FEAT-5: cache 120s — يمنع الضغط عند استدعاءات متكررة.
-    🟢 FEAT-6: لا يلمس pool البوت — يستخدم اتصالاً مستقلاً للقياس النقي.
+    🔬 FEAT-4: get_latency_verdict() — حكم آلي.
+    🟢 FEAT-5: cache 120s.
+    🟢 FEAT-6: SECTION 12 في _build_sections() يظهر عند slow/critical.
 
 🆕 v7.0.1 — FIX-BUNDLE (AF1 + AF2 + AF3 + AF4):
-    🔴 FIX-AF1: bot_addition_log.date_column — من created_at إلى added_at.
-    🔴 FIX-AF2: user_messages.date_column — من created_at إلى message_time.
+    🔴 FIX-AF1: bot_addition_log.date_column — added_at (بدل created_at).
+    🔴 FIX-AF2: user_messages.date_column — message_time (بدل created_at).
     🔴 FIX-AF3: vacuum_analyze_tables — فحص SQLite قبل حلقة VACUUM.
     🔴 FIX-AF4: run_maintenance — نفس منطق AF3 في قسم VACUUM.
 
 🆕 v7.0.0 — CACHE-LAYER + PARALLEL-REPORT:
-    🟢 PERF-1: طبقة cache مركزية بـ TTL لكل دالة تشخيصية.
-    🟢 PERF-2: _build_sections() يستخدم asyncio.gather (6 استعلامات متوازية).
-    🟢 PERF-3: _invalidate_cache() جديدة + تُستدعى بعد VACUUM.
+    🟢 PERF-1: طبقة cache مركزية بـ TTL.
+    🟢 PERF-2: _build_sections() يستخدم asyncio.gather.
+    🟢 PERF-3: _invalidate_cache() جديدة.
 ================================================================================
 """
 
-import logging
-import html as _html
-import asyncio
-import time
 import os
+import ssl
+import time
 import socket
+import asyncio
+import logging
+import tempfile
 import statistics
-from typing import Dict, List, Any, Optional, Tuple
+import html as _html
+from pathlib import Path
 from urllib.parse import urlparse
+from typing import Dict, List, Any, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -46,11 +60,11 @@ logger = logging.getLogger(__name__)
 # الإصدار
 # ═══════════════════════════════════════════════════════════════════════
 
-VERSION = "7.1.0"
+VERSION = "7.2.0"
 
 # 🆕 v6.9.4: حدود الدقة — تمنع الإنذارات الكاذبة
-_MIN_DEAD_FOR_CRITICAL = 50   # أقل من هذا → لا يُصنَّف حرجاً مهما كانت النسبة
-_MIN_DEAD_FOR_COLOR = 10      # أقل من هذا → ✅ دائماً
+_MIN_DEAD_FOR_CRITICAL = 50
+_MIN_DEAD_FOR_COLOR = 10
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -60,13 +74,14 @@ _MIN_DEAD_FOR_COLOR = 10      # أقل من هذا → ✅ دائماً
 _CACHE: Dict[str, Dict[str, Any]] = {}
 
 _CACHE_TTL: Dict[str, float] = {
-    "all_tables_health": 60.0,   # الأهم — 0.45s → ~0ms
-    "all_table_names":   300.0,  # 5 دقائق
-    "db_metadata":       300.0,  # 5 دقائق
-    "pg_settings":       600.0,  # 10 دقائق (نادراً ما تتغير)
-    "table_sizes":       300.0,  # 5 دقائق
-    "indexes":           300.0,  # 5 دقائق
-    "latency_probe":     120.0,  # 🆕 v7.1.0: 120s
+    "all_tables_health": 60.0,
+    "all_table_names":   300.0,
+    "db_metadata":       300.0,
+    "pg_settings":       600.0,
+    "table_sizes":       300.0,
+    "indexes":           300.0,
+    "latency_probe":     120.0,   # 🆕 v7.1.0
+    "full_health":       120.0,   # 🆕 v7.2.0
 }
 
 
@@ -92,11 +107,7 @@ def _cache_set(key: str, data: Any, ttl: Optional[float] = None) -> None:
 
 
 def _invalidate_cache(key: Optional[str] = None) -> None:
-    """
-    🆕 v7.0.0 PERF-3: إبطال الكاش.
-      • key=None → إبطال كل شيء
-      • key="all_tables_health" → إبطال مفتاح واحد
-    """
+    """🆕 v7.0.0 PERF-3: إبطال الكاش."""
     if key is None:
         _CACHE.clear()
     else:
@@ -104,7 +115,7 @@ def _invalidate_cache(key: Optional[str] = None) -> None:
 
 
 def get_cache_stats() -> Dict[str, Any]:
-    """🆕 v7.0.0: إحصائيات الكاش الحالية (للتشخيص)."""
+    """🆕 v7.0.0: إحصائيات الكاش الحالية."""
     now = time.monotonic()
     out: Dict[str, Any] = {"entries": {}, "total_keys": 0}
     for k, v in _CACHE.items():
@@ -321,7 +332,6 @@ def _bar(value: float, max_value: float, width: int = 10,
 
 
 def _dead_color(dead: int, live: int) -> str:
-    """🆕 v6.9.3: حد أدنى مطلق — لا إنذارات على الأعداد التافهة."""
     if dead < _MIN_DEAD_FOR_COLOR:
         return "✅"
 
@@ -344,22 +354,6 @@ def _dead_color(dead: int, live: int) -> str:
 # ═══════════════════════════════════════════════════════════════════════
 # 🆕 v7.1.0: LATENCY PROBE — قياس كمون الشبكة/DB
 # ═══════════════════════════════════════════════════════════════════════
-#
-# الهدف: تشخيص ما إذا كان البطء ناتجاً عن:
-#   (أ) شبكة بطيئة بين البوت و DB  → connect_time مرتفع
-#   (ب) DB محمّلة                   → warm queries مرتفعة
-#   (ج) event loop مشبع             → كل القياسات طبيعية لكن البوت بطيء
-#
-# المنهجية:
-#   1. TCP connect إلى DB host (صافي الشبكة — لا asyncpg).
-#   2. asyncpg.connect → قياس زمن المصادقة الكامل.
-#   3. أول استعلام (cold) → يتضمّن prepare + execute + fetch.
-#   4. 5 استعلامات متتالية (warm) → لقياس الاستقرار.
-#   5. PK SELECT حقيقي → قياس أقرب لسلوك البوت.
-#   6. bulk fetch (100 صف) → لقياس bandwidth.
-#
-# ملاحظة: يستخدم اتصالاً مستقلاً — لا يؤثر على pool البوت.
-# ═══════════════════════════════════════════════════════════════════════
 
 async def _probe_db_latency(
     *,
@@ -368,29 +362,7 @@ async def _probe_db_latency(
 ) -> Dict[str, Any]:
     """
     🔬 v7.1.0: قياس كمون الشبكة/DB مباشرةً.
-
-    Args:
-        force: تجاهل الكاش.
-        socket_timeout: مهلة فتح socket TCP (ثوان).
-
-    Returns:
-        dict بمفاتيح:
-          - ok: bool — هل نجح القياس؟
-          - db_type: "postgres" | "mysql" | "sqlite" | "unknown"
-          - host, port: معلومات الاتصال (بدون credentials)
-          - tcp_connect_ms: زمن TCP connect (خارج asyncpg)
-          - asyncpg_connect_ms: زمن asyncpg.connect الكامل (TCP+auth)
-          - first_query_ms: أول استعلام (cold)
-          - warm_queries_ms: قائمة أزمنة 5 استعلامات warm
-          - warm_median_ms: الوسيط
-          - pk_select_ms: PK SELECT حقيقي
-          - bulk_fetch_ms: fetch 100 صف
-          - bulk_rows: عدد الصفوف
-          - verdict: excellent | good | acceptable | slow | critical
-          - diagnosis: نص وصفي
-          - recommendation: توصية عملية
     """
-
     if not force:
         cached = _cache_get("latency_probe")
         if cached is not None:
@@ -451,7 +423,6 @@ async def _probe_db_latency(
     # PostgreSQL / MySQL — قياس شبكة + DB
     # ═══════════════════════════════════════════════════════════════
 
-    # استخرج host/port من DATABASE_URL (بدون credentials)
     db_url = (
         getattr(db, "DATABASE_URL", "")
         or os.getenv("DATABASE_URL", "")
@@ -471,20 +442,15 @@ async def _probe_db_latency(
     if host != "?" and port > 0:
         try:
             t0 = time.monotonic()
-            loop = asyncio.get_event_loop()
-            # asyncio.open_connection عبر loop.sock_connect → قياس TCP handshake
-            fut = loop.run_in_executor(
-                None,
-                lambda: socket.create_connection(
-                    (host, port), timeout=socket_timeout
-                ),
+
+            def _connect():
+                s = socket.create_connection((host, port), timeout=socket_timeout)
+                s.close()
+
+            await asyncio.wait_for(
+                asyncio.to_thread(_connect), timeout=socket_timeout + 1.0,
             )
-            sock = await asyncio.wait_for(fut, timeout=socket_timeout + 1.0)
             tcp_ms = (time.monotonic() - t0) * 1000
-            try:
-                sock.close()
-            except Exception:
-                pass
             result["tcp_connect_ms"] = round(tcp_ms, 2)
         except asyncio.TimeoutError:
             result["tcp_connect_ms"] = -1.0
@@ -569,7 +535,7 @@ async def _probe_db_latency(
         result["first_query_ms"] = round(first_ms, 2)
 
         # ─── 4) 5 استعلامات warm ─────────────────────────────────
-        warm: List[float] = []
+        warm = []
         for _ in range(5):
             t0 = time.monotonic()
             if db_type == "postgres":
@@ -665,7 +631,6 @@ async def _probe_db_latency(
 
 
 def _verdict_from_warm(warm_ms: float) -> str:
-    """حكم مختصر بناءً على الوسيط فقط (SQLite)."""
     if warm_ms < 5:
         return "excellent"
     if warm_ms < 20:
@@ -678,23 +643,12 @@ def _verdict_from_warm(warm_ms: float) -> str:
 
 
 def _compute_latency_verdict(result: Dict[str, Any]) -> Tuple[str, str, str]:
-    """
-    🔬 v7.1.0 FEAT-4: يبني حكماً آلياً + توصية عملية.
-
-    المنطق:
-      • TCP connect > 300ms → شبكة سيئة (لا علاقة بالـ DB).
-      • asyncpg_connect - tcp_connect > 200ms → مشكلة TLS/auth.
-      • warm_median > 100ms → DB محمّلة.
-      • first_query >> warm_median (10x+) → cold start للـ cache.
-      • pk_select > 200ms → مشكلة فهارس أو network متكرر.
-    """
     tcp = float(result.get("tcp_connect_ms") or 0)
     conn = float(result.get("asyncpg_connect_ms") or 0)
     warm = float(result.get("warm_median_ms") or 0)
     first = float(result.get("first_query_ms") or 0)
     pk = float(result.get("pk_select_ms") or 0)
 
-    # ─── الحالة الأسوأ أولاً ────────────────────────────────
     if tcp < 0:
         return (
             "critical",
@@ -702,7 +656,6 @@ def _compute_latency_verdict(result: Dict[str, Any]) -> Tuple[str, str, str]:
             "تحقّق من DATABASE_URL، حالة DB، وأي firewall.",
         )
 
-    # ─── مقارنة TCP مع warm ────────────────────────────────
     if tcp > 300 and warm < 50:
         return (
             "slow",
@@ -722,7 +675,6 @@ def _compute_latency_verdict(result: Dict[str, Any]) -> Tuple[str, str, str]:
             "قلّل عدد الاستعلامات أو انقل DB أقرب.",
         )
 
-    # ─── DB محمّلة ──────────────────────────────────────────
     if warm > 500:
         return (
             "critical",
@@ -741,7 +693,6 @@ def _compute_latency_verdict(result: Dict[str, Any]) -> Tuple[str, str, str]:
             "تحقّق من shared_buffers (يجب ≥ 25% RAM).",
         )
 
-    # ─── كل شيء جيد ────────────────────────────────────────
     if warm < 20 and tcp < 50:
         return (
             "excellent",
@@ -756,7 +707,6 @@ def _compute_latency_verdict(result: Dict[str, Any]) -> Tuple[str, str, str]:
             "الأداء سليم.",
         )
 
-    # ─── حالة default ───────────────────────────────────────
     return (
         "acceptable",
         f"🟡 TCP={tcp:.0f}ms، DB={warm:.0f}ms، "
@@ -766,9 +716,6 @@ def _compute_latency_verdict(result: Dict[str, Any]) -> Tuple[str, str, str]:
 
 
 def format_latency_report(probe: Dict[str, Any]) -> str:
-    """
-    🔬 v7.1.0 FEAT-2: تقرير HTML جاهز للعرض.
-    """
     if not probe.get("ok"):
         err = _esc(probe.get("error", "خطأ غير معروف"))
         return (
@@ -792,7 +739,6 @@ def format_latency_report(probe: Dict[str, Any]) -> str:
         lines.append(f"🗄️ <b>{_esc(db_type)}</b> (محلي)")
     lines.append("")
 
-    # ─── الشبكة ────────────────────────────────────────────
     tcp = float(probe.get("tcp_connect_ms", 0) or 0)
     if tcp > 0:
         tcp_icon = ("🟢" if tcp < 50 else
@@ -813,7 +759,6 @@ def format_latency_report(probe: Dict[str, Any]) -> str:
                              f"(TLS/auth بطيء)")
     lines.append("")
 
-    # ─── الاستعلامات ───────────────────────────────────────
     first = float(probe.get("first_query_ms", 0) or 0)
     if first > 0:
         first_icon = ("🟢" if first < 10 else
@@ -837,7 +782,6 @@ def format_latency_report(probe: Dict[str, Any]) -> str:
         lines.append(f"🎯 PK SELECT: {pk_icon} <b>{pk:.0f}ms</b>")
     lines.append("")
 
-    # ─── Bulk ──────────────────────────────────────────────
     bulk = float(probe.get("bulk_fetch_ms", 0) or 0)
     bulk_rows = int(probe.get("bulk_rows", 0) or 0)
     if bulk > 0 and bulk_rows > 0:
@@ -846,7 +790,6 @@ def format_latency_report(probe: Dict[str, Any]) -> str:
                      f"({per_row:.2f}ms/row)")
         lines.append("")
 
-    # ─── الحكم ─────────────────────────────────────────────
     verdict = str(probe.get("verdict", "unknown"))
     diagnosis = str(probe.get("diagnosis", ""))
     recommendation = str(probe.get("recommendation", ""))
@@ -875,20 +818,11 @@ def format_latency_report(probe: Dict[str, Any]) -> str:
 
 
 async def diagnose_latency(*, force: bool = False) -> str:
-    """
-    🔬 v7.1.0 FEAT-3: API عام — يُرجع تقرير HTML جاهزاً.
-
-    Args:
-        force: تجاهل الكاش (افتراضياً 120s).
-    """
     probe = await _probe_db_latency(force=force)
     return format_latency_report(probe)
 
 
 async def get_latency_verdict() -> Dict[str, Any]:
-    """
-    🔬 v7.1.0: يُرجع الحكم فقط (بدون HTML) — للاستخدام البرمجي.
-    """
     probe = await _probe_db_latency()
     return {
         "verdict": probe.get("verdict", "unknown"),
@@ -902,7 +836,592 @@ async def get_latency_verdict() -> Dict[str, Any]:
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# 1) DB Metadata — 🆕 v7.0.0: cache 300s
+# 🆕 v7.2.0: FULL HEALTH PROBE — تشخيص شامل لمصدر البطء
+# ═══════════════════════════════════════════════════════════════════════
+
+async def _probe_network_to(
+    host: str, port: int, *, with_tls: bool = False,
+    timeout: float = 5.0,
+) -> Dict[str, Any]:
+    """قياس DNS + TCP + TLS إلى host:port."""
+    result: Dict[str, Any] = {
+        "host": host, "port": port, "ok": False,
+    }
+    if not host or host == "?" or port <= 0:
+        return result
+
+    # ─── DNS ───────────────────────────────────────────────
+    try:
+        t0 = time.perf_counter()
+        ip = await asyncio.wait_for(
+            asyncio.to_thread(socket.gethostbyname, host),
+            timeout=timeout,
+        )
+        result["dns_ms"] = round((time.perf_counter() - t0) * 1000, 2)
+        result["resolved_ip"] = ip
+    except Exception as e:
+        result["dns_ms"] = -1.0
+        result["error"] = f"DNS: {type(e).__name__}"
+        return result
+
+    # ─── TCP ───────────────────────────────────────────────
+    try:
+        t0 = time.perf_counter()
+
+        def _connect():
+            s = socket.create_connection((host, port), timeout=timeout)
+            s.close()
+
+        await asyncio.wait_for(
+            asyncio.to_thread(_connect), timeout=timeout + 1.0,
+        )
+        result["tcp_ms"] = round((time.perf_counter() - t0) * 1000, 2)
+    except Exception as e:
+        result["tcp_ms"] = -1.0
+        result["error"] = f"TCP: {type(e).__name__}"
+        return result
+
+    # ─── TLS ───────────────────────────────────────────────
+    if with_tls:
+        try:
+            t0 = time.perf_counter()
+
+            def _tls_handshake():
+                ctx = ssl.create_default_context()
+                s = socket.create_connection((host, port), timeout=timeout)
+                try:
+                    ss = ctx.wrap_socket(s, server_hostname=host)
+                    ss.close()
+                finally:
+                    try:
+                        s.close()
+                    except Exception:
+                        pass
+
+            await asyncio.wait_for(
+                asyncio.to_thread(_tls_handshake),
+                timeout=timeout + 3.0,
+            )
+            result["tls_ms"] = round((time.perf_counter() - t0) * 1000, 2)
+        except Exception as e:
+            result["tls_ms"] = -1.0
+            logger.debug(f"TLS probe {host}: {e}")
+
+    result["ok"] = True
+    return result
+
+
+async def _probe_event_loop(
+    samples: int = 10, sleep_ms: int = 50,
+) -> Dict[str, Any]:
+    """قياس تأخر event loop."""
+    result: Dict[str, Any] = {
+        "ok": False, "samples_ms": [], "median_ms": 0.0, "max_ms": 0.0,
+    }
+    try:
+        loop = asyncio.get_running_loop()
+        lags: List[float] = []
+        for _ in range(samples):
+            t0 = loop.time()
+            await asyncio.sleep(sleep_ms / 1000.0)
+            actual_ms = (loop.time() - t0) * 1000
+            lag = max(0.0, actual_ms - sleep_ms)
+            lags.append(lag)
+        result["samples_ms"] = [round(x, 2) for x in lags]
+        result["median_ms"] = round(statistics.median(lags), 2)
+        result["max_ms"] = round(max(lags), 2)
+        result["ok"] = True
+    except Exception as e:
+        result["error"] = str(e)
+    return result
+
+
+async def _probe_filesystem() -> Dict[str, Any]:
+    """قياس write/fsync/read على /tmp."""
+    result: Dict[str, Any] = {"ok": False}
+    try:
+        tmp_dir = Path(tempfile.gettempdir())
+        result["tmp_dir"] = str(tmp_dir)
+        test_file = tmp_dir / "_latency_probe.bin"
+        payload = b"x" * (1024 * 1024)  # 1 MB
+
+        # ─── Write ────────────────────────────────────────
+        t0 = time.perf_counter()
+        await asyncio.to_thread(test_file.write_bytes, payload)
+        result["write_1mb_ms"] = round(
+            (time.perf_counter() - t0) * 1000, 2
+        )
+
+        # ─── fsync ────────────────────────────────────────
+        def _fsync():
+            fd = os.open(str(test_file), os.O_RDONLY)
+            try:
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+
+        t0 = time.perf_counter()
+        await asyncio.to_thread(_fsync)
+        result["fsync_ms"] = round(
+            (time.perf_counter() - t0) * 1000, 2
+        )
+
+        # ─── Read ─────────────────────────────────────────
+        t0 = time.perf_counter()
+        _ = await asyncio.to_thread(test_file.read_bytes)
+        result["read_1mb_ms"] = round(
+            (time.perf_counter() - t0) * 1000, 2
+        )
+
+        # ─── Cleanup ──────────────────────────────────────
+        try:
+            test_file.unlink()
+        except Exception:
+            pass
+
+        result["ok"] = True
+    except Exception as e:
+        result["error"] = str(e)
+    return result
+
+
+async def _probe_system() -> Dict[str, Any]:
+    """قياس CPU/RAM/Load."""
+    result: Dict[str, Any] = {"ok": False}
+    try:
+        # ─── Load average (Unix) ─────────────────────────
+        try:
+            load1, load5, load15 = os.getloadavg()
+            result["load_avg_1m"] = round(load1, 2)
+            result["load_avg_5m"] = round(load5, 2)
+            result["load_avg_15m"] = round(load15, 2)
+        except (OSError, AttributeError):
+            pass
+
+        # ─── CPU count ───────────────────────────────────
+        try:
+            result["cpu_count"] = os.cpu_count() or 1
+        except Exception:
+            result["cpu_count"] = 1
+
+        # ─── psutil (CPU + RAM) ──────────────────────────
+        try:
+            import psutil  # type: ignore
+            vm = psutil.virtual_memory()
+            result["ram_percent"] = round(vm.percent, 1)
+            result["ram_used_mb"] = round(vm.used / (1024 ** 2), 1)
+            result["ram_total_mb"] = round(vm.total / (1024 ** 2), 1)
+
+            psutil.cpu_percent(interval=None)  # prime
+            await asyncio.sleep(0.1)
+            result["cpu_percent"] = round(
+                psutil.cpu_percent(interval=None), 1
+            )
+        except ImportError:
+            result["psutil"] = "not installed"
+
+        result["ok"] = True
+    except Exception as e:
+        result["error"] = str(e)
+    return result
+
+
+def _identify_bottleneck(data: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    🎯 v7.2.0: يحلل كل القياسات ويحدد السبب الرئيسي للبطء.
+    """
+    scores: List[Tuple[str, float, str]] = []
+
+    # ─── 1. Network → DB ──────────────────────────────
+    net_db = data.get("network_db") or {}
+    db_tcp = float(net_db.get("tcp_ms") or 0)
+    if db_tcp > 0:
+        weight = db_tcp * 3
+        sev = ("critical" if db_tcp > 300
+               else "high" if db_tcp > 150
+               else "medium" if db_tcp > 50
+               else "low")
+        scores.append(("network_db", weight, sev))
+
+    # ─── 2. DB Internal ──────────────────────────────
+    db_p = data.get("database") or {}
+    warm = float(db_p.get("warm_median_ms") or 0)
+    if warm > 0:
+        sev = ("critical" if warm > 500
+               else "high" if warm > 100
+               else "medium" if warm > 30
+               else "low")
+        scores.append(("database_internal", warm, sev))
+
+    # ─── 3. Event Loop Lag ───────────────────────────
+    loop_p = data.get("event_loop") or {}
+    loop_lag = float(loop_p.get("median_ms") or 0)
+    if loop_lag > 0:
+        sev = ("critical" if loop_lag > 100
+               else "high" if loop_lag > 50
+               else "medium" if loop_lag > 20
+               else "low")
+        scores.append(("event_loop", loop_lag * 2, sev))
+
+    # ─── 4. Filesystem ───────────────────────────────
+    fs_p = data.get("filesystem") or {}
+    fs_write = float(fs_p.get("write_1mb_ms") or 0)
+    if fs_write > 0:
+        sev = ("critical" if fs_write > 500
+               else "high" if fs_write > 200
+               else "medium" if fs_write > 50
+               else "low")
+        scores.append(("filesystem", fs_write / 10, sev))
+
+    # ─── 5. CPU ───────────────────────────────────────
+    sys_p = data.get("system") or {}
+    cpu = float(sys_p.get("cpu_percent") or 0)
+    if cpu > 0:
+        sev = ("critical" if cpu > 90
+               else "high" if cpu > 75
+               else "medium" if cpu > 50
+               else "low")
+        scores.append(("cpu", cpu * 2, sev))
+
+    # ─── 6. RAM ───────────────────────────────────────
+    ram = float(sys_p.get("ram_percent") or 0)
+    if ram > 0:
+        sev = ("critical" if ram > 95
+               else "high" if ram > 85
+               else "medium" if ram > 70
+               else "low")
+        scores.append(("ram", ram * 1.5, sev))
+
+    # ─── 7. Network → Telegram ───────────────────────
+    net_tg = data.get("network_telegram") or {}
+    tg_tcp = float(net_tg.get("tcp_ms") or 0)
+    if tg_tcp > 0:
+        sev = ("high" if tg_tcp > 300
+               else "medium" if tg_tcp > 150
+               else "low")
+        scores.append(("network_telegram", tg_tcp * 0.5, sev))
+
+    scores.sort(key=lambda x: -x[1])
+
+    if not scores or scores[0][1] < 20:
+        return {
+            "primary": "none",
+            "severity": "low",
+            "score_ms": 0.0,
+            "explanation": "🟢 لا يوجد bottleneck واضح — كل الأبعاد سليمة.",
+            "recommendation": "الأداء جيد — لا حاجة لتعديل.",
+            "ranked": [
+                {"component": n, "score_ms": round(m, 2), "severity": s}
+                for n, m, s in scores
+            ],
+        }
+
+    top_name, top_ms, top_sev = scores[0]
+
+    explanations = {
+        "network_db": (
+            f"🔴 الشبكة بين البوت و DB تُضيف ~{top_ms:.0f}ms "
+            f"لكل استعلام. TCP RTT = {db_tcp:.0f}ms."
+        ),
+        "database_internal": (
+            f"🔴 DB نفسه بطيء: warm query = {warm:.0f}ms "
+            f"(المتوقع < 10ms)."
+        ),
+        "event_loop": (
+            f"🟠 Event loop متأخر بـ {loop_lag:.0f}ms وسطي — "
+            f"البوت مشبع بعمليات sync."
+        ),
+        "filesystem": (
+            f"🟠 القرص بطيء: كتابة 1MB = {fs_write:.0f}ms."
+        ),
+        "cpu": (
+            f"🟠 CPU مستخدم بنسبة {cpu:.0f}% — الخادم مشبع."
+        ),
+        "ram": (
+            f"🟠 RAM مستخدمة بنسبة {ram:.0f}% — احتمال swap."
+        ),
+        "network_telegram": (
+            f"🟠 الشبكة إلى Telegram بطيئة: {tg_tcp:.0f}ms."
+        ),
+    }
+
+    recommendations = {
+        "network_db": (
+            "✅ الحل: انقل DB إلى نفس منطقة البوت. "
+            "مثلاً: إذا البوت على Render Oregon → DB في US-West "
+            "(SFO أو Oregon). أو استخدم PgBouncer قريباً."
+        ),
+        "database_internal": (
+            "✅ الحل: راجع pg_stat_activity، شغّل VACUUM ANALYZE، "
+            "زد shared_buffers، وافحص pg_stat_statements."
+        ),
+        "event_loop": (
+            "✅ الحل: ابحث عن استدعاءات sync في async code: "
+            "requests، time.sleep، psycopg2، file I/O مباشر. "
+            "استخدم asyncio.to_thread لكل عملية sync."
+        ),
+        "filesystem": (
+            "✅ الحل: تجنّب كتابة ملفات كبيرة. استخدم /tmp فقط "
+            "للعمليات المؤقتة. في Render free tier القرص بطيء — "
+            "ارفع الـ tier أو قلّل كتابة الملفات."
+        ),
+        "cpu": (
+            "✅ الحل: قلّل MAX_CHANNELS_PER_CYCLE، راجع العمليات "
+            "الثقيلة (OCR، NSFW model)، ارفع الـ tier."
+        ),
+        "ram": (
+            "✅ الحل: راجع caches (SmartCache، banned_words)، "
+            "قلّل max_size، ارفع الـ tier."
+        ),
+        "network_telegram": (
+            "✅ الحل: عادةً مؤقت. تحقّق من status.telegram.org."
+        ),
+    }
+
+    return {
+        "primary": top_name,
+        "severity": top_sev,
+        "score_ms": round(top_ms, 2),
+        "explanation": explanations.get(top_name, ""),
+        "recommendation": recommendations.get(top_name, ""),
+        "ranked": [
+            {"component": n, "score_ms": round(m, 2), "severity": s}
+            for n, m, s in scores
+        ],
+    }
+
+
+async def _probe_full_health(
+    *, force: bool = False,
+) -> Dict[str, Any]:
+    """🆕 v7.2.0: تشخيص شامل — يقيس كل الأبعاد ويحدد السبب."""
+    if not force:
+        cached = _cache_get("full_health")
+        if cached is not None:
+            return cached
+
+    result: Dict[str, Any] = {
+        "ok": False,
+        "ts": time.time(),
+    }
+
+    db = _get_db()
+
+    db_host = "?"
+    db_port = 0
+    if db is not None:
+        url = (getattr(db, "DATABASE_URL", "")
+               or os.getenv("DATABASE_URL", ""))
+        try:
+            p = urlparse(url)
+            db_host = p.hostname or "?"
+            db_port = p.port or (
+                5432 if "postgres" in url.lower() else 3306
+            )
+        except Exception:
+            pass
+
+    probes = await asyncio.gather(
+        (_probe_network_to(db_host, db_port, with_tls=True)
+         if db_host != "?" and db_port > 0
+         else asyncio.sleep(0, result={})),
+        _probe_network_to("api.telegram.org", 443, with_tls=True),
+        _probe_event_loop(),
+        _probe_filesystem(),
+        _probe_system(),
+        _probe_db_latency(force=force),
+        return_exceptions=True,
+    )
+
+    def _safe(x, default):
+        return default if isinstance(x, BaseException) else x
+
+    result["network_db"] = _safe(probes[0], {})
+    result["network_telegram"] = _safe(probes[1], {})
+    result["event_loop"] = _safe(probes[2], {})
+    result["filesystem"] = _safe(probes[3], {})
+    result["system"] = _safe(probes[4], {})
+    result["database"] = _safe(probes[5], {})
+    result["ok"] = True
+
+    result["bottleneck"] = _identify_bottleneck(result)
+
+    _cache_set("full_health", result, ttl=120.0)
+    return result
+
+
+def format_full_health_report(data: Dict[str, Any]) -> str:
+    """تقرير HTML شامل لكل الأبعاد + الحكم."""
+    if not data.get("ok"):
+        return "❌ فشل التشخيص الشامل"
+
+    lines: List[str] = []
+    lines.append("🏥 <b>التشخيص الشامل — Full Health Probe</b>")
+    lines.append("━━━━━━━━━━━━━━━━━━━━━━")
+    lines.append("")
+
+    b = data.get("bottleneck") or {}
+    severity = b.get("severity", "low")
+    icon = {
+        "critical": "🔴",
+        "high": "🟠",
+        "medium": "🟡",
+        "low": "🟢",
+    }.get(severity, "⚪")
+
+    lines.append(f"{icon} <b>السبب الرئيسي للبطء:</b>")
+    if b.get("explanation"):
+        lines.append(f"   {b['explanation']}")
+    if b.get("recommendation"):
+        lines.append(f"   {b['recommendation']}")
+    lines.append("")
+
+    ranked = b.get("ranked") or []
+    if ranked:
+        lines.append("📊 <b>ترتيب الأبعاد (من الأسوأ):</b>")
+        for i, item in enumerate(ranked[:7], 1):
+            name = item.get("component", "?")
+            ms = item.get("score_ms", 0)
+            sev = item.get("severity", "low")
+            ic = {
+                "critical": "🔴", "high": "🟠",
+                "medium": "🟡", "low": "🟢",
+            }.get(sev, "⚪")
+            lines.append(
+                f"  {i}. {ic} <code>{_esc(name):<20}</code> "
+                f"~{ms:.0f}ms"
+            )
+        lines.append("")
+
+    lines.append("━━━━━━━━━━━━━━━━━━━━━━")
+    lines.append("📋 <b>القياسات الكاملة:</b>")
+    lines.append("")
+
+    # Network → DB
+    net_db = data.get("network_db") or {}
+    if net_db.get("ok"):
+        lines.append("🌐 <b>الشبكة → DB</b>")
+        if net_db.get("dns_ms", 0) > 0:
+            lines.append(
+                f"   DNS: <b>{net_db['dns_ms']:.0f}ms</b>"
+            )
+        if net_db.get("tcp_ms", 0) > 0:
+            lines.append(
+                f"   TCP: <b>{net_db['tcp_ms']:.0f}ms</b>"
+            )
+        if net_db.get("tls_ms", 0) > 0:
+            lines.append(
+                f"   TLS: <b>{net_db['tls_ms']:.0f}ms</b>"
+            )
+        lines.append("")
+
+    # Network → Telegram
+    net_tg = data.get("network_telegram") or {}
+    if net_tg.get("ok"):
+        lines.append("📨 <b>الشبكة → Telegram</b>")
+        if net_tg.get("tcp_ms", 0) > 0:
+            lines.append(
+                f"   TCP: <b>{net_tg['tcp_ms']:.0f}ms</b>"
+            )
+        if net_tg.get("tls_ms", 0) > 0:
+            lines.append(
+                f"   TLS: <b>{net_tg['tls_ms']:.0f}ms</b>"
+            )
+        lines.append("")
+
+    # DB Internal
+    db_p = data.get("database") or {}
+    if db_p.get("ok"):
+        lines.append("🗄️ <b>DB Internal</b>")
+        if db_p.get("asyncpg_connect_ms", 0) > 0:
+            lines.append(
+                f"   connect: <b>{db_p['asyncpg_connect_ms']:.0f}ms</b>"
+            )
+        if db_p.get("first_query_ms", 0) > 0:
+            lines.append(
+                f"   first query: <b>{db_p['first_query_ms']:.0f}ms</b>"
+            )
+        if db_p.get("warm_median_ms", 0) > 0:
+            lines.append(
+                f"   warm median: <b>{db_p['warm_median_ms']:.0f}ms</b>"
+            )
+        if db_p.get("pk_select_ms", 0) > 0:
+            lines.append(
+                f"   PK SELECT: <b>{db_p['pk_select_ms']:.0f}ms</b>"
+            )
+        if db_p.get("bulk_fetch_ms", 0) > 0:
+            lines.append(
+                f"   bulk 100: <b>{db_p['bulk_fetch_ms']:.0f}ms</b>"
+            )
+        lines.append("")
+
+    # Event Loop
+    loop_p = data.get("event_loop") or {}
+    if loop_p.get("ok"):
+        lines.append("🔄 <b>Event Loop</b>")
+        lines.append(
+            f"   lag median: <b>{loop_p.get('median_ms', 0):.0f}ms</b>"
+        )
+        lines.append(
+            f"   lag max: <b>{loop_p.get('max_ms', 0):.0f}ms</b>"
+        )
+        lines.append("")
+
+    # Filesystem
+    fs_p = data.get("filesystem") or {}
+    if fs_p.get("ok"):
+        lines.append("💾 <b>القرص (1MB)</b>")
+        lines.append(
+            f"   write: <b>{fs_p.get('write_1mb_ms', 0):.0f}ms</b>"
+        )
+        lines.append(
+            f"   fsync: <b>{fs_p.get('fsync_ms', 0):.0f}ms</b>"
+        )
+        lines.append(
+            f"   read: <b>{fs_p.get('read_1mb_ms', 0):.0f}ms</b>"
+        )
+        lines.append("")
+
+    # System
+    sys_p = data.get("system") or {}
+    if sys_p.get("ok"):
+        lines.append("⚙️ <b>النظام</b>")
+        if "cpu_percent" in sys_p:
+            lines.append(f"   CPU: <b>{sys_p['cpu_percent']:.0f}%</b>")
+        if "ram_percent" in sys_p:
+            lines.append(
+                f"   RAM: <b>{sys_p['ram_percent']:.0f}%</b> "
+                f"({sys_p.get('ram_used_mb', 0):.0f}/"
+                f"{sys_p.get('ram_total_mb', 0):.0f}MB)"
+            )
+        if "load_avg_1m" in sys_p:
+            lines.append(
+                f"   Load: <b>{sys_p['load_avg_1m']}</b> / "
+                f"{sys_p['load_avg_5m']} / {sys_p['load_avg_15m']}"
+            )
+        if "cpu_count" in sys_p:
+            lines.append(f"   CPUs: <b>{sys_p['cpu_count']}</b>")
+        lines.append("")
+
+    lines.append("━━━━━━━━━━━━━━━━━━━━━━")
+    lines.append(f"🕐 <i>{_now_iso()}</i>")
+
+    return "\n".join(lines)
+
+
+async def diagnose_full(*, force: bool = False) -> str:
+    """🆕 v7.2.0: API عام — تقرير HTML شامل."""
+    data = await _probe_full_health(force=force)
+    return format_full_health_report(data)
+
+
+async def get_full_health() -> Dict[str, Any]:
+    """🆕 v7.2.0: للبرمجة — dict بدل HTML."""
+    return await _probe_full_health()
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# 1) DB Metadata
 # ═══════════════════════════════════════════════════════════════════════
 
 async def _get_db_metadata() -> Dict[str, Any]:
@@ -957,14 +1476,14 @@ async def _get_db_metadata() -> Dict[str, Any]:
             meta["database_name"] = "sqlite"
     except Exception as e:
         logger.debug(f"_get_db_metadata: {e}")
-        return meta  # لا نُخزّن الفشل في الكاش
+        return meta
 
     _cache_set("db_metadata", meta)
     return meta
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# 2) Dead Tuples + Clean Tables — 🆕 v7.0.0: cache 60s
+# 2) Dead Tuples + Clean Tables
 # ═══════════════════════════════════════════════════════════════════════
 
 async def _get_all_tables_health() -> Tuple[List[Dict], List[Dict]]:
@@ -1065,7 +1584,7 @@ async def _get_all_tables_health() -> Tuple[List[Dict], List[Dict]]:
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# 3) Activity Stats — بلا cache (real-time)
+# 3) Activity Stats
 # ═══════════════════════════════════════════════════════════════════════
 
 async def _get_activity_stats() -> Dict[str, Any]:
@@ -1111,7 +1630,7 @@ async def _get_activity_stats() -> Dict[str, Any]:
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# 4) PG Settings — cache 600s
+# 4) PG Settings
 # ═══════════════════════════════════════════════════════════════════════
 
 _CRITICAL_SETTINGS = (
@@ -1165,7 +1684,7 @@ async def _get_pg_settings() -> Dict[str, str]:
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# 5) Sizes + Indexes — cache 300s
+# 5) Sizes + Indexes
 # ═══════════════════════════════════════════════════════════════════════
 
 async def _get_table_sizes(limit: int = 15) -> List[Dict[str, Any]]:
@@ -1211,7 +1730,7 @@ async def _get_indexes(tables: List[str]) -> Dict[str, List[Dict[str, Any]]]:
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# 6) Auto-Cleanup Status — بلا cache
+# 6) Auto-Cleanup Status
 # ═══════════════════════════════════════════════════════════════════════
 
 async def _get_cleanup_status() -> List[Dict[str, Any]]:
@@ -1281,7 +1800,7 @@ async def _get_cleanup_status() -> List[Dict[str, Any]]:
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# 7) Table Names Helper — cache 300s
+# 7) Table Names Helper
 # ═══════════════════════════════════════════════════════════════════════
 
 async def _get_all_table_names() -> List[str]:
@@ -1883,7 +2402,7 @@ async def auto_vacuum_dirty_mvs(min_dead: int = 10) -> Dict[str, Any]:
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# 12) Build Sections — parallel gather
+# 12) Build Sections
 # ═══════════════════════════════════════════════════════════════════════
 
 async def _build_sections() -> List[str]:
@@ -2158,17 +2677,25 @@ async def _build_sections() -> List[str]:
     except Exception as e:
         logger.warning(f"maintenance preview in sections: {e}")
 
-    # 🆕 v7.1.0 SECTION 12 — Latency Probe (قسم جديد)
+    # 🆕 v7.1.0 SECTION 12 — Latency Probe (يظهر عند مشكلة)
     try:
         latency_probe = await _probe_db_latency()
-        # نضيف القسم فقط إذا كان DB يحتاج فحص (لا نُثقله)
-        # أو إذا كان الحكم slow/critical — كتنبيه
         verdict = latency_probe.get("verdict", "unknown")
         if verdict in ("slow", "critical", "acceptable"):
             latency_text = format_latency_report(latency_probe)
             parts.append(latency_text)
     except Exception as e:
         logger.debug(f"latency probe in sections: {e}")
+
+    # 🆕 v7.2.0 SECTION 13 — Full Health (يظهر عند وجود bottleneck)
+    try:
+        full = await _probe_full_health()
+        b = full.get("bottleneck") or {}
+        if b.get("primary") not in ("none", None):
+            health_text = format_full_health_report(full)
+            parts.append(health_text)
+    except Exception as e:
+        logger.debug(f"full health in sections: {e}")
 
     return parts
 
@@ -2238,7 +2765,7 @@ async def diagnose_db_quick() -> str:
     except Exception:
         pass
 
-    # 🆕 v7.1.0: سطر كمون مختصر في التقرير السريع
+    # 🆕 v7.1.0: سطر كمون مختصر
     try:
         latency = await get_latency_verdict()
         if latency.get("ok"):
@@ -2258,6 +2785,21 @@ async def diagnose_db_quick() -> str:
                 )
             else:
                 lines.append(f"{icon} كمون DB: {warm:.0f}ms")
+    except Exception:
+        pass
+
+    # 🆕 v7.2.0: سطر bottleneck مختصر
+    try:
+        full = await _probe_full_health()
+        b = full.get("bottleneck") or {}
+        if b.get("primary") != "none":
+            sev = b.get("severity", "low")
+            icon = {"critical": "🔴", "high": "🟠",
+                    "medium": "🟡", "low": "🟢"}.get(sev, "⚪")
+            lines.append(
+                f"{icon} السبب الرئيسي: <code>{b.get('primary')}</code> "
+                f"(~{b.get('score_ms', 0):.0f}ms)"
+            )
     except Exception:
         pass
 
@@ -2322,6 +2864,11 @@ latency_report = diagnose_latency
 check_latency = diagnose_latency
 get_latency_report = diagnose_latency
 
+# 🆕 v7.2.0: aliases للـ full health
+full_health = diagnose_full
+check_full_health = diagnose_full
+health_report = diagnose_full
+
 
 # ═══════════════════════════════════════════════════════════════════════
 # 15) __all__
@@ -2338,7 +2885,7 @@ __all__ = [
     "diagnose_db_split",
     "diagnose_db_quick",
     "get_diagnostics_data",
-    # 🆕 v7.1.0: Latency Probe
+    # v7.1.0: Latency Probe
     "diagnose_latency",
     "get_latency_verdict",
     "format_latency_report",
@@ -2346,6 +2893,13 @@ __all__ = [
     "latency_report",
     "check_latency",
     "get_latency_report",
+    # 🆕 v7.2.0: Full Health Probe
+    "diagnose_full",
+    "get_full_health",
+    "format_full_health_report",
+    "full_health",
+    "check_full_health",
+    "health_report",
     # Auto vacuum
     "auto_vacuum_dirty_mvs",
     "auto_vacuum",
@@ -2397,6 +2951,7 @@ __all__ = [
 try:
     logger.info(
         "🛡️ db_diagnostics.py v%s loaded | "
+        "FULL-HEALTH-PROBE ✅ | "
         "LATENCY-PROBE ✅ | "
         "CACHE-LAYER ✅ | "
         "PARALLEL-REPORT ✅ | "
