@@ -1,24 +1,59 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-handlers_callback.py - معالج الأزرار (v9.7.22-FIX-ALL-VERIFIED)
+handlers_callback.py - معالج الأزرار (v9.7.25-CONFLICT-FREE-FULL)
 =====================================================================
-🆕 v9.7.22-FIX-ALL-VERIFIED:
-    🔴 FIX-1: import datetime صريح (كان مفقوداً → NameError في
-              _show_restore_backups).
-    🔴 FIX-2: _handle_advanced_actions — خريطة صريحة act_* → UserState
-              (كان كل act_* يذهب لـ WAIT_BAN خطأً).
-    🟠 FIX-3: _handle_contests — فحص توفر DB methods + fallback استعلام.
-    🟠 FIX-4: _build_locked_permissions / _build_unlocked_permissions
-              helpers متوافقة مع PTB v13+ و v20+.
-    🟠 FIX-5: _do_backup — إبلاغ المستخدم عند فشل send_document.
-    🟢 FIX-6: تنظيف sched_ch/panel_chat في _CONTEXT_KEYS_TO_CLEAR.
-    🟢 FIX-7: _handle_auto_reply — استخراج chat_id أكثر متانة.
-=====================================================================
+🆕 v9.7.25-CONFLICT-FREE-FULL:
+    🔗 DELEGATE-1: تفويض CB.CH_LIST → handlers_channels_list أولاً.
+    🔗 DELEGATE-2: تفويض CB.CH_ADD → handlers_channels_list أولاً.
+    🔗 DELEGATE-3: تفويض CB.CH_SEL: / CB.CH_DEL: / CB.CH_STATS: /
+                   ch_del_confirm: → channels_list إن توفّر.
+    ✅ FALLBACK-KEPT: كل الدوال الأصلية محفوظة (لا حذف):
+       - _show_channel_list
+       - _handle_channel_select
+       - _handle_channel_delete
+       - _handle_channel_stats
+       - ch_page_prev / ch_page_next
+    ℹ️ المنطق: PTB أول handler يفوز → channels_list مسجَّل أولاً
+       سيتفوّق تلقائياً؛ التفويض ضمانة إضافية.
+
+🆕 v9.7.23-CRITICAL-FIXES (محفوظة بالكامل):
+    🔴 C-1: _show_channel_list + _show_groups_list — banned رقمي
+            + escape + control-chars.
+    🔴 C-2: _show_groups_list — escape للاسم.
+    🔴 C-5: _handle_group_security — try/except صحيح.
+    🟠 H-1: _is_banned() + _safe_display_name().
+    🟠 H-2: _handle_auto_reply — split(':', 1)[0].
+    🟠 H-3: safe_edit — warn عند parse fail.
+    🟠 H-6: _render_referral — code None.
+    🟠 H-9: _publish_all — list + zip.
+    🟠 H-10: _do_backup — bool(success).
+    🟢 M-4: _extract_updates_channel_link — #fragment.
+    🟢 M-5: _check_updates_channel_health — key normalize.
+    🟢 M-7: _membership_save_to_db — log errors.
+    🟢 M-14: _unwrap_get_next_post — tuple>2.
+
+🆕 v9.7.22-FIX-ALL-VERIFIED (محفوظة):
+    🔴 FIX-1..7 كما في الإصدار الأصلي.
+
+═══════════════════════════════════════════════════════════════════════
+⚠️ CONFLICT AVOIDANCE (v9.7.25)
+═══════════════════════════════════════════════════════════════════════
+هذا الملف يحتفظ بكل الدوال الأصلية، لكن:
+  • عند CB.CH_LIST / CB.CH_ADD → يُجرّب channels_list أولاً (delegation).
+  • عند CB.CH_SEL: / CB.CH_DEL: / CB.CH_STATS: / ch_del_confirm:
+    → نفس الشيء.
+  • عند فشل الاستيراد → fallback محلي كامل.
+
+ترتيب التسجيل المطلوب:
+    ✅ register_channels_list_handlers(application)   # أولاً
+    ✅ application.add_handler(CallbackQueryHandler(
+           CallbackHandlers.handle))                    # ثانياً
+═══════════════════════════════════════════════════════════════════════
 """
 import asyncio, importlib, logging, json, time, shutil, os, re
 import html as _html, sys, inspect
-from datetime import timedelta, datetime   # 🔴 FIX-1
+from datetime import timedelta, datetime
 from pathlib import Path
 from typing import Dict, Tuple, Set, List, Optional
 
@@ -175,7 +210,7 @@ except ImportError:
         _coerce_float, _safe_str, _md_to_html, _log_channel_cache_key,
         _is_valid_url, _mask_id, _make_user_cache_keys)
 
-# 🟢 FIX-6: إضافة مفاتيح إضافية للتنظيف
+# 🟢 FIX-6
 try:
     _CONTEXT_KEYS_TO_CLEAR = list(_CONTEXT_KEYS_TO_CLEAR)
     for _extra_key in ('sched_ch', 'panel_chat', 'pending_action'):
@@ -183,6 +218,25 @@ try:
             _CONTEXT_KEYS_TO_CLEAR.append(_extra_key)
 except Exception:
     pass
+
+# ═══════════════════════════════════════════════════════════════════
+# 🔗 DELEGATE-1/2/3: استيراد handlers_channels_list للتفويض
+# ═══════════════════════════════════════════════════════════════════
+_channels_list_module = None
+try:
+    from . import handlers_channels_list as _channels_list_module  # type: ignore
+except ImportError:
+    try:
+        import handlers_channels_list as _channels_list_module  # type: ignore
+    except ImportError:
+        _channels_list_module = None
+
+if _channels_list_module is not None:
+    logger.info(
+        "🔗 v9.7.25: handlers_channels_list متاح — التفويض مُفعَّل")
+else:
+    logger.info(
+        "ℹ️ v9.7.25: handlers_channels_list غير متاح — fallback محلي")
 
 # ═══════════════════════════════════════════════════════════════════
 # SecurityCallbacks
@@ -249,6 +303,32 @@ _MAX_TASKS_PER_USER = 5
 _user_active_tasks: Dict[int, Set[asyncio.Task]] = {}
 
 
+# ═══════════════════════════════════════════════════════════════════
+# 🟠 H-1: Helpers موحّدة
+# ═══════════════════════════════════════════════════════════════════
+
+def _is_banned(row_dict) -> bool:
+    """🟠 H-1: فحص موحّد لحقل 'banned' (int/str/None)."""
+    if not row_dict:
+        return False
+    try:
+        return _coerce_int(row_dict.get('banned'), 0) == 1
+    except Exception:
+        return False
+
+
+def _safe_display_name(raw, fallback="?", max_len=35,
+                        escape=True) -> str:
+    """🟠 H-1: تنظيف اسم للعرض."""
+    if raw is None or raw == "":
+        return fallback if not escape else _html.escape(str(fallback))
+    try:
+        s = str(raw).translate(_CONTROL_CHARS_MAP)[:max_len]
+        return _html.escape(s) if escape else s
+    except Exception:
+        return fallback if not escape else _html.escape(str(fallback))
+
+
 def _register_task(user_id: int, task: asyncio.Task) -> bool:
     try:
         user_set = _user_active_tasks.setdefault(user_id, set())
@@ -278,66 +358,46 @@ def _register_task(user_id: int, task: asyncio.Task) -> bool:
 
 
 # ═══════════════════════════════════════════════════════════════════
-# 🟠 FIX-4: ChatPermissions helpers (PTB v13+ / v20+ compat)
+# 🟠 FIX-4: ChatPermissions helpers
 # ═══════════════════════════════════════════════════════════════════
 
 def _build_locked_permissions() -> ChatPermissions:
-    """يبني ChatPermissions لقفل كامل — متوافق مع PTB v13+ و v20+."""
     try:
-        # PTB v20+ signature
         return ChatPermissions(
-            can_send_messages=False,
-            can_send_audios=False,
-            can_send_documents=False,
-            can_send_photos=False,
-            can_send_videos=False,
-            can_send_video_notes=False,
-            can_send_voice_notes=False,
-            can_send_polls=False,
+            can_send_messages=False, can_send_audios=False,
+            can_send_documents=False, can_send_photos=False,
+            can_send_videos=False, can_send_video_notes=False,
+            can_send_voice_notes=False, can_send_polls=False,
             can_send_other_messages=False,
             can_add_web_page_previews=False,
-            can_change_info=False,
-            can_invite_users=False,
+            can_change_info=False, can_invite_users=False,
             can_pin_messages=False)
     except TypeError:
-        # PTB v13-19 signature
         return ChatPermissions(
-            can_send_messages=False,
-            can_send_media_messages=False,
-            can_send_polls=False,
-            can_send_other_messages=False,
+            can_send_messages=False, can_send_media_messages=False,
+            can_send_polls=False, can_send_other_messages=False,
             can_add_web_page_previews=False,
-            can_change_info=False,
-            can_invite_users=False,
+            can_change_info=False, can_invite_users=False,
             can_pin_messages=False)
 
 
 def _build_unlocked_permissions() -> ChatPermissions:
-    """يبني ChatPermissions لفتح كامل — متوافق مع PTB v13+ و v20+."""
     try:
         return ChatPermissions(
-            can_send_messages=True,
-            can_send_audios=True,
-            can_send_documents=True,
-            can_send_photos=True,
-            can_send_videos=True,
-            can_send_video_notes=True,
-            can_send_voice_notes=True,
-            can_send_polls=True,
+            can_send_messages=True, can_send_audios=True,
+            can_send_documents=True, can_send_photos=True,
+            can_send_videos=True, can_send_video_notes=True,
+            can_send_voice_notes=True, can_send_polls=True,
             can_send_other_messages=True,
             can_add_web_page_previews=True,
-            can_change_info=False,
-            can_invite_users=True,
+            can_change_info=False, can_invite_users=True,
             can_pin_messages=False)
     except TypeError:
         return ChatPermissions(
-            can_send_messages=True,
-            can_send_media_messages=True,
-            can_send_polls=True,
-            can_send_other_messages=True,
+            can_send_messages=True, can_send_media_messages=True,
+            can_send_polls=True, can_send_other_messages=True,
             can_add_web_page_previews=True,
-            can_change_info=False,
-            can_invite_users=True,
+            can_change_info=False, can_invite_users=True,
             can_pin_messages=False)
 
 
@@ -358,6 +418,8 @@ def _extract_updates_channel_link(ch_raw):
             s = s[len(prefix):]; break
     s = s.rstrip('/')
     if '?' in s: s = s.split('?', 1)[0]
+    if '#' in s: s = s.split('#', 1)[0]
+    s = s.rstrip('/')
     if not s: return "", None, False
     if s.lstrip('-').isdigit(): return s, None, False
     return s, f"https://t.me/{s}", True
@@ -367,9 +429,18 @@ _UPDATES_CHANNEL_HEALTH_CACHE: Dict[str, Tuple[dict, float]] = {}
 _UPDATES_CHANNEL_HEALTH_TTL = 300.0
 
 
+def _normalize_updates_channel_key(ch_raw) -> str:
+    try:
+        s = str(ch_raw or '').strip().lower()
+        if s.startswith('@'): s = s[1:]
+        return s
+    except Exception:
+        return ''
+
+
 async def _check_updates_channel_health(bot, ch_raw):
     now = time.monotonic()
-    cache_key = str(ch_raw or '')
+    cache_key = _normalize_updates_channel_key(ch_raw)
     cached = _UPDATES_CHANNEL_HEALTH_CACHE.get(cache_key)
     if cached and now - cached[1] < _UPDATES_CHANNEL_HEALTH_TTL:
         return cached[0]
@@ -667,7 +738,11 @@ async def _membership_save_to_db(chat_id, chat_title, chat_type,
              added_by_id, added_by_name or '', added_by_username or '',
              bot_status or '', TimeUtils.sql_iso()))
         return True
-    except Exception: return False
+    except Exception as e:
+        logger.warning(
+            "🟡 _membership_save_to_db فشل | chat=%s user=%s: %s",
+            chat_id, added_by_id, e)
+        return False
 
 
 def _membership_build_report_text(chat, user, new_status):
@@ -759,7 +834,8 @@ async def handle_my_chat_member(update, context):
             getattr(chat, 'username', None), user.id,
             getattr(user, 'full_name', None) or '',
             getattr(user, 'username', None), new_status)
-    except Exception: pass
+    except Exception as e:
+        logger.debug("handle_my_chat_member save: %s", e)
     log_channel = await _membership_get_log_channel()
     if not log_channel: return
     try: text = _membership_build_report_text(chat, user, new_status)
@@ -802,7 +878,7 @@ def register_membership_handlers(application):
 
 
 # ═══════════════════════════════════════════════════════════════════
-# Metrics (قبل CircuitBreaker)
+# Metrics
 # ═══════════════════════════════════════════════════════════════════
 
 _metrics = {
@@ -1208,14 +1284,17 @@ async def safe_edit(query, text, reply_markup=None, parse_mode="HTML",
         elif ("query is too old" in em
               or "message to edit not found" in em):
             return False
-        elif ("can't parse entities" in em or "parse" in em):
+        elif "can't parse entities" in em:
+            logger.warning(
+                "⚠️ safe_edit parse failed — fallback to plain | %.80s",
+                text)
             try:
-                _clean_text = re.sub(r'<[^>]+>', '', text)
                 await query.edit_message_text(
-                    _clean_text, reply_markup=reply_markup,
-                    parse_mode=None)
+                    text, reply_markup=reply_markup, parse_mode=None)
                 return True
-            except Exception: return False
+            except Exception as e2:
+                logger.debug("safe_edit plain fallback: %s", e2)
+                return False
         elif "message text is empty" in em:
             try:
                 await query.edit_message_text(
@@ -1311,6 +1390,100 @@ def _format_channel_rate_line(ch):
 
 
 # ═══════════════════════════════════════════════════════════════════
+# 🔗 DELEGATE helpers
+# ═══════════════════════════════════════════════════════════════════
+
+async def _delegate_show_channel_list(update, context) -> bool:
+    """تفويض CB.CH_LIST إلى handlers_channels_list إن توفّر."""
+    if _channels_list_module is None:
+        return False
+    try:
+        fn = getattr(_channels_list_module, 'show_channels_list', None)
+        if callable(fn):
+            await fn(update, context)
+            return True
+    except Exception as e:
+        logger.warning("🔀 delegate show_channels_list: %s", e)
+    return False
+
+
+async def _delegate_add_channel(update, context) -> bool:
+    """تفويض CB.CH_ADD إلى handlers_channels_list إن توفّر."""
+    if _channels_list_module is None:
+        return False
+    try:
+        fn = getattr(_channels_list_module,
+                     'add_channel_redirect_callback', None)
+        if callable(fn):
+            await fn(update, context)
+            return True
+    except Exception as e:
+        logger.warning("🔀 delegate add_channel: %s", e)
+    return False
+
+
+async def _delegate_channel_select(update, context) -> bool:
+    """تفويض CB.CH_SEL: إلى channels_list إن توفّر."""
+    if _channels_list_module is None:
+        return False
+    try:
+        fn = getattr(_channels_list_module,
+                     'channel_select_callback', None)
+        if callable(fn):
+            await fn(update, context)
+            return True
+    except Exception as e:
+        logger.warning("🔀 delegate channel_select: %s", e)
+    return False
+
+
+async def _delegate_channel_delete_confirm(update, context) -> bool:
+    """تفويض ch_del_confirm: إلى channels_list إن توفّر."""
+    if _channels_list_module is None:
+        return False
+    try:
+        fn = getattr(_channels_list_module,
+                     'channel_delete_confirm_callback', None)
+        if callable(fn):
+            await fn(update, context)
+            return True
+    except Exception as e:
+        logger.warning("🔀 delegate ch_del_confirm: %s", e)
+    return False
+
+
+async def _delegate_channel_delete_execute(update, context) -> bool:
+    """تفويض CB.CH_DEL: إلى channels_list إن توفّر."""
+    if _channels_list_module is None:
+        return False
+    try:
+        fn = getattr(_channels_list_module,
+                     'channel_delete_execute_callback', None)
+        if callable(fn):
+            await fn(update, context)
+            return True
+    except Exception as e:
+        logger.warning("🔀 delegate ch_delete_execute: %s", e)
+    return False
+
+
+async def _delegate_channel_info(update, context) -> bool:
+    """تفويض CB.CH_STATS: → channel_info_callback إن توفّر."""
+    if _channels_list_module is None:
+        return False
+    try:
+        # channels_list يستخدم ch_info: بدل ch_stats:
+        fn = getattr(_channels_list_module,
+                     'channel_info_callback', None)
+        if callable(fn):
+            await fn(update, context)
+            return True
+    except Exception as e:
+        logger.warning("🔀 delegate channel_info: %s", e)
+    return False
+
+
+# ═══════════════════════════════════════════════════════════════════
 # CallbackHandlers
 # ═══════════════════════════════════════════════════════════════════
 
@@ -1366,6 +1539,29 @@ class CallbackHandlers:
         _ensure_bot_start_time(context)
         try: lang = await DB.get_user_language(user_id) or 'ar'
         except Exception: lang = 'ar'
+
+        # ═══════════════════════════════════════════════════════════
+        # 🔗 DELEGATE-FIRST: قنوات المستخدم
+        # ═══════════════════════════════════════════════════════════
+        if data in (CB.CH_LIST, "ch_list"):
+            if await _delegate_show_channel_list(update, context):
+                return
+        if data in (CB.CH_ADD, "add_channel"):
+            if await _delegate_add_channel(update, context):
+                return
+        if data.startswith(f"{CB.CH_SEL}:"):
+            if await _delegate_channel_select(update, context):
+                return
+        if data.startswith("ch_del_confirm:"):
+            if await _delegate_channel_delete_confirm(update, context):
+                return
+        if data.startswith(f"{CB.CH_DEL}:"):
+            if await _delegate_channel_delete_execute(update, context):
+                return
+        if data.startswith(f"{CB.CH_STATS}:"):
+            if await _delegate_channel_info(update, context):
+                return
+
         try:
             handled = await CallbackHandlers._handle_parameterized(
                 update, context, query, user_id, lang, data)
@@ -1587,7 +1783,11 @@ class CallbackHandlers:
                 StateManager.set(user_id, UserState.SUPPORT_MODE)
                 await safe_send(context.bot, user_id,
                     await _trans('send_support_message', lang, "📞")); return
-            if base_data == CB.CH_ADD:
+
+            # ⚠️ CB.CH_ADD و CB.CH_LIST أُزيلا — يعالجهما delegation
+            # لكن نُبقي fallback للطوارئ:
+            if base_data == CB.CH_ADD or data == "add_channel":
+                # fallback إذا فشل التفويض (يصل هنا فقط عند عدم توفّر channels_list)
                 has_sub = (_is_primary_owner(user_id)
                            or await DB.has_active_subscription(user_id))
                 if not has_sub:
@@ -1598,9 +1798,10 @@ class CallbackHandlers:
                 await safe_edit(query,
                     await _trans('send_channel_id', lang, "📡"),
                     bot=context.bot); return
-            if base_data == CB.CH_LIST:
+            if base_data == CB.CH_LIST or data == "ch_list":
                 await CallbackHandlers._show_channel_list(
                     update, context, query, user_id, lang); return
+
             if base_data == CB.POST_ADD:
                 await CallbackHandlers._handle_post_add(
                     update, context, query, user_id); return
@@ -1831,6 +2032,9 @@ class CallbackHandlers:
             if data.startswith("lang_"):
                 await CallbackHandlers._handle_language_change(
                     update, context, query, user_id); return
+
+            # ⚠️ ch_page_prev / ch_page_next — fallback (يُستخدم فقط إذا
+            # channels_list غير متاح، لكن يبقى للتوافق):
             if data == "ch_page_prev":
                 context.user_data['channel_page'] = max(0, _coerce_int(
                     context.user_data.get('channel_page'), 0) - 1)
@@ -1841,6 +2045,7 @@ class CallbackHandlers:
                     context.user_data.get('channel_page'), 0) + 1
                 await CallbackHandlers._show_channel_list(
                     update, context, query, user_id, lang); return
+
             if data == "post_page_prev":
                 context.user_data['post_page'] = max(0, _coerce_int(
                     context.user_data.get('post_page'), 0) - 1)
@@ -2039,6 +2244,7 @@ class CallbackHandlers:
                     'delete_post_confirm', lang, "⚠️"), post_id=post_id)
                 await safe_edit(query, text, reply_markup=kb,
                     parse_mode='HTML', bot=context.bot); return True
+            # ⚠️ ch_del_confirm: delegated in handle() — fallback here:
             if data.startswith("ch_del_confirm:"):
                 ch_id = _coerce_int(data.split(":")[-1])
                 kb = InlineKeyboardMarkup([
@@ -2086,6 +2292,8 @@ class CallbackHandlers:
                 await CallbackHandlers._handle_group_delete(
                     update, context, query, user_id, data, lang)
                 return True
+            # ⚠️ CB.CH_SEL: / CB.CH_DEL: / CB.CH_STATS: — delegated in handle()
+            # fallback here:
             if data.startswith(CB.CH_SEL + ":"):
                 await CallbackHandlers._handle_channel_select(
                     update, context, query, user_id, data, lang)
@@ -2147,9 +2355,20 @@ class CallbackHandlers:
             if not isinstance(stats, dict):
                 stats = _row_to_dict(stats) or {}
             code = await DB.get_referral_code(user_id)
-            if code and code.startswith('ref_'): code = code[4:]
+            code_str = str(code) if code else ""
+            if code_str.startswith('ref_'):
+                code_str = code_str[4:]
+            if not code_str:
+                logger.warning(
+                    "_render_referral: referral code فارغ | user=%s",
+                    user_id)
+                await safe_edit(query,
+                    await _trans('ref_code_error', lang,
+                                 "❌ تعذّر إنشاء كود الإحالة"),
+                    bot=context.bot)
+                return
             link = (f"https://t.me/{CONFIG.BOT_USERNAME}"
-                    f"?start=ref_{code}")
+                    f"?start=ref_{code_str}")
             title = await _trans('referral_title', lang, "🔗")
             link_label = await _trans('referral_link_label', lang, "📎")
             referred_label = await _trans(
@@ -2433,9 +2652,14 @@ class CallbackHandlers:
                 await _trans('delete_failed', lang, "❌"),
                 bot=context.bot)
 
+    # ═══════════════════════════════════════════════════════════════
+    # FALLBACK-KEPT: دوال القنوات (تبقى للتوافق والطوارئ)
+    # ═══════════════════════════════════════════════════════════════
+
     @staticmethod
     async def _handle_channel_select(update, context, query, user_id,
                                       data, lang):
+        """Fallback — يُستدعى فقط إذا فشل التفويض."""
         try: ch_id = int(data.split(":")[-1])
         except (ValueError, IndexError):
             await safe_edit(query,
@@ -2454,6 +2678,7 @@ class CallbackHandlers:
     @staticmethod
     async def _handle_channel_delete(update, context, query, user_id,
                                       lang, data):
+        """Fallback — يُستدعى فقط إذا فشل التفويض."""
         try: ch_id = int(data.split(":")[-1])
         except (ValueError, IndexError):
             await safe_edit(query,
@@ -2472,6 +2697,7 @@ class CallbackHandlers:
     @staticmethod
     async def _handle_channel_stats(update, context, query, user_id,
                                      data, lang):
+        """Fallback — يُستدعى فقط إذا فشل التفويض."""
         try: ch_id = int(data.split(":")[-1])
         except (ValueError, IndexError):
             await safe_edit(query,
@@ -2493,6 +2719,78 @@ class CallbackHandlers:
                     KeyboardFactory.get_text("back", lang),
                     callback_data=CB.CH_LIST)]]),
             bot=context.bot)
+
+    @staticmethod
+    async def _show_channel_list(update, context, query, user_id,
+                                  lang=None):
+        """
+        Fallback — يُستدعى فقط إذا فشل التفويض
+        (_delegate_show_channel_list رجع False).
+        """
+        if not lang: lang = await DB.get_user_language(user_id) or 'ar'
+        channels = await DB.get_user_channels(user_id)
+        if not channels:
+            kb = InlineKeyboardMarkup([
+                [InlineKeyboardButton(
+                    KeyboardFactory.get_text("ch_add", lang),
+                    callback_data=CB.CH_ADD)],
+                [InlineKeyboardButton(
+                    KeyboardFactory.get_text("back", lang),
+                    callback_data=CB.BACK)]])
+            await safe_edit(query,
+                await _trans('no_channels', lang, "📭"),
+                reply_markup=kb, bot=context.bot); return
+        page = _coerce_int(context.user_data.get('channel_page'), 0)
+        per_page = 5
+        total_pages = max(1, (len(channels) + per_page - 1) // per_page)
+        if page >= total_pages: page = total_pages - 1
+        if page < 0: page = 0
+        context.user_data['channel_page'] = page
+        page_channels = channels[page * per_page:(page + 1) * per_page]
+        start_index = page * per_page
+        title = await _trans('your_channels', lang, "📡")
+        text = (f"{title} ({len(channels)})\n"
+                f"<i>{page + 1}/{total_pages}</i>\n\n")
+        kb = []; display_idx = start_index
+        for ch in page_channels:
+            chd = _row_to_dict(ch) or {}
+            ch_id = chd.get('id')
+            if ch_id is None: continue
+            display_idx += 1
+            number = _group_number(display_idx)
+            st = "🚫" if _is_banned(chd) else "✅"
+            name = _safe_display_name(
+                chd.get('channel_name'), f"Channel {display_idx}")
+            text += f"{st} {number}  {name}\n"
+            kb.append([
+                InlineKeyboardButton(f"{number} 📌",
+                    callback_data=f"{CB.CH_SEL}:{ch_id}"),
+                InlineKeyboardButton(f"{number} 📅",
+                    callback_data=f"sched_open:{ch_id}")])
+            kb.append([
+                InlineKeyboardButton(f"{number} 📊",
+                    callback_data=f"{CB.CH_STATS}:{ch_id}"),
+                InlineKeyboardButton(f"{number} 🗑️",
+                    callback_data=f"ch_del_confirm:{ch_id}")])
+        nav = []
+        if page > 0:
+            nav.append(InlineKeyboardButton(
+                await _trans('prev_btn', lang, "⬅️"),
+                callback_data="ch_page_prev"))
+        if page < total_pages - 1:
+            nav.append(InlineKeyboardButton(
+                await _trans('next_btn', lang, "Next ➡️"),
+                callback_data="ch_page_next"))
+        if nav: kb.append(nav)
+        kb.append([InlineKeyboardButton(
+            KeyboardFactory.get_text("ch_add", lang),
+            callback_data=CB.CH_ADD)])
+        kb.append([InlineKeyboardButton(
+            KeyboardFactory.get_text("back", lang),
+            callback_data=CB.BACK)])
+        await safe_edit(query, text,
+            reply_markup=InlineKeyboardMarkup(kb),
+            parse_mode='HTML', bot=context.bot)
 
     @staticmethod
     async def _handle_post_add(update, context, query, user_id):
@@ -2633,21 +2931,48 @@ class CallbackHandlers:
         except Exception:
             await safe_edit(query,
                 await _trans('invalid_data', lang, "❌"),
-                bot=context.bot); return
+                bot=context.bot)
+            return
+        if chat_id == 0:
+            await safe_edit(query,
+                await _trans('invalid_data', lang, "❌"),
+                bot=context.bot)
+            return
         fn = (getattr(SecurityCallbacks, 'handle_group_security', None)
               or getattr(SecurityCallbacks, '_show_security_menu', None)
               or getattr(SecurityCallbacks, 'show_security', None))
-        if callable(fn):
+        if not callable(fn):
             try:
-                await fn(update, context, query, user_id, lang)
-                return
-            except TypeError:
-                try:
-                    await fn(query, context, user_id, lang)
-                    return
-                except Exception as e:
-                    logger.error(
-                        f"group_security fallback: {e}", exc_info=True)
+                await safe_edit(query,
+                    await _trans('not_available', lang, "⚠️"),
+                    bot=context.bot)
+            except Exception: pass
+            return
+        try:
+            await fn(update, context, query, user_id, lang)
+            return
+        except TypeError as te:
+            logger.warning(
+                "🟡 group_security: signature mismatch, trying legacy: %s",
+                te)
+        except Exception as e:
+            logger.error(
+                "❌ group_security modern signature: %s", e, exc_info=True)
+            try:
+                await safe_edit(query,
+                    await _trans('error_occurred', lang, "❌"),
+                    bot=context.bot)
+            except Exception: pass
+            return
+        try:
+            await fn(query, context, user_id, lang)
+            return
+        except TypeError as te:
+            logger.error(
+                "❌ group_security legacy signature mismatch: %s", te)
+        except Exception as e:
+            logger.error(
+                "❌ group_security legacy: %s", e, exc_info=True)
         try:
             await safe_edit(query,
                 await _trans('not_available', lang, "⚠️"),
@@ -2704,9 +3029,10 @@ class CallbackHandlers:
             if gid is None: continue
             display_idx += 1
             if display_idx == 1: first_chat_id = gid
-            name = gd.get('chat_name') or f"Group {gid}"
-            status = "⛔" if gd.get('banned') else "✅"
+            status = "⛔" if _is_banned(gd) else "✅"
             number = _group_number(display_idx)
+            name = _safe_display_name(
+                gd.get('chat_name'), f"Group {gid}")
             text += f"{status} {number} {name}\n"
             sec_label = _fmt(await _trans(
                 'group_security_btn', lang, "{number} ⚙️ Security"),
@@ -2729,12 +3055,26 @@ class CallbackHandlers:
     @staticmethod
     def _unwrap_get_next_post(result):
         if result is None: return None, False
-        if isinstance(result, tuple) and len(result) == 2:
-            post_obj, was_recycled = result
-            if post_obj is None: return None, bool(was_recycled)
-            as_dict = _row_to_dict(post_obj)
-            if as_dict is not None: return as_dict, bool(was_recycled)
-            return None, False
+        if isinstance(result, tuple):
+            if len(result) == 2:
+                post_obj, was_recycled = result
+                if post_obj is None:
+                    return None, bool(was_recycled)
+                as_dict = _row_to_dict(post_obj)
+                if as_dict is not None:
+                    return as_dict, bool(was_recycled)
+                return None, False
+            elif len(result) > 2:
+                logger.warning(
+                    "_unwrap_get_next_post: tuple len=%d غير متوقع",
+                    len(result))
+                post_obj = result[0]
+                as_dict = _row_to_dict(post_obj)
+                if as_dict is not None:
+                    return as_dict, False
+                return None, False
+            else:
+                return None, False
         as_dict = _row_to_dict(result)
         if as_dict is not None: return as_dict, False
         return None, False
@@ -2876,11 +3216,12 @@ class CallbackHandlers:
         published = 0; failed = 0; tasks = []
         banned_count = 0; no_post_count = 0; lost_count = 0
         published_ch_ids: List[int] = []
-        pending_batch_tasks: Set[asyncio.Task] = set()
+        pending_batch_tasks: List[asyncio.Task] = []
         try:
             for ch in channels:
                 chd = _row_to_dict(ch) or {}
-                if chd.get('banned'): banned_count += 1; continue
+                if _is_banned(chd):
+                    banned_count += 1; continue
                 raw_result = await DB.get_next_post(chd.get('id'))
                 post, _ = CallbackHandlers._unwrap_get_next_post(
                     raw_result)
@@ -2928,9 +3269,9 @@ class CallbackHandlers:
             BATCH = CallbackHandlers.PUBLISH_BATCH_SIZE
             for i in range(0, len(tasks), BATCH):
                 batch = tasks[i:i + BATCH]
-                batch_tasks: Set[asyncio.Task] = {
-                    asyncio.create_task(run(t)) for t in batch}
-                pending_batch_tasks |= batch_tasks
+                batch_tasks: List[asyncio.Task] = [
+                    asyncio.create_task(run(t)) for t in batch]
+                pending_batch_tasks.extend(batch_tasks)
                 try:
                     results = await asyncio.gather(
                         *batch_tasks, return_exceptions=True)
@@ -2945,14 +3286,14 @@ class CallbackHandlers:
                     pending_batch_tasks.clear(); raise
                 finally:
                     for bt in batch_tasks:
-                        pending_batch_tasks.discard(bt)
-                for idx, r in enumerate(results):
+                        try: pending_batch_tasks.remove(bt)
+                        except ValueError: pass
+                for (ch_db_id, _ch_tele, _post), r in zip(batch, results):
                     if r is True:
                         published += 1
-                        try:
-                            published_ch_ids.append(batch[idx][0])
-                        except (IndexError, TypeError): pass
-                    else: failed += 1
+                        published_ch_ids.append(ch_db_id)
+                    else:
+                        failed += 1
             if lost_count:
                 summary = _fmt(await _trans(
                     'publish_summary_lost', lang,
@@ -3096,75 +3437,6 @@ class CallbackHandlers:
             except Exception: pass
 
     @staticmethod
-    async def _show_channel_list(update, context, query, user_id,
-                                  lang=None):
-        if not lang: lang = await DB.get_user_language(user_id) or 'ar'
-        channels = await DB.get_user_channels(user_id)
-        if not channels:
-            kb = InlineKeyboardMarkup([
-                [InlineKeyboardButton(
-                    KeyboardFactory.get_text("ch_add", lang),
-                    callback_data=CB.CH_ADD)],
-                [InlineKeyboardButton(
-                    KeyboardFactory.get_text("back", lang),
-                    callback_data=CB.BACK)]])
-            await safe_edit(query,
-                await _trans('no_channels', lang, "📭"),
-                reply_markup=kb, bot=context.bot); return
-        page = _coerce_int(context.user_data.get('channel_page'), 0)
-        per_page = 5
-        total_pages = max(1, (len(channels) + per_page - 1) // per_page)
-        if page >= total_pages: page = total_pages - 1
-        if page < 0: page = 0
-        context.user_data['channel_page'] = page
-        page_channels = channels[page * per_page:(page + 1) * per_page]
-        start_index = page * per_page
-        title = await _trans('your_channels', lang, "📡")
-        text = (f"{title} ({len(channels)})\n"
-                f"<i>{page + 1}/{total_pages}</i>\n\n")
-        kb = []; display_idx = start_index
-        for ch in page_channels:
-            chd = _row_to_dict(ch) or {}
-            ch_id = chd.get('id')
-            if ch_id is None: continue
-            display_idx += 1
-            number = _group_number(display_idx)
-            st = "✅" if not chd.get('banned') else "🚫"
-            raw_name = (chd.get('channel_name')
-                        or f"Channel {display_idx}")
-            name = _html.escape(str(raw_name)[:35])
-            text += f"{st} {number}  {name}\n"
-            kb.append([
-                InlineKeyboardButton(f"{number} 📌",
-                    callback_data=f"{CB.CH_SEL}:{ch_id}"),
-                InlineKeyboardButton(f"{number} 📅",
-                    callback_data=f"sched_open:{ch_id}")])
-            kb.append([
-                InlineKeyboardButton(f"{number} 📊",
-                    callback_data=f"{CB.CH_STATS}:{ch_id}"),
-                InlineKeyboardButton(f"{number} 🗑️",
-                    callback_data=f"ch_del_confirm:{ch_id}")])
-        nav = []
-        if page > 0:
-            nav.append(InlineKeyboardButton(
-                await _trans('prev_btn', lang, "⬅️"),
-                callback_data="ch_page_prev"))
-        if page < total_pages - 1:
-            nav.append(InlineKeyboardButton(
-                await _trans('next_btn', lang, "Next ➡️"),
-                callback_data="ch_page_next"))
-        if nav: kb.append(nav)
-        kb.append([InlineKeyboardButton(
-            KeyboardFactory.get_text("ch_add", lang),
-            callback_data=CB.CH_ADD)])
-        kb.append([InlineKeyboardButton(
-            KeyboardFactory.get_text("back", lang),
-            callback_data=CB.BACK)])
-        await safe_edit(query, text,
-            reply_markup=InlineKeyboardMarkup(kb),
-            parse_mode='HTML', bot=context.bot)
-
-    @staticmethod
     async def _show_post_list(update, context, query, user_id, lang=None):
         if not lang: lang = await DB.get_user_language(user_id) or 'ar'
         active = await DB.get_active_channel(user_id)
@@ -3235,10 +3507,6 @@ class CallbackHandlers:
             reply_markup=InlineKeyboardMarkup(kb),
             bot=context.bot)
 
-    # ═══════════════════════════════════════════════════════════════
-    # Admin channels / groups
-    # ═══════════════════════════════════════════════════════════════
-
     @staticmethod
     async def _show_admin_channels(update, context, query, user_id, lang):
         try:
@@ -3266,11 +3534,11 @@ class CallbackHandlers:
                 rd = _row_to_dict(r) or {}
                 ch_id = rd.get('id')
                 if ch_id is None: continue
-                banned = _coerce_int(rd.get('banned'), 0)
+                banned = _is_banned(rd)
                 status = "🚫" if banned else "✅"
-                name = _safe_str(rd.get('channel_name') or '?')[:25]
+                name = _safe_display_name(rd.get('channel_name'), '?', 25)
                 owner = rd.get('user_id')
-                text += (f"{status} <b>{_html.escape(name)}</b> — "
+                text += (f"{status} <b>{name}</b> — "
                          f"<code>{owner}</code>\n")
                 toggle_lbl = "🔓 تفعيل" if banned else "🚫 حظر"
                 kb.append([InlineKeyboardButton(
@@ -3325,11 +3593,11 @@ class CallbackHandlers:
                 rd = _row_to_dict(r) or {}
                 chat_id = rd.get('chat_id')
                 if chat_id is None: continue
-                banned = _coerce_int(rd.get('banned'), 0)
+                banned = _is_banned(rd)
                 status = "🚫" if banned else "✅"
-                name = _safe_str(
-                    rd.get('chat_name') or f"Group {chat_id}")[:25]
-                text += (f"{status} <b>{_html.escape(name)}</b> — "
+                name = _safe_display_name(
+                    rd.get('chat_name'), f"Group {chat_id}", 25)
+                text += (f"{status} <b>{name}</b> — "
                          f"<code>{chat_id}</code>\n")
                 toggle_lbl = "🔓 فك الحظر" if banned else "🚫 حظر"
                 kb.append([InlineKeyboardButton(
@@ -3485,10 +3753,6 @@ class CallbackHandlers:
                     bot=context.bot)
             except Exception: pass
 
-    # ═══════════════════════════════════════════════════════════════
-    # 🟠 FIX-5: _do_backup مع إبلاغ المستخدم
-    # ═══════════════════════════════════════════════════════════════
-
     @staticmethod
     async def _do_backup(context, user_id, lang):
         try:
@@ -3498,7 +3762,9 @@ class CallbackHandlers:
                 f"{TimeUtils.mecca_now().strftime('%Y%m%d_%H%M%S')}.db")
             success = False
             if hasattr(DB, "backup_database"):
-                try: success = await DB.backup_database(backup_file)
+                try:
+                    result = await DB.backup_database(backup_file)
+                    success = bool(result)
                 except Exception as e:
                     logger.warning(f"DB.backup_database: {e}")
                     success = False
@@ -3535,7 +3801,6 @@ class CallbackHandlers:
                     "✅ <b>تم إنشاء نسخة احتياطية</b>\n"
                     "📁 <code>{name}</code>"),
                     name=backup_file.name)
-                # 🟠 FIX-5: إبلاغ المستخدم عند فشل الإرسال
                 send_ok = False
                 try:
                     with open(backup_file, 'rb') as f:
@@ -3569,10 +3834,6 @@ class CallbackHandlers:
                     f"❌ {str(e)[:100]}")
             except Exception: pass
 
-    # ═══════════════════════════════════════════════════════════════
-    # 🔴 FIX-1: _show_restore_backups مع datetime صريح
-    # ═══════════════════════════════════════════════════════════════
-
     @staticmethod
     async def _show_restore_backups(update, context, query, user_id, lang):
         try:
@@ -3602,7 +3863,6 @@ class CallbackHandlers:
                 try:
                     st = b.stat()
                     size_kb = st.st_size / 1024
-                    # 🔴 FIX-1: استخدام datetime المستورد صراحةً
                     dt_utc = datetime.utcfromtimestamp(st.st_mtime)
                     mtime = TimeUtils.utc_to_mecca(dt_utc).strftime(
                         '%Y-%m-%d %H:%M')
@@ -3679,21 +3939,17 @@ class CallbackHandlers:
                     bot=context.bot)
             except Exception: pass
 
-    # ═══════════════════════════════════════════════════════════════
-    # 🟢 FIX-7: _handle_auto_reply مع استخراج chat_id متين
-    # ═══════════════════════════════════════════════════════════════
-
     @staticmethod
     async def _handle_auto_reply(update, context, query, user_id, lang):
         data = (query.data or "")
         try:
-            # 🟢 FIX-7: أولوية auto_chat من user_data
             chat_id = _coerce_int(
                 context.user_data.get('auto_chat'), 0)
             if not chat_id and ':' in data:
                 parts = data.split(':', 1)
                 if len(parts) == 2:
-                    try: chat_id = _coerce_int(parts[1])
+                    cid_str = parts[1].split(':', 1)[0]
+                    try: chat_id = _coerce_int(cid_str)
                     except Exception: chat_id = 0
             if not chat_id:
                 await safe_edit(query,
@@ -3821,10 +4077,6 @@ class CallbackHandlers:
                     bot=context.bot)
             except Exception: pass
 
-    # ═══════════════════════════════════════════════════════════════
-    # _handle_schedule
-    # ═══════════════════════════════════════════════════════════════
-
     @staticmethod
     async def _handle_schedule(update, context, query, user_id, lang):
         data = (query.data or "")
@@ -3891,10 +4143,6 @@ class CallbackHandlers:
                     bot=context.bot)
             except Exception: pass
 
-    # ═══════════════════════════════════════════════════════════════
-    # 🔴 FIX-2: _handle_advanced_actions مع خريطة صريحة
-    # ═══════════════════════════════════════════════════════════════
-
     _ACT_TO_STATE = {
         "act_ban":      (UserState.WAIT_BAN,      "🚫 حظر"),
         "act_mute":     (UserState.WAIT_MUTE,     "🔇 كتم"),
@@ -3938,7 +4186,6 @@ class CallbackHandlers:
                     await _trans('send_keyword_delete_prompt', lang,
                                  "🗑️"),
                     bot=context.bot); return
-            # 🔴 FIX-2: خريطة صريحة act_* → UserState
             if base in CallbackHandlers._ACT_TO_STATE:
                 state, label = CallbackHandlers._ACT_TO_STATE[base]
                 StateManager.set(user_id, state)
@@ -3951,7 +4198,6 @@ class CallbackHandlers:
                         action=label),
                     parse_mode='HTML', bot=context.bot); return
             if base == "act_log":
-                # عرض آخر إجراءات
                 try:
                     rows = await DB.fetchall(
                         "SELECT action, target_id, created_at "
@@ -3993,10 +4239,6 @@ class CallbackHandlers:
                     bot=context.bot)
             except Exception: pass
 
-    # ═══════════════════════════════════════════════════════════════
-    # 🟠 FIX-3: _handle_contests مع فحص توفر DB methods
-    # ═══════════════════════════════════════════════════════════════
-
     @staticmethod
     async def _handle_contests(update, context, query, user_id, lang):
         data = (query.data or "")
@@ -4009,7 +4251,6 @@ class CallbackHandlers:
                     await safe_edit(query,
                         await _trans('invalid_data', lang, "❌"),
                         bot=context.bot); return
-                # 🟠 FIX-3: فحص توفر الدالة + fallback
                 winner_id = None
                 if hasattr(DB, 'select_random_contest_participant'):
                     try:
@@ -4055,7 +4296,6 @@ class CallbackHandlers:
                         bot=context.bot)
                 return
             if data == "contest_join":
-                # contest_id قد يكون في user_data
                 contest_id = _coerce_int(
                     context.user_data.get('contest_id'), 0)
                 if contest_id <= 0:
@@ -4106,10 +4346,6 @@ class CallbackHandlers:
                     await _trans('error_occurred', lang, "❌"),
                     bot=context.bot)
             except Exception: pass
-
-    # ═══════════════════════════════════════════════════════════════
-    # 🟠 FIX-4: _handle_panel مع helpers
-    # ═══════════════════════════════════════════════════════════════
 
     @staticmethod
     async def _handle_panel(update, context, query, user_id, data, lang):
@@ -4178,10 +4414,6 @@ class CallbackHandlers:
                     await _trans('error_occurred', lang, "❌"),
                     bot=context.bot)
             except Exception: pass
-
-    # ═══════════════════════════════════════════════════════════════
-    # _handle_admin
-    # ═══════════════════════════════════════════════════════════════
 
     @staticmethod
     async def _handle_admin(update, context, query, user_id, lang=None):
@@ -5070,23 +5302,35 @@ try:
                   '_handle_panel', '_show_admin_channels',
                   '_show_admin_groups', '_show_metrics_dashboard',
                   '_show_admin_update_channel_menu', '_do_backup',
-                  '_show_restore_backups', '_show_updates_channel'):
+                  '_show_restore_backups', '_show_updates_channel',
+                  '_show_channel_list', '_handle_channel_select',
+                  '_handle_channel_delete', '_handle_channel_stats'):
         if not hasattr(CallbackHandlers, _name):
             _missing_check.append(_name)
     if _missing_check:
         logger.critical(
-            f"🚨 v9.7.22: دوال مفقودة: {_missing_check}")
+            f"🚨 v9.7.25: دوال مفقودة: {_missing_check}")
     else:
         logger.info(
-            "🛡️ handlers_callback.py v9.7.22-FIX-ALL-VERIFIED | "
-            "FIX-1: datetime imported | "
-            "FIX-2: act_* → UserState mapping | "
-            "FIX-3: DB methods fallback | "
-            "FIX-4: ChatPermissions helpers | "
-            "FIX-5: backup send error reporting | "
-            "FIX-6: sched_ch cleaned | "
-            "FIX-7: auto_chat priority | "
-            "12/12 methods ✅ | max_tasks_per_user=%d",
+            "🛡️ handlers_callback.py v9.7.25-CONFLICT-FREE-FULL | "
+            "DELEGATE-1/2/3: CB.CH_LIST/CH_ADD/CH_SEL/CH_DEL/CH_STATS → "
+            "handlers_channels_list (fallback=local) | "
+            "C-1: channels+groups banned+escape | "
+            "C-5: group_security try/except | "
+            "H-1: _is_banned() unified | "
+            "H-2: auto_reply chat_id split | "
+            "H-3: safe_edit parse warn | "
+            "H-6: referral code None | "
+            "H-9: publish_all list+zip | "
+            "H-10: backup bool(success) | "
+            "M-4: fragment strip | "
+            "M-5: health cache key norm | "
+            "M-7: membership save log | "
+            "M-14: unwrap tuple>2 | "
+            "16/16 methods ✅ (4 fallbacks kept) | "
+            "channels_list_module=%s | "
+            "max_tasks_per_user=%d",
+            "available" if _channels_list_module else "unavailable",
             _MAX_TASKS_PER_USER)
 except Exception as _be:
     logger.debug(f"load beacon: {_be}")
