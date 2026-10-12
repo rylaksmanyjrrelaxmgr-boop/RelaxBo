@@ -1,18 +1,28 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-utils.py - الأدوات المساعدة للبوت (v7.10.17 — FIX-BUG1)
+utils.py - الأدوات المساعدة للبوت (v7.10.19 — FIX-FOLLOWUP-COMPLETE)
 =================================================================================
+🆕 v7.10.19 (FIX-FOLLOWUP-COMPLETE):
+    🔴 FIX-BUG1c (CRITICAL): _send_media كانت تفقد النص لـ voice/sticker/
+       video_note (لا تدعم caption) أو تُكرره لـ photo/video/doc/audio/anim.
+       الإصلاح: ثابت _CAPTION_MEDIA_TYPES يميّز نوعَي الوسائط، ويُرسل
+       الباقي text[1024:] فقط للأنواع التي حملت caption فعلاً.
+    🔴 FIX-BUG1d: نفس الإصلاح في _publish_post._send_followup_text —
+       voice/sticker/video_note كانت ستفقد أول 1024 حرف بعد FIX-BUG1a.
+       الآن يستخدم نفس _CAPTION_MEDIA_TYPES للتمييز.
+
+🆕 v7.10.18 (FIX-BUG1-R4):
+    🔴 FIX-BUG1a: _publish_post._send_followup_text كانت تُرسل النص كاملاً
+       (text) بدل الباقي → تكرار. الإصلاح: text[1024:] للأنواع ذات caption.
+       (ملاحظة: هذا كان لا يزال يحتاج FIX-BUG1d لمكتمل الصحة.)
+    🔴 FIX-BUG2: check_bot_permissions بلا كاش → _bot_perms_cache (TTL=300s).
+    🟡 FIX-BUG3: POOL_MONITOR_INTERVAL 60 → 300.
+    🟡 FIX-BUG4: pool_timeout في _TIMEOUT_FAST/_TIMEOUT_SLOW.
+
 🆕 v7.10.17 (FIX-BUG1):
-    🔴 FIX-BUG1: _publish_post._send — إضافة استدعاء _send_followup_text
-                 بعد نجاح الإرسال في فروع: photo / video / document /
-                 audio / animation (كان فقط في voice/sticker/video_note).
-                 السبب: منشور بصورة + نص طويل (>1024) → يُرسل caption
-                 واحد فقط، والباقي يُهمَل. الإصلاح يُرسل النص المتبقي
-                 كرسالة follow-up.
-    📌 FIX-BUG8 (المرافق): mark_post_published_pending مُضافة في
-       database_channels_posts.py v7.5.30 — لا تغيير مطلوب في utils.py
-       (يستخدم hasattr + try/except الموجودة).
+    🔴 FIX-BUG1: _publish_post._send — إضافة _send_followup_text في فروع
+                 photo/video/document/audio/animation.
 
 🆕 v7.10.16 (FIX-B-FOLLOWUP):
     🔴 FIX-B2: _format_security_text — audio يقرأ delete_audio.
@@ -106,16 +116,30 @@ _FALLBACK_PENALTY_TYPES: frozenset = frozenset({
     "ban", "mute", "kick", "warn", "restrict", "unban",
 })
 
+# 🔴 v7.10.19 FIX-BUG1c/FIX-BUG1d: أنواع الوسائط التي تدعم caption.
+# للأنواع في هذه القائمة:
+#   • الوسيط يحمل text[:1024] كـ caption
+#   • follow-up يُرسل text[1024:] فقط (الباقي)
+# للأنواع خارج القائمة (voice/sticker/video_note):
+#   • الوسيط لا يحمل نصاً
+#   • follow-up يُرسل text كاملاً
+_CAPTION_MEDIA_TYPES: frozenset = frozenset({
+    'photo', 'video', 'document', 'audio', 'animation',
+})
+
 # 🆕 TIMEOUT-FIX-4: حدود timeouts ديناميكية
+# 🟡 v7.10.18 FIX-BUG4: إضافة pool_timeout للتوافق مع _SEND_KWARGS
 _TIMEOUT_FAST = {
     "read_timeout": 30.0,
     "write_timeout": 30.0,
     "connect_timeout": 15.0,
+    "pool_timeout": 10.0,
 }
 _TIMEOUT_SLOW = {
     "read_timeout": 60.0,
     "write_timeout": 60.0,
     "connect_timeout": 30.0,
+    "pool_timeout": 15.0,
 }
 _TEXT_LONG_THRESHOLD = 2000  # حرف — بعد هذا نستخدم slow timeouts
 
@@ -128,7 +152,12 @@ _SEC_SETTINGS_STALE_MULT = 10.0
 
 # 🆕 PERF-FIX-1: cache الفشل — مع حد أقصى 🆕 v7.10.14 FIX-I
 _sec_settings_neg_cache: Dict[int, float] = {}
-_SEC_SETTINGS_NEG_MAX_SIZE = 5000   # 🆕 FIX-I
+_SEC_SETTINGS_NEG_MAX_SIZE = 5000
+
+# 🆕 v7.10.18 FIX-BUG2: كاش صلاحيات البوت
+_bot_perms_cache: Dict[int, Tuple[float, Dict[str, Any]]] = {}
+_BOT_PERMS_TTL = 300.0
+_BOT_PERMS_MAX_SIZE = 2000
 
 # 🆕 FIX-D14: نطاقات عربية موسّعة
 _ARABIC_TATWEEL = '\u0640'
@@ -138,7 +167,6 @@ _HIDDEN_CHARS = (
     '\u2060', '\u2061', '\u2062', '\u2063', '\u2064', '\ufeff',
 )
 _HIDDEN_TRANSLATE_TABLE = {ord(c): None for c in _HIDDEN_CHARS}
-
 
 def _normalize_unicode(text: str) -> str:
     if not text:
@@ -152,13 +180,9 @@ def _normalize_unicode(text: str) -> str:
         text = text.replace(_ARABIC_TATWEEL, '')
     return text
 
-
 # 🔴 FIX-C v7.10.13: helper لتحويل Row إلى dict بأمان
 def _row_to_dict(row: Any) -> Optional[Dict[str, Any]]:
-    """
-    🆕 v7.10.13 FIX-C: يحوّل Row (asyncpg.Record, aiosqlite.Row, ...)
-    إلى dict بأمان. يُعيد None للقيم الفارغة.
-    """
+    """🆕 v7.10.13 FIX-C: يحوّل Row إلى dict بأمان."""
     if row is None:
         return None
     if isinstance(row, dict):
@@ -168,10 +192,9 @@ def _row_to_dict(row: Any) -> Optional[Dict[str, Any]]:
     except (TypeError, ValueError):
         pass
     try:
-        return {k: row[k] for k in row.keys()}  # type: ignore[attr-defined]
+        return {k: row[k] for k in row.keys()}
     except Exception:
         return None
-
 
 _AVAILABLE_LANGUAGES: Dict[str, str] = {
     "ar": "العربية 🇸🇦", "en": "English 🇬🇧", "fr": "Français 🇫🇷",
@@ -181,7 +204,6 @@ _AVAILABLE_LANGUAGES: Dict[str, str] = {
     "fa": "فارسی 🇮🇷", "ur": "اردو 🇵🇰", "nl": "Nederlands 🇳🇱",
     "pl": "Polski 🇵🇱", "hi": "हिन्दी 🇮🇳",
 }
-
 
 # ═══════════════════════════════════════════════════════════════════════════
 # 0. SmartCache
@@ -297,11 +319,9 @@ class SmartCache:
         async with self._lock:
             return len(self._cache)
 
-
 _auth_cache_smart = SmartCache(ttl=60, max_size=2000)
 _auth_neg_cache = SmartCache(ttl=15, max_size=1000)
 _security_stats_cache = SmartCache(ttl=300, max_size=500)
-
 
 # ═══════════════════════════════════════════════════════════════════════════
 # 1. TimeUtils
@@ -359,7 +379,6 @@ class TimeUtils:
                 continue
         return None
 
-
 # ═══════════════════════════════════════════════════════════════════════════
 # 2. TextUtils
 # ═══════════════════════════════════════════════════════════════════════════
@@ -411,7 +430,6 @@ class TextUtils:
     @staticmethod
     def truncate(text: str, max_len: int = 200) -> str:
         return text[:max_len] + ("..." if len(text) > max_len else "")
-
 
 # ═══════════════════════════════════════════════════════════════════════════
 # 3. RateLimiter
@@ -466,10 +484,8 @@ class RateLimiter:
             else:
                 await asyncio.sleep(0.01)
 
-
 RATE_LIMITER = RateLimiter(max_concurrent=15, max_per_second=30)
 PUBLISH_RATE_LIMITER = RateLimiter(max_concurrent=5, max_per_second=10)
-
 
 # ═══════════════════════════════════════════════════════════════════════════
 # 4. MetricsCollector
@@ -504,9 +520,7 @@ class MetricsCollector:
     def increment_messages(self):
         self.messages_processed += 1
 
-
 METRICS = MetricsCollector()
-
 
 # ═══════════════════════════════════════════════════════════════════════════
 # 5. AutoReplyCache
@@ -531,9 +545,7 @@ class AutoReplyCache:
     def clear(self):
         self._cache.clear()
 
-
 _auto_reply_cache = AutoReplyCache(maxsize=300, ttl=300)
-
 
 # ═══════════════════════════════════════════════════════════════════════════
 # 5.1 _COMMON_PHRASES
@@ -638,7 +650,6 @@ _COMMON_PHRASES: Dict[str, Dict[str, str]] = {
 _ARABIC_TEXT_PATTERN = re.compile(
     r'[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF\uFB50-\uFDFF\uFE70-\uFEFF]'
 )
-
 
 # ═══════════════════════════════════════════════════════════════════════════
 # 6. TranslationManager
@@ -793,10 +804,8 @@ class TranslationManager:
             "default_lang": cls._default_lang,
         }
 
-
 async def get_text(lang: str, key: str, **kwargs) -> str:
     return TranslationManager.get_text(lang, key, **kwargs)
-
 
 # ═══════════════════════════════════════════════════════════════════════════
 # 7. UserState + StateManager
@@ -876,13 +885,8 @@ class UserState(Enum):
     WAIT_REPLY_ADD = auto()
     WAIT_REPLY_REMOVE = auto()
 
-
 class StateManager:
-    """
-    🆕 v7.10.14 FIX-J: توثيق واضح لدالة is_expired.
-
-    الـ cache هو TTLCache تلقائي (300s). أي مدخل يختفي بعد TTL.
-    """
+    """🆕 v7.10.14 FIX-J: توثيق واضح لدالة is_expired."""
     _cache: TTLCache = TTLCache(maxsize=10000, ttl=300)
     _lock = threading.Lock()
 
@@ -903,19 +907,9 @@ class StateManager:
 
     @classmethod
     def is_expired(cls, user_id: int, timeout: int = None) -> bool:
-        """
-        🆕 v7.10.14 FIX-J: مُعاد توثيقها بوضوح.
-
-        تعود True إذا:
-          • لا يوجد مدخل لهذا المستخدم (لم يضبط حالة أو انتهت).
-          • الـ TTL الأساسي (300s) مضى.
-
-        ملاحظة: `timeout` مُعامل للتوافق فقط. الـ TTL الفعلي
-        يُدار تلقائياً بواسطة TTLCache (300s).
-        """
+        """🆕 v7.10.14 FIX-J: الـ TTL يُدار بواسطة TTLCache (300s)."""
         with cls._lock:
             return cls._cache.get(user_id) is None
-
 
 # ═══════════════════════════════════════════════════════════════════════════
 # 8. CB — ثوابت الـ callback
@@ -1016,7 +1010,6 @@ class CB:
     AUTO_REPLY_ADD = "auto_reply_add"
     AUTO_REPLY_DEL = "auto_reply_del"
     AUTO_REPLY_LIST = "auto_reply_list"
-
 
 # ═══════════════════════════════════════════════════════════════════════════
 # 9. KeyboardFactory
@@ -1340,7 +1333,6 @@ class KeyboardFactory:
             "translation": [["trans_off"], ["back"]],
             "referral": [["ref_claim", "ref_list"], ["back"]],
             "contests": [["contest_winners"], ["back"]],
-            # 🟡 UX-1 v7.10.16: إظهار sec_voice + sec_videonote (كانا بلا زر).
             "security": [
                 ["sec_links", "sec_mentions", "sec_forward"],
                 ["sec_video", "sec_audio", "sec_voice"],
@@ -1528,7 +1520,7 @@ class KeyboardFactory:
                 try:
                     return await asyncio.wait_for(
                         DB.fetchone(sql, params), timeout=1.5)
-                except (asyncio.TimeoutError, Exception):
+                except Exception:
                     return default
 
             (penalties_row, deleted_row, warns_row,
@@ -1619,7 +1611,6 @@ class KeyboardFactory:
         links = d(settings.get('delete_links', 0))
         mentions = d(settings.get('mentions', 0))
         video = d(settings.get('delete_videos', 0))
-        # 🔴 FIX-B2 v7.10.16: كان يقرأ 'delete_voice' خطأً — الآن delete_audio
         audio = d(settings.get('delete_audio', 0))
         stickers = d(settings.get('delete_stickers', 0))
         files = d(settings.get('delete_documents', 0))
@@ -1740,7 +1731,6 @@ class KeyboardFactory:
             f"<i>🟢 مفعّل  •  🔴 معطّل</i>"
         )
 
-
 # ═══════════════════════════════════════════════════════════════════════════
 # 10. كاش الكلمات المحظورة
 # ═══════════════════════════════════════════════════════════════════════════
@@ -1758,7 +1748,6 @@ _global_words_loaded_at: float = 0.0
 _global_words_lock: asyncio.Lock = asyncio.Lock()
 _GLOBAL_WORDS_TTL = 1800
 
-
 def _normalize_word(word: Any) -> Optional[str]:
     if not isinstance(word, str):
         return None
@@ -1773,7 +1762,6 @@ def _normalize_word(word: Any) -> Optional[str]:
         word = word.replace(_ARABIC_TATWEEL, '')
     word = re.sub(r'\s+', ' ', word).strip()
     return word if word else None
-
 
 async def _get_or_create_banned_words_lock(chat_id: int) -> asyncio.Lock:
     async with _banned_words_locks_guard:
@@ -1791,7 +1779,6 @@ async def _get_or_create_banned_words_lock(chat_id: int) -> asyncio.Lock:
         lock = asyncio.Lock()
         _banned_words_locks[chat_id] = lock
         return lock
-
 
 async def _get_global_words_cached() -> List[str]:
     global _global_words_cache, _global_words_loaded_at
@@ -1815,7 +1802,6 @@ async def _get_global_words_cached() -> List[str]:
         except Exception as e:
             logger.error(f"❌ فشل جلب الكلمات العامة: {e}")
             return _global_words_cache or []
-
 
 async def get_banned_words_cached(chat_id: int) -> List[str]:
     if _ENABLE_BANNED_WORDS_CACHE:
@@ -1862,7 +1848,6 @@ async def get_banned_words_cached(chat_id: int) -> List[str]:
             logger.error(f"❌ فشل جلب الكلمات المحظورة: {e}")
             return []
 
-
 def _clear_db_banned_words_cache(chat_id: int = None) -> None:
     try:
         if hasattr(DB, '_banned_words_cache') and DB._banned_words_cache is not None:
@@ -1881,7 +1866,6 @@ def _clear_db_banned_words_cache(chat_id: int = None) -> None:
     except Exception as e:
         logger.debug(f"invalidate DB banned_words cache: {e}")
 
-
 def invalidate_banned_words_cache(chat_id: int = None) -> None:
     global _global_words_cache, _global_words_loaded_at
     if chat_id is None or chat_id == -1:
@@ -1893,7 +1877,6 @@ def invalidate_banned_words_cache(chat_id: int = None) -> None:
         _banned_words_cache.pop(chat_id, None)
         _banned_words_cache_time.pop(chat_id, None)
     _clear_db_banned_words_cache(chat_id)
-
 
 async def invalidate_banned_words_cache_async(chat_id: int = None) -> None:
     global _global_words_cache, _global_words_loaded_at
@@ -1908,7 +1891,6 @@ async def invalidate_banned_words_cache_async(chat_id: int = None) -> None:
         _banned_words_cache_time.pop(chat_id, None)
     _clear_db_banned_words_cache(chat_id)
 
-
 async def get_min_publish_interval() -> int:
     val = await DB.get_setting(
         'min_publish_interval', str(CONFIG.MIN_PUBLISH_INTERVAL))
@@ -1916,7 +1898,6 @@ async def get_min_publish_interval() -> int:
         return max(1, int(val))
     except (ValueError, TypeError):
         return CONFIG.MIN_PUBLISH_INTERVAL
-
 
 # ═══════════════════════════════════════════════════════════════════════════
 # 11. دوال الصلاحيات
@@ -1958,7 +1939,6 @@ async def _do_auth_check(bot, chat_id: int, user_id: int) -> bool:
         logger.debug(f"DB auth check failed: {e}")
     return False
 
-
 async def is_authorized_in_group(bot, chat_id: int, user_id: int) -> bool:
     try:
         primary_id = int(CONFIG.PRIMARY_OWNER_ID)
@@ -1982,12 +1962,8 @@ async def is_authorized_in_group(bot, chat_id: int, user_id: int) -> bool:
         await _auth_cache_smart.delete(cache_key)
     return authorized
 
-
 def invalidate_auth_cache(chat_id: int = None, user_id: int = None) -> None:
-    """
-    🔴 FIX-2: تنفيذ آمن — list() قبل iteration.
-    🔴 v7.10.14 FIX-F: دعم user_id وحده بدون مسح كامل.
-    """
+    """🔴 FIX-2 + v7.10.14 FIX-F: user_id-aware، لا clear() كامل."""
     try:
         if chat_id and user_id:
             key = f"auth_{int(chat_id)}_{int(user_id)}"
@@ -2004,7 +1980,6 @@ def invalidate_auth_cache(chat_id: int = None, user_id: int = None) -> None:
             for k in to_del_neg:
                 _auth_neg_cache._cache.pop(k, None)
         elif user_id:
-            # 🔴 v7.10.14 FIX-F: حذف بـ suffix فقط، لا clear()
             suffix = f"_{int(user_id)}"
             to_del_pos = [k for k in list(_auth_cache_smart._cache)
                           if k.startswith("auth_") and k.endswith(suffix)]
@@ -2022,12 +1997,9 @@ def invalidate_auth_cache(chat_id: int = None, user_id: int = None) -> None:
     except Exception as e:
         logger.debug("invalidate_auth_cache (sync): %s", e)
 
-
 async def invalidate_auth_cache_async(chat_id: int = None,
                                       user_id: int = None) -> None:
-    """
-    🔴 v7.10.14 FIX-F: دعم user_id وحده بدون مسح كامل الكاش.
-    """
+    """🔴 v7.10.14 FIX-F: دعم user_id وحده بدون مسح كامل الكاش."""
     with suppress(Exception):
         if chat_id and user_id:
             await _auth_cache_smart.delete(f"auth_{chat_id}_{user_id}")
@@ -2036,7 +2008,6 @@ async def invalidate_auth_cache_async(chat_id: int = None,
             await _auth_cache_smart.delete_prefix(f"auth_{chat_id}_")
             await _auth_neg_cache.delete_prefix(f"auth_{chat_id}_")
         elif user_id:
-            # 🔴 v7.10.14 FIX-F: حذف بـ suffix فقط
             suffix = f"_{int(user_id)}"
             await _auth_cache_smart.delete_suffix(suffix)
             await _auth_neg_cache.delete_suffix(suffix)
@@ -2044,34 +2015,58 @@ async def invalidate_auth_cache_async(chat_id: int = None,
             await _auth_cache_smart.clear()
             await _auth_neg_cache.clear()
 
-
+# 🆕 v7.10.18 FIX-BUG2: كاش check_bot_permissions
 async def check_bot_permissions(bot, chat_id: int) -> dict:
+    """
+    🆕 v7.10.18 FIX-BUG2: كاش TTL=300s لتقليل get_chat_member API calls.
+    """
+    now = time.monotonic()
+    cached = _bot_perms_cache.get(chat_id)
+    if cached is not None and now - cached[0] < _BOT_PERMS_TTL:
+        return dict(cached[1])
     try:
         me = await bot.get_chat_member(chat_id, bot.id)
         if me.status not in ('administrator', 'creator'):
-            return {'can_act': False, 'reason': 'البوت ليس مشرفاً',
-                    'can_pin': False}
-        can_delete = getattr(me, 'can_delete_messages', False)
-        can_restrict = getattr(me, 'can_restrict_members', False)
-        can_pin = getattr(me, 'can_pin_messages', False)
-        if not can_delete or not can_restrict:
-            return {'can_act': False, 'reason': 'صلاحيات ناقصة',
-                    'can_pin': False}
-        return {'can_act': True, 'reason': '', 'can_pin': can_pin}
+            result = {'can_act': False, 'reason': 'البوت ليس مشرفاً',
+                      'can_pin': False}
+        else:
+            can_delete = getattr(me, 'can_delete_messages', False)
+            can_restrict = getattr(me, 'can_restrict_members', False)
+            can_pin = getattr(me, 'can_pin_messages', False)
+            if not can_delete or not can_restrict:
+                result = {'can_act': False, 'reason': 'صلاحيات ناقصة',
+                          'can_pin': False}
+            else:
+                result = {'can_act': True, 'reason': '', 'can_pin': can_pin}
+        # prune قبل الإضافة
+        if len(_bot_perms_cache) >= _BOT_PERMS_MAX_SIZE and chat_id not in _bot_perms_cache:
+            try:
+                sorted_items = sorted(
+                    _bot_perms_cache.items(),
+                    key=lambda kv: kv[1][0])
+                to_remove = max(1, len(sorted_items) // 4)
+                for k, _ in sorted_items[:to_remove]:
+                    _bot_perms_cache.pop(k, None)
+            except Exception as _e:
+                logger.debug("bot_perms cache prune: %s", _e)
+        _bot_perms_cache[chat_id] = (now, result)
+        return dict(result)
     except Exception as e:
         return {'can_act': False, 'reason': str(e)[:50], 'can_pin': False}
 
+def invalidate_bot_perms_cache(chat_id: Optional[int] = None) -> None:
+    """🆕 v7.10.18 FIX-BUG2: إبطال كاش صلاحيات البوت."""
+    if chat_id is None:
+        _bot_perms_cache.clear()
+    else:
+        _bot_perms_cache.pop(chat_id, None)
 
 # ═══════════════════════════════════════════════════════════════════════════
 # 11.b) TIMEOUT-FIX-7/8: تشخيص latency
 # ═══════════════════════════════════════════════════════════════════════════
 
 async def _check_telegram_latency(bot, timeout: float = 10.0) -> float:
-    """
-    🆕 TIMEOUT-FIX-7: قياس زمن الاستجابة لـ Telegram API.
-    🔴 v7.10.14 FIX-G: get_me لا يدعم write_timeout/connect_timeout
-    في PTB < 20.7 → نتدرّج بأمان.
-    """
+    """🆕 TIMEOUT-FIX-7 + 🔴 v7.10.14 FIX-G: PTB-safe fallback."""
     if bot is None:
         return -1.0
     try:
@@ -2079,13 +2074,11 @@ async def _check_telegram_latency(bot, timeout: float = 10.0) -> float:
         try:
             await bot.get_me(read_timeout=timeout)
         except TypeError:
-            # PTB قديم — بدون kwargs
             await bot.get_me()
         return (time.monotonic() - t0) * 1000.0
     except Exception as e:
         logger.debug("Telegram latency check failed: %s", e)
         return -1.0
-
 
 async def get_telegram_latency_text(bot) -> str:
     latency = await _check_telegram_latency(bot)
@@ -2098,7 +2091,6 @@ async def get_telegram_latency_text(bot) -> str:
     else:
         color = "🔴"
     return f"{color} Telegram: <b>{latency:.0f}ms</b>"
-
 
 # ═══════════════════════════════════════════════════════════════════════════
 # 12. إرسال آمن + ChatMigrated
@@ -2125,7 +2117,6 @@ _CHAT_MIGRATION_TABLES: Tuple[Tuple[str, str, bool], ...] = (
     ("user_messages", "chat_id", False),
     ("violation_penalties", "chat_id", False),
 )
-
 
 async def _handle_chat_migrated(chat_id: int, new_chat_id: int) -> None:
     try:
@@ -2186,6 +2177,11 @@ async def _handle_chat_migrated(chat_id: int, new_chat_id: int) -> None:
             invalidate_auth_cache(new_chat_id)
         except Exception:
             pass
+        try:
+            invalidate_bot_perms_cache(chat_id)
+            invalidate_bot_perms_cache(new_chat_id)
+        except Exception:
+            pass
         if failed:
             logger.error(
                 "⚠️ ChatMigrated: %d/%d نجح، %d فشل: %s",
@@ -2197,93 +2193,155 @@ async def _handle_chat_migrated(chat_id: int, new_chat_id: int) -> None:
     except Exception as e:
         logger.error("ChatMigrated handler: %s", e, exc_info=True)
 
-
 def _timeouts_for(text_len: int, is_media: bool = False) -> Dict[str, float]:
     if is_media or text_len > _TEXT_LONG_THRESHOLD:
         return dict(_TIMEOUT_SLOW)
     return dict(_TIMEOUT_FAST)
 
+# ═══════════════════════════════════════════════════════════════════════════
+# 🔴 v7.10.19 FIX-BUG1c: _send_media مصحّحة كاملة
+# ═══════════════════════════════════════════════════════════════════════════
 
 async def _send_media(bot, chat_id, media_type, media_file_id,
                       caption=None, reply_markup=None,
                       parse_mode: str = "HTML",
+                      _full_text: Optional[str] = None,
                       **kwargs):
-    _reply_to = kwargs.get('reply_to_message_id')
+    """
+    إرسال وسائط + نص.
 
-    async def _send_caption_followup(extra_kwargs=None):
-        if not caption:
+    🔴 v7.10.19 FIX-BUG1c (CRITICAL):
+        المنطق الجديد يميّز حسب _CAPTION_MEDIA_TYPES:
+          • photo/video/document/audio/animation → تدعم caption
+            الوسيط يحمل text[:1024]، follow-up يُرسل text[1024:] فقط.
+          • voice/sticker/video_note → لا تدعم caption
+            الوسيط لا يحمل نصاً، follow-up يُرسل text كاملاً.
+
+        سابقاً: كانت voice/sticker/video_note تفقد أول 1024 حرفاً،
+        وكانت photo/video/doc/audio/anim تُكرر أول 1024 (إن أُرسل النص كاملاً).
+
+    معاملات:
+        _full_text: النص الكامل قبل الاقتطاع (يُمرَّر من safe_send).
+                    إن لم يُمرَّر، نستخدم caption كـ fallback (بدون follow-up).
+    """
+    _reply_to = kwargs.get('reply_to_message_id')
+    # _full_text يأتي من safe_send (text الكامل بعد sanitize ≤ 4096).
+    # fallback: caption (المُقتطع) — يمنع أي follow-up زائد في الاستدعاءات القديمة.
+    _full = _full_text if _full_text else (caption or "")
+
+    async def _send_followup_text():
+        """يُرسل النص المتبقي بعد الوسيط — حسب نوع الوسيط."""
+        if not _full:
             return
-        caption_kwargs = {}
+        if media_type in _CAPTION_MEDIA_TYPES:
+            # الوسيط حمل text[:1024] كـ caption → نرسل الباقي فقط
+            if len(_full) <= 1024:
+                return
+            remaining = _full[1024:]
+        else:
+            # voice/sticker/video_note: لا caption → نرسل النص كاملاً
+            remaining = _full
+        if not remaining:
+            return
+
+        # بناء kwargs نظيفة للرسالة التالية
+        followup_kwargs: Dict[str, Any] = {}
         if _reply_to is not None:
-            caption_kwargs['reply_to_message_id'] = _reply_to
-        if extra_kwargs:
-            caption_kwargs.update(extra_kwargs)
-        caption_kwargs.setdefault('read_timeout', _TIMEOUT_SLOW['read_timeout'])
-        caption_kwargs.setdefault('write_timeout', _TIMEOUT_SLOW['write_timeout'])
-        caption_kwargs.setdefault('connect_timeout', _TIMEOUT_SLOW['connect_timeout'])
+            followup_kwargs['reply_to_message_id'] = _reply_to
+        followup_kwargs['read_timeout'] = _TIMEOUT_SLOW['read_timeout']
+        followup_kwargs['write_timeout'] = _TIMEOUT_SLOW['write_timeout']
+        followup_kwargs['connect_timeout'] = _TIMEOUT_SLOW['connect_timeout']
+
+        async def _do_send(pm):
+            if len(remaining) > 4096:
+                for i in range(0, len(remaining), 4096):
+                    chunk = remaining[i:i + 4096]
+                    await bot.send_message(
+                        chat_id, chunk,
+                        parse_mode=pm, **followup_kwargs)
+                    await asyncio.sleep(0.3)
+            else:
+                await bot.send_message(
+                    chat_id, remaining,
+                    parse_mode=pm, **followup_kwargs)
+
         try:
-            await bot.send_message(
-                chat_id, caption, parse_mode=parse_mode, **caption_kwargs)
+            await _do_send(parse_mode)
+        except BadRequest as _e:
+            if ("can't parse entities" in str(_e).lower()
+                    or "parse" in str(_e).lower()):
+                with suppress(Exception):
+                    await _do_send(None)
+            else:
+                logger.warning("⚠️ follow-up BadRequest: %s", _e)
         except TimedOut as _te:
             logger.warning(
-                "⚠️ caption-followup TimedOut | chat=%s | len=%d | err=%s",
-                chat_id, len(caption), str(_te)[:80])
-            try:
-                await bot.send_message(
-                    chat_id, caption, parse_mode=None, **caption_kwargs)
-            except Exception as _e2:
-                logger.warning("⚠️ caption-followup retry failed: %s", _e2)
-        except BadRequest as _e:
-            if "can't parse entities" in str(_e).lower() \
-               or "parse" in str(_e).lower():
-                with suppress(Exception):
-                    await bot.send_message(
-                        chat_id, caption, parse_mode=None, **caption_kwargs)
-            else:
-                logger.warning("⚠️ caption-followup BadRequest: %s", _e)
+                "⚠️ follow-up TimedOut | chat=%s | len=%d | err=%s",
+                chat_id, len(remaining), str(_te)[:80])
+            with suppress(Exception):
+                await _do_send(None)
         except Exception as _e:
-            logger.warning("⚠️ caption-followup: %s", _e)
+            logger.warning(
+                "⚠️ follow-up text فشل | chat=%s | len=%d | err=%s",
+                chat_id, len(remaining), str(_e)[:80])
 
     if media_type == 'photo':
-        return await bot.send_photo(
+        sent = await bot.send_photo(
             chat_id, media_file_id, caption=caption,
             reply_markup=reply_markup, parse_mode=parse_mode, **kwargs)
+        await _send_followup_text()
+        return sent
+
     elif media_type == 'video':
-        return await bot.send_video(
+        sent = await bot.send_video(
             chat_id, media_file_id, caption=caption,
             reply_markup=reply_markup, parse_mode=parse_mode, **kwargs)
+        await _send_followup_text()
+        return sent
+
     elif media_type == 'document':
-        return await bot.send_document(
+        sent = await bot.send_document(
             chat_id, media_file_id, caption=caption,
             reply_markup=reply_markup, parse_mode=parse_mode, **kwargs)
+        await _send_followup_text()
+        return sent
+
     elif media_type == 'audio':
-        return await bot.send_audio(
+        sent = await bot.send_audio(
             chat_id, media_file_id, caption=caption,
             reply_markup=reply_markup, parse_mode=parse_mode, **kwargs)
+        await _send_followup_text()
+        return sent
+
     elif media_type == 'voice':
         sent = await bot.send_voice(
             chat_id, media_file_id, reply_markup=reply_markup, **kwargs)
-        await _send_caption_followup()
+        await _send_followup_text()  # _full → النص كاملاً (voice لا يدعم caption)
         return sent
+
     elif media_type == 'animation':
-        return await bot.send_animation(
+        sent = await bot.send_animation(
             chat_id, media_file_id, caption=caption,
             reply_markup=reply_markup, parse_mode=parse_mode, **kwargs)
+        await _send_followup_text()
+        return sent
+
     elif media_type == 'sticker':
         sent = await bot.send_sticker(
             chat_id, media_file_id, reply_markup=reply_markup)
-        await _send_caption_followup()
+        await _send_followup_text()  # _full → النص كاملاً
         return sent
+
     elif media_type == 'video_note':
         sent = await bot.send_video_note(
             chat_id, media_file_id, reply_markup=reply_markup)
-        await _send_caption_followup()
+        await _send_followup_text()  # _full → النص كاملاً
         return sent
+
     else:
         return await bot.send_message(
             chat_id, caption or ".", reply_markup=reply_markup,
             parse_mode=parse_mode, **kwargs)
-
 
 async def safe_send(bot, chat_id: int, text: str, reply_markup=None,
                     parse_mode: str = "HTML",
@@ -2317,11 +2375,14 @@ async def safe_send(bot, chat_id: int, text: str, reply_markup=None,
     for attempt in range(max_attempts):
         try:
             if media_type:
+                # 🔴 v7.10.19 FIX-BUG1c: تمرير النص الكامل لـ follow-up صحيح
                 return await _send_media(
                     bot, chat_id, media_type, media_file_id,
                     caption=caption_text or None,
                     reply_markup=reply_markup,
-                    parse_mode=parse_mode, **kwargs)
+                    parse_mode=parse_mode,
+                    _full_text=text,
+                    **kwargs)
             else:
                 return await bot.send_message(
                     chat_id=chat_id, text=text,
@@ -2367,11 +2428,14 @@ async def safe_send(bot, chat_id: int, text: str, reply_markup=None,
                     chat_id, new_chat_id)
                 try:
                     if media_type:
+                        # 🔴 v7.10.19 FIX-BUG1c: _full_text=text في إعادة الإرسال
                         return await _send_media(
                             bot, new_chat_id, media_type, media_file_id,
                             caption=caption_text or None,
                             reply_markup=reply_markup,
-                            parse_mode=parse_mode, **kwargs)
+                            parse_mode=parse_mode,
+                            _full_text=text,
+                            **kwargs)
                     else:
                         return await bot.send_message(
                             chat_id=new_chat_id, text=text,
@@ -2433,11 +2497,14 @@ async def safe_send(bot, chat_id: int, text: str, reply_markup=None,
             if "can't parse entities" in error_msg or "parse" in error_msg:
                 try:
                     if media_type:
+                        # 🔴 v7.10.19 FIX-BUG1c: _full_text=text في no-parse fallback
                         return await _send_media(
                             bot, chat_id, media_type, media_file_id,
                             caption=caption_text or None,
                             reply_markup=reply_markup,
-                            parse_mode=None, **kwargs)
+                            parse_mode=None,
+                            _full_text=text,
+                            **kwargs)
                     else:
                         return await bot.send_message(
                             chat_id=chat_id, text=text,
@@ -2456,7 +2523,6 @@ async def safe_send(bot, chat_id: int, text: str, reply_markup=None,
             return None
     return None
 
-
 def get_ram_usage() -> dict:
     if psutil is None:
         return {'total': 0, 'used': 0, 'percent': 0}
@@ -2470,7 +2536,6 @@ def get_ram_usage() -> dict:
     except Exception as e:
         logger.error("❌ فشل جلب الرام: %s", e)
         return {'total': 0, 'used': 0, 'percent': 0}
-
 
 # ═══════════════════════════════════════════════════════════════════════════
 # 13. دوال حظر/فك حظر
@@ -2510,7 +2575,6 @@ async def ban_user_by_id(user_id: int) -> Tuple[bool, str]:
         logger.error("❌ ban_user_by_id(%s): %s", user_id, e, exc_info=True)
         return False, f"❌ فشل الحظر: {str(e)[:100]}"
 
-
 async def unban_user_by_id(user_id: int) -> Tuple[bool, str]:
     try:
         row = await DB.fetchone(
@@ -2529,7 +2593,6 @@ async def unban_user_by_id(user_id: int) -> Tuple[bool, str]:
         logger.error("❌ unban_user_by_id(%s): %s", user_id, e, exc_info=True)
         return False, f"❌ فشل فك الحظر: {str(e)[:100]}"
 
-
 # ═══════════════════════════════════════════════════════════════════════════
 # 14. نظام العقوبات
 # ═══════════════════════════════════════════════════════════════════════════
@@ -2539,7 +2602,6 @@ class PenaltyStrategy(ABC):
     async def apply(self, bot, chat_id: int, user_id: int,
                     **kwargs) -> Tuple[bool, str]:
         pass
-
 
 class BanPenalty(PenaltyStrategy):
     async def apply(self, bot, chat_id, user_id, **kwargs):
@@ -2553,7 +2615,6 @@ class BanPenalty(PenaltyStrategy):
             return True, "✅ تم الحظر"
         except Exception as e:
             return False, str(e)[:100]
-
 
 class MutePenalty(PenaltyStrategy):
     async def apply(self, bot, chat_id, user_id, **kwargs):
@@ -2577,7 +2638,6 @@ class MutePenalty(PenaltyStrategy):
         except Exception as e:
             return False, str(e)[:100]
 
-
 class KickPenalty(PenaltyStrategy):
     async def apply(self, bot, chat_id, user_id, **kwargs):
         if user_id == bot.id:
@@ -2589,7 +2649,6 @@ class KickPenalty(PenaltyStrategy):
         except Exception as e:
             return False, str(e)[:100]
 
-
 class WarnPenalty(PenaltyStrategy):
     async def apply(self, bot, chat_id, user_id, **kwargs):
         if user_id == bot.id:
@@ -2599,7 +2658,6 @@ class WarnPenalty(PenaltyStrategy):
             return True, f"⚠️ تحذير {w}"
         except Exception as e:
             return False, str(e)[:100]
-
 
 class RestrictPenalty(PenaltyStrategy):
     async def apply(self, bot, chat_id, user_id, **kwargs):
@@ -2623,7 +2681,6 @@ class RestrictPenalty(PenaltyStrategy):
         except Exception as e:
             return False, str(e)[:100]
 
-
 class UnbanPenalty(PenaltyStrategy):
     async def apply(self, bot, chat_id, user_id, **kwargs):
         try:
@@ -2631,7 +2688,6 @@ class UnbanPenalty(PenaltyStrategy):
             return True, "✅ تم إلغاء الحظر"
         except Exception as e:
             return False, str(e)[:100]
-
 
 class PenaltyFactory:
     _strategies: Dict[str, PenaltyStrategy] = {
@@ -2643,7 +2699,6 @@ class PenaltyFactory:
     @classmethod
     def get_strategy(cls, penalty_type: str) -> Optional[PenaltyStrategy]:
         return cls._strategies.get(penalty_type)
-
 
 _PENALTY_I18N: Dict[str, Dict[str, str]] = {
     "ar": {
@@ -2698,7 +2753,6 @@ _PENALTY_I18N: Dict[str, Dict[str, str]] = {
     },
 }
 
-
 def _penalty_t(lang: str, key: str, **kwargs) -> str:
     try:
         pack = _PENALTY_I18N.get(lang) or _PENALTY_I18N.get("ar") or {}
@@ -2714,7 +2768,6 @@ def _penalty_t(lang: str, key: str, **kwargs) -> str:
     except Exception:
         return key
 
-
 def _format_duration(seconds, lang: str = "ar") -> str:
     try:
         seconds = int(seconds or 0)
@@ -2729,7 +2782,6 @@ def _format_duration(seconds, lang: str = "ar") -> str:
     if seconds < 86400:
         return _penalty_t(lang, "duration_hours", n=seconds // 3600)
     return _penalty_t(lang, "duration_days", n=seconds // 86400)
-
 
 async def apply_penalty(bot, chat_id, user_id, penalty_type,
                         duration=0, reason="", *, moderator=None,
@@ -2807,7 +2859,6 @@ async def apply_penalty(bot, chat_id, user_id, penalty_type,
             penalty_type, chat_id, user_id, e, exc_info=True)
         return False, f"❌ خطأ غير متوقع: {str(e)[:80]}"
 
-
 # ═══════════════════════════════════════════════════════════════════════════
 # 15. الردود التلقائية
 # ═══════════════════════════════════════════════════════════════════════════
@@ -2820,7 +2871,6 @@ _usage_failure_counts: Dict[Tuple[int, str], int] = {}
 _usage_lock = asyncio.Lock()
 _flush_in_progress = False
 
-
 async def _increment_usage_async(chat_id: int, keyword: str):
     async with _usage_lock:
         key = (chat_id, keyword.lower())
@@ -2828,7 +2878,6 @@ async def _increment_usage_async(chat_id: int, keyword: str):
         should_flush = len(_usage_updates) >= _USAGE_FLUSH_LIMIT
     if should_flush:
         await _flush_usage_updates()
-
 
 async def _flush_usage_updates():
     global _flush_in_progress
@@ -2883,7 +2932,6 @@ async def _flush_usage_updates():
         async with _usage_lock:
             _flush_in_progress = False
 
-
 async def export_auto_replies(chat_id: int, file_path: str = None) -> int:
     rows = await DB.fetchall(
         "SELECT keyword, reply FROM auto_replies "
@@ -2899,7 +2947,6 @@ async def export_auto_replies(chat_id: int, file_path: str = None) -> int:
             json.dump(data, f, ensure_ascii=False, indent=2)
     await asyncio.to_thread(_write)
     return len(data)
-
 
 async def import_auto_replies(chat_id: int,
                               file_path_or_data: Union[str, List[Dict]],
@@ -2942,7 +2989,6 @@ async def import_auto_replies(chat_id: int,
         logger.error("❌ Import error: %s", e)
         return 0
 
-
 async def fetch_json_from_url(url: str) -> Optional[Union[list, dict]]:
     try:
         parsed = urlparse(url)
@@ -2975,7 +3021,6 @@ async def fetch_json_from_url(url: str) -> Optional[Union[list, dict]]:
         logger.error("❌ Fetch JSON error: %s", e)
         return None
 
-
 # ═══════════════════════════════════════════════════════════════════════════
 # 16. الردود من ملف
 # ═══════════════════════════════════════════════════════════════════════════
@@ -2999,7 +3044,6 @@ def load_replies_from_file() -> dict:
         logger.error("❌ خطأ في تحميل replies.py: %s", e)
         return {}
 
-
 _REPLIES_FROM_FILE = load_replies_from_file()
 
 if _REPLIES_FROM_FILE:
@@ -3009,9 +3053,7 @@ if _REPLIES_FROM_FILE:
 else:
     logger.info("ℹ️ لا توجد ردود محملة من ملف replies.py")
 
-
 _COMPILED_REPLIES_LIST: List[Tuple[str, re.Pattern]] = []
-
 
 def _build_compiled_replies_pattern() -> None:
     global _COMPILED_REPLIES_LIST
@@ -3030,9 +3072,7 @@ def _build_compiled_replies_pattern() -> None:
         result.append((k, compiled))
     _COMPILED_REPLIES_LIST = result
 
-
 _build_compiled_replies_pattern()
-
 
 def get_reply_from_file(keyword: str) -> Optional[str]:
     if not _REPLIES_FROM_FILE or not keyword:
@@ -3058,7 +3098,6 @@ def get_reply_from_file(keyword: str) -> Optional[str]:
                 return random.choice(replies)
     return None
 
-
 def reload_replies_from_file() -> dict:
     global _REPLIES_FROM_FILE
     _REPLIES_FROM_FILE = load_replies_from_file()
@@ -3068,7 +3107,6 @@ def reload_replies_from_file() -> dict:
             "✅ تم إعادة تحميل ملف الردود: %d رد",
             len(_REPLIES_FROM_FILE))
     return _REPLIES_FROM_FILE
-
 
 # ═══════════════════════════════════════════════════════════════════════════
 # 17. المهام الخلفية
@@ -3080,7 +3118,8 @@ class BackgroundTasks:
     _BASE_TTL = 600
     _GROUP_ADMINS_CACHE_MAX_SIZE = 5000
 
-    POOL_MONITOR_INTERVAL = 60
+    # 🟡 v7.10.18 FIX-BUG3: 60 → 300 لتقليل استعلامات pg_stat_activity
+    POOL_MONITOR_INTERVAL = 300
     POOL_ALERT_THRESHOLD = 85.0
     POOL_ALERT_COOLDOWN = 600
     POOL_IDLE_TX_ALERT = 3
@@ -3349,11 +3388,15 @@ class BackgroundTasks:
         """
         نشر منشور واحد.
 
+        🔴 v7.10.19 FIX-BUG1d (CRITICAL):
+            _send_followup_text كانت تُرسل text[1024:] دائماً (بعد FIX-BUG1a).
+            لكن voice/sticker/video_note لا تحمل caption → تفقد أول 1024 حرفاً!
+            الإصلاح: يستخدم _CAPTION_MEDIA_TYPES للتمييز:
+              • photo/video/doc/audio/anim: الوسيط حمل caption → text[1024:]
+              • voice/sticker/video_note: لا caption → text الكامل
+
         🟠 v7.10.14 FIX-H: تقسيم النص > 4096 في follow-up text.
-        🔴 v7.10.17 FIX-BUG1: إضافة _send_followup_text() بعد كل نجاح
-           في فروع الوسائط (photo/video/document/audio/animation).
-           كان فقط في voice/sticker/video_note → منشور بصورة + نص
-           طويل كان يُرسل caption واحد فقط (≤1024) والباقي يُهمَل.
+        🔴 v7.10.17 FIX-BUG1: إضافة _send_followup_text في فروع الوسائط.
         """
         _SEND_KWARGS = {
             "read_timeout": 60.0, "write_timeout": 60.0,
@@ -3367,19 +3410,34 @@ class BackgroundTasks:
         caption = text[:1024] if text else None
 
         async def _send_followup_text():
-            """🟠 v7.10.14 FIX-H: تقسيم النص > 4096."""
+            """
+            🔴 v7.10.19 FIX-BUG1d: التمييز حسب نوع الوسيط.
+
+            • photo/video/document/audio/animation:
+                الوسيط حمل text[:1024] → نرسل text[1024:] فقط.
+            • voice/sticker/video_note:
+                الوسيط لا يحمل نصاً → نرسل text كاملاً.
+            """
             if not text:
                 return
+            if media_type in _CAPTION_MEDIA_TYPES:
+                if len(text) <= 1024:
+                    return
+                remaining = text[1024:]
+            else:
+                remaining = text
+            if not remaining:
+                return
             try:
-                if len(text) > 4096:
-                    for i in range(0, len(text), 4096):
-                        chunk = text[i:i + 4096]
+                if len(remaining) > 4096:
+                    for i in range(0, len(remaining), 4096):
+                        chunk = remaining[i:i + 4096]
                         await bot.send_message(
                             channel_id, chunk, **_SEND_KWARGS)
                         await asyncio.sleep(0.3)
                 else:
                     await bot.send_message(
-                        channel_id, text, **_SEND_KWARGS)
+                        channel_id, remaining, **_SEND_KWARGS)
             except Exception as _fex:
                 logger.warning(
                     "⚠️ Publish follow-up text فشل | ch=%s media=%s: %s",
@@ -3503,13 +3561,7 @@ class BackgroundTasks:
     @staticmethod
     async def _publish_single_channel(bot, ch, published_count,
                                        has_sub: bool = None) -> bool:
-        """
-        نشر في قناة واحدة.
-
-        🔴 v7.10.17 FIX-BUG8: mark_post_published_pending الآن موجودة
-           في database_channels_posts.py v7.5.30 — hasattr سيرجع True
-           تلقائياً. لا تغيير مطلوب هنا.
-        """
+        """🔴 v7.10.17 FIX-BUG8: mark_post_published_pending من DB."""
         user_id = None
         try:
             user_id = ch.get('user_id') if isinstance(ch, dict) else None
@@ -3887,6 +3939,7 @@ class BackgroundTasks:
                 BackgroundTasks._group_admins_access_count.clear()
                 _security_settings_cache.clear()
                 _sec_settings_neg_cache.clear()
+                _bot_perms_cache.clear()   # 🆕 v7.10.18 FIX-BUG2
                 now_mono = time.monotonic()
                 if _security_settings_cache:
                     stale = [
@@ -3922,7 +3975,6 @@ class BackgroundTasks:
             except Exception as e:
                 logger.error("❌ فشل تنظيف قاعدة البيانات: %s", e)
 
-
 # ═══════════════════════════════════════════════════════════════════════════
 # 18. Warmup
 # ═══════════════════════════════════════════════════════════════════════════
@@ -3955,7 +4007,6 @@ def _spawn_warmup_task(coro, label: str = "warmup"):
     task.add_done_callback(_cleanup)
     return task
 
-
 async def _bg_warmup_db_words() -> None:
     try:
         if hasattr(DB, 'get_banned_words'):
@@ -3966,7 +4017,6 @@ async def _bg_warmup_db_words() -> None:
                 len(db_words or []))
     except Exception as e:
         logger.debug("bg_warmup db_words: %s", e)
-
 
 async def warmup_all() -> Dict[str, Any]:
     result = {
@@ -4006,7 +4056,6 @@ async def warmup_all() -> Dict[str, Any]:
         result['total_ms'])
     return result
 
-
 # ═══════════════════════════════════════════════════════════════════════════
 # 19. خادم الويب
 # ═══════════════════════════════════════════════════════════════════════════
@@ -4018,7 +4067,6 @@ _NON_RETRYABLE_WEBHOOK_ERRORS = frozenset({
     "jsondecodeerror", "typeerror", "valueerror", "keyerror",
     "attributeerror", "indexerror",
 })
-
 
 async def setup_webhook(app, port: int):
     global _telegram_app
@@ -4037,13 +4085,12 @@ async def setup_webhook(app, port: int):
     site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()
     try:
-        runner.site = site  # type: ignore
-        runner.tcp_site = site  # type: ignore
+        runner.site = site
+        runner.tcp_site = site
     except Exception as _e:
         logger.debug("تعذّر إرفاق site: %s", _e)
     logger.info("✅ Webhook on port %d", port)
     return runner
-
 
 async def webhook_handler(request):
     expected_secret = getattr(CONFIG, 'WEBHOOK_SECRET', None)
@@ -4080,7 +4127,6 @@ async def webhook_handler(request):
             "❌ Webhook error [%s]: %s",
             err_type, err_msg, exc_info=True)
         return web.Response(status=500, text="Internal Error")
-
 
 # ═══════════════════════════════════════════════════════════════════════════
 # 20. معالج الأخطاء
@@ -4126,28 +4172,23 @@ class ErrorHandler:
             except Exception:
                 pass
 
-
 # ═══════════════════════════════════════════════════════════════════════════
 # 21. SECURITY_TOGGLE_MAP + NEW_SECURITY_DEFAULTS + _DEFAULT_SECURITY_SETTINGS
 # ═══════════════════════════════════════════════════════════════════════════
 
-# 🔴 v7.10.15 FIX-B: تصحيح دلالة "audio" و "voice":
-#   • "audio" (ملفات صوتية MP3) → delete_audio
-#   • "voice" (رسائل صوتية)      → delete_voice
-# 🟢 v7.10.15 FIX-E: "slow" → slow_mode (يطابق schema)
 SECURITY_TOGGLE_MAP: Dict[str, str] = {
     "links": "delete_links",
     "mentions": "mentions",
     "forward": "delete_forwarded",
     "video": "delete_videos",
-    "audio": "delete_audio",         # 🔴 FIX-B: كان delete_voice
+    "audio": "delete_audio",
     "anim": "delete_animation",
     "doc": "delete_documents",
     "sticker": "delete_stickers",
     "service": "delete_service",
     "poll": "delete_polls",
     "game": "delete_games",
-    "voice": "delete_voice",         # 🔴 FIX-B: كان delete_voice_notes
+    "voice": "delete_voice",
     "videonote": "delete_video_note",
     "nsfw": "nsfw_enabled",
     "at_channel": "delete_at_channel",
@@ -4157,7 +4198,7 @@ SECURITY_TOGGLE_MAP: Dict[str, str] = {
     "protected_any": "delete_protected_any",
     "postbot": "delete_postbot_pattern",
     "flood": "antiflood_enabled",
-    "slow": "slow_mode",             # 🟢 FIX-E: كان slow_mode_enabled
+    "slow": "slow_mode",
     "night": "night_mode_enabled",
     "welcome": "welcome_enabled",
     "goodbye": "goodbye_enabled",
@@ -4176,8 +4217,6 @@ NEW_SECURITY_DEFAULTS: Dict[str, int] = {
     "delete_postbot_pattern": 0,
 }
 
-# 🔴 v7.10.15 FIX-D (schema-aligned): موسّع + متوافق مع group_security.
-# v7.10.16 FIX-A2: حُذف "delete_voice_notes" نهائياً — لا عمود في schema.
 _DEFAULT_SECURITY_SETTINGS: Dict[str, Any] = {
     # ═══ NEW_SECURITY_DEFAULTS ═══
     "delete_at_channel": 0,
@@ -4191,8 +4230,8 @@ _DEFAULT_SECURITY_SETTINGS: Dict[str, Any] = {
     "mentions": 0,
     "delete_forwarded": 0,
     "delete_videos": 0,
-    "delete_audio": 0,               # 🔴 FIX-A: ملفات صوتية (MP3)
-    "delete_voice": 0,               # رسائل صوتية — موجود في schema
+    "delete_audio": 0,
+    "delete_voice": 0,
     "delete_animation": 0,
     "delete_documents": 0,
     "delete_stickers": 0,
@@ -4204,7 +4243,7 @@ _DEFAULT_SECURITY_SETTINGS: Dict[str, Any] = {
     "delete_protected_forward": 0,
     "delete_banned_words": 0,
     # ═══ Slow mode ═══
-    "slow_mode": 0,                  # 🟢 FIX-E: كان slow_mode_enabled
+    "slow_mode": 0,
     "slow_mode_seconds": 5,
     # ═══ Welcome / Goodbye ═══
     "welcome_enabled": 0,
@@ -4219,7 +4258,7 @@ _DEFAULT_SECURITY_SETTINGS: Dict[str, Any] = {
     "max_warnings": 3,
     "warn_penalty": "ban",
     "warn_penalty_duration": 3600,
-    "warn_default_duration": 0,      # 🟢 FIX-D: موجود مسبقاً، لا تغيير
+    "warn_default_duration": 0,
     # ═══ Violations ═══
     "violation_strikes": 3,
     "violation_duration": 60,
@@ -4258,7 +4297,6 @@ _DEFAULT_SECURITY_SETTINGS: Dict[str, Any] = {
     "max_message_length": 0,
 }
 
-
 # ═══════════════════════════════════════════════════════════════════════════
 # 22. Security Bridge
 # ═══════════════════════════════════════════════════════════════════════════
@@ -4266,7 +4304,6 @@ _DEFAULT_SECURITY_SETTINGS: Dict[str, Any] = {
 _detector_imports: Optional[Dict[str, Any]] = None
 _detector_import_lock = threading.Lock()
 _detector_import_async_lock: Optional[asyncio.Lock] = None
-
 
 def _do_import_detectors() -> Dict[str, Any]:
     _mod = None
@@ -4313,7 +4350,6 @@ def _do_import_detectors() -> Dict[str, Any]:
         _mod = {}
     return _mod
 
-
 def _lazy_import_detectors() -> Dict[str, Any]:
     global _detector_imports
     if _detector_imports is not None:
@@ -4323,7 +4359,6 @@ def _lazy_import_detectors() -> Dict[str, Any]:
             return _detector_imports
         _detector_imports = _do_import_detectors()
         return _detector_imports
-
 
 async def _lazy_import_detectors_async() -> Dict[str, Any]:
     global _detector_imports, _detector_import_async_lock
@@ -4337,30 +4372,18 @@ async def _lazy_import_detectors_async() -> Dict[str, Any]:
         _detector_imports = await asyncio.to_thread(_do_import_detectors)
         return _detector_imports
 
-
 async def get_security_settings(chat_id: int) -> Dict[str, Any]:
-    """
-    جلب إعدادات الأمان.
-
-    🔴 FIX-3: negative cache نظيف.
-    🔴 v7.10.14 FIX-D: ثابت موسّع (كل أعمدة group_security).
-    🔴 v7.10.14 FIX-E: حلقة القراءة تحافظ على النوع (int/float/str/bool).
-    🔴 v7.10.15: schema-aligned (delete_audio, slow_mode).
-    🔴 v7.10.16: إزالة delete_voice_notes من الـ defaults.
-    """
+    """جلب إعدادات الأمان (schema-aligned, typed loop, dual cache)."""
     now = time.monotonic()
 
-    # 1) cache إيجابي
     cached = _security_settings_cache.get(chat_id)
     if cached is not None and now - cached[0] < _SEC_SETTINGS_TTL:
         return dict(cached[1])
 
-    # 2) negative cache
     neg_at = _sec_settings_neg_cache.get(chat_id)
     if neg_at is not None and now - neg_at < _SEC_SETTINGS_NEGATIVE_TTL:
         return dict(_DEFAULT_SECURITY_SETTINGS)
 
-    # 🔴 FIX-D: نبدأ من الثابت الكامل
     settings: Dict[str, Any] = dict(_DEFAULT_SECURITY_SETTINGS)
 
     row_dict: Dict[str, Any] = {}
@@ -4376,7 +4399,7 @@ async def get_security_settings(chat_id: int) -> Dict[str, Any]:
                     row_dict = dict(raw)
                 except (TypeError, ValueError):
                     try:
-                        row_dict = {k: raw[k] for k in raw.keys()}  # type: ignore
+                        row_dict = {k: raw[k] for k in raw.keys()}
                     except Exception:
                         row_dict = {}
             db_ok = True
@@ -4403,7 +4426,6 @@ async def get_security_settings(chat_id: int) -> Dict[str, Any]:
             logger.debug(
                 "get_security_settings fallback(%s): %s", chat_id, e)
 
-    # 🔴 FIX-E: حلقة القراءة — حافظ على النوع
     for key, default_val in list(settings.items()):
         if key not in row_dict:
             continue
@@ -4418,15 +4440,11 @@ async def get_security_settings(chat_id: int) -> Dict[str, Any]:
             elif isinstance(default_val, float):
                 settings[key] = float(raw_val)
             else:
-                # string أو non-typed
                 settings[key] = str(raw_val)
         except (ValueError, TypeError):
-            # احتفظ بالقيمة الافتراضية
             pass
 
-    # 🆕 PERF-FIX-1: negative cache عند الفشل الكامل
     if not db_ok:
-        # 🟠 v7.10.14 FIX-I: prune قبل الإضافة
         if len(_sec_settings_neg_cache) >= _SEC_SETTINGS_NEG_MAX_SIZE:
             try:
                 sorted_neg = sorted(
@@ -4439,7 +4457,6 @@ async def get_security_settings(chat_id: int) -> Dict[str, Any]:
                 logger.debug("neg_cache prune: %s", _e)
         _sec_settings_neg_cache[chat_id] = now
 
-    # prune main cache
     if len(_security_settings_cache) >= _SEC_SETTINGS_MAX_SIZE:
         try:
             sorted_items = sorted(
@@ -4456,7 +4473,6 @@ async def get_security_settings(chat_id: int) -> Dict[str, Any]:
         _sec_settings_neg_cache.pop(chat_id, None)
     return dict(settings)
 
-
 def invalidate_security_settings_cache(chat_id: Optional[int] = None) -> None:
     if chat_id is None:
         _security_settings_cache.clear()
@@ -4464,7 +4480,6 @@ def invalidate_security_settings_cache(chat_id: Optional[int] = None) -> None:
     else:
         _security_settings_cache.pop(chat_id, None)
         _sec_settings_neg_cache.pop(chat_id, None)
-
 
 def _try_detector_call(fn, text: str, **extra_kwargs) -> Any:
     if fn is None or not text:
@@ -4485,7 +4500,6 @@ def _try_detector_call(fn, text: str, **extra_kwargs) -> Any:
     except Exception as e:
         logger.debug("detector call: %s", e)
         return False
-
 
 async def should_delete_by_security(message: Any, ctx: Any = None):
     try:
@@ -4576,7 +4590,6 @@ async def should_delete_by_security(message: Any, ctx: Any = None):
         logger.error("should_delete_by_security: %s", e, exc_info=True)
         return False, None
 
-
 async def check_all_security(message: Any, bot: Any = None,
                               ctx: Any = None) -> Dict[str, Any]:
     result: Dict[str, Any] = {
@@ -4635,7 +4648,6 @@ async def check_all_security(message: Any, bot: Any = None,
         logger.debug("check_all_security/spam: %s", e)
     return result
 
-
 # ═══════════════════════════════════════════════════════════════════════════
 # 23. ثوابت timeouts
 # ═══════════════════════════════════════════════════════════════════════════
@@ -4646,7 +4658,6 @@ _PUBLISH_TIMEOUTS = {
     "connect_timeout": 30.0,
     "pool_timeout": 15.0,
 }
-
 
 # ═══════════════════════════════════════════════════════════════════════════
 # 24. __all__
@@ -4662,6 +4673,7 @@ __all__ = [
     'get_min_publish_interval',
     'is_authorized_in_group', 'invalidate_auth_cache',
     'invalidate_auth_cache_async', 'check_bot_permissions',
+    'invalidate_bot_perms_cache',
     'safe_send', 'get_ram_usage',
     '_check_telegram_latency', 'get_telegram_latency_text',
     'ban_user_by_id', 'unban_user_by_id',
@@ -4685,12 +4697,13 @@ __all__ = [
     '_CHAT_MIGRATION_TABLES',
     '_security_settings_cache', '_sec_settings_neg_cache',
     '_security_stats_cache',
+    '_bot_perms_cache',
+    '_CAPTION_MEDIA_TYPES',
     '_send_media',
     '_timeouts_for', '_TIMEOUT_FAST', '_TIMEOUT_SLOW',
     '_TEXT_LONG_THRESHOLD',
     '_warmup_bg_tasks',
 ]
-
 
 # ═══════════════════════════════════════════════════════════════════════════
 # LOAD BEACON
@@ -4698,8 +4711,12 @@ __all__ = [
 
 try:
     logger.info(
-        "🛡️ utils.py v7.10.17 FIX-BUG1 loaded | "
-        "publish_followup=all-media-branches (photo/video/doc/audio/anim) | "
+        "🛡️ utils.py v7.10.19 FIX-FOLLOWUP-COMPLETE loaded | "
+        "FIX-BUG1c: _send_media uses _CAPTION_MEDIA_TYPES (%d types) | "
+        "FIX-BUG1d: _publish_post._send_followup_text uses same type-check | "
+        "FIX-BUG2: bot_perms_cache=TTL(%ds, max=%d) | "
+        "FIX-BUG3: pool_monitor=%ds (was 60) | "
+        "FIX-BUG4: pool_timeout in FAST/SLOW | "
         "sec_defaults=%d keys (schema-aligned) | "
         "FIX-A2: delete_voice_notes removed from defaults | "
         "FIX-B2: _format_security_text audio→delete_audio | "
@@ -4718,6 +4735,9 @@ try:
         "SecNegCache=✅(TTL=%ds) | SecStats=✅(TTL=300s) | "
         "AuthCache=✅ | AuthCheck=UNION+TO(2s) | "
         "RateLimit=✅ | Webhook=✅ | Publish=✅",
+        len(_CAPTION_MEDIA_TYPES),
+        int(_BOT_PERMS_TTL), _BOT_PERMS_MAX_SIZE,
+        int(BackgroundTasks.POOL_MONITOR_INTERVAL),
         len(_DEFAULT_SECURITY_SETTINGS),
         _SEC_SETTINGS_NEG_MAX_SIZE,
         len(_AVAILABLE_LANGUAGES),
