@@ -1,41 +1,40 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-handlers_message.py - v7.18.30 (C11-D3-D4-FIXES)
+handlers_message.py - v7.18.31 (FIX-AL1-FOLLOWUP)
 (متوافق مع detectors v4.1.0 + banned_words_manager v1.2.0)
 =============================================================================
-🆕 v7.18.30 (C11-D3-D4-FIXES):
+🆕 v7.18.31 (FIX-AL1-FOLLOWUP):
+    🔴 FIX-AL1-FOLLOWUP: إزالة "WAIT_LOG_CH" من
+       _PRIVATE_HANDLERS_MAP. كان يُوجَّه إلى
+       "_handle_wait_channel_text" → يسرق إدخال قناة السجل من
+       handlers_group_log.receive_log_channel ويعالجه كإضافة قناة
+       مستخدم جديدة!
+       متسق مع handlers_channels_list v2.1.2 (FIX-AL1).
+    🟡 FIX-AL1-FOLLOWUP-2: إضافة _EXTERNAL_HANDLED_STATES — مجموعة
+       حالات يتولاها handler خارجي؛ handle_private يتجاهلها بصمت
+       (بلا رسالة "لم أتعرف على العملية"، بلا إشعار مطور).
+
+🆕 v7.18.30 (C11-D3-D4-FIXES) — محفوظ:
     🔴 FIX-C11: _handle_support_mode_text — المسار 3
        استبدال last_insert_rowid() (SQLite فقط) بـ 3 مسارات:
        • PG: RETURNING id عبر DB.fetchone
        • MySQL: SELECT LAST_INSERT_ID()
        • SQLite: SELECT last_insert_rowid()
     🟡 FIX-D3: _MULTILAYER_ENABLED — or بين _HAS_MULTILAYER
-       و _HAS_ASYNC_DETECTORS لتجنّب تعطيل مسار async عند غياب
-       sync فقط.
-    🟡 FIX-D4: _trans — توثيق صريح للسلوك الحقيقي (بلا تغيير
-       سلوكي).
+       و _HAS_ASYNC_DETECTORS.
+    🟡 FIX-D4: _trans — توثيق صريح للسلوك.
 
-🆕 v7.18.29 (SUPPORT-MODE-HANDLER-FIX):
-    🔴 FIX-SUPPORT-1 CRITICAL: إضافة "SUPPORT_MODE" →
-       "_handle_support_mode_text" في _PRIVATE_HANDLERS_MAP.
-    🔴 FIX-SUPPORT-2: إضافة دالة _handle_support_mode_text.
-    🟡 FIX-SUPPORT-3: تحسين رسالة UNHANDLED STATE.
-
-🆕 v7.18.28 (ADDING-POSTS-HANDLER-FIX):
-    🔴 FIX-ADDING-1 CRITICAL: "ADDING_POSTS" → direct handler.
-
-🆕 v7.18.21 (ROUTING-FIX-2026-R3):
-    🔴 FIX-ROUTE-2 CRITICAL: WAIT_CHANNEL direct handler +
-       7 مسارات fallback + _parse_channel_ref.
-
-🆕 v7.18.20 (ROUTING-FIX-2026-R2)
-🆕 v7.18.19 (ROUTING-FIX-2026)
-🆕 v7.18.18 (CACHE-STATS-INTEGRATION)
-🆕 v7.18.17 (DETECTORS-v4.1.0-COMPAT)
-🆕 v7.18.16 (FULL-REWRITE-FIXES)
-🆕 v7.18.15 (BANNED-MANAGER-INTEGRATION + REPLIES-FIX)
-🆕 v7.18.14 (IDLE-TX-AUDIT-INTEGRATION)
+🆕 v7.18.29 (SUPPORT-MODE-HANDLER-FIX) — محفوظ.
+🆕 v7.18.28 (ADDING-POSTS-HANDLER-FIX) — محفوظ.
+🆕 v7.18.21 (ROUTING-FIX-2026-R3) — محفوظ.
+🆕 v7.18.20 (ROUTING-FIX-2026-R2) — محفوظ.
+🆕 v7.18.19 (ROUTING-FIX-2026) — محفوظ.
+🆕 v7.18.18 (CACHE-STATS-INTEGRATION) — محفوظ.
+🆕 v7.18.17 (DETECTORS-v4.1.0-COMPAT) — محفوظ.
+🆕 v7.18.16 (FULL-REWRITE-FIXES) — محفوظ.
+🆕 v7.18.15 (BANNED-MANAGER-INTEGRATION + REPLIES-FIX) — محفوظ.
+🆕 v7.18.14 (IDLE-TX-AUDIT-INTEGRATION) — محفوظ.
 =============================================================================
 """
 
@@ -421,11 +420,6 @@ _SLOW_MODE_AUTO = _env_flag("SLOW_MODE_AUTO", True)
 _SLOW_MODE_UNSUPPORTED = False
 
 # 🔴 FIX-D3 (v7.18.30): توحيد الفحص مع async detectors
-# المشكلة: _HAS_MULTILAYER يعتمد على analyze_message_full (sync)
-#          بينما المسار الساخن يستخدم analyze_message_full_async.
-#          إذا كان async متاحاً و sync غير متاح (نظرياً) →
-#          _MULTILAYER_ENABLED=False → يُتخطّى مسار async أيضاً.
-# الإصلاح: OR بين الاثنين.
 _MULTILAYER_ENABLED = (
     _env_flag("MULTILAYER_ENABLED", True)
     and (_HAS_MULTILAYER or _HAS_ASYNC_DETECTORS)
@@ -956,7 +950,7 @@ async def _lazy_init_columns(bot=None):
         _columns_last_attempt_ts = now
 
         db_type = getattr(DB, "DB_TYPE", "sqlite")
-        logger.info("🔧 v7.18.30: Auto-migration (DB_TYPE=%s)", db_type)
+        logger.info("🔧 v7.18.31: Auto-migration (DB_TYPE=%s)", db_type)
 
         cols = [
             ("delete_protected_any", "INTEGER DEFAULT 0",
@@ -3037,11 +3031,24 @@ def _accepts_state_arg(handler, handler_name: str) -> bool:
     return result
 
 
+# ═══════════════════════════════════════════════════════════════════
+# 🔴 v7.18.31 FIX-AL1-FOLLOWUP-2: حالات يتولاها handler خارجي
+# ═══════════════════════════════════════════════════════════════════
+# هذه الحالات يُسجَّل لها handler في ملف آخر (handlers_group_log,
+# handlers_channels_list, ...). وجودها في handle_private → لا نعرض
+# رسالة "لم أتعرف على العملية" ولا نُشعر المطور — فقط نتجاهل بصمت.
+#
+# السبب: PTB v20+ ينفّذ كل الـ handlers المطابقة بالترتيب في نفس
+# الـ group. حتى لو handler آخر تولّى الرسالة، handle_private قد
+# يُستدعى أيضاً. بدون هذا الفلتر سيُظهر رسالة خطأ مضلِّلة للمستخدم.
+_EXTERNAL_HANDLED_STATES = frozenset({
+    # 🔴 v7.18.31: يتولاها handlers_group_log.receive_log_channel
+    "WAIT_LOG_CH",
+})
+
+
 class MessageHandlers:
 
-    # ═══════════════════════════════════════════════════════════════════
-    # 🆕 v7.18.29 FIX-SUPPORT-1: إضافة SUPPORT_MODE
-    # ═══════════════════════════════════════════════════════════════════
     _PRIVATE_HANDLERS_MAP: Dict[Any, str] = {
         # ─── معالجات محلية ───
         "WAIT_GROUP_BAN": "handle_add_banned_word",
@@ -3057,7 +3064,12 @@ class MessageHandlers:
         "WAIT_ADD_CHANNEL": "_handle_wait_channel_text",
         "WAIT_UPDATE_CH": "_handle_wait_channel_text",
         "WAIT_UPDATE_CHANNEL": "_handle_wait_channel_text",
-        "WAIT_LOG_CH": "_handle_wait_channel_text",
+        # 🔴 v7.18.31 FIX-AL1-FOLLOWUP: WAIT_LOG_CH أُزيل من هنا.
+        # كان يُوجَّه إلى "_handle_wait_channel_text" → يسرق
+        # إدخال قناة السجل من handlers_group_log.receive_log_channel
+        # ويعالجه كإضافة قناة مستخدم جديدة! (متسق مع
+        # handlers_channels_list v2.1.2 FIX-AL1).
+        # WAIT_LOG_CH موجود في _EXTERNAL_HANDLED_STATES أعلاه.
         # 🆕 v7.18.28 FIX-ADDING-1: حالات إضافة المنشورات
         "ADDING_POSTS": "_handle_adding_posts_text",
         "WAIT_POST": "_handle_adding_posts_text",
@@ -4659,6 +4671,19 @@ class MessageHandlers:
             if state_str in ("UserState.NONE", "NONE"):
                 return
 
+            # ═══════════════════════════════════════════════════════════
+            # 🔴 v7.18.31 FIX-AL1-FOLLOWUP-2:
+            # تجاهل بصمت للحالات التي يتولاها handler خارجي.
+            # بدون هذا: handle_private يُظهر "لم أتعرف على العملية"
+            # حتى لو تولّى handler آخر (مثل handlers_group_log) الرسالة.
+            # ═══════════════════════════════════════════════════════════
+            if state_str in _EXTERNAL_HANDLED_STATES:
+                logger.debug(
+                    "⏭️ handle_private: تجاهل %s — "
+                    "يتولاها handler خارجي (group_log/channels_list)",
+                    state_str)
+                return
+
             # ─── الخريطة المحلية ───
             handler_name = MessageHandlers._PRIVATE_HANDLERS_MAP.get(
                 state)
@@ -5797,6 +5822,9 @@ async def handle_cache_stats_command(update, context):
         lines.append(
             f"  • states_mapped: "
             f"<b>{len(MessageHandlers._PRIVATE_HANDLERS_MAP)}</b>")
+        lines.append(
+            f"  • external_handled: "
+            f"<b>{len(_EXTERNAL_HANDLED_STATES)}</b>")
     except Exception:
         pass
 
@@ -6115,6 +6143,8 @@ __all__ = [
     "_bwm_contains",
     "_bwm_is_greeting",
     "_parse_channel_ref",
+    # 🆕 v7.18.31 FIX-AL1-FOLLOWUP-2
+    "_EXTERNAL_HANDLED_STATES",
 ]
 
 
@@ -6124,19 +6154,23 @@ __all__ = [
 
 try:
     logger.info(
-        "✅ handlers_message v7.18.30 loaded | "
+        "✅ handlers_message v7.18.31 loaded | "
         "BWM=%s | PRIVATE_HANDLERS=%d | "
+        "external_handled=%d | "
         "routing-fallback=7-paths | "
         "WAIT_CHANNEL=direct-handler | "
+        "WAIT_LOG_CH=EXTERNAL (group_log) | "
         "ADDING_POSTS=direct-handler | "
         "SUPPORT_MODE=direct-handler | "
         "detectors-compat=v4.1.0 | "
         "commands=(cache_stats, db_idle, autoblocked) | "
-        "fixes=(C11, D3, D4, SUPPORT-1..3, ADDING-1, "
+        "fixes=(AL1-FOLLOWUP, AL1-FOLLOWUP-2, C11, D3, D4, "
+        "SUPPORT-1..3, ADDING-1, "
         "ROUTE-1, ROUTE-2, BWM-3, COL-1, EDIT-1, STATE-1, "
         "BUG-1..BUG-12)",
         "yes" if _HAS_BWM else "no",
         len(MessageHandlers._PRIVATE_HANDLERS_MAP),
+        len(_EXTERNAL_HANDLED_STATES),
     )
 except Exception:
     pass
