@@ -120,6 +120,8 @@
     "pool_live_btn": "🚀 Pool مباشر",
     "slow_queries_btn": "🐌 استعلامات بطيئة",
     "export_excel_btn": "📤 تصدير Excel",
+    "full_health_btn": "🏥 التشخيص الشامل",
+    "latency_btn": "🔬 اختبار الكمون",
     "refresh_btn": "🔄 تحديث",
     "unknown_report": "⚠️ غير معروف",
     "no_data_enough": "📭 بيانات غير كافية",
@@ -491,6 +493,8 @@
         ["pool_live_btn"],
         ["slow_queries_btn"],
         ["export_excel_btn"],
+        ["full_health_btn"],
+        ["latency_btn"],
         ["refresh_btn"],
         ["back"]
       ]
