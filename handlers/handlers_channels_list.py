@@ -2,34 +2,43 @@
 # -*- coding: utf-8 -*-
 
 """
-handlers_channels_list.py - واجهة قائمة القنوات مع حالتها (v2.1.6)
+handlers_channels_list.py - واجهة قائمة القنوات مع حالتها (v2.1.7)
 ================================================================================
-🆕 v2.1.6 (BACK-BUTTON-FIX):
-    🔴 FIX-BACK-1: pattern القائمة الرئيسية الآن **ديناميكي** — يقرأ
-        CB.MAIN + CB.BACK + CB.MENU + CB.HOME من utils.py عند التسجيل
-        ويضيفها إلى الأسماء الحرفية (main_menu|back|home|...).
-        السبب: `CB.BACK` في utils.py قد يكون مختلفاً عن "back" الحرفي،
-        و`KeyboardFactory` تستخدم `CB.BACK` في أزرار "الرجوع" →
-        كانت تسقط على CallbackHandlers.handle → "⚠️ غير متوفر"
-        إن لم تُطابق أي فرع.
+🆕 v2.1.7 (SECURITY-COMPLETENESS-FIX):
+    🔴 FIX-ESC-1: HTML escaping شامل — `_esc()` تُطبَّق على كل
+        حقل ديناميكي (channel_name, chat.title, ch_name) داخل
+        سلاسل parse_mode="HTML".
+        السبب: v2.1.6 كانت تُرسل أسماء القنوات الخام → كسر
+        parsing عند `<`, `>`, `&` في الاسم.
 
-    🔴 FIX-BACK-2: `back_to_main_menu_callback` أصبح أكثر صلابة:
-        • لا يحاول حذف رسالة إن كانت `query.message = None`.
-        • يُظهر القائمة في المحادثة **دائماً** (لا يتركها فارغة).
-        • logging أوضح عند فشل CommandHandlers.start.
+    🔴 FIX-STATE-1: `add_channel_redirect_callback` تُعيّن
+        `UserState.WAIT_CHANNEL` بعد `_clear_user_state`.
+        السبب: كان fallback (handlers_callback) يُعيّنها، بينما
+        primary لا → regression سلوكي.
 
+    🔴 FIX-STATE-2: `posts_add_callback` تُعيّن
+        `UserState.ADDING_POSTS`.
+        السبب: نفس المنطق — handlers_message يعتمد عليها.
+
+    🔴 FIX-DATE-1: `_format_date` تستخدم `TimeUtils.utc_to_mecca`
+        مع fallback آمن يتحقق من tz-aware.
+        السبب: `+timedelta(hours=3)` على dt tz-aware يعطي ساعة
+        خاطئة.
+
+    🔴 FIX-PATTERN-1: كل patterns ديناميكية من CB.* — نفس فكرة
+        FIX-BACK-1 في v2.1.6 لكن مُعمّمة.
+
+🆕 v2.1.6 (BACK-BUTTON-FIX) — محفوظ.
 🆕 v2.1.5 (UNIFIED-PREFIXES) — محفوظ.
 🆕 v2.1.4 (PTB-V20-MULTI-HANDLER-FIX) — محفوظ.
-🆕 v2.1.3 (UI-DEDUP + BANNED-TRUTHY + REGEX-FIX) — محفوظ.
-🆕 v2.1.2 (FIX-AL1) — محفوظ.
-🆕 v2.1.1 (REVIEW-FIXES) — محفوظ.
 ================================================================================
 """
 
 import functools
+import html as _html
 import logging
 import re
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
@@ -39,6 +48,31 @@ from telegram.ext import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+# =====================================================================
+# 🆕 v2.1.7 FIX-ESC-1: HTML escape helper
+# =====================================================================
+
+_CONTROL_CHARS_MAP = {i: ' ' for i in range(0x20)}
+_CONTROL_CHARS_MAP[0x7f] = ' '
+
+
+def _esc(value, default: str = "") -> str:
+    """
+    🆕 v2.1.7 FIX-ESC-1: تنظيف + escape للاستخدام داخل HTML.
+
+    - None/"" → default (بدون escape، للثقة).
+    - غير ذلك → إزالة control chars + html.escape.
+    """
+    if value is None or value == "":
+        return default
+    try:
+        return _html.escape(
+            str(value).translate(_CONTROL_CHARS_MAP)
+        )
+    except Exception:
+        return default
 
 
 # =====================================================================
@@ -121,7 +155,39 @@ except ImportError:
 
 
 # =====================================================================
-# 🆕 v2.1.6 FIX-BACK-1: بناء pattern ديناميكي للقائمة الرئيسية
+# 🆕 v2.1.7 FIX-PATTERN-1: helpers ديناميكية لبناء patterns
+# =====================================================================
+
+def _cb_value(attr: str, fallback: Optional[str] = None) -> Optional[str]:
+    """قراءة قيمة CB.* بأمان."""
+    if _CB_AVAILABLE and _CB_REF is not None:
+        try:
+            v = getattr(_CB_REF, attr, None)
+            if isinstance(v, str) and v:
+                return v
+        except Exception:
+            pass
+    return fallback
+
+
+def _build_exact_pattern(*literals: str) -> str:
+    """نمط مطابقة تامة: `^(name1|name2|...)$`."""
+    names = sorted({n for n in literals if isinstance(n, str) and n})
+    if not names:
+        return r"$^"  # لا يطابق شيئاً
+    return r"^(" + "|".join(re.escape(n) for n in names) + r")$"
+
+
+def _build_prefixed_pattern(*literals: str) -> str:
+    """نمط مع معامل: `^(name1|name2|...):`."""
+    names = sorted({n for n in literals if isinstance(n, str) and n})
+    if not names:
+        return r"$^"
+    return r"^(" + "|".join(re.escape(n) for n in names) + r"):"
+
+
+# =====================================================================
+# 🆕 v2.1.6 FIX-BACK-1 + v2.1.7 FIX-PATTERN-1: pattern القائمة الرئيسية
 # =====================================================================
 
 def _build_main_menu_pattern() -> str:
@@ -130,18 +196,14 @@ def _build_main_menu_pattern() -> str:
       • الأسماء الحرفية المعروفة (main_menu / back / home / ...).
       • قيم CB.MAIN / CB.BACK / CB.MENU / CB.HOME من utils.py.
 
-    السبب: `KeyboardFactory` تستخدم `CB.BACK` في أزرار الرجوع.
-    إذا كانت قيمة CB.BACK مختلفة عن "back" الحرفي، pattern الـ
-    v2.1.5 كان يفشل في مطابقتها.
-
-    الأمان: النتيجة `re.escape()` لكل عنصر — لا حقن regex.
+    الأمان: `re.escape()` لكل عنصر — لا حقن regex.
     """
     names = {
         "main_menu",
         "back_to_main",
         "back_to_main_menu",
         "home",
-        "back",              # CB.BACK المحتمل
+        "back",
         "menu",
         "start_menu",
     }
@@ -159,12 +221,9 @@ def _build_main_menu_pattern() -> str:
             except Exception:
                 continue
 
-    sorted_names = sorted(names)
-    escaped = [re.escape(n) for n in sorted_names]
-    pattern = r"^(" + "|".join(escaped) + r")$"
-
+    pattern = _build_exact_pattern(*names)
     logger.debug(
-        "🔍 [v2.1.6] main_menu pattern = %s | CB=%s",
+        "🔍 [v2.1.7] main_menu pattern = %s | CB=%s",
         pattern,
         "available" if _CB_AVAILABLE else "unavailable",
     )
@@ -172,6 +231,41 @@ def _build_main_menu_pattern() -> str:
 
 
 _MAIN_MENU_PATTERN = _build_main_menu_pattern()
+
+# 🆕 v2.1.7 FIX-PATTERN-1: أنماط ديناميكية لكل handler
+_CH_ADD_PATTERN = _build_exact_pattern(
+    "add_channel", "ch_add",
+    _cb_value("CH_ADD", "ch_add"),
+)
+_CH_LIST_PATTERN = _build_exact_pattern(
+    "ch_list",
+    _cb_value("CH_LIST", "ch_list"),
+)
+_POST_ADD_PATTERN = _build_exact_pattern(
+    "post_add", "posts_add",
+    _cb_value("POST_ADD", "post_add"),
+)
+_CH_SEL_PATTERN = _build_prefixed_pattern(
+    "ch_sel", "ch_select",
+    _cb_value("CH_SEL", "ch_sel"),
+)
+_CH_STATS_PATTERN = _build_prefixed_pattern(
+    "ch_stats", "ch_info",
+    _cb_value("CH_STATS", "ch_stats"),
+)
+_CH_DEL_PATTERN = _build_prefixed_pattern(
+    "ch_del", "ch_delete_execute",
+    _cb_value("CH_DEL", "ch_del"),
+)
+_CH_DEL_CONFIRM_PATTERN = _build_prefixed_pattern(
+    "ch_del_confirm", "ch_delete_confirm",
+)
+_CH_DEL_MENU_PATTERN = _build_exact_pattern(
+    "ch_del_menu", "ch_delete_menu",
+)
+_CH_RECYCLE_PATTERN = _build_prefixed_pattern("ch_recycle")
+_CH_SCHEDULE_PATTERN = _build_prefixed_pattern("ch_schedule")
+_CH_SCHED_SET_PATTERN = _build_prefixed_pattern("ch_sched_set")
 
 
 # =====================================================================
@@ -204,7 +298,6 @@ _CHANNEL_ADD_STATES = (
     "WAIT_ADD_CHANNEL",
     "WAIT_UPDATE_CH",
     "WAIT_UPDATE_CHANNEL",
-    # ✅ FIX-AL1: حُذف WAIT_LOG_CH
 )
 
 
@@ -271,6 +364,25 @@ def _clear_user_state(user_id: int) -> None:
         logger.debug(f"_clear_user_state({user_id}): {e}")
 
 
+def _set_user_state(user_id: int, state_value) -> bool:
+    """
+    🆕 v2.1.7 FIX-STATE-1/2: تعيين حالة بأمان.
+
+    Returns:
+        True إن نُفّذ التعيين، False إن كانت الحالة غير متاحة.
+    """
+    if not _STATE_AVAILABLE or StateManager is None:
+        return False
+    if state_value is None:
+        return False
+    try:
+        StateManager.set(user_id, state_value)
+        return True
+    except Exception as e:
+        logger.debug(f"_set_user_state({user_id}, {state_value}): {e}")
+        return False
+
+
 def _user_has_pending_state(user_id: int) -> bool:
     if not _STATE_AVAILABLE or StateManager is None:
         return False
@@ -305,6 +417,12 @@ async def _safe_answer(query, text: str = None, show_alert: bool = False) -> Non
 
 
 def _format_date(dt_value) -> str:
+    """
+    🆕 v2.1.7 FIX-DATE-1: تنسيق التاريخ بتوقيت مكة.
+
+    - يُفضّل `TimeUtils.utc_to_mecca` إن وُجد.
+    - fallback: يعالج tz-aware قبل الإضافة اليدوية.
+    """
     if not dt_value:
         return "غير محدد"
     if TimeUtils is None:
@@ -313,6 +431,18 @@ def _format_date(dt_value) -> str:
         dt = TimeUtils.safe_parse_iso(dt_value)
         if not dt:
             return "غير محدد"
+
+        # ✅ المسار المفضّل: TimeUtils.utc_to_mecca
+        utc_to_mecca = getattr(TimeUtils, "utc_to_mecca", None)
+        if callable(utc_to_mecca):
+            try:
+                return utc_to_mecca(dt).strftime("%Y-%m-%d %H:%M")
+            except Exception as e:
+                logger.debug(f"utc_to_mecca فشل، fallback: {e}")
+
+        # ⚠️ fallback آمن: تعامل مع tz-aware
+        if dt.tzinfo is not None:
+            dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
         local_dt = dt + timedelta(hours=3)
         return local_dt.strftime("%Y-%m-%d %H:%M")
     except Exception:
@@ -529,9 +659,11 @@ def _build_channels_text(channels, active_channel_id) -> str:
             status = ""
 
         badge = _short_channel_badge(ch)
-        badge_txt = f" <code>{badge}</code>" if badge else ""
+        # ✅ badge آمن (أرقام فقط) — لكن نُبقي _esc للاتساق
+        badge_txt = f" <code>{_esc(badge)}</code>" if badge else ""
 
-        safe_name = _truncate_name(name, max_len=22)
+        # 🆕 v2.1.7 FIX-ESC-1
+        safe_name = _esc(_truncate_name(name, max_len=22))
 
         lines.append(
             f"{icon} <b>{i}. {safe_name}</b>{badge_txt} {status}\n"
@@ -562,6 +694,7 @@ def _build_channels_keyboard(channels, active_channel_id):
         if badge:
             label = f"{label} {badge}"
 
+        # ملاحظة: أزرار InlineKeyboard لا تدعم HTML → لا حاجة لـ _esc
         keyboard.append([
             InlineKeyboardButton(
                 label,
@@ -667,11 +800,18 @@ async def _render_channel_info(query, user_id: int, ch_db_id: int) -> None:
         )
 
         badge = _short_channel_badge(ch)
-        badge_line = f"<b>البادج:</b> <code>{badge}</code>\n" if badge else ""
+        # 🆕 v2.1.7 FIX-ESC-1
+        badge_line = (
+            f"<b>البادج:</b> <code>{_esc(badge)}</code>\n" if badge else ""
+        )
+
+        # 🆕 v2.1.7 FIX-ESC-1
+        name_esc = _esc(name)
+        ch_telegram_id_esc = _esc(ch_telegram_id)
 
         text = (
-            f"📡 <b>{name}</b>\n\n"
-            f"<b>المعرف:</b> <code>{ch_telegram_id}</code>\n"
+            f"📡 <b>{name_esc}</b>\n\n"
+            f"<b>المعرف:</b> <code>{ch_telegram_id_esc}</code>\n"
             f"{badge_line}"
             f"<b>الحالة:</b> {status_icon}\n\n"
             f"<b>📊 الإحصائيات:</b>\n"
@@ -792,6 +932,7 @@ async def channel_delete_menu_callback(
         if badge:
             label = f"{label} {badge}"
 
+        # ملاحظة: زر InlineKeyboard لا يدعم HTML — لا حاجة لـ _esc
         buttons.append([
             InlineKeyboardButton(
                 label,
@@ -842,12 +983,14 @@ async def channel_delete_confirm_callback(
         stats = _row_to_dict(stats_raw)
 
         badge = _short_channel_badge(ch)
-        badge_line = f"  <code>{badge}</code>\n" if badge else ""
+        # 🆕 v2.1.7 FIX-ESC-1
+        badge_line = f"  <code>{_esc(badge)}</code>\n" if badge else ""
+        name_esc = _esc(name)
 
         text = (
             f"⚠️ <b>تأكيد الحذف</b>\n\n"
             f"هل أنت متأكد من حذف القناة:\n"
-            f"<b>{name}</b>\n"
+            f"<b>{name_esc}</b>\n"
             f"{badge_line}"
             f"\n<b>سيتم حذف:</b>\n"
             f"├ 📝 {_safe_int(stats.get('total'), 0)} منشور\n"
@@ -1085,22 +1228,15 @@ async def channel_schedule_set_callback(
 
 
 # =====================================================================
-# 7. الرجوع للقائمة الرئيسية (🆕 v2.1.6 مُحصَّن)
+# 7. الرجوع للقائمة الرئيسية (v2.1.6 مُحصَّن)
 # =====================================================================
 
 async def back_to_main_menu_callback(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ):
     """
-    🆕 v2.1.6 FIX-BACK-2: أصبح أكثر صلابة.
-
-    يستقبل: أي من الأسماء التي يبنيها _build_main_menu_pattern()
-    (main_menu | back | CB.MAIN | CB.BACK | ...).
-
-    الضمانات:
-      • لا يحاول حذف رسالة إن كانت None.
-      • يُظهر القائمة دائماً، حتى لو فشل CommandHandlers.start.
-      • logging واضح عند الفشل.
+    🆕 v2.1.6 FIX-BACK-2: أكثر صلابة.
+    🆕 v2.1.7: لم يتغير — يستفيد من pattern الديناميكي الجديد.
     """
     query = update.callback_query
     if query is None:
@@ -1109,14 +1245,12 @@ async def back_to_main_menu_callback(
 
     await _safe_answer(query)
 
-    # ─── حذف الرسالة الحالية (اختياري) ───
     try:
         if query.message is not None:
             await query.message.delete()
     except Exception as e:
         logger.debug(f"حذف الرسالة: {e}")
 
-    # ─── محاولة عرض القائمة عبر CommandHandlers.start ───
     _cmd_ok = False
     try:
         from handlers.handlers_command import CommandHandlers
@@ -1138,7 +1272,6 @@ async def back_to_main_menu_callback(
     if _cmd_ok:
         return
 
-    # ─── fallback: إرسال قائمة احتياطية ───
     try:
         await _send_main_menu_fallback(context, query.from_user.id)
     except Exception as e:
@@ -1181,6 +1314,11 @@ async def add_channel_redirect_callback(
     user_id = query.from_user.id
 
     _clear_user_state(user_id)
+    # 🆕 v2.1.7 FIX-STATE-1: تعيين WAIT_CHANNEL بعد clear
+    _set_user_state(
+        user_id,
+        getattr(UserState, "WAIT_CHANNEL", None) if UserState else None,
+    )
 
     if context.user_data is not None:
         context.user_data["awaiting_channel_add"] = True
@@ -1375,7 +1513,7 @@ async def add_channel_from_message(
 
             try:
                 processing_msg = await message.reply_text(
-                    f"⏳ جاري التحقق من <code>@{channel_username}</code>...",
+                    f"⏳ جاري التحقق من <code>@{_esc(channel_username)}</code>...",
                     parse_mode="HTML",
                 )
             except Exception:
@@ -1391,7 +1529,7 @@ async def add_channel_from_message(
                     f"❌ <b>لم أتمكن من الوصول للقناة</b>\n\n"
                     f"تأكد أن:\n"
                     f"• القناة موجودة\n"
-                    f"• المعرّف صحيح: <code>@{channel_username}</code>\n"
+                    f"• المعرّف صحيح: <code>@{_esc(channel_username)}</code>\n"
                     f"• القناة عامة (public)"
                 )
                 _mark_channel_add_handled(context)
@@ -1404,15 +1542,18 @@ async def add_channel_from_message(
                 bot_status = getattr(bot_member, "status", "")
 
                 if bot_status not in ("administrator", "creator"):
+                    # 🆕 v2.1.7 FIX-ESC-1
+                    chat_title_esc = _esc(chat.title)
+                    username_esc = _esc(channel_username)
                     await _edit_or_send(
                         processing_msg, message,
                         f"⚠️ <b>البوت ليس مشرفاً في القناة</b>\n\n"
-                        f"📌 القناة: <b>{chat.title}</b>\n\n"
+                        f"📌 القناة: <b>{chat_title_esc}</b>\n\n"
                         f"<b>الحل:</b>\n"
                         f"1. أضف البوت إلى القناة\n"
                         f"2. ارقِّه إلى <b>مشرف</b>\n"
                         f"3. امنحه صلاحية <b>نشر الرسائل</b>\n"
-                        f"4. أعد إرسال <code>@{channel_username}</code>"
+                        f"4. أعد إرسال <code>@{username_esc}</code>"
                     )
                     _mark_channel_add_handled(context)
                     _clear_user_state(user_id)
@@ -1469,11 +1610,16 @@ async def add_channel_from_message(
                 posts_count = _safe_int(
                     (result_d.get("posts_count") if result_d else 0), 0)
 
+                # 🆕 v2.1.7 FIX-ESC-1
+                channel_name_esc = _esc(channel_name)
+                chat_id_esc = _esc(chat.id)
+                username_esc = _esc(channel_username)
+
                 success_text = (
                     f"✅ <b>تم إضافة القناة بنجاح!</b>\n\n"
-                    f"📡 <b>{channel_name}</b>\n"
-                    f"🆔 <code>{chat.id}</code>\n"
-                    f"🔗 @{channel_username}\n\n"
+                    f"📡 <b>{channel_name_esc}</b>\n"
+                    f"🆔 <code>{chat_id_esc}</code>\n"
+                    f"🔗 @{username_esc}\n\n"
                     f"📥 منشورات موجودة: {posts_count}\n"
                     f"🟢 تم تعيينها <b>القناة النشطة</b>"
                 )
@@ -1586,6 +1732,12 @@ async def posts_add_callback(
     user_id = query.from_user.id
     await _safe_answer(query)
 
+    # 🆕 v2.1.7 FIX-STATE-2: تعيين ADDING_POSTS
+    _set_user_state(
+        user_id,
+        getattr(UserState, "ADDING_POSTS", None) if UserState else None,
+    )
+
     ch_name = None
     try:
         row = await DB.fetchone(
@@ -1604,9 +1756,11 @@ async def posts_add_callback(
         logger.error(f"posts_add_callback query: {e}")
 
     if ch_name:
+        # 🆕 v2.1.7 FIX-ESC-1
+        ch_name_esc = _esc(ch_name)
         text = (
             f"➕ <b>إضافة منشورات</b>\n\n"
-            f"📡 القناة النشطة: <b>{ch_name}</b>\n\n"
+            f"📡 القناة النشطة: <b>{ch_name_esc}</b>\n\n"
             f"<b>📌 طرق الإضافة:</b>\n"
             f"• أرسل <b>نص</b> مباشرة في المحادثة\n"
             f"• أرسل <b>صورة/فيديو/ملف</b> مع تعليق\n"
@@ -1614,6 +1768,8 @@ async def posts_add_callback(
             f"💡 <i>ابدأ بإرسال المحتوى الآن</i>"
         )
     else:
+        # لا قناة نشطة → امسح ADDING_POSTS (لا معنى للـ state)
+        _clear_user_state(user_id)
         text = (
             "⚠️ <b>لا توجد قناة نشطة</b>\n\n"
             "اختر قناة أولاً من قائمة قنواتك."
@@ -1648,16 +1804,16 @@ def register_channels_list_handlers(application):
     """
     تسجيل كل handlers قائمة القنوات.
 
-    🆕 v2.1.6 — FIX-BACK-1:
-        pattern الـ "back to main menu" الآن ديناميكي (يقرأ CB.MAIN
-        + CB.BACK + الأسماء الحرفية). هذا يحلّ مشكلة "زر الرجوع غير
-        معروف" عندما تكون `CB.BACK` قيمة مختلفة عن "back".
+    🆕 v2.1.7 FIX-PATTERN-1:
+        كل patterns ديناميكية من CB.* — نفس فكرة v2.1.6 لكن
+        مُعمَّمة على كل الأزرار، لا القائمة فقط.
 
+    🆕 v2.1.6 — FIX-BACK-1 (محفوظ).
     🆕 v2.1.5 — UNIFIED-PREFIXES (محفوظ).
     🆕 v2.1.4 — FIX-CB1 (محفوظ).
     """
     try:
-        # ═══ الرجوع للقائمة الرئيسية (pattern ديناميكي) ═══
+        # ═══ الرجوع للقائمة الرئيسية ═══
         application.add_handler(
             CallbackQueryHandler(
                 _stop_after(back_to_main_menu_callback),
@@ -1665,7 +1821,7 @@ def register_channels_list_handlers(application):
             )
         )
         logger.info(
-            "✅ [v2.1.6] back-to-main pattern = %s",
+            "✅ [v2.1.7] back-to-main pattern = %s",
             _MAIN_MENU_PATTERN,
         )
 
@@ -1673,7 +1829,7 @@ def register_channels_list_handlers(application):
         application.add_handler(
             CallbackQueryHandler(
                 _stop_after(add_channel_redirect_callback),
-                pattern=r"^(add_channel|ch_add)$"
+                pattern=_CH_ADD_PATTERN,
             )
         )
 
@@ -1681,7 +1837,7 @@ def register_channels_list_handlers(application):
         application.add_handler(
             CallbackQueryHandler(
                 _stop_after(posts_add_callback),
-                pattern=r"^(post_add|posts_add)$"
+                pattern=_POST_ADD_PATTERN,
             )
         )
 
@@ -1689,7 +1845,7 @@ def register_channels_list_handlers(application):
         application.add_handler(
             CallbackQueryHandler(
                 _stop_after(show_channels_list),
-                pattern=r"^ch_list$"
+                pattern=_CH_LIST_PATTERN,
             )
         )
 
@@ -1697,13 +1853,13 @@ def register_channels_list_handlers(application):
         application.add_handler(
             CallbackQueryHandler(
                 _stop_after(channel_select_callback),
-                pattern=r"^(ch_sel|ch_select):"
+                pattern=_CH_SEL_PATTERN,
             )
         )
         application.add_handler(
             CallbackQueryHandler(
                 _stop_after(channel_info_callback),
-                pattern=r"^(ch_stats|ch_info):"
+                pattern=_CH_STATS_PATTERN,
             )
         )
 
@@ -1711,19 +1867,19 @@ def register_channels_list_handlers(application):
         application.add_handler(
             CallbackQueryHandler(
                 _stop_after(channel_delete_menu_callback),
-                pattern=r"^(ch_del_menu|ch_delete_menu)$"
+                pattern=_CH_DEL_MENU_PATTERN,
             )
         )
         application.add_handler(
             CallbackQueryHandler(
                 _stop_after(channel_delete_confirm_callback),
-                pattern=r"^(ch_del_confirm|ch_delete_confirm):"
+                pattern=_CH_DEL_CONFIRM_PATTERN,
             )
         )
         application.add_handler(
             CallbackQueryHandler(
                 _stop_after(channel_delete_execute_callback),
-                pattern=r"^(ch_del|ch_delete_execute):"
+                pattern=_CH_DEL_PATTERN,
             )
         )
 
@@ -1731,7 +1887,7 @@ def register_channels_list_handlers(application):
         application.add_handler(
             CallbackQueryHandler(
                 _stop_after(channel_recycle_callback),
-                pattern=r"^ch_recycle:"
+                pattern=_CH_RECYCLE_PATTERN,
             )
         )
 
@@ -1739,13 +1895,13 @@ def register_channels_list_handlers(application):
         application.add_handler(
             CallbackQueryHandler(
                 _stop_after(channel_schedule_callback),
-                pattern=r"^ch_schedule:"
+                pattern=_CH_SCHEDULE_PATTERN,
             )
         )
         application.add_handler(
             CallbackQueryHandler(
                 _stop_after(channel_schedule_set_callback),
-                pattern=r"^ch_sched_set:"
+                pattern=_CH_SCHED_SET_PATTERN,
             )
         )
 
@@ -1762,9 +1918,9 @@ def register_channels_list_handlers(application):
         )
 
         logger.info(
-            "✅ تم تسجيل handlers قائمة القنوات (v2.1.6 — "
-            "BACK-BUTTON-FIX + UNIFIED-PREFIXES + "
-            "PTB-V20-MULTI-HANDLER-FIX)"
+            "✅ تم تسجيل handlers قائمة القنوات (v2.1.7 — "
+            "SECURITY-COMPLETENESS-FIX + BACK-BUTTON-FIX + "
+            "UNIFIED-PREFIXES + PTB-V20-MULTI-HANDLER-FIX)"
         )
         return True
     except Exception as e:
@@ -1800,6 +1956,22 @@ __all__ = [
     "_build_main_menu_pattern",
     "_MAIN_MENU_PATTERN",
     "_CHANNEL_ADD_STATES",
+    # 🆕 v2.1.7
+    "_esc",
+    "_cb_value",
+    "_build_exact_pattern",
+    "_build_prefixed_pattern",
+    "_CH_ADD_PATTERN",
+    "_CH_LIST_PATTERN",
+    "_POST_ADD_PATTERN",
+    "_CH_SEL_PATTERN",
+    "_CH_STATS_PATTERN",
+    "_CH_DEL_PATTERN",
+    "_CH_DEL_CONFIRM_PATTERN",
+    "_CH_DEL_MENU_PATTERN",
+    "_CH_RECYCLE_PATTERN",
+    "_CH_SCHEDULE_PATTERN",
+    "_CH_SCHED_SET_PATTERN",
 ]
 
 
@@ -1809,15 +1981,21 @@ __all__ = [
 
 try:
     logger.info(
-        "✅ handlers_channels_list v2.1.6 loaded | "
-        "fixes=(BACK-BUTTON-FIX + UNIFIED-PREFIXES + "
-        "PTB-V20-MULTI-HANDLER-FIX + UI-DEDUP + BANNED-TRUTHY + "
-        "REGEX-FIX + URL-QUERY-SUPPORT) | "
+        "✅ handlers_channels_list v2.1.7 loaded | "
+        "fixes=(SECURITY-COMPLETENESS-FIX + BACK-BUTTON-FIX + "
+        "UNIFIED-PREFIXES + PTB-V20-MULTI-HANDLER-FIX + "
+        "UI-DEDUP + BANNED-TRUTHY + REGEX-FIX + URL-QUERY-SUPPORT) | "
         "main_menu_pattern=%s | "
+        "ch_add_pattern=%s | "
+        "ch_list_pattern=%s | "
         "stop_after=wraps-all-callbacks | "
-        "WAIT-LOG-CH=excluded-from-add-states | "
+        "html_escape=applied-everywhere | "
+        "states=(WAIT_CHANNEL+ADDING_POSTS) | "
+        "date=utc_to_mecca-with-tz-aware-fallback | "
         "CB_module=%s | row_to_dict=%s",
         _MAIN_MENU_PATTERN,
+        _CH_ADD_PATTERN,
+        _CH_LIST_PATTERN,
         "available" if _CB_AVAILABLE else "unavailable",
         "shared" if _HAS_SHARED_ROW_TO_DICT else "fallback",
     )
