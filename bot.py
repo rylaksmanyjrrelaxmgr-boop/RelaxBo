@@ -2,41 +2,24 @@
 # -*- coding: utf-8 -*-
 
 """
-🌿 Relax Manager – البوت الرئيسي (bot.py v5.6.21-FIX-BUNDLE)
+🌿 Relax Manager – البوت الرئيسي (bot.py v5.6.22-FULLHEALTH)
 ================================================================================
 📌 نقطة الدخول الرسمية للتطبيق (entrypoint).
 
+🆕 v5.6.22 (FULLHEALTH-COMMANDS):
+    🔴 FIX-AN2: تسجيل /fullhealth + /latency كأوامر مباشرة
+        (كانت معرّفة في handlers_analytics لكن غير مُسجَّلة هنا).
+    🔴 FIX-AN3: توسيع regex الـ CallbackQueryHandler ليشمل
+        full_health_btn + latency_btn.
+    🟡 FIX-AN4: سجل إقلاع يوضّح حالة full_health_btn + latency_btn.
+
 🆕 v5.6.21 (FIX-BUNDLE):
-    🔴 FIX-AN1-FOLLOWUP: منع تنفيذ CallbackHandlers.handle مرتين
-              (NAV_FIX v3.3.0 يستدعيه داخليًا — لا نُسجّله في bot.py
-              إلا إذا كان NAV_FIX غير متاح).
-    🔴 FIX-C8/B1: _PM_QUERY_TTL = 290.0 (كان 240 — كاش ميت).
-    🔴 FIX-C9/B13: keep_alive — while True عند غياب URL
-              (منع log spam 51840 سطر/يوم).
-    🔴 FIX-AM1: stop_auto_vacuum_task — متغير + استرجاع + استدعاء
-              (إغلاق نظيف لمهمة VACUUM).
-    🟡 FIX-5: _NAV_FIX_AVAILABLE — import آمن لـ register_nav_fix.
+    🔴 FIX-AN1-FOLLOWUP: منع تنفيذ CallbackHandlers.handle مرتين.
+    🔴 FIX-C8/B1: _PM_QUERY_TTL = 290.0.
+    🔴 FIX-C9/B13: keep_alive — while True عند غياب URL.
+    🔴 FIX-AM1: stop_auto_vacuum_task.
+    🟡 FIX-5: _NAV_FIX_AVAILABLE.
     🟡 FIX-U26: migrate_reminders_columns بعد pre_initialize.
-
-🆕 v5.6.20 (PERF-POOL-CACHE):
-    🟢 PERF-5: cache 240s لاستعلام pg_stat_activity في pool_health_monitor.
-    🟢 PERF-6: تتبع تلقائي للاستعلامات البطيئة.
-    🟡 PERF-7: تحديث Load Beacon + سجل الإقلاع.
-
-🆕 v5.6.19 (PERF-WARMUP):
-    🟢 PERF-4: Warmup Telegram API — await app.bot.get_me().
-
-🆕 v5.6.18 (PERF-FIXES):
-    🟢 PERF-1: keep_alive — الفاصل 180s + KEEP_ALIVE_URL.
-    🟢 PERF-2: سجل تشخيصي لقيم الأداء.
-    🟢 PERF-3: رسالة Cron-job.org.
-
-🆕 v5.6.17 (ROBUST-MAINT-IMPORT):
-    🟢 PATCH-1: استيراد مرن لـ db_maintenance_commands (5 أسماء).
-    🟢 PATCH-2: رسالة خطأ مُفصَّلة.
-
-🆕 v5.6.16 (ANALYTICS-HANDLERS-FIX):
-    🟢 PATCH-1..4: استيراد analytics + تسجيل 2 CallbackQueryHandler.
 ================================================================================
 """
 
@@ -133,31 +116,60 @@ except ImportError as _e1:
                 )
 
 # ═════════════════════════════════════════════════════════════════════
-# handlers_analytics — استيراد آمن
+# handlers_analytics — استيراد آمن + v5.6.22: cmd_fullhealth + cmd_latency
 # ═════════════════════════════════════════════════════════════════════
 _ANALYTICS_HANDLERS_AVAILABLE = False
 _ANALYTICS_HANDLERS_IMPORT_ERROR = None
 _handle_analytics_callback = None
 _show_analytics_menu = None
+# 🆕 v5.6.22: دوال الأوامر المباشرة
+_cmd_fullhealth = None
+_cmd_latency = None
 
 try:
     from handlers.handlers_analytics import (
         handle_analytics_callback as _handle_analytics_callback,
         show_analytics_menu as _show_analytics_menu,
+        cmd_fullhealth as _cmd_fullhealth_imported,
+        cmd_latency as _cmd_latency_imported,
     )
+    _cmd_fullhealth = _cmd_fullhealth_imported
+    _cmd_latency = _cmd_latency_imported
     _ANALYTICS_HANDLERS_AVAILABLE = True
 except ImportError as _e_an1:
     try:
         from handlers_analytics import (  # type: ignore
             handle_analytics_callback as _handle_analytics_callback,
             show_analytics_menu as _show_analytics_menu,
+            cmd_fullhealth as _cmd_fullhealth_imported,
+            cmd_latency as _cmd_latency_imported,
         )
+        _cmd_fullhealth = _cmd_fullhealth_imported
+        _cmd_latency = _cmd_latency_imported
         _ANALYTICS_HANDLERS_AVAILABLE = True
     except ImportError as _e_an2:
-        _handle_analytics_callback = None
-        _show_analytics_menu = None
-        _ANALYTICS_HANDLERS_AVAILABLE = False
-        _ANALYTICS_HANDLERS_IMPORT_ERROR = f"{_e_an1} | {_e_an2}"
+        # fallback: استيراد بدون الأوامر المباشرة (نسخ قديمة)
+        try:
+            from handlers.handlers_analytics import (
+                handle_analytics_callback as _handle_analytics_callback,
+                show_analytics_menu as _show_analytics_menu,
+            )
+            _ANALYTICS_HANDLERS_AVAILABLE = True
+            _cmd_fullhealth = None
+            _cmd_latency = None
+            _ANALYTICS_HANDLERS_IMPORT_ERROR = (
+                f"handlers_analytics محمّل لكن cmd_fullhealth/cmd_latency "
+                f"مفقودة (v1.1.1 أقدم؟). {_e_an1} | {_e_an2}"
+            )
+        except ImportError as _e_an3:
+            _handle_analytics_callback = None
+            _show_analytics_menu = None
+            _cmd_fullhealth = None
+            _cmd_latency = None
+            _ANALYTICS_HANDLERS_AVAILABLE = False
+            _ANALYTICS_HANDLERS_IMPORT_ERROR = (
+                f"{_e_an1} | {_e_an2} | {_e_an3}"
+            )
 
 # ═════════════════════════════════════════════════════════════════════
 # فحص محرك كشف السبام
@@ -393,7 +405,6 @@ except ImportError as _e_cs1:
 register_maintenance_commands = None
 start_weekly_diagnostic_task = None
 stop_weekly_diagnostic_task = None
-# ✅ FIX-AM1 (v5.6.21): متغيّر جديد لإيقاف مهمة VACUUM التلقائية
 stop_auto_vacuum_task = None
 _MAINT_CMDS_AVAILABLE = False
 _MAINT_CMDS_IMPORT_ERROR = None
@@ -433,7 +444,6 @@ if _mod_import_ok:
     except Exception:
         stop_weekly_diagnostic_task = None
 
-    # ✅ FIX-AM1 (v5.6.21): استرجاع stop_auto_vacuum_task
     try:
         stop_auto_vacuum_task = getattr(
             _maint_mod, "stop_auto_vacuum_task", None
@@ -566,20 +576,15 @@ _DIAG_INCOMING = os.getenv("DIAG_INCOMING", "0").strip().lower() in (
     "1", "true", "yes", "on", "enabled",
 )
 
-# 🆕 PERF-1: فاصل keep_alive (3 دقائق بدل 5)
 _KEEP_ALIVE_INTERVAL_SEC = 180.0
 _KEEP_ALIVE_INITIAL_DELAY = 30.0
 
-# 🆕 PERF-4: Warmup Telegram API timeout
 _TG_WARMUP_TIMEOUT = 10.0
 
-# ✅ FIX-C8/B1 (v5.6.21): TTL يجب أن يكون أكبر من الفاصل بين الاستدعاءات
-# (pool_health_monitor يستدعي كل 300s) — وإلا الكاش لا يعمل أبدًا.
-# مع 240 → الكاش ميت. مع 290 → الكاش يعمل ويوفّر ~0.27s كل دورة.
-_PM_QUERY_TTL = 290.0  # 300 - 10s هامش أمان
+_PM_QUERY_TTL = 290.0
 _pm_last_query_ts = 0.0
 _pm_last_query_result: Optional[Dict[str, Any]] = None
-_pm_slow_query_warned = False  # 🆕 PERF-6
+_pm_slow_query_warned = False
 
 # ═══════════════════════════════════════════════════════════════════
 # مساعد مقارنة المبالغ
@@ -623,16 +628,7 @@ def _spawn_notify_dev_log(context, text: str) -> None:
 # ═══════════════════════════════════════════════════════════════════
 
 async def _warmup_telegram_api(app: Application) -> bool:
-    """
-    🆕 PERF-4: تحمية اتصال Telegram API بعد app.initialize().
-
-    الفائدة:
-      - يقصّر أول send_message من ~900ms إلى ~250ms.
-      - يُهيّئ Connection Pool الداخلي لـ PTB.
-      - يكتشف مبكراً أي مشاكل في التوكن أو الاتصال.
-
-    يعيد True عند النجاح، False عند الفشل.
-    """
+    """تحمية اتصال Telegram API بعد app.initialize()."""
     t_warm = time.monotonic()
     try:
         me = await asyncio.wait_for(
@@ -1035,7 +1031,6 @@ else:
         _CH_DELETE_IMPORT_ERROR or "unknown",
     )
 
-# ✅ FIX-5: إشعار حالة NAV_FIX
 if _NAV_FIX_AVAILABLE:
     logger.info(
         "✅ handlers_nav_fix متاح — delegation mode مُفعّل"
@@ -1078,11 +1073,25 @@ else:
         "يتطلب handlers_message.py v7.18.18+"
     )
 
+# 🆕 v5.6.22: سجل أوسع لحالة handlers_analytics
 if _ANALYTICS_HANDLERS_AVAILABLE:
-    logger.info(
-        "✅ handlers_analytics متاح — "
-        "أزرار التحليلات المتقدمة (10 معالجات) جاهزة"
+    _an_extras = []
+    if _cmd_fullhealth is not None:
+        _an_extras.append("/fullhealth")
+    if _cmd_latency is not None:
+        _an_extras.append("/latency")
+    _an_extras_label = (
+        " + " + " + ".join(_an_extras) if _an_extras else ""
     )
+    logger.info(
+        "✅ handlers_analytics متاح — 12 معالج%s",
+        _an_extras_label,
+    )
+    if _cmd_fullhealth is None or _cmd_latency is None:
+        logger.warning(
+            "⚠️ handlers_analytics محمّل لكن /fullhealth و/أو /latency "
+            "مفقودة — تأكد من v1.2.0+"
+        )
 else:
     logger.warning(
         "⚠️ handlers_analytics غير متاح — "
@@ -1093,7 +1102,6 @@ else:
 _log_spam_detector_status()
 _log_security_bridge_status()
 
-# 🆕 PERF-2: سجل قيم الأداء
 _log_perf_tuning_status()
 
 # ═══════════════════════════════════════════════════════════════════
@@ -1158,6 +1166,9 @@ ADMIN_COMMANDS = [
     ("autoblocked", "🚫 المصادر المحجوبة تلقائياً"),
     ("db_idle", "🔍 تدقيق idle-in-transaction"),
     ("cache_stats", "📊 إحصائيات الكاش الحية"),
+    # 🆕 v5.6.22: أوامر التشخيص الشامل + الكمون
+    ("fullhealth", "🏥 التشخيص الشامل"),
+    ("latency", "🔬 اختبار الكمون"),
 ]
 
 GROUP_COMMANDS = [
@@ -1942,11 +1953,7 @@ async def health_check(request):
     return web.Response(text="OK", status=200)
 
 async def keep_alive():
-    """
-    🆕 v5.6.18 PERF-1: keep_alive محسّن.
-    ✅ FIX-C9/B13 (v5.6.21): عند غياب URL — ننام إلى الأبد بدل return
-       (منع run_task_with_retry من إعادة التشغيل كل 5s → log spam).
-    """
+    """keep_alive محسّن."""
     try:
         await asyncio.sleep(_KEEP_ALIVE_INITIAL_DELAY)
     except asyncio.CancelledError:
@@ -1967,11 +1974,9 @@ async def keep_alive():
             "💡 الحل الموصى به: استخدم Cron-job.org (خارجي) "
             "على https://<your-app>.onrender.com/health كل 5 دقائق."
         )
-        # ✅ FIX-C9/B13: لا نخرج — ننام إلى الأبد لتجنّب
-        # run_task_with_retry إعادة التشغيل كل 5s (log spam).
         while True:
             try:
-                await asyncio.sleep(86400)  # 24 ساعة
+                await asyncio.sleep(86400)
             except asyncio.CancelledError:
                 logger.info("🛑 keep_alive (disabled) أُلغي")
                 raise
@@ -2098,13 +2103,8 @@ async def _fetch_pool_data(total: int, active: int) -> Optional[Dict[str, Any]]:
 
     return None
 
-# 🆕 v5.6.20 PERF-5: cache + قياس تلقائي
 async def _fetch_pg_activity_cached() -> Dict[str, Any]:
-    """
-    🆕 PERF-5: كاش 290s لاستعلام pg_stat_activity.
-       ✅ FIX-C8/B1 (v5.6.21): TTL=290 أكبر من دورة الاستدعاء (300s)
-       — وإلا الكاش لا يعمل أبدًا.
-    """
+    """كاش 290s لاستعلام pg_stat_activity."""
     global _pm_last_query_ts, _pm_last_query_result, _pm_slow_query_warned
 
     now = time.monotonic()
@@ -2163,9 +2163,7 @@ async def _fetch_pg_activity_cached() -> Dict[str, Any]:
     return data
 
 async def pool_health_monitor() -> None:
-    """
-    🆕 v5.6.20 PERF-5: يستخدم _fetch_pg_activity_cached (كاش 290s).
-    """
+    """مراقب Pool."""
     _task_start_mono = time.monotonic()
     _idle_tx_streak = 0
     _last_details_dump_mono = 0.0
@@ -2706,9 +2704,10 @@ async def main():
     logger.info("👨‍💼 المالك: %s", CONFIG.PRIMARY_OWNER_ID)
 
     logger.info(
-        "📦 bot.py: v5.6.21 | "
+        "📦 bot.py: v5.6.22 | "
         "detectors=%s | layers=%d | helpers=%s | "
-        "db_idle=%s | cache_stats=%s | analytics=%s | maint_cmds=%s | "
+        "db_idle=%s | cache_stats=%s | analytics=%s | "
+        "fullhealth=%s | latency=%s | maint_cmds=%s | "
         "pool_cache_ttl=%ds | nav_fix=%s",
         _SPAM_DETECTOR_VERSION or "N/A",
         _SPAM_DETECTOR_LAYERS_COUNT,
@@ -2723,6 +2722,8 @@ async def main():
         "yes" if _HAS_DB_IDLE_CMD else "no",
         "yes" if _HAS_CACHE_STATS_CMD else "no",
         "yes" if _ANALYTICS_HANDLERS_AVAILABLE else "no",
+        "yes" if _cmd_fullhealth is not None else "no",
+        "yes" if _cmd_latency is not None else "no",
         "yes" if _MAINT_CMDS_AVAILABLE else "no",
         int(_PM_QUERY_TTL),
         "yes" if _NAV_FIX_AVAILABLE else "no",
@@ -2761,9 +2762,6 @@ async def main():
         time.monotonic() - t0,
     )
 
-    # ✅ FIX-U26 (v5.6.21): استدعاء migrate_reminders_columns بعد pre_initialize
-    # لضمان وجود أعمدة last_daily_sent/last_weekly_sent/last_subscription_sent
-    # على قواعد البيانات القديمة (v1.1-).
     try:
         if hasattr(DB, "migrate_reminders_columns"):
             await DB.migrate_reminders_columns()
@@ -3070,6 +3068,44 @@ async def main():
             "يتطلب handlers_message v7.18.18+"
         )
 
+    # 🆕 v5.6.22: تسجيل /fullhealth + /latency
+    if _cmd_fullhealth is not None:
+        try:
+            app.add_handler(CommandHandler(
+                "fullhealth", _cmd_fullhealth
+            ))
+            logger.info(
+                "✅ /fullhealth مُسجَّل — التشخيص الشامل "
+                "(شبكة + DB + CPU + RAM + event loop + قرص)"
+            )
+        except Exception as _e:
+            logger.error(
+                "❌ فشل تسجيل /fullhealth: %s", _e, exc_info=True
+            )
+    else:
+        logger.warning(
+            "⚠️ /fullhealth غير مُسجَّل — "
+            "cmd_fullhealth غير متاح (handlers_analytics v1.1.1 أقدم؟)"
+        )
+
+    if _cmd_latency is not None:
+        try:
+            app.add_handler(CommandHandler(
+                "latency", _cmd_latency
+            ))
+            logger.info(
+                "✅ /latency مُسجَّل — اختبار كمون الشبكة/DB"
+            )
+        except Exception as _e:
+            logger.error(
+                "❌ فشل تسجيل /latency: %s", _e, exc_info=True
+            )
+    else:
+        logger.warning(
+            "⚠️ /latency غير مُسجَّل — "
+            "cmd_latency غير متاح (handlers_analytics v1.1.1 أقدم؟)"
+        )
+
     if hasattr(MessageHandlers, "handle_cancel"):
         try:
             app.add_handler(
@@ -3161,6 +3197,7 @@ async def main():
     else:
         logger.warning("⚠️ group_log غير متاح — زر قناة السجل لن يعمل")
 
+    # 🆕 v5.6.22: توسيع regex ليشمل full_health_btn + latency_btn
     if _ANALYTICS_HANDLERS_AVAILABLE and \
        _show_analytics_menu is not None and \
        _handle_analytics_callback is not None:
@@ -3174,12 +3211,14 @@ async def main():
                 pattern=(
                     r"^(growth_30d_btn|top_channels_btn|publish_stats_btn|"
                     r"channels_rate_btn|subscriptions_btn|pool_live_btn|"
-                    r"slow_queries_btn|export_excel_btn|refresh_btn)$"
+                    r"slow_queries_btn|export_excel_btn|"
+                    r"full_health_btn|latency_btn|"
+                    r"refresh_btn)$"
                 ),
             ))
             logger.info(
-                "✅ handlers_analytics: 10 معالج مسجّل "
-                "(admin_analytics + 9 أزرار التقرير)"
+                "✅ handlers_analytics: 12 معالج مسجّل "
+                "(admin_analytics + 11 زر تقرير)"
             )
         except Exception as _e:
             logger.error(
@@ -3193,13 +3232,6 @@ async def main():
             _ANALYTICS_HANDLERS_IMPORT_ERROR or "unknown",
         )
 
-    # ✅ FIX-AN1-FOLLOWUP (v5.6.21): لا نُسجّل CallbackHandlers.handle هنا —
-    # NAV_FIX (group=-99) يستدعيه داخليًا. تسجيله هنا يُسبب تنفيذًا مزدوجًا
-    # لكل ضغطة زر (double execution).
-    #
-    # ملاحظة: NAV_FIX مُسجَّل في bot.py بترتيب يضمن استدعاءه أولًا:
-    #   register_nav_fix(app)  ← يُسجّل group=-99
-    # إذا فشل استيراد handlers_nav_fix، يجب تفعيل التسجيل الاحتياطي:
     if not _NAV_FIX_AVAILABLE:
         app.add_handler(CallbackQueryHandler(CallbackHandlers.handle))
         logger.warning(
@@ -3508,7 +3540,6 @@ async def main():
             except Exception as _e:
                 logger.debug("stop_weekly_diagnostic_task: %s", _e)
 
-        # ✅ FIX-AM1 (v5.6.21): إيقاف مهمة VACUUM التلقائية
         if _MAINT_CMDS_AVAILABLE and callable(stop_auto_vacuum_task):
             try:
                 await stop_auto_vacuum_task(timeout=3.0)
