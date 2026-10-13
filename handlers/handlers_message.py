@@ -1,56 +1,41 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-handlers_message.py - v7.18.34 (POLISH-1)
+handlers_message.py - v7.18.35 (POLISH-1-COMPLETE)
 (متوافق مع detectors v4.1.0 + banned_words_manager v1.2.0)
 =============================================================================
-🆕 v7.18.34 (POLISH-1):
-    🔴 POLISH-1: penalty_duration_* — جسر فعلي بين الكتابة والقراءة.
-        _handle_wait_penalty_duration_text يكتب في DB.set_setting،
-        الآن _resolve_penalty يقرأ منه عبر كاش 60s + fallback.
-        بدون هذا: المستخدم يُدخل المدة، تُحفظ، لكن لا تُطبَّق أبداً.
+🆕 v7.18.35 (POLISH-1-COMPLETE) — تحسينات مكمّلة:
+    🟠 POLISH-2-COMPLETE: كاش ars محلي (_ars_local_cache, 5s TTL).
+        الآن المجموعات الجديدة (بلا صفوف) لا تُنفّذ PG query كل رسالة.
+        قبل: sec_ready=True, ars_ready=False (SmartCache فارغ) → PG.
+        بعد: كلاهما ready → return فوري.
+        دمج: get_auto_reply_settings_cached + invalidate + prune.
 
-    🟠 POLISH-2: كاش {} للمجموعات الفارغة (لا صف في DB).
-        بدون هذا: كل رسالة لمجموعة جديدة تُنفّذ BATCH query.
-        الآن: تُخزَّن {} في _sec_settings_local_cache (5s TTL).
+    🟡 POLISH-9: DB.execute يُعيد None عند نجاح الحذف في بعض المكتبات
+        → نعتبره نجاحاً (لا نُضلّل المستخدم بـ"غير موجود").
 
-    🟠 POLISH-3: asyncio.gather لـ set_security + set_auto_reply_settings
-        (كتابة متوازية للـSmartCache).
+    🟡 POLISH-10: توثيق صريح لنطاق _get_penalty_duration_override
+        (عالمي — مفتاح penalty_duration_{ptype} مشترك).
 
-    🟠 POLISH-4: stored يعتمد على نتيجة set_setting الفعلية.
-        (كان: stored=True دائماً — حتى لو فشل الحفظ).
+    🟡 POLISH-11: توثيق صريح لترتيب الأسبقية في _resolve_penalty
+        (settings → override → override يفوز).
 
-    🟠 POLISH-5: WAIT_AUTO_DEL يحفظ الحالة عند فشل DB فقط.
-        (نجاح/غير-موجود → مسح. خطأ استثنائي → إبقاء لإعادة المحاولة).
+🆕 v7.18.34 (POLISH-1) — محفوظة:
+    🔴 POLISH-1: جسر penalty_duration_* (يكتب→كاش→يقرأ).
+    🟠 POLISH-2: كاش {} للمجموعات الفارغة (بسيط).
+    🟠 POLISH-3: asyncio.gather لكتابة الكاش.
+    🟠 POLISH-4: stored يعتمد على نتيجة set_setting.
+    🟠 POLISH-5: WAIT_AUTO_DEL — إبقاء الحالة عند فشل استثنائي.
+    🟡 POLISH-6: _is_dev_user helper موحّد.
+    🟡 POLISH-7: logger.warning عند غياب دوال DB.import_*.
+    🟡 POLISH-8: توثيق _EXTERNAL_HANDLED_STATES.
 
-    🟡 POLISH-6: _is_dev_user helper موحّد (كان مُكرَّراً 5 مرات).
+🆕 v7.18.33 (BATCH-SETTINGS) — محفوظة:
+    ⚡ دمج group_security + auto_reply_settings في استعلام واحد (PG).
+    🔴 REVIEW-FIX-1..5.
 
-    🟡 POLISH-7: logger.warning عند غياب دوال DB.import_* في
-        _handle_wait_github_url_text (تشخيص أفضل).
-
-    🟡 POLISH-8: توثيق _EXTERNAL_HANDLED_STATES بأسماء الـhandlers
-        المسؤولة بشكل صريح.
-
-🆕 v7.18.33 (BATCH-SETTINGS):
-    ⚡ BATCH-SETTINGS: دمج استعلامَي group_security + auto_reply_settings
-        في استعلام واحد على PostgreSQL (1 RTT بدل 2).
-    🔴 REVIEW-FIX-1..5: محفوظة.
-
-🆕 v7.18.32 (FSM-COVERAGE-COMPLETE):
-    🔴 FIX-FSM-1..3, 🟠 FIX-BOOL-1, 🟡 FIX-DEAD-1 — محفوظة.
-
-🆕 v7.18.31 (FIX-AL1-FOLLOWUP) — محفوظ.
-🆕 v7.18.30 (C11-D3-D4-FIXES) — محفوظ.
-🆕 v7.18.29 (SUPPORT-MODE-HANDLER-FIX) — محفوظ.
-🆕 v7.18.28 (ADDING-POSTS-HANDLER-FIX) — محفوظ.
-🆕 v7.18.21 (ROUTING-FIX-2026-R3) — محفوظ.
-🆕 v7.18.20 (ROUTING-FIX-2026-R2) — محفوظ.
-🆕 v7.18.19 (ROUTING-FIX-2026) — محفوظ.
-🆕 v7.18.18 (CACHE-STATS-INTEGRATION) — محفوظ.
-🆕 v7.18.17 (DETECTORS-v4.1.0-COMPAT) — محفوظ.
-🆕 v7.18.16 (FULL-REWRITE-FIXES) — محفوظ.
-🆕 v7.18.15 (BANNED-MANAGER-INTEGRATION + REPLIES-FIX) — محفوظ.
-🆕 v7.18.14 (IDLE-TX-AUDIT-INTEGRATION) — محفوظ.
+🆕 v7.18.32 (FSM-COVERAGE) — محفوظة.
+🆕 v7.18.31..v7.18.14 — محفوظة.
 =============================================================================
 """
 
@@ -61,7 +46,7 @@ import os
 import re
 import inspect
 import ipaddress
-import json                      # v7.18.33: لتحليل row_to_json
+import json
 import threading
 import functools
 from html import escape
@@ -378,7 +363,7 @@ def _as_bool(value, default=False) -> bool:
     return default
 
 
-# 🆕 v7.18.34 POLISH-6: فحص موحّد لصلاحيات المطوّر (بدل التكرار 5×)
+# 🆕 v7.18.34 POLISH-6: فحص موحّد لصلاحيات المطوّر
 def _is_dev_user(user_id) -> bool:
     """فحص موحّد لصلاحيات المطور (developer/owner)."""
     try:
@@ -460,7 +445,6 @@ _ANTIFLOOD_ENABLED = _env_flag("ANTIFLOOD_ENABLED", True)
 _SLOW_MODE_AUTO = _env_flag("SLOW_MODE_AUTO", True)
 _SLOW_MODE_UNSUPPORTED = False
 
-# 🔴 FIX-D3 (v7.18.30): توحيد الفحص مع async detectors
 _MULTILAYER_ENABLED = (
     _env_flag("MULTILAYER_ENABLED", True)
     and (_HAS_MULTILAYER or _HAS_ASYNC_DETECTORS)
@@ -658,6 +642,12 @@ _SEC_SETTINGS_LOCAL_TTL = 5.0
 _SEC_SETTINGS_LOCAL_MAX = 3000
 _sec_settings_local_cache: Dict[int, Tuple[Dict[str, Any], float]] = {}
 
+# 🆕 v7.18.35 POLISH-2-COMPLETE: كاش ars محلي (بدل الاعتماد على
+# SmartCache الفارغ للمجموعات بلا صف). يمنع PG query متكرر.
+_ARS_LOCAL_TTL = 5.0
+_ARS_LOCAL_MAX = 3000
+_ars_local_cache: Dict[int, Tuple[Dict[str, Any], float]] = {}
+
 
 def _invalidate_sec_settings_local(chat_id: Optional[int] = None) -> None:
     try:
@@ -665,6 +655,17 @@ def _invalidate_sec_settings_local(chat_id: Optional[int] = None) -> None:
             _sec_settings_local_cache.clear()
         else:
             _sec_settings_local_cache.pop(int(chat_id), None)
+    except Exception:
+        pass
+
+
+def _invalidate_ars_local_cache(chat_id: Optional[int] = None) -> None:
+    """🆕 v7.18.35 POLISH-2-COMPLETE: مسح كاش ars المحلي."""
+    try:
+        if chat_id is None:
+            _ars_local_cache.clear()
+        else:
+            _ars_local_cache.pop(int(chat_id), None)
     except Exception:
         pass
 
@@ -694,9 +695,10 @@ async def _get_penalty_duration_override(
     🆕 v7.18.34 POLISH-1: قراءة مدة العقوبة من DB.set_setting
     (المفتاح: penalty_duration_{ptype}) مع كاش 60s.
 
-    هذه هي الجسر الذي يربط:
-      • _handle_wait_penalty_duration_text (يكتب)
-      • _resolve_penalty (يقرأ عبر هذه الدالة)
+    🟡 POLISH-10: النطاق عالمي (global) — المفتاح مشترك بين
+    كل المجموعات. أزرار pen_<type> في لوحة الأدمن عامة.
+    للمجموعات المنفردة مستقبلاً، أضف:
+        penalty_duration_{ptype}_chat_{chat_id}
     """
     if not penalty_type:
         return None
@@ -1062,7 +1064,7 @@ async def _lazy_init_columns(bot=None):
         _columns_last_attempt_ts = now
 
         db_type = getattr(DB, "DB_TYPE", "sqlite")
-        logger.info("🔧 v7.18.34: Auto-migration (DB_TYPE=%s)", db_type)
+        logger.info("🔧 v7.18.35: Auto-migration (DB_TYPE=%s)", db_type)
 
         cols = [
             ("delete_protected_any", "INTEGER DEFAULT 0",
@@ -1168,6 +1170,7 @@ async def _lazy_init_columns(bot=None):
 
         _invalidate_group_log_cache()
         _invalidate_sec_settings_local()
+        _invalidate_ars_local_cache()  # 🆕 v7.18.35
         _invalidate_admin_check_cache()
         _invalidate_penalty_duration_override_cache()
 
@@ -2512,6 +2515,17 @@ def _prune_perf_caches() -> int:
         removed += len(stale)
     except Exception:
         pass
+    # 🆕 v7.18.35 POLISH-2-COMPLETE: prune ars local cache
+    try:
+        stale = [
+            k for k, (_, ts) in _ars_local_cache.items()
+            if now - ts > _ARS_LOCAL_TTL * 5
+        ]
+        for k in stale:
+            _ars_local_cache.pop(k, None)
+        removed += len(stale)
+    except Exception:
+        pass
     try:
         stale = [
             k for k, (_, ts) in _admin_check_cache.items()
@@ -2707,24 +2721,22 @@ async def get_security_settings_cached(chat_id) -> dict:
 
 
 # ═══════════════════════════════════════════════════════════════════
-# 🆕 v7.18.33 BATCH-SETTINGS + v7.18.34 POLISH-2 (كاش {})
+# 🆕 v7.18.33 BATCH-SETTINGS + v7.18.34 POLISH-2 + v7.18.35-COMPLETE
 # ═══════════════════════════════════════════════════════════════════
 
 async def _get_batched_message_settings(
     chat_id: int,
 ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     """
-    v7.18.33 BATCH-SETTINGS (reviewed) + v7.18.34 POLISH-2:
+    v7.18.33 BATCH-SETTINGS + v7.18.34 POLISH-2 + v7.18.35 COMPLETE:
         جلب group_security + auto_reply_settings في استعلام واحد
         على PostgreSQL (1 RTT بدل 2).
 
-    v7.18.34 POLISH-2:
-      • كاش النتائج الفارغة أيضاً (مجموعات بلا صف) في
-        _sec_settings_local_cache، لتجنّب BATCH متكرر كل رسالة.
-      • تُخزَّن {} في local cache بـ TTL=5s (نفس TTL الحالي).
-      • settings_cache (SmartCache) يُكتب فيها فقط عند وجود صف
-        فعلي (sec_exists/ars_exists)، للحفاظ على السلوك الأصلي
-        الذي لا يُخزِّن الفارغ.
+    🟠 v7.18.35 POLISH-2-COMPLETE:
+      • إضافة _ars_local_cache (5s TTL) — بديل عن SmartCache
+        الفارغ للمجموعات بلا صف.
+      • الآن: sec_ready=True + ars_ready_local=True → 0 round-trips
+        حتى للمجموعات الجديدة.
 
     ملاحظات المراجعة (v7.18.33):
       🔴 _row_to_dict_local بدل isinstance(row, dict) — asyncpg
@@ -2753,10 +2765,19 @@ async def _get_batched_message_settings(
             chat_id_int)
     except Exception:
         ars_cached = None
-    ars_ready = isinstance(ars_cached, dict)
+    ars_ready_smart = isinstance(ars_cached, dict)
 
-    if sec_ready and ars_ready:
-        return sec_entry[0], ars_cached
+    # 🆕 v7.18.35 POLISH-2-COMPLETE: كاش ars محلي
+    ars_local_entry = _ars_local_cache.get(chat_id_int)
+    ars_ready_local = (
+        ars_local_entry is not None
+        and (now - ars_local_entry[1]) < _ARS_LOCAL_TTL
+    )
+
+    if sec_ready and (ars_ready_smart or ars_ready_local):
+        ars_result = (
+            ars_cached if ars_ready_smart else ars_local_entry[0])
+        return sec_entry[0], ars_result
 
     # ─── 2) PG batched ──────────────────────────────────────────
     if bool(getattr(DB, "USE_POSTGRES", False)):
@@ -2806,8 +2827,7 @@ async def _get_batched_message_settings(
                     logger.debug(
                         "BATCH-SETTINGS: ars JSON parse: %s", _je)
 
-            # ─── 🟠 POLISH-2: كاش النتائج الفارغة في local cache ───
-            # (حتى لو sec_exists=False)، بـ TTL=5s
+            # ─── كاش محلي (حتى الفارغ) — 5s TTL ───
             if isinstance(sec_data, dict):
                 try:
                     if (len(_sec_settings_local_cache)
@@ -2823,9 +2843,21 @@ async def _get_batched_message_settings(
                 except Exception:
                     pass
 
-            # SmartCache: فقط عند وجود صف فعلي (للحفاظ على
-            # السلوك الأصلي: get_security_settings_cached لا
-            # يُخزِّن الفارغ)
+            # 🆕 v7.18.35 POLISH-2-COMPLETE: كاش ars محلي (حتى الفارغ)
+            if isinstance(ars_data, dict):
+                try:
+                    if len(_ars_local_cache) >= _ARS_LOCAL_MAX:
+                        oldest = sorted(
+                            _ars_local_cache.items(),
+                            key=lambda kv: kv[1][1],
+                        )[: max(1, _ARS_LOCAL_MAX // 5)]
+                        for k, _ in oldest:
+                            _ars_local_cache.pop(k, None)
+                    _ars_local_cache[chat_id_int] = (ars_data, now)
+                except Exception:
+                    pass
+
+            # SmartCache: فقط عند وجود صف فعلي
             # 🟠 POLISH-3: كتابات متوازية
             gather_coros = []
             if sec_exists and isinstance(sec_data, dict):
@@ -2864,15 +2896,49 @@ async def _get_batched_message_settings(
 
 
 async def get_auto_reply_settings_cached(chat_id) -> dict:
+    """
+    🆕 v7.18.35 POLISH-2-COMPLETE: يستخدم _ars_local_cache (5s TTL)
+        قبل SmartCache، لمنع PG query متكرر للمجموعات بلا صف.
+    """
+    now = time.monotonic()
+    try:
+        chat_id_int = int(chat_id)
+    except (TypeError, ValueError):
+        chat_id_int = None
+
+    # كاش محلي أولاً
+    if chat_id_int is not None:
+        entry = _ars_local_cache.get(chat_id_int)
+        if entry is not None and (now - entry[1]) < _ARS_LOCAL_TTL:
+            return entry[0]
+
     cached = await settings_cache.get_auto_reply_settings(chat_id)
     if cached is not None and isinstance(cached, dict):
+        if chat_id_int is not None:
+            try:
+                _ars_local_cache[chat_id_int] = (cached, now)
+            except Exception:
+                pass
         return cached
+
     settings = await DB.get_auto_reply_settings(chat_id)
     settings = _row_to_dict_local(settings) or {}
     try:
         await settings_cache.set_auto_reply_settings(chat_id, settings)
     except Exception:
         pass
+    if chat_id_int is not None:
+        try:
+            if len(_ars_local_cache) >= _ARS_LOCAL_MAX:
+                oldest = sorted(
+                    _ars_local_cache.items(),
+                    key=lambda kv: kv[1][1],
+                )[: max(1, _ARS_LOCAL_MAX // 5)]
+                for k, _ in oldest:
+                    _ars_local_cache.pop(k, None)
+            _ars_local_cache[chat_id_int] = (settings, now)
+        except Exception:
+            pass
     return settings
 
 
@@ -2884,7 +2950,18 @@ async def invalidate_security_cache(chat_id=None):
 
 
 async def invalidate_auto_reply_cache(chat_id=None):
+    """
+    🆕 v7.18.35 POLISH-2-COMPLETE: يمسح الكاش المحلي أيضاً.
+    chat_id=-1 → مسح الكل (توافق مع السلوك القديم).
+    """
     await settings_cache.invalidate_auto_reply(chat_id)
+    try:
+        if chat_id is None or int(chat_id) == -1:
+            _ars_local_cache.clear()
+        else:
+            _ars_local_cache.pop(int(chat_id), None)
+    except Exception:
+        pass
 
 
 async def _detect_and_translate(update, context, chat_id, user_id, text):
@@ -3291,7 +3368,7 @@ def _accepts_state_arg(handler, handler_name: str) -> bool:
 
 
 # ═══════════════════════════════════════════════════════════════════
-# 🆕 v7.18.32 FIX-FSM-2/3 + v7.18.34 POLISH-8 (توثيق مُحسَّن)
+# 🆕 v7.18.32 FIX-FSM-2/3 + v7.18.34 POLISH-8: توثيق مُحسَّن
 # ═══════════════════════════════════════════════════════════════════
 # الحالات التي يُسجَّل لها handler في ملف آخر (خارج handle_private).
 # PTB v20+ ينفّذ كل الـ handlers المطابقة بالترتيب في نفس الـgroup.
@@ -3306,8 +3383,6 @@ _EXTERNAL_HANDLED_STATES = frozenset({
     # ─── CommandHandlers.handle_text (تحديث قناة التحديثات) ───
     "WAIT_UPDATE_CH",
     # ─── (TODO) معالج Documents مستقبلي ───
-    # سيُعالَج في handlers_document (لم يُبنَ بعد).
-    # حالياً: تجاهل صامت لتجنّب رسالة "لم أتعرف" عند إرسال ملف.
     "WAIT_IMPORT_FILE",
     "WAIT_BACKUP_FILE",
 })
@@ -3328,14 +3403,11 @@ class MessageHandlers:
         # 🆕 v7.18.21 FIX-ROUTE-2: حالات إدخال القناة
         "WAIT_CHANNEL": "_handle_wait_channel_text",
         "WAIT_ADD_CHANNEL": "_handle_wait_channel_text",
-        # 🆕 v7.18.32 FIX-FSM-2: WAIT_UPDATE_CH أُزيل من هنا.
         # WAIT_UPDATE_CHANNEL يبقى (alias قديم لـ WAIT_ADD_CHANNEL).
         "WAIT_UPDATE_CHANNEL": "_handle_wait_channel_text",
-        # 🔴 v7.18.31 FIX-AL1-FOLLOWUP: WAIT_LOG_CH أُزيل من هنا.
         # 🆕 v7.18.28 FIX-ADDING-1: حالات إضافة المنشورات
         "ADDING_POSTS": "_handle_adding_posts_text",
         # 🟡 FIX-DEAD-1 (v7.18.32): "WAIT_POST" — dead entry
-        # (احتياطي مستقبلي، لا يُعيَّن في أي handler حالياً).
         "WAIT_POST": "_handle_adding_posts_text",
         # 🆕 v7.18.29 FIX-SUPPORT-1: حالة الدعم الفني
         "SUPPORT_MODE": "_handle_support_mode_text",
@@ -3528,8 +3600,7 @@ class MessageHandlers:
         except Exception:
             pass
 
-        # 🆕 v7.18.33 BATCH-SETTINGS: استعلام واحد بدل اثنين (PG)
-        # 🆕 v7.18.34 POLISH-2: كاش النتائج الفارغة أيضاً
+        # 🆕 v7.18.33 BATCH-SETTINGS + v7.18.35 POLISH-2-COMPLETE
         settings, _preloaded_ars = await _get_batched_message_settings(
             chat_id)
         if not isinstance(settings, dict):
@@ -4065,10 +4136,16 @@ class MessageHandlers:
     @staticmethod
     async def _resolve_penalty(chat_id, violation_type, settings):
         """
-        🆕 v7.18.34 POLISH-1: بعد حساب ptype، اقرأ المدة من
-        DB.set_setting (penalty_duration_{ptype}) عبر كاش 60s —
-        هذا هو الجسر الذي كان مفقوداً بين _handle_wait_penalty_
-        duration_text (يكتب) و _resolve_penalty (يقرأ).
+        🆕 v7.18.34 POLISH-1 + v7.18.35 POLISH-11 (توثيق):
+
+        ترتيب أسبقية حساب مدة العقوبة:
+          1. settings dict (defaults + DB group_security).
+          2. override من DB.set_setting (penalty_duration_{ptype}).
+          3. override يفوز دائماً — إعداد الأدمن يُلغي defaults.
+
+        الاستثناء الوحيد: penalty_rule من DB.get_violation_penalty
+        (base rule للمخالفة المحددة) — يُعيد duration مباشرة بدون
+        المرور بـ override (لأنه قاعدة مخالفة، لا default عام).
         """
         penalty_rule = None
         try:
@@ -4114,7 +4191,7 @@ class MessageHandlers:
         duration = MessageHandlers._get_penalty_duration(
             settings, violation_type)
 
-        # 🆕 v7.18.34 POLISH-1: تجاوز المدة من DB.set_setting
+        # 🆕 v7.18.34 POLISH-1 + v7.18.35 POLISH-11: override يفوز
         try:
             override = await _get_penalty_duration_override(ptype)
             if override is not None:
@@ -4322,8 +4399,6 @@ class MessageHandlers:
         preloaded_ars=None,
     ):
         try:
-            # 🆕 v7.18.33 BATCH-SETTINGS: استخدم الـsettings الجاهزة
-            # إن وُجدت (0 round-trips) — وإلا اجلبها بنفسك.
             if preloaded_ars is not None:
                 ars = preloaded_ars
             else:
@@ -4903,9 +4978,7 @@ class MessageHandlers:
     async def _handle_wait_auto_key_text(
         update, context, state=None
     ):
-        """
-        🆕 v7.18.32 FIX-FSM-1: إدخال كلمة مفتاحية لرد تلقائي جديد.
-        """
+        """🆕 v7.18.32 FIX-FSM-1: إدخال كلمة مفتاحية لرد تلقائي."""
         user_id = (
             update.effective_user.id if update.effective_user else None)
         if not user_id:
@@ -4928,7 +5001,6 @@ class MessageHandlers:
                 parse_mode='HTML')
             return
 
-        # تحويل الحالة إلى جمع الرد
         try:
             StateManager.set(user_id, UserState.WAIT_REPLY_RESPONSE)
         except Exception as e:
@@ -4936,7 +5008,6 @@ class MessageHandlers:
                 "_handle_wait_auto_key: set state: %s", e)
         context.user_data['reply_trigger_pending'] = keyword
         context.user_data['reply_chat'] = chat_id
-        # إبقاء auto_chat أيضاً للتوافق
         context.user_data['auto_chat'] = chat_id
 
         try:
@@ -4959,8 +5030,9 @@ class MessageHandlers:
     ):
         """
         🆕 v7.18.32 FIX-FSM-1: حذف رد تلقائي بالكلمة المفتاحية.
-        🆕 v7.18.34 POLISH-5: clear الحالة فقط عند نتيجة نهائية
-           (نجاح أو "غير موجود")، نبقيها عند فشل استثنائي.
+        🆕 v7.18.34 POLISH-5: clear فقط عند نتيجة نهائية.
+        🆕 v7.18.35 POLISH-9: DB.execute قد يُعيد None عند نجاح
+            الحذف (بعض المكتبات) → نعتبره نجاحاً.
         """
         user_id = (
             update.effective_user.id if update.effective_user else None)
@@ -4994,7 +5066,7 @@ class MessageHandlers:
 
         removed = False
         removed_error = None
-        definitive = False  # هل حصلنا على نتيجة نهائية؟
+        definitive = False
 
         try:
             for name in (
@@ -5025,7 +5097,12 @@ class MessageHandlers:
                         "DELETE FROM auto_replies "
                         "WHERE chat_id = ? AND keyword = ?",
                         (chat_id, keyword))
-                    removed = bool(rc)
+                    # 🟡 POLISH-9: بعض مكتبات DB تُعيد None عند نجاح
+                    # الحذف (بدون rowcount). نعتبرها نجاحاً.
+                    if rc is None:
+                        removed = True
+                    else:
+                        removed = bool(rc)
                     definitive = True
                 except Exception as e:
                     removed_error = str(e)[:100]
@@ -5051,13 +5128,11 @@ class MessageHandlers:
                 await safe_send(
                     context.bot, user_id, msg, parse_mode='HTML')
             elif definitive:
-                # نتيجة نهائية: غير موجود
                 msg = await _trans(
                     'reply_not_found', lang,
                     "❌ الرد غير موجود.")
                 await safe_send(context.bot, user_id, msg)
             else:
-                # فشل استثنائي — نبقي الحالة
                 msg = await _trans(
                     'reply_delete_failed', lang,
                     "❌ فشل الحذف — حاول مجدداً أو /cancel.")
@@ -5090,8 +5165,10 @@ class MessageHandlers:
         🆕 v7.18.34 POLISH-1 + POLISH-4:
           • stored يعتمد على نتيجة set_setting الفعلية.
           • عند النجاح: تحديث _PENALTY_DURATION_OVERRIDE_CACHE فوراً.
-          • _resolve_penalty يقرأ من هذا الكاش عبر
-            _get_penalty_duration_override.
+          • _resolve_penalty يقرأ من هذا الكاش.
+
+        🟡 v7.18.35 POLISH-10: النطاق عالمي (global) — المفتاح
+        penalty_duration_{ptype} مشترك بين كل المجموعات.
         """
         user_id = (
             update.effective_user.id if update.effective_user else None)
@@ -5137,8 +5214,6 @@ class MessageHandlers:
                 result = setter(key, str(duration))
                 if asyncio.iscoroutine(result):
                     result = await result
-                # None = لا قيمة معادة (اعتبره نجاحاً)
-                # False/0/"" = فشل صريح
                 if result is None:
                     stored = True
                 else:
@@ -5199,7 +5274,7 @@ class MessageHandlers:
         """
         🆕 v7.18.32 FIX-FSM-1: استيراد ردود من GitHub URL.
         🆕 v7.18.34 POLISH-6/7: _is_dev_user + warning عند غياب
-           دوال DB.import_*.
+            دوال DB.import_*.
         """
         user_id = (
             update.effective_user.id if update.effective_user else None)
@@ -5218,7 +5293,6 @@ class MessageHandlers:
         if not is_dev:
             return
 
-        # التحقق من URL
         if not _is_safe_url(raw_url):
             await safe_send(
                 context.bot, user_id,
@@ -5226,7 +5300,6 @@ class MessageHandlers:
                 parse_mode='HTML')
             return
 
-        # محاولة استيراد عبر عدة طرق
         imported = False
         count = 0
         error_msg = None
@@ -5324,7 +5397,6 @@ class MessageHandlers:
             if state is None:
                 return
 
-            # ─── تجاهل NONE ───
             try:
                 _none_member = getattr(UserState, 'NONE', None)
             except Exception:
@@ -5339,19 +5411,13 @@ class MessageHandlers:
             if state_str in ("UserState.NONE", "NONE"):
                 return
 
-            # ═══════════════════════════════════════════════════════════
-            # 🔴 v7.18.32 FIX-FSM-2/3:
-            # تجاهل بصمت للحالات التي يتولاها handler خارجي.
-            # ═══════════════════════════════════════════════════════════
             if state_str in _EXTERNAL_HANDLED_STATES:
                 logger.debug(
                     "⏭️ handle_private: تجاهل %s — "
-                    "يتولاها handler خارجي "
-                    "(group_log / channels_list / command)",
+                    "يتولاها handler خارجي",
                     state_str)
                 return
 
-            # ─── الخريطة المحلية ───
             handler_name = MessageHandlers._PRIVATE_HANDLERS_MAP.get(
                 state)
             if not handler_name:
@@ -5385,9 +5451,6 @@ class MessageHandlers:
                         await handler(update, context)
                     return
 
-            # ═══════════════════════════════════════════════════════
-            # 🆕 FIX-ROUTE-2: مسارات متعددة
-            # ═══════════════════════════════════════════════════════
             from importlib import import_module
             _fallback_paths = (
                 ("handlers.handlers_command", "CommandHandlers",
@@ -5437,7 +5500,6 @@ class MessageHandlers:
             if _succeeded:
                 return
 
-            # ─── ملاذ أخير ───
             logger.error(
                 "🚨 UNHANDLED PRIVATE STATE | user=%s state=%r | "
                 "tried=%s | "
@@ -6326,7 +6388,6 @@ async def handle_cache_stats_command(update, context):
     if not update.effective_user or not update.effective_message:
         return
     user_id = update.effective_user.id
-    # 🟡 POLISH-6: فحص موحّد
     if not _is_dev_user(user_id):
         return
     chat_id = update.effective_chat.id
@@ -6384,6 +6445,13 @@ async def handle_cache_stats_command(update, context):
             _SEC_SETTINGS_LOCAL_MAX,
             _SEC_SETTINGS_LOCAL_TTL,
         ),
+        # 🆕 v7.18.35 POLISH-2-COMPLETE
+        (
+            "ars_local",
+            _ars_local_cache,
+            _ARS_LOCAL_MAX,
+            _ARS_LOCAL_TTL,
+        ),
         (
             "admin_check",
             _admin_check_cache,
@@ -6391,7 +6459,7 @@ async def handle_cache_stats_command(update, context):
             _ADMIN_CHECK_CACHE_TTL,
         ),
         (
-            "penalty_duration_override",  # 🆕 v7.18.34
+            "penalty_duration_override",
             _PENALTY_DURATION_OVERRIDE_CACHE,
             _PENALTY_DURATION_OVERRIDE_MAX,
             _PENALTY_DURATION_OVERRIDE_TTL,
@@ -6558,7 +6626,6 @@ async def handle_db_idle_command(update, context):
     if not update.effective_user or not update.effective_message:
         return
     user_id = update.effective_user.id
-    # 🟡 POLISH-6: فحص موحّد
     if not _is_dev_user(user_id):
         return
     chat_id = update.effective_chat.id
@@ -6743,6 +6810,11 @@ __all__ = [
     "_SEC_SETTINGS_LOCAL_MAX",
     "_sec_settings_local_cache",
     "_invalidate_sec_settings_local",
+    # 🆕 v7.18.35 POLISH-2-COMPLETE
+    "_ARS_LOCAL_TTL",
+    "_ARS_LOCAL_MAX",
+    "_ars_local_cache",
+    "_invalidate_ars_local_cache",
     "_ADMIN_CHECK_CACHE_TTL",
     "_ADMIN_CHECK_CACHE_MAX",
     "_admin_check_cache",
@@ -6789,7 +6861,7 @@ __all__ = [
 
 try:
     logger.info(
-        "✅ handlers_message v7.18.34 loaded | "
+        "✅ handlers_message v7.18.35 loaded | "
         "BWM=%s | PRIVATE_HANDLERS=%d | "
         "external_handled=%d | "
         "routing-fallback=7-paths | "
@@ -6801,10 +6873,11 @@ try:
         "SUPPORT_MODE=direct-handler | "
         "AUTO_KEY/AUTO_DEL/PENALTY_DURATION/GITHUB_URL=direct-handler | "
         "BATCH-SETTINGS=PG-1RTT+empty-cache+fallback | "
+        "ars_local_cache=5s-TTL (POLISH-2-COMPLETE) | "
         "penalty-duration=bridged (DB.set_setting↔_resolve_penalty) | "
         "detectors-compat=v4.1.0 | "
         "commands=(cache_stats, db_idle, autoblocked) | "
-        "fixes=(POLISH-1..8, BATCH-SETTINGS, REVIEW-FIX-1..5, "
+        "fixes=(POLISH-1..11, BATCH-SETTINGS, REVIEW-FIX-1..5, "
         "FSM-COVERAGE, AL1-FOLLOWUP, AL1-FOLLOWUP-2, C11, D3, D4, "
         "SUPPORT-1..3, ADDING-1, ROUTE-1, ROUTE-2, BWM-3, "
         "COL-1, EDIT-1, STATE-1, BUG-1..BUG-12)",
