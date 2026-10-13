@@ -1,19 +1,46 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-database.py - قاعدة البيانات المتكاملة (v7.7.66 — TIMEZONE-VACUUM-REMINDERS-FIX)
+database.py - قاعدة البيانات المتكاملة (v7.7.67 — NESTED-TX-LIFECYCLE-FIX)
 ================================================================================
+🆕 v7.7.67 (NESTED-TX-LIFECYCLE-FIX):
+  🔴 FIX-DB5 (CRITICAL): نقل migrate_reminders_columns و
+     ensure_all_dev_subscriptions **خارج** transaction البوتستراب.
+     السبب: كلتاهما تفتحان self.transaction() داخلياً → nested tx.
+     على SQLite: "cannot start a transaction within a transaction".
+     على MySQL: implicit COMMIT يُفقد ذرية bootstrap.
+     النتيجة قبل الإصلاح: البوت قد يفشل في الإقلاع على SQLite/MySQL
+     عند أول تشغيل (أو بعد migrate_reminders_columns إذا أُضيف لاحقاً).
+     ملاحظة: المشكلة كانت موجودة قبل v7.7.66 (بسبب
+     ensure_all_dev_subscriptions) — FIX-DB2 (v7.7.66) ضاعفها.
+
+  🔴 FIX-DB6: _load_mixin — except BaseException → except Exception.
+     السبب: BaseException يلتقط KeyboardInterrupt/SystemExit/
+     CancelledError → يحوّلها إلى "fallback صامت"، فيخفي أعطال
+     حقيقية عن المُشغّل.
+
+  🟠 FIX-DB7: _spawn_bg_task — فحص self._closing/self._closed قبل
+     create_task. السبب: مهام spawn أثناء الإغلاق لا تُلغى →
+     task leak + تحذيرات "Task was destroyed but it is pending".
+
+  🟠 FIX-DB8: vacuum() — فحص idle-in-transaction قبل VACUUM.
+     السبب: لو كان الاتصال الموروث من pool في tx عالقة (نادر)،
+     VACUUM يفشل بـ "cannot run inside a transaction block".
+
+  🟡 FIX-DB9: توثيق منطق cooldown في _maybe_refresh_mv (كان صحيحاً
+     لكن غامضاً).
+
 🆕 v7.7.66 (TIMEZONE-VACUUM-REMINDERS-FIX):
   🔴 FIX-DB1: _pg_pool_factory — server_settings["timezone"] = "UTC".
   🔴 FIX-DB2: _do_bootstrap_inner — استدعاء migrate_reminders_columns.
+     ⚠️ v7.7.67: هذا الاستدعاء نُقل خارج _do_bootstrap_inner.
   🔴 FIX-DB3: vacuum() — تعطيل statement_timeout أثناء VACUUM.
   🟡 FIX-DB4: _slow_query_log_threshold — توحيد 0.2 مع config.py.
 
 🆕 v7.7.65 (ANALYTICS-MIXIN-FIX):
-  🔴 FIX-MIXIN-1: _load_mixin — التقاط كل الاستثناءات (كان ImportError فقط).
-  🔴 FIX-MIXIN-2: _verify_analytics_methods() — فحص شامل بعد DB = Database().
+  🔴 FIX-MIXIN-1: _load_mixin — التقاط كل الاستثناءات.
+  🔴 FIX-MIXIN-2: _verify_analytics_methods().
   🟡 FIX-MIXIN-3: _load_mixin — فحص مسبق لـ AnalyticsMixin.get_user_growth.
-  🟢 تحديث LOAD BEACON.
 
 🆕 v7.7.64 (REVIEW-FIXES-2026-R2):
   🔴 FIX-E1: _refresh_user_subscription_end — ? في كل الفروع.
@@ -76,6 +103,9 @@ database.py - قاعدة البيانات المتكاملة (v7.7.66 — TIMEZO
 # [24] v7.7.64: IN (...) chunking
 # [25] v7.7.65: _load_mixin BaseException + verify methods
 # [26] v7.7.66: timezone UTC + migrate_reminders + vacuum timeout
+# [27] v7.7.67: نقل migrate_reminders/ensure_dev OUT من bootstrap tx
+#              + _load_mixin Exception + _spawn_bg_task closing
+#              + vacuum tx check
 # =====================================================================
 
 import os
@@ -303,15 +333,17 @@ except ImportError as _re:
     REFACTOR_MIXIN_AVAILABLE = False
 
 # =====================================================================
-# Mixins — 🆕 FIX-MIXIN-1/3
+# Mixins — FIX-MIXIN-1/3 + FIX-DB6
 # =====================================================================
 
 def _load_mixin(module_name: str, class_name: str):
     """
     🆕 v7.7.65 FIX-MIXIN-1: التقاط كل الاستثناءات + تشخيص واضح.
+    🆕 v7.7.67 FIX-DB6: except BaseException → except Exception.
 
-    سابقاً: كان يلتقط ImportError فقط.
-    الآن: يلتقط أي BaseException، يطبع traceback كامل، ويستخدم Fallback.
+    السبب: BaseException يلتقط KeyboardInterrupt/SystemExit/
+    CancelledError → يحوّلها إلى "fallback صامت"، فيخفي أعطال
+    حقيقية عن المُشغّل. Exception يغطي كل أخطاء التحميل المتوقعة.
     """
     try:
         module = __import__(module_name, fromlist=[class_name])
@@ -342,7 +374,8 @@ def _load_mixin(module_name: str, class_name: str):
             {"__module__": __name__},
         )
         return fallback, False
-    except BaseException as e:
+    except Exception as e:
+        # 🆕 v7.7.67 FIX-DB6: Exception بدل BaseException
         import traceback as _tb
         logger.error(
             f"❌ فشل تحميل {module_name}.{class_name}: "
@@ -2180,9 +2213,6 @@ class Database(
 
             self._backup_lock = asyncio.Lock()
             # 🟡 FIX-DB4 (v7.7.66): توحيد القيمة الافتراضية مع config.py.
-            # السبب: config.py يستخدم 0.2 (PERF-2)، لكن database.py
-            # كان يستخدم 1.0. بدون .env محمّل، السلوك غير متسق.
-            # القيمة الصحيحة 0.2 (متوافقة مع PERF-2 في config.py).
             self._slow_query_log_threshold = float(
                 os.getenv("SLOW_QUERY_LOG_THRESHOLD", "0.2"))
             self._max_post_text_length = MAX_POST_TEXT_LENGTH
@@ -2643,18 +2673,6 @@ class Database(
                     "application_name": "relax_bot",
                     "synchronous_commit": "off",
                     # 🔴 FIX-DB1 (v7.7.66): ضبط timezone = UTC.
-                    # السبب: كل التواريخ في DB مخزّنة كـ naive UTC.
-                    # إذا كانت الجلسة غير UTC → NOW() يُعيد الوقت
-                    # المحلي → مقارنات end_time/created_at/next_publish
-                    # خاطئة.
-                    # الأثر قبل الإصلاح:
-                    #   • على VPS بـ TZ=Asia/Riyadh (UTC+3):
-                    #     NOW() = UTC+3 → فرق 3 ساعات في العقوبات
-                    #     والاشتراكات.
-                    #   • على Render/Railway (UTC افتراضياً):
-                    #     لا مشكلة.
-                    # ملاحظة: يُطبَّق على كل اتصال جديد في الـ pool
-                    # تلقائياً — لا حاجة لـ SET يدوي.
                     "timezone": "UTC",
                     "tcp_keepalives_idle": str(PG_TCP_KEEPIDLE),
                     "tcp_keepalives_interval": str(PG_TCP_KEEPINTVL),
@@ -2743,17 +2761,22 @@ class Database(
         conn = await asyncio.wait_for(
             pool.acquire(), timeout=self._connection_timeout)
         try:
+            # 🆕 v7.7.67 FIX-DB8: فحص idle-in-transaction قبل VACUUM.
+            # السبب: إذا كان الاتصال الموروث من pool في tx عالقة
+            # (نادر لكن ممكن)، VACUUM يفشل بـ:
+            #   ERROR: VACUUM cannot run inside a transaction block
+            try:
+                if _pg_in_transaction(conn):
+                    logger.warning(
+                        "🔌 vacuum(%s): conn في tx عالقة — "
+                        "rollback وقائي قبل VACUUM", table)
+                    await asyncio.wait_for(
+                        conn.rollback(),
+                        timeout=PG_ROLLBACK_ON_RETURN_TIMEOUT)
+            except Exception as _tx_e:
+                logger.debug("vacuum pre-tx check: %s", _tx_e)
+
             # 🔴 FIX-DB3 (v7.7.66): تعطيل statement_timeout مؤقتاً.
-            # السبب: statement_timeout (60s بعد FIX-R12) يُطبَّق
-            # على VACUUM في PostgreSQL. على جدول كبير (>500K صف)
-            # VACUUM (ANALYZE) قد يستغرق 2-10 دقائق → يُقتل بعد
-            # 60s → dead tuples لا تُنظَّف.
-            #
-            # ⚠️ مهم: VACUUM لا يعمل داخل transaction block في PG،
-            # لذلك لا يمكن استخدام SET LOCAL. نستخدم SET
-            # (session-level) ونستعيد القيمة الأصلية يدوياً في
-            # finally — لأن asyncpg pool.release() **لا** يُعيد
-            # session settings تلقائياً.
             _original_timeout: Optional[str] = None
             try:
                 _original_timeout = await conn.fetchval(
@@ -3003,6 +3026,16 @@ class Database(
                 logger.warning(f"⚠️ MV refresh: {e}")
                 return False
             finally:
+                # 🆕 v7.7.67 FIX-DB9: توضيح منطق cooldown.
+                # الهدف: عند النجاح، ننتظر cooldown كامل قبل المحاولة
+                # التالية. عند الفشل، ننتظر short_cooldown فقط (10%
+                # من cooldown الأصلي، بحد أدنى 60s) لمحاولة أسرع.
+                #
+                # الحساب: `_mv_last_refresh_mono` يُقارَن بـ now في
+                # شرط cooldown. لتحقيق "انتظار short_cooldown" عند
+                # الفشل، نُزيح الطابع الزمني إلى الوراء بمقدار
+                # (cooldown - short_cooldown) — بحيث يكون قد مرّ
+                # فعلياً short_cooldown فقط.
                 if success:
                     self._mv_last_refresh_mono = time.monotonic()
                 else:
@@ -3013,6 +3046,23 @@ class Database(
                         - (self._mv_refresh_cooldown - short_cooldown))
 
     def _spawn_bg_task(self, coro) -> Optional[asyncio.Task]:
+        """
+        يُنشئ مهمة خلفية مُتتبَّعة.
+
+        🆕 v7.7.67 FIX-DB7: يتحقق من _closing/_closed قبل create_task.
+        السبب: المهام المُنشأة أثناء الإغلاق لا تُلغى تلقائياً →
+        task leak + تحذيرات "Task was destroyed but it is pending".
+        """
+        # 🆕 v7.7.67 FIX-DB7
+        if self._closing or self._closed:
+            logger.debug(
+                "⚠️ _spawn_bg_task: DB في حالة إغلاق — "
+                "تجاهل إنشاء المهمة")
+            try:
+                coro.close()
+            except Exception:
+                pass
+            return None
         try:
             task = asyncio.create_task(coro)
         except Exception as e:
@@ -5744,27 +5794,15 @@ class Database(
                 logger.error("❌ فشل حفظ bootstrap_hash")
             logger.info(f"✅ ترحيل في {elapsed:.2f}s")
 
-        # 🔴 FIX-DB2 (v7.7.66): استدعاء migrate_reminders_columns.
-        # السبب: هذه الدالة تُضيف أعمدة user_reminder_settings الجديدة
-        # (last_daily_sent, last_weekly_sent, last_subscription_sent).
-        # بدون استدعائها، على DB قديمة (v1.1-)،
-        # get_users_for_daily_reminder يفشل بـ "no such column" →
-        # التذكيرات اليومية/الأسبوعية معطّلة.
+        # 🆕 v7.7.67 FIX-DB5 (CRITICAL):
+        # ⚠️ تم نقل migrate_reminders_columns و
+        # ensure_all_dev_subscriptions **خارج** هذه الدالة إلى
+        # _bootstrap (بعد commit الـ tx الخارجية).
         #
-        # ملاحظة: bot.py يستدعيها أيضاً، لكن وجودها هنا يضمن أن
-        # أي استدعاء لـ pre_initialize يُنفّذ الترحيل تلقائياً.
-        # idempotent → لا ضرر من الاستدعاء المزدوج.
-        try:
-            if hasattr(self, "migrate_reminders_columns"):
-                await self.migrate_reminders_columns()
-                logger.info("✅ migrate_reminders_columns: تم")
-            else:
-                logger.debug(
-                    "ℹ️ migrate_reminders_columns غير متاحة "
-                    "(RemindersMixin لم يُحمَّل)")
-        except Exception as _mrc_e:
-            logger.warning(
-                "⚠️ migrate_reminders_columns: %s", _mrc_e)
+        # السبب: كلتاهما تفتحان self.transaction() داخلياً →
+        # nested tx. على SQLite:
+        #   "cannot start a transaction within a transaction"
+        # على MySQL: implicit COMMIT يُفقد ذرية bootstrap.
 
         try:
             secondary_indexes = self._get_secondary_indexes()
@@ -5784,14 +5822,6 @@ class Database(
                 logger.debug(f"autovacuum tune: {e}")
         await self._import_banned_words(conn)
         await self._import_auto_replies(conn)
-        if not self._dev_subscription_ensured:
-            try:
-                await self.ensure_all_dev_subscriptions()
-                self._dev_subscription_ensured = True
-            except Exception as e:
-                logger.warning(
-                    f"⚠️ ensure_all_dev_subscriptions: {e}",
-                    exc_info=True)
         if USE_POSTGRES:
             try:
                 await self._analyze_after_tune(conn)
@@ -5811,6 +5841,40 @@ class Database(
                         await self._do_bootstrap_inner(conn)
                 finally:
                     self._in_bootstrap_tx = False
+
+                # ═══════════════════════════════════════════════════════
+                # 🆕 v7.7.67 FIX-DB5 (CRITICAL): بعد commit الـ tx
+                # الخارجية — نُشغّل الدوال التي تفتح tx خاصة بها.
+                # ═══════════════════════════════════════════════════════
+
+                # 1) ترحيل أعمدة التذكيرات (RemindersMixin)
+                #    كانت داخل _do_bootstrap_inner → nested tx.
+                try:
+                    if hasattr(self, "migrate_reminders_columns"):
+                        await self.migrate_reminders_columns()
+                        logger.info(
+                            "✅ migrate_reminders_columns: تم")
+                    else:
+                        logger.debug(
+                            "ℹ️ migrate_reminders_columns غير متاحة "
+                            "(RemindersMixin لم يُحمَّل)")
+                except Exception as _mrc_e:
+                    logger.warning(
+                        "⚠️ migrate_reminders_columns: %s", _mrc_e)
+
+                # 2) تأمين اشتراكات المطورين
+                #    كانت داخل _do_bootstrap_inner → nested tx.
+                if not self._dev_subscription_ensured:
+                    try:
+                        await self.ensure_all_dev_subscriptions()
+                        self._dev_subscription_ensured = True
+                    except Exception as e:
+                        logger.warning(
+                            f"⚠️ ensure_all_dev_subscriptions: {e}",
+                            exc_info=True)
+
+                # ═══════════════════════════════════════════════════════
+
                 if USE_POSTGRES and self._pending_secondary_indexes:
                     try:
                         pending = self._pending_secondary_indexes
@@ -7658,11 +7722,11 @@ DB = Database()
 
 
 # ═════════════════════════════════════════════════════════════════════
-# 🆕 v7.7.65 FIX-MIXIN-2: فحص شامل أن كل دوال التحليلات موجودة
+# v7.7.65 FIX-MIXIN-2: فحص شامل أن كل دوال التحليلات موجودة
 # ═════════════════════════════════════════════════════════════════════
 
 def _verify_analytics_methods() -> bool:
-    """🆕 v7.7.65 FIX-MIXIN-2: يتحقق من وجود 16 دالة تحليلات."""
+    """v7.7.65 FIX-MIXIN-2: يتحقق من وجود 16 دالة تحليلات."""
     required = [
         "get_user_growth",
         "get_top_channels",
@@ -7841,22 +7905,27 @@ __all__ = [
 
 
 # =====================================================================
-# LOAD BEACON — v7.7.66
+# LOAD BEACON — v7.7.67
 # =====================================================================
 
 try:
     _analytics_status = (
         "✅" if hasattr(Database, "get_user_growth") else "❌")
     logger.info(
-        "🛡️ database.py v7.7.66 TIMEZONE-VACUUM-REMINDERS-FIX loaded | "
+        "🛡️ database.py v7.7.67 NESTED-TX-LIFECYCLE-FIX loaded | "
         "DB=%s | Analytics=%s (available=%s) | "
         "Migrations=%s | Refactor=%s | Caches=%s | "
         "Idle-TX-Audit=%s (interval=%.0fs, threshold=%d) | "
         "PG-rollback-on-return=%.1fs | "
         "Fixes: DB1 (timezone=UTC), "
-        "DB2 (migrate_reminders in bootstrap), "
+        "DB2 (migrate_reminders in bootstrap — moved out of tx v7.7.67), "
         "DB3 (vacuum statement_timeout=0), "
         "DB4 (slow_query_log_threshold=0.2), "
+        "DB5 (NESTED-TX: migrate_reminders + ensure_dev OUT of bootstrap tx), "
+        "DB6 (_load_mixin Exception), "
+        "DB7 (_spawn_bg_task closing check), "
+        "DB8 (vacuum idle-tx check), "
+        "DB9 (mv cooldown docs), "
         "MIXIN-1/2/3 (v7.7.65), "
         "E1..E8 (v7.7.64) | IN chunking max=%d",
         DB_TYPE.upper(),
