@@ -1,9 +1,19 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-database_tickets.py - دوال التذاكر (v7.4.4)
+database_tickets.py - دوال التذاكر (v7.4.5)
 ================================================================================
-🆕 v7.4.4 (FIX-T4 + FIX-T5):
+🆕 v7.4.5 (QUALITY-HARDENING):
+  🟢 FIX-T6: aliases (create_support_ticket, add_support_ticket) —
+      log warning عند استقبال kwargs غير متوقعة (كانت تُبتلع بصمت).
+  🟢 FIX-T7: aliases تقبل `content` كـ param صريح أيضاً
+      (بعض الاستدعاءات القديمة قد تستخدم content=... مباشرة).
+  🟢 FIX-T8: sanity check على next_num (يجب أن يكون >= 1).
+      إذا وصل عدّاد التذاكر إلى حد غير معقول (> 10^12)، نُعيد
+      العدّاد إلى 1 مع log تحذيري (يمنع overflow طويل الأمد).
+  🟢 FIX-T9: توثيق أفضل لسبب استخدام per-user lock + UPSERT.
+
+🆕 v7.4.4 (FIX-T4 + FIX-T5) — محفوظ:
   🔴 FIX-T4 (CRITICAL): create_ticket — استخدام UPSERT ذرّي بدل UPDATE فقط.
       السبب: إذا كان صف 'last_ticket_number' مفقوداً في جدول settings
       (بعد migration سيئة أو حذف يدوي)، فإن UPDATE يُرجع rowcount=0
@@ -43,6 +53,11 @@ import logging
 from typing import Dict, List, Optional
 
 logger = logging.getLogger(__name__)
+
+# 🆕 v7.4.5 FIX-T8: حد أقصى معقول لعدّاد التذاكر.
+# السبب: منع تراكم الأرقام إلى قيم ضخمة على مدى سنوات الاستخدام.
+# عملياً، حتى 1000 تذكرة/يوم × 10 سنوات ≈ 3.6M — أقل بكثير من 10^12.
+_MAX_REASONABLE_TICKET_NUMBER = 10 ** 12
 
 
 class TicketsMixin:
@@ -85,6 +100,7 @@ class TicketsMixin:
 
         🔴 FIX-T4 (v7.4.4): يستخدم UPSERT ذرّي لتحديث العدّاد.
         🟡 FIX-T5 (v7.4.4): يستخدم قفل per-user بدل العام.
+        🟢 FIX-T8 (v7.4.5): sanity check على next_num.
         """
         # 🆕 v7.4.3: alias — إذا أُرسل `message` ولم يُرسل `content`
         if not content and message:
@@ -99,7 +115,8 @@ class TicketsMixin:
             #
             # _get_user_lock(user_id) يُنشئ قفل مستقل لكل مستخدم →
             # عمليات المستخدمين المختلفين متوازية، وعمليات نفس
-            # المستخدم متسلسلة (وهو المطلوب).
+            # المستخدم متسلسلة (وهو المطلوب — لأن العدّاد لا بد أن
+            # يُقرأ ويُحدَّث بشكل متسلسل).
             #
             # ⚠️ مع fallback آمن إذا لم تكن _get_user_lock متاحة.
             _lock = self._lock
@@ -136,6 +153,18 @@ class TicketsMixin:
                     except (ValueError, TypeError):
                         next_num = 1
 
+                    # 🆕 v7.4.5 FIX-T8: sanity check.
+                    # لو وصل العدّاد إلى قيمة غير معقولة (overflow
+                    # محتمل أو فساد بيانات)، نُعيده إلى 1.
+                    if next_num > _MAX_REASONABLE_TICKET_NUMBER:
+                        logger.warning(
+                            f"⚠️ create_ticket: عدّاد التذاكر "
+                            f"({next_num}) > الحد المعقول "
+                            f"({_MAX_REASONABLE_TICKET_NUMBER}) — "
+                            f"إعادة العدّاد إلى 1"
+                        )
+                        next_num = 1
+
                     # 🔴 FIX-T4 (v7.4.4): استخدام UPSERT بدل UPDATE فقط.
                     #
                     # السبب: إذا كان صف 'last_ticket_number' مفقوداً
@@ -155,6 +184,9 @@ class TicketsMixin:
                             "last_ticket_number", str(next_num),
                         )
                     elif getattr(self, "USE_MYSQL", False):
+                        # ⚠️ ملاحظة: VALUES(`value`) deprecated في
+                        # MySQL 8.0.20+ لكنه مدعوم للتوافق الخلفي.
+                        # الصيغة الحديثة (alias) غير مدعومة على MySQL <8.
                         await self._execute_with_conn(
                             conn,
                             f"INSERT INTO settings "
@@ -199,6 +231,7 @@ class TicketsMixin:
 
     # ═════════════════════════════════════════════════════════════════
     # 🆕 v7.4.3 SUPPORT-ALIAS-1/2: aliases للتوافق مع handlers_message
+    # 🆕 v7.4.5 FIX-T6/T7: تحسينات على الـ aliases
     # ═════════════════════════════════════════════════════════════════
 
     async def create_support_ticket(
@@ -208,25 +241,37 @@ class TicketsMixin:
         message: str = "",
         media_type: Optional[str] = None,
         media_file_id: Optional[str] = None,
+        content: str = "",  # 🆕 FIX-T7: أيضاً كـ param صريح
         **kwargs,
     ) -> int:
         """
         🆕 v7.4.3: alias لـ create_ticket للتوافق مع
         handlers_message.py v7.18.29 (_handle_support_mode_text).
 
+        🆕 v7.4.5 FIX-T6: log warning عن kwargs غير متوقعة (كانت
+            تُبتلع بصمت → تُخفي أخطاء استدعاء).
+        🆕 v7.4.5 FIX-T7: يقبل `content` أيضاً كـ param صريح
+            (بعض الاستدعاءات القديمة قد تستخدم content=...).
+
         يقبل:
           - user_id:     معرّف المستخدم
           - username:    اسم المستخدم (اختياري)
           - message:     نص الرسالة
+          - content:     نص الرسالة (alias)
           - media_type:  نوع الوسائط (photo/video/voice/...)
           - media_file_id: معرّف الملف
 
         يُرجع رقم التذكرة أو 0 عند الفشل.
         """
+        if kwargs:
+            logger.warning(
+                f"⚠️ create_support_ticket: kwargs غير متوقعة "
+                f"سيتم تجاهلها: {list(kwargs.keys())}"
+            )
         return await self.create_ticket(
             user_id=user_id,
             username=username or "",
-            content=message or "",
+            content=content or message or "",
             media_type=media_type,
             media_file_id=media_file_id,
         )
@@ -238,6 +283,7 @@ class TicketsMixin:
         message: str = "",
         media_type: Optional[str] = None,
         media_file_id: Optional[str] = None,
+        content: str = "",  # 🆕 FIX-T7
         **kwargs,
     ) -> int:
         """
@@ -245,11 +291,18 @@ class TicketsMixin:
 
         بعض الإصدارات القديمة من handlers_message تستخدم
         add_support_ticket بدلاً من create_support_ticket.
+
+        🆕 v7.4.5 FIX-T6/T7 — نفس تحسينات create_support_ticket.
         """
+        if kwargs:
+            logger.warning(
+                f"⚠️ add_support_ticket: kwargs غير متوقعة "
+                f"سيتم تجاهلها: {list(kwargs.keys())}"
+            )
         return await self.create_ticket(
             user_id=user_id,
             username=username or "",
-            content=message or "",
+            content=content or message or "",
             media_type=media_type,
             media_file_id=media_file_id,
         )
