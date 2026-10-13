@@ -1,46 +1,44 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-db_diagnostics.py — واجهة تشخيص وصيانة قاعدة البيانات (v7.2.4 — MISLEADING-FIX)
+db_diagnostics.py — واجهة تشخيص وصيانة قاعدة البيانات (v7.2.5 — TLS-DEADLINE + EL-P90)
 ================================================================================
-🆕 v7.2.4 — MISLEADING-FIX (إصلاح التسميات المضللة):
-    🔴 FIX-RANK-VALUE: _identify_bottleneck — إعادة كتابة كاملة.
-        قبل: "ترتيب الأبعاد ~140ms" كان يعرض أوزاناً مضروبة
-              (مثلاً: tg_tcp × 0.5، cpu% × 2) وكأنها أزمنة.
-              مثال: 279ms × 0.5 = 139.5 → يُعرض "~140ms".
-              المستخدم يفهم أن الرقم "مللي ثانية" وهو في الحقيقة
-              وزن ترتيبي عشوائي — مضلل تماماً.
-        بعد:
-          • كل عنصر يحمل {value, unit, severity, weight, kind}
-          • value + unit = القيمة والوحدة الحقيقية (ms أو %)
-          • weight = داخلي فقط للترتيب — لا يُعرض أبداً
-          • severity مبنية على عتبات واقعية لكل مقياس على حدة
-          • عتبات Telegram متسامحة: RTT 100-300ms يُعد low
-            (طبيعي عبر القارات، لا يؤثر على سرعة الردود).
+🆕 v7.2.5 — TLS-DEADLINE + EL-P90-FIX:
 
-    🔴 FIX-RANK-DISPLAY: format_full_health_report — قسم "ترتيب
-        الأبعاد" يعرض الآن {value}{unit} الحقيقي:
-          • "network_telegram 279ms" (وليس "~140ms")
-          • "network_db 43ms" (وليس "~128ms")
-          • "ram 51%" (وليس "~77ms")
-          • "cpu 30%" (وليس "~61ms")
+    🔴 FIX-TLS-DEADLINE (جذري):
+        المشكلة المُكتشَفة من التقرير الحقيقي:
+            TLS: TimeoutError (8s) → CPU نافذة 12.8s → Event Loop max 12348ms
+        السبب الجذري:
+            `socket.settimeout(5.0)` هو per-read/write، وليس للـ handshake
+            بأكمله. على شبكات بطيئة، TLS handshake قد يستهلك 5 قراءات ×
+            5s = 25s نظرياً. و `asyncio.wait_for` كان يستخدم `timeout + 3.0`
+            (أي 8s) كحد أقصى فعلي.
+        الإصلاح:
+          • wait_for timeout = `timeout + 0.5` (5.5s بدل 8s).
+          • Force-close للـ raw_sock عند timeout → يُحرّر الثريد.
+          • التقاط asyncio.TimeoutError بشكل صريح ورسالة واضحة.
 
-    🔴 FIX-PRIMARY-SELECTION: "السبب الرئيسي" يُختار الآن حسب
-        severity الحقيقية (low/medium/high/critical) — وليس حسب
-        الوزن المضروب. النتيجة: أسباب أكثر منطقية.
+    🔴 FIX-EL-P90 (تفسير أفضل):
+        • `_probe_event_loop` يحسب الآن p50 + p90 + max.
+        • التقرير يعرض:
+            - lag median كـ مؤشر رئيسي 🟢/🟡/🔴
+            - lag p90 كمؤشر ثانوي
+            - lag max كـ "spike معزول" فقط عند تجاوزه 1000ms
+        • السبب: median=0ms و max=12348ms يخلقان انطباعاً مضللاً بأن
+          البوت بطيء، بينما spike واحد لا يعني ذلك.
 
-    ℹ️ ما لا يتغير:
-        • كل القياسات (TCP/TLS/CPU/Load/PK/warm) دقيقة كما هي.
-        • Cache، Cleanup، Maintenance، VACUUM — كلها دون تغيير.
-        • جميع Aliases و __all__ محفوظة.
+    🔴 FIX-MISLEADING (من v7.2.4 — مستمر):
+        • value+unit حقيقية بدل أوزان مضروبة.
+        • severity حسب عتبات واقعية.
 
-🆕 v7.2.3 — MYSQL-PARITY-FIX (5 إصلاحات) — محفوظ.
-🆕 v7.2.2 — PROBE-ACCURACY (3 إصلاحات دقة) — محفوظ.
-🆕 v7.2.1 — FIXES-BUNDLE (10 إصلاحات) — محفوظ.
-🆕 v7.2.0 — FULL-HEALTH-PROBE (محفوظ).
-🆕 v7.1.0 — LATENCY-PROBE (محفوظ).
-🆕 v7.0.1 — FIX-BUNDLE (محفوظ).
-🆕 v7.0.0 — CACHE-LAYER + PARALLEL-REPORT (محفوظ).
+🆕 v7.2.4 — MISLEADING-FIX — محفوظ.
+🆕 v7.2.3 — MYSQL-PARITY-FIX — محفوظ.
+🆕 v7.2.2 — PROBE-ACCURACY — محفوظ.
+🆕 v7.2.1 — FIXES-BUNDLE — محفوظ.
+🆕 v7.2.0 — FULL-HEALTH-PROBE — محفوظ.
+🆕 v7.1.0 — LATENCY-PROBE — محفوظ.
+🆕 v7.0.1 — FIX-BUNDLE — محفوظ.
+🆕 v7.0.0 — CACHE-LAYER + PARALLEL-REPORT — محفوظ.
 ================================================================================
 """
 
@@ -64,7 +62,7 @@ logger = logging.getLogger(__name__)
 # الإصدار
 # ═══════════════════════════════════════════════════════════════════════
 
-VERSION = "7.2.4"
+VERSION = "7.2.5"
 
 _MIN_DEAD_FOR_CRITICAL = 50
 _MIN_DEAD_FOR_COLOR = 10
@@ -330,6 +328,19 @@ def _hash_key(prefix: str, items: Any) -> str:
         return f"{prefix}_{h}"
     except Exception:
         return f"{prefix}_fallback"
+
+def _percentile(sorted_vals: List[float], pct: float) -> float:
+    """🆕 v7.2.5: حساب percentile بدون numpy. sorted_vals مفروض مرتب."""
+    if not sorted_vals:
+        return 0.0
+    if len(sorted_vals) == 1:
+        return float(sorted_vals[0])
+    try:
+        idx = int(round(pct * (len(sorted_vals) - 1)))
+        idx = max(0, min(idx, len(sorted_vals) - 1))
+        return float(sorted_vals[idx])
+    except Exception:
+        return float(sorted_vals[0])
 
 # ═══════════════════════════════════════════════════════════════════════
 # LATENCY PROBE — قياس كمون الشبكة/DB
@@ -850,8 +861,11 @@ async def _probe_network_to(
 ) -> Dict[str, Any]:
     """
     قياس DNS + TCP + TLS إلى host:port.
-    v7.2.2 FIX-TLS: TLS بـ CERT_NONE — نحن نقيس الزمن فقط.
-        TCP يبقى مسجّلاً حتى لو فشل TLS (مهم لـ Aiven CA مخصص).
+
+    v7.2.5 FIX-TLS-DEADLINE:
+        • TLS wait_for timeout = `timeout + 0.5` (5.5s بدل 8s سابقاً).
+        • Force-close للـ raw_sock عند timeout (يُحرّر الثريد).
+        • رسالة خطأ أوضح (كانت "TimeoutError: " فارغة).
     """
     result: Dict[str, Any] = {
         "host": host, "port": port, "ok": False,
@@ -873,7 +887,7 @@ async def _probe_network_to(
         result["error"] = f"DNS: {type(e).__name__}"
         return result
 
-    # ─── TCP (منفصل عن TLS) ────────────────────────────────
+    # ─── TCP ───────────────────────────────────────────────
     def _do_tcp():
         t0 = time.perf_counter()
         s = socket.create_connection((host, port), timeout=timeout)
@@ -894,6 +908,12 @@ async def _probe_network_to(
 
     # ─── TLS (فشله لا يُلغي TCP) ───────────────────────────
     if with_tls and raw_sock is not None:
+        # v7.2.5: enforce socket timeout قبل wrap
+        try:
+            raw_sock.settimeout(timeout)
+        except Exception:
+            pass
+
         def _do_tls():
             try:
                 ctx = ssl.create_default_context()
@@ -908,22 +928,34 @@ async def _probe_network_to(
                         ss.close()
                     except Exception:
                         pass
-            except Exception as e:
+            except Exception as _e:
                 try:
                     raw_sock.close()
                 except Exception:
                     pass
-                raise e
+                raise _e
 
         try:
+            # v7.2.5: timeout + 0.5 (بدل +3.0)
             tls_ms = await asyncio.wait_for(
                 asyncio.to_thread(_do_tls),
-                timeout=timeout + 3.0,
+                timeout=timeout + 0.5,
             )
             result["tls_ms"] = round(tls_ms, 2)
+        except asyncio.TimeoutError:
+            # v7.2.5: force-close لإلغاء الـ thread
+            try:
+                raw_sock.close()
+            except Exception:
+                pass
+            result["tls_ms"] = -1.0
+            result["tls_error"] = (
+                f"TimeoutError (>{timeout + 0.5:.1f}s)"
+            )
         except Exception as e:
             result["tls_ms"] = -1.0
-            result["tls_error"] = f"{type(e).__name__}: {str(e)[:80]}"
+            msg = str(e)[:80] if str(e) else type(e).__name__
+            result["tls_error"] = f"{type(e).__name__}: {msg}"
     else:
         try:
             raw_sock.close()
@@ -936,8 +968,18 @@ async def _probe_network_to(
 async def _probe_event_loop(
     samples: int = 10, sleep_ms: int = 50,
 ) -> Dict[str, Any]:
+    """
+    v7.2.5 FIX-EL-P90:
+        • يحسب median + p90 + max.
+        • p90 يظهر spike قصير لا يظهره median.
+        • max يبقى للعلم فقط.
+    """
     result: Dict[str, Any] = {
-        "ok": False, "samples_ms": [], "median_ms": 0.0, "max_ms": 0.0,
+        "ok": False,
+        "samples_ms": [],
+        "median_ms": 0.0,
+        "p90_ms": 0.0,
+        "max_ms": 0.0,
     }
     try:
         loop = asyncio.get_running_loop()
@@ -949,8 +991,10 @@ async def _probe_event_loop(
             lag = max(0.0, actual_ms - sleep_ms)
             lags.append(lag)
         result["samples_ms"] = [round(x, 2) for x in lags]
-        result["median_ms"] = round(statistics.median(lags), 2)
-        result["max_ms"] = round(max(lags), 2)
+        sorted_lags = sorted(lags)
+        result["median_ms"] = round(statistics.median(sorted_lags), 2)
+        result["p90_ms"] = round(_percentile(sorted_lags, 0.90), 2)
+        result["max_ms"] = round(max(sorted_lags), 2)
         result["ok"] = True
     except Exception as e:
         result["error"] = str(e)
@@ -1054,14 +1098,11 @@ async def _probe_system() -> Dict[str, Any]:
 
 def _identify_bottleneck(data: Dict[str, Any]) -> Dict[str, Any]:
     """
-    يحدد السبب الرئيسي للبطء بأرقام حقيقية غير مضللة.
-
-    v7.2.4 FIX-RANK-VALUE:
-        • كل عنصر يحمل: value (حقيقي) + unit (ms/%) + kind + severity + weight
-        • value + unit هما ما يُعرض للمستخدم — لا أوزان مضروبة
-        • weight داخلي فقط للترتيب — لا يظهر أبداً
-        • severity مبنية على عتبات واقعية لكل مقياس على حدة
-        • عتبات Telegram متسامحة (RTT عبر القارات = low)
+    v7.2.4 FIX-RANK-VALUE (مستمر في v7.2.5):
+        • كل عنصر يحمل {value, unit, severity, weight, kind}.
+        • value + unit حقيقية (ms/%) — weight داخلي فقط.
+        • severity حسب عتبات واقعية.
+        • عتبات Telegram متسامحة (RTT عبر القارات = low).
     """
     comps: List[Dict[str, Any]] = []
 
@@ -1075,7 +1116,7 @@ def _identify_bottleneck(data: Dict[str, Any]) -> Dict[str, Any]:
             "weight": round(float(weight), 2),
         })
 
-    # ─── 1) network_db (زمني) ─────────────────────────────
+    # ─── 1) network_db ─────────────────────────────────────
     net_db = data.get("network_db") or {}
     db_tcp = float(net_db.get("tcp_ms") or 0)
     if db_tcp > 0:
@@ -1089,7 +1130,7 @@ def _identify_bottleneck(data: Dict[str, Any]) -> Dict[str, Any]:
             sev = "critical"
         _add("network_db", "time", db_tcp, "ms", sev, db_tcp * 3.0)
 
-    # ─── 2) database_internal (زمني) ──────────────────────
+    # ─── 2) database_internal ──────────────────────────────
     db_p = data.get("database") or {}
     warm = float(db_p.get("warm_median_ms") or 0)
     if warm > 0:
@@ -1103,11 +1144,12 @@ def _identify_bottleneck(data: Dict[str, Any]) -> Dict[str, Any]:
             sev = "critical"
         _add("database_internal", "time", warm, "ms", sev, warm * 3.0)
 
-    # ─── 3) event_loop (زمني) ─────────────────────────────
+    # ─── 3) event_loop ─────────────────────────────────────
     loop_p = data.get("event_loop") or {}
-    lag = float(loop_p.get("median_ms") or 0)
+    # v7.2.5: نستخدم p90 (أكثر تمثيلاً من median، وأقل تشويشاً من max)
+    lag = float(loop_p.get("p90_ms") or loop_p.get("median_ms") or 0)
     if lag > 0:
-        if lag < 15:
+        if lag < 20:
             sev = "low"
         elif lag < 50:
             sev = "medium"
@@ -1117,7 +1159,7 @@ def _identify_bottleneck(data: Dict[str, Any]) -> Dict[str, Any]:
             sev = "critical"
         _add("event_loop", "time", lag, "ms", sev, lag * 5.0)
 
-    # ─── 4) filesystem (زمني) ─────────────────────────────
+    # ─── 4) filesystem ─────────────────────────────────────
     fs_p = data.get("filesystem") or {}
     fs_w = float(fs_p.get("write_1mb_ms") or 0)
     if fs_w > 0:
@@ -1131,7 +1173,7 @@ def _identify_bottleneck(data: Dict[str, Any]) -> Dict[str, Any]:
             sev = "critical"
         _add("filesystem", "time", fs_w, "ms", sev, fs_w * 0.5)
 
-    # ─── 5) CPU (نسبة مئوية) ──────────────────────────────
+    # ─── 5) CPU ────────────────────────────────────────────
     sys_p = data.get("system") or {}
     cpu = float(sys_p.get("cpu_percent") or 0)
     if cpu > 0:
@@ -1145,7 +1187,7 @@ def _identify_bottleneck(data: Dict[str, Any]) -> Dict[str, Any]:
             sev = "critical"
         _add("cpu", "percent", cpu, "%", sev, cpu * 1.0)
 
-    # ─── 6) RAM (نسبة مئوية) ──────────────────────────────
+    # ─── 6) RAM ────────────────────────────────────────────
     ram = float(sys_p.get("ram_percent") or 0)
     if ram > 0:
         if ram < 85:
@@ -1158,7 +1200,7 @@ def _identify_bottleneck(data: Dict[str, Any]) -> Dict[str, Any]:
             sev = "critical"
         _add("ram", "percent", ram, "%", sev, ram * 0.8)
 
-    # ─── 7) network_telegram (زمني — خارجي متسامح) ────────
+    # ─── 7) network_telegram ───────────────────────────────
     net_tg = data.get("network_telegram") or {}
     tg_tcp = float(net_tg.get("tcp_ms") or 0)
     if tg_tcp > 0:
@@ -1172,17 +1214,15 @@ def _identify_bottleneck(data: Dict[str, Any]) -> Dict[str, Any]:
             sev = "critical"
         _add("network_telegram", "time", tg_tcp, "ms", sev, tg_tcp * 0.2)
 
-    # ─── ترتيب بالوزن (الأعلى أولاً) ──────────────────────
+    # ─── ترتيب بالوزن ─────────────────────────────────────
     comps.sort(key=lambda x: -x["weight"])
 
-    # ─── أعلى severity ────────────────────────────────────
     sev_rank = {"low": 0, "medium": 1, "high": 2, "critical": 3}
     max_sev = "low"
     for c in comps:
         if sev_rank.get(c["severity"], 0) > sev_rank.get(max_sev, 0):
             max_sev = c["severity"]
 
-    # ─── لا bottleneck ────────────────────────────────────
     if max_sev == "low" or not comps:
         return {
             "primary": "none",
@@ -1195,7 +1235,6 @@ def _identify_bottleneck(data: Dict[str, Any]) -> Dict[str, Any]:
             "ranked": comps,
         }
 
-    # ─── أعلى severity → ثم أعلى weight ───────────────────
     candidates = [c for c in comps if c["severity"] == max_sev]
     candidates.sort(key=lambda x: -x["weight"])
     top = candidates[0]
@@ -1214,7 +1253,7 @@ def _identify_bottleneck(data: Dict[str, Any]) -> Dict[str, Any]:
             f"(المتوقع < 20ms)."
         ),
         "event_loop": (
-            f"🟠 Event loop lag = {tv:.0f}{tu} — "
+            f"🟠 Event loop lag (p90) = {tv:.0f}{tu} — "
             f"البوت مشبع بعمليات sync."
         ),
         "filesystem": (
@@ -1228,8 +1267,7 @@ def _identify_bottleneck(data: Dict[str, Any]) -> Dict[str, Any]:
         ),
         "network_telegram": (
             f"🟡 RTT إلى Telegram = {tv:.0f}{tu}. "
-            f"لا يؤثر على سرعة الردود (webhook-driven)، "
-            f"فقط على العمليات الاستباقية (النشر، الإشعارات)."
+            f"لا يؤثر على سرعة الردود (webhook-driven)."
         ),
     }
 
@@ -1240,8 +1278,7 @@ def _identify_bottleneck(data: Dict[str, Any]) -> Dict[str, Any]:
         ),
         "database_internal": (
             "✅ راجع pg_stat_activity، شغّل VACUUM ANALYZE، "
-            "اضبط shared_buffers (≥ 25% RAM)، "
-            "وافحص pg_stat_statements."
+            "اضبط shared_buffers (≥ 25% RAM)."
         ),
         "event_loop": (
             "✅ ابحث عن استدعاءات sync في async code: "
@@ -1249,8 +1286,7 @@ def _identify_bottleneck(data: Dict[str, Any]) -> Dict[str, Any]:
             "استخدم asyncio.to_thread."
         ),
         "filesystem": (
-            "✅ تجنّب كتابة ملفات كبيرة. استخدم /tmp فقط. "
-            "في Render free tier القرص بطيء."
+            "✅ تجنّب كتابة ملفات كبيرة. استخدم /tmp فقط."
         ),
         "cpu": (
             "✅ قلّل MAX_CHANNELS_PER_CYCLE، راجع العمليات "
@@ -1280,6 +1316,7 @@ async def _probe_full_health(
     """
     تشخيص شامل — يقيس كل الأبعاد ويحدد السبب.
     v7.2.2 FIX-CPU: prime CPU قبل gather، read بعده (نافذة كاملة).
+    v7.2.5: TLS timeout مضبوط → نافذة أقصر.
     """
     if not force:
         cached = _cache_get("full_health")
@@ -1481,16 +1518,39 @@ def format_full_health_report(data: Dict[str, Any]) -> str:
             )
         lines.append("")
 
-    # Event Loop
+    # Event Loop — v7.2.5: median + p90 + max
     loop_p = data.get("event_loop") or {}
     if loop_p.get("ok"):
         lines.append("🔄 <b>Event Loop</b>")
+        median_v = float(loop_p.get('median_ms', 0) or 0)
+        p90_v = float(loop_p.get('p90_ms', 0) or 0)
+        max_v = float(loop_p.get('max_ms', 0) or 0)
+
+        med_icon = ("🟢" if median_v < 5 else
+                    "🟡" if median_v < 20 else "🔴")
         lines.append(
-            f"   lag median: <b>{loop_p.get('median_ms', 0):.0f}ms</b>"
+            f"   {med_icon} lag median: <b>{median_v:.0f}ms</b> "
+            f"<i>(الأساسي)</i>"
         )
-        lines.append(
-            f"   lag max: <b>{loop_p.get('max_ms', 0):.0f}ms</b>"
-        )
+
+        if p90_v > 0:
+            p90_icon = ("🟢" if p90_v < 20 else
+                        "🟡" if p90_v < 100 else "🔴")
+            lines.append(
+                f"   {p90_icon} lag p90: <b>{p90_v:.0f}ms</b>"
+            )
+
+        if max_v > 1000:
+            lines.append(
+                f"   🔴 lag max: <b>{max_v:.0f}ms</b> "
+                f"<i>(spike معزول — راجع السجل)</i>"
+            )
+        elif max_v > 0:
+            max_icon = ("🟢" if max_v < 100 else
+                        "🟡" if max_v < 500 else "🟠")
+            lines.append(
+                f"   {max_icon} lag max: <b>{max_v:.0f}ms</b>"
+            )
         lines.append("")
 
     # Filesystem
@@ -3118,21 +3178,17 @@ __all__ = [
 ]
 
 # ═══════════════════════════════════════════════════════════════════════
-# LOAD BEACON — v7.2.4
+# LOAD BEACON — v7.2.5
 # ═══════════════════════════════════════════════════════════════════════
 
 try:
     logger.info(
         "🛡️ db_diagnostics.py v%s loaded | "
+        "TLS-DEADLINE ✅ (wait_for=timeout+0.5, force-close) | "
+        "EL-P90 ✅ (median+p90+max) | "
         "MISLEADING-FIX ✅ | "
-        "RANK-VALUE ✅ (real values+units) | "
-        "RANK-DISPLAY ✅ (no ~XXms fake) | "
-        "PRIMARY-SELECTION ✅ (by severity) | "
+        "RANK-VALUE ✅ | "
         "MYSQL-PARITY ✅ | "
-        "MYSQL-CLOSE-AWAIT ✅ | "
-        "MYSQL-TABLES-SUPPORT ✅ | "
-        "MYSQL-META-SUPPORT ✅ | "
-        "AV-SCORE-GUARD ✅ | "
         "PROBE-ACCURACY ✅ | "
         "CPU-WINDOW-FIXED ✅ | "
         "TLS-CERT-NONE ✅ | "
