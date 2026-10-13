@@ -1,35 +1,33 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-database.py - قاعدة البيانات المتكاملة (v7.7.68 — DB-POOL-LATENCY-FIX)
+database.py - قاعدة البيانات المتكاملة (v7.7.69 — STATEMENT-CACHE-REVERT-FIX)
 ================================================================================
+🆕 v7.7.69 (STATEMENT-CACHE-REVERT-FIX):
+  🔴 FIX-DB16 (CRITICAL): إلغاء الكشف التلقائي لـ statement_cache_size=0
+     في PgBouncer endpoint.
+     السبب الجذري:
+       في v7.7.68، افترضنا أن أي منفذ ":21834" = PgBouncer tx-mode →
+       فرضنا statement_cache_size=0. الاختبار الفعلي أظهر:
+         - قبل (cache=100): warm = 42ms (1 RTT) ✅
+         - بعد (cache=0):   warm = 84ms (2 RTT) ❌
+       أي أن Aiven endpoint ":21834" **يدعم prepared statements** بنجاح.
+     الإصلاح:
+       • العودة إلى statement_cache_size=100 (asyncpg default).
+       • إلغاء فرض القيمة عند كشف ":21834".
+       • إبقاء كشف "-pooler." كتحذير فقط (بدون فرض).
+       • env var PG_STATEMENT_CACHE_SIZE للتحكم اليدوي.
+
+  🟠 FIX-DB17: PG_STATEMENT_CACHE_SIZE default 0 → 100.
+  🟠 FIX-DB18: PG_MAX_CACHED_STATEMENT_LIFETIME default 0 → 300.
+
 🆕 v7.7.68 (DB-POOL-LATENCY-FIX):
-  🔴 FIX-DB10 (CRITICAL): PG pool — إضافة
-     statement_cache_size=0 + max_cached_statement_lifetime=0.
-     السبب: Aiven pooled endpoint (PgBouncer في transaction mode)
-     لا يحفظ prepared statements بين transactions. asyncpg الافتراضي
-     (statement_cache_size=100) يُجبر 4 RTT لكل استعلام جديد:
-       Parse → Bind → Execute + إعادة محاولة عند فشل الـ prepared stmt.
-     النتيجة قبل الإصلاح: PK SELECT = 172ms (4 × 42ms RTT).
-     المتوقع بعد: 50-60ms (2 RTT).
-     ملاحظة: يُفعَّل تلقائياً عند استخدام endpoint يحتوي "pooler"
-     في الرابط، أو يدوياً عبر PG_STATEMENT_CACHE_SIZE env.
-
+  🔴 FIX-DB10 (CRITICAL): ... (تم التراجع عن الكشف التلقائي)
   🔴 FIX-DB11: PG_MAX_INACTIVE_LIFETIME 15s → 300s.
-     السبب: 15s كان يفصل الاتصالات في الساعات الهادئة →
-     full TLS+auth عند أول استعلام بعد خمول = 413ms connect.
-     مع min_size=5 + lifetime=300s، الاتصالات تبقى ساخنة.
-
   🟠 FIX-DB12: PG_CONN_PING_IDLE_THRESHOLD 5s → 60s.
-     السبب: كل استعلام بعد 5s idle كان يدفع +42ms لـ SELECT 1
-     وقائي. مع Aiven keepalive جيد، 60s كافٍ.
-
   🟡 FIX-DB13: _conn_last_used → weakref.WeakKeyDictionary.
-     السبب: id(conn) قد يتصادم بعد GC لأحد الاتصالات وإنشاء آخر
-     في نفس عنوان الذاكرة.
-
   🟡 FIX-DB14: DB_TIMEOUT 30s → 10s.
-  🟡 FIX-DB15: _query_timeout = timeout × 2 = 20s (كان 60s).
+  🟡 FIX-DB15: _query_timeout = timeout × 2 = 20s.
 
 🆕 v7.7.67 (NESTED-TX-LIFECYCLE-FIX):
   🔴 FIX-DB5 (CRITICAL): نقل migrate_reminders_columns و
@@ -83,8 +81,10 @@ database.py - قاعدة البيانات المتكاملة (v7.7.68 — DB-POO
 # [27] v7.7.67: نقل migrate_reminders/ensure_dev OUT من bootstrap tx
 #              + _load_mixin Exception + _spawn_bg_task closing
 #              + vacuum tx check
-# [28] v7.7.68: PG statement_cache_size=0 + lifetime 300s
-#              + ping_idle 60s + WeakKeyDictionary + DB_TIMEOUT 10s
+# [28] v7.7.68: pool lifetime 300s + ping_idle 60s
+#              + WeakKeyDictionary + DB_TIMEOUT 10s
+# [29] v7.7.69: REVERT statement_cache_size=0 (كان يسبب بطء 2x)
+#              — Aiven ":21834" يدعم prepared statements بنجاح.
 # =====================================================================
 
 import os
@@ -617,35 +617,52 @@ PG_COMMAND_TIMEOUT = float(os.getenv("PG_COMMAND_TIMEOUT", "10.0"))
 PG_ROLLBACK_ON_RETURN_TIMEOUT = float(
     os.getenv("PG_ROLLBACK_ON_RETURN_TIMEOUT", "2.0"))
 
-# 🆕 v7.7.68 FIX-DB10: prepared statement cache — للتوافق مع PgBouncer
-# في transaction mode (Aiven pooled endpoint).
+# ═══════════════════════════════════════════════════════════════════════
+# 🔴 v7.7.69 FIX-DB16/17/18: REVERT statement_cache_size
+# ═══════════════════════════════════════════════════════════════════════
 #
-# القيم الافتراضية = 0 (معطّل).
-# لتفعيل الـ prepared statements: PG_STATEMENT_CACHE_SIZE=100
-# (يُنصح فقط مع direct endpoint أو PgBouncer في session mode).
+# التصحيح السابق (v7.7.68 FIX-DB10) كان يفرض statement_cache_size=0
+# عند كشف ":21834" (منفذ Aiven) — بناءً على افتراض أنه PgBouncer
+# في transaction mode.
+#
+# الاختبار الفعلي على Aiven ":21834":
+#   • cache=100 → warm = 42ms (1 RTT)  ✅
+#   • cache=0   → warm = 84ms (2 RTT)  ❌
+#
+# أي أن Aiven ":21834" يدعم prepared statements بنجاح. الافتراض كان
+# خاطئاً. الفرض كان يُضعف الأداء بدل تحسينه.
+#
+# القاعدة الجديدة:
+#   • default = 100 (asyncpg default) — الأداء الأمثل.
+#   • env var PG_STATEMENT_CACHE_SIZE للتحكم اليدوي (0 = تعطيل).
+#   • كشف "-pooler." صريح → تحذير فقط (بدون فرض قيمة).
+#
 PG_STATEMENT_CACHE_SIZE = int(
-    os.getenv("PG_STATEMENT_CACHE_SIZE", "0"))
+    os.getenv("PG_STATEMENT_CACHE_SIZE", "100"))
 PG_MAX_CACHED_STATEMENT_LIFETIME = float(
-    os.getenv("PG_MAX_CACHED_STATEMENT_LIFETIME", "0"))
+    os.getenv("PG_MAX_CACHED_STATEMENT_LIFETIME", "300.0"))
 
-# 🔍 كشف تلقائي: إذا كان الرابط يحتوي "pooler" أو منفذ Aiven النموذجي
-# (21834)، نُجبر statement_cache_size=0 حتى لو كان env مضبوطاً.
+# 🔍 كشف تشخيصي فقط (لا فرض):
 _PG_IS_POOLED = False
 if USE_POSTGRES and DATABASE_URL:
     _url_low = DATABASE_URL.lower()
-    if ("pooler" in _url_low
-            or ":21834" in _url_low
-            or "pgbouncer" in _url_low
-            or "-pooler." in _url_low):
+    # نتحقق فقط من مؤشرات واضحة '-pooler.' (بدون فرض قيمة).
+    if "-pooler." in _url_low or "pgbouncer" in _url_low:
         _PG_IS_POOLED = True
-        if PG_STATEMENT_CACHE_SIZE != 0:
-            logger.warning(
-                "⚠️ v7.7.68 FIX-DB10: تم كشف pooled endpoint — "
-                "إجبار PG_STATEMENT_CACHE_SIZE=0 "
-                "(prepared statements غير مدعومة في tx-pooling)"
-            )
-            PG_STATEMENT_CACHE_SIZE = 0
-            PG_MAX_CACHED_STATEMENT_LIFETIME = 0
+        logger.info(
+            "ℹ️ v7.7.69: كُشف مؤشر pooled endpoint — "
+            f"الحالي statement_cache_size={PG_STATEMENT_CACHE_SIZE} "
+            f"(من env). إذا لاحظت أخطاء "
+            f"'prepared statement does not exist'، اضبط "
+            f"PG_STATEMENT_CACHE_SIZE=0 في env."
+        )
+    elif ":21834" in _url_low:
+        # ملاحظة توثيقية فقط
+        logger.debug(
+            "ℹ️ v7.7.69: Aiven ':21834' — "
+            f"statement_cache_size={PG_STATEMENT_CACHE_SIZE} "
+            f"(تجريبي: يدعم prepared statements)."
+        )
 
 IDLE_TX_AUDIT_ENABLED = (
     os.getenv("IDLE_TX_AUDIT_ENABLED", "true").lower() == "true")
@@ -2683,14 +2700,15 @@ class Database(
 
     async def _pg_pool_factory(self):
         """
-        🆕 v7.7.68 FIX-DB10/DB11: pool PG محسّن لـ Aiven PgBouncer.
+        🆕 v7.7.69 FIX-DB16: pool PG محسّن مع statement cache.
+        🆕 v7.7.68 FIX-DB11: max_inactive_lifetime=300s.
+        🆕 v7.7.69 FIX-DB17: statement_cache_size=100 (default).
 
-        - statement_cache_size=0: توافق tx-pooling.
-        - max_inactive_connection_lifetime=300s: اتصالات ساخنة.
+        Aiven ":21834" يدعم prepared statements بنجاح (warm=42ms=1 RTT).
+        إذا لاحظت أخطاء "prepared statement does not exist"، اضبط
+        PG_STATEMENT_CACHE_SIZE=0 في env.
         """
         try:
-            # 🆕 v7.7.68 FIX-DB10: تمرير statement_cache_size للتوافق
-            # مع PgBouncer في transaction mode.
             create_kwargs: Dict[str, Any] = {
                 "min_size": max(5, self._min_connections),
                 "max_size": self._max_connections,
@@ -2710,7 +2728,7 @@ class Database(
                         PG_IDLE_TX_TIMEOUT_MS),
                 },
             }
-            # 🔴 v7.7.68 FIX-DB10: statement cache للتوافق مع PgBouncer.
+            # 🆕 v7.7.69 FIX-DB17: statement cache قابل للضبط
             try:
                 create_kwargs["statement_cache_size"] = int(
                     PG_STATEMENT_CACHE_SIZE)
@@ -2718,7 +2736,7 @@ class Database(
                     PG_MAX_CACHED_STATEMENT_LIFETIME)
             except TypeError as _tce:
                 logger.warning(
-                    "⚠️ v7.7.68: asyncpg لا يدعم "
+                    "⚠️ v7.7.69: asyncpg لا يدعم "
                     "statement_cache_size في create_pool: %s",
                     _tce)
             pool = await asyncpg.create_pool(DATABASE_URL, **create_kwargs)
@@ -3065,9 +3083,6 @@ class Database(
                 return False
             finally:
                 # 🆕 v7.7.67 FIX-DB9: توضيح منطق cooldown.
-                # الهدف: عند النجاح، ننتظر cooldown كامل قبل المحاولة
-                # التالية. عند الفشل، ننتظر short_cooldown فقط (10%
-                # من cooldown الأصلي، بحد أدنى 60s) لمحاولة أسرع.
                 if success:
                     self._mv_last_refresh_mono = time.monotonic()
                 else:
@@ -3639,8 +3654,6 @@ class Database(
                         try:
                             self._conn_last_used[conn] = now
                         except (TypeError, KeyError) as _ck_e:
-                            # WeakKeyDictionary قد ترفض أنواعاً غير
-                            # قابلة للـ weak-ref.
                             if not self._use_weak_conn_cache:
                                 logger.debug(
                                     f"_conn_last_used set: {_ck_e}")
@@ -4693,8 +4706,6 @@ class Database(
                 await self.cleanup_channel_locks()
                 await self.cleanup_group_locks()
                 await self.cleanup_penalty_locks()
-                # 🆕 v7.7.68 FIX-DB13: WeakKeyDictionary — تنظيم
-                # تلقائي، لكن نُبقي الـ cleanup للاتصالات طويلة العمر.
                 try:
                     if len(self._conn_last_used) > 1000:
                         now = time.monotonic()
@@ -7948,29 +7959,27 @@ __all__ = [
 
 
 # =====================================================================
-# LOAD BEACON — v7.7.68
+# LOAD BEACON — v7.7.69
 # =====================================================================
 
 try:
     _analytics_status = (
         "✅" if hasattr(Database, "get_user_growth") else "❌")
     logger.info(
-        "🛡️ database.py v7.7.68 DB-POOL-LATENCY-FIX loaded | "
+        "🛡️ database.py v7.7.69 STATEMENT-CACHE-REVERT-FIX loaded | "
         "DB=%s | Analytics=%s (available=%s) | "
         "Migrations=%s | Refactor=%s | Caches=%s | "
         "Idle-TX-Audit=%s (interval=%.0fs, threshold=%d) | "
         "PG-rollback-on-return=%.1fs | "
-        "PG-stmt-cache=%d (pooled=%s) | "
+        "PG-stmt-cache=%d (pooled=%s) ← REVERTED | "
         "PG-max-inactive=%.0fs | "
         "PG-ping-idle=%.0fs | "
-        "Fixes: DB10 (stmt_cache=0 لـ PgBouncer), "
-        "DB11 (max_inactive 300s), "
-        "DB12 (ping_idle 60s), "
-        "DB13 (WeakKeyDictionary), "
-        "DB14 (DB_TIMEOUT=10s), "
-        "DB15 (query_timeout=20s), "
-        "DB1..DB9 (v7.7.66/67), "
-        "MIXIN-1/2/3 (v7.7.65), "
+        "Fixes: DB16 (REVERT stmt_cache=0)، "
+        "DB17 (stmt_cache default 100)، "
+        "DB18 (cache lifetime default 300s)، "
+        "DB11..DB15 (v7.7.68)، "
+        "DB5..DB9 (v7.7.67)، "
+        "MIXIN-1/2/3 (v7.7.65)، "
         "E1..E8 (v7.7.64) | IN chunking max=%d",
         DB_TYPE.upper(),
         _analytics_status,
