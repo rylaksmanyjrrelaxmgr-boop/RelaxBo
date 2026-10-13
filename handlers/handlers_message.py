@@ -1,8 +1,30 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-handlers_message.py - v7.18.36 (POLISH-PLUS)
+handlers_message.py - v7.18.37 (POLISH-PLUS-2)
 (متوافق مع detectors v4.1.0 + banned_words_manager v1.2.0)
+=============================================================================
+🆕 v7.18.37 (POLISH-PLUS-2) — تحسينات مراجعة (بلا تغيير سلوكي):
+    🟡 POLISH-13-ENHANCED: logger.warning بدل debug في partial_return
+        → الفشل نادر جداً (get_security_settings_cached تلتقط
+          الاستثناءات داخلياً) — رؤيته في السجل = شذوذ حقيقي.
+        → رسالة أوضح: "falling back to full BATCH path".
+
+    🟡 THREADING-NOTE: توثيق صريح لافتراض single event loop على
+        كل الـcaches المحلية (_sec_settings_local_cache,
+        _ars_local_cache, _admin_check_cache,
+        _PENALTY_DURATION_OVERRIDE_CACHE, _group_log_channel_cache).
+        → في asyncio، dict ops ذرّية ما لم يوجد await بينها.
+        → _prune_perf_caches يستخدم sorted(...) = لقطة كاملة.
+        → لو انتقل النظام لـmulti-thread: أضف threading.Lock.
+
+    🟡 LAYER-ENABLED-DOC: توثيق سبب استيراد *_LAYER_ENABLED
+        من _detectors_module رغم عدم استخدامها محلياً.
+        → bot.py يقرؤها مباشرة من _detectors_module.
+        → إزالتها ستكسر الـimport العلوي (توافق م backwards).
+
+    🟢 محفوظ من v7.18.36 (POLISH-PLUS):
+        POLISH-9-ENHANCED, POLISH-12, POLISH-13, POLISH-14.
 =============================================================================
 🆕 v7.18.36 (POLISH-PLUS) — تصحيحات وتحسينات مكمّلة:
     🔴 POLISH-9-ENHANCED: فحص وجود قبل DELETE في _handle_wait_auto_del_text
@@ -234,6 +256,15 @@ for _path in (
         SpamVerdict = getattr(_mod, "SpamVerdict", None)
         FINAL_THRESHOLD = getattr(_mod, "FINAL_THRESHOLD", 5)
         LAYER_WEIGHTS = getattr(_mod, "LAYER_WEIGHTS", {}) or {}
+
+        # ───────────────────────────────────────────────────────────
+        # 🟡 v7.18.37 LAYER-ENABLED-DOC:
+        #   هذه الثوابت تُستورَد من _detectors_module للتوافق مع
+        #   bot.py الذي يقرؤها مباشرة من نفس الـmodule.
+        #   لا تُستعمل داخل handlers_message — تُصدَّر للأعلى فقط.
+        #   ⚠️ إزالتها ستكسر الـimport العلوي في bot.py إذا استُوردت
+        #   من handlers_message بدل _detectors_module في نسخ أقدم.
+        # ───────────────────────────────────────────────────────────
         TEXT_LAYER_ENABLED = getattr(_mod, "TEXT_LAYER_ENABLED", False)
         OCR_LAYER_ENABLED = getattr(_mod, "OCR_LAYER_ENABLED", False)
         AUDIO_LAYER_ENABLED = getattr(_mod, "AUDIO_LAYER_ENABLED", False)
@@ -597,6 +628,11 @@ _DEBUG_SPAM = DEBUG_SPAM
 _GROUP_LOG_CHANNEL_CACHE_TTL = 60.0
 _GROUP_LOG_CHANNEL_CACHE_MAX = 2000
 _GROUP_LOG_CHANNEL_CACHE_MAX_STALE = 600.0
+# 🟡 v7.18.37 THREADING-NOTE:
+#   dict يستخدم من event loop واحد فقط (single asyncio loop).
+#   في asyncio: dict ops ذرّية (GIL) ما لم يوجد await بينها.
+#   _prune_perf_caches يستخدم sorted(...) = لقطة كاملة قبل الحذف.
+#   لو انتقل النظام لـmulti-thread: أضف threading.Lock.
 _group_log_channel_cache: Dict[int, Tuple[Any, float]] = {}
 
 
@@ -647,6 +683,11 @@ async def _get_group_log_channel_cached(chat_id: int):
     return value
 
 
+# 🟡 v7.18.37 THREADING-NOTE:
+#   كل الكاشات أدناه تُستخدم من event loop واحد فقط.
+#   عمليات dict الذرّية مضمونة في asyncio — لا حاجة لـlock.
+#   الأنماط الحساسة (sorted/iteration) تعمل على لقطة كاملة.
+#   في حال الانتقال لـmulti-thread: أضف threading.Lock.
 _SEC_SETTINGS_LOCAL_TTL = 5.0
 _SEC_SETTINGS_LOCAL_MAX = 3000
 _sec_settings_local_cache: Dict[int, Tuple[Dict[str, Any], float]] = {}
@@ -1073,7 +1114,7 @@ async def _lazy_init_columns(bot=None):
         _columns_last_attempt_ts = now
 
         db_type = getattr(DB, "DB_TYPE", "sqlite")
-        logger.info("🔧 v7.18.36: Auto-migration (DB_TYPE=%s)", db_type)
+        logger.info("🔧 v7.18.37: Auto-migration (DB_TYPE=%s)", db_type)
 
         cols = [
             ("delete_protected_any", "INTEGER DEFAULT 0",
@@ -2734,6 +2775,7 @@ async def get_security_settings_cached(chat_id) -> dict:
 # 🆕 v7.18.34 POLISH-2
 # 🆕 v7.18.35 POLISH-2-COMPLETE
 # 🆕 v7.18.36 POLISH-12 + POLISH-13 (partial_return)
+# 🆕 v7.18.37 POLISH-13-ENHANCED (warning بدل debug)
 # ═══════════════════════════════════════════════════════════════════
 
 async def _get_batched_message_settings(
@@ -2741,7 +2783,7 @@ async def _get_batched_message_settings(
 ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     """
     v7.18.33 BATCH-SETTINGS + v7.18.34 POLISH-2 + v7.18.35 COMPLETE
-    + v7.18.36 POLISH-12 (أولوية ars_local) + POLISH-13 (partial_return):
+    + v7.18.36 POLISH-12 + POLISH-13 + v7.18.37 POLISH-13-ENHANCED:
 
         جلب group_security + auto_reply_settings في استعلام واحد
         على PostgreSQL (1 RTT بدل 2).
@@ -2758,6 +2800,11 @@ async def _get_batched_message_settings(
       • sec غير جاهز + ars جاهز → استعلام sec فقط
         (تجنّب BATCH PG بلا داعٍ).
       • التوفير: ~50% من زمن الاستعلام لهذه الحالة النادرة.
+
+    🟡 v7.18.37 POLISH-13-ENHANCED:
+      • عند فشل partial_return → logger.warning (بدل debug).
+      • السبب: get_security_settings_cached تلتقط الاستثناءات
+        داخلياً، لذا فشلها = شذوذ حقيقي يستحق الظهور في السجل.
 
     ملاحظات المراجعة (v7.18.33):
       🔴 _row_to_dict_local بدل isinstance(row, dict).
@@ -2814,9 +2861,13 @@ async def _get_batched_message_settings(
                 "local" if ars_ready_local else "smart")
             return sec_data, _pick_ars()
         except Exception as _pe:
-            logger.debug(
+            # 🟡 v7.18.37 POLISH-13-ENHANCED: warning بدل debug —
+            #   الفشل نادر جداً (get_security_settings_cached تلتقط
+            #   الاستثناءات داخلياً). ظهوره = شذوذ حقيقي.
+            logger.warning(
                 "POLISH-13 partial_return failed: %s — "
-                "fallback to BATCH", _pe)
+                "falling back to full BATCH path",
+                _pe)
             # fallback إلى BATCH
 
     # ─── 2) PG batched ──────────────────────────────────────────
@@ -3641,7 +3692,7 @@ class MessageHandlers:
             pass
 
         # 🆕 v7.18.33 BATCH-SETTINGS + v7.18.35 POLISH-2-COMPLETE
-        # + v7.18.36 POLISH-12/13
+        # + v7.18.36 POLISH-12/13 + v7.18.37 POLISH-13-ENHANCED
         settings, _preloaded_ars = await _get_batched_message_settings(
             chat_id)
         if not isinstance(settings, dict):
@@ -6936,7 +6987,7 @@ __all__ = [
 
 try:
     logger.info(
-        "✅ handlers_message v7.18.36 loaded | "
+        "✅ handlers_message v7.18.37 loaded | "
         "BWM=%s | PRIVATE_HANDLERS=%d | "
         "external_handled=%d | "
         "routing-fallback=7-paths | "
@@ -6951,10 +7002,13 @@ try:
         "ars_local_cache=5s-TTL (POLISH-2-COMPLETE) | "
         "ars-priority=local-first (POLISH-12) | "
         "auto-del=existence-check (POLISH-9-ENHANCED) | "
+        "partial-fallback=warning (POLISH-13-ENHANCED) | "
+        "threading-note=caches (THREADING-NOTE) | "
         "penalty-duration=bridged (DB.set_setting↔_resolve_penalty) | "
         "detectors-compat=v4.1.0 | "
         "commands=(cache_stats, db_idle, autoblocked) | "
         "fixes=(POLISH-1..14, POLISH-9-ENHANCED, POLISH-12, POLISH-13, "
+        "POLISH-13-ENHANCED, THREADING-NOTE, LAYER-ENABLED-DOC, "
         "BATCH-SETTINGS, REVIEW-FIX-1..5, FSM-COVERAGE, AL1-FOLLOWUP, "
         "AL1-FOLLOWUP-2, C11, D3, D4, SUPPORT-1..3, ADDING-1, "
         "ROUTE-1, ROUTE-2, BWM-3, COL-1, EDIT-1, STATE-1, BUG-1..BUG-12)",
