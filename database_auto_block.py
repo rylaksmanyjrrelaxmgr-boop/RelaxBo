@@ -1,20 +1,39 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-database_auto_block.py - v1.1.0
+database_auto_block.py - v1.1.1
 =============================================================================
 🗄️ جدول تلقائي لحجب المصادر المشبوهة (Post Bot / Spam channels)
 =============================================================================
+🆕 v1.1.1 (INPUT-HARDENING + MYSQL-INTERVAL-FIX):
+  🔴 R1: _to_int_or_none() helper — تطبيع source_id في كل الدوال.
+      السبب: source_id قد يأتي من callback_data كـ string
+      ("-1001234567890") → PG/MySQL يفشلان بـ TypeError غير واضح.
+      الآن: تحويل آمن إلى int قبل الاستعلام.
+  🔴 R2: ensure_table() في كل دوال القراءة (is_blocked, get_source,
+      list_blocked, search_by_name, count_blocked, get_stats,
+      remove_source, reset_hits).
+      السبب: إذا استُدعيت قبل أول add_source، الجدول قد لا يكون موجوداً
+      → فشل صامت. الآن: ضمان تلقائي.
+  🔴 R3: cleanup_old_entries — MySQL INTERVAL placeholder.
+      السبب: `DATE_SUB(UTC_TIMESTAMP(), INTERVAL %s DAY)` قد يفشل
+      على بعض إصدارات MySQL مع prepared statements. الآن: interpolation
+      بعد التحقق (days مُطبَّع كـ int).
+  🟠 R4: update_source — counter واضح لـ placeholders (بدل تعديل ph
+      بشكل تدريجي).
+  🟠 R5: remove_source — log عند عدم وجود الصف + توثيق idempotency.
+  🟡 R6: _get_db_type — import نظيف بدل __import__("database").
+  🟡 R7: __version__ موثّق.
+  🟡 R8: count_blocked/get_stats — ensure_table قبل الاستعلام.
+
 🆕 v1.1.0 (FIX + FEATURES):
   🔴 FIX-CRITICAL: DB.DB_TYPE → استخدام USE_POSTGRES/USE_MYSQL الرسمية
   🔴 FIX-CRITICAL: cleanup_old_entries كان يُرجع 0 دائماً
-                   (DB.execute يُرجع "DELETE N" كنص، ليس int)
-  🔴 FIX-CRITICAL: SQLite كان يستخدم INSERT OR REPLACE
-                   (يحذف الصف ثم يعيد إدخاله → يفقد created_at)
+  🔴 FIX-CRITICAL: SQLite كان يستخدم INSERT OR REPLACE (يفقد created_at)
                    → استُبدل بـ ON CONFLICT DO UPDATE
   🟡 FIX: MySQL cleanup استخدم NOW() بدل UTC_TIMESTAMP() للتوحيد
-  🟡 FIX: ensure_table أصبح مُخزَّناً (cache flag) — لا يضرب DB كل مرة
-  🟡 FIX: log levels مُحدَّثة (warning للأخطاء الحقيقية، debug لغير الموجود)
+  🟡 FIX: ensure_table أصبح مُخزَّناً (cache flag)
+  🟡 FIX: log levels مُحدَّثة
   🟢 NEW: update_source()       — تحديث source_name بدون زيادة hit_count
   🟢 NEW: get_source()          — جلب مصدر واحد
   🟢 NEW: count_blocked()       — عدّ سريع
@@ -44,7 +63,6 @@ database_auto_block.py - v1.1.0
     from database_auto_block import (
         ensure_table, is_blocked, add_source,
         list_blocked, remove_source, cleanup_old_entries,
-        # 🆕 v1.1.0
         get_source, update_source, count_blocked,
         get_top_blocked, search_by_name, bulk_add, reset_hits,
     )
@@ -55,6 +73,8 @@ from __future__ import annotations
 import logging
 from typing import Optional, List, Dict, Any, Iterable
 
+
+__version__ = "1.1.1"
 
 logger = logging.getLogger(__name__)
 
@@ -90,6 +110,8 @@ def _get_db_type() -> str:
     """
     🔴 FIX v1.1.0: يعتمد على USE_POSTGRES/USE_MYSQL الرسمية
     بدلاً من DB.DB_TYPE غير المضمون.
+
+    🟡 FIX v1.1.1: import نظيف بدل __import__.
     """
     try:
         from database import USE_POSTGRES, USE_MYSQL
@@ -99,15 +121,40 @@ def _get_db_type() -> str:
             return "mysql"
         return "sqlite"
     except Exception as e:
-        logger.debug("_get_db_type: fallback → sqlite (%s)", e)
+        logger.debug("_get_db_type: fallback (%s)", e)
         # fallback للتوافق الخلفي فقط
         try:
-            t = getattr(__import__("database").DB, "DB_TYPE", None)
+            import database as _db_mod
+            t = getattr(_db_mod.DB, "DB_TYPE", None)
             if t:
                 return str(t).lower()
         except Exception:
             pass
         return "sqlite"
+
+
+def _to_int_or_none(value: Any) -> Optional[int]:
+    """
+    🟢 NEW v1.1.1 R1: تحويل آمن إلى int.
+
+    يُستخدم لتطبيع `source_id` القادم من callback_data (قد يكون string)
+    أو من أي مصدر خارجي.
+
+    - None → None
+    - bool → None (ليس id صالح)
+    - int → int
+    - str رقمي → int
+    - str غير رقمي → None
+    - أي نوع آخر → None
+    """
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _parse_delete_count(result: Any) -> int:
@@ -116,7 +163,7 @@ def _parse_delete_count(result: Any) -> int:
 
     - asyncpg: يُرجع "DELETE N"
     - aiomysql: يُرجع rowcount كـ int
-    - aiosqlite (عبر wrapper): قد يُرجع int أو "DELETE N"
+    - aiosqlite (عبر wrapper): قد يُرجع int
     """
     if result is None:
         return 0
@@ -248,14 +295,33 @@ async def ensure_table() -> bool:
         return False
 
 
+async def _ensure_safe() -> bool:
+    """
+    🟢 v1.1.1 R2: wrapper داخلي — يضمن وجود الجدول قبل أي عملية.
+
+    لا يرفع استثناءً — يُرجع False عند الفشل فقط.
+    """
+    if _table_ensured:
+        return True
+    try:
+        return await ensure_table()
+    except Exception:
+        return False
+
+
 # ═════════════════════════════════════════════════════════════════════
 # فحص مصدر
 # ═════════════════════════════════════════════════════════════════════
 
 async def is_blocked(source_id: Optional[int]) -> bool:
     """هل المصدر في القائمة السوداء؟"""
-    if source_id is None:
+    sid = _to_int_or_none(source_id)
+    if sid is None:
         return False
+
+    # 🟢 R2: ضمان وجود الجدول
+    await _ensure_safe()
+
     try:
         db_type = _get_db_type()
         if db_type == "postgres":
@@ -266,10 +332,10 @@ async def is_blocked(source_id: Optional[int]) -> bool:
                    "WHERE source_id = ? LIMIT 1")
 
         from database import DB
-        row = await DB.fetchval(sql, (source_id,))
+        row = await DB.fetchval(sql, (sid,))
         return row is not None
     except Exception as e:
-        logger.debug("is_blocked(%s): %s", source_id, e)
+        logger.debug("is_blocked(%s): %s", sid, e)
         return False
 
 
@@ -281,8 +347,13 @@ async def get_source(source_id: Optional[int]) -> Optional[Dict[str, Any]]:
     """
     🟢 NEW v1.1.0: جلب بيانات مصدر واحد.
     """
-    if source_id is None:
+    sid = _to_int_or_none(source_id)
+    if sid is None:
         return None
+
+    # 🟢 R2
+    await _ensure_safe()
+
     try:
         db_type = _get_db_type()
         if db_type == "postgres":
@@ -293,7 +364,7 @@ async def get_source(source_id: Optional[int]) -> Optional[Dict[str, Any]]:
                    "WHERE source_id = ? LIMIT 1")
 
         from database import DB
-        row = await DB.fetchone(sql, (source_id,))
+        row = await DB.fetchone(sql, (sid,))
         if not row:
             return None
         try:
@@ -301,7 +372,7 @@ async def get_source(source_id: Optional[int]) -> Optional[Dict[str, Any]]:
         except Exception:
             return None
     except Exception as e:
-        logger.debug("get_source(%s): %s", source_id, e)
+        logger.debug("get_source(%s): %s", sid, e)
         return None
 
 
@@ -321,15 +392,21 @@ async def add_source(
     إذا كان موجوداً، يزيد hit_count ويحدّث last_seen.
 
     Args:
+        source_id: مُطبَّع داخلياً عبر _to_int_or_none (يقبل str رقمي).
         auto_added: True للإضافة التلقائية، False للإضافة اليدوية.
     """
-    if source_id is None:
+    sid = _to_int_or_none(source_id)
+    if sid is None:
+        logger.debug("add_source: source_id غير صالح: %r", source_id)
         return False
 
     # ✅ تطبيع المدخلات
     source_type = _normalize_source_type(source_type)
     source_name = _safe_str(source_name, MAX_SOURCE_NAME_LEN, "")
-    reason = _safe_str(reason, MAX_REASON_LEN, "auto_detected") or "auto_detected"
+    reason = (
+        _safe_str(reason, MAX_REASON_LEN, "auto_detected")
+        or "auto_detected"
+    )
 
     # ✅ ضمان وجود الجدول
     if not _table_ensured:
@@ -338,7 +415,6 @@ async def add_source(
     db_type = _get_db_type()
     try:
         if db_type == "postgres":
-            # ✅ v1.1.0: تمرير auto_added بشكل صريح
             sql = """
                 INSERT INTO auto_blocked_sources
                     (source_id, source_type, source_name, reason,
@@ -352,7 +428,7 @@ async def add_source(
             """
             await _execute(
                 sql,
-                (source_id, source_type, source_name, reason, auto_added),
+                (sid, source_type, source_name, reason, auto_added),
             )
 
         elif db_type == "mysql":
@@ -369,7 +445,7 @@ async def add_source(
             """
             await _execute(
                 sql,
-                (source_id, source_type, source_name, reason,
+                (sid, source_type, source_name, reason,
                  1 if auto_added else 0),
             )
 
@@ -392,13 +468,13 @@ async def add_source(
             """
             await _execute(
                 sql,
-                (source_id, source_type, source_name, reason,
+                (sid, source_type, source_name, reason,
                  1 if auto_added else 0),
             )
 
         return True
     except Exception as e:
-        logger.warning("add_source(%s): %s", source_id, e)
+        logger.warning("add_source(%s): %s", sid, e)
         return False
 
 
@@ -414,45 +490,56 @@ async def update_source(
     """
     🟢 NEW v1.1.0: تحديث بيانات مصدر بدون زيادة hit_count.
     مفيد لتصحيح الأسماء من لوحة الإدارة.
+
+    🟠 v1.1.1 R4: counter واضح لـ placeholders.
     """
-    if source_id is None:
+    sid = _to_int_or_none(source_id)
+    if sid is None:
         return False
 
     updates: List[str] = []
     params: List[Any] = []
 
     db_type = _get_db_type()
-    ph = "$1" if db_type == "postgres" else "?"
 
-    if source_name is not None:
-        updates.append(f"source_name = {ph}")
-        params.append(_safe_str(source_name, MAX_SOURCE_NAME_LEN, ""))
-        if db_type == "postgres":
-            ph = f"${len(params) + 1}"
-
-    if reason is not None:
-        updates.append(f"reason = {ph}")
-        params.append(_safe_str(reason, MAX_REASON_LEN, "auto_detected"))
-        if db_type == "postgres":
-            ph = f"${len(params) + 1}"
+    if db_type == "postgres":
+        placeholder_n = 1
+        if source_name is not None:
+            updates.append(f"source_name = ${placeholder_n}")
+            params.append(_safe_str(source_name, MAX_SOURCE_NAME_LEN, ""))
+            placeholder_n += 1
+        if reason is not None:
+            updates.append(f"reason = ${placeholder_n}")
+            params.append(_safe_str(reason, MAX_REASON_LEN, "auto_detected"))
+            placeholder_n += 1
+    else:
+        if source_name is not None:
+            updates.append("source_name = ?")
+            params.append(_safe_str(source_name, MAX_SOURCE_NAME_LEN, ""))
+        if reason is not None:
+            updates.append("reason = ?")
+            params.append(_safe_str(reason, MAX_REASON_LEN, "auto_detected"))
 
     if not updates:
         return False
 
     if db_type == "postgres":
-        sql = (f"UPDATE auto_blocked_sources SET {', '.join(updates)} "
-               f"WHERE source_id = ${len(params) + 1}")
+        # placeholder_n يشير الآن للـ placeholder التالي الحر
+        sql = (f"UPDATE auto_blocked_sources SET "
+               f"{', '.join(updates)} "
+               f"WHERE source_id = ${placeholder_n}")
     else:
-        sql = (f"UPDATE auto_blocked_sources SET {', '.join(updates)} "
+        sql = (f"UPDATE auto_blocked_sources SET "
+               f"{', '.join(updates)} "
                f"WHERE source_id = ?")
 
-    params.append(source_id)
+    params.append(sid)
 
     try:
         await _execute(sql, tuple(params))
         return True
     except Exception as e:
-        logger.warning("update_source(%s): %s", source_id, e)
+        logger.warning("update_source(%s): %s", sid, e)
         return False
 
 
@@ -466,6 +553,9 @@ async def list_blocked(limit: int = 100) -> List[Dict[str, Any]]:
         limit = max(1, min(int(limit), MAX_BULK_SIZE))
     except (TypeError, ValueError):
         limit = 100
+
+    # 🟢 R2
+    await _ensure_safe()
 
     try:
         db_type = _get_db_type()
@@ -528,6 +618,9 @@ async def search_by_name(
     except (TypeError, ValueError):
         limit = 50
 
+    # 🟢 R2
+    await _ensure_safe()
+
     db_type = _get_db_type()
     try:
         from database import DB
@@ -563,9 +656,21 @@ async def search_by_name(
 # ═════════════════════════════════════════════════════════════════════
 
 async def remove_source(source_id: int) -> bool:
-    """إزالة مصدر من القائمة السوداء (unblock)."""
-    if source_id is None:
+    """
+    إزالة مصدر من القائمة السوداء (unblock).
+
+    Idempotent: يُرجع True حتى لو لم يكن المصدر موجوداً أصلاً
+    (العملية لا تفشل في هذه الحالة). للمعرفة الحقيقية، راجع السجل.
+
+    🟠 v1.1.1 R5: log عند عدم وجود الصف.
+    """
+    sid = _to_int_or_none(source_id)
+    if sid is None:
         return False
+
+    # 🟢 R2
+    await _ensure_safe()
+
     try:
         db_type = _get_db_type()
         if db_type == "postgres":
@@ -573,10 +678,17 @@ async def remove_source(source_id: int) -> bool:
         else:
             sql = "DELETE FROM auto_blocked_sources WHERE source_id = ?"
 
-        await _execute(sql, (source_id,))
+        result = await _execute(sql, (sid,))
+        # 🟠 R5: log معلوماتي عند عدم حذف أي صف
+        rowcount = _parse_delete_count(result)
+        if rowcount == 0:
+            logger.debug(
+                "remove_source(%s): لم يكن موجوداً (idempotent)",
+                sid,
+            )
         return True
     except Exception as e:
-        logger.warning("remove_source(%s): %s", source_id, e)
+        logger.warning("remove_source(%s): %s", sid, e)
         return False
 
 
@@ -587,6 +699,9 @@ async def remove_source(source_id: int) -> bool:
 async def bulk_add(sources: Iterable[Dict[str, Any]]) -> Dict[str, int]:
     """
     🟢 NEW v1.1.0: إضافة عدة مصادر دفعة واحدة.
+
+    ⚠️ غير transactional: كل add_source مستقل. عند فشل عنصر،
+    العناصر السابقة تبقى مُضافة والعناصر اللاحقة تُحاوَل.
 
     Returns:
         {"total": N, "success": M, "failed": K}
@@ -600,6 +715,10 @@ async def bulk_add(sources: Iterable[Dict[str, Any]]) -> Dict[str, int]:
 
     for src in sources:
         if total >= MAX_BULK_SIZE:
+            logger.warning(
+                "bulk_add: تجاوز MAX_BULK_SIZE=%d — إيقاف",
+                MAX_BULK_SIZE,
+            )
             break
         total += 1
         try:
@@ -628,9 +747,17 @@ async def bulk_add(sources: Iterable[Dict[str, Any]]) -> Dict[str, int]:
 async def reset_hits(source_id: int) -> bool:
     """
     🟢 NEW v1.1.0: تصفير hit_count لمصدر (بعد مراجعة إدارية).
+
+    Idempotent: True حتى لو لم يكن المصدر موجوداً (UPDATE يؤثر على
+    0 صفوف). لا يرفع استثناءً.
     """
-    if source_id is None:
+    sid = _to_int_or_none(source_id)
+    if sid is None:
         return False
+
+    # 🟢 R2
+    await _ensure_safe()
+
     try:
         db_type = _get_db_type()
         if db_type == "postgres":
@@ -640,10 +767,10 @@ async def reset_hits(source_id: int) -> bool:
             sql = ("UPDATE auto_blocked_sources SET hit_count = 0 "
                    "WHERE source_id = ?")
 
-        await _execute(sql, (source_id,))
+        await _execute(sql, (sid,))
         return True
     except Exception as e:
-        logger.warning("reset_hits(%s): %s", source_id, e)
+        logger.warning("reset_hits(%s): %s", sid, e)
         return False
 
 
@@ -658,11 +785,18 @@ async def cleanup_old_entries(days: int = DEFAULT_CLEANUP_DAYS) -> int:
 
     🔴 FIX v1.1.0: الاستخدام الصحيح لـ _parse_delete_count
     لإرجاع العدد الحقيقي بدلاً من 0 دائماً.
+
+    🔴 FIX v1.1.1 R3: MySQL INTERVAL — استخدام interpolation بعد
+    التحقق من int (بدل placeholder %s الذي قد يفشل على بعض
+    إصدارات MySQL مع prepared statements).
     """
     try:
         days = max(1, int(days))
     except (TypeError, ValueError):
         days = DEFAULT_CLEANUP_DAYS
+
+    # 🟢 R2
+    await _ensure_safe()
 
     db_type = _get_db_type()
     try:
@@ -672,11 +806,13 @@ async def cleanup_old_entries(days: int = DEFAULT_CLEANUP_DAYS) -> int:
             result = await _execute(sql, (days,))
 
         elif db_type == "mysql":
-            # ✅ v1.1.0: استخدام DATE_SUB + UTC_TIMESTAMP للتوحيد
+            # 🔴 R3: interpolation بعد التحقق (days int مضمون).
+            # كان: DATE_SUB(UTC_TIMESTAMP(), INTERVAL %s DAY)
+            # — قد يفشل على بعض إصدارات MySQL مع prepared statements.
             sql = ("DELETE FROM auto_blocked_sources "
                    "WHERE last_seen < DATE_SUB(UTC_TIMESTAMP(), "
-                   "INTERVAL %s DAY)")
-            result = await _execute(sql, (days,))
+                   f"INTERVAL {days} DAY)")
+            result = await _execute(sql)
 
         else:  # sqlite
             sql = ("DELETE FROM auto_blocked_sources "
@@ -703,7 +839,11 @@ async def cleanup_old_entries(days: int = DEFAULT_CLEANUP_DAYS) -> int:
 async def count_blocked() -> int:
     """
     🟢 NEW v1.1.0: عدد المصادر المحجوبة إجمالاً.
+    🟡 v1.1.1 R8: ensure_table قبل الاستعلام.
     """
+    # 🟢 R8
+    await _ensure_safe()
+
     try:
         from database import DB
         db_type = _get_db_type()
@@ -722,7 +862,13 @@ async def count_blocked() -> int:
 
 
 async def get_stats() -> Dict[str, int]:
-    """إحصائيات سريعة للقائمة السوداء."""
+    """
+    إحصائيات سريعة للقائمة السوداء.
+    🟡 v1.1.1 R8: ensure_table قبل الاستعلام.
+    """
+    # 🟢 R8
+    await _ensure_safe()
+
     try:
         from database import DB
         db_type = _get_db_type()
@@ -730,10 +876,6 @@ async def get_stats() -> Dict[str, int]:
         if db_type == "postgres":
             sql = ("SELECT COUNT(*)::int AS total, "
                    "COALESCE(SUM(hit_count), 0)::int AS hits "
-                   "FROM auto_blocked_sources")
-        elif db_type == "mysql":
-            sql = ("SELECT COUNT(*) AS total, "
-                   "COALESCE(SUM(hit_count), 0) AS hits "
                    "FROM auto_blocked_sources")
         else:
             sql = ("SELECT COUNT(*) AS total, "
@@ -761,6 +903,8 @@ async def get_stats() -> Dict[str, int]:
 # ═════════════════════════════════════════════════════════════════════
 
 __all__ = [
+    # Version
+    "__version__",
     # Core
     "ensure_table",
     "is_blocked",
@@ -769,7 +913,7 @@ __all__ = [
     "remove_source",
     "cleanup_old_entries",
     "get_stats",
-    # 🆕 v1.1.0
+    # v1.1.0
     "get_source",
     "update_source",
     "count_blocked",
@@ -782,6 +926,7 @@ __all__ = [
     "MAX_BULK_SIZE",
     # Internal helpers (للاختبار)
     "_get_db_type",
+    "_to_int_or_none",
     "_parse_delete_count",
     "_normalize_source_type",
     "_execute",
