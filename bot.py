@@ -2,43 +2,23 @@
 # -*- coding: utf-8 -*-
 
 """
-🌿 Relax Manager – البوت الرئيسي (bot.py v5.6.25-NAV-FIX-COMPAT)
+🌿 Relax Manager – البوت الرئيسي (bot.py v5.6.27-SLEEP-PROBE)
 ================================================================================
 📌 نقطة الدخول الرسمية للتطبيق (entrypoint).
 
-🆕 v5.6.25 (NAV-FIX-COMPAT):
-    🔴 CRITICAL — FIX-ORDER6:
-        `handlers_nav_fix.py` v3.4.0 أصبح **trace-only** (لا تفويض).
-        v5.6.24 كان يفترض خطأً أن NAV_FIX يُسجّل CallbackHandlers.handle
-        من داخله → عند توفّر NAV_FIX، لم يُسجَّل handle أصلاً.
-        النتيجة: أزرار generic (toggle_auto, settings, referral,
-        admin_*, auto_reply_*, sched_*, pub_all, ...) معطّلة بصمت.
+🆕 v5.6.27 (SLEEP-PROBE):
+    🔵 ADD-SP-1: تكامل sleep_probe.py — كاشف تأخيرات event loop.
+        • auto_install عند الإقلاع (env: SLEEP_PROBE_ENABLED=1).
+        • uninstall عند الإغلاق (استعادة asyncio.sleep الأصلي).
+        • اختياري بالكامل — لا يؤثر إذا كان الملف مفقوداً.
+        الهدف: كشف asyncio.sleep overshoots الناتجة عن عمليات sync.
 
-        ✅ الإصلاح:
-            `CallbackHandlers.handle` يُسجَّل **دائماً** في ORDER 6/6،
-            بغض النظر عن توفّر NAV_FIX.
-            ترتيب group=0 (channels_list → handle) يضمن أن
-            `_stop_after` يمنع التكرار عندما تُطابق channels_list.
+🆕 v5.6.26 (DUP-FIX):
+    🟠 FIX-DUP-1: إزالة الاستدعاء المكرر لـ
+        `start_weekly_diagnostic_task` من main().
 
-    🟠 FIX-COMMENT-1: تصحيح تعليقات NAV_FIX (trace-only، ليس
-        delegation). التعليقات القديمة كانت من زمن v3.3.0.
-
-    🟠 FIX-PM-1: عتبة تحذير الاستعلام البطيء في pool_health_monitor
-        قابلة للضبط عبر `PM_SLOW_QUERY_WARN_MS` (افتراضي 250ms
-        بدل 100ms المُزعج، مع فترة سماح cold-start).
-
-    🟠 FIX-KA-1: keep_alive عند غياب URL يعود بدل انتظار لا نهائي
-        (لا يحتفظ بمهمة خلفية بلا داعٍ).
-
-    🟠 FIX-PAY-1: successful_payment يتحقق أن payment_id غير None
-        قبل تمريره إلى DB (منع تخزين NULL).
-
-    🟠 FIX-PAY-2: pre_checkout يتحقق من العملة (currency) إن أمكن.
-
-    🟠 FIX-MAINT-1: start_weekly_diagnostic_task — يتعامل مع
-        الحالة التي تُعيد فيها coroutine.
-
-🆕 v5.6.24 (ORDER-FIX) — محفوظ كمرجع.
+🆕 v5.6.25 (NAV-FIX-COMPAT) — محفوظ.
+🆕 v5.6.24 (ORDER-FIX) — محفوظ.
 🆕 v5.6.23 (PERF-SESSIONS) — محفوظ.
 🆕 v5.6.22 (FULLHEALTH-COMMANDS) — محفوظ.
 🆕 v5.6.21 (FIX-BUNDLE) — محفوظ.
@@ -566,6 +546,35 @@ for _noisy in (
 
 logger = logging.getLogger(__name__)
 
+# ═══════════════════════════════════════════════════════════════════════
+# 🆕 v5.6.27 SLEEP-PROBE — تفعيل كاشف تأخيرات event loop
+# ═══════════════════════════════════════════════════════════════════════
+_sleep_probe_available = False
+try:
+    from sleep_probe import (
+        auto_install as _sp_auto_install,
+        is_installed as _sp_is_installed,
+    )
+    _sleep_probe_available = True
+    try:
+        _sp_activated = _sp_auto_install()
+        if _sp_activated:
+            logger.info(
+                "✅ sleep_probe: مُفعَّل — "
+                "سيكشف asyncio.sleep overshoots (SLEEP_PROBE_ENABLED=1)"
+            )
+        else:
+            logger.debug(
+                "ℹ️ sleep_probe: متاح لكن معطّل — "
+                "اضبط SLEEP_PROBE_ENABLED=1 لتفعيله"
+            )
+    except Exception as _sp_install_e:
+        logger.warning("⚠️ sleep_probe install: %s", _sp_install_e)
+except ImportError:
+    logger.debug("ℹ️ sleep_probe.py غير موجود — تخطي كاشف التأخيرات")
+except Exception as _sp_import_e:
+    logger.warning("⚠️ sleep_probe import: %s", _sp_import_e)
+
 # ═══════════════════════════════════════════════════════════════════
 # Constants
 # ═══════════════════════════════════════════════════════════════════
@@ -589,7 +598,6 @@ _PM_LOCK_WAIT_WARN = 1
 _PM_WAITING_WARN = 3
 _PM_ALERT_COOLDOWN_SEC = 600.0
 
-# 🆕 v5.6.25 FIX-PM-1: عتبة تحذير الاستعلام البطيء قابلة للضبط
 try:
     _PM_SLOW_QUERY_WARN_MS = float(
         os.getenv("PM_SLOW_QUERY_WARN_MS", "250")
@@ -1058,7 +1066,6 @@ else:
         _CH_DELETE_IMPORT_ERROR or "unknown",
     )
 
-# 🆕 v5.6.25: تصحيح وصف NAV_FIX (trace-only، ليس delegation)
 if _NAV_FIX_AVAILABLE:
     logger.info(
         "✅ handlers_nav_fix متاح — trace-only mode "
@@ -1803,7 +1810,6 @@ async def pre_checkout(update, context):
             logger.error("❌ Failed to answer pre-checkout rejection: %s", e)
         return
 
-    # 🆕 v5.6.25 FIX-PAY-2: فحص العملة إن كانت متاحة
     try:
         q_currency = getattr(query, 'currency', None)
         if q_currency and q_currency != "XTR":
@@ -1879,7 +1885,6 @@ async def successful_payment(update, context):
     payment_type = data.get('type')
     payment_id = telegram_payment_charge_id or provider_payment_charge_id
 
-    # 🆕 v5.6.25 FIX-PAY-1: payment_id إلزامي
     if not payment_id:
         logger.error(
             "❌ payment_id كلاهما None | user=%s invoice=%s type=%s",
@@ -2018,7 +2023,7 @@ async def keep_alive():
     """
     keep_alive محسّن — v5.6.25:
     - session واحد على مستوى الدالة (v5.6.23/PERF-A).
-    - 🆕 FIX-KA-1: عند غياب URL → يعود بدل انتظار لا نهائي.
+    - FIX-KA-1: عند غياب URL → يعود بدل انتظار لا نهائي.
     """
     try:
         await asyncio.sleep(_KEEP_ALIVE_INITIAL_DELAY)
@@ -2040,7 +2045,6 @@ async def keep_alive():
             "💡 الحل الموصى به: استخدم Cron-job.org (خارجي) "
             "على https://<your-app>.onrender.com/health كل 5 دقائق."
         )
-        # 🆕 FIX-KA-1: العودة بدل while True: sleep(86400)
         return
 
     url = url.rstrip('/')
@@ -2204,7 +2208,6 @@ async def _fetch_pg_activity_cached() -> Dict[str, Any]:
     )
     elapsed_ms = (time.monotonic() - t0) * 1000
 
-    # 🆕 v5.6.25 FIX-PM-1: عتبة قابلة للضبط + cold-start grace
     if (
         elapsed_ms > _PM_SLOW_QUERY_WARN_MS
         and not _pm_slow_query_warned
@@ -2787,12 +2790,13 @@ async def main():
     logger.info("👨‍💼 المالك: %s", CONFIG.PRIMARY_OWNER_ID)
 
     logger.info(
-        "📦 bot.py: v5.6.25 | "
+        "📦 bot.py: v5.6.27 | "
         "detectors=%s | layers=%d | helpers=%s | "
         "db_idle=%s | cache_stats=%s | analytics=%s | "
         "fullhealth=%s | latency=%s | maint_cmds=%s | "
         "pool_cache_ttl=%ds | nav_fix=%s | perf_sessions=on | "
-        "nav_fix_mode=trace-only | handle_reg=always",
+        "nav_fix_mode=trace-only | handle_reg=always | "
+        "dup_fix=on | sleep_probe=%s",
         _SPAM_DETECTOR_VERSION or "N/A",
         _SPAM_DETECTOR_LAYERS_COUNT,
         (
@@ -2811,6 +2815,9 @@ async def main():
         "yes" if _MAINT_CMDS_AVAILABLE else "no",
         int(_PM_QUERY_TTL),
         "yes" if _NAV_FIX_AVAILABLE else "no",
+        (
+            "available" if _sleep_probe_available else "missing"
+        ),
     )
 
     try:
@@ -3232,15 +3239,7 @@ async def main():
     app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, successful_payment))
 
     # ═══════════════════════════════════════════════════════════════
-    # 🆕 v5.6.25 ORDER-FIX-COMPAT:
-    # ترتيب التسجيل الصحيح (NAV_FIX v3.4.0 = trace-only):
-    #   1. channels_list   (يحتوي _stop_after على كل callback)
-    #   2. nav_fix         (trace-only، لا يتداخل)
-    #   3. channels_delete
-    #   4. group_log
-    #   5. analytics
-    #   6. CallbackHandlers.handle — 🔴 دائماً!
-    #      (NAV_FIX v3.4.0 لا يُسجّله، فنتسجله هنا)
+    # ORDER-FIX-COMPAT: ترتيب التسجيل (v5.6.25 + v5.6.26)
     # ═══════════════════════════════════════════════════════════════
 
     # 1️⃣ channels_list — الأولوية القصوى
@@ -3256,7 +3255,7 @@ async def main():
             e, exc_info=True
         )
 
-    # 2️⃣ nav_fix — trace-only (v3.4.0)
+    # 2️⃣ nav_fix — trace-only
     if _NAV_FIX_AVAILABLE and callable(register_nav_fix):
         try:
             register_nav_fix(app)
@@ -3348,7 +3347,7 @@ async def main():
             _ANALYTICS_HANDLERS_IMPORT_ERROR or "unknown",
         )
 
-    # 6️⃣ CallbackHandlers.handle — 🔴 دائماً (v5.6.25 CRITICAL FIX)
+    # 6️⃣ CallbackHandlers.handle — دائماً
     try:
         app.add_handler(CallbackQueryHandler(CallbackHandlers.handle))
         logger.info(
@@ -3461,31 +3460,9 @@ async def main():
             _MAINTENANCE_IMPORT_ERROR or "module missing",
         )
 
-    # 🆕 v5.6.25 FIX-MAINT-1: تعامل مع coroutine
-    if _MAINT_CMDS_AVAILABLE and callable(start_weekly_diagnostic_task):
-        try:
-            _weekly_result = start_weekly_diagnostic_task(app)
-            if asyncio.iscoroutine(_weekly_result):
-                # دالة async — شغّلها كمهمة خلفية
-                _weekly_task = asyncio.create_task(_weekly_result)
-                tasks.append(_weekly_task)
-                logger.info(
-                    "✅ weekly diagnostic task بدأت (coroutine) "
-                    "(تُرسل التقرير كل 7 أيام إن كان مُفعّلاً)"
-                )
-            elif _weekly_result:
-                logger.info(
-                    "✅ weekly diagnostic task بدأت "
-                    "(تُرسل التقرير كل 7 أيام إن كان مُفعّلاً)"
-                )
-            else:
-                logger.warning(
-                    "⚠️ start_weekly_diagnostic_task أعادت False"
-                )
-        except Exception as _e:
-            logger.error(
-                "❌ فشل بدء weekly diagnostic: %s", _e, exc_info=True
-            )
+    # 🆕 v5.6.26 FIX-DUP-1: تمت إزالة الاستدعاء المكرر لـ
+    # start_weekly_diagnostic_task — register_maintenance_commands()
+    # يتكفّل بتشغيلها.
 
     logger.info("✅ تم تشغيل %d مهمة خلفية", len(tasks))
     if _ADMIN_LOGS_CLEANUP_AVAILABLE:
@@ -3693,6 +3670,15 @@ async def main():
             await _shutdown_delete_tasks(timeout=3.0)
         except Exception as _e:
             logger.debug("shutdown_delete_tasks (bot): %s", _e)
+
+        # 🆕 v5.6.27: إلغاء تفعيل sleep_probe
+        if _sleep_probe_available:
+            try:
+                from sleep_probe import uninstall_sleep_probe as _sp_uninstall
+                if _sp_uninstall():
+                    logger.info("✅ sleep_probe: uninstalled")
+            except Exception as _sp_u_e:
+                logger.debug("sleep_probe uninstall: %s", _sp_u_e)
 
         if not app_shutdown_done:
             try:
