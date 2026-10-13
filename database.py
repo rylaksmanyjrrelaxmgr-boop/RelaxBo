@@ -1,76 +1,53 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-database.py - قاعدة البيانات المتكاملة (v7.7.67 — NESTED-TX-LIFECYCLE-FIX)
+database.py - قاعدة البيانات المتكاملة (v7.7.68 — DB-POOL-LATENCY-FIX)
 ================================================================================
+🆕 v7.7.68 (DB-POOL-LATENCY-FIX):
+  🔴 FIX-DB10 (CRITICAL): PG pool — إضافة
+     statement_cache_size=0 + max_cached_statement_lifetime=0.
+     السبب: Aiven pooled endpoint (PgBouncer في transaction mode)
+     لا يحفظ prepared statements بين transactions. asyncpg الافتراضي
+     (statement_cache_size=100) يُجبر 4 RTT لكل استعلام جديد:
+       Parse → Bind → Execute + إعادة محاولة عند فشل الـ prepared stmt.
+     النتيجة قبل الإصلاح: PK SELECT = 172ms (4 × 42ms RTT).
+     المتوقع بعد: 50-60ms (2 RTT).
+     ملاحظة: يُفعَّل تلقائياً عند استخدام endpoint يحتوي "pooler"
+     في الرابط، أو يدوياً عبر PG_STATEMENT_CACHE_SIZE env.
+
+  🔴 FIX-DB11: PG_MAX_INACTIVE_LIFETIME 15s → 300s.
+     السبب: 15s كان يفصل الاتصالات في الساعات الهادئة →
+     full TLS+auth عند أول استعلام بعد خمول = 413ms connect.
+     مع min_size=5 + lifetime=300s، الاتصالات تبقى ساخنة.
+
+  🟠 FIX-DB12: PG_CONN_PING_IDLE_THRESHOLD 5s → 60s.
+     السبب: كل استعلام بعد 5s idle كان يدفع +42ms لـ SELECT 1
+     وقائي. مع Aiven keepalive جيد، 60s كافٍ.
+
+  🟡 FIX-DB13: _conn_last_used → weakref.WeakKeyDictionary.
+     السبب: id(conn) قد يتصادم بعد GC لأحد الاتصالات وإنشاء آخر
+     في نفس عنوان الذاكرة.
+
+  🟡 FIX-DB14: DB_TIMEOUT 30s → 10s.
+  🟡 FIX-DB15: _query_timeout = timeout × 2 = 20s (كان 60s).
+
 🆕 v7.7.67 (NESTED-TX-LIFECYCLE-FIX):
   🔴 FIX-DB5 (CRITICAL): نقل migrate_reminders_columns و
      ensure_all_dev_subscriptions **خارج** transaction البوتستراب.
-     السبب: كلتاهما تفتحان self.transaction() داخلياً → nested tx.
-     على SQLite: "cannot start a transaction within a transaction".
-     على MySQL: implicit COMMIT يُفقد ذرية bootstrap.
-     النتيجة قبل الإصلاح: البوت قد يفشل في الإقلاع على SQLite/MySQL
-     عند أول تشغيل (أو بعد migrate_reminders_columns إذا أُضيف لاحقاً).
-     ملاحظة: المشكلة كانت موجودة قبل v7.7.66 (بسبب
-     ensure_all_dev_subscriptions) — FIX-DB2 (v7.7.66) ضاعفها.
-
   🔴 FIX-DB6: _load_mixin — except BaseException → except Exception.
-     السبب: BaseException يلتقط KeyboardInterrupt/SystemExit/
-     CancelledError → يحوّلها إلى "fallback صامت"، فيخفي أعطال
-     حقيقية عن المُشغّل.
-
-  🟠 FIX-DB7: _spawn_bg_task — فحص self._closing/self._closed قبل
-     create_task. السبب: مهام spawn أثناء الإغلاق لا تُلغى →
-     task leak + تحذيرات "Task was destroyed but it is pending".
-
+  🟠 FIX-DB7: _spawn_bg_task — فحص _closing/_closed قبل create_task.
   🟠 FIX-DB8: vacuum() — فحص idle-in-transaction قبل VACUUM.
-     السبب: لو كان الاتصال الموروث من pool في tx عالقة (نادر)،
-     VACUUM يفشل بـ "cannot run inside a transaction block".
-
-  🟡 FIX-DB9: توثيق منطق cooldown في _maybe_refresh_mv (كان صحيحاً
-     لكن غامضاً).
+  🟡 FIX-DB9: توثيق cooldown في _maybe_refresh_mv.
 
 🆕 v7.7.66 (TIMEZONE-VACUUM-REMINDERS-FIX):
-  🔴 FIX-DB1: _pg_pool_factory — server_settings["timezone"] = "UTC".
-  🔴 FIX-DB2: _do_bootstrap_inner — استدعاء migrate_reminders_columns.
-     ⚠️ v7.7.67: هذا الاستدعاء نُقل خارج _do_bootstrap_inner.
-  🔴 FIX-DB3: vacuum() — تعطيل statement_timeout أثناء VACUUM.
-  🟡 FIX-DB4: _slow_query_log_threshold — توحيد 0.2 مع config.py.
+  🔴 FIX-DB1..DB4 (كما هي).
 
-🆕 v7.7.65 (ANALYTICS-MIXIN-FIX):
-  🔴 FIX-MIXIN-1: _load_mixin — التقاط كل الاستثناءات.
-  🔴 FIX-MIXIN-2: _verify_analytics_methods().
-  🟡 FIX-MIXIN-3: _load_mixin — فحص مسبق لـ AnalyticsMixin.get_user_growth.
-
-🆕 v7.7.64 (REVIEW-FIXES-2026-R2):
-  🔴 FIX-E1: _refresh_user_subscription_end — ? في كل الفروع.
-  🔴 FIX-E2: _import_auto_replies — chat_id = ? في existing query.
-  🟡 FIX-E3: _ensure_materialized_views_postgres — return False بدل raise.
-  🟡 FIX-E4: mark_published_batch + _verify_pairs_belong — chunking.
-  🟡 FIX-E5: _sqlite_is_alive — cursor cleanup في finally.
-  🟡 FIX-E6: _pg_in_transaction — log.debug.
-  🟡 FIX-E7: _import_banned_words — رسالة أوضح.
-  🟡 FIX-E8: _destroy_connection — تفريق pool vs conn.
-
-🆕 v7.7.63 (REVIEW-FIXES-2026):
-  🔴 FIX-C13: _import_auto_replies — إزالة WHERE added_by = 0.
-  🔴 FIX-C14: _recover_pool — تمييز pool-dead من connection-dead.
-  🟡 FIX-D7: _find_values_end — dollar quotes.
-  🟡 FIX-B2: connection() — log warning عند PG tx مفتوحة.
-  🟡 FIX-D8: _compute_text_hash — توثيق عامة.
-  🟡 FIX-D9: _upsert_setting — ? مع _execute_with_conn.
-  🟡 FIX-D10: _get_unique_columns_impl — schemas مختلفة.
-
-🆕 v7.7.62 (IDLE-TX-AUTO-AUDIT):
-  🔍 AUDIT-1..4: مهمة دورية + audit_idle_in_transactions + إيقاف نظيف.
-  🆕 ثوابت: IDLE_TX_AUDIT_* + get_idle_tx_audit_status().
-
-🆕 v7.7.61 (IDLE-TX-ROLLBACK-FINAL):
-  🔴 TX-1..4: ping-before-use + rollback وقائي + فرع PG صريح.
-  🆕 PG_ROLLBACK_ON_RETURN_TIMEOUT (env, default 2.0s).
-
-🆕 v7.7.60 (POOL-KEEPALIVE-FINAL):
-  🐌 SQ-1..SQ-5: pool lifecycle 15s + ping-before-use + factories.
+🆕 v7.7.65 (ANALYTICS-MIXIN-FIX): FIX-MIXIN-1/2/3
+🆕 v7.7.64 (REVIEW-FIXES-2026-R2): FIX-E1..E8
+🆕 v7.7.63 (REVIEW-FIXES-2026): FIX-C13, C14 + D7..D10
+🆕 v7.7.62 (IDLE-TX-AUTO-AUDIT): AUDIT-1..4
+🆕 v7.7.61 (IDLE-TX-ROLLBACK-FINAL): TX-1..4
+🆕 v7.7.60 (POOL-KEEPALIVE-FINAL): SQ-1..SQ-5
 ================================================================================
 """
 
@@ -106,6 +83,8 @@ database.py - قاعدة البيانات المتكاملة (v7.7.67 — NESTED
 # [27] v7.7.67: نقل migrate_reminders/ensure_dev OUT من bootstrap tx
 #              + _load_mixin Exception + _spawn_bg_task closing
 #              + vacuum tx check
+# [28] v7.7.68: PG statement_cache_size=0 + lifetime 300s
+#              + ping_idle 60s + WeakKeyDictionary + DB_TIMEOUT 10s
 # =====================================================================
 
 import os
@@ -616,10 +595,14 @@ IMPORT_MARKER_ADDED_BY = 0
 
 MAX_SQL_IN_PARAMS = int(os.getenv("MAX_SQL_IN_PARAMS", "500"))
 
+# 🆕 v7.7.68 FIX-DB11: 15s → 300s (اتصالات ساخنة)
 PG_MAX_INACTIVE_LIFETIME = float(
-    os.getenv("PG_MAX_INACTIVE_LIFETIME", "15.0"))
+    os.getenv("PG_MAX_INACTIVE_LIFETIME", "300.0"))
+
+# 🆕 v7.7.68 FIX-DB12: 5s → 60s (لا ping وقائي متكرر)
 PG_CONN_PING_IDLE_THRESHOLD = float(
-    os.getenv("PG_CONN_PING_IDLE_THRESHOLD", "5.0"))
+    os.getenv("PG_CONN_PING_IDLE_THRESHOLD", "60.0"))
+
 PG_CONN_PING_TIMEOUT = float(
     os.getenv("PG_CONN_PING_TIMEOUT", "2.0"))
 PG_TCP_KEEPIDLE = int(os.getenv("PG_TCP_KEEPIDLE", "20"))
@@ -633,6 +616,36 @@ PG_COMMAND_TIMEOUT = float(os.getenv("PG_COMMAND_TIMEOUT", "10.0"))
 
 PG_ROLLBACK_ON_RETURN_TIMEOUT = float(
     os.getenv("PG_ROLLBACK_ON_RETURN_TIMEOUT", "2.0"))
+
+# 🆕 v7.7.68 FIX-DB10: prepared statement cache — للتوافق مع PgBouncer
+# في transaction mode (Aiven pooled endpoint).
+#
+# القيم الافتراضية = 0 (معطّل).
+# لتفعيل الـ prepared statements: PG_STATEMENT_CACHE_SIZE=100
+# (يُنصح فقط مع direct endpoint أو PgBouncer في session mode).
+PG_STATEMENT_CACHE_SIZE = int(
+    os.getenv("PG_STATEMENT_CACHE_SIZE", "0"))
+PG_MAX_CACHED_STATEMENT_LIFETIME = float(
+    os.getenv("PG_MAX_CACHED_STATEMENT_LIFETIME", "0"))
+
+# 🔍 كشف تلقائي: إذا كان الرابط يحتوي "pooler" أو منفذ Aiven النموذجي
+# (21834)، نُجبر statement_cache_size=0 حتى لو كان env مضبوطاً.
+_PG_IS_POOLED = False
+if USE_POSTGRES and DATABASE_URL:
+    _url_low = DATABASE_URL.lower()
+    if ("pooler" in _url_low
+            or ":21834" in _url_low
+            or "pgbouncer" in _url_low
+            or "-pooler." in _url_low):
+        _PG_IS_POOLED = True
+        if PG_STATEMENT_CACHE_SIZE != 0:
+            logger.warning(
+                "⚠️ v7.7.68 FIX-DB10: تم كشف pooled endpoint — "
+                "إجبار PG_STATEMENT_CACHE_SIZE=0 "
+                "(prepared statements غير مدعومة في tx-pooling)"
+            )
+            PG_STATEMENT_CACHE_SIZE = 0
+            PG_MAX_CACHED_STATEMENT_LIFETIME = 0
 
 IDLE_TX_AUDIT_ENABLED = (
     os.getenv("IDLE_TX_AUDIT_ENABLED", "true").lower() == "true")
@@ -2147,7 +2160,8 @@ class Database(
             self._db_type = DB_TYPE
             self._max_connections = int(os.getenv("DB_POOL_SIZE", "20"))
             self._min_connections = int(os.getenv("DB_POOL_MIN_SIZE", "2"))
-            self._connection_timeout = int(os.getenv("DB_TIMEOUT", "30"))
+            # 🆕 v7.7.68 FIX-DB14: 30 → 10
+            self._connection_timeout = int(os.getenv("DB_TIMEOUT", "10"))
 
             self._cleanup_task = None
             self._secondary_index_task = None
@@ -2218,6 +2232,7 @@ class Database(
             self._max_post_text_length = MAX_POST_TEXT_LENGTH
             self._posts_batch_size = POSTS_BATCH_SIZE
             self._explain_slow_queries = EXPLAIN_SLOW_QUERIES
+            # 🆕 v7.7.68 FIX-DB15: 60s → 20s (timeout × 2 بعد DB14)
             self._query_timeout = self._connection_timeout * 2
             self._commit_timeout = 30
             self.DB_TYPE = DB_TYPE
@@ -2266,7 +2281,13 @@ class Database(
 
             self._dev_subscription_ensured = False
 
-            self._conn_last_used: Dict[int, float] = {}
+            # 🆕 v7.7.68 FIX-DB13: WeakKeyDictionary بدل id()-keyed dict
+            try:
+                self._conn_last_used = weakref.WeakKeyDictionary()
+                self._use_weak_conn_cache = True
+            except Exception:
+                self._conn_last_used = {}
+                self._use_weak_conn_cache = False
             self._conn_used_lock = asyncio.Lock()
 
             self._singleton_init_done = True
@@ -2661,15 +2682,22 @@ class Database(
             return {"type": "error", "message": str(e)}
 
     async def _pg_pool_factory(self):
+        """
+        🆕 v7.7.68 FIX-DB10/DB11: pool PG محسّن لـ Aiven PgBouncer.
+
+        - statement_cache_size=0: توافق tx-pooling.
+        - max_inactive_connection_lifetime=300s: اتصالات ساخنة.
+        """
         try:
-            pool = await asyncpg.create_pool(
-                DATABASE_URL,
-                min_size=max(5, self._min_connections),
-                max_size=self._max_connections,
-                max_inactive_connection_lifetime=PG_MAX_INACTIVE_LIFETIME,
-                command_timeout=PG_COMMAND_TIMEOUT,
-                init=self._pg_init_connection,
-                server_settings={
+            # 🆕 v7.7.68 FIX-DB10: تمرير statement_cache_size للتوافق
+            # مع PgBouncer في transaction mode.
+            create_kwargs: Dict[str, Any] = {
+                "min_size": max(5, self._min_connections),
+                "max_size": self._max_connections,
+                "max_inactive_connection_lifetime": PG_MAX_INACTIVE_LIFETIME,
+                "command_timeout": PG_COMMAND_TIMEOUT,
+                "init": self._pg_init_connection,
+                "server_settings": {
                     "application_name": "relax_bot",
                     "synchronous_commit": "off",
                     # 🔴 FIX-DB1 (v7.7.66): ضبط timezone = UTC.
@@ -2680,7 +2708,20 @@ class Database(
                     "statement_timeout": str(PG_STATEMENT_TIMEOUT_MS),
                     "idle_in_transaction_session_timeout": str(
                         PG_IDLE_TX_TIMEOUT_MS),
-                })
+                },
+            }
+            # 🔴 v7.7.68 FIX-DB10: statement cache للتوافق مع PgBouncer.
+            try:
+                create_kwargs["statement_cache_size"] = int(
+                    PG_STATEMENT_CACHE_SIZE)
+                create_kwargs["max_cached_statement_lifetime"] = float(
+                    PG_MAX_CACHED_STATEMENT_LIFETIME)
+            except TypeError as _tce:
+                logger.warning(
+                    "⚠️ v7.7.68: asyncpg لا يدعم "
+                    "statement_cache_size في create_pool: %s",
+                    _tce)
+            pool = await asyncpg.create_pool(DATABASE_URL, **create_kwargs)
             return pool
         except Exception as e:
             raise _FactoryFailed(
@@ -2762,9 +2803,6 @@ class Database(
             pool.acquire(), timeout=self._connection_timeout)
         try:
             # 🆕 v7.7.67 FIX-DB8: فحص idle-in-transaction قبل VACUUM.
-            # السبب: إذا كان الاتصال الموروث من pool في tx عالقة
-            # (نادر لكن ممكن)، VACUUM يفشل بـ:
-            #   ERROR: VACUUM cannot run inside a transaction block
             try:
                 if _pg_in_transaction(conn):
                     logger.warning(
@@ -3030,12 +3068,6 @@ class Database(
                 # الهدف: عند النجاح، ننتظر cooldown كامل قبل المحاولة
                 # التالية. عند الفشل، ننتظر short_cooldown فقط (10%
                 # من cooldown الأصلي، بحد أدنى 60s) لمحاولة أسرع.
-                #
-                # الحساب: `_mv_last_refresh_mono` يُقارَن بـ now في
-                # شرط cooldown. لتحقيق "انتظار short_cooldown" عند
-                # الفشل، نُزيح الطابع الزمني إلى الوراء بمقدار
-                # (cooldown - short_cooldown) — بحيث يكون قد مرّ
-                # فعلياً short_cooldown فقط.
                 if success:
                     self._mv_last_refresh_mono = time.monotonic()
                 else:
@@ -3050,10 +3082,7 @@ class Database(
         يُنشئ مهمة خلفية مُتتبَّعة.
 
         🆕 v7.7.67 FIX-DB7: يتحقق من _closing/_closed قبل create_task.
-        السبب: المهام المُنشأة أثناء الإغلاق لا تُلغى تلقائياً →
-        task leak + تحذيرات "Task was destroyed but it is pending".
         """
-        # 🆕 v7.7.67 FIX-DB7
         if self._closing or self._closed:
             logger.debug(
                 "⚠️ _spawn_bg_task: DB في حالة إغلاق — "
@@ -3134,7 +3163,9 @@ class Database(
                     f"[synchronous_commit=off, "
                     f"max_inactive_lifetime={PG_MAX_INACTIVE_LIFETIME:.0f}s, "
                     f"TCP-keepalive={PG_TCP_KEEPIDLE}s, "
-                    f"rollback-on-return={PG_ROLLBACK_ON_RETURN_TIMEOUT:.1f}s]")
+                    f"rollback-on-return={PG_ROLLBACK_ON_RETURN_TIMEOUT:.1f}s, "
+                    f"stmt_cache={PG_STATEMENT_CACHE_SIZE}, "
+                    f"pooled_endpoint={'yes' if _PG_IS_POOLED else 'no'}]")
             elif USE_MYSQL:
                 self._pool = await _create_pool_with_retry(
                     self._mysql_pool_factory, "MySQL",
@@ -3555,9 +3586,10 @@ class Database(
                         pass
                 elif USE_POSTGRES:
                     try:
-                        conn_id = id(conn)
+                        # 🆕 v7.7.68 FIX-DB13: WeakKeyDictionary —
+                        # نستخدم conn مباشرة كمفتاح.
                         now = time.monotonic()
-                        last_used = self._conn_last_used.get(conn_id, 0.0)
+                        last_used = self._conn_last_used.get(conn, 0.0)
                         if now - last_used > PG_CONN_PING_IDLE_THRESHOLD:
                             poisoned = False
                             try:
@@ -3582,7 +3614,6 @@ class Database(
                                 conn = await asyncio.wait_for(
                                     self._pool.acquire(),
                                     timeout=self._connection_timeout)
-                                conn_id = id(conn)
                             else:
                                 try:
                                     await asyncio.wait_for(
@@ -3605,8 +3636,14 @@ class Database(
                                     conn = await asyncio.wait_for(
                                         self._pool.acquire(),
                                         timeout=self._connection_timeout)
-                                    conn_id = id(conn)
-                        self._conn_last_used[conn_id] = now
+                        try:
+                            self._conn_last_used[conn] = now
+                        except (TypeError, KeyError) as _ck_e:
+                            # WeakKeyDictionary قد ترفض أنواعاً غير
+                            # قابلة للـ weak-ref.
+                            if not self._use_weak_conn_cache:
+                                logger.debug(
+                                    f"_conn_last_used set: {_ck_e}")
                     except Exception as _pbe:
                         logger.debug(
                             f"ping-before-use error (non-fatal): "
@@ -3672,7 +3709,11 @@ class Database(
     async def _return_connection(self, conn):
         try:
             if USE_POSTGRES:
-                self._conn_last_used[id(conn)] = time.monotonic()
+                # 🆕 v7.7.68 FIX-DB13: conn كمفتاح مباشرة.
+                try:
+                    self._conn_last_used[conn] = time.monotonic()
+                except (TypeError, KeyError):
+                    pass
         except Exception:
             pass
         if USE_POSTGRES or USE_MYSQL:
@@ -3770,9 +3811,10 @@ class Database(
                             await result
                     except Exception as e:
                         logger.debug(f"PG close: {e}")
+            # 🆕 v7.7.68 FIX-DB13: WeakKeyDictionary pop by conn
             try:
-                self._conn_last_used.pop(id(conn), None)
-            except Exception:
+                self._conn_last_used.pop(conn, None)
+            except (TypeError, KeyError):
                 pass
         elif USE_MYSQL:
             destroyed = False
@@ -4651,15 +4693,21 @@ class Database(
                 await self.cleanup_channel_locks()
                 await self.cleanup_group_locks()
                 await self.cleanup_penalty_locks()
+                # 🆕 v7.7.68 FIX-DB13: WeakKeyDictionary — تنظيم
+                # تلقائي، لكن نُبقي الـ cleanup للاتصالات طويلة العمر.
                 try:
                     if len(self._conn_last_used) > 1000:
                         now = time.monotonic()
                         stale = [
-                            k for k, ts in self._conn_last_used.items()
+                            k for k, ts in list(
+                                self._conn_last_used.items())
                             if now - ts > 3600
                         ]
                         for k in stale:
-                            self._conn_last_used.pop(k, None)
+                            try:
+                                self._conn_last_used.pop(k, None)
+                            except (TypeError, KeyError):
+                                pass
                 except Exception:
                     pass
             except asyncio.CancelledError:
@@ -5798,11 +5846,6 @@ class Database(
         # ⚠️ تم نقل migrate_reminders_columns و
         # ensure_all_dev_subscriptions **خارج** هذه الدالة إلى
         # _bootstrap (بعد commit الـ tx الخارجية).
-        #
-        # السبب: كلتاهما تفتحان self.transaction() داخلياً →
-        # nested tx. على SQLite:
-        #   "cannot start a transaction within a transaction"
-        # على MySQL: implicit COMMIT يُفقد ذرية bootstrap.
 
         try:
             secondary_indexes = self._get_secondary_indexes()
@@ -5848,7 +5891,6 @@ class Database(
                 # ═══════════════════════════════════════════════════════
 
                 # 1) ترحيل أعمدة التذكيرات (RemindersMixin)
-                #    كانت داخل _do_bootstrap_inner → nested tx.
                 try:
                     if hasattr(self, "migrate_reminders_columns"):
                         await self.migrate_reminders_columns()
@@ -5863,7 +5905,6 @@ class Database(
                         "⚠️ migrate_reminders_columns: %s", _mrc_e)
 
                 # 2) تأمين اشتراكات المطورين
-                #    كانت داخل _do_bootstrap_inner → nested tx.
                 if not self._dev_subscription_ensured:
                     try:
                         await self.ensure_all_dev_subscriptions()
@@ -7859,6 +7900,8 @@ __all__ = [
     "PG_STATEMENT_TIMEOUT_MS", "PG_IDLE_TX_TIMEOUT_MS",
     "PG_COMMAND_TIMEOUT",
     "PG_ROLLBACK_ON_RETURN_TIMEOUT",
+    "PG_STATEMENT_CACHE_SIZE",
+    "PG_MAX_CACHED_STATEMENT_LIFETIME",
     "IDLE_TX_AUDIT_ENABLED",
     "IDLE_TX_AUDIT_INTERVAL_SEC",
     "IDLE_TX_AUDIT_MIN_SECONDS",
@@ -7905,27 +7948,28 @@ __all__ = [
 
 
 # =====================================================================
-# LOAD BEACON — v7.7.67
+# LOAD BEACON — v7.7.68
 # =====================================================================
 
 try:
     _analytics_status = (
         "✅" if hasattr(Database, "get_user_growth") else "❌")
     logger.info(
-        "🛡️ database.py v7.7.67 NESTED-TX-LIFECYCLE-FIX loaded | "
+        "🛡️ database.py v7.7.68 DB-POOL-LATENCY-FIX loaded | "
         "DB=%s | Analytics=%s (available=%s) | "
         "Migrations=%s | Refactor=%s | Caches=%s | "
         "Idle-TX-Audit=%s (interval=%.0fs, threshold=%d) | "
         "PG-rollback-on-return=%.1fs | "
-        "Fixes: DB1 (timezone=UTC), "
-        "DB2 (migrate_reminders in bootstrap — moved out of tx v7.7.67), "
-        "DB3 (vacuum statement_timeout=0), "
-        "DB4 (slow_query_log_threshold=0.2), "
-        "DB5 (NESTED-TX: migrate_reminders + ensure_dev OUT of bootstrap tx), "
-        "DB6 (_load_mixin Exception), "
-        "DB7 (_spawn_bg_task closing check), "
-        "DB8 (vacuum idle-tx check), "
-        "DB9 (mv cooldown docs), "
+        "PG-stmt-cache=%d (pooled=%s) | "
+        "PG-max-inactive=%.0fs | "
+        "PG-ping-idle=%.0fs | "
+        "Fixes: DB10 (stmt_cache=0 لـ PgBouncer), "
+        "DB11 (max_inactive 300s), "
+        "DB12 (ping_idle 60s), "
+        "DB13 (WeakKeyDictionary), "
+        "DB14 (DB_TIMEOUT=10s), "
+        "DB15 (query_timeout=20s), "
+        "DB1..DB9 (v7.7.66/67), "
         "MIXIN-1/2/3 (v7.7.65), "
         "E1..E8 (v7.7.64) | IN chunking max=%d",
         DB_TYPE.upper(),
@@ -7938,6 +7982,10 @@ try:
         IDLE_TX_AUDIT_INTERVAL_SEC,
         IDLE_TX_AUDIT_ALERT_THRESHOLD,
         PG_ROLLBACK_ON_RETURN_TIMEOUT,
+        PG_STATEMENT_CACHE_SIZE,
+        "yes" if _PG_IS_POOLED else "no",
+        PG_MAX_INACTIVE_LIFETIME,
+        PG_CONN_PING_IDLE_THRESHOLD,
         MAX_SQL_IN_PARAMS,
     )
 except Exception:
