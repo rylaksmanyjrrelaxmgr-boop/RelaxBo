@@ -2,50 +2,42 @@
 # -*- coding: utf-8 -*-
 
 """
-handlers_command.py - معالجات الأوامر (CommandHandlers) - v7.7.4
+handlers_command.py - معالجات الأوامر (CommandHandlers) - v7.7.5
 ===================================================================================
+🆕 v7.7.5 (UNDEFINED-REF-FIX + CONTEST-CLEANUP-FIX):
+    🔴 FIX-10 (CRITICAL): استيراد invalidate_banned_words_cache_async
+        من utils. السبب: WAIT_KEYWORD كان يستدعي
+        `_invalidate_banned_words_cache(chat_id)` — دالة **غير معرّفة**
+        في هذا الملف ولا في utils (اسم مُختلَق). النتيجة: NameError
+        يُلتقط بـ `except Exception: pass` → الكلمات المحظورة تُضاف
+        لكن الكاش **لا يُبطَل** → الإضافة لا تظهر حتى TTL (60s).
+
+    🔴 FIX-11 (CRITICAL): _finalize_contest — مسح ud keys في كل
+        المسارات. السبب: عند فشل `DB.create_contest` بـ TypeError،
+        الكود ينتقل إلى `except TypeError` ويستدعي
+        `StateManager.clear(user_id)` فقط، لكن **لا يمسح**
+        `contest_title`/`contest_desc`/... من `context.user_data`.
+        النتيجة: stale state يُفسد إنشاء مسابقة جديدة في الجلسة التالية.
+
+    🟠 FIX-12: from datetime import timedelta في الأعلى بدل inline.
+        السبب: الـ inline import داخل حلقة handle_text يضيف overhead
+        صغير لكن متكرر. الأفضل: import واحد عند التحميل.
+
+    🟡 FIX-13: _handle_contest_text — فحص text فارغ.
+        السبب: مدخلات فارغة ("" أو "   ") كانت تُحفظ كـ title/desc
+        فارغ → مسابقة غير صالحة.
+
+    🟡 FIX-14: تحديث header + load beacon إلى v7.7.5.
+
 🆕 v7.7.4 (FSM-HANDLERS-POLISH + FIX-PACK):
     🔴 FIX-1: إزالة "none" من قائمة الإلغاء العامة في handle_text.
-        السبب: كان يمنع تعطيل WAIT_FORCE عبر كتابة "none".
-        الأثر قبل الإصلاح: المستخدم يكتب "none" لتعطيل قناة
-        الاشتراك الإجباري، فيلتقطه فحص الإلغاء أولاً → لا شيء.
-        الآن: "none" يصل لـ WAIT_FORCE handler → ينجح التعطيل.
-
     🔴 FIX-2: context.args = text.split() بدل [text].
-        السبب: [text] كقائمة بعنصر واحد يكسر _moderation_command
-        عند إرسال "123456 60" (ID + دقائق) → int("123456 60") يفشل.
-        الآن: split() يسمح بتمرير args متعددة.
-
     🔴 FIX-3: _finalize_contest — فحص signature.
-        السبب: `except TypeError` كان يبتلع أي TypeError داخلي
-        (ليس فقط signature mismatch). الآن نستخدم inspect.signature
-        لفحص دعم question/correct_answer قبل الاستدعاء.
-
     🔴 FIX-4: WAIT_CONTEST_TYPE — إزالة "other".
-        السبب: DB.create_contest لا تدعم contest_type="other" في
-        VALID_* → فشل صامت. الآن نرفض any نوع غير raffle/quiz.
-
     🟠 FIX-5: WAIT_PIN — فحص صلاحية can_pin.
-        السبب: كان يُرسل pin_chat_message بدون فحص مسبق →
-        إذا لم يكن للبوت الصلاحية، يظهر خطأ Telegram الخام.
-
     🟠 FIX-6: WAIT_BROADCAST — إبلاغ المستخدم عند فشل البث.
-        السبب: في المسار البديل (عند غياب _do_broadcast)، كان
-        يُرسل للمالك فقط ويُخبر المستخدم بأن البث تم. الآن
-        يُخبر المستخدم أن البث لم يُنفَّذ.
-
     🟠 FIX-7: WAIT_KEYWORD — استخدام auto_chat + التمييز.
-        السبب: كان يستخدم DB.add_auto_reply(-1, text, text) دائماً
-        (رد عالمي، النص=الرد). الآن:
-          • إذا keyword_action="banned_word" → add_banned_word
-          • إذا keyword_action="auto_reply" → transition to
-            WAIT_REPLY_RESPONSE لجمع الرد الفعلي
-          • إذا auto_chat محدّد → استخدمه بدل -1
-
     🟡 FIX-8: WAIT_CONTEST_DURATION — دعم float.
-        السبب: كان int(text) فقط → "1.5" مرفوض. الآن float ثم
-        تقريب إلى أقرب ساعة.
-
     🟡 FIX-9: _handle_wait_penalty_duration_text — رسائل أوضح.
 
 🆕 v7.7.3 (FIX-C1 — LARGE):
@@ -66,6 +58,7 @@ import re
 import time
 import inspect
 import logging
+from datetime import timedelta
 from typing import Optional, List, Set, Tuple, Any
 from html import escape, unescape
 
@@ -89,6 +82,8 @@ from utils import (
     KeyboardFactory, TranslationManager, CB,
     export_auto_replies,
     safe_send,
+    # 🔴 FIX-10 (v7.7.5): استيراد دالة إبطال كاش الكلمات المحظورة
+    invalidate_banned_words_cache_async,
 )
 from cache import user_cache
 
@@ -159,6 +154,13 @@ _PARSE_ERROR_KEYWORDS = (
 )
 
 _SECURITY_LANG_SUPPORT: Optional[bool] = None
+
+# 🟡 FIX-11 (v7.7.5): قائمة موحّدة لتنظيف ud عند اكتمال/فشل إنشاء المسابقة.
+_CONTEST_UD_KEYS = (
+    'contest_title', 'contest_desc', 'contest_prize',
+    'contest_end_date', 'contest_type',
+    'contest_question', 'contest_correct_answer',
+)
 
 
 def _is_parse_error(err_str: str) -> bool:
@@ -2781,8 +2783,6 @@ class CommandHandlers:
                 if callable(do_broadcast):
                     await do_broadcast(update, context, text)
                 else:
-                    # مسار بديل محدود: نُبلّغ المالك فقط + نُخبر المستخدم
-                    # بأن البث لم يُنفَّذ فعلياً.
                     owner_id = int(getattr(
                         CONFIG, 'PRIMARY_OWNER_ID', 0) or 0)
                     if owner_id:
@@ -3015,8 +3015,11 @@ class CommandHandlers:
             return
 
         # ═══════════════════════════════════════════════════════════════
-        # 11) WAIT_KEYWORD — 🟠 FIX-7 (v7.7.4):
+        # 11) WAIT_KEYWORD — 🟠 FIX-7 (v7.7.4) + 🔴 FIX-10 (v7.7.5)
         #     استخدام auto_chat + التمييز بين banned_word / auto_reply.
+        #     🔴 FIX-10: استخدام invalidate_banned_words_cache_async
+        #               من utils (كان `_invalidate_banned_words_cache`
+        #               غير معرّفة → NameError يُلتقط بصمت).
         # ═══════════════════════════════════════════════════════════════
         if state_name == "WAIT_KEYWORD":
             if not CONFIG.is_developer(user_id):
@@ -3035,10 +3038,13 @@ class CommandHandlers:
                         except Exception as _be:
                             logger.debug(
                                 "handle_text/keyword banned: %s", _be)
+                        # 🔴 FIX-10 (v7.7.5): استخدم الدالة الصحيحة من utils
                         try:
-                            await _invalidate_banned_words_cache(chat_id)
-                        except Exception:
-                            pass
+                            await invalidate_banned_words_cache_async(chat_id)
+                        except Exception as _ce:
+                            logger.debug(
+                                "handle_text/keyword invalidate cache: %s",
+                                _ce)
                     await _safe_edit_or_send(
                         update, context,
                         await _trans('saved_success', lang, "✅ تم")
@@ -3052,6 +3058,8 @@ class CommandHandlers:
                     except Exception as _se:
                         logger.debug(
                             "handle_text/keyword set state: %s", _se)
+                    if context.user_data is None:
+                        context.user_data = {}
                     context.user_data['reply_trigger_pending'] = text
                     context.user_data['reply_chat'] = chat_id
                     context.user_data['auto_chat'] = chat_id
@@ -3153,7 +3161,17 @@ class CommandHandlers:
             StateManager.clear(user_id)
             return
 
-        ud = context.user_data or {}
+        if context.user_data is None:
+            context.user_data = {}
+        ud = context.user_data
+
+        # 🟡 FIX-13 (v7.7.5): رفض المدخلات الفارغة.
+        if not text or not text.strip():
+            await _safe_edit_or_send(
+                update, context,
+                "❌ لا يمكن قبول قيمة فارغة. أرسل نصاً صحيحاً."
+            )
+            return
 
         if state_name == "WAIT_CONTEST_TITLE":
             ud['contest_title'] = text[:200]
@@ -3185,7 +3203,7 @@ class CommandHandlers:
             )
             return
 
-        # 🟡 FIX-8 (v7.7.4): دعم float
+        # 🟡 FIX-8 (v7.7.4): دعم float. (FIX-12 v7.7.5: timedelta في الأعلى)
         if state_name == "WAIT_CONTEST_DURATION":
             try:
                 hours_raw = float(text)
@@ -3197,7 +3215,6 @@ class CommandHandlers:
                     update, context, "❌ قيمة غير صالحة"
                 )
                 return
-            from datetime import timedelta
             end_dt = TimeUtils.utc_now() + timedelta(hours=hours)
             ud['contest_end_date'] = end_dt.isoformat()
             StateManager.set(user_id, UserState.WAIT_CONTEST_TYPE)
@@ -3245,13 +3262,29 @@ class CommandHandlers:
             return
 
     # ═══════════════════════════════════════════════════════════════
-    # 🔴 FIX-3 (v7.7.4): _finalize_contest — فحص signature
+    # 🔴 FIX-3 (v7.7.4) + 🔴 FIX-11 (v7.7.5): _finalize_contest
+    #     v7.7.5: مسح ud keys في جميع المسارات (نجاح/فشل/استثناء)
     # ═══════════════════════════════════════════════════════════════
     @staticmethod
     async def _finalize_contest(update, context, lang: str) -> None:
-        """إنشاء المسابقة النهائي (مع فحص signature)."""
+        """إنشاء المسابقة النهائي (مع فحص signature + تنظيف ud)."""
         user_id = update.effective_user.id
-        ud = context.user_data or {}
+        if context.user_data is None:
+            context.user_data = {}
+        ud = context.user_data
+
+        # 🔴 FIX-11: دالة مساعدة للتنظيف (تُستدعى في كل المسارات)
+        def _cleanup_contest_state() -> None:
+            try:
+                StateManager.clear(user_id)
+            except Exception:
+                pass
+            try:
+                for _k in _CONTEST_UD_KEYS:
+                    ud.pop(_k, None)
+            except Exception:
+                pass
+
         try:
             kwargs = {
                 "creator_id": user_id,
@@ -3273,16 +3306,13 @@ class CommandHandlers:
                     extra['correct_answer'] = ud.get(
                         'contest_correct_answer', '')
             except (TypeError, ValueError):
-                # في حال فشل inspect → نحاول بدون extra
                 pass
 
             cid = await DB.create_contest(**kwargs, **extra)
 
-            StateManager.clear(user_id)
-            for k in ('contest_title', 'contest_desc', 'contest_prize',
-                      'contest_end_date', 'contest_type',
-                      'contest_question', 'contest_correct_answer'):
-                ud.pop(k, None)
+            # 🔴 FIX-11: تنظيف في المسار الناجح
+            _cleanup_contest_state()
+
             if cid:
                 await _safe_edit_or_send(
                     update, context,
@@ -3295,11 +3325,11 @@ class CommandHandlers:
                                  "❌ فشل الإنشاء")
                 )
         except TypeError as te:
-            # signature mismatch — try بدون extra كملاذ
             logger.warning("_finalize_contest TypeError: %s", te)
             try:
                 cid = await DB.create_contest(**kwargs)
-                StateManager.clear(user_id)
+                # 🔴 FIX-11: تنظيف في مسار fallback
+                _cleanup_contest_state()
                 if cid:
                     await _safe_edit_or_send(
                         update, context,
@@ -3313,10 +3343,28 @@ class CommandHandlers:
                     )
             except Exception as e2:
                 logger.error("_finalize_contest fallback: %s", e2)
-                StateManager.clear(user_id)
+                # 🔴 FIX-11: تنظيف حتى عند فشل الـ fallback
+                _cleanup_contest_state()
+                try:
+                    await _safe_edit_or_send(
+                        update, context,
+                        await _trans('contest_create_failed', lang,
+                                     "❌ فشل الإنشاء")
+                    )
+                except Exception:
+                    pass
         except Exception as e:
             logger.error("_finalize_contest: %s", e, exc_info=True)
-            StateManager.clear(user_id)
+            # 🔴 FIX-11: تنظيف في أي استثناء آخر
+            _cleanup_contest_state()
+            try:
+                await _safe_edit_or_send(
+                    update, context,
+                    await _trans('contest_create_failed', lang,
+                                 "❌ فشل الإنشاء")
+                )
+            except Exception:
+                pass
 
     # ═══════════════════════════════════════════════════════════════
     # أوامر المطور المتبقية
@@ -3763,8 +3811,12 @@ __all__ = [
 # ═══════════════════════════════════════════════════════════════════
 try:
     logger.info(
-        "📋 handlers_command.py v7.7.4 FIX-PACK loaded | "
-        "handle_text=✅(FIX-C1) | "
+        "📋 handlers_command.py v7.7.5 "
+        "UNDEFINED-REF-FIX + CONTEST-CLEANUP-FIX loaded | "
+        "FIX-10=invalidate-banned-words-imported | "
+        "FIX-11=contest-ud-cleanup-all-paths | "
+        "FIX-12=timedelta-top-import | "
+        "FIX-13=contest-empty-text-reject | "
         "FIX-1=cancel-no-none | "
         "FIX-2=args-split | "
         "FIX-3=contest-sig-check | "
