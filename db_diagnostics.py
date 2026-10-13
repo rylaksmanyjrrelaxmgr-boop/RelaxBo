@@ -1,8 +1,29 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-db_diagnostics.py — واجهة تشخيص وصيانة قاعدة البيانات (v7.2.2 — PROBE-ACCURACY)
+db_diagnostics.py — واجهة تشخيص وصيانة قاعدة البيانات (v7.2.3 — MYSQL-PARITY-FIX)
 ================================================================================
+🆕 v7.2.3 — MYSQL-PARITY-FIX (5 إصلاحات):
+    🔴 FIX-MYSQL-CLOSE: _probe_db_latency — conn.close() لـ asyncmy
+        كان يُستدعى بدون await → coroutine لم يُنفَّذ → **تسريب
+        اتصالات MySQL** + RuntimeWarning "coroutine was never awaited".
+        asyncmy.Connection.close() هي async def → يجب await.
+    🔴 FIX-MYSQL-TABLES: _get_all_table_names — عند DB_TYPE=MYSQL
+        كان يُرسل استعلام SQLite (sqlite_master) → OperationalError
+        يُبتلَع بصمت → قائمة فارغة → VACUUM على صفر جداول.
+        الحل: فرع صريح لـ MySQL عبر information_schema.TABLES.
+    🔴 FIX-MYSQL-META: _get_db_metadata — نفس المشكلة: كان يفترض
+        SQLite لأي DB غير Postgres → get_db_size_kb صحيح فعلاً لكن
+        current_schema/database_name خطأ. الحل: فرع MySQL صريح.
+    🟠 FIX-AV-SCORE: _calc_technical_score — كان يخصم 15 نقطة عند
+        settings.get("autovacuum") != "on". إذا settings={}
+        (SQLite/MySQL أو فشل fetch) → خصم كاذب.
+        الحل: الخصم فقط عندما settings غير فارغ.
+    🟠 FIX-AV-LABEL: _build_sections — عرض autovacuum: "?" على
+        SQLite/MySQL كان misleading. الآن يُخفى إذا لم يوجد.
+    🟡 FIX-CONNECT-LABEL: format_latency_report — "asyncpg connect"
+        كان يُعرض على MySQL أيضاً. الآن "connect" (DB-agnostic).
+
 🆕 v7.2.2 — PROBE-ACCURACY (3 إصلاحات دقة):
     🔴 FIX-CPU: قياس CPU تم نقله من _probe_system إلى _probe_full_health.
         السبب: psutil.cpu_percent(interval=None) داخل gather كان يقيس
@@ -22,39 +43,17 @@ db_diagnostics.py — واجهة تشخيص وصيانة قاعدة البيان
     🔴 FIX-2: إزالة :<20 من _esc(name) (HTML entities تكسر المحاذاة).
     🔴 FIX-3: PK probe يكتشف عمود PK في users ديناميكياً.
     🔴 FIX-4: فرع warm>200+tcp<80 في _compute_latency_verdict.
-    🔴 FIX-5: _probe_network_to — TCP+TLS (تم تعديله في v7.2.2).
+    🔴 FIX-5: _probe_network_to — TCP+TLS.
     🟡 FIX-6: _probe_filesystem — fallback إلى cwd.
     🟡 FIX-7: format_maintenance_preview — عرض تحذير عند count=-1.
     🟡 FIX-8: _get_indexes — cache key بـ hash.
     🟡 FIX-9: format_full_health_report — عنوان شرطي.
     🟡 FIX-10: SECTION 12/13 اختيارية.
 
-🆕 v7.2.0 — FULL-HEALTH-PROBE:
-    🔬 FEAT-1: _probe_full_health() — 6 أبعاد.
-    🎯 FEAT-2: _identify_bottleneck() — تحليل + توصية.
-    🔬 FEAT-3: format_full_health_report() — تقرير HTML.
-    🔬 FEAT-4: diagnose_full() + get_full_health().
-    🟢 FEAT-5: cache 120s.
-    🟢 FEAT-6: SECTION 13 شرطي.
-
-🆕 v7.1.0 — LATENCY-PROBE:
-    🔬 FEAT-1: _probe_db_latency().
-    🔬 FEAT-2: format_latency_report().
-    🔬 FEAT-3: diagnose_latency().
-    🔬 FEAT-4: get_latency_verdict().
-    🟢 FEAT-5: cache 120s.
-    🟢 FEAT-6: SECTION 12 شرطي.
-
-🆕 v7.0.1 — FIX-BUNDLE (AF1 + AF2 + AF3 + AF4):
-    🔴 FIX-AF1: bot_addition_log.date_column — added_at.
-    🔴 FIX-AF2: user_messages.date_column — message_time.
-    🔴 FIX-AF3: vacuum_analyze_tables — فحص SQLite.
-    🔴 FIX-AF4: run_maintenance — نفس منطق AF3.
-
-🆕 v7.0.0 — CACHE-LAYER + PARALLEL-REPORT:
-    🟢 PERF-1: طبقة cache مركزية بـ TTL.
-    🟢 PERF-2: _build_sections() يستخدم asyncio.gather.
-    🟢 PERF-3: _invalidate_cache().
+🆕 v7.2.0 — FULL-HEALTH-PROBE (محفوظ).
+🆕 v7.1.0 — LATENCY-PROBE (محفوظ).
+🆕 v7.0.1 — FIX-BUNDLE (محفوظ).
+🆕 v7.0.0 — CACHE-LAYER + PARALLEL-REPORT (محفوظ).
 ================================================================================
 """
 
@@ -79,14 +78,14 @@ logger = logging.getLogger(__name__)
 # الإصدار
 # ═══════════════════════════════════════════════════════════════════════
 
-VERSION = "7.2.2"
+VERSION = "7.2.3"
 
 _MIN_DEAD_FOR_CRITICAL = 50
 _MIN_DEAD_FOR_COLOR = 10
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# 🆕 v7.0.0 PERF-1: طبقة Cache مركزية بـ TTL
+# طبقة Cache مركزية بـ TTL
 # ═══════════════════════════════════════════════════════════════════════
 
 _CACHE: Dict[str, Dict[str, Any]] = {}
@@ -269,6 +268,11 @@ def _get_db_type() -> str:
 def _is_postgres() -> bool:
     db = _get_db()
     return db is not None and bool(getattr(db, "USE_POSTGRES", False))
+
+
+def _is_mysql() -> bool:
+    db = _get_db()
+    return db is not None and bool(getattr(db, "USE_MYSQL", False))
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -584,13 +588,12 @@ async def _probe_db_latency(
         warm_median = statistics.median(warm)
         result["warm_median_ms"] = round(warm_median, 2)
 
-        # ─── 5) PK SELECT — 🆕 v7.2.2 FIX-PK: SELECT 1 ─────────
+        # ─── 5) PK SELECT — FIX-PK: SELECT 1 ────────────────────
         try:
             t0 = time.monotonic()
             if db_type == "postgres":
                 pk_col = await _detect_users_pk_col(conn)
                 result["users_pk_col"] = pk_col
-                # 🆕 FIX-PK: SELECT 1 بدل SELECT *
                 await conn.fetchval(
                     f'SELECT 1 FROM users WHERE {pk_col} = $1 LIMIT 1',
                     1,
@@ -648,17 +651,21 @@ async def _probe_db_latency(
         result["error"] = f"{type(e).__name__}: {str(e)[:200]}"
         result["verdict"] = "critical"
     finally:
+        # 🆕 v7.2.3 FIX-MYSQL-CLOSE:
+        # asyncmy.Connection.close() هي async def → يجب await.
+        # قبل الإصلاح: `conn.close()` بدون await → coroutine لم
+        # يُنفَّذ → تسريب اتصال MySQL + RuntimeWarning.
         if conn is not None:
-            try:
-                if db_type == "postgres":
+            if db_type == "postgres":
+                try:
                     await conn.close()
-                else:
-                    try:
-                        conn.close()
-                    except Exception:
-                        pass
-            except Exception:
-                pass
+                except Exception:
+                    pass
+            else:  # mysql / asyncmy
+                try:
+                    await conn.close()
+                except Exception as _mc_e:
+                    logger.debug(f"asyncmy close: {_mc_e}")
 
     _cache_set("latency_probe", result, ttl=120.0)
     return result
@@ -690,7 +697,6 @@ def _compute_latency_verdict(result: Dict[str, Any]) -> Tuple[str, str, str]:
             "تحقّق من DATABASE_URL، حالة DB، وأي firewall.",
         )
 
-    # 🆕 FIX-4: فرع صريح — DB بطيء رغم شبكة ممتازة
     if warm > 200 and tcp < 80:
         return (
             "critical",
@@ -795,7 +801,9 @@ def format_latency_report(probe: Dict[str, Any]) -> str:
     if conn > 0:
         conn_icon = ("🟢" if conn < 100 else
                      "🟡" if conn < 300 else "🔴")
-        lines.append(f"🔌 asyncpg connect: {conn_icon} "
+        # 🆕 v7.2.3 FIX-CONNECT-LABEL: "connect" بدل "asyncpg connect"
+        # (يعمل على PostgreSQL و MySQL على حد سواء)
+        lines.append(f"🔌 connect: {conn_icon} "
                      f"<b>{conn:.0f}ms</b>")
         if tcp > 0:
             delta = conn - tcp
@@ -890,7 +898,7 @@ async def _probe_network_to(
 ) -> Dict[str, Any]:
     """
     قياس DNS + TCP + TLS إلى host:port.
-    🆕 v7.2.2 FIX-TLS: TLS بـ CERT_NONE — نحن نقيس الزمن فقط.
+    v7.2.2 FIX-TLS: TLS بـ CERT_NONE — نحن نقيس الزمن فقط.
         TCP يبقى مسجّلاً حتى لو فشل TLS (مهم لـ Aiven CA مخصص).
     """
     result: Dict[str, Any] = {
@@ -936,7 +944,7 @@ async def _probe_network_to(
     if with_tls and raw_sock is not None:
         def _do_tls():
             try:
-                # 🆕 FIX-TLS: CERT_NONE — قياس زمني فقط
+                # FIX-TLS: CERT_NONE — قياس زمني فقط
                 ctx = ssl.create_default_context()
                 ctx.check_hostname = False
                 ctx.verify_mode = ssl.CERT_NONE
@@ -1064,7 +1072,7 @@ async def _probe_filesystem() -> Dict[str, Any]:
 async def _probe_system() -> Dict[str, Any]:
     """
     قياس Load / CPU count / RAM.
-    🆕 v7.2.2 FIX-CPU: لم يعد يقيس cpu_percent — يُقاس في
+    v7.2.2 FIX-CPU: لم يعد يقيس cpu_percent — يُقاس في
     _probe_full_health عبر نافذة كاملة (prime قبل gather، read بعده).
     """
     result: Dict[str, Any] = {"ok": False}
@@ -1260,7 +1268,7 @@ async def _probe_full_health(
 ) -> Dict[str, Any]:
     """
     تشخيص شامل — يقيس كل الأبعاد ويحدد السبب.
-    🆕 v7.2.2 FIX-CPU: prime CPU قبل gather، read بعده (نافذة كاملة).
+    v7.2.2 FIX-CPU: prime CPU قبل gather، read بعده (نافذة كاملة).
     """
     if not force:
         cached = _cache_get("full_health")
@@ -1287,7 +1295,7 @@ async def _probe_full_health(
         except Exception:
             pass
 
-    # 🆕 FIX-CPU: prime CPU قبل gather — يبدأ نافذة القياس
+    # FIX-CPU: prime CPU قبل gather — يبدأ نافذة القياس
     _cpu_primed = False
     try:
         import psutil  # type: ignore
@@ -1322,7 +1330,7 @@ async def _probe_full_health(
     result["system"] = _safe(probes[4], {})
     result["database"] = _safe(probes[5], {})
 
-    # 🆕 FIX-CPU: اقرأ CPU الآن — يمثل نافذة الـgather كاملة
+    # FIX-CPU: اقرأ CPU الآن — يمثل نافذة الـgather كاملة
     if _cpu_primed:
         try:
             import psutil  # type: ignore
@@ -1366,7 +1374,6 @@ def format_full_health_report(data: Dict[str, Any]) -> str:
         "low": "🟢",
     }.get(severity, "⚪")
 
-    # عنوان شرطي عند primary=none
     if primary == "none":
         lines.append(f"{icon} <b>لا يوجد bottleneck — كل الأبعاد سليمة.</b>")
         if b.get("recommendation"):
@@ -1585,7 +1592,37 @@ async def _get_db_metadata() -> Dict[str, Any]:
             meta["database_name"] = await db.fetchval(
                 "SELECT current_database()", default="?"
             ) or "?"
+        elif _is_mysql():
+            # 🆕 v7.2.3 FIX-MYSQL-META: فرع MySQL صريح
+            size_b = await db.fetchval(
+                "SELECT COALESCE(SUM(data_length + index_length), 0) "
+                "FROM information_schema.TABLES "
+                "WHERE TABLE_SCHEMA = DATABASE()",
+                default=0,
+            ) or 0
+            meta["size_bytes"] = int(size_b)
+            meta["size_display"] = _fmt_bytes(size_b)
+
+            meta["current_schema"] = await db.fetchval(
+                "SELECT DATABASE()", default="?"
+            ) or "?"
+
+            rows = await db.fetchall(
+                "SELECT SCHEMA_NAME FROM information_schema.SCHEMATA "
+                "WHERE SCHEMA_NAME NOT IN "
+                "('information_schema', 'mysql', 'performance_schema', 'sys') "
+                "ORDER BY SCHEMA_NAME"
+            ) or []
+            meta["schemas"] = [
+                r.get("SCHEMA_NAME") or r.get("schema_name")
+                for r in rows
+                if isinstance(r, dict)
+            ]
+            meta["schemas"] = [s for s in meta["schemas"] if s]
+
+            meta["database_name"] = meta["current_schema"]
         else:
+            # SQLite
             size_kb = (await db.get_db_size_kb()
                        if hasattr(db, "get_db_size_kb") else 0)
             meta["size_bytes"] = int(size_kb * 1024)
@@ -1923,6 +1960,13 @@ async def _get_cleanup_status() -> List[Dict[str, Any]]:
 # ═══════════════════════════════════════════════════════════════════════
 
 async def _get_all_table_names() -> List[str]:
+    """
+    🆕 v7.2.3 FIX-MYSQL-TABLES: فرع صريح لكل DB.
+
+    قبل الإصلاح: أي DB غير Postgres كان يُرسل استعلام SQLite
+    (sqlite_master) → على MySQL يفشل بـ OperationalError
+    يُبتلَع بصمت → قائمة فارغة → VACUUM على صفر جداول.
+    """
     cached = _cache_get("all_table_names")
     if cached is not None:
         return cached
@@ -1931,46 +1975,73 @@ async def _get_all_table_names() -> List[str]:
     if db is None:
         return []
 
-    if not _is_postgres():
+    db_type = _get_db_type()
+
+    # ═══ MySQL ═══
+    if db_type == "MYSQL":
         try:
             rows = await db.fetchall(
-                "SELECT name FROM sqlite_master "
-                "WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+                "SELECT TABLE_NAME AS tablename "
+                "FROM information_schema.TABLES "
+                "WHERE TABLE_SCHEMA = DATABASE() "
+                "  AND TABLE_TYPE IN ('BASE TABLE', 'VIEW') "
+                "ORDER BY TABLE_NAME"
             ) or []
-            result = [r.get("name") for r in rows
-                      if isinstance(r, dict) and r.get("name")]
+            result = [
+                r.get("tablename") or r.get("TABLE_NAME")
+                for r in rows
+                if isinstance(r, dict)
+            ]
+            result = [t for t in result if t]
             _cache_set("all_table_names", result, ttl=300.0)
             return result
-        except Exception:
+        except Exception as e:
+            logger.warning(f"_get_all_table_names (MySQL): {e}")
             return []
 
-    try:
-        rows = await db.fetchall("""
-            SELECT c.relname AS tablename
-            FROM pg_class c
-            JOIN pg_namespace n ON n.oid = c.relnamespace
-            WHERE n.nspname = current_schema()
-              AND c.relkind IN ('r', 'm')
-            ORDER BY c.relkind DESC, c.relname
-        """) or []
-        result = [r.get("tablename") for r in rows
-                  if isinstance(r, dict) and r.get("tablename")]
-        _cache_set("all_table_names", result, ttl=300.0)
-        return result
-    except Exception as e:
-        logger.debug(f"_get_all_table_names: {e}")
+    # ═══ PostgreSQL ═══
+    if _is_postgres():
         try:
             rows = await db.fetchall("""
-                SELECT tablename FROM pg_tables
-                WHERE schemaname = current_schema()
-                ORDER BY tablename
+                SELECT c.relname AS tablename
+                FROM pg_class c
+                JOIN pg_namespace n ON n.oid = c.relnamespace
+                WHERE n.nspname = current_schema()
+                  AND c.relkind IN ('r', 'm')
+                ORDER BY c.relkind DESC, c.relname
             """) or []
             result = [r.get("tablename") for r in rows
                       if isinstance(r, dict) and r.get("tablename")]
             _cache_set("all_table_names", result, ttl=300.0)
             return result
-        except Exception:
-            return []
+        except Exception as e:
+            logger.debug(f"_get_all_table_names (PG): {e}")
+            try:
+                rows = await db.fetchall("""
+                    SELECT tablename FROM pg_tables
+                    WHERE schemaname = current_schema()
+                    ORDER BY tablename
+                """) or []
+                result = [r.get("tablename") for r in rows
+                          if isinstance(r, dict) and r.get("tablename")]
+                _cache_set("all_table_names", result, ttl=300.0)
+                return result
+            except Exception:
+                return []
+
+    # ═══ SQLite (افتراضي) ═══
+    try:
+        rows = await db.fetchall(
+            "SELECT name FROM sqlite_master "
+            "WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+        ) or []
+        result = [r.get("name") for r in rows
+                  if isinstance(r, dict) and r.get("name")]
+        _cache_set("all_table_names", result, ttl=300.0)
+        return result
+    except Exception as e:
+        logger.debug(f"_get_all_table_names (SQLite): {e}")
+        return []
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -2004,7 +2075,10 @@ def _calc_technical_score(
         score -= 5
     if activity.get("idle_tx", 0) > 0:
         score -= 2
-    if settings.get("autovacuum") != "on":
+
+    # 🆕 v7.2.3 FIX-AV-SCORE: الخصم فقط عندما settings غير فارغ
+    # (SQLite/MySQL أو فشل fetch — لا معنى للخصم).
+    if settings and settings.get("autovacuum") != "on":
         score -= 15
 
     score = max(0, min(100, score))
@@ -2613,9 +2687,13 @@ async def _build_sections(*, include_probes: bool = True) -> List[str]:
     s1.append(f"  💀 إجمالي dead tuples: <b>{_fmt_num(total_dead)}</b>")
     s1.append(f"  📊 جداول مهمة: <b>{len(dirty)}</b>")
     s1.append(f"  🗂️ إجمالي الجداول: <b>{total_tables}</b>")
-    av_setting = settings.get("autovacuum", "?")
-    av_icon = "🟢" if av_setting == "on" else "🔴"
-    s1.append(f"  autovacuum: {av_icon} <b>{_esc(av_setting).upper()}</b>")
+
+    # 🆕 v7.2.3 FIX-AV-LABEL: اعرض autovacuum فقط عندما موجود
+    av_setting = settings.get("autovacuum", "")
+    if av_setting:
+        av_icon = "🟢" if av_setting == "on" else "🔴"
+        s1.append(f"  autovacuum: {av_icon} <b>{_esc(av_setting).upper()}</b>")
+
     s1.append(f"  مؤشر الحالة التقني: <b>{score}/100</b> {score_icon}")
     parts.append("\n".join(s1))
 
@@ -2625,10 +2703,14 @@ async def _build_sections(*, include_probes: bool = True) -> List[str]:
     s2.append("║  🎯 التحليل المنطقي          ║")
     s2.append("╚══════════════════════════════════╝")
     s2.append("")
-    if av_setting == "on":
-        s2.append("🟢 autovacuum = ON.")
+
+    if av_setting:
+        if av_setting == "on":
+            s2.append("🟢 autovacuum = ON.")
+        else:
+            s2.append("🔴 autovacuum = OFF — خطر على الأداء.")
     else:
-        s2.append("🔴 autovacuum = OFF — خطر على الأداء.")
+        s2.append("ℹ️ autovacuum: N/A (غير PostgreSQL).")
 
     if settings.get("synchronous_commit") == "off":
         s2.append("")
@@ -2893,9 +2975,10 @@ async def diagnose_db_quick() -> str:
 
     try:
         settings = await _get_pg_settings()
-        av = settings.get("autovacuum", "?")
-        av_icon = "🟢" if av == "on" else "🔴"
-        lines.append(f"{av_icon} autovacuum: <b>{_esc(av).upper()}</b>")
+        if settings:
+            av = settings.get("autovacuum", "?")
+            av_icon = "🟢" if av == "on" else "🔴"
+            lines.append(f"{av_icon} autovacuum: <b>{_esc(av).upper()}</b>")
     except Exception:
         pass
 
@@ -3068,12 +3151,17 @@ __all__ = [
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# LOAD BEACON
+# LOAD BEACON — v7.2.3
 # ═══════════════════════════════════════════════════════════════════════
 
 try:
     logger.info(
         "🛡️ db_diagnostics.py v%s loaded | "
+        "MYSQL-PARITY ✅ | "
+        "MYSQL-CLOSE-AWAIT ✅ | "
+        "MYSQL-TABLES-SUPPORT ✅ | "
+        "MYSQL-META-SUPPORT ✅ | "
+        "AV-SCORE-GUARD ✅ | "
         "PROBE-ACCURACY ✅ | "
         "CPU-WINDOW-FIXED ✅ | "
         "TLS-CERT-NONE ✅ | "
@@ -3087,7 +3175,6 @@ try:
         "MV-AWARE-HEALTH ✅ | "
         "SAFE CLEANUP ✅ | "
         "subscribers protected 🔒 | "
-        "MVs in VACUUM ✅ | "
         "abs-threshold=%d dead | "
         "auto-vacuum API ✅ | "
         "AF1+AF2+AF3+AF4 ✅ | "
