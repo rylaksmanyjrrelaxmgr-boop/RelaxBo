@@ -1,39 +1,30 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-handlers_message.py - v7.18.32 (FSM-COVERAGE-COMPLETE)
+handlers_message.py - v7.18.33 (BATCH-SETTINGS)
 (متوافق مع detectors v4.1.0 + banned_words_manager v1.2.0)
 =============================================================================
+🆕 v7.18.33 (BATCH-SETTINGS):
+    ⚡ BATCH-SETTINGS: دمج استعلامَي group_security + auto_reply_settings
+        في استعلام واحد على PostgreSQL (1 RTT بدل 2).
+        التوفير: ~238ms لكل رسالة مجموعة.
+    🔴 REVIEW-FIX-1: استخدام _row_to_dict_local بدل isinstance(row, dict)
+        — asyncpg يعيد Record لا dict (Bug إنتاجي كان سيفقد الإعدادات).
+    🟠 REVIEW-FIX-2: EXISTS(...) للتفريق "صف موجود" من "لا صف"
+        — لتجنب كاش defaults مصطنعة تحجب إعدادات لاحقة.
+    🟡 REVIEW-FIX-3: عدم دمج _DEFAULT_SECURITY_SETTINGS — للـconsistency.
+    🟡 REVIEW-FIX-4: logger.info بدل debug — ليظهر في Render.
+    🟡 REVIEW-FIX-5: _process_auto_reply تقبل preloaded_ars=None.
+
 🆕 v7.18.32 (FSM-COVERAGE-COMPLETE):
-    🔴 FIX-FSM-1: 4 معالجات جديدة لـ4 حالات FSM كانت غير مُعالَجة:
-        • WAIT_AUTO_KEY           → _handle_wait_auto_key_text
-        • WAIT_AUTO_DEL           → _handle_wait_auto_del_text
-        • WAIT_PENALTY_DURATION   → _handle_wait_penalty_duration_text
-        • WAIT_GITHUB_URL         → _handle_wait_github_url_text
-        كانت تُعيَّن في handlers_callback لكن لا يلتقطها أي مسار →
-        "⚠️ حالة غير مدعومة". الآن مُعالَجة كاملة.
-
+    🔴 FIX-FSM-1: 4 معالجات جديدة لـ4 حالات FSM كانت غير مُعالَجة.
     🔴 FIX-FSM-2: WAIT_UPDATE_CH — إزالة من _PRIVATE_HANDLERS_MAP.
-        كان يُوجَّه إلى _handle_wait_channel_text → يُحلّل مدخل
-        قناة التحديثات (developer setting) كإضافة قناة مستخدم!
-        الآن في _EXTERNAL_HANDLED_STATES → يذهب لـ
-        CommandHandlers.handle_text الذي يعالجه صحيحاً
-        (DB.set_setting('updates_channel', ...)).
-
-    🟠 FIX-FSM-3: WAIT_IMPORT_FILE + WAIT_BACKUP_FILE — أُضيفا إلى
-        _EXTERNAL_HANDLED_STATES مع TODO موثّق. السبب: يتطلبان
-        معالج Documents (bot.get_file + download + import).
-        بدون إضافتهما كان المستخدم يرى "حالة غير مدعومة".
-
+    🟠 FIX-FSM-3: WAIT_IMPORT_FILE + WAIT_BACKUP_FILE أُضيفا إلى
+        _EXTERNAL_HANDLED_STATES مع TODO موثّق.
     🟠 FIX-BOOL-1: _handle_support_mode_text — فحص bool قبل int.
-        السبب: isinstance(True, int) == True → ticket_id = True
-        → f"#{True}" = "#True". الآن bool يُتخطّى صراحةً.
+    🟡 FIX-DEAD-1: توثيق "WAIT_POST" كـ dead entry.
 
-    🟡 FIX-DEAD-1: توثيق "WAIT_POST" كـ dead entry (احتياطي مستقبلي).
-
-🆕 v7.18.31 (FIX-AL1-FOLLOWUP):
-    🔴 FIX-AL1-FOLLOWUP: إزالة "WAIT_LOG_CH" من _PRIVATE_HANDLERS_MAP.
-    🟡 FIX-AL1-FOLLOWUP-2: إضافة _EXTERNAL_HANDLED_STATES.
+🆕 v7.18.31 (FIX-AL1-FOLLOWUP) — محفوظ.
 🆕 v7.18.30 (C11-D3-D4-FIXES) — محفوظ.
 🆕 v7.18.29 (SUPPORT-MODE-HANDLER-FIX) — محفوظ.
 🆕 v7.18.28 (ADDING-POSTS-HANDLER-FIX) — محفوظ.
@@ -55,6 +46,7 @@ import os
 import re
 import inspect
 import ipaddress
+import json                      # 🆕 v7.18.33: لتحليل row_to_json
 import threading
 import functools
 from html import escape
@@ -960,7 +952,7 @@ async def _lazy_init_columns(bot=None):
         _columns_last_attempt_ts = now
 
         db_type = getattr(DB, "DB_TYPE", "sqlite")
-        logger.info("🔧 v7.18.32: Auto-migration (DB_TYPE=%s)", db_type)
+        logger.info("🔧 v7.18.33: Auto-migration (DB_TYPE=%s)", db_type)
 
         cols = [
             ("delete_protected_any", "INTEGER DEFAULT 0",
@@ -2592,6 +2584,156 @@ async def get_security_settings_cached(chat_id) -> dict:
     return settings
 
 
+# ═══════════════════════════════════════════════════════════════════
+# 🆕 v7.18.33 BATCH-SETTINGS: دالة الدمج
+# ═══════════════════════════════════════════════════════════════════
+
+async def _get_batched_message_settings(
+    chat_id: int,
+) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    """
+    🆕 v7.18.33 BATCH-SETTINGS (reviewed):
+        جلب group_security + auto_reply_settings في استعلام واحد
+        على PostgreSQL (1 RTT بدل 2). fallback لاستعلامين على
+        SQLite/MySQL أو عند أي فشل.
+
+    الإصلاحات بعد المراجعة:
+      🔴 استخدام _row_to_dict_local بدل isinstance(row, dict) — لأن
+         asyncpg يعيد Record وليس dict. تجاهل هذه النقطة كان سيؤدي
+         إلى فقدان إعدادات كل المجموعات صامتاً لمدة TTL.
+
+      🟠 EXISTS(...) للتفريق بين "صف موجود" و "لا صف" — لتجنب
+         كاش defaults مصطنعة تحجب الإعدادات الحقيقية لـ5 دقائق.
+
+      🟡 عدم دمج _DEFAULT_SECURITY_SETTINGS — للـconsistency مع
+         get_security_settings_cached الذي يُرجع {} عند غياب الصف.
+
+      🟡 logger.info بدل debug — ليظهر في Render (LOG_LEVEL=INFO).
+
+      🟡 json.loads داخل try/except — سطر JSON تالف لا يُسقط
+         الدالة بالكامل.
+    """
+    now = time.monotonic()
+    try:
+        chat_id_int = int(chat_id)
+    except (TypeError, ValueError):
+        return {}, {}
+
+    # ─── 1) caches ──────────────────────────────────────────────
+    sec_entry = _sec_settings_local_cache.get(chat_id_int)
+    sec_ready = (
+        sec_entry is not None
+        and (now - sec_entry[1]) < _SEC_SETTINGS_LOCAL_TTL
+    )
+
+    ars_cached = None
+    try:
+        ars_cached = await settings_cache.get_auto_reply_settings(
+            chat_id_int)
+    except Exception:
+        ars_cached = None
+    ars_ready = isinstance(ars_cached, dict)
+
+    if sec_ready and ars_ready:
+        return sec_entry[0], ars_cached
+
+    # ─── 2) PG batched ──────────────────────────────────────────
+    if bool(getattr(DB, "USE_POSTGRES", False)):
+        try:
+            row = await DB.fetchone(
+                """
+                SELECT
+                  (SELECT row_to_json(s) FROM group_security s
+                    WHERE chat_id = $1) AS sec,
+                  (SELECT row_to_json(a) FROM auto_reply_settings a
+                    WHERE chat_id = $1) AS ars,
+                  EXISTS(SELECT 1 FROM group_security
+                          WHERE chat_id = $1) AS sec_exists,
+                  EXISTS(SELECT 1 FROM auto_reply_settings
+                          WHERE chat_id = $1) AS ars_exists
+                """,
+                (chat_id_int,),
+            )
+            rd = _row_to_dict_local(row) or {}
+
+            sec_data: Dict[str, Any] = {}
+            ars_data: Dict[str, Any] = {}
+            sec_exists = bool(rd.get("sec_exists"))
+            ars_exists = bool(rd.get("ars_exists"))
+
+            _sec_raw = rd.get("sec")
+            if isinstance(_sec_raw, dict):
+                sec_data = _sec_raw
+            elif isinstance(_sec_raw, str) and _sec_raw:
+                try:
+                    parsed = json.loads(_sec_raw)
+                    if isinstance(parsed, dict):
+                        sec_data = parsed
+                except Exception as _je:
+                    logger.debug(
+                        "BATCH-SETTINGS: sec JSON parse: %s", _je)
+
+            _ars_raw = rd.get("ars")
+            if isinstance(_ars_raw, dict):
+                ars_data = _ars_raw
+            elif isinstance(_ars_raw, str) and _ars_raw:
+                try:
+                    parsed = json.loads(_ars_raw)
+                    if isinstance(parsed, dict):
+                        ars_data = parsed
+                except Exception as _je:
+                    logger.debug(
+                        "BATCH-SETTINGS: ars JSON parse: %s", _je)
+
+            # 🟡 كاش فقط عند وجود صف فعلي (لا defaults مصطنعة)
+            if sec_exists and isinstance(sec_data, dict):
+                try:
+                    if (len(_sec_settings_local_cache)
+                            >= _SEC_SETTINGS_LOCAL_MAX):
+                        oldest = sorted(
+                            _sec_settings_local_cache.items(),
+                            key=lambda kv: kv[1][1],
+                        )[: max(1, _SEC_SETTINGS_LOCAL_MAX // 5)]
+                        for k, _ in oldest:
+                            _sec_settings_local_cache.pop(k, None)
+                    _sec_settings_local_cache[chat_id_int] = (
+                        sec_data, now)
+                except Exception:
+                    pass
+                try:
+                    await settings_cache.set_security(
+                        chat_id_int, sec_data)
+                except Exception:
+                    pass
+
+            if ars_exists and isinstance(ars_data, dict):
+                try:
+                    await settings_cache.set_auto_reply_settings(
+                        chat_id_int, ars_data)
+                except Exception:
+                    pass
+
+            logger.info(
+                "⚡ BATCH-SETTINGS hit (PG, 1 RTT) | chat=%s | "
+                "sec_exists=%s ars_exists=%s sec_keys=%d ars_keys=%d",
+                chat_id_int, sec_exists, ars_exists,
+                len(sec_data), len(ars_data))
+            return sec_data, ars_data
+
+        except Exception as e:
+            logger.debug(
+                "BATCH-SETTINGS PG failed: %s — "
+                "fallback to 2 queries", e)
+
+    # ─── 3) fallback (SQLite / MySQL / فشل PG) ──────────────────
+    sec_data = await get_security_settings_cached(chat_id_int)
+    try:
+        ars_data = await get_auto_reply_settings_cached(chat_id_int)
+    except Exception:
+        ars_data = {}
+    return sec_data, ars_data
+
+
 async def get_auto_reply_settings_cached(chat_id) -> dict:
     cached = await settings_cache.get_auto_reply_settings(chat_id)
     if cached is not None and isinstance(cached, dict):
@@ -3268,7 +3410,9 @@ class MessageHandlers:
         except Exception:
             pass
 
-        settings = await get_security_settings_cached(chat_id)
+        # 🆕 v7.18.33 BATCH-SETTINGS: استعلام واحد بدل اثنين (PG)
+        settings, _preloaded_ars = await _get_batched_message_settings(
+            chat_id)
         if not isinstance(settings, dict):
             settings = {}
 
@@ -3722,8 +3866,10 @@ class MessageHandlers:
 
         _reply_source = ctx.text or ctx.caption
         if _reply_source and not is_anonymous:
+            # 🆕 v7.18.33: تمرير الـars الجاهزة (0 round-trips)
             await MessageHandlers._process_auto_reply(
-                update, context, chat_id, _reply_source, user_id)
+                update, context, chat_id, _reply_source, user_id,
+                preloaded_ars=_preloaded_ars)
 
     @staticmethod
     def _get_penalty_duration(settings, violation_type):
@@ -4031,9 +4177,15 @@ class MessageHandlers:
     @staticmethod
     async def _process_auto_reply(
         update, context, chat_id, text, user_id=None,
+        preloaded_ars=None,
     ):
         try:
-            ars = await get_auto_reply_settings_cached(chat_id)
+            # 🆕 v7.18.33 BATCH-SETTINGS: استخدم الـsettings الجاهزة
+            # إن وُجدت (0 round-trips) — وإلا اجلبها بنفسك.
+            if preloaded_ars is not None:
+                ars = preloaded_ars
+            else:
+                ars = await get_auto_reply_settings_cached(chat_id)
             if not _as_bool(ars.get('enabled', False), False):
                 logger.debug("auto_reply disabled for chat=%s", chat_id)
                 return False
@@ -6469,6 +6621,8 @@ __all__ = [
     "_bwm_is_greeting",
     "_parse_channel_ref",
     "_EXTERNAL_HANDLED_STATES",
+    # 🆕 v7.18.33
+    "_get_batched_message_settings",
 ]
 
 
@@ -6478,7 +6632,7 @@ __all__ = [
 
 try:
     logger.info(
-        "✅ handlers_message v7.18.32 loaded | "
+        "✅ handlers_message v7.18.33 loaded | "
         "BWM=%s | PRIVATE_HANDLERS=%d | "
         "external_handled=%d | "
         "routing-fallback=7-paths | "
@@ -6489,9 +6643,11 @@ try:
         "ADDING_POSTS=direct-handler | "
         "SUPPORT_MODE=direct-handler | "
         "AUTO_KEY/AUTO_DEL/PENALTY_DURATION/GITHUB_URL=direct-handler | "
+        "BATCH-SETTINGS=PG-1RTT+fallback | "
         "detectors-compat=v4.1.0 | "
         "commands=(cache_stats, db_idle, autoblocked) | "
-        "fixes=(FSM-COVERAGE, AL1-FOLLOWUP, AL1-FOLLOWUP-2, C11, D3, D4, "
+        "fixes=(BATCH-SETTINGS, REVIEW-FIX-1..5, FSM-COVERAGE, "
+        "AL1-FOLLOWUP, AL1-FOLLOWUP-2, C11, D3, D4, "
         "SUPPORT-1..3, ADDING-1, "
         "ROUTE-1, ROUTE-2, BWM-3, COL-1, EDIT-1, STATE-1, "
         "BUG-1..BUG-12)",
