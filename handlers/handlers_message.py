@@ -1,30 +1,40 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-handlers_message.py - v7.18.31 (FIX-AL1-FOLLOWUP)
+handlers_message.py - v7.18.32 (FSM-COVERAGE-COMPLETE)
 (متوافق مع detectors v4.1.0 + banned_words_manager v1.2.0)
 =============================================================================
+🆕 v7.18.32 (FSM-COVERAGE-COMPLETE):
+    🔴 FIX-FSM-1: 4 معالجات جديدة لـ4 حالات FSM كانت غير مُعالَجة:
+        • WAIT_AUTO_KEY           → _handle_wait_auto_key_text
+        • WAIT_AUTO_DEL           → _handle_wait_auto_del_text
+        • WAIT_PENALTY_DURATION   → _handle_wait_penalty_duration_text
+        • WAIT_GITHUB_URL         → _handle_wait_github_url_text
+        كانت تُعيَّن في handlers_callback لكن لا يلتقطها أي مسار →
+        "⚠️ حالة غير مدعومة". الآن مُعالَجة كاملة.
+
+    🔴 FIX-FSM-2: WAIT_UPDATE_CH — إزالة من _PRIVATE_HANDLERS_MAP.
+        كان يُوجَّه إلى _handle_wait_channel_text → يُحلّل مدخل
+        قناة التحديثات (developer setting) كإضافة قناة مستخدم!
+        الآن في _EXTERNAL_HANDLED_STATES → يذهب لـ
+        CommandHandlers.handle_text الذي يعالجه صحيحاً
+        (DB.set_setting('updates_channel', ...)).
+
+    🟠 FIX-FSM-3: WAIT_IMPORT_FILE + WAIT_BACKUP_FILE — أُضيفا إلى
+        _EXTERNAL_HANDLED_STATES مع TODO موثّق. السبب: يتطلبان
+        معالج Documents (bot.get_file + download + import).
+        بدون إضافتهما كان المستخدم يرى "حالة غير مدعومة".
+
+    🟠 FIX-BOOL-1: _handle_support_mode_text — فحص bool قبل int.
+        السبب: isinstance(True, int) == True → ticket_id = True
+        → f"#{True}" = "#True". الآن bool يُتخطّى صراحةً.
+
+    🟡 FIX-DEAD-1: توثيق "WAIT_POST" كـ dead entry (احتياطي مستقبلي).
+
 🆕 v7.18.31 (FIX-AL1-FOLLOWUP):
-    🔴 FIX-AL1-FOLLOWUP: إزالة "WAIT_LOG_CH" من
-       _PRIVATE_HANDLERS_MAP. كان يُوجَّه إلى
-       "_handle_wait_channel_text" → يسرق إدخال قناة السجل من
-       handlers_group_log.receive_log_channel ويعالجه كإضافة قناة
-       مستخدم جديدة!
-       متسق مع handlers_channels_list v2.1.2 (FIX-AL1).
-    🟡 FIX-AL1-FOLLOWUP-2: إضافة _EXTERNAL_HANDLED_STATES — مجموعة
-       حالات يتولاها handler خارجي؛ handle_private يتجاهلها بصمت
-       (بلا رسالة "لم أتعرف على العملية"، بلا إشعار مطور).
-
-🆕 v7.18.30 (C11-D3-D4-FIXES) — محفوظ:
-    🔴 FIX-C11: _handle_support_mode_text — المسار 3
-       استبدال last_insert_rowid() (SQLite فقط) بـ 3 مسارات:
-       • PG: RETURNING id عبر DB.fetchone
-       • MySQL: SELECT LAST_INSERT_ID()
-       • SQLite: SELECT last_insert_rowid()
-    🟡 FIX-D3: _MULTILAYER_ENABLED — or بين _HAS_MULTILAYER
-       و _HAS_ASYNC_DETECTORS.
-    🟡 FIX-D4: _trans — توثيق صريح للسلوك.
-
+    🔴 FIX-AL1-FOLLOWUP: إزالة "WAIT_LOG_CH" من _PRIVATE_HANDLERS_MAP.
+    🟡 FIX-AL1-FOLLOWUP-2: إضافة _EXTERNAL_HANDLED_STATES.
+🆕 v7.18.30 (C11-D3-D4-FIXES) — محفوظ.
 🆕 v7.18.29 (SUPPORT-MODE-HANDLER-FIX) — محفوظ.
 🆕 v7.18.28 (ADDING-POSTS-HANDLER-FIX) — محفوظ.
 🆕 v7.18.21 (ROUTING-FIX-2026-R3) — محفوظ.
@@ -950,7 +960,7 @@ async def _lazy_init_columns(bot=None):
         _columns_last_attempt_ts = now
 
         db_type = getattr(DB, "DB_TYPE", "sqlite")
-        logger.info("🔧 v7.18.31: Auto-migration (DB_TYPE=%s)", db_type)
+        logger.info("🔧 v7.18.32: Auto-migration (DB_TYPE=%s)", db_type)
 
         cols = [
             ("delete_protected_any", "INTEGER DEFAULT 0",
@@ -2467,11 +2477,6 @@ async def _trans(key, lang, default=""):
     ترجمة آمنة مع fallback.
 
     🟡 FIX-D4 (v7.18.30): توثيق صريح للسلوك الحقيقي.
-
-    ملاحظة: TranslationManager.get_text هو sync + cache (JSON محمّل
-    مسبقاً). إذا أعاد قيمة صالحة، نستخدمها. الـ await get_text (async)
-    fallback نادراً ما يُستدعى — فقط عند فشل الأول أو إعادة المفتاح
-    كما هو.
     """
     if not key:
         return default or ""
@@ -2482,7 +2487,6 @@ async def _trans(key, lang, default=""):
                 return text
     except Exception:
         pass
-    # 🟡 fallback: يُستدعى فقط إذا فشل TranslationManager
     try:
         if lang and lang != 'off':
             text = await get_text(lang, key)
@@ -2749,23 +2753,8 @@ def _parse_contest_date(date_str):
     return None
 
 
-# ═════════════════════════════════════════════════════════════════════
-# 🆕 v7.18.21 FIX-ROUTE-2: تحقق من صيغة معرف القناة
-# ═════════════════════════════════════════════════════════════════════
-
 def _parse_channel_ref(raw: str) -> Tuple[bool, str]:
-    """
-    🆕 v7.18.21 FIX-ROUTE-2: التحقق من صيغة معرف قناة.
-
-    يقبل:
-      • @username  (4-32 حرفاً، يبدأ بحرف)
-      • -100xxxxxxxxx  (channel ID)
-      • https://t.me/username  أو  https://t.me/c/123456
-      • t.me/username
-      • username (بدون @)
-
-    يعيد: (True, "") عند النجاح، أو (False, reason).
-    """
+    """v7.18.21 FIX-ROUTE-2: التحقق من صيغة معرف قناة."""
     if not raw:
         return False, "empty"
     s = raw.strip()
@@ -2966,10 +2955,7 @@ def _get_spaced_banned_pattern(banned_word: str) -> Optional[re.Pattern]:
 
 
 def _contains_banned_word(text, banned_word) -> bool:
-    """
-    ⚠️ v7.18.19: للتوافق القديم فقط.
-    المسار الحديث يستخدم BannedWordsManager.check_message.
-    """
+    """v7.18.19: للتوافق القديم فقط."""
     if not text or not banned_word:
         return False
     if len(text) > 4000:
@@ -3032,18 +3018,28 @@ def _accepts_state_arg(handler, handler_name: str) -> bool:
 
 
 # ═══════════════════════════════════════════════════════════════════
-# 🔴 v7.18.31 FIX-AL1-FOLLOWUP-2: حالات يتولاها handler خارجي
+# 🆕 v7.18.32 FIX-FSM-2/3: حالات يتولاها handler خارجي
 # ═══════════════════════════════════════════════════════════════════
 # هذه الحالات يُسجَّل لها handler في ملف آخر (handlers_group_log,
-# handlers_channels_list, ...). وجودها في handle_private → لا نعرض
+# handlers_command, ...). وجودها في handle_private → لا نعرض
 # رسالة "لم أتعرف على العملية" ولا نُشعر المطور — فقط نتجاهل بصمت.
 #
 # السبب: PTB v20+ ينفّذ كل الـ handlers المطابقة بالترتيب في نفس
 # الـ group. حتى لو handler آخر تولّى الرسالة، handle_private قد
 # يُستدعى أيضاً. بدون هذا الفلتر سيُظهر رسالة خطأ مضلِّلة للمستخدم.
 _EXTERNAL_HANDLED_STATES = frozenset({
-    # 🔴 v7.18.31: يتولاها handlers_group_log.receive_log_channel
+    # 🆕 v7.18.31: يتولاها handlers_group_log.receive_log_channel
     "WAIT_LOG_CH",
+    # 🆕 v7.18.32 FIX-FSM-2: كان مُوجَّهاً خطأً إلى
+    # _handle_wait_channel_text → الآن يتولاه
+    # CommandHandlers.handle_text (DB.set_setting('updates_channel')).
+    "WAIT_UPDATE_CH",
+    # 🆕 v7.18.32 FIX-FSM-3: يحتاجان معالج Documents في المستقبل.
+    # حاليّاً نتجاهل بصمت (لا رسالة "لم أتعرف") لأن المستخدم قد
+    # يرسل ملفاً ولا داعي لإظهار خطأ عام. TODO: إضافة معالج
+    # Documents في handlers_message لاستقبال ملفات JSON/db.
+    "WAIT_IMPORT_FILE",
+    "WAIT_BACKUP_FILE",
 })
 
 
@@ -3062,19 +3058,32 @@ class MessageHandlers:
         # 🆕 v7.18.21 FIX-ROUTE-2: حالات إدخال القناة
         "WAIT_CHANNEL": "_handle_wait_channel_text",
         "WAIT_ADD_CHANNEL": "_handle_wait_channel_text",
-        "WAIT_UPDATE_CH": "_handle_wait_channel_text",
+        # 🆕 v7.18.32 FIX-FSM-2: WAIT_UPDATE_CH أُزيل من هنا.
+        # كان يُوجَّه إلى "_handle_wait_channel_text" → يُحلّل مدخل
+        # قناة التحديثات (developer setting) كإضافة قناة مستخدم!
+        # الآن في _EXTERNAL_HANDLED_STATES → يتولاه
+        # CommandHandlers.handle_text الذي يعالجه صحيحاً.
+        # WAIT_UPDATE_CHANNEL يبقى (alias قديم لـ WAIT_ADD_CHANNEL).
         "WAIT_UPDATE_CHANNEL": "_handle_wait_channel_text",
         # 🔴 v7.18.31 FIX-AL1-FOLLOWUP: WAIT_LOG_CH أُزيل من هنا.
         # كان يُوجَّه إلى "_handle_wait_channel_text" → يسرق
         # إدخال قناة السجل من handlers_group_log.receive_log_channel
         # ويعالجه كإضافة قناة مستخدم جديدة! (متسق مع
         # handlers_channels_list v2.1.2 FIX-AL1).
-        # WAIT_LOG_CH موجود في _EXTERNAL_HANDLED_STATES أعلاه.
+        # WAIT_LOG_CH موجود في _EXTERNAL_HANDLED_STATES.
         # 🆕 v7.18.28 FIX-ADDING-1: حالات إضافة المنشورات
         "ADDING_POSTS": "_handle_adding_posts_text",
+        # 🟡 FIX-DEAD-1 (v7.18.32): "WAIT_POST" — dead entry
+        # (احتياطي مستقبلي، لا يُعيَّن في أي handler حالياً).
         "WAIT_POST": "_handle_adding_posts_text",
         # 🆕 v7.18.29 FIX-SUPPORT-1: حالة الدعم الفني
         "SUPPORT_MODE": "_handle_support_mode_text",
+        # 🆕 v7.18.32 FIX-FSM-1: حالات FSM ناقصة (كانت تُعيَّن في
+        # handlers_callback لكن لا يلتقطها أي مسار → "حالة غير مدعومة").
+        "WAIT_AUTO_KEY": "_handle_wait_auto_key_text",
+        "WAIT_AUTO_DEL": "_handle_wait_auto_del_text",
+        "WAIT_PENALTY_DURATION": "_handle_wait_penalty_duration_text",
+        "WAIT_GITHUB_URL": "_handle_wait_github_url_text",
     }
 
     @staticmethod
@@ -4067,9 +4076,7 @@ class MessageHandlers:
     # ═══════════════════════════════════════════════════════════════════
     @staticmethod
     async def _handle_wait_channel_text(update, context, state=None):
-        """
-        🆕 v7.18.21 FIX-ROUTE-2: معالجة إدخال معرف القناة.
-        """
+        """v7.18.21 FIX-ROUTE-2: معالجة إدخال معرف القناة."""
         user_id = (
             update.effective_user.id if update.effective_user else None)
         if not user_id:
@@ -4190,19 +4197,7 @@ class MessageHandlers:
     # ═══════════════════════════════════════════════════════════════════
     @staticmethod
     async def _handle_adding_posts_text(update, context, state=None):
-        """
-        🆕 v7.18.28 FIX-ADDING-1: حفظ منشور في القناة النشطة.
-
-        يُستدعى عندما يكون المستخدم في حالة ADDING_POSTS ويرسل:
-          • نصاً (منشور نصي)
-          • صورة + caption
-          • فيديو + caption
-          • مستنداً + caption
-          • voice / audio / animation
-
-        يستدعي DB.add_post() (المفرد) التي أُضيفت في
-        database_channels_posts v7.5.28.
-        """
+        """v7.18.28 FIX-ADDING-1: حفظ منشور في القناة النشطة."""
         user_id = (
             update.effective_user.id if update.effective_user else None)
         if not user_id:
@@ -4211,7 +4206,6 @@ class MessageHandlers:
         if not message:
             return
 
-        # ─── جلب القناة النشطة ───
         try:
             active_db_id = await DB.fetchval(
                 "SELECT active_channel FROM users WHERE user_id = ?",
@@ -4236,7 +4230,6 @@ class MessageHandlers:
                 pass
             return
 
-        # ─── استخراج النص والوسائط ───
         text = message.text or message.caption or ""
         media_type = None
         file_id = None
@@ -4270,7 +4263,6 @@ class MessageHandlers:
             logger.warning(
                 "_handle_adding_posts: media extraction: %s", _me)
 
-        # ─── التحقق من وجود محتوى ───
         if not text and not file_id:
             try:
                 await safe_send(
@@ -4280,7 +4272,6 @@ class MessageHandlers:
                 pass
             return
 
-        # ─── حفظ المنشور ───
         try:
             add_post_fn = getattr(DB, "add_post", None)
             if not callable(add_post_fn):
@@ -4313,7 +4304,6 @@ class MessageHandlers:
                 pass
             return
 
-        # ─── النتيجة ───
         if post_id:
             try:
                 media_info = ""
@@ -4350,21 +4340,8 @@ class MessageHandlers:
     async def _handle_support_mode_text(update, context, state=None):
         """
         🆕 v7.18.29 FIX-SUPPORT-2: معالجة رسائل الدعم الفني.
-
-        يُستدعى عندما يكون المستخدم في حالة SUPPORT_MODE ويرسل رسالة
-        نصية (أو وسائط + caption). السلوك:
-          1. التحقق من وجود نص/وسائط.
-          2. محاولة إنشاء تذكرة دعم عبر عدة طرق (DB + دوال مساعدة).
-          3. إشعار المطور (PRIMARY_OWNER_ID) بملخص التذكرة.
-          4. الرد على المستخدم برقم التذكرة + شكر.
-          5. البقاء في حالة SUPPORT_MODE (يمكن للمستخدم إرسال عدة
-             رسائل)، مع خيار الخروج عبر /cancel.
-
-        🔴 FIX-C11 (v7.18.30): المسار 3 يستخدم الآن:
-          • PG:    RETURNING id عبر DB.fetchone
-          • MySQL: SELECT LAST_INSERT_ID()
-          • SQLite: SELECT last_insert_rowid()
-        بدل last_insert_rowid() فقط.
+        🔴 FIX-C11 (v7.18.30): 3 مسارات لـ ticket_id.
+        🟠 FIX-BOOL-1 (v7.18.32): فحص bool قبل int.
         """
         user_id = (
             update.effective_user.id if update.effective_user else None)
@@ -4376,7 +4353,6 @@ class MessageHandlers:
 
         lang = await _ensure_lang(update, context)
 
-        # ─── استخراج النص + معلومات المستخدم ───
         text = (message.text or message.caption or "").strip()
         first_name = ""
         username = None
@@ -4388,7 +4364,6 @@ class MessageHandlers:
             pass
         first_name = first_name or "User"
 
-        # ─── وسائط مرفقة (اختياري) ───
         media_type = None
         try:
             if message.photo:
@@ -4422,15 +4397,13 @@ class MessageHandlers:
         if not text and media_type:
             text = f"[{media_type} بدون وصف]"
 
-        # ─── التحقق من الطول ───
         if len(text) > 4000:
             text = text[:4000] + "…"
 
-        # ─── محاولة إنشاء التذكرة ───
         ticket_id = None
         ticket_error = None
 
-        # المسار 1: DB.create_support_ticket (إن وُجد)
+        # المسار 1: DB.create_support_ticket
         try:
             create_fn = getattr(DB, "create_support_ticket", None)
             if callable(create_fn):
@@ -4443,6 +4416,9 @@ class MessageHandlers:
                     result = await result
                 if isinstance(result, dict):
                     ticket_id = result.get("id") or result.get("ticket_id")
+                elif isinstance(result, bool):
+                    # 🟠 FIX-BOOL-1: bool قبل int
+                    ticket_id = None
                 elif isinstance(result, int):
                     ticket_id = result
                 elif result:
@@ -4467,6 +4443,8 @@ class MessageHandlers:
                     if isinstance(result, dict):
                         ticket_id = (
                             result.get("id") or result.get("ticket_id"))
+                    elif isinstance(result, bool):
+                        ticket_id = None
                     elif isinstance(result, int):
                         ticket_id = result
                     elif result:
@@ -4476,11 +4454,7 @@ class MessageHandlers:
                 logger.debug(
                     "_handle_support_mode: add_support_ticket: %s", e)
 
-        # ═══════════════════════════════════════════════════════════════
-        # المسار 3: DB.execute مباشر (بدون تذكرة رسمية)
-        # 🔴 FIX-C11 (v7.18.30): استخدام RETURNING id (PG) /
-        #     LAST_INSERT_ID (MySQL) بدل last_insert_rowid() (SQLite).
-        # ═══════════════════════════════════════════════════════════════
+        # المسار 3: DB.execute مباشر (مع 3 فروع DB)
         if ticket_id is None:
             try:
                 insert_fn = getattr(DB, "execute", None)
@@ -4488,14 +4462,12 @@ class MessageHandlers:
                 fetchval_fn = getattr(DB, "fetchval", None)
 
                 if callable(insert_fn):
-                    # ── تحديد نوع DB ──
                     _is_pg = bool(getattr(DB, "USE_POSTGRES", False))
                     _is_mysql = bool(getattr(DB, "USE_MYSQL", False))
 
                     now_str = datetime.utcnow().isoformat()
 
                     if _is_pg and callable(fetchone_fn):
-                        # ✅ FIX-C11: PG يدعم RETURNING
                         sql_pg = (
                             "INSERT INTO support_tickets "
                             "(user_id, message, media_type, created_at) "
@@ -4517,7 +4489,6 @@ class MessageHandlers:
                             except (TypeError, ValueError):
                                 ticket_id = None
                     else:
-                        # MySQL / SQLite: INSERT عادي
                         sql = (
                             "INSERT INTO support_tickets "
                             "(user_id, message, media_type, created_at) "
@@ -4527,14 +4498,11 @@ class MessageHandlers:
                         if asyncio.iscoroutine(res):
                             res = await res
 
-                        # ── جلب ID المُدرج ──
                         if callable(fetchval_fn):
                             if _is_mysql:
-                                # ✅ FIX-C11: MySQL يدعم LAST_INSERT_ID()
                                 lid = fetchval_fn(
                                     "SELECT LAST_INSERT_ID()")
                             else:
-                                # SQLite
                                 lid = fetchval_fn(
                                     "SELECT last_insert_rowid()")
                             if asyncio.iscoroutine(lid):
@@ -4544,13 +4512,11 @@ class MessageHandlers:
                                     ticket_id = int(lid)
                                 except (TypeError, ValueError):
                                     ticket_id = None
-                        # ملاحظة: لا نستخدم `res` كـ ticket_id لأنه
-                        # غالباً rowcount (int) وليس آخر ID فعلياً.
             except Exception as e:
                 logger.debug(
                     "_handle_support_mode: raw insert outer: %s", e)
 
-        # ─── إشعار المطور ───
+        # إشعار المطور
         try:
             owner_id = int(getattr(CONFIG, 'PRIMARY_OWNER_ID', 0) or 0)
             if owner_id and owner_id != user_id:
@@ -4599,7 +4565,7 @@ class MessageHandlers:
             logger.warning(
                 "_handle_support_mode: notify owner: %s", e)
 
-        # ─── إشعار قناة Dev Log (إن متاحة) ───
+        # إشعار قناة Dev Log
         try:
             dev_log_text = (
                 f"🆘 <b>Support ticket</b>\n"
@@ -4610,7 +4576,7 @@ class MessageHandlers:
         except Exception:
             pass
 
-        # ─── الرد على المستخدم ───
+        # الرد على المستخدم
         try:
             if ticket_id is not None:
                 reply_msg = (
@@ -4636,13 +4602,373 @@ class MessageHandlers:
             len(text), ticket_error or "—")
 
     # ═══════════════════════════════════════════════════════════════════
+    # 🆕 v7.18.32 FIX-FSM-1: معالجات FSM ناقصة
+    # ═══════════════════════════════════════════════════════════════════
+
+    @staticmethod
+    async def _handle_wait_auto_key_text(
+        update, context, state=None
+    ):
+        """
+        🆕 v7.18.32 FIX-FSM-1: إدخال كلمة مفتاحية لرد تلقائي جديد.
+
+        يُعيَّن عبر زر "auto_reply_add" في handlers_callback:
+            StateManager.set(user_id, WAIT_AUTO_KEY)
+            context.user_data['auto_chat'] = chat_id
+
+        بعد استقبال الكلمة → نحتاج رداً فعلياً. نُحوّل الحالة إلى
+        WAIT_REPLY_RESPONSE ونجمع الرد في الخطوة التالية.
+        """
+        user_id = (
+            update.effective_user.id if update.effective_user else None)
+        if not user_id:
+            return
+        message = update.effective_message
+        if not message or not message.text:
+            return
+        lang = await _ensure_lang(update, context)
+        chat_id = (context.user_data or {}).get("auto_chat")
+
+        if chat_id is None:
+            StateManager.clear(user_id)
+            return
+
+        keyword = message.text.strip()
+        if not keyword or len(keyword) > 200:
+            await safe_send(
+                context.bot, user_id,
+                "❌ الكلمة المفتاحية فارغة أو طويلة جداً.",
+                parse_mode='HTML')
+            return
+
+        # تحويل الحالة إلى جمع الرد
+        try:
+            StateManager.set(user_id, UserState.WAIT_REPLY_RESPONSE)
+        except Exception as e:
+            logger.debug(
+                "_handle_wait_auto_key: set state: %s", e)
+        context.user_data['reply_trigger_pending'] = keyword
+        context.user_data['reply_chat'] = chat_id
+        # إبقاء auto_chat أيضاً للتوافق
+        context.user_data['auto_chat'] = chat_id
+
+        try:
+            msg = await _trans(
+                'reply_enter_response', lang,
+                "📝 أرسل الآن نص الرد:")
+            await safe_send(
+                context.bot, user_id, msg, parse_mode='HTML')
+        except Exception:
+            pass
+
+        logger.info(
+            "✅ WAIT_AUTO_KEY: keyword=%r user=%s chat=%s → "
+            "WAIT_REPLY_RESPONSE",
+            keyword[:40], user_id, chat_id)
+
+    @staticmethod
+    async def _handle_wait_auto_del_text(
+        update, context, state=None
+    ):
+        """
+        🆕 v7.18.32 FIX-FSM-1: حذف رد تلقائي بالكلمة المفتاحية.
+
+        يُعيَّن عبر زر "auto_reply_del":
+            StateManager.set(user_id, WAIT_AUTO_DEL)
+            context.user_data['auto_chat'] = chat_id
+        """
+        user_id = (
+            update.effective_user.id if update.effective_user else None)
+        if not user_id:
+            return
+        message = update.effective_message
+        if not message or not message.text:
+            return
+        lang = await _ensure_lang(update, context)
+        chat_id = (context.user_data or {}).get("auto_chat")
+
+        if chat_id is None:
+            StateManager.clear(user_id)
+            return
+
+        keyword = message.text.strip()
+        StateManager.clear(user_id)
+        try:
+            context.user_data.pop('auto_chat', None)
+        except Exception:
+            pass
+
+        if not keyword:
+            return
+
+        removed = False
+        removed_error = None
+        try:
+            for name in (
+                "remove_auto_reply", "delete_reply", "remove_reply",
+                "delete_auto_reply",
+            ):
+                fn = getattr(DB, name, None)
+                if not callable(fn):
+                    continue
+                try:
+                    result = fn(chat_id, keyword)
+                    if asyncio.iscoroutine(result):
+                        result = await result
+                    # دعم tuple (ok, reason) و int
+                    if isinstance(result, tuple) and result:
+                        removed = bool(result[0])
+                    else:
+                        removed = bool(result)
+                    break
+                except Exception as e:
+                    removed_error = str(e)[:100]
+                    continue
+
+            # Fallback مباشر عبر SQL
+            if not removed and removed_error is None:
+                try:
+                    rc = await DB.execute(
+                        "DELETE FROM auto_replies "
+                        "WHERE chat_id = ? AND keyword = ?",
+                        (chat_id, keyword))
+                    removed = bool(rc)
+                except Exception as e:
+                    removed_error = str(e)[:100]
+        except Exception as e:
+            removed_error = str(e)[:100]
+            logger.warning(
+                "_handle_wait_auto_del: %s", e)
+
+        try:
+            if removed:
+                try:
+                    await invalidate_auto_reply_cache(chat_id)
+                except Exception:
+                    pass
+                msg = await _trans(
+                    'reply_removed', lang,
+                    "✅ تمت إزالة الرد: <code>{trigger}</code>")
+                try:
+                    msg = msg.format(trigger=escape(keyword))
+                except (KeyError, IndexError):
+                    pass
+                await safe_send(
+                    context.bot, user_id, msg, parse_mode='HTML')
+            else:
+                msg = await _trans(
+                    'reply_not_found', lang,
+                    "❌ الرد غير موجود.")
+                await safe_send(context.bot, user_id, msg)
+        except Exception:
+            pass
+
+        logger.info(
+            "✅ WAIT_AUTO_DEL: keyword=%r user=%s chat=%s removed=%s",
+            keyword[:40], user_id, chat_id, removed)
+
+    @staticmethod
+    async def _handle_wait_penalty_duration_text(
+        update, context, state=None
+    ):
+        """
+        🆕 v7.18.32 FIX-FSM-1: مدة العقوبة الافتراضية.
+
+        يُعيَّن عبر زر "pen_<type>":
+            context.user_data['penalty_type'] = "mute"/"ban"/...
+            StateManager.set(user_id, WAIT_PENALTY_DURATION)
+
+        المستخدم يرسل عدد الثواني (0 = دائم). نحاول تخزينه في
+        user_data['pen_timer'] أو في DB كإعداد للمجموعة.
+        """
+        user_id = (
+            update.effective_user.id if update.effective_user else None)
+        if not user_id:
+            return
+        message = update.effective_message
+        if not message or not message.text:
+            return
+        lang = await _ensure_lang(update, context)
+
+        penalty_type = (context.user_data or {}).get("penalty_type")
+        StateManager.clear(user_id)
+        try:
+            context.user_data.pop('penalty_type', None)
+            context.user_data.pop('pending_action', None)
+        except Exception:
+            pass
+
+        if not penalty_type:
+            return
+
+        try:
+            duration = int(message.text.strip())
+            if duration < 0:
+                raise ValueError
+            if duration > 365 * 86400:
+                duration = 365 * 86400
+        except (ValueError, TypeError):
+            await safe_send(
+                context.bot, user_id,
+                "❌ قيمة غير صالحة — أرسل عدداً صحيحاً "
+                "(0 = دائم).",
+                parse_mode='HTML')
+            return
+
+        # محاولة تخزين في DB كإعداد موحّد للمجموعة أو عالمياً
+        stored = False
+        try:
+            setter = getattr(DB, "set_setting", None)
+            if callable(setter):
+                key = f"penalty_duration_{penalty_type}"
+                result = setter(key, str(duration))
+                if asyncio.iscoroutine(result):
+                    await result
+                stored = True
+        except Exception as e:
+            logger.debug(
+                "_handle_wait_penalty_duration: set_setting: %s", e)
+
+        try:
+            label_map = {
+                "ban": "🚫 حظر", "mute": "🔇 كتم",
+                "kick": "👢 طرد", "restrict": "🔒 تقييد",
+                "warn": "⚠️ تحذير",
+            }
+            label = label_map.get(penalty_type, penalty_type)
+            duration_str = (
+                "دائم" if duration == 0 else f"{duration} ثانية")
+            msg = (
+                f"✅ تم تعيين مدة <b>{label}</b> إلى: "
+                f"<b>{duration_str}</b>"
+            )
+            if not stored:
+                msg += (
+                    "\n\n⚠️ لم يُحفظ في DB — "
+                    "استخدم /cancel وأعد المحاولة.")
+            await safe_send(
+                context.bot, user_id, msg, parse_mode='HTML')
+        except Exception:
+            pass
+
+        logger.info(
+            "✅ WAIT_PENALTY_DURATION: type=%s duration=%d "
+            "user=%s stored=%s",
+            penalty_type, duration, user_id, stored)
+
+    @staticmethod
+    async def _handle_wait_github_url_text(
+        update, context, state=None
+    ):
+        """
+        🆕 v7.18.32 FIX-FSM-1: استيراد ردود من GitHub URL.
+
+        يُعيَّن عبر زر "admin_import_github":
+            StateManager.set(user_id, WAIT_GITHUB_URL)
+        """
+        user_id = (
+            update.effective_user.id if update.effective_user else None)
+        if not user_id:
+            return
+        message = update.effective_message
+        if not message or not message.text:
+            return
+        lang = await _ensure_lang(update, context)
+        raw_url = message.text.strip()
+
+        # فحص developer (الزر admin-only)
+        try:
+            is_dev = False
+            for attr in ('is_developer', 'is_dev', 'is_owner'):
+                fn = getattr(CONFIG, attr, None)
+                if callable(fn) and fn(user_id):
+                    is_dev = True
+                    break
+            if (not is_dev and user_id == int(
+                    getattr(CONFIG, 'PRIMARY_OWNER_ID', 0) or 0)):
+                is_dev = True
+        except Exception:
+            is_dev = False
+
+        StateManager.clear(user_id)
+        if not is_dev:
+            return
+
+        # التحقق من URL
+        if not _is_safe_url(raw_url):
+            await safe_send(
+                context.bot, user_id,
+                "❌ رابط غير صالح أو غير آمن.",
+                parse_mode='HTML')
+            return
+
+        # محاولة استيراد عبر عدة طرق
+        imported = False
+        count = 0
+        error_msg = None
+        for name in (
+            "import_replies_from_github",
+            "import_from_github",
+            "import_replies_url",
+        ):
+            fn = getattr(DB, name, None)
+            if not callable(fn):
+                continue
+            try:
+                result = fn(raw_url)
+                if asyncio.iscoroutine(result):
+                    result = await result
+                if isinstance(result, tuple) and len(result) >= 2:
+                    imported = bool(result[0])
+                    try:
+                        count = int(result[1])
+                    except (TypeError, ValueError):
+                        count = 0
+                elif isinstance(result, int):
+                    count = result
+                    imported = count > 0
+                else:
+                    imported = bool(result)
+                break
+            except Exception as e:
+                error_msg = str(e)[:120]
+                logger.warning(
+                    "_handle_wait_github_url: %s: %s", name, e)
+                continue
+
+        if imported:
+            try:
+                await invalidate_auto_reply_cache(-1)
+            except Exception:
+                pass
+            msg = await _trans(
+                'import_success', lang,
+                "✅ تم استيراد {count} رد من GitHub")
+            try:
+                msg = msg.format(count=count)
+            except (KeyError, IndexError):
+                pass
+            await safe_send(
+                context.bot, user_id, msg, parse_mode='HTML')
+        else:
+            err_text = error_msg or "دالة الاستيراد غير متاحة"
+            await safe_send(
+                context.bot, user_id,
+                f"❌ فشل الاستيراد من GitHub.\n\n"
+                f"<i>{escape(err_text)}</i>\n\n"
+                f"تأكد من صحة الرابط أو تواصل مع المطور.",
+                parse_mode='HTML')
+
+        logger.info(
+            "✅ WAIT_GITHUB_URL: url=%r user=%s imported=%s count=%d",
+            raw_url[:80], user_id, imported, count)
+
+    # ═══════════════════════════════════════════════════════════════════
     # 🆕 v7.18.21 FIX-ROUTE-2: handle_private مع 7 مسارات fallback
     # ═══════════════════════════════════════════════════════════════════
     @staticmethod
     async def handle_private(update, context):
-        """
-        معالج الرسائل الخاصة.
-        """
+        """معالج الرسائل الخاصة."""
         try:
             if not update.effective_user:
                 return
@@ -4672,7 +4998,7 @@ class MessageHandlers:
                 return
 
             # ═══════════════════════════════════════════════════════════
-            # 🔴 v7.18.31 FIX-AL1-FOLLOWUP-2:
+            # 🔴 v7.18.32 FIX-FSM-2/3:
             # تجاهل بصمت للحالات التي يتولاها handler خارجي.
             # بدون هذا: handle_private يُظهر "لم أتعرف على العملية"
             # حتى لو تولّى handler آخر (مثل handlers_group_log) الرسالة.
@@ -4680,7 +5006,8 @@ class MessageHandlers:
             if state_str in _EXTERNAL_HANDLED_STATES:
                 logger.debug(
                     "⏭️ handle_private: تجاهل %s — "
-                    "يتولاها handler خارجي (group_log/channels_list)",
+                    "يتولاها handler خارجي "
+                    "(group_log / channels_list / command)",
                     state_str)
                 return
 
@@ -4779,7 +5106,6 @@ class MessageHandlers:
                 user_id, state, _tried)
             try:
                 lang = await _ensure_lang(update, context)
-                # 🆕 v7.18.29 FIX-SUPPORT-3: رسالة أوضح + تلميح
                 msg = await _trans(
                     "state_not_handled", lang,
                     "❌ لم أتعرف على العملية.\n\n"
@@ -4802,7 +5128,6 @@ class MessageHandlers:
                             parse_mode='HTML')
                 except Exception:
                     pass
-                # 🆕 v7.18.29 FIX-SUPPORT-3: إرسال أيضاً لقناة Dev Log
                 try:
                     await _notify_dev_log(
                         context,
@@ -6143,7 +6468,6 @@ __all__ = [
     "_bwm_contains",
     "_bwm_is_greeting",
     "_parse_channel_ref",
-    # 🆕 v7.18.31 FIX-AL1-FOLLOWUP-2
     "_EXTERNAL_HANDLED_STATES",
 ]
 
@@ -6154,17 +6478,20 @@ __all__ = [
 
 try:
     logger.info(
-        "✅ handlers_message v7.18.31 loaded | "
+        "✅ handlers_message v7.18.32 loaded | "
         "BWM=%s | PRIVATE_HANDLERS=%d | "
         "external_handled=%d | "
         "routing-fallback=7-paths | "
         "WAIT_CHANNEL=direct-handler | "
         "WAIT_LOG_CH=EXTERNAL (group_log) | "
+        "WAIT_UPDATE_CH=EXTERNAL (command) | "
+        "WAIT_IMPORT_FILE/WAIT_BACKUP_FILE=EXTERNAL (document-TODO) | "
         "ADDING_POSTS=direct-handler | "
         "SUPPORT_MODE=direct-handler | "
+        "AUTO_KEY/AUTO_DEL/PENALTY_DURATION/GITHUB_URL=direct-handler | "
         "detectors-compat=v4.1.0 | "
         "commands=(cache_stats, db_idle, autoblocked) | "
-        "fixes=(AL1-FOLLOWUP, AL1-FOLLOWUP-2, C11, D3, D4, "
+        "fixes=(FSM-COVERAGE, AL1-FOLLOWUP, AL1-FOLLOWUP-2, C11, D3, D4, "
         "SUPPORT-1..3, ADDING-1, "
         "ROUTE-1, ROUTE-2, BWM-3, COL-1, EDIT-1, STATE-1, "
         "BUG-1..BUG-12)",
