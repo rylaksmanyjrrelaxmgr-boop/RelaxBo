@@ -1,55 +1,42 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-db_diagnostics.py — واجهة تشخيص وصيانة قاعدة البيانات (v7.2.3 — MYSQL-PARITY-FIX)
+db_diagnostics.py — واجهة تشخيص وصيانة قاعدة البيانات (v7.2.4 — MISLEADING-FIX)
 ================================================================================
-🆕 v7.2.3 — MYSQL-PARITY-FIX (5 إصلاحات):
-    🔴 FIX-MYSQL-CLOSE: _probe_db_latency — conn.close() لـ asyncmy
-        كان يُستدعى بدون await → coroutine لم يُنفَّذ → **تسريب
-        اتصالات MySQL** + RuntimeWarning "coroutine was never awaited".
-        asyncmy.Connection.close() هي async def → يجب await.
-    🔴 FIX-MYSQL-TABLES: _get_all_table_names — عند DB_TYPE=MYSQL
-        كان يُرسل استعلام SQLite (sqlite_master) → OperationalError
-        يُبتلَع بصمت → قائمة فارغة → VACUUM على صفر جداول.
-        الحل: فرع صريح لـ MySQL عبر information_schema.TABLES.
-    🔴 FIX-MYSQL-META: _get_db_metadata — نفس المشكلة: كان يفترض
-        SQLite لأي DB غير Postgres → get_db_size_kb صحيح فعلاً لكن
-        current_schema/database_name خطأ. الحل: فرع MySQL صريح.
-    🟠 FIX-AV-SCORE: _calc_technical_score — كان يخصم 15 نقطة عند
-        settings.get("autovacuum") != "on". إذا settings={}
-        (SQLite/MySQL أو فشل fetch) → خصم كاذب.
-        الحل: الخصم فقط عندما settings غير فارغ.
-    🟠 FIX-AV-LABEL: _build_sections — عرض autovacuum: "?" على
-        SQLite/MySQL كان misleading. الآن يُخفى إذا لم يوجد.
-    🟡 FIX-CONNECT-LABEL: format_latency_report — "asyncpg connect"
-        كان يُعرض على MySQL أيضاً. الآن "connect" (DB-agnostic).
+🆕 v7.2.4 — MISLEADING-FIX (إصلاح التسميات المضللة):
+    🔴 FIX-RANK-VALUE: _identify_bottleneck — إعادة كتابة كاملة.
+        قبل: "ترتيب الأبعاد ~140ms" كان يعرض أوزاناً مضروبة
+              (مثلاً: tg_tcp × 0.5، cpu% × 2) وكأنها أزمنة.
+              مثال: 279ms × 0.5 = 139.5 → يُعرض "~140ms".
+              المستخدم يفهم أن الرقم "مللي ثانية" وهو في الحقيقة
+              وزن ترتيبي عشوائي — مضلل تماماً.
+        بعد:
+          • كل عنصر يحمل {value, unit, severity, weight, kind}
+          • value + unit = القيمة والوحدة الحقيقية (ms أو %)
+          • weight = داخلي فقط للترتيب — لا يُعرض أبداً
+          • severity مبنية على عتبات واقعية لكل مقياس على حدة
+          • عتبات Telegram متسامحة: RTT 100-300ms يُعد low
+            (طبيعي عبر القارات، لا يؤثر على سرعة الردود).
 
-🆕 v7.2.2 — PROBE-ACCURACY (3 إصلاحات دقة):
-    🔴 FIX-CPU: قياس CPU تم نقله من _probe_system إلى _probe_full_health.
-        السبب: psutil.cpu_percent(interval=None) داخل gather كان يقيس
-        100ms فقط (نافذة الـprobe الذاتي) → 98% كاذبة بينما Load=5.28.
-        الحل: prime قبل gather + read بعد gather → نافذة 2-4s حقيقية.
-    🔴 FIX-TLS: _probe_network_to لم يعد يُسقط TCP عند فشل TLS.
-        السبب: Aiven يستخدم CA مخصصاً غير موجود في trust store →
-        create_default_context() يرمي استثناء → فقدان TCP أيضاً.
-        الحل: TLS بـ CERT_NONE (نحن نقيس الزمن فقط، لا نتحقق) +
-        TCP يُسجَّل دائماً حتى لو فشل TLS.
-    🔴 FIX-PK: PK SELECT يستخدم SELECT 1 بدل SELECT *.
-        السبب: SELECT * ينقل 2-3KB (serialization + network) →
-        159ms بدل ~40ms للـindex lookup الحقيقي.
+    🔴 FIX-RANK-DISPLAY: format_full_health_report — قسم "ترتيب
+        الأبعاد" يعرض الآن {value}{unit} الحقيقي:
+          • "network_telegram 279ms" (وليس "~140ms")
+          • "network_db 43ms" (وليس "~128ms")
+          • "ram 51%" (وليس "~77ms")
+          • "cpu 30%" (وليس "~61ms")
 
-🆕 v7.2.1 — FIXES-BUNDLE (10 إصلاحات):
-    🔴 FIX-1: _build_sections(include_probes=True) — منع تشغيل probes قسرياً.
-    🔴 FIX-2: إزالة :<20 من _esc(name) (HTML entities تكسر المحاذاة).
-    🔴 FIX-3: PK probe يكتشف عمود PK في users ديناميكياً.
-    🔴 FIX-4: فرع warm>200+tcp<80 في _compute_latency_verdict.
-    🔴 FIX-5: _probe_network_to — TCP+TLS.
-    🟡 FIX-6: _probe_filesystem — fallback إلى cwd.
-    🟡 FIX-7: format_maintenance_preview — عرض تحذير عند count=-1.
-    🟡 FIX-8: _get_indexes — cache key بـ hash.
-    🟡 FIX-9: format_full_health_report — عنوان شرطي.
-    🟡 FIX-10: SECTION 12/13 اختيارية.
+    🔴 FIX-PRIMARY-SELECTION: "السبب الرئيسي" يُختار الآن حسب
+        severity الحقيقية (low/medium/high/critical) — وليس حسب
+        الوزن المضروب. النتيجة: أسباب أكثر منطقية.
 
+    ℹ️ ما لا يتغير:
+        • كل القياسات (TCP/TLS/CPU/Load/PK/warm) دقيقة كما هي.
+        • Cache، Cleanup، Maintenance، VACUUM — كلها دون تغيير.
+        • جميع Aliases و __all__ محفوظة.
+
+🆕 v7.2.3 — MYSQL-PARITY-FIX (5 إصلاحات) — محفوظ.
+🆕 v7.2.2 — PROBE-ACCURACY (3 إصلاحات دقة) — محفوظ.
+🆕 v7.2.1 — FIXES-BUNDLE (10 إصلاحات) — محفوظ.
 🆕 v7.2.0 — FULL-HEALTH-PROBE (محفوظ).
 🆕 v7.1.0 — LATENCY-PROBE (محفوظ).
 🆕 v7.0.1 — FIX-BUNDLE (محفوظ).
@@ -73,16 +60,14 @@ from typing import Dict, List, Any, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
-
 # ═══════════════════════════════════════════════════════════════════════
 # الإصدار
 # ═══════════════════════════════════════════════════════════════════════
 
-VERSION = "7.2.3"
+VERSION = "7.2.4"
 
 _MIN_DEAD_FOR_CRITICAL = 50
 _MIN_DEAD_FOR_COLOR = 10
-
 
 # ═══════════════════════════════════════════════════════════════════════
 # طبقة Cache مركزية بـ TTL
@@ -101,7 +86,6 @@ _CACHE_TTL: Dict[str, float] = {
     "full_health":       120.0,
 }
 
-
 def _cache_get(key: str) -> Optional[Any]:
     entry = _CACHE.get(key)
     if not entry:
@@ -112,7 +96,6 @@ def _cache_get(key: str) -> Optional[Any]:
         return None
     return entry["data"]
 
-
 def _cache_set(key: str, data: Any, ttl: Optional[float] = None) -> None:
     _CACHE[key] = {
         "ts": time.monotonic(),
@@ -120,13 +103,11 @@ def _cache_set(key: str, data: Any, ttl: Optional[float] = None) -> None:
         "ttl": ttl if ttl is not None else _CACHE_TTL.get(key, 60.0),
     }
 
-
 def _invalidate_cache(key: Optional[str] = None) -> None:
     if key is None:
         _CACHE.clear()
     else:
         _CACHE.pop(key, None)
-
 
 def get_cache_stats() -> Dict[str, Any]:
     now = time.monotonic()
@@ -142,7 +123,6 @@ def get_cache_stats() -> Dict[str, Any]:
         }
         out["total_keys"] += 1
     return out
-
 
 # ═══════════════════════════════════════════════════════════════════════
 # سياسة التنظيف الآمنة
@@ -225,13 +205,11 @@ _CLEANUP_TABLES = tuple(
 )
 _CLEANUP_THRESHOLD_KB = 20 * 1024
 
-
 # ═══════════════════════════════════════════════════════════════════════
 # Lazy imports
 # ═══════════════════════════════════════════════════════════════════════
 
 _DB_IMPORT_ERROR: Optional[str] = None
-
 
 def _get_db():
     global _DB_IMPORT_ERROR
@@ -243,7 +221,6 @@ def _get_db():
             _DB_IMPORT_ERROR = f"{type(e).__name__}: {e}"
             logger.error(f"❌ db_diagnostics: فشل استيراد DB: {_DB_IMPORT_ERROR}")
         return None
-
 
 def _now_iso() -> str:
     try:
@@ -257,23 +234,19 @@ def _now_iso() -> str:
     except Exception:
         return "?"
 
-
 def _get_db_type() -> str:
     db = _get_db()
     if db is not None:
         return str(getattr(db, "DB_TYPE", "sqlite")).upper()
     return "UNKNOWN"
 
-
 def _is_postgres() -> bool:
     db = _get_db()
     return db is not None and bool(getattr(db, "USE_POSTGRES", False))
 
-
 def _is_mysql() -> bool:
     db = _get_db()
     return db is not None and bool(getattr(db, "USE_MYSQL", False))
-
 
 # ═══════════════════════════════════════════════════════════════════════
 # أدوات مساعدة
@@ -285,16 +258,13 @@ def _safe_escape(text: Any) -> str:
     except Exception:
         return ""
 
-
 _esc = _safe_escape
-
 
 def _fmt_num(n: Any) -> str:
     try:
         return f"{int(n):,}"
     except (TypeError, ValueError):
         return "0"
-
 
 def _fmt_bytes(num: Any) -> str:
     try:
@@ -309,7 +279,6 @@ def _fmt_bytes(num: Any) -> str:
         return f"{b / (1024 * 1024):.2f} MB"
     return f"{b / (1024 * 1024 * 1024):.2f} GB"
 
-
 def _fmt_ts(ts: Any) -> str:
     if not ts:
         return "—"
@@ -318,7 +287,6 @@ def _fmt_ts(ts: Any) -> str:
         return s[:16] if len(s) >= 16 else s
     except Exception:
         return "—"
-
 
 def _bar(value: float, max_value: float, width: int = 10,
          filled: str = "█", empty: str = "░") -> str:
@@ -332,7 +300,6 @@ def _bar(value: float, max_value: float, width: int = 10,
         return filled * n + empty * (width - n)
     except Exception:
         return empty * width
-
 
 def _dead_color(dead: int, live: int) -> str:
     if dead < _MIN_DEAD_FOR_COLOR:
@@ -353,7 +320,6 @@ def _dead_color(dead: int, live: int) -> str:
         return "🟠"
     return "🔴"
 
-
 def _hash_key(prefix: str, items: Any) -> str:
     try:
         if isinstance(items, (list, tuple, set)):
@@ -364,7 +330,6 @@ def _hash_key(prefix: str, items: Any) -> str:
         return f"{prefix}_{h}"
     except Exception:
         return f"{prefix}_fallback"
-
 
 # ═══════════════════════════════════════════════════════════════════════
 # LATENCY PROBE — قياس كمون الشبكة/DB
@@ -390,7 +355,6 @@ async def _detect_users_pk_col(conn) -> str:
     except Exception as e:
         logger.debug(f"_detect_users_pk_col: {e}")
     return "user_id"
-
 
 async def _probe_db_latency(
     *,
@@ -651,17 +615,13 @@ async def _probe_db_latency(
         result["error"] = f"{type(e).__name__}: {str(e)[:200]}"
         result["verdict"] = "critical"
     finally:
-        # 🆕 v7.2.3 FIX-MYSQL-CLOSE:
-        # asyncmy.Connection.close() هي async def → يجب await.
-        # قبل الإصلاح: `conn.close()` بدون await → coroutine لم
-        # يُنفَّذ → تسريب اتصال MySQL + RuntimeWarning.
         if conn is not None:
             if db_type == "postgres":
                 try:
                     await conn.close()
                 except Exception:
                     pass
-            else:  # mysql / asyncmy
+            else:
                 try:
                     await conn.close()
                 except Exception as _mc_e:
@@ -669,7 +629,6 @@ async def _probe_db_latency(
 
     _cache_set("latency_probe", result, ttl=120.0)
     return result
-
 
 def _verdict_from_warm(warm_ms: float) -> str:
     if warm_ms < 5:
@@ -681,7 +640,6 @@ def _verdict_from_warm(warm_ms: float) -> str:
     if warm_ms < 500:
         return "slow"
     return "critical"
-
 
 def _compute_latency_verdict(result: Dict[str, Any]) -> Tuple[str, str, str]:
     tcp = float(result.get("tcp_connect_ms") or 0)
@@ -765,7 +723,6 @@ def _compute_latency_verdict(result: Dict[str, Any]) -> Tuple[str, str, str]:
         "راقب الأداء — قد يحتاج ضبطاً لاحقاً.",
     )
 
-
 def format_latency_report(probe: Dict[str, Any]) -> str:
     if not probe.get("ok"):
         err = _esc(probe.get("error", "خطأ غير معروف"))
@@ -801,8 +758,6 @@ def format_latency_report(probe: Dict[str, Any]) -> str:
     if conn > 0:
         conn_icon = ("🟢" if conn < 100 else
                      "🟡" if conn < 300 else "🔴")
-        # 🆕 v7.2.3 FIX-CONNECT-LABEL: "connect" بدل "asyncpg connect"
-        # (يعمل على PostgreSQL و MySQL على حد سواء)
         lines.append(f"🔌 connect: {conn_icon} "
                      f"<b>{conn:.0f}ms</b>")
         if tcp > 0:
@@ -869,11 +824,9 @@ def format_latency_report(probe: Dict[str, Any]) -> str:
 
     return "\n".join(lines)
 
-
 async def diagnose_latency(*, force: bool = False) -> str:
     probe = await _probe_db_latency(force=force)
     return format_latency_report(probe)
-
 
 async def get_latency_verdict() -> Dict[str, Any]:
     probe = await _probe_db_latency()
@@ -886,7 +839,6 @@ async def get_latency_verdict() -> Dict[str, Any]:
         "diagnosis": probe.get("diagnosis", ""),
         "recommendation": probe.get("recommendation", ""),
     }
-
 
 # ═══════════════════════════════════════════════════════════════════════
 # FULL HEALTH PROBE
@@ -944,7 +896,6 @@ async def _probe_network_to(
     if with_tls and raw_sock is not None:
         def _do_tls():
             try:
-                # FIX-TLS: CERT_NONE — قياس زمني فقط
                 ctx = ssl.create_default_context()
                 ctx.check_hostname = False
                 ctx.verify_mode = ssl.CERT_NONE
@@ -982,7 +933,6 @@ async def _probe_network_to(
     result["ok"] = True
     return result
 
-
 async def _probe_event_loop(
     samples: int = 10, sleep_ms: int = 50,
 ) -> Dict[str, Any]:
@@ -1005,7 +955,6 @@ async def _probe_event_loop(
     except Exception as e:
         result["error"] = str(e)
     return result
-
 
 async def _probe_filesystem() -> Dict[str, Any]:
     """قياس write/fsync/read. fallback إلى cwd إن فشل /tmp."""
@@ -1068,7 +1017,6 @@ async def _probe_filesystem() -> Dict[str, Any]:
         result["error"] = str(e)
     return result
 
-
 async def _probe_system() -> Dict[str, Any]:
     """
     قياس Load / CPU count / RAM.
@@ -1077,7 +1025,6 @@ async def _probe_system() -> Dict[str, Any]:
     """
     result: Dict[str, Any] = {"ok": False}
     try:
-        # ─── Load average ─────────────────────────────────
         try:
             load1, load5, load15 = os.getloadavg()
             result["load_avg_1m"] = round(load1, 2)
@@ -1091,7 +1038,6 @@ async def _probe_system() -> Dict[str, Any]:
         except Exception:
             result["cpu_count"] = 1
 
-        # ─── RAM (psutil) ─────────────────────────────────
         try:
             import psutil  # type: ignore
             vm = psutil.virtual_memory()
@@ -1106,162 +1052,227 @@ async def _probe_system() -> Dict[str, Any]:
         result["error"] = str(e)
     return result
 
-
 def _identify_bottleneck(data: Dict[str, Any]) -> Dict[str, Any]:
-    """يحلل كل القياسات ويحدد السبب الرئيسي للبطء."""
-    scores: List[Tuple[str, float, str]] = []
+    """
+    يحدد السبب الرئيسي للبطء بأرقام حقيقية غير مضللة.
 
+    v7.2.4 FIX-RANK-VALUE:
+        • كل عنصر يحمل: value (حقيقي) + unit (ms/%) + kind + severity + weight
+        • value + unit هما ما يُعرض للمستخدم — لا أوزان مضروبة
+        • weight داخلي فقط للترتيب — لا يظهر أبداً
+        • severity مبنية على عتبات واقعية لكل مقياس على حدة
+        • عتبات Telegram متسامحة (RTT عبر القارات = low)
+    """
+    comps: List[Dict[str, Any]] = []
+
+    def _add(name, kind, value, unit, severity, weight):
+        comps.append({
+            "component": name,
+            "kind": kind,
+            "value": round(float(value), 1),
+            "unit": unit,
+            "severity": severity,
+            "weight": round(float(weight), 2),
+        })
+
+    # ─── 1) network_db (زمني) ─────────────────────────────
     net_db = data.get("network_db") or {}
     db_tcp = float(net_db.get("tcp_ms") or 0)
     if db_tcp > 0:
-        weight = db_tcp * 3
-        sev = ("critical" if db_tcp > 300
-               else "high" if db_tcp > 150
-               else "medium" if db_tcp > 50
-               else "low")
-        scores.append(("network_db", weight, sev))
+        if db_tcp < 100:
+            sev = "low"
+        elif db_tcp < 250:
+            sev = "medium"
+        elif db_tcp < 500:
+            sev = "high"
+        else:
+            sev = "critical"
+        _add("network_db", "time", db_tcp, "ms", sev, db_tcp * 3.0)
 
+    # ─── 2) database_internal (زمني) ──────────────────────
     db_p = data.get("database") or {}
     warm = float(db_p.get("warm_median_ms") or 0)
     if warm > 0:
-        sev = ("critical" if warm > 500
-               else "high" if warm > 100
-               else "medium" if warm > 30
-               else "low")
-        scores.append(("database_internal", warm, sev))
+        if warm < 20:
+            sev = "low"
+        elif warm < 60:
+            sev = "medium"
+        elif warm < 200:
+            sev = "high"
+        else:
+            sev = "critical"
+        _add("database_internal", "time", warm, "ms", sev, warm * 3.0)
 
+    # ─── 3) event_loop (زمني) ─────────────────────────────
     loop_p = data.get("event_loop") or {}
-    loop_lag = float(loop_p.get("median_ms") or 0)
-    if loop_lag > 0:
-        sev = ("critical" if loop_lag > 100
-               else "high" if loop_lag > 50
-               else "medium" if loop_lag > 20
-               else "low")
-        scores.append(("event_loop", loop_lag * 2, sev))
+    lag = float(loop_p.get("median_ms") or 0)
+    if lag > 0:
+        if lag < 15:
+            sev = "low"
+        elif lag < 50:
+            sev = "medium"
+        elif lag < 200:
+            sev = "high"
+        else:
+            sev = "critical"
+        _add("event_loop", "time", lag, "ms", sev, lag * 5.0)
 
+    # ─── 4) filesystem (زمني) ─────────────────────────────
     fs_p = data.get("filesystem") or {}
-    fs_write = float(fs_p.get("write_1mb_ms") or 0)
-    if fs_write > 0:
-        sev = ("critical" if fs_write > 500
-               else "high" if fs_write > 200
-               else "medium" if fs_write > 50
-               else "low")
-        scores.append(("filesystem", fs_write / 10, sev))
+    fs_w = float(fs_p.get("write_1mb_ms") or 0)
+    if fs_w > 0:
+        if fs_w < 30:
+            sev = "low"
+        elif fs_w < 100:
+            sev = "medium"
+        elif fs_w < 500:
+            sev = "high"
+        else:
+            sev = "critical"
+        _add("filesystem", "time", fs_w, "ms", sev, fs_w * 0.5)
 
+    # ─── 5) CPU (نسبة مئوية) ──────────────────────────────
     sys_p = data.get("system") or {}
     cpu = float(sys_p.get("cpu_percent") or 0)
     if cpu > 0:
-        sev = ("critical" if cpu > 90
-               else "high" if cpu > 75
-               else "medium" if cpu > 50
-               else "low")
-        scores.append(("cpu", cpu * 2, sev))
+        if cpu < 70:
+            sev = "low"
+        elif cpu < 85:
+            sev = "medium"
+        elif cpu < 95:
+            sev = "high"
+        else:
+            sev = "critical"
+        _add("cpu", "percent", cpu, "%", sev, cpu * 1.0)
 
+    # ─── 6) RAM (نسبة مئوية) ──────────────────────────────
     ram = float(sys_p.get("ram_percent") or 0)
     if ram > 0:
-        sev = ("critical" if ram > 95
-               else "high" if ram > 85
-               else "medium" if ram > 70
-               else "low")
-        scores.append(("ram", ram * 1.5, sev))
+        if ram < 85:
+            sev = "low"
+        elif ram < 92:
+            sev = "medium"
+        elif ram < 97:
+            sev = "high"
+        else:
+            sev = "critical"
+        _add("ram", "percent", ram, "%", sev, ram * 0.8)
 
+    # ─── 7) network_telegram (زمني — خارجي متسامح) ────────
     net_tg = data.get("network_telegram") or {}
     tg_tcp = float(net_tg.get("tcp_ms") or 0)
     if tg_tcp > 0:
-        sev = ("high" if tg_tcp > 300
-               else "medium" if tg_tcp > 150
-               else "low")
-        scores.append(("network_telegram", tg_tcp * 0.5, sev))
+        if tg_tcp < 300:
+            sev = "low"
+        elif tg_tcp < 500:
+            sev = "medium"
+        elif tg_tcp < 800:
+            sev = "high"
+        else:
+            sev = "critical"
+        _add("network_telegram", "time", tg_tcp, "ms", sev, tg_tcp * 0.2)
 
-    scores.sort(key=lambda x: -x[1])
+    # ─── ترتيب بالوزن (الأعلى أولاً) ──────────────────────
+    comps.sort(key=lambda x: -x["weight"])
 
-    if not scores or scores[0][1] < 20:
+    # ─── أعلى severity ────────────────────────────────────
+    sev_rank = {"low": 0, "medium": 1, "high": 2, "critical": 3}
+    max_sev = "low"
+    for c in comps:
+        if sev_rank.get(c["severity"], 0) > sev_rank.get(max_sev, 0):
+            max_sev = c["severity"]
+
+    # ─── لا bottleneck ────────────────────────────────────
+    if max_sev == "low" or not comps:
         return {
             "primary": "none",
             "severity": "low",
-            "score_ms": 0.0,
-            "explanation": "🟢 لا يوجد bottleneck واضح — كل الأبعاد سليمة.",
+            "explanation": (
+                "🟢 لا يوجد bottleneck — "
+                "كل الأبعاد ضمن الحدود الطبيعية."
+            ),
             "recommendation": "الأداء جيد — لا حاجة لتعديل.",
-            "ranked": [
-                {"component": n, "score_ms": round(m, 2), "severity": s}
-                for n, m, s in scores
-            ],
+            "ranked": comps,
         }
 
-    top_name, top_ms, top_sev = scores[0]
+    # ─── أعلى severity → ثم أعلى weight ───────────────────
+    candidates = [c for c in comps if c["severity"] == max_sev]
+    candidates.sort(key=lambda x: -x["weight"])
+    top = candidates[0]
+
+    top_name = top["component"]
+    tv = top["value"]
+    tu = top["unit"]
 
     explanations = {
         "network_db": (
-            f"🔴 الشبكة بين البوت و DB تُضيف ~{top_ms:.0f}ms "
-            f"لكل استعلام. TCP RTT = {db_tcp:.0f}ms."
+            f"🟠 الشبكة بين البوت و DB تُضيف ~{tv:.0f}{tu} "
+            f"لكل استعلام (TCP RTT)."
         ),
         "database_internal": (
-            f"🔴 DB نفسه بطيء: warm query = {warm:.0f}ms "
-            f"(المتوقع < 10ms)."
+            f"🟠 DB نفسه بطيء: warm query = {tv:.0f}{tu} "
+            f"(المتوقع < 20ms)."
         ),
         "event_loop": (
-            f"🟠 Event loop متأخر بـ {loop_lag:.0f}ms وسطي — "
+            f"🟠 Event loop lag = {tv:.0f}{tu} — "
             f"البوت مشبع بعمليات sync."
         ),
         "filesystem": (
-            f"🟠 القرص بطيء: كتابة 1MB = {fs_write:.0f}ms."
+            f"🟠 كتابة 1MB تستغرق {tv:.0f}{tu}."
         ),
         "cpu": (
-            f"🟠 CPU مستخدم بنسبة {cpu:.0f}% — الخادم مشبع."
+            f"🟠 CPU = {tv:.0f}{tu} — الخادم مشبع."
         ),
         "ram": (
-            f"🟠 RAM مستخدمة بنسبة {ram:.0f}% — احتمال swap."
+            f"🟠 RAM = {tv:.0f}{tu} — احتمال swap."
         ),
         "network_telegram": (
-            f"🟠 الشبكة إلى Telegram بطيئة: {tg_tcp:.0f}ms."
+            f"🟡 RTT إلى Telegram = {tv:.0f}{tu}. "
+            f"لا يؤثر على سرعة الردود (webhook-driven)، "
+            f"فقط على العمليات الاستباقية (النشر، الإشعارات)."
         ),
     }
 
     recommendations = {
         "network_db": (
-            "✅ الحل: انقل DB إلى نفس منطقة البوت. "
-            "مثلاً: إذا البوت على Render Oregon → DB في US-West "
-            "(SFO أو Oregon). أو استخدم PgBouncer قريباً."
+            "✅ انقل DB إلى نفس منطقة البوت، أو استخدم "
+            "connection pooler قريب (PgBouncer)."
         ),
         "database_internal": (
-            "✅ الحل: راجع pg_stat_activity، شغّل VACUUM ANALYZE، "
-            "زد shared_buffers، وافحص pg_stat_statements."
+            "✅ راجع pg_stat_activity، شغّل VACUUM ANALYZE، "
+            "اضبط shared_buffers (≥ 25% RAM)، "
+            "وافحص pg_stat_statements."
         ),
         "event_loop": (
-            "✅ الحل: ابحث عن استدعاءات sync في async code: "
-            "requests، time.sleep، psycopg2، file I/O مباشر. "
-            "استخدم asyncio.to_thread لكل عملية sync."
+            "✅ ابحث عن استدعاءات sync في async code: "
+            "requests، time.sleep، psycopg2، file I/O. "
+            "استخدم asyncio.to_thread."
         ),
         "filesystem": (
-            "✅ الحل: تجنّب كتابة ملفات كبيرة. استخدم /tmp فقط "
-            "للعمليات المؤقتة. في Render free tier القرص بطيء — "
-            "ارفع الـ tier أو قلّل كتابة الملفات."
+            "✅ تجنّب كتابة ملفات كبيرة. استخدم /tmp فقط. "
+            "في Render free tier القرص بطيء."
         ),
         "cpu": (
-            "✅ الحل: قلّل MAX_CHANNELS_PER_CYCLE، راجع العمليات "
-            "الثقيلة (OCR، NSFW model)، ارفع الـ tier."
+            "✅ قلّل MAX_CHANNELS_PER_CYCLE، راجع العمليات "
+            "الثقيلة (OCR، NSFW)، ارفع الـ tier."
         ),
         "ram": (
-            "✅ الحل: راجع caches (SmartCache، banned_words)، "
+            "✅ راجع caches (SmartCache، banned_words)، "
             "قلّل max_size، ارفع الـ tier."
         ),
         "network_telegram": (
-            "✅ الحل: عادةً مؤقت. تحقّق من status.telegram.org."
+            "✅ عادةً لا يحتاج إجراءً. تحقّق من "
+            "status.telegram.org فقط إذا تجاوز 600ms."
         ),
     }
 
     return {
         "primary": top_name,
-        "severity": top_sev,
-        "score_ms": round(top_ms, 2),
+        "severity": max_sev,
         "explanation": explanations.get(top_name, ""),
         "recommendation": recommendations.get(top_name, ""),
-        "ranked": [
-            {"component": n, "score_ms": round(m, 2), "severity": s}
-            for n, m, s in scores
-        ],
+        "ranked": comps,
     }
-
 
 async def _probe_full_health(
     *, force: bool = False,
@@ -1295,11 +1306,10 @@ async def _probe_full_health(
         except Exception:
             pass
 
-    # FIX-CPU: prime CPU قبل gather — يبدأ نافذة القياس
     _cpu_primed = False
     try:
         import psutil  # type: ignore
-        psutil.cpu_percent(interval=None)  # reset counter
+        psutil.cpu_percent(interval=None)
         _cpu_primed = True
     except ImportError:
         pass
@@ -1330,7 +1340,6 @@ async def _probe_full_health(
     result["system"] = _safe(probes[4], {})
     result["database"] = _safe(probes[5], {})
 
-    # FIX-CPU: اقرأ CPU الآن — يمثل نافذة الـgather كاملة
     if _cpu_primed:
         try:
             import psutil  # type: ignore
@@ -1343,7 +1352,6 @@ async def _probe_full_health(
         except Exception:
             pass
 
-    # ضمان وجود system dict
     if not isinstance(result["system"], dict):
         result["system"] = {"ok": True, "error": "system probe failed"}
 
@@ -1352,7 +1360,6 @@ async def _probe_full_health(
 
     _cache_set("full_health", result, ttl=120.0)
     return result
-
 
 def format_full_health_report(data: Dict[str, Any]) -> str:
     """تقرير HTML شامل لكل الأبعاد + الحكم."""
@@ -1388,10 +1395,11 @@ def format_full_health_report(data: Dict[str, Any]) -> str:
 
     ranked = b.get("ranked") or []
     if ranked:
-        lines.append("📊 <b>ترتيب الأبعاد (من الأسوأ):</b>")
+        lines.append("📊 <b>ترتيب الأبعاد (من الأعلى تأثيراً):</b>")
         for i, item in enumerate(ranked[:7], 1):
             name = item.get("component", "?")
-            ms = item.get("score_ms", 0)
+            val = item.get("value", 0)
+            unit = item.get("unit", "ms")
             sev = item.get("severity", "low")
             ic = {
                 "critical": "🔴", "high": "🟠",
@@ -1399,7 +1407,7 @@ def format_full_health_report(data: Dict[str, Any]) -> str:
             }.get(sev, "⚪")
             lines.append(
                 f"  {i}. {ic} <code>{_esc(name)}</code> "
-                f"~{ms:.0f}ms"
+                f"{val:.0f}{unit}"
             )
         lines.append("")
 
@@ -1536,15 +1544,12 @@ def format_full_health_report(data: Dict[str, Any]) -> str:
 
     return "\n".join(lines)
 
-
 async def diagnose_full(*, force: bool = False) -> str:
     data = await _probe_full_health(force=force)
     return format_full_health_report(data)
 
-
 async def get_full_health() -> Dict[str, Any]:
     return await _probe_full_health()
-
 
 # ═══════════════════════════════════════════════════════════════════════
 # 1) DB Metadata
@@ -1593,7 +1598,6 @@ async def _get_db_metadata() -> Dict[str, Any]:
                 "SELECT current_database()", default="?"
             ) or "?"
         elif _is_mysql():
-            # 🆕 v7.2.3 FIX-MYSQL-META: فرع MySQL صريح
             size_b = await db.fetchval(
                 "SELECT COALESCE(SUM(data_length + index_length), 0) "
                 "FROM information_schema.TABLES "
@@ -1622,7 +1626,6 @@ async def _get_db_metadata() -> Dict[str, Any]:
 
             meta["database_name"] = meta["current_schema"]
         else:
-            # SQLite
             size_kb = (await db.get_db_size_kb()
                        if hasattr(db, "get_db_size_kb") else 0)
             meta["size_bytes"] = int(size_kb * 1024)
@@ -1636,7 +1639,6 @@ async def _get_db_metadata() -> Dict[str, Any]:
 
     _cache_set("db_metadata", meta)
     return meta
-
 
 # ═══════════════════════════════════════════════════════════════════════
 # 2) Dead Tuples
@@ -1738,7 +1740,6 @@ async def _get_all_tables_health() -> Tuple[List[Dict], List[Dict]]:
     _cache_set("all_tables_health", result, ttl=60.0)
     return result
 
-
 # ═══════════════════════════════════════════════════════════════════════
 # 3) Activity Stats
 # ═══════════════════════════════════════════════════════════════════════
@@ -1784,7 +1785,6 @@ async def _get_activity_stats() -> Dict[str, Any]:
 
     return out
 
-
 # ═══════════════════════════════════════════════════════════════════════
 # 4) PG Settings
 # ═══════════════════════════════════════════════════════════════════════
@@ -1805,7 +1805,6 @@ _CRITICAL_SETTINGS = (
     "statement_timeout",
     "server_version",
 )
-
 
 async def _get_pg_settings() -> Dict[str, str]:
     cached = _cache_get("pg_settings")
@@ -1838,7 +1837,6 @@ async def _get_pg_settings() -> Dict[str, str]:
         logger.debug(f"_get_pg_settings: {e}")
         return {}
 
-
 # ═══════════════════════════════════════════════════════════════════════
 # 5) Sizes + Indexes
 # ═══════════════════════════════════════════════════════════════════════
@@ -1863,7 +1861,6 @@ async def _get_table_sizes(limit: int = 15) -> List[Dict[str, Any]]:
         logger.debug(f"_get_table_sizes: {e}")
         return []
 
-
 async def _get_indexes(tables: List[str]) -> Dict[str, List[Dict[str, Any]]]:
     cache_key = _hash_key("indexes", tables)
     cached = _cache_get(cache_key)
@@ -1883,7 +1880,6 @@ async def _get_indexes(tables: List[str]) -> Dict[str, List[Dict[str, Any]]]:
     except Exception as e:
         logger.debug(f"_get_indexes: {e}")
         return {}
-
 
 # ═══════════════════════════════════════════════════════════════════════
 # 6) Auto-Cleanup Status
@@ -1954,19 +1950,11 @@ async def _get_cleanup_status() -> List[Dict[str, Any]]:
     ))
     return out
 
-
 # ═══════════════════════════════════════════════════════════════════════
 # 7) Table Names Helper
 # ═══════════════════════════════════════════════════════════════════════
 
 async def _get_all_table_names() -> List[str]:
-    """
-    🆕 v7.2.3 FIX-MYSQL-TABLES: فرع صريح لكل DB.
-
-    قبل الإصلاح: أي DB غير Postgres كان يُرسل استعلام SQLite
-    (sqlite_master) → على MySQL يفشل بـ OperationalError
-    يُبتلَع بصمت → قائمة فارغة → VACUUM على صفر جداول.
-    """
     cached = _cache_get("all_table_names")
     if cached is not None:
         return cached
@@ -2043,7 +2031,6 @@ async def _get_all_table_names() -> List[str]:
         logger.debug(f"_get_all_table_names (SQLite): {e}")
         return []
 
-
 # ═══════════════════════════════════════════════════════════════════════
 # 8) Score
 # ═══════════════════════════════════════════════════════════════════════
@@ -2076,14 +2063,11 @@ def _calc_technical_score(
     if activity.get("idle_tx", 0) > 0:
         score -= 2
 
-    # 🆕 v7.2.3 FIX-AV-SCORE: الخصم فقط عندما settings غير فارغ
-    # (SQLite/MySQL أو فشل fetch — لا معنى للخصم).
     if settings and settings.get("autovacuum") != "on":
         score -= 15
 
     score = max(0, min(100, score))
     return score, critical, warn, activity.get("idle_tx", 0)
-
 
 # ═══════════════════════════════════════════════════════════════════════
 # 9) Maintenance — dict API
@@ -2185,7 +2169,6 @@ async def preview_maintenance() -> Dict[str, Any]:
     result['has_errors'] = has_errors
     result['vacuum_tables'] = await _get_all_table_names()
     return result
-
 
 async def run_maintenance() -> Dict[str, Any]:
     db = _get_db()
@@ -2303,7 +2286,6 @@ async def run_maintenance() -> Dict[str, Any]:
     _invalidate_cache()
     return result
 
-
 # ═══════════════════════════════════════════════════════════════════════
 # 10) Maintenance formatters
 # ═══════════════════════════════════════════════════════════════════════
@@ -2390,7 +2372,6 @@ def format_maintenance_preview(preview: Dict[str, Any]) -> str:
 
     return "\n".join(lines)
 
-
 def format_maintenance_result(result: Dict[str, Any]) -> str:
     lines: List[str] = []
     lines.append("✅ <b>اكتملت الصيانة بنجاح</b>")
@@ -2450,7 +2431,6 @@ def format_maintenance_result(result: Dict[str, Any]) -> str:
 
     return "\n".join(lines)
 
-
 # ═══════════════════════════════════════════════════════════════════════
 # 11) Maintenance HTML shortcuts
 # ═══════════════════════════════════════════════════════════════════════
@@ -2459,11 +2439,9 @@ async def diagnose_maintenance_preview() -> str:
     preview = await preview_maintenance()
     return format_maintenance_preview(preview)
 
-
 async def run_db_maintenance() -> str:
     result = await run_maintenance()
     return format_maintenance_result(result)
-
 
 async def vacuum_analyze_tables() -> str:
     db = _get_db()
@@ -2528,7 +2506,6 @@ async def vacuum_analyze_tables() -> str:
 
     _invalidate_cache()
     return "\n".join(lines)
-
 
 # ═══════════════════════════════════════════════════════════════════════
 # 11b) التنظيف التلقائي للـ MVs
@@ -2603,7 +2580,6 @@ async def auto_vacuum_dirty_mvs(min_dead: int = 10) -> Dict[str, Any]:
         result['duration_sec'],
     )
     return result
-
 
 # ═══════════════════════════════════════════════════════════════════════
 # 12) Build Sections
@@ -2688,7 +2664,6 @@ async def _build_sections(*, include_probes: bool = True) -> List[str]:
     s1.append(f"  📊 جداول مهمة: <b>{len(dirty)}</b>")
     s1.append(f"  🗂️ إجمالي الجداول: <b>{total_tables}</b>")
 
-    # 🆕 v7.2.3 FIX-AV-LABEL: اعرض autovacuum فقط عندما موجود
     av_setting = settings.get("autovacuum", "")
     if av_setting:
         av_icon = "🟢" if av_setting == "on" else "🔴"
@@ -2915,7 +2890,6 @@ async def _build_sections(*, include_probes: bool = True) -> List[str]:
 
     return parts
 
-
 # ═══════════════════════════════════════════════════════════════════════
 # 13) Public API — Diagnostics
 # ═══════════════════════════════════════════════════════════════════════
@@ -2924,10 +2898,8 @@ async def diagnose_db(*, include_probes: bool = True) -> str:
     parts = await _build_sections(include_probes=include_probes)
     return "\n\n".join(parts)
 
-
 async def diagnose_db_split(*, include_probes: bool = True) -> List[str]:
     return await _build_sections(include_probes=include_probes)
-
 
 async def diagnose_db_quick() -> str:
     db = _get_db()
@@ -3012,14 +2984,12 @@ async def diagnose_db_quick() -> str:
             icon = {"critical": "🔴", "high": "🟠",
                     "medium": "🟡", "low": "🟢"}.get(sev, "⚪")
             lines.append(
-                f"{icon} السبب الرئيسي: <code>{b.get('primary')}</code> "
-                f"(~{b.get('score_ms', 0):.0f}ms)"
+                f"{icon} السبب الرئيسي: <code>{b.get('primary')}</code>"
             )
     except Exception:
         pass
 
     return "\n".join(lines)
-
 
 async def get_diagnostics_data(top_n: int = 15) -> Dict[str, Any]:
     parts = await _build_sections()
@@ -3029,7 +2999,6 @@ async def get_diagnostics_data(top_n: int = 15) -> Dict[str, Any]:
         "db_type": _get_db_type(),
         "version": VERSION,
     }
-
 
 # ═══════════════════════════════════════════════════════════════════════
 # 14) Aliases
@@ -3081,7 +3050,6 @@ get_latency_report = diagnose_latency
 full_health = diagnose_full
 check_full_health = diagnose_full
 health_report = diagnose_full
-
 
 # ═══════════════════════════════════════════════════════════════════════
 # 15) __all__
@@ -3149,14 +3117,17 @@ __all__ = [
     "get_pg_info",
 ]
 
-
 # ═══════════════════════════════════════════════════════════════════════
-# LOAD BEACON — v7.2.3
+# LOAD BEACON — v7.2.4
 # ═══════════════════════════════════════════════════════════════════════
 
 try:
     logger.info(
         "🛡️ db_diagnostics.py v%s loaded | "
+        "MISLEADING-FIX ✅ | "
+        "RANK-VALUE ✅ (real values+units) | "
+        "RANK-DISPLAY ✅ (no ~XXms fake) | "
+        "PRIMARY-SELECTION ✅ (by severity) | "
         "MYSQL-PARITY ✅ | "
         "MYSQL-CLOSE-AWAIT ✅ | "
         "MYSQL-TABLES-SUPPORT ✅ | "
