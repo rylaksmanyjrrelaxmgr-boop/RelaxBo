@@ -1,25 +1,48 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-db_maintenance_commands.py - أوامر صيانة قاعدة البيانات (v1.1.1)
+db_maintenance_commands.py - أوامر صيانة قاعدة البيانات (v1.1.2)
 ================================================================================
-🆕 v1.1.1 — FIX-AM1 (توثيقي):
-    🟢 FIX-AM1: توثيق إلزامي في register_maintenance_commands يُذكّر
-                بضرورة استدعاء stop_auto_vacuum_task +
-                stop_weekly_diagnostic_task عند إغلاق التطبيق.
-                السبب: بدون هذا، المهمة تستمر بعد بدء الإغلاق →
-                deadlock محتمل على pool connection + "Task was
-                destroyed but it is pending" في السجل.
-                ✅ الإصلاح الفعلي مطبَّق في bot.py (FIX-AM1).
-                الحماية هنا: إذا حذف مطوّر لاحقًا الاستدعاء من bot.py
-                سهوًا، السجل يُنبّهه.
+🆕 v1.1.2 — IDEMPOTENT-REG + HTML-SAFE + DB-AWARE:
 
-🆕 v1.1.0 — التنظيف التلقائي الكامل:
-    🟢 AUTO-1: مهمة خلفية auto_vacuum_dirty_mvs تعمل تلقائياً.
-    🟢 AUTO-2: تُصلح dead tuples على MVs (mv_active_user_limits...).
-    🟢 AUTO-3: تفعيل/تعطيل عبر /db_weekly auto_on|auto_off.
-    🟢 AUTO-4: تشغيل فوري عبر /db_weekly auto_now.
-    🟢 AUTO-5: حالة كل المهام عبر /db_weekly status.
+    🔴 FIX-AM2: idempotency لـ register_maintenance_commands
+        (flag _commands_registered يمنع التسجيل المزدوج).
+
+    🔴 FIX-AM3: scheduled_auto_vacuum يقف فوراً إذا DB_TYPE != postgres
+        (SQLite/MySQL لا تستفيد من auto_vacuum_dirty_mvs → توفير دورات).
+
+    🔴 FIX-AM4: HTML escape على أسماء الجداول ورسائل الأخطاء في
+        auto_now + إشعار log_ch (كانت رسائل PostgreSQL تحتوي على < >).
+
+    🟠 FIX-AM5: _VERSION_OK — رفض تشغيل auto-vacuum عند إصدار
+        db_diagnostics أقدم من الحد الأدنى.
+
+    🟠 FIX-AM6: فحص DB._closing/_closed في حلقة auto-vacuum
+        (يمنع deadlock أثناء إغلاق التطبيق).
+
+    🟠 FIX-AM7: _AUTO_VACUUM_MIN_DEAD قابل للضبط من env.
+
+    🟠 FIX-AM8: _parse_version يقبل pre-release suffixes
+        (7.2.6-rc1 → (7, 2, 6)).
+
+    🟠 FIX-AM9: تتبّع تغيّر حالة auto-vacuum + log عند التبديل.
+
+    🟠 FIX-AM10: stop_*_task — فحص loop.is_closed() + try/except شامل.
+
+    🟠 FIX-AM11: db_weekly_command ينظّف pending قديم أولاً.
+
+    🟡 FIX-AM12: log target_chat أسبوعياً (debugging).
+
+    🟡 FIX-AM13: _AUTO_VACUUM_NOTIFY_MIN_CLEANED = 3 (ثابت موثّق).
+
+    🟡 FIX-AM14: get_tasks_status() helper للتشخيص.
+
+    🟡 FIX-AM15: __version__ موثّق.
+
+🆕 v1.1.1 — FIX-AM1 (توثيقي): تذكير بضرورة استدعاء stop_auto_vacuum_task
+    + stop_weekly_diagnostic_task عند إغلاق التطبيق.
+
+🆕 v1.1.0 — التنظيف التلقائي الكامل (AUTO-1..5).
 
 📋 الأوامر:
   /db_diag_quick   — تقرير صحي مختصر
@@ -42,10 +65,14 @@ db_maintenance_commands.py - أوامر صيانة قاعدة البيانات (
 ================================================================================
 """
 
+__version__ = "1.1.2"
+
+import os
 import asyncio
 import logging
 import time
-from typing import Optional
+import html as _html_mod
+from typing import Optional, Dict, Any
 
 from telegram import Update
 from telegram.ext import CommandHandler, ContextTypes
@@ -60,8 +87,28 @@ from database import DB
 
 _DB_DIAGNOSTICS_VERSION = "0.0.0"
 _DB_DIAGNOSTICS_MIN_VERSION = (6, 9, 4)
+_VERSION_OK = False
 
 logger = logging.getLogger(__name__)
+
+
+def _parse_version(v) -> tuple:
+    """
+    🆕 FIX-AM8: يستخرج الأرقام حتى مع suffixes
+    (7.2.6-rc1 → (7, 2, 6)؛ 7.2.6.dev0 → (7, 2, 6)).
+    """
+    try:
+        out = []
+        for part in str(v).split("."):
+            digits = "".join(c for c in part if c.isdigit())
+            if digits:
+                out.append(int(digits))
+            else:
+                out.append(0)
+        return tuple(out) if out else (0, 0, 0)
+    except Exception:
+        return (0, 0, 0)
+
 
 try:
     from db_diagnostics import (
@@ -78,19 +125,15 @@ try:
     except ImportError:
         _DB_DIAGNOSTICS_VERSION = "unknown"
 
-    def _parse_version(v):
-        try:
-            return tuple(int(x) for x in str(v).split("."))
-        except Exception:
-            return (0, 0, 0)
-
     _parsed = _parse_version(_DB_DIAGNOSTICS_VERSION)
-    if _parsed < _DB_DIAGNOSTICS_MIN_VERSION:
+    _VERSION_OK = _parsed >= _DB_DIAGNOSTICS_MIN_VERSION
+
+    if not _VERSION_OK:
         logger.warning(
             f"⚠️ db_diagnostics الإصدار {_DB_DIAGNOSTICS_VERSION} "
             f"أقدم من المطلوب "
             f"{'.'.join(map(str, _DB_DIAGNOSTICS_MIN_VERSION))} — "
-            f"قد لا تعمل ميزة auto_vacuum. الرجاء ترقية db_diagnostics.py."
+            f"سيُعطَّل التنظيف التلقائي. الرجاء ترقية db_diagnostics.py."
         )
 
 except ImportError as _imp_err:
@@ -104,6 +147,7 @@ except ImportError as _imp_err:
     format_maintenance_result = None
     auto_vacuum_dirty_mvs = None
     _DB_DIAGNOSTICS_VERSION = "missing"
+    _VERSION_OK = False
 
 
 try:
@@ -130,7 +174,18 @@ _WEEKLY_REPORT_INITIAL_DELAY = 3600
 # 🆕 v1.1.0 — التنظيف التلقائي
 _AUTO_VACUUM_INTERVAL_SEC = 30 * 60      # كل 30 دقيقة
 _AUTO_VACUUM_INITIAL_DELAY = 120         # أول تشغيل بعد دقيقتين
-_AUTO_VACUUM_MIN_DEAD = 10               # الحد الأدنى للتنظيف
+
+# 🆕 FIX-AM7: من env
+_AUTO_VACUUM_MIN_DEAD = int(
+    os.getenv("AUTO_VACUUM_MIN_DEAD", "10")
+)
+
+# 🆕 FIX-AM13: ثابت موثّق
+_AUTO_VACUUM_NOTIFY_MIN_CLEANED = 3
+
+# 🆕 FIX-AM2: idempotency
+_commands_registered = False
+_auto_vacuum_previous_state: Optional[bool] = None
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -166,6 +221,16 @@ def _is_authorized(user_id: int) -> bool:
 # أدوات مساعدة
 # ═══════════════════════════════════════════════════════════════════
 
+def _esc(text: Any) -> str:
+    """🆕 FIX-AM4: HTML escape آمن."""
+    try:
+        if text is None:
+            return ""
+        return _html_mod.escape(str(text))
+    except Exception:
+        return ""
+
+
 def _cleanup_stale_pending(context) -> bool:
     """يحذف أي pending قديم تجاوز مهلة التأكيد."""
     try:
@@ -195,6 +260,46 @@ def _preview_has_errors(preview) -> bool:
     except Exception:
         pass
     return False
+
+
+def _is_postgres() -> bool:
+    """🆕 FIX-AM3: فحص موحّد لنوع DB."""
+    try:
+        return bool(getattr(DB, "USE_POSTGRES", False))
+    except Exception:
+        return False
+
+
+def _is_db_closing() -> bool:
+    """🆕 FIX-AM6: هل DB في حالة إغلاق؟"""
+    try:
+        return bool(
+            getattr(DB, "_closing", False)
+            or getattr(DB, "_closed", False)
+        )
+    except Exception:
+        return False
+
+
+def get_tasks_status() -> Dict[str, Any]:
+    """
+    🆕 FIX-AM14: حالة المهام الدورية للتشخيص.
+    """
+    return {
+        "weekly_running": (
+            _weekly_task is not None and not _weekly_task.done()
+        ),
+        "auto_vacuum_running": (
+            _auto_vacuum_task is not None
+            and not _auto_vacuum_task.done()
+        ),
+        "commands_registered": _commands_registered,
+        "db_diagnostics_version": _DB_DIAGNOSTICS_VERSION,
+        "db_diagnostics_version_ok": _VERSION_OK,
+        "is_postgres": _is_postgres(),
+        "auto_vacuum_min_dead": _AUTO_VACUUM_MIN_DEAD,
+        "auto_vacuum_interval_sec": _AUTO_VACUUM_INTERVAL_SEC,
+    }
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -229,7 +334,7 @@ async def db_diag_quick_command(
         logger.error(f"db_diag_quick: {e}", exc_info=True)
         try:
             await update.message.reply_text(
-                f"❌ فشل التشخيص: {str(e)[:150]}"
+                f"❌ فشل التشخيص: {_esc(str(e)[:150])}"
             )
         except Exception:
             pass
@@ -277,7 +382,7 @@ async def db_maintenance_command(
         except Exception as e:
             logger.error(f"preview_maintenance: {e}", exc_info=True)
             await update.message.reply_text(
-                f"❌ فشل المعاينة: {str(e)[:150]}"
+                f"❌ فشل المعاينة: {_esc(str(e)[:150])}"
             )
             return
 
@@ -286,7 +391,7 @@ async def db_maintenance_command(
         except Exception as e:
             logger.error(f"format preview: {e}", exc_info=True)
             await update.message.reply_text(
-                f"❌ فشل التنسيق: {str(e)[:150]}"
+                f"❌ فشل التنسيق: {_esc(str(e)[:150])}"
             )
             return
 
@@ -352,7 +457,7 @@ async def db_maintenance_command(
             result = await run_maintenance()
         except Exception as e:
             logger.error(f"run_maintenance: {e}", exc_info=True)
-            err_text = f"❌ فشلت الصيانة: {str(e)[:200]}"
+            err_text = f"❌ فشلت الصيانة: {_esc(str(e)[:200])}"
             try:
                 if status_msg is not None:
                     await status_msg.edit_text(err_text)
@@ -454,6 +559,9 @@ async def db_weekly_command(
         await update.message.reply_text("⛔ غير مصرح.")
         return
 
+    # 🆕 FIX-AM11: تنظيف pending قديم
+    _cleanup_stale_pending(context)
+
     args = context.args or []
     action = args[0].lower() if args else "status"
 
@@ -484,6 +592,13 @@ async def db_weekly_command(
                 and not _auto_vacuum_task.done()
             )
 
+            # 🆕 FIX-AM3: توضيح للـ admin إذا DB ليست PG
+            pg_note = ""
+            if not _is_postgres():
+                pg_note = (
+                    "\n⚠️ <i>Auto-vacuum معطّل — DB ليست PostgreSQL.</i>"
+                )
+
             text = (
                 "📅 <b>حالة المهام الدورية</b>\n"
                 "━━━━━━━━━━━━━━━━━━━━━━\n\n"
@@ -498,7 +613,8 @@ async def db_weekly_command(
                 f"{'🟢 نشطة' if auto_running else '🔴 متوقفة'}\n"
                 f"⏱️ الدورة: كل "
                 f"{_AUTO_VACUUM_INTERVAL_SEC // 60} دقيقة\n"
-                f"🎯 الحد الأدنى: {_AUTO_VACUUM_MIN_DEAD} dead tuples\n\n"
+                f"🎯 الحد الأدنى: {_AUTO_VACUUM_MIN_DEAD} dead tuples"
+                f"{pg_note}\n\n"
                 f"━━━━━━━━━━━━━━━━━━━━━━\n"
                 f"<b>أوامر التحكم:</b>\n"
                 f"<code>/db_weekly on|off</code> — التقرير الأسبوعي\n"
@@ -551,6 +667,13 @@ async def db_weekly_command(
                 )
                 return
 
+            # 🆕 FIX-AM3: فحص النوع
+            if not _is_postgres():
+                await update.message.reply_text(
+                    "⚠️ التنظيف التلقائي يعمل فقط على PostgreSQL."
+                )
+                return
+
             await update.message.reply_text(
                 "⏳ <b>جارٍ التنظيف الفوري...</b>",
                 parse_mode='HTML',
@@ -563,7 +686,7 @@ async def db_weekly_command(
             except Exception as e:
                 logger.error(f"auto_now: {e}", exc_info=True)
                 await update.message.reply_text(
-                    f"❌ فشل التنظيف: {str(e)[:150]}"
+                    f"❌ فشل التنظيف: {_esc(str(e)[:150])}"
                 )
                 return
 
@@ -587,10 +710,12 @@ async def db_weekly_command(
             if vacuumed:
                 text += "\n<b>التفاصيل:</b>\n"
                 for v in vacuumed[:10]:
+                    # 🆕 FIX-AM4: escape أسماء الجداول
+                    name = _esc(v.get('name', '?'))
                     mv_tag = " <code>[MV]</code>" if v.get('is_matview') else ""
                     text += (
-                        f"  ✅ <code>{v['name']}</code>{mv_tag} "
-                        f"(dead={v['dead_before']})\n"
+                        f"  ✅ <code>{name}</code>{mv_tag} "
+                        f"(dead={v.get('dead_before', 0)})\n"
                     )
                 if len(vacuumed) > 10:
                     text += f"  … و{len(vacuumed) - 10} آخر\n"
@@ -599,9 +724,12 @@ async def db_weekly_command(
             if failed:
                 text += f"\n❌ <b>فشل:</b> {len(failed)}\n"
                 for f in failed[:5]:
+                    # 🆕 FIX-AM4: escape name و error
+                    name = _esc(f.get('name', '?'))
+                    err = _esc(f.get('error', '?')[:60])
                     text += (
-                        f"  ❌ <code>{f['name']}</code> — "
-                        f"<i>{f.get('error', '?')[:60]}</i>\n"
+                        f"  ❌ <code>{name}</code> — "
+                        f"<i>{err}</i>\n"
                     )
 
             if cleaned == 0 and before == 0:
@@ -629,7 +757,7 @@ async def db_weekly_command(
         logger.error(f"db_weekly: {e}", exc_info=True)
         try:
             await update.message.reply_text(
-                f"❌ فشل: {str(e)[:150]}"
+                f"❌ فشل: {_esc(str(e)[:150])}"
             )
         except Exception:
             pass
@@ -690,8 +818,10 @@ async def scheduled_weekly_diagnostic(bot):
                             bot, target_chat, text,
                             parse_mode='HTML',
                         )
+                        # 🆕 FIX-AM12: log target_chat
                         logger.info(
-                            f"✅ أُرسل التقرير الأسبوعي إلى {target_chat}"
+                            f"✅ أُرسل التقرير الأسبوعي إلى "
+                            f"{target_chat}"
                         )
                     except Exception as e:
                         logger.warning(
@@ -724,9 +854,21 @@ async def scheduled_weekly_diagnostic(bot):
 async def scheduled_auto_vacuum(bot):
     """
     🧹 تنظيف تلقائي دوري.
-    يعمل كل 30 دقيقة على MVs والجداول التي فيها
-    dead_tuples >= _AUTO_VACUUM_MIN_DEAD.
+
+    🆕 FIX-AM3: يتوقف فوراً إذا DB_TYPE != postgres.
+    🆕 FIX-AM6: يتخطى الدورة إذا DB في حالة إغلاق.
+    🆕 FIX-AM9: log عند تغيّر حالة التفعيل.
     """
+    global _auto_vacuum_previous_state
+
+    # 🆕 FIX-AM3: فحص مبكر
+    if not _is_postgres():
+        logger.info(
+            "⏭️ scheduled_auto_vacuum: DB ليست PostgreSQL — "
+            "المهمة لا تعمل."
+        )
+        return
+
     logger.info(
         f"🧹 auto-vacuum scheduler started | "
         f"interval={_AUTO_VACUUM_INTERVAL_SEC}s | "
@@ -742,6 +884,18 @@ async def scheduled_auto_vacuum(bot):
 
     while True:
         try:
+            # 🆕 FIX-AM6: فحص إغلاق DB
+            if _is_db_closing():
+                logger.debug(
+                    "⏭️ auto-vacuum: DB في حالة إغلاق — تخطي الدورة"
+                )
+                try:
+                    await asyncio.sleep(_AUTO_VACUUM_INTERVAL_SEC)
+                except asyncio.CancelledError:
+                    logger.info("⏹️ scheduled_auto_vacuum: أُلغي")
+                    return
+                continue
+
             # هل الميزة مفعّلة؟
             enabled = True
             try:
@@ -753,6 +907,20 @@ async def scheduled_auto_vacuum(bot):
                 )
             except Exception as e:
                 logger.debug(f"auto_vacuum setting: {e}")
+
+            # 🆕 FIX-AM9: log عند التغيّر
+            if _auto_vacuum_previous_state != enabled:
+                if _auto_vacuum_previous_state is None:
+                    logger.info(
+                        f"🧹 auto-vacuum: الحالة الأولية = "
+                        f"{'مفعّل' if enabled else 'معطّل'}"
+                    )
+                else:
+                    logger.info(
+                        f"🔄 auto-vacuum: "
+                        f"{'عُطِّل' if not enabled else 'فُعِّل'}"
+                    )
+                _auto_vacuum_previous_state = enabled
 
             if enabled and auto_vacuum_dirty_mvs is not None:
                 try:
@@ -772,10 +940,14 @@ async def scheduled_auto_vacuum(bot):
                         # إشعار اختياري بقناة المطور
                         try:
                             log_ch = await DB.get_dev_log_channel()
-                            if log_ch and cleaned >= 3:
+                            # 🆕 FIX-AM13: ثابت موثّق
+                            if (log_ch and cleaned
+                                    >= _AUTO_VACUUM_NOTIFY_MIN_CLEANED):
                                 vacuumed = result.get('vacuumed', [])
+                                # 🆕 FIX-AM4: escape أسماء الجداول
                                 details = "\n".join(
-                                    f"  • <code>{v['name']}</code>"
+                                    f"  • <code>{_esc(v.get('name', '?'))}"
+                                    f"</code>"
                                     + (" <code>[MV]</code>"
                                        if v.get('is_matview') else "")
                                     for v in vacuumed[:5]
@@ -851,13 +1023,34 @@ def start_weekly_diagnostic_task(application) -> bool:
 
 
 async def stop_weekly_diagnostic_task(timeout: float = 3.0) -> None:
-    """✅ إيقاف المهمة الأسبوعية."""
+    """
+    ✅ إيقاف المهمة الأسبوعية.
+
+    🆕 FIX-AM10: فحص loop مغلق + استثناءات شاملة.
+    """
     global _weekly_task
 
     if _weekly_task is None or _weekly_task.done():
         return
 
     try:
+        try:
+            loop = asyncio.get_running_loop()
+            if loop.is_closed():
+                logger.debug(
+                    "stop_weekly_diagnostic_task: loop مغلق — تخطي"
+                )
+                _weekly_task = None
+                return
+        except RuntimeError:
+            # لا يوجد loop — نُلغي بلا await
+            try:
+                _weekly_task.cancel()
+            except Exception:
+                pass
+            _weekly_task = None
+            return
+
         _weekly_task.cancel()
         try:
             await asyncio.wait_for(_weekly_task, timeout=timeout)
@@ -903,13 +1096,33 @@ def start_auto_vacuum_task(application) -> bool:
 
 
 async def stop_auto_vacuum_task(timeout: float = 3.0) -> None:
-    """✅ إيقاف مهمة التنظيف."""
+    """
+    ✅ إيقاف مهمة التنظيف.
+
+    🆕 FIX-AM10: فحص loop مغلق + استثناءات شاملة.
+    """
     global _auto_vacuum_task
 
     if _auto_vacuum_task is None or _auto_vacuum_task.done():
         return
 
     try:
+        try:
+            loop = asyncio.get_running_loop()
+            if loop.is_closed():
+                logger.debug(
+                    "stop_auto_vacuum_task: loop مغلق — تخطي"
+                )
+                _auto_vacuum_task = None
+                return
+        except RuntimeError:
+            try:
+                _auto_vacuum_task.cancel()
+            except Exception:
+                pass
+            _auto_vacuum_task = None
+            return
+
         _auto_vacuum_task.cancel()
         try:
             await asyncio.wait_for(_auto_vacuum_task, timeout=timeout)
@@ -931,7 +1144,18 @@ def register_maintenance_commands(application) -> bool:
     ✅ v1.1.0: تسجيل الأوامر + بدء مهمة التنظيف التلقائي.
 
     كل أمر في try/except منفصل — إذا فشل أمر، الآخرون يُسجَّلون.
+    🆕 FIX-AM2: idempotent — لا يُسجَّل مرتين.
     """
+    global _commands_registered
+
+    # 🆕 FIX-AM2: فحص idempotency
+    if _commands_registered:
+        logger.debug(
+            "register_maintenance_commands: "
+            "الأوامر مُسجَّلة مسبقاً — تخطي."
+        )
+        return True
+
     ok_all = True
 
     # ═══════════ تسجيل الأوامر ═══════════
@@ -970,9 +1194,26 @@ def register_maintenance_commands(application) -> bool:
     except Exception as e:
         logger.error(f"weekly startup: {e}", exc_info=True)
 
-    # 2) التنظيف التلقائي (فقط إذا auto_vacuum متوفر)
+    # 2) التنظيف التلقائي — 🆕 FIX-AM3+AM5
     try:
-        if auto_vacuum_dirty_mvs is not None:
+        if auto_vacuum_dirty_mvs is None:
+            logger.warning(
+                "⚠️ auto_vacuum_dirty_mvs غير متوفر — "
+                "تأكد من db_diagnostics >= v6.9.4"
+            )
+        elif not _VERSION_OK:
+            logger.error(
+                f"❌ رفض تشغيل auto-vacuum — "
+                f"db_diagnostics={_DB_DIAGNOSTICS_VERSION} "
+                f"< الحد الأدنى "
+                f"{'.'.join(map(str, _DB_DIAGNOSTICS_MIN_VERSION))}"
+            )
+        elif not _is_postgres():
+            logger.info(
+                "⏭️ auto-vacuum: DB ليست PostgreSQL — "
+                "المهمة لن تُسجَّل."
+            )
+        else:
             started = start_auto_vacuum_task(application)
             if started:
                 logger.info(
@@ -983,13 +1224,12 @@ def register_maintenance_commands(application) -> bool:
                 logger.warning(
                     "⚠️ فشل بدء مهمة التنظيف التلقائي"
                 )
-        else:
-            logger.warning(
-                "⚠️ auto_vacuum_dirty_mvs غير متوفر — "
-                "تأكد من db_diagnostics >= v6.9.4"
-            )
     except Exception as e:
         logger.error(f"auto_vacuum startup: {e}", exc_info=True)
+
+    # 🆕 FIX-AM2: تحديث flag
+    if ok_all:
+        _commands_registered = True
 
     # ═══════════════════════════════════════════════════════════════════
     # ⚠️ FIX-AM1 (v1.1.1): توثيق إلزامي — يجب على bot.py استدعاء
@@ -1038,6 +1278,7 @@ register_db_maintenance = register_maintenance_commands
 # ═══════════════════════════════════════════════════════════════════
 
 __all__ = [
+    "__version__",
     # الأوامر
     "db_diag_quick_command",
     "db_maintenance_command",
@@ -1050,6 +1291,8 @@ __all__ = [
     "scheduled_auto_vacuum",
     "start_auto_vacuum_task",
     "stop_auto_vacuum_task",
+    # 🆕 v1.1.2: تشخيص
+    "get_tasks_status",
     # التسجيل (الرئيسي + aliases)
     "register_maintenance_commands",
     "register",
@@ -1066,14 +1309,28 @@ __all__ = [
 # ═══════════════════════════════════════════════════════════════════
 
 try:
-    logger.info(
-        "🛡️ db_maintenance_commands.py v1.1.1 loaded | "
-        "commands: /db_diag_quick, /db_maintenance, /db_weekly | "
-        "auto-vacuum: ✅ every %d min | "
-        "FIX-AM1 shutdown docs ✅ | "
-        "db_diagnostics=%s",
-        _AUTO_VACUUM_INTERVAL_SEC // 60,
-        _DB_DIAGNOSTICS_VERSION,
-    )
+    _beacon_parts = [
+        f"🛡️ db_maintenance_commands.py v{__version__} loaded",
+        f"commands: /db_diag_quick, /db_maintenance, /db_weekly",
+        f"auto-vacuum: ✅ every {_AUTO_VACUUM_INTERVAL_SEC // 60} min",
+        f"min_dead={_AUTO_VACUUM_MIN_DEAD}",
+        f"db_diagnostics={_DB_DIAGNOSTICS_VERSION}",
+        f"version_ok={_VERSION_OK}",
+        "FIX-AM1 shutdown docs ✅",
+        "FIX-AM2 idempotent-reg ✅",
+        "FIX-AM3 db-type-aware ✅",
+        "FIX-AM4 html-escape ✅",
+        "FIX-AM5 version-guard ✅",
+        "FIX-AM6 closing-guard ✅",
+        "FIX-AM7 env-min-dead ✅",
+        "FIX-AM8 pre-release-parse ✅",
+        "FIX-AM9 state-change-log ✅",
+        "FIX-AM10 closed-loop-guard ✅",
+        "FIX-AM11 weekly-pending-clean ✅",
+        "FIX-AM12 weekly-target-log ✅",
+        "FIX-AM13 notify-threshold-const ✅",
+        "FIX-AM14 tasks-status-helper ✅",
+    ]
+    logger.info(" | ".join(_beacon_parts))
 except Exception:
     pass
