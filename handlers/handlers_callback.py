@@ -1,60 +1,20 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-handlers_callback.py - معالج الأزرار (v9.7.27-POST-AUDIT-FIXES)
+handlers_callback.py - معالج الأزرار (v9.7.28-CONTEST-JOIN-FIX)
 =====================================================================
-🆕 v9.7.27-POST-AUDIT-FIXES:
-    🔴 FIX-1: _show_post_list — HTML escape للـ preview.
-       كان يُرسل النص الخام بـ parse_mode='HTML' → يفشل عند
-       وجود <, >, & في المنشور.
-    🔴 FIX-2: datetime.utcfromtimestamp → datetime.fromtimestamp(
-       tz=timezone.utc). Deprecated في 3.12+، ويُصلح مقارنة
-       tz-aware مع TimeUtils.utc_to_mecca.
-    🔴 FIX-3: _handle_schedule — إعادة فحص _is_channel_owner
-       لمسارات sched_min/hour/day/time (كان يثق بـ sched_ch
-       المخزّن فقط). ثغرة تفويض جزئية.
-    🔴 FIX-4: admin_toggle_gr — استخدام _is_banned() بدل
-       row_d.get('banned') truthy (كان يُخطئ عند None).
-    🟠 FIX-5: _handle_buy_subscription — parsing أقوى لـ
-       data[len('buy_sub_'):].split(':', 1)[0].
-    🟠 FIX-6: admin_toggle_ch — استخدام _is_banned للاتساق.
-
-🆕 v9.7.26-CLEANUP-DEAD-DELEGATE (محفوظ):
-    🧹 REMOVE-1: حذف كتلة استيراد `_channels_list_module`.
-    🧹 REMOVE-2: حذف دوال `_delegate_*` الستة.
-    🧹 REMOVE-3: حذف كتلة DELEGATE-FIRST الستة `if` في `handle()`.
-    ✅ KEPT: كل الدوال المحلية كما هي (fallback).
-
-🆕 v9.7.25-CONFLICT-FREE-FULL (محفوظ كمرجع للتراجع).
-🆕 v9.7.23-CRITICAL-FIXES (محفوظة بالكامل):
-    🔴 C-1: _show_channel_list + _show_groups_list — banned رقمي
-            + escape + control-chars.
-    🔴 C-2: _show_groups_list — escape للاسم.
-    🔴 C-5: _handle_group_security — try/except صحيح.
-    🟠 H-1: _is_banned() + _safe_display_name().
-    🟠 H-2: _handle_auto_reply — split(':', 1)[0].
-    🟠 H-3: safe_edit — warn عند parse fail.
-    🟠 H-6: _render_referral — code None.
-    🟠 H-9: _publish_all — list + zip.
-    🟠 H-10: _do_backup — bool(success).
-    🟢 M-4: _extract_updates_channel_link — #fragment.
-    🟢 M-5: _check_updates_channel_health — key normalize.
-    🟢 M-7: _membership_save_to_db — log errors.
-    🟢 M-14: _unwrap_get_next_post — tuple>2.
-
-🆕 v9.7.22-FIX-ALL-VERIFIED (محفوظة):
-    🔴 FIX-1..7 كما في الإصدار الأصلي.
-
-═══════════════════════════════════════════════════════════════════════
-📋 ترتيب التسجيل المطلوب في bot.py / main.py:
-═══════════════════════════════════════════════════════════════════════
-    ✅ register_channels_list_handlers(application)   # أولاً
-    ✅ application.add_handler(CallbackQueryHandler(
-           CallbackHandlers.handle))                    # ثانياً
-
-مع هذا الترتيب: channels_list يتفوّق على handle() تلقائياً (بسبب
-`_stop_after`)، وهذا الملف يعمل كـ fallback عند عدم التسجيل.
-═══════════════════════════════════════════════════════════════════════
+🆕 v9.7.28-CONTEST-JOIN-FIX:
+    🔴 FIX-CJ-1: إصلاح زر "المشاركة" في المسابقات.
+       السبب: الزر يُرسل `contest_join:<id>` (يحمل ID ديناميكي)،
+              بينما المعالج كان يقارن بـ `data == "contest_join"`
+              (exact match فقط) → يسقط إلى fallback "not_available".
+       الإصلاح:
+         • قبول `contest_join` أو `contest_join:<id>`
+         • استخراج contest_id من data بعد ':' (أو user_data)
+         • تمرير الوسائط بالترتيب الصحيح:
+              DB.join_contest(contest_id, user_id)
+         • فحص check_contest_joined قبل المحاولة.
+=====================================================================
 """
 import asyncio, importlib, logging, json, time, shutil, os, re
 import html as _html, sys, inspect
@@ -225,13 +185,6 @@ except Exception:
     pass
 
 # ═══════════════════════════════════════════════════════════════════
-# 🧹 v9.7.26-CLEANUP: كتلة استيراد `_channels_list_module` أُزيلت
-# ═══════════════════════════════════════════════════════════════════
-# السبب: منذ handlers_channels_list v2.1.4 (decorator `_stop_after`)
-# كل callback في قائمة القنوات يرفع ApplicationHandlerStop قبل
-# الوصول إلى CallbackHandlers.handle. لذا التفويض أصبح dead code.
-
-# ═══════════════════════════════════════════════════════════════════
 # SecurityCallbacks
 # ═══════════════════════════════════════════════════════════════════
 try:
@@ -297,11 +250,10 @@ _user_active_tasks: Dict[int, Set[asyncio.Task]] = {}
 
 
 # ═══════════════════════════════════════════════════════════════════
-# 🟠 H-1: Helpers موحّدة
+# Helpers موحّدة
 # ═══════════════════════════════════════════════════════════════════
 
 def _is_banned(row_dict) -> bool:
-    """🟠 H-1: فحص موحّد لحقل 'banned' (int/str/None)."""
     if not row_dict:
         return False
     try:
@@ -312,7 +264,6 @@ def _is_banned(row_dict) -> bool:
 
 def _safe_display_name(raw, fallback="?", max_len=35,
                         escape=True) -> str:
-    """🟠 H-1: تنظيف اسم للعرض."""
     if raw is None or raw == "":
         return fallback if not escape else _html.escape(str(fallback))
     try:
@@ -349,10 +300,6 @@ def _register_task(user_id: int, task: asyncio.Task) -> bool:
         except Exception: pass
         return True
 
-
-# ═══════════════════════════════════════════════════════════════════
-# 🟠 FIX-4: ChatPermissions helpers
-# ═══════════════════════════════════════════════════════════════════
 
 def _build_locked_permissions() -> ChatPermissions:
     try:
@@ -393,10 +340,6 @@ def _build_unlocked_permissions() -> ChatPermissions:
             can_change_info=False, can_invite_users=True,
             can_pin_messages=False)
 
-
-# ═══════════════════════════════════════════════════════════════════
-# Updates-channel helpers
-# ═══════════════════════════════════════════════════════════════════
 
 def _extract_updates_channel_link(ch_raw):
     if not ch_raw: return "", None, False
@@ -1383,14 +1326,6 @@ def _format_channel_rate_line(ch):
 
 
 # ═══════════════════════════════════════════════════════════════════
-# 🧹 v9.7.26-CLEANUP: دوال `_delegate_*` الستة أُزيلت
-# ═══════════════════════════════════════════════════════════════════
-# السبب: منذ handlers_channels_list v2.1.4، كل callback لهذا الملف
-# يرفع ApplicationHandlerStop قبل الوصول إلى `CallbackHandlers.handle`.
-# فكانت هذه الدوال dead code.
-
-
-# ═══════════════════════════════════════════════════════════════════
 # CallbackHandlers
 # ═══════════════════════════════════════════════════════════════════
 
@@ -1446,10 +1381,6 @@ class CallbackHandlers:
         _ensure_bot_start_time(context)
         try: lang = await DB.get_user_language(user_id) or 'ar'
         except Exception: lang = 'ar'
-
-        # ═══════════════════════════════════════════════════════════
-        # 🧹 v9.7.26-CLEANUP: كتلة DELEGATE-FIRST أُزيلت
-        # ═══════════════════════════════════════════════════════════
 
         try:
             handled = await CallbackHandlers._handle_parameterized(
@@ -1673,7 +1604,6 @@ class CallbackHandlers:
                 await safe_send(context.bot, user_id,
                     await _trans('send_support_message', lang, "📞")); return
 
-            # ⚠️ CB.CH_ADD و CB.CH_LIST: fallback محلي
             if base_data == CB.CH_ADD or data == "add_channel":
                 has_sub = (_is_primary_owner(user_id)
                            or await DB.has_active_subscription(user_id))
@@ -1920,7 +1850,6 @@ class CallbackHandlers:
                 await CallbackHandlers._handle_language_change(
                     update, context, query, user_id); return
 
-            # ⚠️ ch_page_prev / ch_page_next — fallback محلي
             if data == "ch_page_prev":
                 context.user_data['channel_page'] = max(0, _coerce_int(
                     context.user_data.get('channel_page'), 0) - 1)
@@ -2130,7 +2059,6 @@ class CallbackHandlers:
                     'delete_post_confirm', lang, "⚠️"), post_id=post_id)
                 await safe_edit(query, text, reply_markup=kb,
                     parse_mode='HTML', bot=context.bot); return True
-            # ⚠️ fallback محلي لـ ch_del_confirm
             if data.startswith("ch_del_confirm:"):
                 ch_id = _coerce_int(data.split(":")[-1])
                 kb = InlineKeyboardMarkup([
@@ -2178,7 +2106,6 @@ class CallbackHandlers:
                 await CallbackHandlers._handle_group_delete(
                     update, context, query, user_id, data, lang)
                 return True
-            # ⚠️ fallback محلي لـ CB.CH_SEL/CH_DEL/CH_STATS
             if data.startswith(CB.CH_SEL + ":"):
                 await CallbackHandlers._handle_channel_select(
                     update, context, query, user_id, data, lang)
@@ -2411,11 +2338,8 @@ class CallbackHandlers:
     @staticmethod
     async def _handle_buy_subscription(update, context, query, user_id,
                                         data, lang):
-        # 🟠 FIX-5: parsing أقوى — تأخذ فقط الجزء الرقمي بعد buy_sub_
-        # وتتجاهل أي ':' أو لاحقة.
         try:
             raw = data[len("buy_sub_"):] if data.startswith("buy_sub_") else ""
-            # اقتطع عند أول ':' إن وُجد
             if ':' in raw:
                 raw = raw.split(':', 1)[0]
             days = int(raw)
@@ -2548,14 +2472,9 @@ class CallbackHandlers:
                 await _trans('delete_failed', lang, "❌"),
                 bot=context.bot)
 
-    # ═══════════════════════════════════════════════════════════════
-    # FALLBACK-KEPT: دوال القنوات (تبقى للطوارئ)
-    # ═══════════════════════════════════════════════════════════════
-
     @staticmethod
     async def _handle_channel_select(update, context, query, user_id,
                                       data, lang):
-        """Fallback محلي — يُستدعى فقط عند عدم تسجيل channels_list."""
         try: ch_id = int(data.split(":")[-1])
         except (ValueError, IndexError):
             await safe_edit(query,
@@ -2574,7 +2493,6 @@ class CallbackHandlers:
     @staticmethod
     async def _handle_channel_delete(update, context, query, user_id,
                                       lang, data):
-        """Fallback محلي — يُستدعى فقط عند عدم تسجيل channels_list."""
         try: ch_id = int(data.split(":")[-1])
         except (ValueError, IndexError):
             await safe_edit(query,
@@ -2593,7 +2511,6 @@ class CallbackHandlers:
     @staticmethod
     async def _handle_channel_stats(update, context, query, user_id,
                                      data, lang):
-        """Fallback محلي — يُستدعى فقط عند عدم تسجيل channels_list."""
         try: ch_id = int(data.split(":")[-1])
         except (ValueError, IndexError):
             await safe_edit(query,
@@ -2619,10 +2536,6 @@ class CallbackHandlers:
     @staticmethod
     async def _show_channel_list(update, context, query, user_id,
                                   lang=None):
-        """
-        Fallback محلي — يُستدعى فقط عند عدم تسجيل channels_list.
-        (بعد v2.1.4، أزرار ch_list يتولاها channels_list مباشرة).
-        """
         if not lang: lang = await DB.get_user_language(user_id) or 'ar'
         channels = await DB.get_user_channels(user_id)
         if not channels:
@@ -3223,9 +3136,6 @@ class CallbackHandlers:
                 await safe_send(bot, user_id, msg)
             except Exception: pass
 
-    # ═══════════════════════════════════════════════════════════════
-    # Analytics fallback
-    # ═══════════════════════════════════════════════════════════════
     @staticmethod
     def _get_handlers_analytics_module():
         try:
@@ -3374,7 +3284,6 @@ class CallbackHandlers:
             pid = pd.get('id')
             if pid is None: continue
             raw_preview = str(pd.get('text') or '')
-            # 🆕 v9.7.27 FIX-1: HTML escape بعد إزالة control chars
             preview = _html.escape(
                 raw_preview.translate(_CONTROL_CHARS_MAP)[:30])
             text += f"🆔 {pid}: {preview}\n"
@@ -3761,8 +3670,6 @@ class CallbackHandlers:
                 try:
                     st = b.stat()
                     size_kb = st.st_size / 1024
-                    # 🆕 v9.7.27 FIX-2: fromtimestamp مع tz=utc
-                    # بدل utcfromtimestamp (Deprecated + tz-aware).
                     dt_utc = datetime.fromtimestamp(
                         st.st_mtime, tz=timezone.utc)
                     mtime = TimeUtils.utc_to_mecca(dt_utc).strftime(
@@ -4011,8 +3918,6 @@ class CallbackHandlers:
                 await safe_edit(query,
                     await _trans('no_active_channel', lang, "❌"),
                     bot=context.bot); return
-            # 🆕 v9.7.27 FIX-3: إعادة فحص الملكية لكل مسار جدولة
-            # (كان يثق بـ sched_ch المخزّن فقط).
             if not await _is_channel_owner(user_id, ch_id):
                 await safe_edit(query,
                     await _trans('not_owner', lang, "❌"),
@@ -4148,6 +4053,9 @@ class CallbackHandlers:
                     bot=context.bot)
             except Exception: pass
 
+    # ═══════════════════════════════════════════════════════════════
+    # 🔴 v9.7.28 FIX-CJ-1: _handle_contests — إصلاح زر المشاركة
+    # ═══════════════════════════════════════════════════════════════
     @staticmethod
     async def _handle_contests(update, context, query, user_id, lang):
         data = (query.data or "")
@@ -4204,28 +4112,61 @@ class CallbackHandlers:
                         await _trans('declare_winner_failed', lang, "❌"),
                         bot=context.bot)
                 return
-            if data == "contest_join":
-                contest_id = _coerce_int(
-                    context.user_data.get('contest_id'), 0)
+
+            # 🔴 v9.7.28 FIX-CJ-1: قبول "contest_join" أو "contest_join:<id>"
+            if data == "contest_join" or data.startswith("contest_join:"):
+                # استخراج contest_id من data أولاً
+                contest_id = 0
+                if ':' in data:
+                    try:
+                        contest_id = _coerce_int(data.split(":", 1)[1])
+                    except Exception:
+                        contest_id = 0
+                # fallback: من user_data (للتوافق الخلفي)
+                if contest_id <= 0:
+                    contest_id = _coerce_int(
+                        context.user_data.get('contest_id'), 0)
                 if contest_id <= 0:
                     await safe_edit(query,
                         await _trans('invalid_data', lang, "❌"),
-                        bot=context.bot); return
+                        bot=context.bot)
+                    return
+
+                already = False
                 ok = False
-                if hasattr(DB, 'join_contest'):
-                    try:
-                        ok = await DB.join_contest(user_id, contest_id)
-                    except Exception as e:
-                        logger.warning(f"join_contest: {e}")
+                try:
+                    if hasattr(DB, 'check_contest_joined'):
+                        try:
+                            already = await DB.check_contest_joined(
+                                contest_id, user_id,
+                                include_finished=False)
+                        except Exception as _ce:
+                            logger.debug(
+                                f"check_contest_joined: {_ce}")
+                    if not already and hasattr(DB, 'join_contest'):
+                        # 🔴 الترتيب الصحيح: (contest_id, user_id)
+                        ok = await DB.join_contest(contest_id, user_id)
+                except Exception as e:
+                    logger.warning(f"join_contest: {e}")
+
                 if ok:
                     await safe_edit(query,
-                        await _trans('contest_joined', lang, "✅"),
+                        await _trans('contest_joined', lang,
+                                     "✅ تم تسجيل مشاركتك بنجاح!"),
+                        bot=context.bot)
+                elif already:
+                    await safe_edit(query,
+                        await _trans('contest_already_joined', lang,
+                                     "ℹ️ أنت مشارك مسبقاً في هذه المسابقة."),
                         bot=context.bot)
                 else:
                     await safe_edit(query,
-                        await _trans('contest_join_failed', lang, "❌"),
+                        await _trans('contest_join_failed', lang,
+                                     "❌ فشل تسجيل المشاركة "
+                                     "(ربما انتهت المسابقة)."),
                         bot=context.bot)
                 return
+
             if data == "contest_winners":
                 winners = await DB.get_contest_winners(10)
                 if winners:
@@ -4494,7 +4435,6 @@ class CallbackHandlers:
                     await safe_edit(query,
                         await _trans('invalid_data', lang, "❌"),
                         bot=context.bot); return
-                # 🆕 v9.7.27 FIX-6: استخدام _is_banned للاتساق
                 row = await DB.fetchone(
                     "SELECT banned FROM user_channels WHERE id=?",
                     (ch_db_id,))
@@ -4524,7 +4464,6 @@ class CallbackHandlers:
                     (chat_id,))
                 row_d = _row_to_dict(row) or {}
                 if row_d:
-                    # 🆕 v9.7.27 FIX-4: استخدام _is_banned
                     new_val = 0 if _is_banned(row_d) else 1
                     db_ok = False
                     try:
@@ -5227,21 +5166,16 @@ try:
             _missing_check.append(_name)
     if _missing_check:
         logger.critical(
-            f"🚨 v9.7.27: دوال مفقودة: {_missing_check}")
+            f"🚨 v9.7.28: دوال مفقودة: {_missing_check}")
     else:
         logger.info(
-            "🛡️ handlers_callback.py v9.7.27-POST-AUDIT-FIXES | "
-            "REMOVED: _channels_list_module + 6 _delegate_* + "
-            "DELEGATE-FIRST block | "
+            "🛡️ handlers_callback.py v9.7.28-CONTEST-JOIN-FIX | "
+            "FIX-CJ-1: contest_join:<id> pattern + correct "
+            "join_contest(contest_id, user_id) order | "
             "KEPT: 16/16 methods (fallbacks) | "
-            "NEW: FIX-1 (post_list escape) + FIX-2 (tz-aware "
-            "fromtimestamp) + FIX-3 (sched ownership recheck) + "
-            "FIX-4 (toggle_gr _is_banned) + FIX-5 (buy_sub "
-            "parse) + FIX-6 (toggle_ch _is_banned) | "
-            "C-1: channels+groups banned+escape | "
-            "H-1: _is_banned() unified | "
-            "H-3: safe_edit parse warn | "
-            "H-9: publish_all list+zip | "
+            "v9.7.27: FIX-1..6 (post_list escape, tz-aware, "
+            "sched ownership recheck, _is_banned unified, "
+            "buy_sub parse, toggle_ch _is_banned) | "
             "max_tasks_per_user=%d",
             _MAX_TASKS_PER_USER)
 except Exception as _be:
