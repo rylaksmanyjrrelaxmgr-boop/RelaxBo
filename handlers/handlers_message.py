@@ -1,28 +1,43 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-handlers_message.py - v7.18.33 (BATCH-SETTINGS)
+handlers_message.py - v7.18.34 (POLISH-1)
 (متوافق مع detectors v4.1.0 + banned_words_manager v1.2.0)
 =============================================================================
+🆕 v7.18.34 (POLISH-1):
+    🔴 POLISH-1: penalty_duration_* — جسر فعلي بين الكتابة والقراءة.
+        _handle_wait_penalty_duration_text يكتب في DB.set_setting،
+        الآن _resolve_penalty يقرأ منه عبر كاش 60s + fallback.
+        بدون هذا: المستخدم يُدخل المدة، تُحفظ، لكن لا تُطبَّق أبداً.
+
+    🟠 POLISH-2: كاش {} للمجموعات الفارغة (لا صف في DB).
+        بدون هذا: كل رسالة لمجموعة جديدة تُنفّذ BATCH query.
+        الآن: تُخزَّن {} في _sec_settings_local_cache (5s TTL).
+
+    🟠 POLISH-3: asyncio.gather لـ set_security + set_auto_reply_settings
+        (كتابة متوازية للـSmartCache).
+
+    🟠 POLISH-4: stored يعتمد على نتيجة set_setting الفعلية.
+        (كان: stored=True دائماً — حتى لو فشل الحفظ).
+
+    🟠 POLISH-5: WAIT_AUTO_DEL يحفظ الحالة عند فشل DB فقط.
+        (نجاح/غير-موجود → مسح. خطأ استثنائي → إبقاء لإعادة المحاولة).
+
+    🟡 POLISH-6: _is_dev_user helper موحّد (كان مُكرَّراً 5 مرات).
+
+    🟡 POLISH-7: logger.warning عند غياب دوال DB.import_* في
+        _handle_wait_github_url_text (تشخيص أفضل).
+
+    🟡 POLISH-8: توثيق _EXTERNAL_HANDLED_STATES بأسماء الـhandlers
+        المسؤولة بشكل صريح.
+
 🆕 v7.18.33 (BATCH-SETTINGS):
     ⚡ BATCH-SETTINGS: دمج استعلامَي group_security + auto_reply_settings
         في استعلام واحد على PostgreSQL (1 RTT بدل 2).
-        التوفير: ~238ms لكل رسالة مجموعة.
-    🔴 REVIEW-FIX-1: استخدام _row_to_dict_local بدل isinstance(row, dict)
-        — asyncpg يعيد Record لا dict (Bug إنتاجي كان سيفقد الإعدادات).
-    🟠 REVIEW-FIX-2: EXISTS(...) للتفريق "صف موجود" من "لا صف"
-        — لتجنب كاش defaults مصطنعة تحجب إعدادات لاحقة.
-    🟡 REVIEW-FIX-3: عدم دمج _DEFAULT_SECURITY_SETTINGS — للـconsistency.
-    🟡 REVIEW-FIX-4: logger.info بدل debug — ليظهر في Render.
-    🟡 REVIEW-FIX-5: _process_auto_reply تقبل preloaded_ars=None.
+    🔴 REVIEW-FIX-1..5: محفوظة.
 
 🆕 v7.18.32 (FSM-COVERAGE-COMPLETE):
-    🔴 FIX-FSM-1: 4 معالجات جديدة لـ4 حالات FSM كانت غير مُعالَجة.
-    🔴 FIX-FSM-2: WAIT_UPDATE_CH — إزالة من _PRIVATE_HANDLERS_MAP.
-    🟠 FIX-FSM-3: WAIT_IMPORT_FILE + WAIT_BACKUP_FILE أُضيفا إلى
-        _EXTERNAL_HANDLED_STATES مع TODO موثّق.
-    🟠 FIX-BOOL-1: _handle_support_mode_text — فحص bool قبل int.
-    🟡 FIX-DEAD-1: توثيق "WAIT_POST" كـ dead entry.
+    🔴 FIX-FSM-1..3, 🟠 FIX-BOOL-1, 🟡 FIX-DEAD-1 — محفوظة.
 
 🆕 v7.18.31 (FIX-AL1-FOLLOWUP) — محفوظ.
 🆕 v7.18.30 (C11-D3-D4-FIXES) — محفوظ.
@@ -46,7 +61,7 @@ import os
 import re
 import inspect
 import ipaddress
-import json                      # 🆕 v7.18.33: لتحليل row_to_json
+import json                      # v7.18.33: لتحليل row_to_json
 import threading
 import functools
 from html import escape
@@ -363,6 +378,30 @@ def _as_bool(value, default=False) -> bool:
     return default
 
 
+# 🆕 v7.18.34 POLISH-6: فحص موحّد لصلاحيات المطوّر (بدل التكرار 5×)
+def _is_dev_user(user_id) -> bool:
+    """فحص موحّد لصلاحيات المطور (developer/owner)."""
+    try:
+        if not user_id:
+            return False
+        try:
+            uid = int(user_id)
+        except (TypeError, ValueError):
+            return False
+        for attr in ('is_developer', 'is_dev', 'is_owner'):
+            fn = getattr(CONFIG, attr, None)
+            if callable(fn):
+                try:
+                    if fn(uid):
+                        return True
+                except Exception:
+                    continue
+        primary = int(getattr(CONFIG, 'PRIMARY_OWNER_ID', 0) or 0)
+        return bool(primary and uid == primary)
+    except Exception:
+        return False
+
+
 def _row_to_dict_local(row) -> Optional[Dict[str, Any]]:
     if row is None:
         return None
@@ -628,6 +667,77 @@ def _invalidate_sec_settings_local(chat_id: Optional[int] = None) -> None:
             _sec_settings_local_cache.pop(int(chat_id), None)
     except Exception:
         pass
+
+
+# 🆕 v7.18.34 POLISH-1: كاش مدة العقوبات (من DB.set_setting)
+_PENALTY_DURATION_OVERRIDE_CACHE: Dict[str, Tuple[Optional[int], float]] = {}
+_PENALTY_DURATION_OVERRIDE_TTL = 60.0
+_PENALTY_DURATION_OVERRIDE_MAX = 64
+
+
+def _invalidate_penalty_duration_override_cache(
+    penalty_type: Optional[str] = None,
+) -> None:
+    try:
+        if penalty_type is None:
+            _PENALTY_DURATION_OVERRIDE_CACHE.clear()
+        else:
+            _PENALTY_DURATION_OVERRIDE_CACHE.pop(penalty_type, None)
+    except Exception:
+        pass
+
+
+async def _get_penalty_duration_override(
+    penalty_type: str,
+) -> Optional[int]:
+    """
+    🆕 v7.18.34 POLISH-1: قراءة مدة العقوبة من DB.set_setting
+    (المفتاح: penalty_duration_{ptype}) مع كاش 60s.
+
+    هذه هي الجسر الذي يربط:
+      • _handle_wait_penalty_duration_text (يكتب)
+      • _resolve_penalty (يقرأ عبر هذه الدالة)
+    """
+    if not penalty_type:
+        return None
+    now = time.monotonic()
+    entry = _PENALTY_DURATION_OVERRIDE_CACHE.get(penalty_type)
+    if entry is not None:
+        cached_value, cached_at = entry
+        if now - cached_at < _PENALTY_DURATION_OVERRIDE_TTL:
+            return cached_value
+
+    value: Optional[int] = None
+    try:
+        getter = getattr(DB, "get_setting", None)
+        if callable(getter):
+            raw = getter(f"penalty_duration_{penalty_type}")
+            if asyncio.iscoroutine(raw):
+                raw = await raw
+            if raw is not None and str(raw).strip():
+                try:
+                    parsed = int(str(raw).strip())
+                    if parsed >= 0:
+                        value = parsed
+                except (ValueError, TypeError):
+                    value = None
+    except Exception as e:
+        logger.debug(
+            "_get_penalty_duration_override(%s): %s",
+            penalty_type, e)
+
+    if len(_PENALTY_DURATION_OVERRIDE_CACHE) >= _PENALTY_DURATION_OVERRIDE_MAX:
+        try:
+            oldest = sorted(
+                _PENALTY_DURATION_OVERRIDE_CACHE.items(),
+                key=lambda kv: kv[1][1],
+            )[: max(1, _PENALTY_DURATION_OVERRIDE_MAX // 4)]
+            for k, _ in oldest:
+                _PENALTY_DURATION_OVERRIDE_CACHE.pop(k, None)
+        except Exception:
+            pass
+    _PENALTY_DURATION_OVERRIDE_CACHE[penalty_type] = (value, now)
+    return value
 
 
 _ADMIN_CHECK_CACHE_TTL = 30.0
@@ -952,7 +1062,7 @@ async def _lazy_init_columns(bot=None):
         _columns_last_attempt_ts = now
 
         db_type = getattr(DB, "DB_TYPE", "sqlite")
-        logger.info("🔧 v7.18.33: Auto-migration (DB_TYPE=%s)", db_type)
+        logger.info("🔧 v7.18.34: Auto-migration (DB_TYPE=%s)", db_type)
 
         cols = [
             ("delete_protected_any", "INTEGER DEFAULT 0",
@@ -1059,6 +1169,7 @@ async def _lazy_init_columns(bot=None):
         _invalidate_group_log_cache()
         _invalidate_sec_settings_local()
         _invalidate_admin_check_cache()
+        _invalidate_penalty_duration_override_cache()
 
         if migration_ok:
             _columns_initialized = True
@@ -2411,6 +2522,17 @@ def _prune_perf_caches() -> int:
         removed += len(stale)
     except Exception:
         pass
+    # 🆕 v7.18.34 POLISH-1: prune penalty override cache
+    try:
+        stale = [
+            k for k, (_, ts) in _PENALTY_DURATION_OVERRIDE_CACHE.items()
+            if now - ts > _PENALTY_DURATION_OVERRIDE_TTL * 5
+        ]
+        for k in stale:
+            _PENALTY_DURATION_OVERRIDE_CACHE.pop(k, None)
+        removed += len(stale)
+    except Exception:
+        pass
     if removed > 0:
         logger.debug("🧹 _prune_perf_caches: حُذف %d إدخال", removed)
     return removed
@@ -2585,33 +2707,32 @@ async def get_security_settings_cached(chat_id) -> dict:
 
 
 # ═══════════════════════════════════════════════════════════════════
-# 🆕 v7.18.33 BATCH-SETTINGS: دالة الدمج
+# 🆕 v7.18.33 BATCH-SETTINGS + v7.18.34 POLISH-2 (كاش {})
 # ═══════════════════════════════════════════════════════════════════
 
 async def _get_batched_message_settings(
     chat_id: int,
 ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     """
-    🆕 v7.18.33 BATCH-SETTINGS (reviewed):
+    v7.18.33 BATCH-SETTINGS (reviewed) + v7.18.34 POLISH-2:
         جلب group_security + auto_reply_settings في استعلام واحد
-        على PostgreSQL (1 RTT بدل 2). fallback لاستعلامين على
-        SQLite/MySQL أو عند أي فشل.
+        على PostgreSQL (1 RTT بدل 2).
 
-    الإصلاحات بعد المراجعة:
-      🔴 استخدام _row_to_dict_local بدل isinstance(row, dict) — لأن
-         asyncpg يعيد Record وليس dict. تجاهل هذه النقطة كان سيؤدي
-         إلى فقدان إعدادات كل المجموعات صامتاً لمدة TTL.
+    v7.18.34 POLISH-2:
+      • كاش النتائج الفارغة أيضاً (مجموعات بلا صف) في
+        _sec_settings_local_cache، لتجنّب BATCH متكرر كل رسالة.
+      • تُخزَّن {} في local cache بـ TTL=5s (نفس TTL الحالي).
+      • settings_cache (SmartCache) يُكتب فيها فقط عند وجود صف
+        فعلي (sec_exists/ars_exists)، للحفاظ على السلوك الأصلي
+        الذي لا يُخزِّن الفارغ.
 
-      🟠 EXISTS(...) للتفريق بين "صف موجود" و "لا صف" — لتجنب
-         كاش defaults مصطنعة تحجب الإعدادات الحقيقية لـ5 دقائق.
-
-      🟡 عدم دمج _DEFAULT_SECURITY_SETTINGS — للـconsistency مع
-         get_security_settings_cached الذي يُرجع {} عند غياب الصف.
-
-      🟡 logger.info بدل debug — ليظهر في Render (LOG_LEVEL=INFO).
-
-      🟡 json.loads داخل try/except — سطر JSON تالف لا يُسقط
-         الدالة بالكامل.
+    ملاحظات المراجعة (v7.18.33):
+      🔴 _row_to_dict_local بدل isinstance(row, dict) — asyncpg
+         يعيد Record.
+      🟠 EXISTS(...) للتفريق بين "صف موجود" و "لا صف".
+      🟡 لا دمج _DEFAULT_SECURITY_SETTINGS.
+      🟡 logger.info (لا debug).
+      🟡 json.loads داخل try/except.
     """
     now = time.monotonic()
     try:
@@ -2685,8 +2806,9 @@ async def _get_batched_message_settings(
                     logger.debug(
                         "BATCH-SETTINGS: ars JSON parse: %s", _je)
 
-            # 🟡 كاش فقط عند وجود صف فعلي (لا defaults مصطنعة)
-            if sec_exists and isinstance(sec_data, dict):
+            # ─── 🟠 POLISH-2: كاش النتائج الفارغة في local cache ───
+            # (حتى لو sec_exists=False)، بـ TTL=5s
+            if isinstance(sec_data, dict):
                 try:
                     if (len(_sec_settings_local_cache)
                             >= _SEC_SETTINGS_LOCAL_MAX):
@@ -2700,16 +2822,23 @@ async def _get_batched_message_settings(
                         sec_data, now)
                 except Exception:
                     pass
-                try:
-                    await settings_cache.set_security(
-                        chat_id_int, sec_data)
-                except Exception:
-                    pass
 
+            # SmartCache: فقط عند وجود صف فعلي (للحفاظ على
+            # السلوك الأصلي: get_security_settings_cached لا
+            # يُخزِّن الفارغ)
+            # 🟠 POLISH-3: كتابات متوازية
+            gather_coros = []
+            if sec_exists and isinstance(sec_data, dict):
+                gather_coros.append(
+                    settings_cache.set_security(chat_id_int, sec_data))
             if ars_exists and isinstance(ars_data, dict):
+                gather_coros.append(
+                    settings_cache.set_auto_reply_settings(
+                        chat_id_int, ars_data))
+            if gather_coros:
                 try:
-                    await settings_cache.set_auto_reply_settings(
-                        chat_id_int, ars_data)
+                    await asyncio.gather(
+                        *gather_coros, return_exceptions=True)
                 except Exception:
                     pass
 
@@ -2750,6 +2879,8 @@ async def get_auto_reply_settings_cached(chat_id) -> dict:
 async def invalidate_security_cache(chat_id=None):
     await settings_cache.invalidate_security(chat_id)
     _invalidate_sec_settings_local(chat_id)
+    # 🆕 v7.18.34: أعد تعيين كاش تجاوزات المدة أيضاً
+    _invalidate_penalty_duration_override_cache()
 
 
 async def invalidate_auto_reply_cache(chat_id=None):
@@ -3160,26 +3291,23 @@ def _accepts_state_arg(handler, handler_name: str) -> bool:
 
 
 # ═══════════════════════════════════════════════════════════════════
-# 🆕 v7.18.32 FIX-FSM-2/3: حالات يتولاها handler خارجي
+# 🆕 v7.18.32 FIX-FSM-2/3 + v7.18.34 POLISH-8 (توثيق مُحسَّن)
 # ═══════════════════════════════════════════════════════════════════
-# هذه الحالات يُسجَّل لها handler في ملف آخر (handlers_group_log,
-# handlers_command, ...). وجودها في handle_private → لا نعرض
-# رسالة "لم أتعرف على العملية" ولا نُشعر المطور — فقط نتجاهل بصمت.
+# الحالات التي يُسجَّل لها handler في ملف آخر (خارج handle_private).
+# PTB v20+ ينفّذ كل الـ handlers المطابقة بالترتيب في نفس الـgroup.
+# بدون هذا الفلتر، handle_private قد يُظهر رسالة "لم أتعرف على
+# العملية" حتى لو تولّى handler آخر الرسالة بالفعل.
 #
-# السبب: PTB v20+ ينفّذ كل الـ handlers المطابقة بالترتيب في نفس
-# الـ group. حتى لو handler آخر تولّى الرسالة، handle_private قد
-# يُستدعى أيضاً. بدون هذا الفلتر سيُظهر رسالة خطأ مضلِّلة للمستخدم.
+# الحل: تجاهل صامت (لا رسالة، لا إشعار مطوّر) عند رؤية أي من هذه
+# الحالات في handle_private.
 _EXTERNAL_HANDLED_STATES = frozenset({
-    # 🆕 v7.18.31: يتولاها handlers_group_log.receive_log_channel
+    # ─── handlers_group_log.receive_log_channel ───
     "WAIT_LOG_CH",
-    # 🆕 v7.18.32 FIX-FSM-2: كان مُوجَّهاً خطأً إلى
-    # _handle_wait_channel_text → الآن يتولاه
-    # CommandHandlers.handle_text (DB.set_setting('updates_channel')).
+    # ─── CommandHandlers.handle_text (تحديث قناة التحديثات) ───
     "WAIT_UPDATE_CH",
-    # 🆕 v7.18.32 FIX-FSM-3: يحتاجان معالج Documents في المستقبل.
-    # حاليّاً نتجاهل بصمت (لا رسالة "لم أتعرف") لأن المستخدم قد
-    # يرسل ملفاً ولا داعي لإظهار خطأ عام. TODO: إضافة معالج
-    # Documents في handlers_message لاستقبال ملفات JSON/db.
+    # ─── (TODO) معالج Documents مستقبلي ───
+    # سيُعالَج في handlers_document (لم يُبنَ بعد).
+    # حالياً: تجاهل صامت لتجنّب رسالة "لم أتعرف" عند إرسال ملف.
     "WAIT_IMPORT_FILE",
     "WAIT_BACKUP_FILE",
 })
@@ -3201,18 +3329,9 @@ class MessageHandlers:
         "WAIT_CHANNEL": "_handle_wait_channel_text",
         "WAIT_ADD_CHANNEL": "_handle_wait_channel_text",
         # 🆕 v7.18.32 FIX-FSM-2: WAIT_UPDATE_CH أُزيل من هنا.
-        # كان يُوجَّه إلى "_handle_wait_channel_text" → يُحلّل مدخل
-        # قناة التحديثات (developer setting) كإضافة قناة مستخدم!
-        # الآن في _EXTERNAL_HANDLED_STATES → يتولاه
-        # CommandHandlers.handle_text الذي يعالجه صحيحاً.
         # WAIT_UPDATE_CHANNEL يبقى (alias قديم لـ WAIT_ADD_CHANNEL).
         "WAIT_UPDATE_CHANNEL": "_handle_wait_channel_text",
         # 🔴 v7.18.31 FIX-AL1-FOLLOWUP: WAIT_LOG_CH أُزيل من هنا.
-        # كان يُوجَّه إلى "_handle_wait_channel_text" → يسرق
-        # إدخال قناة السجل من handlers_group_log.receive_log_channel
-        # ويعالجه كإضافة قناة مستخدم جديدة! (متسق مع
-        # handlers_channels_list v2.1.2 FIX-AL1).
-        # WAIT_LOG_CH موجود في _EXTERNAL_HANDLED_STATES.
         # 🆕 v7.18.28 FIX-ADDING-1: حالات إضافة المنشورات
         "ADDING_POSTS": "_handle_adding_posts_text",
         # 🟡 FIX-DEAD-1 (v7.18.32): "WAIT_POST" — dead entry
@@ -3220,8 +3339,7 @@ class MessageHandlers:
         "WAIT_POST": "_handle_adding_posts_text",
         # 🆕 v7.18.29 FIX-SUPPORT-1: حالة الدعم الفني
         "SUPPORT_MODE": "_handle_support_mode_text",
-        # 🆕 v7.18.32 FIX-FSM-1: حالات FSM ناقصة (كانت تُعيَّن في
-        # handlers_callback لكن لا يلتقطها أي مسار → "حالة غير مدعومة").
+        # 🆕 v7.18.32 FIX-FSM-1: حالات FSM ناقصة
         "WAIT_AUTO_KEY": "_handle_wait_auto_key_text",
         "WAIT_AUTO_DEL": "_handle_wait_auto_del_text",
         "WAIT_PENALTY_DURATION": "_handle_wait_penalty_duration_text",
@@ -3411,6 +3529,7 @@ class MessageHandlers:
             pass
 
         # 🆕 v7.18.33 BATCH-SETTINGS: استعلام واحد بدل اثنين (PG)
+        # 🆕 v7.18.34 POLISH-2: كاش النتائج الفارغة أيضاً
         settings, _preloaded_ars = await _get_batched_message_settings(
             chat_id)
         if not isinstance(settings, dict):
@@ -3945,6 +4064,12 @@ class MessageHandlers:
 
     @staticmethod
     async def _resolve_penalty(chat_id, violation_type, settings):
+        """
+        🆕 v7.18.34 POLISH-1: بعد حساب ptype، اقرأ المدة من
+        DB.set_setting (penalty_duration_{ptype}) عبر كاش 60s —
+        هذا هو الجسر الذي كان مفقوداً بين _handle_wait_penalty_
+        duration_text (يكتب) و _resolve_penalty (يقرأ).
+        """
         penalty_rule = None
         try:
             penalty_rule = await DB.get_violation_penalty(
@@ -3988,6 +4113,23 @@ class MessageHandlers:
             ptype = 'mute'
         duration = MessageHandlers._get_penalty_duration(
             settings, violation_type)
+
+        # 🆕 v7.18.34 POLISH-1: تجاوز المدة من DB.set_setting
+        try:
+            override = await _get_penalty_duration_override(ptype)
+            if override is not None:
+                if override <= 0:
+                    duration = 0  # دائم
+                else:
+                    duration = override
+                logger.debug(
+                    "⏱️ penalty-duration-override | chat=%s "
+                    "vtype=%s ptype=%s → %d",
+                    chat_id, violation_type, ptype, duration)
+        except Exception as _e:
+            logger.debug(
+                "penalty-duration-override lookup: %s", _e)
+
         return ptype, duration
 
     @staticmethod
@@ -4763,13 +4905,6 @@ class MessageHandlers:
     ):
         """
         🆕 v7.18.32 FIX-FSM-1: إدخال كلمة مفتاحية لرد تلقائي جديد.
-
-        يُعيَّن عبر زر "auto_reply_add" في handlers_callback:
-            StateManager.set(user_id, WAIT_AUTO_KEY)
-            context.user_data['auto_chat'] = chat_id
-
-        بعد استقبال الكلمة → نحتاج رداً فعلياً. نُحوّل الحالة إلى
-        WAIT_REPLY_RESPONSE ونجمع الرد في الخطوة التالية.
         """
         user_id = (
             update.effective_user.id if update.effective_user else None)
@@ -4824,10 +4959,8 @@ class MessageHandlers:
     ):
         """
         🆕 v7.18.32 FIX-FSM-1: حذف رد تلقائي بالكلمة المفتاحية.
-
-        يُعيَّن عبر زر "auto_reply_del":
-            StateManager.set(user_id, WAIT_AUTO_DEL)
-            context.user_data['auto_chat'] = chat_id
+        🆕 v7.18.34 POLISH-5: clear الحالة فقط عند نتيجة نهائية
+           (نجاح أو "غير موجود")، نبقيها عند فشل استثنائي.
         """
         user_id = (
             update.effective_user.id if update.effective_user else None)
@@ -4844,17 +4977,25 @@ class MessageHandlers:
             return
 
         keyword = message.text.strip()
-        StateManager.clear(user_id)
-        try:
-            context.user_data.pop('auto_chat', None)
-        except Exception:
-            pass
+
+        def _clear_state():
+            try:
+                StateManager.clear(user_id)
+            except Exception:
+                pass
+            try:
+                context.user_data.pop('auto_chat', None)
+            except Exception:
+                pass
 
         if not keyword:
+            _clear_state()
             return
 
         removed = False
         removed_error = None
+        definitive = False  # هل حصلنا على نتيجة نهائية؟
+
         try:
             for name in (
                 "remove_auto_reply", "delete_reply", "remove_reply",
@@ -4867,24 +5008,25 @@ class MessageHandlers:
                     result = fn(chat_id, keyword)
                     if asyncio.iscoroutine(result):
                         result = await result
-                    # دعم tuple (ok, reason) و int
                     if isinstance(result, tuple) and result:
                         removed = bool(result[0])
                     else:
                         removed = bool(result)
+                    definitive = True
                     break
                 except Exception as e:
                     removed_error = str(e)[:100]
                     continue
 
             # Fallback مباشر عبر SQL
-            if not removed and removed_error is None:
+            if not definitive and removed_error is None:
                 try:
                     rc = await DB.execute(
                         "DELETE FROM auto_replies "
                         "WHERE chat_id = ? AND keyword = ?",
                         (chat_id, keyword))
                     removed = bool(rc)
+                    definitive = True
                 except Exception as e:
                     removed_error = str(e)[:100]
         except Exception as e:
@@ -4892,6 +5034,7 @@ class MessageHandlers:
             logger.warning(
                 "_handle_wait_auto_del: %s", e)
 
+        # إبلاغ المستخدم
         try:
             if removed:
                 try:
@@ -4907,17 +5050,35 @@ class MessageHandlers:
                     pass
                 await safe_send(
                     context.bot, user_id, msg, parse_mode='HTML')
-            else:
+            elif definitive:
+                # نتيجة نهائية: غير موجود
                 msg = await _trans(
                     'reply_not_found', lang,
                     "❌ الرد غير موجود.")
                 await safe_send(context.bot, user_id, msg)
+            else:
+                # فشل استثنائي — نبقي الحالة
+                msg = await _trans(
+                    'reply_delete_failed', lang,
+                    "❌ فشل الحذف — حاول مجدداً أو /cancel.")
+                await safe_send(context.bot, user_id, msg)
         except Exception:
             pass
 
+        # 🟠 POLISH-5: مسح الحالة عند نتيجة نهائية فقط
+        if removed or definitive:
+            _clear_state()
+        else:
+            logger.info(
+                "⏸️ WAIT_AUTO_DEL: keeping state for retry | "
+                "user=%s chat=%s err=%s",
+                user_id, chat_id, removed_error or "—")
+
         logger.info(
-            "✅ WAIT_AUTO_DEL: keyword=%r user=%s chat=%s removed=%s",
-            keyword[:40], user_id, chat_id, removed)
+            "✅ WAIT_AUTO_DEL: keyword=%r user=%s chat=%s "
+            "removed=%s definitive=%s err=%s",
+            keyword[:40], user_id, chat_id, removed, definitive,
+            removed_error or "—")
 
     @staticmethod
     async def _handle_wait_penalty_duration_text(
@@ -4926,12 +5087,11 @@ class MessageHandlers:
         """
         🆕 v7.18.32 FIX-FSM-1: مدة العقوبة الافتراضية.
 
-        يُعيَّن عبر زر "pen_<type>":
-            context.user_data['penalty_type'] = "mute"/"ban"/...
-            StateManager.set(user_id, WAIT_PENALTY_DURATION)
-
-        المستخدم يرسل عدد الثواني (0 = دائم). نحاول تخزينه في
-        user_data['pen_timer'] أو في DB كإعداد للمجموعة.
+        🆕 v7.18.34 POLISH-1 + POLISH-4:
+          • stored يعتمد على نتيجة set_setting الفعلية.
+          • عند النجاح: تحديث _PENALTY_DURATION_OVERRIDE_CACHE فوراً.
+          • _resolve_penalty يقرأ من هذا الكاش عبر
+            _get_penalty_duration_override.
         """
         user_id = (
             update.effective_user.id if update.effective_user else None)
@@ -4967,19 +5127,36 @@ class MessageHandlers:
                 parse_mode='HTML')
             return
 
-        # محاولة تخزين في DB كإعداد موحّد للمجموعة أو عالمياً
+        # 🟠 POLISH-4: stored يعتمد على نتيجة set_setting
         stored = False
+        set_error = None
         try:
             setter = getattr(DB, "set_setting", None)
             if callable(setter):
                 key = f"penalty_duration_{penalty_type}"
                 result = setter(key, str(duration))
                 if asyncio.iscoroutine(result):
-                    await result
-                stored = True
+                    result = await result
+                # None = لا قيمة معادة (اعتبره نجاحاً)
+                # False/0/"" = فشل صريح
+                if result is None:
+                    stored = True
+                else:
+                    stored = bool(result)
+            else:
+                set_error = "DB.set_setting غير متاح"
         except Exception as e:
+            set_error = str(e)[:120]
             logger.debug(
                 "_handle_wait_penalty_duration: set_setting: %s", e)
+
+        # 🟠 POLISH-1: تحديث كاش التجاوز فوراً عند النجاح
+        if stored:
+            try:
+                _PENALTY_DURATION_OVERRIDE_CACHE[penalty_type] = (
+                    duration, time.monotonic())
+            except Exception:
+                pass
 
         try:
             label_map = {
@@ -4990,14 +5167,20 @@ class MessageHandlers:
             label = label_map.get(penalty_type, penalty_type)
             duration_str = (
                 "دائم" if duration == 0 else f"{duration} ثانية")
-            msg = (
-                f"✅ تم تعيين مدة <b>{label}</b> إلى: "
-                f"<b>{duration_str}</b>"
-            )
-            if not stored:
-                msg += (
-                    "\n\n⚠️ لم يُحفظ في DB — "
-                    "استخدم /cancel وأعد المحاولة.")
+            if stored:
+                msg = (
+                    f"✅ تم تعيين مدة <b>{label}</b> إلى: "
+                    f"<b>{duration_str}</b>\n\n"
+                    f"💡 ستُطبَّق على العقوبات التالية تلقائياً."
+                )
+            else:
+                msg = (
+                    f"⚠️ لم يُحفظ إعداد المدة.\n"
+                    f"المحاولة: <b>{label}</b> = "
+                    f"<b>{duration_str}</b>"
+                )
+                if set_error:
+                    msg += f"\n\n<code>{escape(set_error)}</code>"
             await safe_send(
                 context.bot, user_id, msg, parse_mode='HTML')
         except Exception:
@@ -5005,8 +5188,9 @@ class MessageHandlers:
 
         logger.info(
             "✅ WAIT_PENALTY_DURATION: type=%s duration=%d "
-            "user=%s stored=%s",
-            penalty_type, duration, user_id, stored)
+            "user=%s stored=%s err=%s",
+            penalty_type, duration, user_id, stored,
+            set_error or "—")
 
     @staticmethod
     async def _handle_wait_github_url_text(
@@ -5014,9 +5198,8 @@ class MessageHandlers:
     ):
         """
         🆕 v7.18.32 FIX-FSM-1: استيراد ردود من GitHub URL.
-
-        يُعيَّن عبر زر "admin_import_github":
-            StateManager.set(user_id, WAIT_GITHUB_URL)
+        🆕 v7.18.34 POLISH-6/7: _is_dev_user + warning عند غياب
+           دوال DB.import_*.
         """
         user_id = (
             update.effective_user.id if update.effective_user else None)
@@ -5028,19 +5211,8 @@ class MessageHandlers:
         lang = await _ensure_lang(update, context)
         raw_url = message.text.strip()
 
-        # فحص developer (الزر admin-only)
-        try:
-            is_dev = False
-            for attr in ('is_developer', 'is_dev', 'is_owner'):
-                fn = getattr(CONFIG, attr, None)
-                if callable(fn) and fn(user_id):
-                    is_dev = True
-                    break
-            if (not is_dev and user_id == int(
-                    getattr(CONFIG, 'PRIMARY_OWNER_ID', 0) or 0)):
-                is_dev = True
-        except Exception:
-            is_dev = False
+        # 🟡 POLISH-6: فحص موحّد
+        is_dev = _is_dev_user(user_id)
 
         StateManager.clear(user_id)
         if not is_dev:
@@ -5058,6 +5230,7 @@ class MessageHandlers:
         imported = False
         count = 0
         error_msg = None
+        attempted: List[str] = []
         for name in (
             "import_replies_from_github",
             "import_from_github",
@@ -5066,6 +5239,7 @@ class MessageHandlers:
             fn = getattr(DB, name, None)
             if not callable(fn):
                 continue
+            attempted.append(name)
             try:
                 result = fn(raw_url)
                 if asyncio.iscoroutine(result):
@@ -5088,6 +5262,16 @@ class MessageHandlers:
                     "_handle_wait_github_url: %s: %s", name, e)
                 continue
 
+        # 🟡 POLISH-7: تشخيص أوضح عند غياب الدوال
+        if not imported and not attempted:
+            logger.warning(
+                "🚨 WAIT_GITHUB_URL: لا توجد دالة استيراد في DB "
+                "| user=%s url=%r | tried=%s",
+                user_id, raw_url[:80],
+                ["import_replies_from_github",
+                 "import_from_github",
+                 "import_replies_url"])
+
         if imported:
             try:
                 await invalidate_auto_reply_cache(-1)
@@ -5103,7 +5287,12 @@ class MessageHandlers:
             await safe_send(
                 context.bot, user_id, msg, parse_mode='HTML')
         else:
-            err_text = error_msg or "دالة الاستيراد غير متاحة"
+            if not attempted:
+                err_text = (
+                    "دالة الاستيراد غير متاحة — "
+                    "تأكد من نسخة database.py")
+            else:
+                err_text = error_msg or "فشل غير معروف"
             await safe_send(
                 context.bot, user_id,
                 f"❌ فشل الاستيراد من GitHub.\n\n"
@@ -5112,8 +5301,9 @@ class MessageHandlers:
                 parse_mode='HTML')
 
         logger.info(
-            "✅ WAIT_GITHUB_URL: url=%r user=%s imported=%s count=%d",
-            raw_url[:80], user_id, imported, count)
+            "✅ WAIT_GITHUB_URL: url=%r user=%s imported=%s count=%d "
+            "attempted=%s",
+            raw_url[:80], user_id, imported, count, attempted)
 
     # ═══════════════════════════════════════════════════════════════════
     # 🆕 v7.18.21 FIX-ROUTE-2: handle_private مع 7 مسارات fallback
@@ -5152,8 +5342,6 @@ class MessageHandlers:
             # ═══════════════════════════════════════════════════════════
             # 🔴 v7.18.32 FIX-FSM-2/3:
             # تجاهل بصمت للحالات التي يتولاها handler خارجي.
-            # بدون هذا: handle_private يُظهر "لم أتعرف على العملية"
-            # حتى لو تولّى handler آخر (مثل handlers_group_log) الرسالة.
             # ═══════════════════════════════════════════════════════════
             if state_str in _EXTERNAL_HANDLED_STATES:
                 logger.debug(
@@ -5304,6 +5492,8 @@ class MessageHandlers:
             context.user_data.pop('ban_chat', None)
             context.user_data.pop('reply_chat', None)
             context.user_data.pop('reply_trigger_pending', None)
+            context.user_data.pop('auto_chat', None)
+            context.user_data.pop('penalty_type', None)
             clear_lang_cache(context)
             lang = await _ensure_lang(update, context)
             msg = await _trans(
@@ -5497,20 +5687,8 @@ class MessageHandlers:
         if not user_id:
             return
         lang = await _ensure_lang(update, context)
-        try:
-            is_dev = False
-            for attr in ('is_developer', 'is_dev', 'is_owner'):
-                fn = getattr(CONFIG, attr, None)
-                if callable(fn) and fn(user_id):
-                    is_dev = True
-                    break
-            if (not is_dev
-                    and user_id == getattr(
-                        CONFIG, 'PRIMARY_OWNER_ID', -1)):
-                is_dev = True
-        except Exception:
-            is_dev = False
-        if not is_dev:
+        # 🟡 POLISH-6: فحص موحّد
+        if not _is_dev_user(user_id):
             try:
                 msg = await _trans(
                     'ban_add_no_perms', lang,
@@ -5709,20 +5887,8 @@ class MessageHandlers:
         if not user_id:
             return
         lang = await _ensure_lang(update, context)
-        try:
-            is_dev = False
-            for attr in ('is_developer', 'is_dev', 'is_owner'):
-                fn = getattr(CONFIG, attr, None)
-                if callable(fn) and fn(user_id):
-                    is_dev = True
-                    break
-            if (not is_dev
-                    and user_id == getattr(
-                        CONFIG, 'PRIMARY_OWNER_ID', -1)):
-                is_dev = True
-        except Exception:
-            is_dev = False
-        if not is_dev:
+        # 🟡 POLISH-6: فحص موحّد
+        if not _is_dev_user(user_id):
             try:
                 msg = await _trans(
                     'ban_add_no_perms', lang,
@@ -6160,19 +6326,8 @@ async def handle_cache_stats_command(update, context):
     if not update.effective_user or not update.effective_message:
         return
     user_id = update.effective_user.id
-    try:
-        is_dev = False
-        for attr in ('is_developer', 'is_dev', 'is_owner'):
-            fn = getattr(CONFIG, attr, None)
-            if callable(fn) and fn(user_id):
-                is_dev = True
-                break
-        if not is_dev and user_id == int(
-                getattr(CONFIG, 'PRIMARY_OWNER_ID', 0) or 0):
-            is_dev = True
-    except Exception:
-        is_dev = False
-    if not is_dev:
+    # 🟡 POLISH-6: فحص موحّد
+    if not _is_dev_user(user_id):
         return
     chat_id = update.effective_chat.id
     now = time.monotonic()
@@ -6234,6 +6389,12 @@ async def handle_cache_stats_command(update, context):
             _admin_check_cache,
             _ADMIN_CHECK_CACHE_MAX,
             _ADMIN_CHECK_CACHE_TTL,
+        ),
+        (
+            "penalty_duration_override",  # 🆕 v7.18.34
+            _PENALTY_DURATION_OVERRIDE_CACHE,
+            _PENALTY_DURATION_OVERRIDE_MAX,
+            _PENALTY_DURATION_OVERRIDE_TTL,
         ),
     ]
     for name, cache, max_size, ttl in _cache_specs:
@@ -6397,19 +6558,8 @@ async def handle_db_idle_command(update, context):
     if not update.effective_user or not update.effective_message:
         return
     user_id = update.effective_user.id
-    try:
-        is_dev = False
-        for attr in ('is_developer', 'is_dev', 'is_owner'):
-            fn = getattr(CONFIG, attr, None)
-            if callable(fn) and fn(user_id):
-                is_dev = True
-                break
-        if not is_dev and user_id == int(
-                getattr(CONFIG, 'PRIMARY_OWNER_ID', 0) or 0):
-            is_dev = True
-    except Exception:
-        is_dev = False
-    if not is_dev:
+    # 🟡 POLISH-6: فحص موحّد
+    if not _is_dev_user(user_id):
         return
     chat_id = update.effective_chat.id
     audit_fn = getattr(DB, 'audit_idle_in_transactions', None)
@@ -6623,6 +6773,13 @@ __all__ = [
     "_EXTERNAL_HANDLED_STATES",
     # 🆕 v7.18.33
     "_get_batched_message_settings",
+    # 🆕 v7.18.34
+    "_is_dev_user",
+    "_PENALTY_DURATION_OVERRIDE_CACHE",
+    "_PENALTY_DURATION_OVERRIDE_TTL",
+    "_PENALTY_DURATION_OVERRIDE_MAX",
+    "_get_penalty_duration_override",
+    "_invalidate_penalty_duration_override_cache",
 ]
 
 
@@ -6632,7 +6789,7 @@ __all__ = [
 
 try:
     logger.info(
-        "✅ handlers_message v7.18.33 loaded | "
+        "✅ handlers_message v7.18.34 loaded | "
         "BWM=%s | PRIVATE_HANDLERS=%d | "
         "external_handled=%d | "
         "routing-fallback=7-paths | "
@@ -6643,14 +6800,14 @@ try:
         "ADDING_POSTS=direct-handler | "
         "SUPPORT_MODE=direct-handler | "
         "AUTO_KEY/AUTO_DEL/PENALTY_DURATION/GITHUB_URL=direct-handler | "
-        "BATCH-SETTINGS=PG-1RTT+fallback | "
+        "BATCH-SETTINGS=PG-1RTT+empty-cache+fallback | "
+        "penalty-duration=bridged (DB.set_setting↔_resolve_penalty) | "
         "detectors-compat=v4.1.0 | "
         "commands=(cache_stats, db_idle, autoblocked) | "
-        "fixes=(BATCH-SETTINGS, REVIEW-FIX-1..5, FSM-COVERAGE, "
-        "AL1-FOLLOWUP, AL1-FOLLOWUP-2, C11, D3, D4, "
-        "SUPPORT-1..3, ADDING-1, "
-        "ROUTE-1, ROUTE-2, BWM-3, COL-1, EDIT-1, STATE-1, "
-        "BUG-1..BUG-12)",
+        "fixes=(POLISH-1..8, BATCH-SETTINGS, REVIEW-FIX-1..5, "
+        "FSM-COVERAGE, AL1-FOLLOWUP, AL1-FOLLOWUP-2, C11, D3, D4, "
+        "SUPPORT-1..3, ADDING-1, ROUTE-1, ROUTE-2, BWM-3, "
+        "COL-1, EDIT-1, STATE-1, BUG-1..BUG-12)",
         "yes" if _HAS_BWM else "no",
         len(MessageHandlers._PRIVATE_HANDLERS_MAP),
         len(_EXTERNAL_HANDLED_STATES),
