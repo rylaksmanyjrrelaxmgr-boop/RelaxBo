@@ -1,24 +1,36 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-handlers_message.py - v7.18.35 (POLISH-1-COMPLETE)
+handlers_message.py - v7.18.36 (POLISH-PLUS)
 (متوافق مع detectors v4.1.0 + banned_words_manager v1.2.0)
 =============================================================================
-🆕 v7.18.35 (POLISH-1-COMPLETE) — تحسينات مكمّلة:
+🆕 v7.18.36 (POLISH-PLUS) — تصحيحات وتحسينات مكمّلة:
+    🔴 POLISH-9-ENHANCED: فحص وجود قبل DELETE في _handle_wait_auto_del_text
+        → يمنع الإيجابيات الكاذبة عند rc=None من DB.execute.
+        قبل: rc=None → removed=True (قد يكون خطأ إن لم يكن الصف موجوداً).
+        بعد: fetchval SELECT 1 قبل الحذف — definitive دقيق.
+        Fallback عند تعذّر fetchval → السلوك القديم (توافق).
+
+    🟠 POLISH-12: عكس أولوية ars في _get_batched_message_settings.
+        السبب: _get_batched_message_settings يكتب _ars_local_cache من
+        PG مباشرة (الأحدث)، بينما SmartCache قد يحمل بيانات أقدم.
+        قبل: ars_cached (SmartCache) يفوز عند جاهزية الاثنين.
+        بعد: ars_local يفوز — يضمن رؤية آخر تغيير خلال 5s.
+
+    🟢 POLISH-13: partial_return — تجنّب BATCH عند sec غير جاهز
+        لكن ars جاهز محلياً.
+        قبل: sec_ready=False, ars_ready_local=True → PG BATCH (2 استعلام).
+        بعد: استعلام sec فقط عبر get_security_settings_cached.
+        التوفير: ~50% زمن الاستجابة لهذه الحالة النادرة.
+
+    🟡 POLISH-14: توثيق صريح لسلوك fetchval عند غيابه في
+        _handle_wait_auto_del_text.
+
+🆕 v7.18.35 (POLISH-1-COMPLETE) — محفوظة:
     🟠 POLISH-2-COMPLETE: كاش ars محلي (_ars_local_cache, 5s TTL).
-        الآن المجموعات الجديدة (بلا صفوف) لا تُنفّذ PG query كل رسالة.
-        قبل: sec_ready=True, ars_ready=False (SmartCache فارغ) → PG.
-        بعد: كلاهما ready → return فوري.
-        دمج: get_auto_reply_settings_cached + invalidate + prune.
-
-    🟡 POLISH-9: DB.execute يُعيد None عند نجاح الحذف في بعض المكتبات
-        → نعتبره نجاحاً (لا نُضلّل المستخدم بـ"غير موجود").
-
-    🟡 POLISH-10: توثيق صريح لنطاق _get_penalty_duration_override
-        (عالمي — مفتاح penalty_duration_{ptype} مشترك).
-
-    🟡 POLISH-11: توثيق صريح لترتيب الأسبقية في _resolve_penalty
-        (settings → override → override يفوز).
+    🟡 POLISH-9: DB.execute يُعيد None عند نجاح الحذف.
+    🟡 POLISH-10: توثيق _get_penalty_duration_override (عالمي).
+    🟡 POLISH-11: توثيق ترتيب الأسبقية في _resolve_penalty.
 
 🆕 v7.18.34 (POLISH-1) — محفوظة:
     🔴 POLISH-1: جسر penalty_duration_* (يكتب→كاش→يقرأ).
@@ -30,10 +42,7 @@ handlers_message.py - v7.18.35 (POLISH-1-COMPLETE)
     🟡 POLISH-7: logger.warning عند غياب دوال DB.import_*.
     🟡 POLISH-8: توثيق _EXTERNAL_HANDLED_STATES.
 
-🆕 v7.18.33 (BATCH-SETTINGS) — محفوظة:
-    ⚡ دمج group_security + auto_reply_settings في استعلام واحد (PG).
-    🔴 REVIEW-FIX-1..5.
-
+🆕 v7.18.33 (BATCH-SETTINGS) — محفوظة.
 🆕 v7.18.32 (FSM-COVERAGE) — محفوظة.
 🆕 v7.18.31..v7.18.14 — محفوظة.
 =============================================================================
@@ -1064,7 +1073,7 @@ async def _lazy_init_columns(bot=None):
         _columns_last_attempt_ts = now
 
         db_type = getattr(DB, "DB_TYPE", "sqlite")
-        logger.info("🔧 v7.18.35: Auto-migration (DB_TYPE=%s)", db_type)
+        logger.info("🔧 v7.18.36: Auto-migration (DB_TYPE=%s)", db_type)
 
         cols = [
             ("delete_protected_any", "INTEGER DEFAULT 0",
@@ -2721,29 +2730,39 @@ async def get_security_settings_cached(chat_id) -> dict:
 
 
 # ═══════════════════════════════════════════════════════════════════
-# 🆕 v7.18.33 BATCH-SETTINGS + v7.18.34 POLISH-2 + v7.18.35-COMPLETE
+# 🆕 v7.18.33 BATCH-SETTINGS
+# 🆕 v7.18.34 POLISH-2
+# 🆕 v7.18.35 POLISH-2-COMPLETE
+# 🆕 v7.18.36 POLISH-12 + POLISH-13 (partial_return)
 # ═══════════════════════════════════════════════════════════════════
 
 async def _get_batched_message_settings(
     chat_id: int,
 ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     """
-    v7.18.33 BATCH-SETTINGS + v7.18.34 POLISH-2 + v7.18.35 COMPLETE:
+    v7.18.33 BATCH-SETTINGS + v7.18.34 POLISH-2 + v7.18.35 COMPLETE
+    + v7.18.36 POLISH-12 (أولوية ars_local) + POLISH-13 (partial_return):
+
         جلب group_security + auto_reply_settings في استعلام واحد
         على PostgreSQL (1 RTT بدل 2).
 
     🟠 v7.18.35 POLISH-2-COMPLETE:
-      • إضافة _ars_local_cache (5s TTL) — بديل عن SmartCache
-        الفارغ للمجموعات بلا صف.
-      • الآن: sec_ready=True + ars_ready_local=True → 0 round-trips
-        حتى للمجموعات الجديدة.
+      • _ars_local_cache (5s TTL) — بديل عن SmartCache الفارغ.
+      • المجموعات الجديدة: 0 round-trips خلال 5s.
+
+    🟠 v7.18.36 POLISH-12:
+      • عند جاهزية ars_local و ars_smart معاً → ars_local يفوز
+        (الأحدث، يُكتب من PG مباشرة في _get_batched_message_settings).
+
+    🟢 v7.18.36 POLISH-13 (partial_return):
+      • sec غير جاهز + ars جاهز → استعلام sec فقط
+        (تجنّب BATCH PG بلا داعٍ).
+      • التوفير: ~50% من زمن الاستعلام لهذه الحالة النادرة.
 
     ملاحظات المراجعة (v7.18.33):
-      🔴 _row_to_dict_local بدل isinstance(row, dict) — asyncpg
-         يعيد Record.
+      🔴 _row_to_dict_local بدل isinstance(row, dict).
       🟠 EXISTS(...) للتفريق بين "صف موجود" و "لا صف".
       🟡 لا دمج _DEFAULT_SECURITY_SETTINGS.
-      🟡 logger.info (لا debug).
       🟡 json.loads داخل try/except.
     """
     now = time.monotonic()
@@ -2774,10 +2793,31 @@ async def _get_batched_message_settings(
         and (now - ars_local_entry[1]) < _ARS_LOCAL_TTL
     )
 
+    # 🟠 v7.18.36 POLISH-12: ars_local يفوز (الأحدث)
+    def _pick_ars():
+        if ars_ready_local:
+            return ars_local_entry[0]
+        return ars_cached
+
     if sec_ready and (ars_ready_smart or ars_ready_local):
-        ars_result = (
-            ars_cached if ars_ready_smart else ars_local_entry[0])
-        return sec_entry[0], ars_result
+        return sec_entry[0], _pick_ars()
+
+    # 🟢 v7.18.36 POLISH-13: partial_return
+    # sec غير جاهز لكن ars جاهز → استعلم sec فقط (single query)
+    if not sec_ready and (ars_ready_smart or ars_ready_local):
+        try:
+            sec_data = await get_security_settings_cached(chat_id_int)
+            logger.info(
+                "⚡ PARTIAL-SETTINGS hit (sec-only) | chat=%s | "
+                "sec_keys=%d ars_source=%s",
+                chat_id_int, len(sec_data),
+                "local" if ars_ready_local else "smart")
+            return sec_data, _pick_ars()
+        except Exception as _pe:
+            logger.debug(
+                "POLISH-13 partial_return failed: %s — "
+                "fallback to BATCH", _pe)
+            # fallback إلى BATCH
 
     # ─── 2) PG batched ──────────────────────────────────────────
     if bool(getattr(DB, "USE_POSTGRES", False)):
@@ -3601,6 +3641,7 @@ class MessageHandlers:
             pass
 
         # 🆕 v7.18.33 BATCH-SETTINGS + v7.18.35 POLISH-2-COMPLETE
+        # + v7.18.36 POLISH-12/13
         settings, _preloaded_ars = await _get_batched_message_settings(
             chat_id)
         if not isinstance(settings, dict):
@@ -5033,6 +5074,9 @@ class MessageHandlers:
         🆕 v7.18.34 POLISH-5: clear فقط عند نتيجة نهائية.
         🆕 v7.18.35 POLISH-9: DB.execute قد يُعيد None عند نجاح
             الحذف (بعض المكتبات) → نعتبره نجاحاً.
+        🆕 v7.18.36 POLISH-9-ENHANCED: فحص وجود قبل DELETE عبر
+            DB.fetchval لتجنّب الإيجابية الكاذبة عند rc=None.
+        🆕 v7.18.36 POLISH-14: توثيق صريح لسلوك fetchval الغائب.
         """
         user_id = (
             update.effective_user.id if update.effective_user else None)
@@ -5090,20 +5134,51 @@ class MessageHandlers:
                     removed_error = str(e)[:100]
                     continue
 
-            # Fallback مباشر عبر SQL
+            # ─── Fallback مباشر عبر SQL ───
+            # 🆕 v7.18.36 POLISH-9-ENHANCED: فحص وجود قبل الحذف
+            # لتجنّب إيجابيات كاذبة عند rc=None.
             if not definitive and removed_error is None:
                 try:
-                    rc = await DB.execute(
-                        "DELETE FROM auto_replies "
-                        "WHERE chat_id = ? AND keyword = ?",
-                        (chat_id, keyword))
-                    # 🟡 POLISH-9: بعض مكتبات DB تُعيد None عند نجاح
-                    # الحذف (بدون rowcount). نعتبرها نجاحاً.
-                    if rc is None:
-                        removed = True
+                    # ─── 1) فحص الوجود (إن توفر fetchval) ───
+                    # POLISH-14: إن غاب fetchval → exists يبقى None
+                    # → نعتمد على سلوك execute القديم (توافق).
+                    exists = None
+                    fetchval = getattr(DB, "fetchval", None)
+                    if callable(fetchval):
+                        try:
+                            exists = fetchval(
+                                "SELECT 1 FROM auto_replies "
+                                "WHERE chat_id = ? AND keyword = ? "
+                                "LIMIT 1",
+                                (chat_id, keyword))
+                            if asyncio.iscoroutine(exists):
+                                exists = await exists
+                        except Exception as _ee:
+                            logger.debug(
+                                "auto_del existence check: %s", _ee)
+                            exists = None
+
+                    if exists:
+                        # ─── 2) الصف موجود — احذف ───
+                        rc = await DB.execute(
+                            "DELETE FROM auto_replies "
+                            "WHERE chat_id = ? AND keyword = ?",
+                            (chat_id, keyword))
+                        # POLISH-9: None → نجاح (بلا rowcount)
+                        removed = True if rc is None else bool(rc)
+                        definitive = True
+                    elif exists is not None:
+                        # ─── 3) الصف غير موجود (تحقق مؤكد) ───
+                        removed = False
+                        definitive = True
                     else:
-                        removed = bool(rc)
-                    definitive = True
+                        # ─── 4) لا يمكن التحقق — اعتمد على execute ───
+                        rc = await DB.execute(
+                            "DELETE FROM auto_replies "
+                            "WHERE chat_id = ? AND keyword = ?",
+                            (chat_id, keyword))
+                        removed = True if rc is None else bool(rc)
+                        definitive = True
                 except Exception as e:
                     removed_error = str(e)[:100]
         except Exception as e:
@@ -6861,7 +6936,7 @@ __all__ = [
 
 try:
     logger.info(
-        "✅ handlers_message v7.18.35 loaded | "
+        "✅ handlers_message v7.18.36 loaded | "
         "BWM=%s | PRIVATE_HANDLERS=%d | "
         "external_handled=%d | "
         "routing-fallback=7-paths | "
@@ -6872,15 +6947,17 @@ try:
         "ADDING_POSTS=direct-handler | "
         "SUPPORT_MODE=direct-handler | "
         "AUTO_KEY/AUTO_DEL/PENALTY_DURATION/GITHUB_URL=direct-handler | "
-        "BATCH-SETTINGS=PG-1RTT+empty-cache+fallback | "
+        "BATCH-SETTINGS=PG-1RTT+empty-cache+partial_return | "
         "ars_local_cache=5s-TTL (POLISH-2-COMPLETE) | "
+        "ars-priority=local-first (POLISH-12) | "
+        "auto-del=existence-check (POLISH-9-ENHANCED) | "
         "penalty-duration=bridged (DB.set_setting↔_resolve_penalty) | "
         "detectors-compat=v4.1.0 | "
         "commands=(cache_stats, db_idle, autoblocked) | "
-        "fixes=(POLISH-1..11, BATCH-SETTINGS, REVIEW-FIX-1..5, "
-        "FSM-COVERAGE, AL1-FOLLOWUP, AL1-FOLLOWUP-2, C11, D3, D4, "
-        "SUPPORT-1..3, ADDING-1, ROUTE-1, ROUTE-2, BWM-3, "
-        "COL-1, EDIT-1, STATE-1, BUG-1..BUG-12)",
+        "fixes=(POLISH-1..14, POLISH-9-ENHANCED, POLISH-12, POLISH-13, "
+        "BATCH-SETTINGS, REVIEW-FIX-1..5, FSM-COVERAGE, AL1-FOLLOWUP, "
+        "AL1-FOLLOWUP-2, C11, D3, D4, SUPPORT-1..3, ADDING-1, "
+        "ROUTE-1, ROUTE-2, BWM-3, COL-1, EDIT-1, STATE-1, BUG-1..BUG-12)",
         "yes" if _HAS_BWM else "no",
         len(MessageHandlers._PRIVATE_HANDLERS_MAP),
         len(_EXTERNAL_HANDLED_STATES),
