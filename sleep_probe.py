@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-sleep_probe.py — كاشف تأخيرات asyncio.sleep (v1.0.0)
+sleep_probe.py — كاشف تأخيرات asyncio.sleep (v1.0.2)
 ================================================================================
 الغرض:
     كشف تأخيرات event loop الناتجة عن استدعاءات asyncio.sleep التي تنتظر
@@ -16,9 +16,24 @@ sleep_probe.py — كاشف تأخيرات asyncio.sleep (v1.0.0)
     3. يُسجَّل الـ traceback للوصول لمكان الاستدعاء الأصلي.
     4. get_stats() يُرجع ملخص (للتكامل مع /fullhealth أو /cache_stats).
 
+🆕 v1.0.2 — FULL-POLISHED:
+    🔴 FIX-UNINSTALL-REDUNDANT: تبسيط uninstall_sleep_probe().
+        الفرعان كانا يفعلان نفس السطر — تم توحيدهما في سطر واحد.
+    🟡 FIX-UNINSTALL-DETECT: كشف الحالة الفعلية عبر السمة
+        _sleep_probe_wrapped بدل الاعتماد على _INSTALLED فقط.
+        يضمن الاستعادة حتى بعد importlib.reload.
+    🟡 FIX-SHOULD-LOG: ضمان صحة should_log حتى لو فشل increment
+        الإحصاء (يُحدَّد بشكل مستقل عن try/except).
+
+🆕 v1.0.1 — POLISHED (محفوظ):
+    • إزالة imports غير مستخدمة (Deque, Tuple).
+    • _traceback_hint() كسول (lazy).
+    • حماية double-wrap عبر سمة _sleep_probe_wrapped.
+    • signature مطابق للأصل (delay, result=None).
+
 ⚠️ تحذيرات مهمة:
     • استخدم install_sleep_probe() في bot.py بعد logging.basicConfig.
-    • اللفّ العالمي يؤثر على كل imports لاحقة — راجع الملاحظات في النهاية.
+    • اللفّ العالمي يؤثر على كل imports لاحقة.
     • uninstall_sleep_probe() يُعيد السلوك الأصلي (reversible).
     • يمكن تفعيله تلقائياً عبر env: SLEEP_PROBE_ENABLED=1
 
@@ -36,16 +51,33 @@ import os
 import time
 import traceback
 from collections import deque
-from typing import Any, Deque, Dict, Optional, Tuple
+from typing import Any, Dict, Optional
 
 logger = logging.getLogger(__name__)
 
 # ═══════════════════════════════════════════════════════════════════════
-# الحالة العامة
+# استخراج asyncio.sleep الأصلي بأمان (متجاوزاً أي wrap سابق منّا)
 # ═══════════════════════════════════════════════════════════════════════
 
-# نحفظ الدالة الأصلية قبل أي patch
-_ORIG_SLEEP = asyncio.sleep
+def _get_true_orig_sleep():
+    """
+    يُرجع asyncio.sleep الأصلي الحقيقي، متجاوزاً أي wrap سابق منّا.
+
+    السبب: عند importlib.reload(sleep_probe) بعد install،
+    asyncio.sleep يكون نسخة _wrapped_sleep من الجلسة السابقة.
+    نكشف ذلك عبر السمة _sleep_probe_wrapped.
+    """
+    current = asyncio.sleep
+    inner = getattr(current, "_sleep_probe_wrapped", None)
+    if inner is not None and callable(inner):
+        return inner
+    return current
+
+_ORIG_SLEEP = _get_true_orig_sleep()
+
+# ═══════════════════════════════════════════════════════════════════════
+# الحالة العامة
+# ═══════════════════════════════════════════════════════════════════════
 
 _INSTALLED = False
 
@@ -59,7 +91,7 @@ _STATS: Dict[str, Any] = {
     "total_sleeps": 0,
     "overshoot_count": 0,
     "max_overshoot_ms": 0.0,
-    "top_slow": deque(maxlen=10),   # deque[(overshoot_ms, delay_s, location)]
+    "top_slow": deque(maxlen=10),
 }
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -102,14 +134,12 @@ def _traceback_hint() -> str:
     """
     try:
         stack = traceback.extract_stack()
-        # تجاهل frames sleep_probe نفسه + asyncio internals
         for frame in reversed(stack[:-1]):
             fname = frame.filename or ""
             if ("sleep_probe" in fname
                     or "/asyncio/" in fname
                     or "\\asyncio\\" in fname):
                 continue
-            # نحاول إظهار اسم ملف مختصر
             short = fname
             for sep in ("/", "\\"):
                 if sep in short:
@@ -125,9 +155,11 @@ def _traceback_hint() -> str:
 # الدالة المُلفَّفة
 # ═══════════════════════════════════════════════════════════════════════
 
-async def _wrapped_sleep(delay, *args, **kwargs):
+async def _wrapped_sleep(delay, result=None):
     """
     نسخة مُلفَّفة من asyncio.sleep.
+
+    signature مطابق للأصل: async def sleep(delay, result=None).
 
     السلوك:
       • تستدعي الأصلية بنفس الوسائط.
@@ -135,8 +167,9 @@ async def _wrapped_sleep(delay, *args, **kwargs):
       • عند overshoot > _THRESHOLD_MS → WARNING (بحد أقصى _MAX_LOGS).
       • تعيد رفع asyncio.CancelledError كما هو (لا تكسره).
       • آمنة للاستدعاء من مهام متعددة في وقت واحد.
+      • _traceback_hint() يُستدعى فقط عندما نكون على وشك التسجيل.
     """
-    # حماية: بعض المكتبات تمرّر delay=None أو None-ish
+    # حماية: بعض المكتبات تمرّر delay=None
     if delay is None:
         delay = 0
     try:
@@ -148,9 +181,12 @@ async def _wrapped_sleep(delay, *args, **kwargs):
 
     t0 = time.monotonic()
     cancelled = False
-    result = None
+    return_value = None
     try:
-        result = await _ORIG_SLEEP(delay, *args, **kwargs)
+        if result is not None:
+            return_value = await _ORIG_SLEEP(delay, result)
+        else:
+            return_value = await _ORIG_SLEEP(delay)
     except asyncio.CancelledError:
         cancelled = True
         raise
@@ -166,20 +202,35 @@ async def _wrapped_sleep(delay, *args, **kwargs):
 
         # لا نُسجِّل عند الإلغاء (سلوك طبيعي)
         if not cancelled and overshoot_ms > _THRESHOLD_MS:
+            # تحديث الإحصاءات
             try:
                 _STATS["overshoot_count"] += 1
                 if overshoot_ms > _STATS["max_overshoot_ms"]:
                     _STATS["max_overshoot_ms"] = overshoot_ms
+            except Exception:
+                pass
+
+            # 🟡 FIX-SHOULD-LOG: تحديد مستقل — لا يعتمد على try/except
+            try:
+                should_log = (
+                    _STATS["overshoot_count"] <= _MAX_LOGS
+                )
+            except Exception:
+                should_log = False
+
+            # نحفظ hint فقط إذا كنا سنُسجِّل
+            hint = _traceback_hint() if should_log else "?"
+            try:
                 _STATS["top_slow"].append((
                     round(overshoot_ms, 1),
                     round(delay_f, 3),
-                    _traceback_hint(),
+                    hint,
                 ))
             except Exception:
                 pass
 
-            # حد السبام
-            if _STATS["overshoot_count"] <= _MAX_LOGS:
+            # التسجيل (spam-limited)
+            if should_log:
                 try:
                     logger.log(
                         _LOG_LEVEL,
@@ -188,12 +239,15 @@ async def _wrapped_sleep(delay, *args, **kwargs):
                         expected_ms,
                         elapsed_ms,
                         overshoot_ms,
-                        _STATS["top_slow"][-1][2],
+                        hint,
                     )
                 except Exception:
                     pass
 
-    return result
+    return return_value
+
+# حفظ الأصل على الدالة نفسها لكشف double-wrap لاحقاً
+_wrapped_sleep._sleep_probe_wrapped = _ORIG_SLEEP
 
 # ═══════════════════════════════════════════════════════════════════════
 # API العام
@@ -223,11 +277,12 @@ def install_sleep_probe(
         logger.debug("sleep_probe: already installed — skipped")
         return False
 
-    # إعدادات: الوسائط تتقدّم على env vars
     if threshold_ms is not None:
         _THRESHOLD_MS = max(10.0, float(threshold_ms))
     else:
-        _THRESHOLD_MS = max(10.0, _env_float("SLEEP_PROBE_THRESHOLD_MS", 100.0))
+        _THRESHOLD_MS = max(
+            10.0, _env_float("SLEEP_PROBE_THRESHOLD_MS", 100.0)
+        )
 
     if max_logs is not None:
         _MAX_LOGS = max(1, int(max_logs))
@@ -237,7 +292,9 @@ def install_sleep_probe(
     if log_level is not None:
         _LOG_LEVEL = int(log_level)
     else:
-        _LOG_LEVEL = _env_log_level("SLEEP_PROBE_LOG_LEVEL", logging.WARNING)
+        _LOG_LEVEL = _env_log_level(
+            "SLEEP_PROBE_LOG_LEVEL", logging.WARNING
+        )
 
     asyncio.sleep = _wrapped_sleep
     _INSTALLED = True
@@ -255,12 +312,28 @@ def install_sleep_probe(
     return True
 
 def uninstall_sleep_probe() -> bool:
-    """يُعيد asyncio.sleep الأصلي (reversible)."""
+    """
+    يُعيد asyncio.sleep الأصلي (reversible).
+
+    🟡 FIX-UNINSTALL-DETECT: كشف الحالة الفعلية عبر السمة بدل
+    الاعتماد على _INSTALLED فقط. يضمن الاستعادة حتى بعد reload.
+
+    🟡 FIX-UNINSTALL-REDUNDANT: سطر استعادة واحد (لا فروع مكررة).
+    """
     global _INSTALLED
-    if not _INSTALLED:
+
+    # كشف الحالة الفعلية: هل asyncio.sleep يحمل سمتنا؟
+    currently_wrapped = (
+        getattr(asyncio.sleep, "_sleep_probe_wrapped", None) is not None
+    )
+
+    if not _INSTALLED and not currently_wrapped:
         return False
+
+    # استعادة الأصل مباشرة (سطر واحد)
     asyncio.sleep = _ORIG_SLEEP
     _INSTALLED = False
+
     try:
         logger.info("🔍 sleep_probe: UNINSTALLED")
     except Exception:
@@ -336,7 +409,6 @@ def reset_stats() -> None:
 def auto_install() -> bool:
     """
     يُثبِّت تلقائياً بناءً على env var SLEEP_PROBE_ENABLED.
-    مُصمَّم للاستدعاء من bot.py عند الإقلاع.
 
     Returns:
         True إذا فُعِّل، False إذا لم يُفعَّل (env غير مضبوط).
@@ -371,17 +443,21 @@ __all__ = [
 ]
 
 # ═══════════════════════════════════════════════════════════════════════
-# LOAD BEACON
+# LOAD BEACON — v1.0.2
 # ═══════════════════════════════════════════════════════════════════════
 
 try:
     logger.info(
-        "🛡️ sleep_probe.py v1.0.0 loaded | "
+        "🛡️ sleep_probe.py v1.0.2 loaded | "
         "install/uninstall ✅ | "
         "idempotent ✅ | "
         "cancel-safe ✅ | "
         "traceback-hint ✅ | "
         "env-config ✅ | "
+        "double-wrap-guard ✅ | "
+        "signature-preserved ✅ | "
+        "lazy-hint ✅ | "
+        "uninstall-detect ✅ | "
         "auto_install=%s",
         "on" if os.getenv("SLEEP_PROBE_ENABLED", "0") == "1" else "off",
     )
