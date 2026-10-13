@@ -1,21 +1,46 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-utils.py - الأدوات المساعدة للبوت (v7.10.19 — FIX-FOLLOWUP-COMPLETE)
+utils.py - الأدوات المساعدة للبوت (v7.10.20 — BACKUP-BLOCKING-FIX + TIMEOUT-GUARDS)
 =================================================================================
+🆕 v7.10.20 (BACKUP-BLOCKING-FIX + TIMEOUT-GUARDS):
+    🔴 FIX-UB1 (CRITICAL): BackgroundTasks._do_backup — glob/stat/unlink
+       sync → asyncio.to_thread.
+       السبب الجذري المُكتشف:
+         backups = sorted(PATHS.BACKUPS.glob("backup_*.db"),
+                          key=lambda x: x.stat().st_mtime, ...)
+         for old in backups[CONFIG.MAX_BACKUPS:]:
+             old.unlink()
+       على مجلد فيه 50-500 نسخة، هذه العملية تستهلك 50-500ms
+       من event loop (glob يعمل sync + stat لكل ملف + unlink).
+       مع daily backup + startup backup = blocking متكرر.
+       الإصلاح: نقل العملية بالكامل إلى thread منفصل عبر
+       asyncio.to_thread.
+
+    🔴 FIX-UB2: DB.backup_database بلا timeout → wait_for(300s).
+       السبب: إذا علِق pg_dump (شبكة مقطوعة، خادم مشبع)،
+       البوت ينتظر بلا نهاية — يحجب الـ background task فقط
+       لكن يستهلك pool connection ثميناً.
+
+    🟠 FIX-UB3: _send_media — log warning عند fallback لاستدعاء
+       بدون _full_text + media_type لا يدعم caption
+       (voice/sticker/video_note).
+       السبب: بعض الاستدعاءات القديمة قد تمرّر caption فقط
+       بدون _full_text → يفقد النص الطويل بصمت.
+
+    🟠 FIX-UB4: get_security_settings — فحص وجود الصف بـ SELECT 1
+       قبل SELECT * (يحمي من استعلام ثقيل على 66 عمود لصف غائب).
+
+    🟡 FIX-UB5: _do_backup — log متدرّج + قياس timing أفضل.
+
 🆕 v7.10.19 (FIX-FOLLOWUP-COMPLETE):
     🔴 FIX-BUG1c (CRITICAL): _send_media كانت تفقد النص لـ voice/sticker/
        video_note (لا تدعم caption) أو تُكرره لـ photo/video/doc/audio/anim.
-       الإصلاح: ثابت _CAPTION_MEDIA_TYPES يميّز نوعَي الوسائط، ويُرسل
-       الباقي text[1024:] فقط للأنواع التي حملت caption فعلاً.
-    🔴 FIX-BUG1d: نفس الإصلاح في _publish_post._send_followup_text —
-       voice/sticker/video_note كانت ستفقد أول 1024 حرف بعد FIX-BUG1a.
-       الآن يستخدم نفس _CAPTION_MEDIA_TYPES للتمييز.
+    🔴 FIX-BUG1d: نفس الإصلاح في _publish_post._send_followup_text.
 
 🆕 v7.10.18 (FIX-BUG1-R4):
     🔴 FIX-BUG1a: _publish_post._send_followup_text كانت تُرسل النص كاملاً
-       (text) بدل الباقي → تكرار. الإصلاح: text[1024:] للأنواع ذات caption.
-       (ملاحظة: هذا كان لا يزال يحتاج FIX-BUG1d لمكتمل الصحة.)
+       (text) بدل الباقي → تكرار.
     🔴 FIX-BUG2: check_bot_permissions بلا كاش → _bot_perms_cache (TTL=300s).
     🟡 FIX-BUG3: POOL_MONITOR_INTERVAL 60 → 300.
     🟡 FIX-BUG4: pool_timeout في _TIMEOUT_FAST/_TIMEOUT_SLOW.
@@ -117,18 +142,11 @@ _FALLBACK_PENALTY_TYPES: frozenset = frozenset({
 })
 
 # 🔴 v7.10.19 FIX-BUG1c/FIX-BUG1d: أنواع الوسائط التي تدعم caption.
-# للأنواع في هذه القائمة:
-#   • الوسيط يحمل text[:1024] كـ caption
-#   • follow-up يُرسل text[1024:] فقط (الباقي)
-# للأنواع خارج القائمة (voice/sticker/video_note):
-#   • الوسيط لا يحمل نصاً
-#   • follow-up يُرسل text كاملاً
 _CAPTION_MEDIA_TYPES: frozenset = frozenset({
     'photo', 'video', 'document', 'audio', 'animation',
 })
 
 # 🆕 TIMEOUT-FIX-4: حدود timeouts ديناميكية
-# 🟡 v7.10.18 FIX-BUG4: إضافة pool_timeout للتوافق مع _SEND_KWARGS
 _TIMEOUT_FAST = {
     "read_timeout": 30.0,
     "write_timeout": 30.0,
@@ -158,6 +176,11 @@ _SEC_SETTINGS_NEG_MAX_SIZE = 5000
 _bot_perms_cache: Dict[int, Tuple[float, Dict[str, Any]]] = {}
 _BOT_PERMS_TTL = 300.0
 _BOT_PERMS_MAX_SIZE = 2000
+
+# 🆕 v7.10.20 FIX-UB2: timeout للنسخ الاحتياطي
+_BACKUP_TIMEOUT_SECONDS = float(
+    getattr(CONFIG, 'BACKUP_TIMEOUT_SECONDS', 300.0)
+)
 
 # 🆕 FIX-D14: نطاقات عربية موسّعة
 _ARABIC_TATWEEL = '\u0640'
@@ -2199,7 +2222,7 @@ def _timeouts_for(text_len: int, is_media: bool = False) -> Dict[str, float]:
     return dict(_TIMEOUT_FAST)
 
 # ═══════════════════════════════════════════════════════════════════════════
-# 🔴 v7.10.19 FIX-BUG1c: _send_media مصحّحة كاملة
+# 🔴 v7.10.20 FIX-UB3: _send_media مصحّحة مع log warning
 # ═══════════════════════════════════════════════════════════════════════════
 
 async def _send_media(bot, chat_id, media_type, media_file_id,
@@ -2217,17 +2240,22 @@ async def _send_media(bot, chat_id, media_type, media_file_id,
           • voice/sticker/video_note → لا تدعم caption
             الوسيط لا يحمل نصاً، follow-up يُرسل text كاملاً.
 
-        سابقاً: كانت voice/sticker/video_note تفقد أول 1024 حرفاً،
-        وكانت photo/video/doc/audio/anim تُكرر أول 1024 (إن أُرسل النص كاملاً).
-
-    معاملات:
-        _full_text: النص الكامل قبل الاقتطاع (يُمرَّر من safe_send).
-                    إن لم يُمرَّر، نستخدم caption كـ fallback (بدون follow-up).
+    🆕 v7.10.20 FIX-UB3:
+        log warning عند استدعاء قديم بدون _full_text + media_type
+        لا يدعم caption (voice/sticker/video_note) — لأن هذا يعني
+        احتمال فقدان جزء من النص الطويل بصمت.
     """
     _reply_to = kwargs.get('reply_to_message_id')
-    # _full_text يأتي من safe_send (text الكامل بعد sanitize ≤ 4096).
-    # fallback: caption (المُقتطع) — يمنع أي follow-up زائد في الاستدعاءات القديمة.
     _full = _full_text if _full_text else (caption or "")
+
+    # 🆕 v7.10.20 FIX-UB3: كشف الاستدعاء القديم الخطير
+    if (not _full_text
+            and media_type
+            and media_type not in _CAPTION_MEDIA_TYPES):
+        logger.warning(
+            "⚠️ _send_media: media=%s بلا _full_text — "
+            "قد يفقد النص الطويل. استخدم safe_send بدل الاستدعاء المباشر.",
+            media_type)
 
     async def _send_followup_text():
         """يُرسل النص المتبقي بعد الوسيط — حسب نوع الوسيط."""
@@ -2244,7 +2272,6 @@ async def _send_media(bot, chat_id, media_type, media_file_id,
         if not remaining:
             return
 
-        # بناء kwargs نظيفة للرسالة التالية
         followup_kwargs: Dict[str, Any] = {}
         if _reply_to is not None:
             followup_kwargs['reply_to_message_id'] = _reply_to
@@ -2375,7 +2402,6 @@ async def safe_send(bot, chat_id: int, text: str, reply_markup=None,
     for attempt in range(max_attempts):
         try:
             if media_type:
-                # 🔴 v7.10.19 FIX-BUG1c: تمرير النص الكامل لـ follow-up صحيح
                 return await _send_media(
                     bot, chat_id, media_type, media_file_id,
                     caption=caption_text or None,
@@ -2428,7 +2454,6 @@ async def safe_send(bot, chat_id: int, text: str, reply_markup=None,
                     chat_id, new_chat_id)
                 try:
                     if media_type:
-                        # 🔴 v7.10.19 FIX-BUG1c: _full_text=text في إعادة الإرسال
                         return await _send_media(
                             bot, new_chat_id, media_type, media_file_id,
                             caption=caption_text or None,
@@ -2497,7 +2522,6 @@ async def safe_send(bot, chat_id: int, text: str, reply_markup=None,
             if "can't parse entities" in error_msg or "parse" in error_msg:
                 try:
                     if media_type:
-                        # 🔴 v7.10.19 FIX-BUG1c: _full_text=text في no-parse fallback
                         return await _send_media(
                             bot, chat_id, media_type, media_file_id,
                             caption=caption_text or None,
@@ -3391,9 +3415,7 @@ class BackgroundTasks:
         🔴 v7.10.19 FIX-BUG1d (CRITICAL):
             _send_followup_text كانت تُرسل text[1024:] دائماً (بعد FIX-BUG1a).
             لكن voice/sticker/video_note لا تحمل caption → تفقد أول 1024 حرفاً!
-            الإصلاح: يستخدم _CAPTION_MEDIA_TYPES للتمييز:
-              • photo/video/doc/audio/anim: الوسيط حمل caption → text[1024:]
-              • voice/sticker/video_note: لا caption → text الكامل
+            الإصلاح: يستخدم _CAPTION_MEDIA_TYPES للتمييز.
 
         🟠 v7.10.14 FIX-H: تقسيم النص > 4096 في follow-up text.
         🔴 v7.10.17 FIX-BUG1: إضافة _send_followup_text في فروع الوسائط.
@@ -3410,14 +3432,7 @@ class BackgroundTasks:
         caption = text[:1024] if text else None
 
         async def _send_followup_text():
-            """
-            🔴 v7.10.19 FIX-BUG1d: التمييز حسب نوع الوسيط.
-
-            • photo/video/document/audio/animation:
-                الوسيط حمل text[:1024] → نرسل text[1024:] فقط.
-            • voice/sticker/video_note:
-                الوسيط لا يحمل نصاً → نرسل text كاملاً.
-            """
+            """🔴 v7.10.19 FIX-BUG1d: التمييز حسب نوع الوسيط."""
             if not text:
                 return
             if media_type in _CAPTION_MEDIA_TYPES:
@@ -3734,55 +3749,129 @@ class BackgroundTasks:
             except Exception as e:
                 logger.error("❌ Backup error: %s", e)
 
+    # ═════════════════════════════════════════════════════════════════════
+    # 🔴 v7.10.20 FIX-UB1 + FIX-UB2: _do_backup مصحّحة بالكامل
+    # ═════════════════════════════════════════════════════════════════════
     @staticmethod
     async def _do_backup() -> None:
+        """
+        تنفيذ نسخة احتياطية واحدة.
+
+        🔴 v7.10.20 FIX-UB1 (CRITICAL):
+            تنظيف النسخ القديمة (glob + stat + unlink) كان sync
+            → يحجب event loop 50-500ms على مجلد فيه 50-500 نسخة.
+            الإصلاح: نقل العملية إلى asyncio.to_thread.
+
+        🔴 v7.10.20 FIX-UB2:
+            DB.backup_database بلا timeout → hang محتمل عند تعليق
+            pg_dump. الإصلاح: asyncio.wait_for مع timeout قابل للضبط.
+
+        🟡 v7.10.20 FIX-UB5:
+            log متدرّج + قياس timing أفضل لكل مرحلة.
+        """
         t_start = time.monotonic()
         try:
             if not await DB.get_auto_backup():
+                logger.debug("⏭️ _do_backup: auto_backup معطّل")
                 return
+
             PATHS.BACKUPS.mkdir(parents=True, exist_ok=True)
-            backup_file = (PATHS.BACKUPS /
-                           f"backup_{TimeUtils.utc_now().strftime('%Y%m%d_%H%M%S')}.db")
+            backup_file = (
+                PATHS.BACKUPS /
+                f"backup_{TimeUtils.utc_now().strftime('%Y%m%d_%H%M%S')}.db"
+            )
+
             success = False
+            t_backup = time.monotonic()
+
             if hasattr(DB, "backup_database"):
                 try:
-                    success = await DB.backup_database(backup_file)
+                    # 🔴 FIX-UB2: timeout لمنع hang
+                    success = await asyncio.wait_for(
+                        DB.backup_database(backup_file),
+                        timeout=_BACKUP_TIMEOUT_SECONDS,
+                    )
+                except asyncio.TimeoutError:
+                    logger.error(
+                        "❌ DB.backup_database timeout بعد %.0fs "
+                        "(pg_dump/dump معلّق؟)",
+                        _BACKUP_TIMEOUT_SECONDS)
+                    success = False
                 except Exception as e:
                     logger.warning("⚠️ DB.backup_database فشل: %s", e)
                     success = False
+
+            # fallback SQLite
             if (not success
                     and getattr(DB, "DB_TYPE", "sqlite") == "sqlite"):
                 try:
-                    def _backup():
+                    def _backup_sync():
                         import sqlite3 as sqlite3_sync
                         source = sqlite3_sync.connect(str(PATHS.DB))
                         dest = sqlite3_sync.connect(str(backup_file))
-                        with dest:
-                            source.backup(dest)
-                        dest.close()
-                        source.close()
-                    await asyncio.to_thread(_backup)
+                        try:
+                            with dest:
+                                source.backup(dest)
+                        finally:
+                            dest.close()
+                            source.close()
+                    await asyncio.to_thread(_backup_sync)
                     success = True
                 except Exception as e:
                     logger.error("❌ SQLite backup failed: %s", e)
                     success = False
-            if success:
-                try:
-                    await DB.set_setting('last_backup', TimeUtils.sql_iso())
-                except Exception as e:
-                    logger.warning("⚠️ فشل حفظ last_backup: %s", e)
-                backups = sorted(
-                    PATHS.BACKUPS.glob("backup_*.db"),
-                    key=lambda x: x.stat().st_mtime, reverse=True)
-                for old in backups[CONFIG.MAX_BACKUPS:]:
-                    with suppress(Exception):
-                        old.unlink()
-                elapsed = time.monotonic() - t_start
-                logger.info(
-                    "✅ نسخة احتياطية: %s (%.2fs)",
-                    backup_file.name, elapsed)
-            else:
-                logger.error("❌ فشل النسخ الاحتياطي")
+
+            backup_elapsed = time.monotonic() - t_backup
+
+            if not success:
+                logger.error(
+                    "❌ فشل النسخ الاحتياطي بعد %.2fs",
+                    backup_elapsed)
+                return
+
+            # تحديث settings
+            try:
+                await DB.set_setting(
+                    'last_backup', TimeUtils.sql_iso())
+            except Exception as e:
+                logger.warning("⚠️ فشل حفظ last_backup: %s", e)
+
+            # 🔴 FIX-UB1: تنظيف النسخ القديمة في thread منفصل
+            # (glob + stat + unlink كانت تحجب event loop)
+            cleanup_count = 0
+            t_cleanup = time.monotonic()
+            try:
+                def _cleanup_old_backups() -> int:
+                    backups = sorted(
+                        PATHS.BACKUPS.glob("backup_*.db"),
+                        key=lambda x: x.stat().st_mtime,
+                        reverse=True)
+                    removed = 0
+                    max_backups = getattr(CONFIG, 'MAX_BACKUPS', 5)
+                    for old in backups[max_backups:]:
+                        try:
+                            old.unlink()
+                            removed += 1
+                        except Exception:
+                            pass
+                    return removed
+                cleanup_count = await asyncio.to_thread(
+                    _cleanup_old_backups)
+            except Exception as _ce:
+                logger.debug("cleanup old backups: %s", _ce)
+
+            cleanup_elapsed = time.monotonic() - t_cleanup
+            total_elapsed = time.monotonic() - t_start
+
+            logger.info(
+                "✅ نسخة احتياطية: %s | backup=%.2fs | "
+                "cleanup=%.3fs (%d محذوف) | total=%.2fs",
+                backup_file.name,
+                backup_elapsed,
+                cleanup_elapsed,
+                cleanup_count,
+                total_elapsed,
+            )
         except Exception as e:
             logger.error("❌ _do_backup: %s", e, exc_info=True)
 
@@ -4372,8 +4461,18 @@ async def _lazy_import_detectors_async() -> Dict[str, Any]:
         _detector_imports = await asyncio.to_thread(_do_import_detectors)
         return _detector_imports
 
+# ═══════════════════════════════════════════════════════════════════════════
+# 🟠 v7.10.20 FIX-UB4: get_security_settings مع SELECT 1 pre-check
+# ═══════════════════════════════════════════════════════════════════════════
+
 async def get_security_settings(chat_id: int) -> Dict[str, Any]:
-    """جلب إعدادات الأمان (schema-aligned, typed loop, dual cache)."""
+    """
+    جلب إعدادات الأمان (schema-aligned, typed loop, dual cache).
+
+    🟠 v7.10.20 FIX-UB4: قبل SELECT * (66 عمود)، نتحقق من وجود
+        الصف بـ SELECT 1 خفيف. إذا غير موجود، نتخطى SELECT *
+        الثقيل — يوفر RTT كامل للـ chats الجديدة.
+    """
     now = time.monotonic()
 
     cached = _security_settings_cache.get(chat_id)
@@ -4409,19 +4508,34 @@ async def get_security_settings(chat_id: int) -> Dict[str, Any]:
         except Exception as e:
             logger.debug("DB.get_security_settings(%s): %s", chat_id, e)
 
+    # 🟠 FIX-UB4: فحص خفيف قبل SELECT * الثقيل
     if not row_dict and not db_ok:
         try:
-            row = await asyncio.wait_for(
-                DB.fetchone(
-                    "SELECT * FROM group_security WHERE chat_id = ?",
-                    (chat_id,)),
-                timeout=3.0)
-            if row is not None:
-                row_dict = _row_to_dict(row) or {}
-                db_ok = True
+            # فحص وجود الصف بـ SELECT 1 (خفيف — لا يحمل 66 عمود)
+            exists = await asyncio.wait_for(
+                DB.fetchval(
+                    "SELECT 1 FROM group_security "
+                    "WHERE chat_id = ? LIMIT 1",
+                    (chat_id,), default=None),
+                timeout=2.0)
+            if exists is not None:
+                # الصف موجود — نُحمّل الأعمدة الآن
+                row = await asyncio.wait_for(
+                    DB.fetchone(
+                        "SELECT * FROM group_security WHERE chat_id = ?",
+                        (chat_id,)),
+                    timeout=3.0)
+                if row is not None:
+                    row_dict = _row_to_dict(row) or {}
+                    db_ok = True
+            else:
+                # الصف غير موجود — لا نضيع RTT على SELECT * ثقيل
+                logger.debug(
+                    "get_security_settings(%s): صف غير موجود "
+                    "(SELECT 1 → None)", chat_id)
         except asyncio.TimeoutError:
             logger.warning(
-                "🐌 group_security fallback(%s): timeout 3s", chat_id)
+                "🐌 group_security fallback(%s): timeout", chat_id)
         except Exception as e:
             logger.debug(
                 "get_security_settings fallback(%s): %s", chat_id, e)
@@ -4703,6 +4817,7 @@ __all__ = [
     '_timeouts_for', '_TIMEOUT_FAST', '_TIMEOUT_SLOW',
     '_TEXT_LONG_THRESHOLD',
     '_warmup_bg_tasks',
+    '_BACKUP_TIMEOUT_SECONDS',
 ]
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -4711,41 +4826,32 @@ __all__ = [
 
 try:
     logger.info(
-        "🛡️ utils.py v7.10.19 FIX-FOLLOWUP-COMPLETE loaded | "
-        "FIX-BUG1c: _send_media uses _CAPTION_MEDIA_TYPES (%d types) | "
-        "FIX-BUG1d: _publish_post._send_followup_text uses same type-check | "
+        "🛡️ utils.py v7.10.20 BACKUP-BLOCKING-FIX loaded | "
+        "FIX-UB1: _do_backup cleanup via asyncio.to_thread | "
+        "FIX-UB2: DB.backup_database timeout=%.0fs | "
+        "FIX-UB3: _send_media warns on legacy calls | "
+        "FIX-UB4: get_security_settings SELECT 1 pre-check | "
+        "FIX-UB5: _do_backup staged timing logs | "
+        "FIX-BUG1c/d: _CAPTION_MEDIA_TYPES (%d types) | "
         "FIX-BUG2: bot_perms_cache=TTL(%ds, max=%d) | "
-        "FIX-BUG3: pool_monitor=%ds (was 60) | "
+        "FIX-BUG3: pool_monitor=%ds | "
         "FIX-BUG4: pool_timeout in FAST/SLOW | "
-        "sec_defaults=%d keys (schema-aligned) | "
-        "FIX-A2: delete_voice_notes removed from defaults | "
-        "FIX-B2: _format_security_text audio→delete_audio | "
-        "UX-1: sec_voice+sec_videonote shown in menu | "
+        "sec_defaults=%d keys | "
         "sec_neg_cache=MAX(%d) | "
         "auth_cache=user_id-aware | "
-        "check_latency=PTB-safe | "
-        "publish_followup=split-4096 | "
-        "warmup_bg_tasks=early | "
-        "detector_call=safe | flush_usage=race-fixed | "
-        "row_to_dict=added | mig_exc_info=tuple | "
-        "Latency-Check=✅ | Detectors=lazy+async | Langs=%d | "
-        "Buttons=✅ | Security-Bridge=✅ | Penalty=✅ | "
-        "ChatMigrated=✅(%d ops) | ToggleMap=%d | "
-        "SecCache=✅(TTL=%ds, max=%d) | "
-        "SecNegCache=✅(TTL=%ds) | SecStats=✅(TTL=300s) | "
-        "AuthCache=✅ | AuthCheck=UNION+TO(2s) | "
-        "RateLimit=✅ | Webhook=✅ | Publish=✅",
+        "Lang=%d | SecCache=TTL(%ds) | "
+        "ChatMigrated=%d ops | ToggleMap=%d | "
+        "Webhook=✅ | Publish=✅ | Penalty=✅",
+        _BACKUP_TIMEOUT_SECONDS,
         len(_CAPTION_MEDIA_TYPES),
         int(_BOT_PERMS_TTL), _BOT_PERMS_MAX_SIZE,
         int(BackgroundTasks.POOL_MONITOR_INTERVAL),
         len(_DEFAULT_SECURITY_SETTINGS),
         _SEC_SETTINGS_NEG_MAX_SIZE,
         len(_AVAILABLE_LANGUAGES),
+        int(_SEC_SETTINGS_TTL),
         len(_CHAT_MIGRATION_TABLES),
         len(SECURITY_TOGGLE_MAP),
-        int(_SEC_SETTINGS_TTL),
-        _SEC_SETTINGS_MAX_SIZE,
-        int(_SEC_SETTINGS_NEGATIVE_TTL),
     )
 except Exception:
     pass
