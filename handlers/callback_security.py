@@ -1,16 +1,34 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-callback_security.py - معالج أزرار الأمان (v9.7.25-FIX-C3)
+callback_security.py - معالج أزرار الأمان (v9.7.26-FIX-C4)
 =====================================================================
-🎯 v9.7.25-FIX-C3:
+🎯 v9.7.26-FIX-C4:
+    🔴 FIX-C4-A: _extract_chat_id — كان dead code منذ v9.7.24
+       (IMPROVE-1). الآن يُستخدم فعلياً في:
+           • handle_security (top-level chat_id extraction)
+           • handle_group_settings (بدل int(data.split(":")[-1]))
+       سلوك مُصحَّح ليطابق docstring: إذا كان parts[1] موجوداً وليس
+       رقماً → نرفض (None)، بدون fallback على stored.
+
+    🔴 FIX-C4-B: handle_security — إزالة فرعين ميتين:
+           • action == "set_antiflood_messages"
+           • action == "set_antiflood_seconds"
+       السبب: يعترضهما _handle_parameterized_inner أولاً (نفس
+       الـ prefix) فيُنشئان حالة WAIT_ANTIFLOOD_* معلّقة لا تُستهلك.
+
+    🟠 FIX-C4-C: استخراج _is_parse_error() كدالة مسماة.
+    🟠 FIX-C4-D: تبسيط sec_penalty_<type> في _handle_parameterized_inner
+       (chat_id مُستخرج أصلاً في handle_security).
+    🟡 FIX-C4-E: _prune_sec_auth_cache — تنظيف أقوى للـ locks.
+
+🆕 v9.7.25-FIX-C3 (محفوظ):
     🔴 إضافة 'none' إلى أنواع العقوبات الصالحة في
-       _get_valid_penalty_types().
-       السبب: تُستخدم للتحقق من قيم الإعدادات (antiflood_penalty,
-       night_mode_action, violation_penalty, delete_penalty, ...)
-       حيث 'none' خيار مقصود (= تعطيل العقوبة).
-       DB.VALID_PENALTY_TYPES مُعرّفة لأغراض apply_penalty ولا
-       تحتوي 'none' — لذا نضيفها صراحةً.
+       _get_valid_penalty_types(). السبب: تُستخدم للتحقق من قيم
+       الإعدادات (antiflood_penalty, night_mode_action,
+       violation_penalty, delete_penalty, ...) حيث 'none' خيار مقصود
+       (= تعطيل العقوبة). DB.VALID_PENALTY_TYPES مُعرّفة لأغراض
+       apply_penalty ولا تحتوي 'none' — لذا نضيفها صراحةً.
        الأثر: تفعيل زر "بدون عقوبة" في 7 مسارات:
            • sec_set_antiflood_penalty:*:none
            • sec_set_night_action:*:none
@@ -18,44 +36,13 @@ callback_security.py - معالج أزرار الأمان (v9.7.25-FIX-C3)
            • sec_set_del_penalty:none:*
            • sec_penalty_none:*
            • pen_none:*
-           • deactivate_all (prefix callback — لا علاقة)
+           • deactivate_all
 
-🎯 v9.7.24-STABLE: النسخة الموصى بها للإنتاج
-    مبنية على v9.7.22-FULL-FIX (المستقرة والمُجرَّبة) +
-    4 تحسينات منخفضة المخاطر من v9.7.23 مع إصلاح مخاطرها:
-
-    🟢 IMPROVE-1: helper _extract_chat_id.
-    🟢 IMPROVE-2: helper _invalid_data.
-    🟢 IMPROVE-3: _check_sec_auth يميّز أخطاء الشبكة عن البرمجية.
-    🟢 IMPROVE-4: _metrics_inc يسجّل تحذيراً مرة واحدة بدل pass.
-
-    🆕 v9.7.24-LOAD-DIAGNOSTIC:
-    🟢 إضافة _log_module_load() لعرض معلومات التحميل في stderr.
-
-    ⚠️ ملاحظات:
-    - لم يتم تقسيم _handle_parameterized_inner.
-    - لم يتم تمرير None بدل update في أي مكان.
-    - لا يوجد كود ميت (dead code).
-    - parts[-1] لم يُستخدم (يبقى parts[1] كما في الأصل).
-
-🆕 v9.7.22-FULL-FIX:
-    🟢 FIX-1: التحقق من نطاق المدة الزمنية في set_duration.
-    🟢 FIX-2: توحيد استخدام DB.VALID_PENALTY_TYPES.
-    🟢 FIX-3: إزالة الثابت غير المستخدم _SEC_AUTH_PRUNE_EVERY.
-    🟢 FIX-4: رفع _ACT_USER_ACTIONS إلى ثابت على مستوى الوحدة.
-    🟢 FIX-5: إضافة helper _require_sec_auth.
-    🟢 FIX-6: HTML escaping في اختبار قناة السجل.
-    🟢 FIX-7: تسجيل تحذيري بدل pass الصامت في أماكن حرجة.
-    🟢 FIX-8: helper _schedule_task لتوحيد إضافة المهام.
-
-🆕 v9.7.21-PACKAGE-IMPORT-FIX:
-    🟢 استبدال كل from handlers_callback import X بـ try/except.
-
-🆕 v9.7.20-NIGHT-NONE-FIX:
-    🟢 إضافة 'none' للعقوبات المقبولة في sec_set_night_action.
-
-🆕 v9.7.19-ROUTING-FIX:
-    🟢 act_* / ban_* / pen_* تُعالج عبر cache auth.
+🆕 v9.7.24-STABLE (محفوظ): IMPROVE-1..4.
+🆕 v9.7.22-FULL-FIX (محفوظ): FIX-1..8.
+🆕 v9.7.21-PACKAGE-IMPORT-FIX (محفوظ).
+🆕 v9.7.20-NIGHT-NONE-FIX (محفوظ).
+🆕 v9.7.19-ROUTING-FIX (محفوظ).
 =====================================================================
 """
 import asyncio
@@ -118,11 +105,10 @@ logger = logging.getLogger(__name__)
 
 
 # ═══════════════════════════════════════════════════════════════════
-# v9.7.21-PACKAGE-IMPORT-FIX: مساعد الاستيراد الآمن لـ handlers_callback
+# v9.7.21-PACKAGE-IMPORT-FIX: مساعد الاستيراد الآمن
 # ═══════════════════════════════════════════════════════════════════
 
 def _hc_import():
-    """استيراد وحدة handlers_callback بأمان (يدعم الحزمة والوحدة المستقلة)."""
     try:
         from . import handlers_callback
         return handlers_callback
@@ -135,7 +121,6 @@ def _hc_import():
 
 
 def _hc_get(name, default=None):
-    """إرجاع خاصية من handlers_callback بأمان (لا يرمي استثناء)."""
     mod = _hc_import()
     if mod is None:
         return default
@@ -143,10 +128,7 @@ def _hc_get(name, default=None):
 
 
 def _schedule_task(coro) -> Optional[asyncio.Task]:
-    """
-    v9.7.22: مساعد موحّد لإنشاء مهمة وإضافتها إلى ACTIVE_TASKS إن وُجد.
-    يعيد الـ Task أو None عند الفشل.
-    """
+    """v9.7.22: مساعد موحّد لإنشاء مهمة وإضافتها إلى ACTIVE_TASKS."""
     try:
         task = asyncio.create_task(coro)
     except Exception as e:
@@ -163,7 +145,7 @@ def _schedule_task(coro) -> Optional[asyncio.Task]:
 
 
 # ═══════════════════════════════════════════════════════════════════
-# ثوابت الأمان
+# ثوابت
 # ═══════════════════════════════════════════════════════════════════
 
 _ANTIFLOOD_MESSAGES_OPTIONS = [3, 5, 7, 10, 15, 20, 30]
@@ -180,15 +162,12 @@ _SEC_AUTH_NEG_BASE = 3.0
 _SEC_AUTH_NEG_MAX = 60.0
 _SEC_VIEW_TOKEN_KEY = '_sec_view_token'
 
-# v9.7.22: حد أقصى للمدة الزمنية (سنة واحدة) لمنع القيم الشاذة/السالبة.
 _MAX_DURATION_SECONDS = 365 * 24 * 3600
 
-# v9.7.22: أنواع العقوبات المقبولة (fallback إذا لم تتوفر DB.VALID_PENALTY_TYPES).
 _FALLBACK_PENALTY_TYPES: FrozenSet[str] = frozenset({
     'ban', 'mute', 'kick', 'restrict', 'none'
 })
 
-# v9.7.22: خريطة أزرار إجراءات المستخدم (كانت تُبنى داخل الدالة).
 _ACT_USER_ACTIONS: Dict[str, Tuple[UserState, str, str]] = {
     "act_ban":      (UserState.WAIT_BAN,      "send_user_id_ban",      "🚫"),
     "act_mute":     (UserState.WAIT_MUTE,     "send_user_id_mute",     "🔇"),
@@ -199,7 +178,6 @@ _ACT_USER_ACTIONS: Dict[str, Tuple[UserState, str, str]] = {
     "act_pin":      (UserState.WAIT_PIN,      "pin_prompt_full",       "📌"),
 }
 
-# v9.7.22: خريطة أعمدة المدة حسب نوع العقوبة.
 _DURATION_COL_MAP: Dict[str, str] = {
     'mute': 'mute_default_duration',
     'ban': 'ban_default_duration',
@@ -213,19 +191,11 @@ _DURATION_COL_MAP: Dict[str, str] = {
 
 
 def _get_valid_penalty_types() -> FrozenSet[str]:
-    """
-    v9.7.25-FIX-C3: يُرجع قيم الإعدادات الصالحة (تشمل 'none').
-
-    السبب: تُستخدم هذه الدالة في callback_security للتحقق من قيم
-    الإعدادات (antiflood_penalty, night_mode_action, ...) حيث 'none'
-    خيار مقصود (= تعطيل العقوبة).
-    DB.VALID_PENALTY_TYPES مُعرّفة لأغراض apply_penalty ولا تحتوي
-    'none' — لذا نضيفها هنا صراحةً.
-    """
+    """v9.7.25-FIX-C3: قيم الإعدادات الصالحة (تشمل 'none')."""
     try:
         vt = DB.VALID_PENALTY_TYPES
         if vt:
-            return frozenset(vt) | {'none'}    # ← FIX-C3
+            return frozenset(vt) | {'none'}
     except Exception as e:
         logger.debug(f"_get_valid_penalty_types DB access failed: {e}")
     return _FALLBACK_PENALTY_TYPES
@@ -247,7 +217,7 @@ _security_stats_cache_local = SmartCache(ttl=SEC_STATS_CACHE_TTL, max_size=500)
 
 _metrics_inc_fn = None
 _safe_edit_fn = None
-_metrics_error_logged = False  # v9.7.24: لتسجيل التحذير مرة واحدة فقط.
+_metrics_error_logged = False
 
 
 def set_metrics_inc(fn):
@@ -261,7 +231,7 @@ def set_safe_edit(fn):
 
 
 def _metrics_inc(key, delta=1):
-    """v9.7.24 IMPROVE-4: تسجيل تحذير مرة واحدة بدل pass الصامت."""
+    """v9.7.24 IMPROVE-4: تحذير مرة واحدة بدل pass."""
     global _metrics_error_logged
     if _metrics_inc_fn is None:
         return
@@ -271,6 +241,12 @@ def _metrics_inc(key, delta=1):
         if not _metrics_error_logged:
             logger.warning(f"_metrics_inc failed (will not repeat): {e}")
             _metrics_error_logged = True
+
+
+def _is_parse_error(err_str: str) -> bool:
+    """🆕 v9.7.26 FIX-C4-C: كشف موحّد لأخطاء HTML parse."""
+    low = (err_str or "").lower()
+    return "can't parse" in low or "parse" in low
 
 
 async def _safe_edit(query, text, reply_markup=None, parse_mode="HTML",
@@ -294,7 +270,7 @@ async def _safe_edit(query, text, reply_markup=None, parse_mode="HTML",
         em = str(e).lower()
         if "message is not modified" in em:
             return True
-        if "can't parse entities" in em or "parse" in em:
+        if _is_parse_error(em):
             try:
                 clean = re.sub(r'<[^>]+>', '', text or "")
                 await query.edit_message_text(
@@ -332,7 +308,7 @@ async def _show_error(query, context, lang):
 
 
 async def _invalid_data(query, context, lang) -> bool:
-    """v9.7.24 IMPROVE-2: helper موحّد لرسالة 'بيانات غير صالحة'."""
+    """v9.7.24 IMPROVE-2: helper موحّد."""
     await _safe_edit(query,
         await _trans('invalid_data', lang, "❌ بيانات غير صالحة"),
         bot=context.bot)
@@ -344,6 +320,9 @@ async def _invalid_data(query, context, lang) -> bool:
 # ═══════════════════════════════════════════════════════════════════
 
 def _prune_sec_auth_cache(now):
+    """
+    🆕 v9.7.26 FIX-C4-E: تنظيف أقوى للـ locks الفارغة.
+    """
     removed = 0
     for k in [k for k, (_, ts) in _sec_auth_cache.items()
               if now - ts >= SEC_AUTH_CACHE_TTL]:
@@ -366,9 +345,11 @@ def _prune_sec_auth_cache(now):
             expired_neg.append(k)
     for k in expired_neg:
         _sec_auth_neg_cache.pop(k, None)
+    # 🆕 FIX-C4-E: تنظيف locks للـ keys الفارغة
     for k in list(_sec_auth_locks.keys()):
         lock = _sec_auth_locks.get(k)
         if lock is None:
+            _sec_auth_locks.pop(k, None)
             continue
         if (not lock.locked() and k not in _sec_auth_cache
                 and k not in _sec_auth_neg_cache):
@@ -417,7 +398,7 @@ async def _check_sec_auth(context, user_id, chat_id):
         if len(_sec_auth_cache) >= SEC_AUTH_CACHE_MAX_SIZE:
             _prune_sec_auth_cache(now)
 
-        # v9.7.24 IMPROVE-3: تمييز أخطاء الشبكة عن الأخطاء البرمجية.
+        # v9.7.24 IMPROVE-3: تمييز أخطاء الشبكة عن البرمجية
         try:
             result = await is_authorized_in_group(
                 context.bot, chat_id, user_id
@@ -510,19 +491,21 @@ async def _resolve_sec_chat_id(context, data):
 
 def _extract_chat_id(data: str, context=None) -> Optional[int]:
     """
-    v9.7.24 IMPROVE-1: helper موحّد لاستخراج chat_id من callback_data.
+    v9.7.24 IMPROVE-1 + v9.7.26 FIX-C4-A: helper موحّد.
 
-    ⚠️ سلوك آمن: إذا كان parts[1] موجوداً وليس رقماً، نرفض البيانات
-    (لا نستخدم fallback من user_data) — هذا يمنع استخدام chat_id قديم
-    بسبب بيانات خاطئة.
+    - إذا كان parts[1] موجوداً ورقماً → يُرجعه.
+    - إذا كان parts[1] موجوداً وليس رقماً → None (بدون fallback).
+    - إذا كان parts قصير → None (بدون fallback).
 
-    يعيد chat_id أو None.
+    ⚠️ context غير مستخدم (مُحتفظ للتوافق الرجعي).
     """
     try:
         parts = data.split(":")
         if len(parts) < 2:
             return None
         p = parts[1].strip()
+        if not p:
+            return None
         if p.lstrip('-').isdigit():
             return int(p)
         return None
@@ -533,10 +516,7 @@ def _extract_chat_id(data: str, context=None) -> Optional[int]:
 
 async def _require_sec_auth(query, context, user_id, chat_id,
                              lang) -> bool:
-    """
-    v9.7.22: مساعد موحّد لفحص المصادقة وإرسال رسالة عند الفشل.
-    يعيد True إذا كان مصرَّحاً، False خلاف ذلك (مع تعديل الرسالة).
-    """
+    """v9.7.22: مساعد موحّد لفحص المصادقة."""
     if await _check_sec_auth(context, user_id, chat_id):
         return True
     await _safe_edit(query,
@@ -1224,6 +1204,8 @@ class SecurityCallbacks:
 
     # ═══════════════════════════════════════════════════════════════
     # الموجّه الرئيسي
+    # 🆕 v9.7.26 FIX-C4-A: استخدام _extract_chat_id
+    # 🆕 v9.7.26 FIX-C4-B: إزالة فرعين ميتين
     # ═══════════════════════════════════════════════════════════════
     @staticmethod
     async def handle_security(update, context, query, user_id, lang=None):
@@ -1232,10 +1214,10 @@ class SecurityCallbacks:
             lang = await DB.get_user_language(user_id) or 'ar'
         data = query.data
         parts = data.split(":")
-        chat_id = None
-        if len(parts) >= 2 and parts[1].lstrip('-').isdigit():
-            chat_id = int(parts[1])
-        else:
+
+        # 🆕 FIX-C4-A: استخدام helper موحّد
+        chat_id = _extract_chat_id(data)
+        if chat_id is None:
             stored = (context.user_data.get('security_chat_id')
                       or context.user_data.get('sec_chat'))
             if stored:
@@ -1243,15 +1225,19 @@ class SecurityCallbacks:
                     chat_id = int(stored)
                 except (TypeError, ValueError):
                     chat_id = None
+
         if chat_id is None:
             await _safe_edit(query,
                 await _trans('group_not_specified', lang, "❌"),
                 bot=context.bot)
             return
+
         prefix0 = parts[0]
         action = (prefix0[4:] if prefix0.startswith("sec_") else prefix0)
+
         if not await _require_sec_auth(query, context, user_id, chat_id, lang):
             return
+
         try:
             if action == "auto_reply_menu":
                 if render_auto_reply_fn is not None:
@@ -1380,9 +1366,9 @@ class SecurityCallbacks:
                 return
             if action in ("close", "back"):
                 StateManager.clear(user_id)
-                show_groups_fn = _hc_get('CallbackHandlers')
-                if show_groups_fn is not None:
-                    await show_groups_fn._show_groups_list(
+                callbacks_cls = _hc_get('CallbackHandlers')
+                if callbacks_cls is not None:
+                    await callbacks_cls._show_groups_list(
                         update, context, query, user_id, lang)
                 return
             if action == "antiflood_settings":
@@ -1418,20 +1404,11 @@ class SecurityCallbacks:
                     await _trans('send_goodbye_text', lang, "📝"),
                     bot=context.bot)
                 return
-            if action == "set_antiflood_messages":
-                StateManager.set(user_id, UserState.WAIT_ANTIFLOOD_MESSAGES)
-                _set_sec_chat(context, chat_id)
-                await _safe_edit(query,
-                    await _trans('send_antiflood_messages', lang, "📊"),
-                    bot=context.bot)
-                return
-            if action == "set_antiflood_seconds":
-                StateManager.set(user_id, UserState.WAIT_ANTIFLOOD_SECONDS)
-                _set_sec_chat(context, chat_id)
-                await _safe_edit(query,
-                    await _trans('send_antiflood_seconds', lang, "⏱️"),
-                    bot=context.bot)
-                return
+
+            # 🆕 FIX-C4-B: تم إزالة set_antiflood_messages و
+            #             set_antiflood_seconds — dead code بسبب
+            #             اعتراض _handle_parameterized_inner.
+
             if action == "antiflood_penalty":
                 await SecurityCallbacks._show_penalty_type_selection(
                     update, context, query, chat_id, lang,
@@ -1581,11 +1558,8 @@ class SecurityCallbacks:
                                            lang, data) -> bool:
         # ─── act_log:<chat> ──────────────────────────────────────
         if data.startswith("act_log:"):
-            parts = data.split(":")
-            if len(parts) < 2:
-                return await _invalid_data(query, context, lang)
-            chat_id = _coerce_int(parts[1])
-            if chat_id == 0 or chat_id == -1:
+            chat_id = _extract_chat_id(data)
+            if chat_id is None or chat_id == -1:
                 return await _invalid_data(query, context, lang)
             if not await _require_sec_auth(query, context, user_id,
                                             chat_id, lang):
@@ -1646,16 +1620,12 @@ class SecurityCallbacks:
                     bot=context.bot)
                 return True
 
-        # ─── act_ban / act_mute / act_warn / act_kick / act_restrict /
-        #     act_unban / act_pin ───────────────────────────────────
+        # ─── act_ban / act_mute / ... ────────────────────────────
         for act_prefix, (state, prompt_key, prompt_default) in \
                 _ACT_USER_ACTIONS.items():
             if data.startswith(act_prefix + ":"):
-                parts = data.split(":")
-                if len(parts) < 2:
-                    return await _invalid_data(query, context, lang)
-                chat_id = _coerce_int(parts[1])
-                if chat_id == 0 or chat_id == -1:
+                chat_id = _extract_chat_id(data)
+                if chat_id is None or chat_id == -1:
                     return await _invalid_data(query, context, lang)
                 if not await _require_sec_auth(query, context, user_id,
                                                 chat_id, lang):
@@ -1826,10 +1796,9 @@ class SecurityCallbacks:
 
         # ─── sec_set_del_penalty_duration ─────────────────────────
         if data.startswith("sec_set_del_penalty_duration:"):
-            parts = data.split(":")
-            if len(parts) != 2:
+            chat_id = _extract_chat_id(data)
+            if chat_id is None:
                 return await _invalid_data(query, context, lang)
-            chat_id = _coerce_int(parts[1])
             if not await _require_sec_auth(query, context, user_id,
                                             chat_id, lang):
                 return True
@@ -1864,10 +1833,9 @@ class SecurityCallbacks:
 
         # ─── sec_penalty_durations:<chat> ─────────────────────────
         if data.startswith("sec_penalty_durations:"):
-            parts = data.split(":")
-            if len(parts) != 2:
+            chat_id = _extract_chat_id(data)
+            if chat_id is None:
                 return await _invalid_data(query, context, lang)
-            chat_id = _coerce_int(parts[1])
             if not await _require_sec_auth(query, context, user_id,
                                             chat_id, lang):
                 return True
@@ -1884,10 +1852,9 @@ class SecurityCallbacks:
             ("sec_night_duration:", "night"),
         ):
             if data.startswith(prefix):
-                parts = data.split(":")
-                if len(parts) != 2:
+                chat_id = _extract_chat_id(data)
+                if chat_id is None:
                     return await _invalid_data(query, context, lang)
-                chat_id = _coerce_int(parts[1])
                 if not await _require_sec_auth(query, context, user_id,
                                                 chat_id, lang):
                     return True
@@ -1897,10 +1864,9 @@ class SecurityCallbacks:
 
         # ─── sec_warn_penalty_duration ────────────────────────────
         if data.startswith("sec_warn_penalty_duration:"):
-            parts = data.split(":")
-            if len(parts) != 2:
+            chat_id = _extract_chat_id(data)
+            if chat_id is None:
                 return await _invalid_data(query, context, lang)
-            chat_id = _coerce_int(parts[1])
             if not await _require_sec_auth(query, context, user_id,
                                             chat_id, lang):
                 return True
@@ -1910,10 +1876,9 @@ class SecurityCallbacks:
 
         # ─── sec_warn_penalty ─────────────────────────────────────
         if data.startswith("sec_warn_penalty:"):
-            parts = data.split(":")
-            if len(parts) != 2:
+            chat_id = _extract_chat_id(data)
+            if chat_id is None:
                 return await _invalid_data(query, context, lang)
-            chat_id = _coerce_int(parts[1])
             if not await _require_sec_auth(query, context, user_id,
                                             chat_id, lang):
                 return True
@@ -1923,10 +1888,9 @@ class SecurityCallbacks:
 
         # ─── sec_warn_count ───────────────────────────────────────
         if data.startswith("sec_warn_count:"):
-            parts = data.split(":")
-            if len(parts) != 2:
+            chat_id = _extract_chat_id(data)
+            if chat_id is None:
                 return await _invalid_data(query, context, lang)
-            chat_id = _coerce_int(parts[1])
             if not await _require_sec_auth(query, context, user_id,
                                             chat_id, lang):
                 return True
@@ -1936,10 +1900,9 @@ class SecurityCallbacks:
 
         # ─── sec_warn_toggle ──────────────────────────────────────
         if data.startswith("sec_warn_toggle:"):
-            parts = data.split(":")
-            if len(parts) != 2:
+            chat_id = _extract_chat_id(data)
+            if chat_id is None:
                 return await _invalid_data(query, context, lang)
-            chat_id = _coerce_int(parts[1])
             if not await _require_sec_auth(query, context, user_id,
                                             chat_id, lang):
                 return True
@@ -1953,15 +1916,10 @@ class SecurityCallbacks:
                 query, context, chat_id, lang)
             return True
 
-        # ─── sec_penalty_<type> ───────────────────────────────────
+        # ─── sec_penalty_<type>:<chat> ────────────────────────────
+        # 🆕 FIX-C4-D: chat_id يُستخرج بـ helper موحّد
         if data.startswith("sec_penalty_"):
-            parts = data.split(":")
-            if len(parts) < 2:
-                return await _invalid_data(query, context, lang)
-            if parts[1].lstrip('-').isdigit():
-                chat_id = int(parts[1])
-            else:
-                chat_id = await _resolve_sec_chat_id(context, data)
+            chat_id = _extract_chat_id(data)
             if chat_id is None:
                 await _safe_edit(query,
                     await _trans('group_not_specified', lang, "❌"),
@@ -1970,8 +1928,8 @@ class SecurityCallbacks:
             if not await _require_sec_auth(query, context, user_id,
                                             chat_id, lang):
                 return True
-            action = (parts[0][4:] if parts[0].startswith("sec_")
-                      else parts[0])
+            parts = data.split(":")
+            action = parts[0][4:]  # "penalty_<type>"
             if action.startswith("penalty_"):
                 action = action[len("penalty_"):]
             if action in _get_valid_penalty_types():
@@ -1988,12 +1946,11 @@ class SecurityCallbacks:
                     bot=context.bot)
             return True
 
-        # ─── sec_set_antiflood_messages / seconds ─────────────────
+        # ─── sec_set_antiflood_messages / seconds (show buttons) ──
         if data.startswith("sec_set_antiflood_messages:"):
-            parts = data.split(":")
-            if len(parts) != 2:
+            chat_id = _extract_chat_id(data)
+            if chat_id is None:
                 return await _invalid_data(query, context, lang)
-            chat_id = _coerce_int(parts[1])
             if not await _require_sec_auth(query, context, user_id,
                                             chat_id, lang):
                 return True
@@ -2003,10 +1960,9 @@ class SecurityCallbacks:
             return True
 
         if data.startswith("sec_set_antiflood_seconds:"):
-            parts = data.split(":")
-            if len(parts) != 2:
+            chat_id = _extract_chat_id(data)
+            if chat_id is None:
                 return await _invalid_data(query, context, lang)
-            chat_id = _coerce_int(parts[1])
             if not await _require_sec_auth(query, context, user_id,
                                             chat_id, lang):
                 return True
@@ -2017,10 +1973,9 @@ class SecurityCallbacks:
 
         # ─── sec_antiflood_penalty / sec_set_antiflood_penalty ────
         if data.startswith("sec_antiflood_penalty:"):
-            parts = data.split(":")
-            if len(parts) != 2:
+            chat_id = _extract_chat_id(data)
+            if chat_id is None:
                 return await _invalid_data(query, context, lang)
-            chat_id = _coerce_int(parts[1])
             if not await _require_sec_auth(query, context, user_id,
                                             chat_id, lang):
                 return True
@@ -2054,10 +2009,9 @@ class SecurityCallbacks:
             ("sec_set_night_end:", UserState.WAIT_NIGHT_END,
              "send_night_end", "🌙 Send end time (HH:MM):")):
             if data.startswith(prefix):
-                parts = data.split(":")
-                if len(parts) != 2:
+                chat_id = _extract_chat_id(data)
+                if chat_id is None:
                     return await _invalid_data(query, context, lang)
-                chat_id = _coerce_int(parts[1])
                 if not await _require_sec_auth(query, context, user_id,
                                                 chat_id, lang):
                     return True
@@ -2070,10 +2024,9 @@ class SecurityCallbacks:
 
         # ─── sec_night_action / sec_set_night_action ──────────────
         if data.startswith("sec_night_action:"):
-            parts = data.split(":")
-            if len(parts) != 2:
+            chat_id = _extract_chat_id(data)
+            if chat_id is None:
                 return await _invalid_data(query, context, lang)
-            chat_id = _coerce_int(parts[1])
             if not await _require_sec_auth(query, context, user_id,
                                             chat_id, lang):
                 return True
@@ -2081,7 +2034,6 @@ class SecurityCallbacks:
                 update, context, query, chat_id, lang, 'night_action')
             return True
 
-        # 🟢 v9.7.20: 'none' مُضمَّن
         if data.startswith("sec_set_night_action:"):
             parts = data.split(":")
             if len(parts) < 3:
@@ -2105,12 +2057,11 @@ class SecurityCallbacks:
                     bot=context.bot)
             return True
 
-        # ─── sec_violation_settings / violation_penalties ─────────
+        # ─── sec_violation_settings ───────────────────────────────
         if data.startswith("sec_violation_settings:"):
-            parts = data.split(":")
-            if len(parts) != 2:
+            chat_id = _extract_chat_id(data)
+            if chat_id is None:
                 return await _invalid_data(query, context, lang)
-            chat_id = _coerce_int(parts[1])
             if not await _require_sec_auth(query, context, user_id,
                                             chat_id, lang):
                 return True
@@ -2120,10 +2071,9 @@ class SecurityCallbacks:
 
         # ─── sec_set_violation_strikes ────────────────────────────
         if data.startswith("sec_set_violation_strikes:"):
-            parts = data.split(":")
-            if len(parts) != 2:
+            chat_id = _extract_chat_id(data)
+            if chat_id is None:
                 return await _invalid_data(query, context, lang)
-            chat_id = _coerce_int(parts[1])
             if not await _require_sec_auth(query, context, user_id,
                                             chat_id, lang):
                 return True
@@ -2136,10 +2086,9 @@ class SecurityCallbacks:
 
         # ─── sec_set_violation_duration ───────────────────────────
         if data.startswith("sec_set_violation_duration:"):
-            parts = data.split(":")
-            if len(parts) != 2:
+            chat_id = _extract_chat_id(data)
+            if chat_id is None:
                 return await _invalid_data(query, context, lang)
-            chat_id = _coerce_int(parts[1])
             if not await _require_sec_auth(query, context, user_id,
                                             chat_id, lang):
                 return True
@@ -2217,11 +2166,15 @@ class SecurityCallbacks:
     @staticmethod
     async def handle_group_settings(update, context, query, user_id, lang,
                                      data):
-        try:
-            chat_id = int(data.split(":")[-1])
-        except (ValueError, IndexError):
-            await _invalid_data(query, context, lang)
-            return
+        # 🆕 FIX-C4-A: استخدام _extract_chat_id
+        chat_id = _extract_chat_id(data)
+        if chat_id is None:
+            # fallback: آخر جزء
+            try:
+                chat_id = int(data.split(":")[-1])
+            except (ValueError, IndexError, TypeError):
+                await _invalid_data(query, context, lang)
+                return
         if not await _require_sec_auth(query, context, user_id, chat_id, lang):
             return
         _set_sec_chat(context, chat_id)
@@ -2244,6 +2197,7 @@ __all__ = [
     "_MAX_DURATION_SECONDS",
     "_ACT_USER_ACTIONS", "_DURATION_COL_MAP",
     "_FALLBACK_PENALTY_TYPES", "_get_valid_penalty_types",
+    "_is_parse_error",
     "safe_edit",
     "_hc_import", "_hc_get", "_schedule_task",
     "_require_sec_auth", "_invalid_data",
@@ -2251,21 +2205,15 @@ __all__ = [
 
 
 # ═══════════════════════════════════════════════════════════════════
-# 🆕 v9.7.24-LOAD-DIAGNOSTIC: تشخيص التحميل (يظهر دائماً في stderr)
+# LOAD-DIAGNOSTIC
 # ═══════════════════════════════════════════════════════════════════
 def _log_module_load():
-    """
-    يُسجّل معلومات تحميل الملف في stderr مباشرة.
-    لا يعتمد على إعدادات logging في المشروع — يظهر دائماً.
-    """
     try:
         import sys as _sys
 
-        # التحقق من توفر handlers_callback
         hc_available = _hc_import() is not None
         hc_status = "✅ متاح" if hc_available else "⚠️ غير متاح (fallback)"
 
-        # التحقق من settings_cache الحقيقي (ليس dummy)
         cache_is_real = False
         try:
             cache_is_real = (settings_cache.__class__.__name__
@@ -2274,11 +2222,9 @@ def _log_module_load():
             cache_is_real = False
         cache_status = "✅ حقيقي" if cache_is_real else "⚠️ dummy"
 
-        # التحقق من bridge
         bridge_status = ("✅ متاح" if _SECURITY_BRIDGE_AVAILABLE
                          else "❌ غير متاح")
 
-        # معلومات الثوابت
         try:
             penalty_count = len(_get_valid_penalty_types())
         except Exception:
@@ -2288,7 +2234,7 @@ def _log_module_load():
         info = (
             "\n"
             "╔═══════════════════════════════════════════════════════════╗\n"
-            "║  🔐 callback_security.py — v9.7.25-FIX-C3                 ║\n"
+            "║  🔐 callback_security.py — v9.7.26-FIX-C4                 ║\n"
             "╠═══════════════════════════════════════════════════════════╣\n"
             f"║  📁 المسار: {__file__[-55:]:<55} ║\n"
             f"║  🔧 handlers_callback: {hc_status:<45} ║\n"
@@ -2297,17 +2243,16 @@ def _log_module_load():
             f"║  📊 ثوابت: TOGGLE_MAP={toggle_map_ok} | "
             f"PENALTIES={penalty_count} | ACTIONS={len(_ACT_USER_ACTIONS)}"
             f"{'':<17} ║\n"
-            "║  ✅ كل الأنظمة جاهزة (+ 'none' في valid_types)            ║\n"
+            "║  ✅ FIX-C4: extract_chat_id مستخدم | فرعين ميتين أُزيلا   ║\n"
             "╚═══════════════════════════════════════════════════════════╝\n"
         )
         _sys.stderr.write(info)
         _sys.stderr.flush()
     except Exception as _e:
-        # لا نُفشل التحميل بسبب التشخيص
         try:
             import sys as _sys2
             _sys2.stderr.write(
-                f"🔐 callback_security.py v9.7.25-FIX-C3 loaded "
+                f"🔐 callback_security.py v9.7.26-FIX-C4 loaded "
                 f"(diagnostic failed: {_e})\n"
             )
             _sys2.stderr.flush()
@@ -2317,5 +2262,4 @@ def _log_module_load():
 
 _log_module_load()
 
-# احتياطي: عبر logger (قد لا يظهر حسب إعدادات المشروع)
-logger.info("🔐 callback_security.py loaded (v9.7.25-FIX-C3)")
+logger.info("🔐 callback_security.py loaded (v9.7.26-FIX-C4)")
