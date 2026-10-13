@@ -1,58 +1,27 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-db_diagnostics.py — واجهة تشخيص وصيانة قاعدة البيانات (v7.2.6 — POOL-AWARE + TLS-ASYNC-FIX)
+db_diagnostics.py — واجهة تشخيص وصيانة قاعدة البيانات (v7.2.7 — PK-TIMING-FIX)
 ================================================================================
-🆕 v7.2.6 — POOL-AWARE + TLS-ASYNC-FIX:
+🆕 v7.2.7 — PK-TIMING-FIX:
 
-    🔴 FIX-POOL-AWARE (جذري):
+    🔴 FIX-PK-TIMING (جذري):
         المشكلة المُكتشَفة:
-            `_probe_db_latency` يفتح اتصالاً جديداً (asyncpg.connect)
-            لقياس PK SELECT. لكن البوت يستخدم **connection pool ساخن**.
-            النتيجة: القياس كان يُظهر 172ms (TLS+auth+3×RTT للـ prepared
-            statement) بينما البوت الفعلي يرى 42-55ms على pool warm.
+            PK SELECT في التقرير كان يُظهر 162ms (4 RTT) بينما
+            الاستعلام الفعلي = 1 RTT (40ms). السبب: استدعاء
+            `_detect_users_pk_col(conn)` كان **داخل نافذة التوقيت**.
+            هذه الدالة تنفّذ JOIN على 4 جداول نظام
+            (pg_index + pg_class + pg_namespace + pg_attribute)
+            يستغرق ~120ms على Aiven.
         الإصلاح:
-          • استخدام `db._pool` إذا كان متاحاً.
-          • إضافة `pool_acquire_ms` كمقياس منفصل.
-          • fallback آمن إذا pool=None.
-          • تعليم `used_pool` في التقرير.
+          • فصل `_detect_users_pk_col` خارج نافذة التوقيت.
+          • `users_pk_col` يُسجَّل في result قبل القياس.
+          • قياس PK SELECT يعكس الاستعلام الفعلي فقط (1 RTT).
 
-    🔴 FIX-PK-DETECT (جذري):
-        المشكلة: `'users'::regclass` يعتمد على search_path وقد يفشل
-        بصمت على قواعد بيانات بمستخدمين مقيّدين.
-        الإصلاح: استعلام عبر pg_class + pg_namespace + current_schema().
+    🟡 تحديث VERSION إلى "7.2.7" + load beacon.
 
-    🔴 FIX-TLS-ASYNC (جذري):
-        المشكلة (v7.2.5): TLS كان يجري في ثريد منفصل. عند timeout،
-        الإلغاء لا يوقف الثريد → thread leak تراكمي.
-        الإصلاح: استخدام `asyncio.open_connection(ssl=ctx)` — TLS
-        غير متزامن حقيقي، إلغاء نظيف، لا ثريد.
-
-    🟠 FIX-PARALLEL-PROBES:
-        `_build_sections` كان يشغّل latency+full_health بعد gather
-        التسلسلي → +3-5s. الآن داخل gather نفسه.
-
-    🟠 FIX-FS-SHM:
-        fallback إلى `/dev/shm` إذا `tempdir` و `cwd` read-only.
-
-    🟠 FIX-SCORE-GRADUAL:
-        عقوبات `_calc_technical_score` متدرّجة (long_tx/50 كل واحدة)
-        بدل خصم ثابت.
-
-    🟡 FIX-CACHE-IMMUTABLE:
-        `_cache_get` يعيد نسخة محمية (deepcopy للـ dicts) لمنع
-        إفساد الكاش من caller.
-
-    🟡 FIX-QUICK-PATH:
-        `diagnose_db_quick` لم يعد يستدعي probes ثقيلة.
-
-    🟡 FIX-MYSQL-SCHEMA-ALIAS:
-        alias موحّد في استعلام MySQL لتجنّب فشل حالة الأحرف.
-
-    🟡 FIX-CONN-CLOSE-TIMEOUT:
-        `conn.close()` مع wait_for(2s) لتجنّب hang.
-
-🆕 v7.2.5 — TLS-DEADLINE + EL-P90-FIX — محفوظ (مع تحويل TLS إلى async).
+🆕 v7.2.6 — POOL-AWARE + TLS-ASYNC-FIX — محفوظ.
+🆕 v7.2.5 — TLS-DEADLINE + EL-P90-FIX — محفوظ.
 🆕 v7.2.4 — MISLEADING-FIX — محفوظ.
 🆕 v7.2.3 — MYSQL-PARITY-FIX — محفوظ.
 🆕 v7.2.2 — PROBE-ACCURACY — محفوظ.
@@ -85,7 +54,7 @@ logger = logging.getLogger(__name__)
 # الإصدار
 # ═══════════════════════════════════════════════════════════════════════
 
-VERSION = "7.2.6"
+VERSION = "7.2.7"
 
 _MIN_DEAD_FOR_CRITICAL = 50
 _MIN_DEAD_FOR_COLOR = 10
@@ -127,14 +96,12 @@ def _cache_get(key: str) -> Optional[Any]:
         _CACHE.pop(key, None)
         return None
     data = entry["data"]
-    # حماية من mutation: نُعيد نسخة عميقة للـ mutable structures
     if isinstance(data, (dict, list)):
         try:
             return _copy.deepcopy(data)
         except Exception:
             return data
     if isinstance(data, tuple):
-        # tuple قد يحتوي dict/list داخلياً
         try:
             return _copy.deepcopy(data)
         except Exception:
@@ -404,6 +371,9 @@ async def _detect_users_pk_col(conn) -> str:
         يفشل بصمت على قواعد بيانات بمستخدمين مقيّدين أو search_path غير
         قياسي (شائع في Aiven/pooled endpoints).
         الإصلاح: استعلام عبر pg_class + pg_namespace + current_schema().
+
+    ⚠️ v7.2.7 NOTE: هذه الدالة تنفّذ JOIN على 4 جداول نظام و تستغرق
+        ~120ms على Aiven. **يجب استدعاؤها خارج نافذة توقيت PK SELECT**.
     """
     try:
         row = await conn.fetchrow("""
@@ -437,14 +407,9 @@ async def _probe_db_latency(
     قياس كمون الشبكة/DB مباشرةً.
 
     🆕 v7.2.6 FIX-POOL-AWARE:
-        المشكلة السابقة: كان يفتح اتصالاً جديداً دائماً (asyncpg.connect)،
-        بينما البوت يستخدم pool ساخن. النتيجة: قياس مضلّل (يُظهر TLS+auth
-        + cold start = 400ms+، بينما البوت الفعلي 40-60ms على pool warm).
-        الإصلاح:
-          • نحاول استخدام pool موجود أولاً.
-          • إضافة `pool_acquire_ms` كمقياس منفصل.
-          • `used_pool=True` في التقرير.
-          • fallback آمن إذا pool=None.
+        استخدام pool موجود بدل اتصال جديد.
+    🆕 v7.2.7 FIX-PK-TIMING:
+        فصل `_detect_users_pk_col` خارج نافذة توقيت PK SELECT.
     """
     if not force:
         cached = _cache_get("latency_probe")
@@ -558,7 +523,6 @@ async def _probe_db_latency(
         result["tcp_connect_ms"] = -1.0
 
     # ─── 2) الحصول على اتصال — pool أولاً ────────────────────────
-    # 🆕 v7.2.6 FIX-POOL-AWARE: نحاول pool أولاً
     conn = None
     from_pool = False
     pool = getattr(db, "_pool", None)
@@ -673,11 +637,24 @@ async def _probe_db_latency(
         result["warm_median_ms"] = round(warm_median, 2)
 
         # ─── 3.3) PK SELECT ─────────────────────────────────────
+        # 🆕 v7.2.7 FIX-PK-TIMING:
+        #   نُخرج اكتشاف pk_col من نافذة التوقيت. السبب:
+        #   `_detect_users_pk_col` ينفّذ JOIN على 4 جداول نظام
+        #   (pg_index + pg_class + pg_namespace + pg_attribute)
+        #   يستغرق ~120ms على Aiven. تضمينه في التوقيت كان يجعل
+        #   PK SELECT يظهر 162ms بينما الاستعلام الفعلي 40ms.
+        pk_col = "user_id"
+        if db_type == "postgres":
+            try:
+                pk_col = await _detect_users_pk_col(conn)
+            except Exception as e:
+                logger.debug(f"_detect_users_pk_col: {e}")
+        result["users_pk_col"] = pk_col
+
+        # قياس الاستعلام الفعلي فقط.
         try:
             t0 = time.monotonic()
             if db_type == "postgres":
-                pk_col = await _detect_users_pk_col(conn)
-                result["users_pk_col"] = pk_col
                 await conn.fetchval(
                     f'SELECT 1 FROM users WHERE {pk_col} = $1 LIMIT 1',
                     1,
@@ -735,7 +712,6 @@ async def _probe_db_latency(
         result["error"] = f"{type(e).__name__}: {str(e)[:200]}"
         result["verdict"] = "critical"
     finally:
-        # 🆕 v7.2.6 FIX-POOL-AWARE: إرجاع الاتصال للـ pool أو إغلاقه
         if conn is not None:
             if from_pool and pool is not None:
                 try:
@@ -745,7 +721,6 @@ async def _probe_db_latency(
                 except Exception as e:
                     logger.debug(f"pool.release: {e}")
             else:
-                # 🆕 v7.2.6: close مع timeout
                 try:
                     await asyncio.wait_for(
                         conn.close(), timeout=_CONN_CLOSE_TIMEOUT,
@@ -879,7 +854,6 @@ def format_latency_report(probe: Dict[str, Any]) -> str:
     else:
         lines.append(f"🗄️ <b>{_esc(db_type)}</b> (محلي)")
 
-    # 🆕 v7.2.6: توضيح إن استُخدم pool
     if probe.get("used_pool"):
         pool_ms = probe.get("pool_acquire_ms", 0)
         lines.append(f"   🏊 pool warm — acquire={pool_ms:.0f}ms")
@@ -996,12 +970,7 @@ async def _probe_network_to(
     قياس DNS + TCP + TLS إلى host:port.
 
     🆕 v7.2.6 FIX-TLS-ASYNC:
-        المشكلة السابقة (v7.2.5): TLS كان في ثريد منفصل، وعند timeout
-        الإلغاء لا يوقف الثريد → thread leak تراكمي (كل 30s تقرير).
-        الإصلاح: استخدام `asyncio.open_connection(ssl=ctx)` — TLS
-        غير متزامن حقيقي، إلغاء نظيف، لا ثريد، لا تسريب.
-        ملاحظة: يفتح TCP جديد (لكنها RTT واحدة إضافية ≈ 40ms، مقبولة
-        مقابل السلامة).
+        TLS عبر asyncio.open_connection (لا ثريد، لا تسريب).
     """
     result: Dict[str, Any] = {
         "host": host, "port": port, "ok": False,
@@ -1042,7 +1011,6 @@ async def _probe_network_to(
         result["error"] = f"TCP: {type(e).__name__}"
         return result
     finally:
-        # 🆕 v7.2.6: نُغلق raw_sock دائماً (لا نُعيد استخدامه لـ TLS)
         if raw_sock is not None:
             try:
                 raw_sock.close()
@@ -1055,7 +1023,6 @@ async def _probe_network_to(
         tls_error: Optional[str] = None
 
         async def _do_tls_async() -> float:
-            """TLS handshake عبر asyncio.open_connection — إلغاء نظيف."""
             ctx = ssl.create_default_context()
             ctx.check_hostname = False
             ctx.verify_mode = ssl.CERT_NONE
@@ -1068,7 +1035,6 @@ async def _probe_network_to(
                 )
                 return (time.perf_counter() - t0) * 1000
             finally:
-                # إغلاق نظيف
                 if writer is not None:
                     try:
                         writer.close()
@@ -1088,7 +1054,6 @@ async def _probe_network_to(
             result["tls_ms"] = -1.0
             tls_error = f"TimeoutError (>{timeout + 0.5:.1f}s)"
         except asyncio.CancelledError:
-            # إلغاء نظيف — لا شيء معلّق
             result["tls_ms"] = -1.0
             tls_error = "cancelled"
             raise
@@ -1110,8 +1075,6 @@ async def _probe_event_loop(
     """
     v7.2.5 FIX-EL-P90:
         • يحسب median + p90 + max.
-        • p90 يظهر spike قصير لا يظهره median.
-        • max يبقى للعلم فقط.
     """
     result: Dict[str, Any] = {
         "ok": False,
@@ -1130,7 +1093,6 @@ async def _probe_event_loop(
             lag = max(0.0, actual_ms - sleep_ms)
             lags.append(lag)
         result["samples_ms"] = [round(x, 2) for x in lags]
-        # 🆕 v7.2.6: statistics.median يعمل بدون pre-sort
         result["median_ms"] = round(statistics.median(lags), 2)
         sorted_lags = sorted(lags)
         result["p90_ms"] = round(_percentile(sorted_lags, 0.90), 2)
@@ -1146,10 +1108,7 @@ async def _probe_filesystem() -> Dict[str, Any]:
     قياس write/fsync/read.
 
     🆕 v7.2.6 FIX-FS-SHM:
-        المشكلة السابقة: fallback إلى cwd فقط. في Kubernetes/Docker
-        مع read-only rootfs، قد يفشل tempdir و cwd معاً.
-        الإصلاح: إضافة `/dev/shm` كخيار ثالث (عادةً دائماً متاح في
-        Linux containers).
+        candidates موسّعة (tempdir → /dev/shm → cwd).
     """
     result: Dict[str, Any] = {"ok": False}
     try:
@@ -1197,7 +1156,6 @@ async def _probe_filesystem() -> Dict[str, Any]:
                 result["_last_dir_error"] = f"{label}: {e}"
                 return False
 
-        # 🆕 v7.2.6: candidates موسّعة
         candidates: List[Tuple[Path, str]] = [
             (Path(tempfile.gettempdir()), "tempdir"),
             (Path("/dev/shm"), "shm"),
@@ -1222,10 +1180,7 @@ async def _probe_system(*, prime_cpu: bool = False) -> Dict[str, Any]:
     """
     قياس Load / CPU count / RAM.
 
-    🆕 v7.2.6 FIX-PROBE-SYSTEM-PRIME:
-        أضفنا `prime_cpu` param. عندما يُستدعى من `_probe_full_health`،
-        نمرّر prime_cpu=False (لأن prime يحدث خارجياً في نافذة القياس
-        الكاملة). عند الاستدعاء المباشر، prime_cpu=True لدقة القياس.
+    🆕 v7.2.6: prime_cpu param.
     """
     result: Dict[str, Any] = {"ok": False}
     try:
@@ -1248,10 +1203,8 @@ async def _probe_system(*, prime_cpu: bool = False) -> Dict[str, Any]:
             result["ram_percent"] = round(vm.percent, 1)
             result["ram_used_mb"] = round(vm.used / (1024 ** 2), 1)
             result["ram_total_mb"] = round(vm.total / (1024 ** 2), 1)
-            # 🆕 v7.2.6: prime اختياري لـ cpu_percent
             if prime_cpu:
                 psutil.cpu_percent(interval=None)
-                # ننتظر قليلاً ثم نقيس
                 await asyncio.sleep(0.1)
                 result["cpu_percent"] = round(
                     psutil.cpu_percent(interval=None), 1
@@ -1267,10 +1220,7 @@ async def _probe_system(*, prime_cpu: bool = False) -> Dict[str, Any]:
 
 def _identify_bottleneck(data: Dict[str, Any]) -> Dict[str, Any]:
     """
-    v7.2.4 FIX-RANK-VALUE (مستمر في v7.2.6):
-        • كل عنصر يحمل {value, unit, severity, weight, kind}.
-        • value + unit حقيقية (ms/%) — weight داخلي فقط.
-        • severity حسب عتبات واقعية.
+    v7.2.4 FIX-RANK-VALUE (مستمر في v7.2.7).
     """
     comps: List[Dict[str, Any]] = []
 
@@ -1486,6 +1436,7 @@ async def _probe_full_health(
     v7.2.2 FIX-CPU: prime CPU قبل gather، read بعده (نافذة كاملة).
     v7.2.5: TLS timeout مضبوط → نافذة أقصر.
     v7.2.6: TLS عبر async (لا ثريد)، Telegram له TTL منفصل.
+    v7.2.7: FIX-PK-TIMING منقول إلى `_probe_db_latency`.
     """
     if not force:
         cached = _cache_get("full_health")
@@ -1522,7 +1473,6 @@ async def _probe_full_health(
 
     _t_gather_start = time.monotonic()
 
-    # 🆕 v7.2.6: Telegram probe مع cache TTL منفصل
     async def _cached_telegram_probe():
         cached = _cache_get("telegram_network")
         if cached is not None:
@@ -1711,7 +1661,7 @@ def format_full_health_report(data: Dict[str, Any]) -> str:
             )
         lines.append("")
 
-    # Event Loop — median + p90 + max
+    # Event Loop
     loop_p = data.get("event_loop") or {}
     if loop_p.get("ok"):
         lines.append("🔄 <b>Event Loop</b>")
@@ -1867,8 +1817,7 @@ async def _get_db_metadata() -> Dict[str, Any]:
                 "SELECT DATABASE()", default="?"
             ) or "?"
 
-            # 🆕 v7.2.6 FIX-MYSQL-SCHEMA-ALIAS:
-            # نستخدم alias واضح لتجنّب فشل حالة الأحرف.
+            # 🆕 v7.2.6 FIX-MYSQL-SCHEMA-ALIAS
             rows = await db.fetchall(
                 "SELECT SCHEMA_NAME AS schema_name "
                 "FROM information_schema.SCHEMATA "
@@ -1905,7 +1854,6 @@ async def _get_db_metadata() -> Dict[str, Any]:
 async def _get_all_tables_health() -> Tuple[List[Dict], List[Dict]]:
     cached = _cache_get("all_tables_health")
     if cached is not None:
-        # _cache_get يعيد نسخة محمية الآن
         if isinstance(cached, tuple) and len(cached) == 2:
             return cached
         return [], []
@@ -2017,7 +1965,6 @@ async def _get_activity_stats() -> Dict[str, Any]:
     if db is None or not _is_postgres():
         return out
 
-    # 🆕 v7.2.6: استخدام الثابت المُوثَّق بدل '5 minutes' المضمّن
     long_tx_sec = _LONG_TX_THRESHOLD_SECONDS
     try:
         row = await db.fetchone(f"""
@@ -2306,10 +2253,7 @@ def _calc_technical_score(
     settings: Dict,
 ) -> Tuple[int, int, int, int]:
     """
-    🆕 v7.2.6 FIX-SCORE-GRADUAL:
-        المشكلة السابقة: عقوبات ثابتة (long_tx > 0 → -5).
-        100 long_tx = نفس عقوبة 1 long_tx = تشخيص مُضلّل.
-        الإصلاح: عقوبات متدرّجة مع سقف.
+    🆕 v7.2.6 FIX-SCORE-GRADUAL: عقوبات متدرّجة.
     """
     score = 100
     critical = 0
@@ -2329,16 +2273,13 @@ def _calc_technical_score(
             warn += 1
             score -= 3
 
-    # 🆕 v7.2.6: عقوبات متدرّجة
     long_tx = int(activity.get("long_tx", 0) or 0)
     if long_tx > 0:
-        # -5 لأول واحد، -2 لكل إضافي، بحد أقصى -20
         penalty = min(20, 5 + (long_tx - 1) * 2)
         score -= penalty
 
     idle_tx = int(activity.get("idle_tx", 0) or 0)
     if idle_tx > 0:
-        # -2 لأول واحد، -1 لكل إضافي، بحد أقصى -10
         penalty = min(10, 2 + (idle_tx - 1))
         score -= penalty
 
@@ -2873,21 +2814,13 @@ async def _build_sections(*, include_probes: bool = True) -> List[str]:
     include_probes=True (افتراضي): يشغّل Full/Latency probes.
 
     🆕 v7.2.6 FIX-PARALLEL-PROBES:
-        المشكلة السابقة: latency_probe + full_health كانا يُشغَّلان
-        بشكل تسلسلي بعد gather → +3-5s.
-        الإصلاح: تشغيلهما موازياً مع باقي الاستعلامات.
-
-    🆕 v7.2.6 FIX-PROBES-NO-DOUBLE:
-        المشكلة السابقة: `_probe_db_latency()` و `_probe_full_health()`
-        داخلياً يستدعيان `_probe_db_latency` (مع الكاش يعمل).
-        الآن الكاش موجود في `_probe_db_latency` — لن يُعاد الاتصال.
+        latency_probe + full_health بالتوازي بعد gather.
     """
     parts: List[str] = []
 
     critical_idx_tables = ["posts", "banned_words", "bot_groups",
                            "users", "user_channels", "subscriptions"]
 
-    # 🆕 v7.2.6: نجمع كل الاستدعاءات (بدون probes الثقال) في gather
     gathered = await asyncio.gather(
         _get_db_metadata(),
         _get_all_tables_health(),
@@ -3161,9 +3094,8 @@ async def _build_sections(*, include_probes: bool = True) -> List[str]:
     except Exception as e:
         logger.warning(f"maintenance preview in sections: {e}")
 
-    # SECTION 12/13 — اختيارية — 🆕 v7.2.6: موازية
+    # SECTION 12/13 — اختيارية
     if include_probes:
-        # نُشغّل latency + full_health بالتوازي (كل واحد يستخدم الكاش داخلياً)
         probes = await asyncio.gather(
             _probe_db_latency(),
             _probe_full_health(),
@@ -3208,10 +3140,8 @@ async def diagnose_db_split(*, include_probes: bool = True) -> List[str]:
 async def diagnose_db_quick() -> str:
     """
     🆕 v7.2.6 FIX-QUICK-PATH:
-        المشكلة السابقة: كان يستدعي get_latency_verdict (8 استعلامات)
-        و _probe_full_health (3-5s). "Quick" كان يستهلك 5s في الأسوأ.
-        الإصلاح: يستخدم بيانات مخزّنة/مُخزّنة بـ TTL فقط.
-        إذا الكاش فارغ، يعرض رسالة، ولا يُشغّل probes ثقيلة.
+        يستخدم بيانات مخزّنة/مُخزّنة بـ TTL فقط.
+        إذا الكاش فارغ، لا يُشغّل probes ثقيلة.
     """
     db = _get_db()
     if db is None:
@@ -3435,18 +3365,19 @@ __all__ = [
 ]
 
 # ═══════════════════════════════════════════════════════════════════════
-# LOAD BEACON — v7.2.6
+# LOAD BEACON — v7.2.7
 # ═══════════════════════════════════════════════════════════════════════
 
 try:
     logger.info(
         "🛡️ db_diagnostics.py v%s loaded | "
-        "POOL-AWARE ✅ (يستخدم db._pool) | "
+        "PK-TIMING ✅ (_detect_users_pk_col خارج نافذة التوقيت) | "
+        "POOL-AWARE ✅ | "
         "PK-DETECT ✅ (current_schema) | "
         "TLS-ASYNC ✅ (open_connection، لا ثريد) | "
-        "PARALLEL-PROBES ✅ (بلا تسلسل) | "
+        "PARALLEL-PROBES ✅ | "
         "FS-SHM ✅ (/dev/shm fallback) | "
-        "SCORE-GRADUAL ✅ (عقوبات متدرّجة) | "
+        "SCORE-GRADUAL ✅ | "
         "CACHE-IMMUTABLE ✅ (deepcopy) | "
         "QUICK-PATH ✅ (cache-only) | "
         "MYSQL-SCHEMA-ALIAS ✅ | "
