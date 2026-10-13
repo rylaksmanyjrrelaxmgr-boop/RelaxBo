@@ -1,29 +1,34 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-handlers_analytics.py — واجهة التحليلات المتقدمة (v1.2.1 — SECURE-FIX)
+handlers_analytics.py — واجهة التحليلات المتقدمة (v1.2.2 — FALLBACK-HARDENING)
 ================================================================================
-v1.2.1: إصلاحات أمنية ووظيفية
-    🔴 FIX-HA1: HTML escape في _err_detail
-        (كان أي خطأ يحتوي < أو > يكسر parse HTML في Telegram).
-    🟡 FIX-HA2: /fullhealth و /latency يردان على غير المطور
-        (كانا يرجعان بصمت عند غياب callback_query).
-    🟡 FIX-HA3: except ImportError → except Exception
-        (يلتقط SyntaxError وغيرها في db_diagnostics).
-    🟢 FIX-HA4: تحويل ternary + await إلى if/else.
-    🟢 FIX-HA5: _safe_send_long يدعم reply_markup على آخر chunk.
-    🟢 FIX-HA6: رسالة "waiting" تُستبدل برسالة نهائية بدل تركها معلّقة.
+v1.2.2: تصلب fallbacks + إصلاح HTML escape ناقص
+    🔴 FIX-HA7: HTML escape في show_growth_30d.day
+        (كان date يُدرج خاماً داخل <code> → يكسر HTML لو احتوى <).
+    🔴 FIX-HA8: _safe_get_chat_id() موحّد — يعالج حالة
+        update.effective_chat=None (يحدث في نادر من تحديثات callback
+        معطوبة أو Commands من قنوات).
+    🟠 FIX-HA9: _safe_edit — عند "can't parse entities" يجرّب
+        HTML-strip + إعادة الإرسال بدون parse_mode.
+    🟠 FIX-HA10: _safe_edit — عند "there is no text in the message"
+        يجرب edit_message_caption كـ fallback.
+    🟠 FIX-HA11: _safe_send_long — عند parse error في أي chunk
+        يعيد المحاولة بـ plain text.
+    🟠 FIX-HA12: show_full_health / show_latency — إرسال رسالة
+        "waiting" حتى عند الاستدعاء من CommandHandler (كان لا يُرسل).
+    🟡 FIX-HA13: _back_keyboard / _back_refresh_keyboard — قبول
+        lang param (كانت مثبّتة على العربية).
+    🟡 FIX-HA14: register_handlers — try/except مع log.
 
-v1.2.0: تكامل التشخيص الشامل + اختبار الكمون
-    🔬 /fullhealth — تشخيص كامل (شبكة، DB، CPU، RAM، event loop، قرص)
-    🔬 /latency — اختبار كمون الشبكة/DB فقط
-    🎯 زر "🏥 التشخيص الشامل" + "🔬 اختبار الكمون" في القائمة
-
-v1.1.1: كشف تلقائي للفروقات + عرض الخطأ الكامل في Telegram.
+v1.2.1: إصلاحات أمنية ووظيفية (محفوظة).
+v1.2.0: تكامل التشخيص الشامل + اختبار الكمون (محفوظ).
+v1.1.1: كشف تلقائي للفروقات (محفوظ).
 ================================================================================
 """
 
 import logging
+import re as _re_mod
 import io
 import html as _html_mod
 import traceback as _tb
@@ -34,6 +39,7 @@ from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import (
     ContextTypes, CallbackQueryHandler, CommandHandler,
 )
+from telegram.error import BadRequest
 
 from config import CONFIG
 from database import DB
@@ -56,7 +62,6 @@ ANALYTICS_BUTTONS = (
     "slow_queries_btn",
     "export_excel_btn",
     "refresh_btn",
-    # 🆕 v1.2.0
     "full_health_btn",
     "latency_btn",
 )
@@ -102,10 +107,37 @@ def _check_developer(user_id: int) -> bool:
         return False
 
 
-async def _reject_non_dev(bot, chat_id: int, query=None,
+def _safe_get_chat_id(update: Update, query=None) -> Optional[int]:
+    """
+    🆕 v1.2.2 FIX-HA8: استخراج chat_id بأمان.
+
+    الأولوية:
+      1. query.message.chat_id (لو callback)
+      2. update.effective_chat.id
+      3. None
+    """
+    try:
+        if query is not None and getattr(query, 'message', None):
+            cid = getattr(query.message, 'chat_id', None)
+            if cid is not None:
+                return cid
+    except Exception:
+        pass
+    try:
+        if update is not None and getattr(update, 'effective_chat', None):
+            cid = getattr(update.effective_chat, 'id', None)
+            if cid is not None:
+                return cid
+    except Exception:
+        pass
+    return None
+
+
+async def _reject_non_dev(bot, chat_id: Optional[int], query=None,
                           message: str = "❌ هذا الأمر للمطور فقط.") -> None:
     """
-    🆕 v1.2.1 FIX-HA2: رفض موحّد — يعمل سواء جاء من callback أو command.
+    🆕 v1.2.1 FIX-HA2: رفض موحّد.
+    🆕 v1.2.2 FIX-HA8: chat_id يمكن أن يكون None.
     """
     if query is not None:
         try:
@@ -120,27 +152,95 @@ async def _reject_non_dev(bot, chat_id: int, query=None,
             logger.debug(f"_reject_non_dev: {e}")
 
 
+def _is_parse_error(err_str: str) -> bool:
+    """🆕 v1.2.2 FIX-HA9/HA11: كشف أخطاء parse HTML."""
+    low = (err_str or "").lower()
+    return any(k in low for k in (
+        "can't parse",
+        "can't find end tag",
+        "unsupported start tag",
+        "unclosed tag",
+        "invalid entity",
+    ))
+
+
+def _strip_html(text: str) -> str:
+    """إزالة وسوم HTML — للعرض كـ plain."""
+    if not text:
+        return text
+    try:
+        import html as _h
+        return _h.unescape(_re_mod.sub(r"<[^>]+>", "", text))
+    except Exception:
+        return text
+
+
 async def _safe_edit(query, text: str, keyboard=None,
                      parse_mode: str = "HTML") -> bool:
+    """
+    🆕 v1.2.2:
+      - FIX-HA9: HTML-strip fallback عند parse error
+      - FIX-HA10: caption-fallback عند no-text
+    """
+    if query is None or getattr(query, 'message', None) is None:
+        return False
+
+    # محاولة 1: edit_message_text عادي
     try:
         await query.edit_message_text(
             text, parse_mode=parse_mode, reply_markup=keyboard,
             disable_web_page_preview=True,
         )
         return True
-    except Exception as e:
+    except BadRequest as e:
         err = str(e).lower()
         if "message is not modified" in err:
             return True
-        try:
-            if query.message:
-                await safe_send(
-                    query.bot, query.message.chat_id, text,
-                    reply_markup=keyboard, parse_mode=parse_mode,
+        # 🆕 FIX-HA9: parse error → plain
+        if parse_mode and _is_parse_error(err):
+            logger.warning(
+                "⚠️ _safe_edit parse failed — fallback plain | %.80s",
+                text,
+            )
+            try:
+                await query.edit_message_text(
+                    _strip_html(text), parse_mode=None,
+                    reply_markup=keyboard,
+                    disable_web_page_preview=True,
                 )
                 return True
+            except Exception as e2:
+                logger.debug(f"_safe_edit plain fallback: {e2}")
+        # 🆕 FIX-HA10: caption-only message
+        if "there is no text in the message" in err or \
+           "message can't be edited" in err:
+            try:
+                await query.edit_message_caption(
+                    caption=text, parse_mode=parse_mode,
+                    reply_markup=keyboard,
+                )
+                return True
+            except Exception as e2:
+                logger.debug(f"_safe_edit caption fallback: {e2}")
+    except Exception as e:
+        logger.debug(f"_safe_edit non-bad: {type(e).__name__}: {e}")
+
+    # 🆕 fallback: إرسال كرسالة جديدة
+    try:
+        chat_id = None
+        try:
+            chat_id = query.message.chat_id
         except Exception:
             pass
+        if chat_id is None:
+            return False
+        await safe_send(
+            query.bot, chat_id, text,
+            reply_markup=keyboard, parse_mode=parse_mode,
+        )
+        return True
+    except Exception as e:
+        logger.debug(f"_safe_edit send fallback: {e}")
         return False
 
 
@@ -149,23 +249,47 @@ async def _safe_send_long(bot, chat_id: int, text: str,
                           reply_markup=None) -> None:
     """
     إرسال نص طويل مع تقسيم إلى 3800 حرف/رسالة.
-    🆕 v1.2.1 FIX-HA5: reply_markup يُرفَق بآخر chunk فقط.
+    🆕 v1.2.2 FIX-HA11: plain fallback عند parse error.
     """
-    if not text:
-        return
-    MAX = 3800
-    if len(text) <= MAX:
-        try:
-            await bot.send_message(
-                chat_id, text, parse_mode=parse_mode,
-                disable_web_page_preview=True,
-                reply_markup=reply_markup,
-            )
-        except Exception as e:
-            logger.warning(f"_safe_send_long (single): {e}")
+    if not text or chat_id is None:
         return
 
-    # تقسيم ذكي — نحاول القطع عند \n
+    async def _send_one(cid, body, kb, pmode):
+        try:
+            await bot.send_message(
+                cid, body, parse_mode=pmode,
+                disable_web_page_preview=True,
+                reply_markup=kb,
+            )
+            return True
+        except BadRequest as be:
+            if pmode and _is_parse_error(str(be)):
+                logger.warning(
+                    "⚠️ _safe_send_long parse failed — plain | %.80s",
+                    body,
+                )
+                try:
+                    await bot.send_message(
+                        cid, _strip_html(body), parse_mode=None,
+                        disable_web_page_preview=True,
+                        reply_markup=kb,
+                    )
+                    return True
+                except Exception as e2:
+                    logger.warning(
+                        f"_safe_send_long plain fallback: {e2}")
+                    return False
+            logger.warning(f"_safe_send_long BadRequest: {be}")
+            return False
+        except Exception as e:
+            logger.warning(f"_safe_send_long: {type(e).__name__}: {e}")
+            return False
+
+    MAX = 3800
+    if len(text) <= MAX:
+        await _send_one(chat_id, text, reply_markup, parse_mode)
+        return
+
     chunks: List[str] = []
     remaining = text
     while len(remaining) > MAX:
@@ -178,40 +302,38 @@ async def _safe_send_long(bot, chat_id: int, text: str,
         chunks.append(remaining)
 
     for i, chunk in enumerate(chunks, 1):
-        try:
-            header = ""
-            if len(chunks) > 1:
-                header = f"<i>({i}/{len(chunks)})</i>\n"
-            # 🆕 FIX-HA5: keyboard على آخر chunk فقط
-            kb = reply_markup if i == len(chunks) else None
-            await bot.send_message(
-                chat_id, header + chunk, parse_mode=parse_mode,
-                disable_web_page_preview=True,
-                reply_markup=kb,
-            )
-        except Exception as e:
-            logger.warning(f"_safe_send_long part {i}: {e}")
+        header = ""
+        if len(chunks) > 1:
+            header = f"<i>({i}/{len(chunks)})</i>\n"
+        # keyboard على آخر chunk فقط
+        kb = reply_markup if i == len(chunks) else None
+        await _send_one(chat_id, header + chunk, kb, parse_mode)
 
 
-def _back_keyboard(target: str = "admin_analytics") -> InlineKeyboardMarkup:
+def _back_keyboard(
+    target: str = "admin_analytics", lang: str = "ar"
+) -> InlineKeyboardMarkup:
+    """🆕 v1.2.2 FIX-HA13: lang param."""
     return InlineKeyboardMarkup([[
         InlineKeyboardButton(
-            _t("back", "🔙 رجوع"),
+            _t("back", "🔙 رجوع", lang),
             callback_data=target,
         )
     ]])
 
 
 def _back_refresh_keyboard(target: str = "admin_analytics",
-                           refresh: str = "refresh_btn"
+                           refresh: str = "refresh_btn",
+                           lang: str = "ar"
                            ) -> InlineKeyboardMarkup:
+    """🆕 v1.2.2 FIX-HA13: lang param."""
     return InlineKeyboardMarkup([
         [InlineKeyboardButton(
-            _t("refresh_btn", "🔄 تحديث"),
+            _t("refresh_btn", "🔄 تحديث", lang),
             callback_data=refresh,
         )],
         [InlineKeyboardButton(
-            _t("back", "🔙 رجوع"),
+            _t("back", "🔙 رجوع", lang),
             callback_data=target,
         )],
     ])
@@ -239,7 +361,7 @@ def _fmt_elapsed(sec) -> str:
 def _err_detail(e: Exception) -> str:
     """
     استخراج تفاصيل كاملة للخطأ.
-    🔴 v1.2.1 FIX-HA1: HTML escape لكل القيم (كان < أو > يكسر parse).
+    🔴 v1.2.1 FIX-HA1: HTML escape.
     """
     try:
         tb_lines = _tb.format_exc().strip().split("\n")
@@ -256,7 +378,6 @@ def _err_detail(e: Exception) -> str:
         err_msg = "?"
     if not err_msg:
         err_msg = "(بدون رسالة)"
-    # 🔴 FIX-HA1: escape HTML
     safe_type = _html_mod.escape(err_type)
     safe_msg = _html_mod.escape(err_msg)
     safe_loc = _html_mod.escape(loc)
@@ -265,12 +386,6 @@ def _err_detail(e: Exception) -> str:
         f"<b>الرسالة:</b> <code>{safe_msg}</code>\n"
         f"<b>الموقع:</b> <code>{safe_loc}</code>"
     )
-
-
-def _strip_html(text: str) -> str:
-    """إزالة وسوم HTML للعرض في console."""
-    import re
-    return re.sub(r"<[^>]+>", "", text or "")
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -282,7 +397,7 @@ async def show_analytics_menu(update: Update,
     try:
         query = update.callback_query
         user_id = update.effective_user.id
-        chat_id = update.effective_chat.id if update.effective_chat else None
+        chat_id = _safe_get_chat_id(update, query)
 
         if query:
             try:
@@ -297,7 +412,6 @@ async def show_analytics_menu(update: Update,
             )
             return
 
-        # تشخيص: هل DB يملك دوال AnalyticsMixin؟
         missing = []
         for _fn in (
             "get_user_growth", "get_top_channels",
@@ -380,7 +494,6 @@ def _default_analytics_keyboard() -> InlineKeyboardMarkup:
          InlineKeyboardButton("🚀 Pool مباشر", callback_data="pool_live_btn")],
         [InlineKeyboardButton("🐌 استعلامات بطيئة", callback_data="slow_queries_btn"),
          InlineKeyboardButton("📤 تصدير Excel", callback_data="export_excel_btn")],
-        # 🆕 v1.2.0
         [InlineKeyboardButton("🏥 التشخيص الشامل", callback_data="full_health_btn")],
         [InlineKeyboardButton("🔬 اختبار الكمون", callback_data="latency_btn")],
         [InlineKeyboardButton("🔄 تحديث", callback_data="refresh_btn")],
@@ -400,9 +513,9 @@ async def show_growth_30d(update: Update,
     except Exception:
         pass
 
+    chat_id = _safe_get_chat_id(update, query)
     if not _check_developer(update.effective_user.id):
-        await _reject_non_dev(context.bot,
-                              update.effective_chat.id, query)
+        await _reject_non_dev(context.bot, chat_id, query)
         return
 
     try:
@@ -428,7 +541,8 @@ async def show_growth_30d(update: Update,
         if rows:
             lines.append("<b>آخر 10 أيام:</b>")
             for r in rows[-10:]:
-                day = str(r.get("date", "?"))[-5:]
+                # 🔴 v1.2.2 FIX-HA7: HTML escape
+                day = _html_mod.escape(str(r.get("date", "?"))[-5:])
                 cnt = r.get("count", 0)
                 bar = _bar(cnt, max_count or 1, width=8)
                 lines.append(f"  <code>{day}</code> {bar} <b>{cnt}</b>")
@@ -462,9 +576,9 @@ async def show_top_channels(update: Update,
     except Exception:
         pass
 
+    chat_id = _safe_get_chat_id(update, query)
     if not _check_developer(update.effective_user.id):
-        await _reject_non_dev(context.bot,
-                              update.effective_chat.id, query)
+        await _reject_non_dev(context.bot, chat_id, query)
         return
 
     try:
@@ -521,9 +635,9 @@ async def show_publish_stats(update: Update,
     except Exception:
         pass
 
+    chat_id = _safe_get_chat_id(update, query)
     if not _check_developer(update.effective_user.id):
-        await _reject_non_dev(context.bot,
-                              update.effective_chat.id, query)
+        await _reject_non_dev(context.bot, chat_id, query)
         return
 
     try:
@@ -580,9 +694,9 @@ async def show_channels_rate(update: Update,
     except Exception:
         pass
 
+    chat_id = _safe_get_chat_id(update, query)
     if not _check_developer(update.effective_user.id):
-        await _reject_non_dev(context.bot,
-                              update.effective_chat.id, query)
+        await _reject_non_dev(context.bot, chat_id, query)
         return
 
     try:
@@ -643,9 +757,9 @@ async def show_subscriptions(update: Update,
     except Exception:
         pass
 
+    chat_id = _safe_get_chat_id(update, query)
     if not _check_developer(update.effective_user.id):
-        await _reject_non_dev(context.bot,
-                              update.effective_chat.id, query)
+        await _reject_non_dev(context.bot, chat_id, query)
         return
 
     try:
@@ -701,9 +815,9 @@ async def show_pool_live(update: Update,
     except Exception:
         pass
 
+    chat_id = _safe_get_chat_id(update, query)
     if not _check_developer(update.effective_user.id):
-        await _reject_non_dev(context.bot,
-                              update.effective_chat.id, query)
+        await _reject_non_dev(context.bot, chat_id, query)
         return
 
     try:
@@ -780,9 +894,9 @@ async def show_slow_queries(update: Update,
     except Exception:
         pass
 
+    chat_id = _safe_get_chat_id(update, query)
     if not _check_developer(update.effective_user.id):
-        await _reject_non_dev(context.bot,
-                              update.effective_chat.id, query)
+        await _reject_non_dev(context.bot, chat_id, query)
         return
 
     try:
@@ -806,7 +920,6 @@ async def show_slow_queries(update: Update,
             for i, r in enumerate(rows[:10], 1):
                 q_raw = (r.get("query") or r.get("sql") or "?")[:80]
                 elapsed = r.get("elapsed", 0)
-                # 🔴 v1.2.1: HTML escape
                 q = _html_mod.escape(q_raw)
                 lines.append(
                     f"{i}. <code>{q}</code>\n"
@@ -840,9 +953,17 @@ async def export_excel(update: Update,
     except Exception:
         pass
 
+    chat_id = _safe_get_chat_id(update, query)
     if not _check_developer(update.effective_user.id):
-        await _reject_non_dev(context.bot,
-                              update.effective_chat.id, query)
+        await _reject_non_dev(context.bot, chat_id, query)
+        return
+
+    # 🆕 v1.2.2: تأكد أننا في سياق callback
+    if query is None or getattr(query, 'message', None) is None:
+        if chat_id is not None:
+            await safe_send(
+                context.bot, chat_id,
+                "❌ هذا الزر يعمل من داخل القائمة فقط.")
         return
 
     try:
@@ -927,24 +1048,21 @@ async def export_excel(update: Update,
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# v1.2.0: 9) التشخيص الشامل (Full Health Probe)
-# 🟢 v1.2.1 FIX-HA3, FIX-HA4, FIX-HA6
+# 10) التشخيص الشامل (Full Health Probe)
+# 🆕 v1.2.2 FIX-HA12: إرسال "waiting" أيضاً للـ CommandHandler
 # ═══════════════════════════════════════════════════════════════════════
 
 async def show_full_health(update: Update,
                            context: ContextTypes.DEFAULT_TYPE) -> None:
     """🏥 تشخيص شامل — 6 أبعاد + حكم آلي."""
     query = update.callback_query
-    chat_id = None
+    chat_id = _safe_get_chat_id(update, query)
 
     if query:
         try:
             await query.answer("⏳ جاري التشخيص الشامل... (5-10s)")
         except Exception:
             pass
-        chat_id = query.message.chat_id if query.message else None
-    else:
-        chat_id = update.effective_chat.id if update.effective_chat else None
 
     if not _check_developer(update.effective_user.id):
         await _reject_non_dev(context.bot, chat_id, query)
@@ -966,14 +1084,22 @@ async def show_full_health(update: Update,
         "  ⚙️ CPU/RAM\n\n"
         "⏳ يرجى الانتظار 5-10 ثواني..."
     )
+    # 🆕 FIX-HA12: للـ callback نُعدّل، وللـ command نُرسل جديد
     if query:
         try:
             await _safe_edit(query, waiting_text, None)
         except Exception as e:
-            logger.debug(f"show_full_health waiting: {e}")
+            logger.debug(f"show_full_health waiting (edit): {e}")
+    else:
+        try:
+            await safe_send(
+                context.bot, chat_id, waiting_text,
+                parse_mode="HTML",
+            )
+        except Exception as e:
+            logger.debug(f"show_full_health waiting (send): {e}")
 
     # ─── استيراد آمن ──────────────────────────────────────────
-    # 🟡 v1.2.1 FIX-HA3: except Exception بدل ImportError
     try:
         from db_diagnostics import diagnose_full
     except Exception as ie:
@@ -1001,20 +1127,16 @@ async def show_full_health(update: Update,
             refresh="full_health_btn",
         )
 
-        # 🟢 FIX-HA6: لو التقرير قصير → عدّل رسالة الانتظار مباشرة
-        # لو طويل → أرسله كرسائل جديدة، واستبدل الانتظار بإشارة
         MAX_SINGLE = 3800
         if len(report) <= MAX_SINGLE and query:
             ok = await _safe_edit(query, report, back_kb)
             if ok:
                 return
-            # fallback: أرسل كرسالة جديدة مع keyboard
             await _safe_send_long(
                 context.bot, chat_id, report,
                 reply_markup=back_kb,
             )
         else:
-            # استبدل "waiting" بإشارة قصيرة
             if query:
                 try:
                     await _safe_edit(
@@ -1024,7 +1146,6 @@ async def show_full_health(update: Update,
                     )
                 except Exception as e:
                     logger.debug(f"show_full_health after: {e}")
-            # أرسل التقرير مع keyboard على آخر chunk
             await _safe_send_long(
                 context.bot, chat_id, report,
                 reply_markup=back_kb,
@@ -1037,7 +1158,6 @@ async def show_full_health(update: Update,
             f"❌ <b>فشل التشخيص الشامل</b>\n"
             f"━━━━━━━━━━━━━━━━━━━━━━\n{err_html}"
         )
-        # 🟢 FIX-HA4: if/else بدل ternary + await
         if query:
             await _safe_edit(
                 query, err_text, _back_keyboard("admin_analytics"))
@@ -1046,24 +1166,21 @@ async def show_full_health(update: Update,
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# v1.2.0: 10) اختبار الكمون (Latency Probe)
-# 🟢 v1.2.1 FIX-HA3, FIX-HA4
+# 11) اختبار الكمون (Latency Probe)
+# 🆕 v1.2.2 FIX-HA12: إرسال "waiting" أيضاً للـ CommandHandler
 # ═══════════════════════════════════════════════════════════════════════
 
 async def show_latency(update: Update,
                        context: ContextTypes.DEFAULT_TYPE) -> None:
-    """🔬 اختبار كمون الشبكة/DB — أسرع من التشخيص الشامل."""
+    """🔬 اختبار كمون الشبكة/DB."""
     query = update.callback_query
-    chat_id = None
+    chat_id = _safe_get_chat_id(update, query)
 
     if query:
         try:
             await query.answer("⏳ جاري اختبار الكمون...")
         except Exception:
             pass
-        chat_id = query.message.chat_id if query.message else None
-    else:
-        chat_id = update.effective_chat.id if update.effective_chat else None
 
     if not _check_developer(update.effective_user.id):
         await _reject_non_dev(context.bot, chat_id, query)
@@ -1072,7 +1189,26 @@ async def show_latency(update: Update,
     if chat_id is None:
         return
 
-    # 🟡 FIX-HA3: except Exception بدل ImportError
+    # 🆕 FIX-HA12: waiting message
+    waiting_text = (
+        "🔬 <b>جاري اختبار الكمون...</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        "⏳ 3-5 ثواني..."
+    )
+    if query:
+        try:
+            await _safe_edit(query, waiting_text, None)
+        except Exception as e:
+            logger.debug(f"show_latency waiting (edit): {e}")
+    else:
+        try:
+            await safe_send(
+                context.bot, chat_id, waiting_text,
+                parse_mode="HTML",
+            )
+        except Exception as e:
+            logger.debug(f"show_latency waiting (send): {e}")
+
     try:
         from db_diagnostics import diagnose_latency
     except Exception as ie:
@@ -1099,11 +1235,26 @@ async def show_latency(update: Update,
             refresh="latency_btn",
         )
 
-        # 🟢 FIX-HA4: if/else بدل ternary + await
-        if query:
-            await _safe_edit(query, report, back_kb)
+        MAX_SINGLE = 3800
+        if len(report) <= MAX_SINGLE and query:
+            ok = await _safe_edit(query, report, back_kb)
+            if ok:
+                return
+            await _safe_send_long(
+                context.bot, chat_id, report,
+                reply_markup=back_kb,
+            )
         else:
-            await safe_send(
+            if query:
+                try:
+                    await _safe_edit(
+                        query,
+                        "✅ <b>التقرير جاهز 👇</b>",
+                        None,
+                    )
+                except Exception as e:
+                    logger.debug(f"show_latency after: {e}")
+            await _safe_send_long(
                 context.bot, chat_id, report,
                 reply_markup=back_kb,
             )
@@ -1123,7 +1274,7 @@ async def show_latency(update: Update,
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# 11) التوجيه المركزي
+# 12) التوجيه المركزي
 # ═══════════════════════════════════════════════════════════════════════
 
 _ANALYTICS_HANDLERS = {
@@ -1136,7 +1287,6 @@ _ANALYTICS_HANDLERS = {
     "pool_live_btn": show_pool_live,
     "slow_queries_btn": show_slow_queries,
     "export_excel_btn": export_excel,
-    # 🆕 v1.2.0
     "full_health_btn": show_full_health,
     "latency_btn": show_latency,
 }
@@ -1186,22 +1336,20 @@ async def handle_analytics_callback(
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# 12) /analytics
+# 13) /analytics
 # ═══════════════════════════════════════════════════════════════════════
 
 async def cmd_analytics(update: Update,
                         context: ContextTypes.DEFAULT_TYPE) -> None:
     if not _check_developer(update.effective_user.id):
-        chat_id = (update.effective_chat.id
-                   if update.effective_chat else None)
+        chat_id = _safe_get_chat_id(update, None)
         await _reject_non_dev(context.bot, chat_id, None)
         return
     await show_analytics_menu(update, context)
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# v1.2.0: 13) أوامر مباشرة — /fullhealth + /latency
-# 🟢 v1.2.1 FIX-HA2: الفحص داخل show_full_health/show_latency
+# 14) أوامر مباشرة — /fullhealth + /latency
 # ═══════════════════════════════════════════════════════════════════════
 
 async def cmd_fullhealth(update: Update,
@@ -1217,27 +1365,50 @@ async def cmd_latency(update: Update,
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# 14) التسجيل
+# 15) التسجيل
+# 🆕 v1.2.2 FIX-HA14: try/except
 # ═══════════════════════════════════════════════════════════════════════
 
-def register_handlers(application) -> None:
-    pattern = r"^(?:" + "|".join(ANALYTICS_BUTTONS) + r")(?::\d+)?$"
-    application.add_handler(
-        CallbackQueryHandler(
-            handle_analytics_callback,
-            pattern=pattern,
-        )
-    )
-    application.add_handler(CommandHandler("analytics", cmd_analytics))
-    # 🆕 v1.2.0: أوامر مباشرة
-    application.add_handler(CommandHandler("fullhealth", cmd_fullhealth))
-    application.add_handler(CommandHandler("latency", cmd_latency))
+def register_handlers(application) -> bool:
+    """
+    🆕 v1.2.2 FIX-HA14: try/except + إرجاع bool.
 
-    logger.info(
-        "✅ handlers_analytics: تم تسجيل %d زر + /analytics "
-        "+ /fullhealth + /latency",
-        len(ANALYTICS_BUTTONS),
-    )
+    ملاحظة: هذا الـ helper غير مطلوب عادةً لأن bot.py
+    يسجّل الـ handlers مباشرة (ORDER 5/6). يبقى للاستخدام المستقل.
+    """
+    try:
+        pattern = (
+            r"^(?:" + "|".join(ANALYTICS_BUTTONS) + r")(?::\d+)?$"
+        )
+        application.add_handler(
+            CallbackQueryHandler(
+                handle_analytics_callback,
+                pattern=pattern,
+            )
+        )
+        application.add_handler(
+            CommandHandler("analytics", cmd_analytics)
+        )
+        application.add_handler(
+            CommandHandler("fullhealth", cmd_fullhealth)
+        )
+        application.add_handler(
+            CommandHandler("latency", cmd_latency)
+        )
+
+        logger.info(
+            "✅ handlers_analytics: تم تسجيل %d زر + /analytics "
+            "+ /fullhealth + /latency",
+            len(ANALYTICS_BUTTONS),
+        )
+        return True
+    except Exception as e:
+        logger.error(
+            f"❌ handlers_analytics.register_handlers: "
+            f"{type(e).__name__}: {e}",
+            exc_info=True,
+        )
+        return False
 
 
 register = register_handlers
@@ -1255,7 +1426,6 @@ __all__ = [
     "show_pool_live",
     "show_slow_queries",
     "export_excel",
-    # 🆕 v1.2.0
     "show_full_health",
     "show_latency",
     "cmd_analytics",
@@ -1264,3 +1434,25 @@ __all__ = [
     "register_handlers",
     "register",
 ]
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# LOAD BEACON
+# ═══════════════════════════════════════════════════════════════════════
+
+try:
+    logger.info(
+        "✅ handlers_analytics v1.2.2 loaded | "
+        "buttons=%d | "
+        "FIX-HA7=growth-day-escape | "
+        "FIX-HA8=safe-chat-id | "
+        "FIX-HA9=edit-html-fallback | "
+        "FIX-HA10=edit-caption-fallback | "
+        "FIX-HA11=send-long-plain-fallback | "
+        "FIX-HA12=waiting-for-commands | "
+        "FIX-HA13=keyboard-lang-param | "
+        "FIX-HA14=register-try-except",
+        len(ANALYTICS_BUTTONS),
+    )
+except Exception:
+    pass
