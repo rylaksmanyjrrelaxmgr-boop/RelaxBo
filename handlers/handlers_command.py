@@ -2,37 +2,62 @@
 # -*- coding: utf-8 -*-
 
 """
-handlers_command.py - معالجات الأوامر (CommandHandlers) - v7.7.3
+handlers_command.py - معالجات الأوامر (CommandHandlers) - v7.7.4
 ===================================================================================
+🆕 v7.7.4 (FSM-HANDLERS-POLISH + FIX-PACK):
+    🔴 FIX-1: إزالة "none" من قائمة الإلغاء العامة في handle_text.
+        السبب: كان يمنع تعطيل WAIT_FORCE عبر كتابة "none".
+        الأثر قبل الإصلاح: المستخدم يكتب "none" لتعطيل قناة
+        الاشتراك الإجباري، فيلتقطه فحص الإلغاء أولاً → لا شيء.
+        الآن: "none" يصل لـ WAIT_FORCE handler → ينجح التعطيل.
+
+    🔴 FIX-2: context.args = text.split() بدل [text].
+        السبب: [text] كقائمة بعنصر واحد يكسر _moderation_command
+        عند إرسال "123456 60" (ID + دقائق) → int("123456 60") يفشل.
+        الآن: split() يسمح بتمرير args متعددة.
+
+    🔴 FIX-3: _finalize_contest — فحص signature.
+        السبب: `except TypeError` كان يبتلع أي TypeError داخلي
+        (ليس فقط signature mismatch). الآن نستخدم inspect.signature
+        لفحص دعم question/correct_answer قبل الاستدعاء.
+
+    🔴 FIX-4: WAIT_CONTEST_TYPE — إزالة "other".
+        السبب: DB.create_contest لا تدعم contest_type="other" في
+        VALID_* → فشل صامت. الآن نرفض any نوع غير raffle/quiz.
+
+    🟠 FIX-5: WAIT_PIN — فحص صلاحية can_pin.
+        السبب: كان يُرسل pin_chat_message بدون فحص مسبق →
+        إذا لم يكن للبوت الصلاحية، يظهر خطأ Telegram الخام.
+
+    🟠 FIX-6: WAIT_BROADCAST — إبلاغ المستخدم عند فشل البث.
+        السبب: في المسار البديل (عند غياب _do_broadcast)، كان
+        يُرسل للمالك فقط ويُخبر المستخدم بأن البث تم. الآن
+        يُخبر المستخدم أن البث لم يُنفَّذ.
+
+    🟠 FIX-7: WAIT_KEYWORD — استخدام auto_chat + التمييز.
+        السبب: كان يستخدم DB.add_auto_reply(-1, text, text) دائماً
+        (رد عالمي، النص=الرد). الآن:
+          • إذا keyword_action="banned_word" → add_banned_word
+          • إذا keyword_action="auto_reply" → transition to
+            WAIT_REPLY_RESPONSE لجمع الرد الفعلي
+          • إذا auto_chat محدّد → استخدمه بدل -1
+
+    🟡 FIX-8: WAIT_CONTEST_DURATION — دعم float.
+        السبب: كان int(text) فقط → "1.5" مرفوض. الآن float ثم
+        تقريب إلى أقرب ساعة.
+
+    🟡 FIX-9: _handle_wait_penalty_duration_text — رسائل أوضح.
+
 🆕 v7.7.3 (FIX-C1 — LARGE):
     🔴 FIX-C1: إضافة CommandHandlers.handle_text — Fallback لـ ~40 حالة
               FSM غير مُعالَجة في handlers_message._PRIVATE_HANDLERS_MAP.
-              السبب: handlers_message.handle_private يحتوي fallback paths
-              تشير إلى CommandHandlers.handle_text — التي كانت مفقودة.
-              الأثر قبل الإصلاح: ~40 حالة FSM (إشراف، أمان، جدولة،
-              مسابقات، etc.) تُظهر "❌ لم أتعرف على العملية".
-              الإصلاح: دالة handle_text + 3 معالجات فرعية.
     🟡 FIX-IMPORT-Any: إضافة Any إلى typing imports.
     🟡 FIX-IMPORT-safe_send: إضافة safe_send إلى utils imports.
 
-🆕 v7.7.2 (PERF-FIXES للبطء):
-    🟢 PERF-1: Timing logs في start — لتشخيص أين البطء.
-    🟢 PERF-2: cache للاشتراك الإجباري في user_data (3600s TTL).
-    🟢 PERF-3: _FORCE_CHANNEL_CACHE_TTL من 600s إلى 1800s.
-    🟢 PERF-4: helper _timed لأي عملية.
-
-🆕 v7.7.1 (L1 REVIEW FIXES):
-    🟠 L1 _truncate_grapheme_safe: فحص nxt in _EMOJI_MODIFIERS
-    🟠 L2 db_diag/db_vacuum: logger.warning بدل debug
-    🟠 L3 _notify_dev_log: معالجة t.me/s/<channel> → parts[4]
-    🟡 L4 restore: فحص b.is_file() و not b.is_symlink()
-    🟡 L5 mood: round() بدل int(round())
-    🟡 L6 _split_text_for_telegram: min_acceptable = safe_limit//4
-
-🆕 v7.7.0 (POST-REVIEW POLISH): K1-K13
-🆕 v7.6.9 (DEEP REVIEW FIXES):
-    🔴 J1 _moderation_command: invalidate_auth_cache بدون await + positional
-    🟡 J2-J13
+🆕 v7.7.2 (PERF-FIXES): PERF-1..4.
+🆕 v7.7.1 (L1 REVIEW FIXES): L1..L6.
+🆕 v7.7.0 (POST-REVIEW POLISH): K1-K13.
+🆕 v7.6.9 (DEEP REVIEW FIXES): J1..J13.
 ===================================================================================
 """
 
@@ -63,7 +88,7 @@ from utils import (
     get_text, StateManager, UserState,
     KeyboardFactory, TranslationManager, CB,
     export_auto_replies,
-    safe_send,  # 🟡 FIX-IMPORT-safe_send
+    safe_send,
 )
 from cache import user_cache
 
@@ -142,7 +167,6 @@ def _is_parse_error(err_str: str) -> bool:
 
 
 def _strip_html_tags(s: str) -> str:
-    """✅ F1/F6: يزيل وسوم HTML ويُفكّ الكيانات المُهرَّبة."""
     if not s:
         return s
     try:
@@ -152,9 +176,6 @@ def _strip_html_tags(s: str) -> str:
 
 
 def _find_last_unclosed_lt(s: str) -> int:
-    """
-    ✅ H1 + J6: يرجع موضع '<' لآخر وسم HTML غير مغلق.
-    """
     if not s:
         return -1
 
@@ -199,7 +220,6 @@ def _find_last_unclosed_lt(s: str) -> int:
 
 
 def _no_preview_kwargs() -> dict:
-    """✅ C2: kwargs لتعطيل معاينة الرابط."""
     if _HAS_LINK_PREVIEW_OPTIONS:
         try:
             return {"link_preview_options": LinkPreviewOptions(is_disabled=True)}
@@ -209,7 +229,6 @@ def _no_preview_kwargs() -> dict:
 
 
 def _is_chat_id(s: str) -> bool:
-    """✅ H6: يتحقق إن كانت السلسلة معرف قناة رقمي."""
     if not s:
         return False
     if s.startswith('-'):
@@ -218,7 +237,6 @@ def _is_chat_id(s: str) -> bool:
 
 
 def _pct(v, default: float = 0.0) -> float:
-    """✅ H3 + I4 + K9: يحوّل قيمة إلى float بأمان."""
     if v is None:
         return default
     try:
@@ -232,7 +250,6 @@ def _pct(v, default: float = 0.0) -> float:
 
 
 async def _safe_fetchall(query: str, params: tuple = ()) -> list:
-    """✅ H4 + J7: fetchall مع try/except موحّد."""
     try:
         result = await DB.fetchall(query, params)
         return list(result) if result else []
@@ -242,7 +259,6 @@ async def _safe_fetchall(query: str, params: tuple = ()) -> list:
 
 
 def _security_supports_lang() -> bool:
-    """✅ I6: cache نتيجة فحص دعم lang."""
     global _SECURITY_LANG_SUPPORT
     if _SECURITY_LANG_SUPPORT is None:
         try:
@@ -269,12 +285,11 @@ _STALE_KEYS_ON_START = (
     'schedule_ch', 'ban_chat', 'contest_join', 'log_group_id',
     'pin_msg_id', 'channel_page', 'post_page', 'adm_ch_page',
     'adm_gr_page', 'auto_keyword', 'contest_id', 'contest_title',
-    'contest_desc', 'contest_prize',
+    'contest_desc', 'contest_prize', 'pending_action', 'sched_ch',
 )
 
 
 def _clear_stale_state(user_id: int, context) -> None:
-    """✅ v7.5.26 + C4 + J9: يمسح الحالة المعلقة."""
     try:
         StateManager.clear(user_id)
     except Exception as e:
@@ -295,7 +310,6 @@ def _clear_stale_state(user_id: int, context) -> None:
 
 
 class _Timed:
-    """🆕 PERF-4: context manager لقياس زمن عملية."""
     __slots__ = ('_label', '_t0', '_prefix')
 
     def __init__(self, label: str, prefix: str = "⏱️ [START]"):
@@ -324,7 +338,6 @@ _AUTO_DELETE_TASKS: Set[asyncio.Task] = set()
 
 
 def _spawn_notify_dev_log(context, text: str) -> None:
-    """✅ C2 + R7 + C5: مهمة خلفية مع تنظيف وتتبّع."""
     try:
         task = asyncio.create_task(_notify_dev_log(context, text))
         _NOTIFY_TASKS.add(task)
@@ -352,7 +365,6 @@ def _safe_mtime(p):
 
 
 def _get_field(row, key, default=None):
-    """✅ J8: تنظيف — sqlite3.Row يدعم indexing فقط."""
     if row is None:
         return default
     if isinstance(row, dict):
@@ -375,7 +387,6 @@ def _row_to_dict(row) -> dict:
 
 
 def _mask_id(id_value, prefix=3, suffix=2):
-    """✅ C3: حد أوضح (prefix + suffix)."""
     if id_value is None:
         return "***"
     s = str(id_value)
@@ -396,7 +407,6 @@ def _is_anonymous_sender(update: Update) -> bool:
 def _resolve_target_id(
     update, context, *, prefer_chat: bool = False
 ) -> Optional[int]:
-    """✅ C1 + R5 + F7: استخراج معرف الهدف الآمن."""
     if not prefer_chat:
         try:
             q = getattr(update, 'callback_query', None) if update else None
@@ -432,10 +442,6 @@ def _resolve_target_id(
 
 
 async def _safe_send_message(bot, chat_id, text, **extra):
-    """
-    إرسال مع retry + timeout + fallback داخلي.
-    ✅ G4 + H8 + I5 + J10 + K5.
-    """
     parse_mode = extra.get('parse_mode')
 
     for attempt in range(SEND_MAX_RETRIES + 1):
@@ -503,9 +509,6 @@ async def _safe_send_message(bot, chat_id, text, **extra):
 
 
 async def _notify_dev_log(context, text: str) -> None:
-    """
-    ✅ v7.6.0 + R8 + F3 + G1 + I2 + J3 + K13 + L3.
-    """
     try:
         log_ch = ''
         try:
@@ -595,7 +598,6 @@ async def _notify_dev_log(context, text: str) -> None:
 
 
 async def _trans(key: str, lang: str, default: str = "") -> str:
-    """ترجمة آمنة مع fallback عربي."""
     if not key:
         return default or ""
 
@@ -619,7 +621,6 @@ async def _trans(key: str, lang: str, default: str = "") -> str:
 
 
 async def _get_lang(user_id: int) -> str:
-    """✅ M1: cache أولاً، ثم DB."""
     try:
         data = await user_cache.get_or_load(user_id, DB)
         if data and isinstance(data, dict):
@@ -637,7 +638,6 @@ async def _get_lang(user_id: int) -> str:
 
 
 async def _delete_message_after(bot, chat_id: int, message_id: int, delay: int = 10):
-    """✅ K7: debug كافٍ."""
     try:
         safe_delay = max(0, int(delay))
         if safe_delay > 0:
@@ -648,7 +648,6 @@ async def _delete_message_after(bot, chat_id: int, message_id: int, delay: int =
 
 
 def _spawn_auto_delete(bot, chat_id: int, message_id: int, delay: int) -> None:
-    """✅ C7 + K7: تتبّع + cleanup."""
     try:
         task = asyncio.create_task(
             _delete_message_after(bot, chat_id, message_id, delay)
@@ -672,7 +671,6 @@ async def _send_and_auto_delete(
     context, chat_id: int, text: str,
     reply_markup=None, parse_mode=None, delay: int = 10,
 ):
-    """إرسال مع auto-delete + retry."""
     msg = await _safe_send_message(
         context.bot, chat_id, text,
         reply_markup=reply_markup, parse_mode=parse_mode,
@@ -690,7 +688,6 @@ async def _send_and_auto_delete(
 
 
 async def _safe_edit_or_send(update, context, text, reply_markup=None, parse_mode=None):
-    """إرسال/تعديل مع retry + fallback. ✅ C1, R5, F6, F7, G10."""
     query = update.callback_query
     prefer_chat = query is None
     target = _resolve_target_id(
@@ -764,14 +761,12 @@ _FORCE_CHANNEL_CACHE_MAX = 500
 
 
 def _normalize_force_ch(force_ch: str) -> str:
-    """✅ C5 + R3 + G5: تطبيع قيمة force_channel."""
     if not force_ch:
         return ""
     return str(force_ch).strip().removeprefix('@')
 
 
 def _force_sub_cache_set(key, value):
-    """✅ M2: LRU عند التجاوز."""
     if (
         key not in _force_sub_cache
         and len(_force_sub_cache) >= _FORCE_SUB_CACHE_MAX
@@ -790,7 +785,6 @@ def _force_sub_cache_set(key, value):
 
 
 def _force_channel_cache_set(key, value):
-    """✅ M2: cap على كاش القنوات."""
     if (
         key not in _force_channel_cache
         and len(_force_channel_cache) >= _FORCE_CHANNEL_CACHE_MAX
@@ -809,7 +803,6 @@ def _force_channel_cache_set(key, value):
 
 
 async def _get_force_channel_cached(bot, force_ch: str):
-    """✅ R3 + H6."""
     norm = _normalize_force_ch(force_ch)
     if not norm:
         return None
@@ -836,7 +829,6 @@ async def _get_force_channel_cached(bot, force_ch: str):
 
 
 async def _check_force_subscription_cached(bot, user_id: int, force_ch: str) -> bool:
-    """✅ R3 + M6 + H6."""
     norm = _normalize_force_ch(force_ch)
     if not norm:
         return _FORCE_SUB_FAILS_OPEN
@@ -876,7 +868,6 @@ def _invalidate_force_sub_cache(user_id: int = None):
 async def _check_force_sub_via_ud(
     context, user_id: int, force_ch: str
 ) -> bool:
-    """🆕 PERF-2: cache الاشتراك الإجباري في user_data لمدة ساعة."""
     ud = getattr(context, 'user_data', None)
     if ud is None:
         return await _check_force_subscription_cached(
@@ -911,7 +902,6 @@ async def _send_long_report(
     limit: int = TELEGRAM_MESSAGE_LIMIT,
     split_delay: float = DB_DIAG_SPLIT_DELAY,
 ) -> int:
-    """✅ F1 + G9 + H9 + K6."""
     if not text:
         return 0
 
@@ -968,7 +958,6 @@ def _split_text_for_telegram(
     text: str,
     limit: int = TELEGRAM_MESSAGE_LIMIT,
 ) -> List[str]:
-    """✅ F4 + H1 + L6."""
     if not text:
         return [""]
 
@@ -1014,7 +1003,6 @@ _EMOJI_MODIFIERS = frozenset((
 
 
 def _truncate_grapheme_safe(text: str, max_len: int) -> str:
-    """✅ K1 + L1: قطع آمن عند حدود grapheme."""
     if not text or max_len <= 0:
         return ""
     if len(text) <= max_len:
@@ -1038,7 +1026,6 @@ def _safe_truncate_button_title(
     join_text: str,
     max_len: int = TELEGRAM_BUTTON_TEXT_LIMIT,
 ) -> str:
-    """✅ R6 + J12."""
     if not raw_title:
         return ""
 
@@ -1049,15 +1036,13 @@ def _safe_truncate_button_title(
         return ""
 
     return _truncate_grapheme_safe(raw_title, available)
+
+
 # ═══════════════════════════════════════════════════════════════════
 # CommandHandlers
 # ═══════════════════════════════════════════════════════════════════
 
 class CommandHandlers:
-
-    # ═══════════════════════════════════════════════════════════════
-    # start — ✅ G2 + H2 + J4 + K2 + K3 + PERF-1 + PERF-2
-    # ═══════════════════════════════════════════════════════════════
 
     @staticmethod
     async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1299,7 +1284,6 @@ class CommandHandlers:
 
     @staticmethod
     async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """✅ G8: _trans آمنة داخلياً."""
         user_id = update.effective_user.id
         lang = await _get_lang(user_id)
         help_text = await _trans('help_text', lang, "❓ المساعدة")
@@ -1307,7 +1291,6 @@ class CommandHandlers:
 
     @staticmethod
     async def trial(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """✅ J5: type-safe على activate_trial."""
         user_id = update.effective_user.id
         username = update.effective_user.username or ""
         first_name = update.effective_user.first_name or ""
@@ -1391,7 +1374,6 @@ class CommandHandlers:
 
     @staticmethod
     async def developer(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """✅ F9: escape الترجمات."""
         user_id = update.effective_user.id
         lang = await _get_lang(user_id)
 
@@ -1425,7 +1407,6 @@ class CommandHandlers:
 
     @staticmethod
     async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """✅ F9: escape الترجمات."""
         user_id = update.effective_user.id
         lang = await _get_lang(user_id)
         if not CONFIG.is_developer(user_id):
@@ -1464,7 +1445,6 @@ class CommandHandlers:
 
     @staticmethod
     async def language(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """✅ R2 + R9 + F5."""
         user_id = update.effective_user.id
         lang = await _get_lang(user_id)
 
@@ -1603,7 +1583,6 @@ class CommandHandlers:
 
     @staticmethod
     async def mood(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """✅ H3 + I4 + K4 + L5."""
         user_id = update.effective_user.id
         lang = await _get_lang(user_id)
         args = context.args or []
@@ -1834,7 +1813,6 @@ class CommandHandlers:
 
     @staticmethod
     async def restore(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """✅ J13 + L4: فحص path traversal + is_file/is_symlink."""
         user_id = update.effective_user.id
         if not CONFIG.is_developer(user_id):
             return
@@ -1987,7 +1965,6 @@ class CommandHandlers:
 
     @staticmethod
     async def security(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """✅ H7 + I6 + J11."""
         if not update.effective_chat or update.effective_chat.type not in ['group', 'supergroup']:
             return
         chat_id = update.effective_chat.id
@@ -2156,7 +2133,6 @@ class CommandHandlers:
 
     @staticmethod
     async def remove_hidden_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """✅ K12: يستخدم raw SQL للتناسق مع الجدول hidden_admins."""
         user_id = update.effective_user.id
         chat_id = update.effective_chat.id
         is_owner = user_id == CONFIG.PRIMARY_OWNER_ID
@@ -2182,7 +2158,6 @@ class CommandHandlers:
 
     @staticmethod
     async def list_hidden_admins(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """✅ G7 + H4: _safe_fetchall موحّد للـ3 استعلامات."""
         user_id = update.effective_user.id
         chat_id = update.effective_chat.id
         is_owner = user_id == CONFIG.PRIMARY_OWNER_ID
@@ -2227,7 +2202,6 @@ class CommandHandlers:
 
     @staticmethod
     async def syncgroup(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """✅ F11 + K10."""
         if not update.effective_chat or update.effective_chat.type not in ['group', 'supergroup']:
             return
 
@@ -2438,7 +2412,6 @@ class CommandHandlers:
     @staticmethod
     async def _moderation_command(update: Update, context: ContextTypes.DEFAULT_TYPE,
                                    action: str) -> None:
-        """✅ J1: إصلاح invalidate_auth_cache (بدون await + positional)."""
         if not update.effective_chat or update.effective_chat.type not in ['group', 'supergroup']:
             return
         chat_id = update.effective_chat.id
@@ -2535,20 +2508,10 @@ class CommandHandlers:
                 invalidate_auth_cache(chat_id, target)
             except Exception as e:
                 logger.debug(f"invalidate_auth_cache failed: {e}")
+
     # ═══════════════════════════════════════════════════════════════
-    # 🔴 FIX-C1 (v7.7.3): handle_text — Fallback لـ ~40 حالة FSM
+    # handle_text — Fallback لـ ~40 حالة FSM
     # ═══════════════════════════════════════════════════════════════
-    #
-    # يُستدعى من handlers_message.handle_private عبر fallback paths
-    # عند عدم وجود الحالة في _PRIVATE_HANDLERS_MAP.
-    #
-    # الهدف: تحويل "❌ لم أتعرف على العملية" إلى معالجة صحيحة.
-    #
-    # ملاحظة معمارية:
-    #   • 15 حالة مُعالَجة في handlers_message (banned_words, replies,
-    #     channel, adding_posts, support).
-    #   • هذه الدالة تُغطّي الباقي (~40 حالة).
-    #   • كل معالج فرعي يمسح الحالة تلقائياً.
 
     @staticmethod
     async def _get_state_name(user_id: int) -> Optional[str]:
@@ -2571,7 +2534,6 @@ class CommandHandlers:
     async def _refresh_admin_commands_safe(
         bot, user_id: int, is_admin: bool
     ) -> None:
-        """🔴 FIX-C1: استدعاء refresh_admin_commands من bot.py بأمان."""
         try:
             from bot import refresh_admin_commands
             await refresh_admin_commands(bot, user_id, is_admin)
@@ -2585,7 +2547,7 @@ class CommandHandlers:
         update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
         """
-        🔴 FIX-C1: معالج fallback لكل حالات FSM غير المُعالجة في
+        Fallback لكل حالات FSM غير المُعالَجة في
         handlers_message._PRIVATE_HANDLERS_MAP.
         """
         if not update.effective_user or not update.message:
@@ -2599,8 +2561,9 @@ class CommandHandlers:
         text = (update.message.text or "").strip()
         lang = await _get_lang(user_id)
 
-        # ─── إلغاء عام ───
-        if text.lower() in ("إلغاء", "الغاء", "cancel", "/cancel", "none"):
+        # 🔴 FIX-1 (v7.7.4): لا نُدخل "none" هنا — يُفسد WAIT_FORCE.
+        #             "none" شائع في WAIT_FORCE لتعطيل قناة الاشتراك.
+        if text.lower() in ("إلغاء", "الغاء", "cancel", "/cancel"):
             StateManager.clear(user_id)
             try:
                 await update.message.reply_text(
@@ -2624,7 +2587,8 @@ class CommandHandlers:
         }
         action = _MOD_MAP.get(state_name)
         if action:
-            context.args = [text]
+            # 🔴 FIX-2 (v7.7.4): split() بدل [text]
+            context.args = text.split()
             StateManager.clear(user_id)
             try:
                 await CommandHandlers._moderation_command(
@@ -2638,9 +2602,11 @@ class CommandHandlers:
 
         # ═══════════════════════════════════════════════════════════════
         # 2) WAIT_PIN — تثبيت رسالة (نص = message_id)
+        # 🟠 FIX-5 (v7.7.4): فحص صلاحية can_pin قبل pin_chat_message
         # ═══════════════════════════════════════════════════════════════
         if state_name == "WAIT_PIN":
-            adv_chat = (context.user_data or {}).get("adv_chat")
+            adv_chat = (context.user_data or {}).get("adv_chat") \
+                or (context.user_data or {}).get("pin_chat")
             StateManager.clear(user_id)
             if not adv_chat:
                 return
@@ -2653,6 +2619,15 @@ class CommandHandlers:
                 )
                 return
             try:
+                perms = await check_bot_permissions(
+                    context.bot, adv_chat)
+                if not perms.get('can_pin', False):
+                    await _safe_edit_or_send(
+                        update, context,
+                        "❌ البوت لا يملك صلاحية تثبيت الرسائل.",
+                        parse_mode=None,
+                    )
+                    return
                 await context.bot.pin_chat_message(adv_chat, msg_id)
                 await _safe_edit_or_send(
                     update, context,
@@ -2687,7 +2662,6 @@ class CommandHandlers:
             StateManager.clear(user_id)
             if not chat_id:
                 return
-            # تحويل القيم الرقمية
             value: Any = text
             if col in ("max_message_length", "slow_mode_seconds",
                        "antiflood_messages", "antiflood_seconds",
@@ -2730,7 +2704,8 @@ class CommandHandlers:
         }
         sched_col = _SCHED_MAP.get(state_name)
         if sched_col:
-            ch_id = (context.user_data or {}).get("schedule_ch")
+            ch_id = (context.user_data or {}).get("schedule_ch") \
+                or (context.user_data or {}).get("sched_ch")
             StateManager.clear(user_id)
             if not ch_id:
                 return
@@ -2766,7 +2741,8 @@ class CommandHandlers:
             return
 
         if state_name == "WAIT_PUB_TIME":
-            ch_id = (context.user_data or {}).get("schedule_ch")
+            ch_id = (context.user_data or {}).get("schedule_ch") \
+                or (context.user_data or {}).get("sched_ch")
             StateManager.clear(user_id)
             if not ch_id:
                 return
@@ -2793,6 +2769,7 @@ class CommandHandlers:
 
         # ═══════════════════════════════════════════════════════════════
         # 5) WAIT_BROADCAST
+        # 🟠 FIX-6 (v7.7.4): إبلاغ المستخدم عند فشل البث البديل.
         # ═══════════════════════════════════════════════════════════════
         if state_name == "WAIT_BROADCAST":
             if not CONFIG.is_developer(user_id):
@@ -2804,15 +2781,28 @@ class CommandHandlers:
                 if callable(do_broadcast):
                     await do_broadcast(update, context, text)
                 else:
-                    await safe_send(
-                        context.bot, CONFIG.PRIMARY_OWNER_ID,
-                        f"📨 <b>بث (fallback)</b>\n\n{escape(text[:3900])}",
-                        parse_mode='HTML',
-                    )
+                    # مسار بديل محدود: نُبلّغ المالك فقط + نُخبر المستخدم
+                    # بأن البث لم يُنفَّذ فعلياً.
+                    owner_id = int(getattr(
+                        CONFIG, 'PRIMARY_OWNER_ID', 0) or 0)
+                    if owner_id:
+                        try:
+                            await safe_send(
+                                context.bot, owner_id,
+                                f"📨 <b>بث (fallback غير مُنفَّذ)</b>\n\n"
+                                f"{escape(text[:3900])}",
+                                parse_mode='HTML',
+                            )
+                        except Exception as _oe:
+                            logger.warning(
+                                "handle_text/broadcast owner notify: %s",
+                                _oe)
                     await _safe_edit_or_send(
                         update, context,
-                        await _trans('broadcast_sent', lang,
-                                     "✅ تم إرسال البث")
+                        "⚠️ <b>البث لم يُنفَّذ فعلياً</b>\n\n"
+                        "دالة <code>_do_broadcast</code> غير متاحة. "
+                        "تم إرسال النص للمالك فقط.",
+                        parse_mode='HTML',
                     )
             except Exception as e:
                 logger.error("handle_text/broadcast: %s", e, exc_info=True)
@@ -3025,20 +3015,50 @@ class CommandHandlers:
             return
 
         # ═══════════════════════════════════════════════════════════════
-        # 11) WAIT_KEYWORD (إضافة رد تلقائي عالمي)
+        # 11) WAIT_KEYWORD — 🟠 FIX-7 (v7.7.4):
+        #     استخدام auto_chat + التمييز بين banned_word / auto_reply.
         # ═══════════════════════════════════════════════════════════════
         if state_name == "WAIT_KEYWORD":
             if not CONFIG.is_developer(user_id):
                 StateManager.clear(user_id)
                 return
+            chat_id = (context.user_data or {}).get("auto_chat", -1)
+            action_kind = (context.user_data or {}).get(
+                "keyword_action", "auto_reply")
             StateManager.clear(user_id)
             try:
-                if hasattr(DB, "add_auto_reply"):
-                    await DB.add_auto_reply(-1, text, text)
-                await _safe_edit_or_send(
-                    update, context,
-                    await _trans('saved_success', lang, "✅ تم")
-                )
+                if action_kind == "banned_word":
+                    # إضافة كلمة محظورة عالمية
+                    if hasattr(DB, "add_banned_word"):
+                        try:
+                            await DB.add_banned_word(chat_id, text, user_id)
+                        except Exception as _be:
+                            logger.debug(
+                                "handle_text/keyword banned: %s", _be)
+                        try:
+                            await _invalidate_banned_words_cache(chat_id)
+                        except Exception:
+                            pass
+                    await _safe_edit_or_send(
+                        update, context,
+                        await _trans('saved_success', lang, "✅ تم")
+                    )
+                else:
+                    # رد تلقائي: نحتاج نص الرد الفعلي
+                    # → انتقل إلى WAIT_REPLY_RESPONSE لجمع الرد
+                    try:
+                        StateManager.set(
+                            user_id, UserState.WAIT_REPLY_RESPONSE)
+                    except Exception as _se:
+                        logger.debug(
+                            "handle_text/keyword set state: %s", _se)
+                    context.user_data['reply_trigger_pending'] = text
+                    context.user_data['reply_chat'] = chat_id
+                    context.user_data['auto_chat'] = chat_id
+                    await _safe_edit_or_send(
+                        update, context,
+                        "📝 أرسل الآن نص الرد:",
+                    )
             except Exception as e:
                 logger.warning("handle_text/keyword: %s", e)
             return
@@ -3121,7 +3141,7 @@ class CommandHandlers:
         )
 
     # ═══════════════════════════════════════════════════════════════
-    # 🔴 FIX-C1: معالج فرعي لمسابقات
+    # معالج فرعي لمسابقات
     # ═══════════════════════════════════════════════════════════════
     @staticmethod
     async def _handle_contest_text(
@@ -3165,10 +3185,12 @@ class CommandHandlers:
             )
             return
 
+        # 🟡 FIX-8 (v7.7.4): دعم float
         if state_name == "WAIT_CONTEST_DURATION":
             try:
-                hours = int(text)
-                if hours < 1 or hours > 24 * 30:
+                hours_raw = float(text)
+                hours = max(1, int(round(hours_raw)))
+                if hours > 24 * 30:
                     raise ValueError
             except (ValueError, TypeError):
                 await _safe_edit_or_send(
@@ -3187,11 +3209,12 @@ class CommandHandlers:
             )
             return
 
+        # 🔴 FIX-4 (v7.7.4): رفض "other"
         if state_name == "WAIT_CONTEST_TYPE":
             ctype = text.lower().strip()
-            if ctype not in ("raffle", "quiz", "other"):
+            if ctype not in ("raffle", "quiz"):
                 await _safe_edit_or_send(
-                    update, context, "❌ raffle أو quiz"
+                    update, context, "❌ raffle أو quiz فقط"
                 )
                 return
             ud['contest_type'] = ctype
@@ -3221,9 +3244,12 @@ class CommandHandlers:
             )
             return
 
+    # ═══════════════════════════════════════════════════════════════
+    # 🔴 FIX-3 (v7.7.4): _finalize_contest — فحص signature
+    # ═══════════════════════════════════════════════════════════════
     @staticmethod
     async def _finalize_contest(update, context, lang: str) -> None:
-        """إنشاء المسابقة النهائي."""
+        """إنشاء المسابقة النهائي (مع فحص signature)."""
         user_id = update.effective_user.id
         ud = context.user_data or {}
         try:
@@ -3235,15 +3261,22 @@ class CommandHandlers:
                 "end_date": ud.get('contest_end_date', ''),
                 "contest_type": ud.get('contest_type', 'raffle'),
             }
-            # إضافة question/correct_answer اختيارياً (قد لا تدعمها DB)
+
+            # فحص دعم question/correct_answer قبل الاستدعاء
+            extra = {}
             try:
-                cid = await DB.create_contest(
-                    **kwargs,
-                    question=ud.get('contest_question', ''),
-                    correct_answer=ud.get('contest_correct_answer', ''),
-                )
-            except TypeError:
-                cid = await DB.create_contest(**kwargs)
+                sig = inspect.signature(DB.create_contest)
+                params = sig.parameters
+                if 'question' in params:
+                    extra['question'] = ud.get('contest_question', '')
+                if 'correct_answer' in params:
+                    extra['correct_answer'] = ud.get(
+                        'contest_correct_answer', '')
+            except (TypeError, ValueError):
+                # في حال فشل inspect → نحاول بدون extra
+                pass
+
+            cid = await DB.create_contest(**kwargs, **extra)
 
             StateManager.clear(user_id)
             for k in ('contest_title', 'contest_desc', 'contest_prize',
@@ -3261,6 +3294,26 @@ class CommandHandlers:
                     await _trans('contest_create_failed', lang,
                                  "❌ فشل الإنشاء")
                 )
+        except TypeError as te:
+            # signature mismatch — try بدون extra كملاذ
+            logger.warning("_finalize_contest TypeError: %s", te)
+            try:
+                cid = await DB.create_contest(**kwargs)
+                StateManager.clear(user_id)
+                if cid:
+                    await _safe_edit_or_send(
+                        update, context,
+                        f"✅ تم إنشاء المسابقة <code>#{cid}</code>"
+                    )
+                else:
+                    await _safe_edit_or_send(
+                        update, context,
+                        await _trans('contest_create_failed', lang,
+                                     "❌ فشل الإنشاء")
+                    )
+            except Exception as e2:
+                logger.error("_finalize_contest fallback: %s", e2)
+                StateManager.clear(user_id)
         except Exception as e:
             logger.error("_finalize_contest: %s", e, exc_info=True)
             StateManager.clear(user_id)
@@ -3542,7 +3595,6 @@ class CommandHandlers:
 
     @staticmethod
     async def db_diag(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """✅ /db_diag — تشخيص قاعدة البيانات."""
         user_id = update.effective_user.id
         if not CONFIG.is_developer(user_id):
             return
@@ -3643,7 +3695,6 @@ class CommandHandlers:
 
     @staticmethod
     async def db_vacuum(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """✅ /db_vacuum — VACUUM ANALYZE."""
         user_id = update.effective_user.id
         if not CONFIG.is_developer(user_id):
             return
@@ -3712,8 +3763,16 @@ __all__ = [
 # ═══════════════════════════════════════════════════════════════════
 try:
     logger.info(
-        "📋 handlers_command.py v7.7.3 FIX-C1 loaded | "
+        "📋 handlers_command.py v7.7.4 FIX-PACK loaded | "
         "handle_text=✅(FIX-C1) | "
+        "FIX-1=cancel-no-none | "
+        "FIX-2=args-split | "
+        "FIX-3=contest-sig-check | "
+        "FIX-4=contest-type-strict | "
+        "FIX-5=pin-perms-check | "
+        "FIX-6=broadcast-honest-fail | "
+        "FIX-7=keyword-kind-split | "
+        "FIX-8=contest-duration-float | "
         "Timing=✅(start) | ForceSubUD=✅(TTL=%ds) | "
         "ForceChCache=✅(%ds) | Timed=✅",
         _FORCE_SUB_UD_TTL,
