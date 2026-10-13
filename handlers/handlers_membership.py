@@ -2,60 +2,55 @@
 # -*- coding: utf-8 -*-
 
 """
-handlers_membership.py - مراقبة إضافة/إزالة البوت (v1.3.2-final)
+handlers_membership.py - مراقبة إضافة/إزالة البوت (v1.3.3-final)
 =====================================================================
+🆕 v1.3.3-final — POST-AUDIT FIXES (I–L):
+    🔴 FIX-I: _should_send — throttle لـ _prune_recent_reports.
+              السبب: كان يُستدعى في كل استدعاء → O(n) على كل
+              my_chat_member، وعند 10K إدخال يصبح مساراً حاراً
+              مكلفاً. الآن: throttle 60s + إزالة الاستدعاء المُكرَّر
+              في handle_my_chat_member.
+              الأثر قبل الإصلاح: عند 10K قناة في _recent_reports،
+              كل my_chat_member = iterate 10K (×2 بسبب التكرار في
+              handler). الآن: iterate مرة كل 60s.
+
+    🟠 FIX-J: _restore_channel_if_soft_deleted — fallback تلقائي
+              بدون removal_reason عند schema قديم.
+              السبب: بعض deployments قديمة قد لا تحتوي عمود
+              removal_reason → UPDATE يفشل بالكامل → لا استرجاع
+              ولا استرداد. الآن: try مع العمود، عند فشل بسبب
+              "column not found" → fallback بدون العمود.
+
+    🟠 FIX-K: شجرة الإرسال — HTML-strip fallback عند parse error.
+              السبب: لو _build_report_text أنتج HTML مكسور (اسم قناة
+              أو مستخدم غريب)، كل المحاولات الثلاث تفشل بصمت (مع
+              log debug فقط) → لا شيء يُرسل. الآن: BadRequest مع
+              "can't parse" → strip HTML → retry بنفس الشجرة.
+
+    🟠 FIX-L: _ensure_table_exists — warn مرة واحدة للجدول المفقود.
+              السبب: عند schema قديم على PG/MySQL، كل استدعاء لاحق
+              يُكرّر نفس الـ warning → log noise. الآن: flag
+              _table_missing_warned — warning مرة واحدة.
+
 🆕 v1.3.2-final — POST-AUDIT FIXES (D–H):
-    🔴 FIX-D: _restore_channel_if_soft_deleted — تصفير banned=0 أيضاً
-              عند الاسترجاع. السبب: عند طرد البوت (Forbidden أثناء
-              النشر) كان يُضبط banned=1. لاحقاً عند الإزالة يُضبط
-              removed_at. عند إعادة الإضافة، كانت removed_at تُصفَّر
-              فقط — بينما banned=1 يبقى → القناة تُظهر "مُسترجَعة"
-              لكن لا تنشر أبداً (كل الاستعلامات تشترط banned=0).
-              الأثر: إرباك المستخدم + شلل النشر بعد الاسترجاع.
-    🟠 FIX-E: _recent_reports — إضافة حد أقصى _MAX_RECENT_REPORTS
-              مع pruning LRU عند التجاوز. السبب: بدون حد، لو تفاعل
-              البوت مع آلاف القنوات دون إضافات فعلية، الذاكرة تتضخم
-              (prune TTL الحالي يعمل فقط عند _should_send=True).
-    🟠 FIX-F: _save_addition_to_db — رفع مستوى الفشل من debug → warning
-              مع نوع الاستثناء. السبب: الفشل المتكرر (schema قديم،
-              أعمدة مفقودة) كان صامتاً ويصعب تشخيصه.
-    🟡 FIX-G: _ensure_table_exists — asyncio.Lock للـ double-check
-              بدل bool فقط. يضمن تزامن صحيح تحت coroutines متعددة.
-    🟡 FIX-H: _build_report_text — تصحيح رسالة "منشوراتها (N صف)"
-              إلى "N صف في user_channels" (كانت مضلِّلة — N هو عدد
-              صفوف user_channels، وليس المنشورات).
+    🔴 FIX-D: _restore_channel_if_soft_deleted — banned=0 أيضاً.
+    🟠 FIX-E: _recent_reports — حد + LRU.
+    🟠 FIX-F: _save_addition_to_db — warning بدل debug.
+    🟡 FIX-G: _ensure_table_exists — asyncio.Lock للـ double-check.
+    🟡 FIX-H: تصحيح رسالة "N صف في user_channels".
 
 🆕 v1.3.1-final — POST-AUDIT FIXES:
-    🔴 FIX-A: _get_effective_log_channel — استخدام
-              _sql_get_setting_value() بدل الاستعلام الخام.
-              السبب: `key` محجوز في PostgreSQL/MySQL، و`value` محجوز
-              في MySQL. الاستعلام الخام كان يفشل دائماً على هذه
-              المنصات، والخطأ مدفون في try/except → fallback معطّل.
-    🟠 FIX-B: _restore_channel_if_soft_deleted — تحسين التسجيل:
-              - logger.info عند نجاح استرجاع فعلي
-              - logger.warning عند فشل الاستعلام (كان debug)
-              - تسجيل تفصيلي لأسباب عدم الاسترجاع
-    🟡 FIX-C: _try_get_chat_photo — إضافة "channel" للـ fallback
-              عبر bot.get_chat() — لأن بعض تحديثات my_chat_member
-              لا تحمل صورة القناة.
+    🔴 FIX-A: _get_effective_log_channel — _sql_get_setting_value().
+    🟠 FIX-B: تحسين التسجيل في _restore_channel_if_soft_deleted.
+    🟡 FIX-C: _try_get_chat_photo — إضافة "channel".
 
-🆕 v1.3.0-final — استرجاع تلقائي عند إعادة الإضافة:
-    ✅ FIX-11: دالة _restore_channel_if_soft_deleted()
-               تُلغي علامة الإزالة (removed_at) عند إعادة إضافة البوت
-    ✅ FIX-12: تُستدعى من handle_my_chat_member بعد حفظ الإضافة
-    ✅ FIX-13: __all__ محدّث بالدالة الجديدة
-    ✅ الفائدة: إذا أعاد المستخدم البوت خلال فترة السماح،
-                تُستعاد القناة + جميع منشوراتها تلقائياً
-
-🆕 v1.2.2-final — إصلاح نوع added_at:
-    ✅ FIX-9: تحويل صريح للتاريخ إلى datetime قبل الإرسال
-    ✅ FIX-10: استيراد datetime صراحة
-
-🆕 v1.2.1-final — إصلاح نوع added_at (v1)
-🆕 v1.2.0-final — إصلاح PostgreSQL (AUTOINCREMENT → SERIAL)
-🆕 v1.1.0-final — إصلاح قناة السجل (FIX-1..3)
-🆕 v1.0.1-final — إصلاحات بعد المراجعة
-🆕 v1.0.0-final — الإصدار الأول
+🆕 v1.3.0-final — استرجاع تلقائي عند إعادة الإضافة.
+🆕 v1.2.2-final — إصلاح نوع added_at.
+🆕 v1.2.1-final — إصلاح نوع added_at (v1).
+🆕 v1.2.0-final — إصلاح PostgreSQL.
+🆕 v1.1.0-final — إصلاح قناة السجل.
+🆕 v1.0.1-final — إصلاحات بعد المراجعة.
+🆕 v1.0.0-final — الإصدار الأول.
 =====================================================================
 """
 
@@ -69,6 +64,7 @@ from typing import Optional, Dict, Any, Tuple
 from telegram import (
     Update, InlineKeyboardButton, InlineKeyboardMarkup,
 )
+from telegram.error import BadRequest
 from telegram.ext import ContextTypes, ChatMemberHandler
 
 from database import DB, TimeUtils
@@ -98,8 +94,14 @@ _DEBOUNCE_STALE_AGE = _DEBOUNCE_SECONDS * 20  # 10 دقائق
 # ✅ v1.3.2 FIX-E: حد أقصى لعدد الإدخالات في _recent_reports
 _MAX_RECENT_REPORTS = 10000
 
+# ✅ v1.3.3 FIX-I: throttle لـ prune (60 ثانية)
+_PRUNE_INTERVAL_SEC = 60.0
+
 _OUT_STATUSES = frozenset(('left', 'kicked'))
 _IN_STATUSES = frozenset(('member', 'administrator'))
+
+# ✅ v1.3.3 FIX-L: flag warning-once
+_table_missing_warned: bool = False
 
 
 # ═════════════════════════════════════════════════════════════════════
@@ -115,11 +117,12 @@ async def _ensure_table_exists() -> None:
     """
     ✅ v1.2.0 (FIX-4..7): إنشاء جدول bot_addition_log.
     ✅ v1.3.2 FIX-G: double-checked locking تحت asyncio.Lock.
+    ✅ v1.3.3 FIX-L: warn-once للجدول المفقود على PG/MySQL.
 
     - PostgreSQL/MySQL: يُنشأ من database_tables.py → فحص فقط
     - SQLite: إنشاء محلي (للتوافق)
     """
-    global _table_created
+    global _table_created, _table_missing_warned
 
     if _table_created:
         return
@@ -152,10 +155,19 @@ async def _ensure_table_exists() -> None:
                             "(مُنشأ من database_tables.py)")
                         return
                     else:
-                        logger.warning(
-                            "⚠️ bot_addition_log غير موجود على "
-                            f"{'PostgreSQL' if getattr(DB, 'USE_POSTGRES', False) else 'MySQL'} "
-                            "— تأكد من رفع database_tables.py المُصحَّح")
+                        # ✅ FIX-L: warning مرة واحدة فقط
+                        if not _table_missing_warned:
+                            _table_missing_warned = True
+                            _db_label = (
+                                'PostgreSQL'
+                                if getattr(DB, 'USE_POSTGRES', False)
+                                else 'MySQL'
+                            )
+                            logger.warning(
+                                f"⚠️ bot_addition_log غير موجود على "
+                                f"{_db_label} — تأكد من رفع "
+                                f"database_tables.py المُصحَّح "
+                                f"(سيُكتَم هذا التحذير)")
                         return
                 except Exception as e:
                     logger.debug(
@@ -188,23 +200,28 @@ async def _ensure_table_exists() -> None:
 # ═════════════════════════════════════════════════════════════════════
 # Debounce
 # ✅ v1.3.2 FIX-E: حد أقصى + pruning LRU
+# ✅ v1.3.3 FIX-I: throttle لـ prune (60s)
 # ═════════════════════════════════════════════════════════════════════
 
 _recent_reports: Dict[int, float] = {}
+_last_prune_ts: float = 0.0
 
 
 def _should_send(chat_id: int) -> bool:
+    global _last_prune_ts
+
     if chat_id is None:
         return False
     now = time.monotonic()
 
-    # ✅ FIX-E: pruning TTL عند كل فحص (ليس فقط بعد النجاح)
-    # + cap على الحجم
-    if len(_recent_reports) > 0:
-        try:
-            _prune_recent_reports()
-        except Exception:
-            pass
+    # ✅ FIX-I: prune throttled (60s)
+    if now - _last_prune_ts >= _PRUNE_INTERVAL_SEC:
+        _last_prune_ts = now
+        if len(_recent_reports) > 0:
+            try:
+                _prune_recent_reports()
+            except Exception:
+                pass
 
     last = _recent_reports.get(chat_id, 0.0)
     if now - last < _DEBOUNCE_SECONDS:
@@ -261,6 +278,30 @@ def _safe_html(value: Any, default: str = "") -> str:
         return html.escape(str(value))
     except Exception:
         return default
+
+
+def _strip_html_tags(s: str) -> str:
+    """✅ v1.3.3 FIX-K: fallback عند فشل parse."""
+    if not s:
+        return s
+    try:
+        import re as _re
+        from html import unescape as _unescape
+        return _unescape(_re.sub(r'<[^>]+>', '', s))
+    except Exception:
+        return s
+
+
+def _is_parse_error(err_str: str) -> bool:
+    """✅ v1.3.3 FIX-K: كشف أخطاء parse HTML."""
+    low = (err_str or "").lower()
+    return any(k in low for k in (
+        "can't parse",
+        "can't find end tag",
+        "unsupported start tag",
+        "unclosed tag",
+        "invalid entity",
+    ))
 
 
 def _build_user_link(
@@ -343,6 +384,7 @@ def _normalize_datetime(value: Any) -> datetime:
 # ✅ v1.3.0 (FIX-11): استرجاع تلقائي للقناة المُعلَّمة كمُزالة
 # ✅ v1.3.1 FIX-B: تحسين التسجيل
 # ✅ v1.3.2 FIX-D: تصفير banned=0 أيضاً + تصحيح رسالة اللوج
+# ✅ v1.3.3 FIX-J: fallback بدون removal_reason (schema قديم)
 # ═════════════════════════════════════════════════════════════════════
 
 async def _restore_channel_if_soft_deleted(chat_id: int) -> int:
@@ -353,15 +395,8 @@ async def _restore_channel_if_soft_deleted(chat_id: int) -> int:
     تُلغى العلامة تلقائياً + تُستعاد القناة مع منشوراتها.
 
     ✅ v1.3.2 FIX-D: يُصفَّر banned=0 أيضاً.
-       السبب: عند طرد البوت (Forbidden أثناء النشر) يُضبط banned=1.
-       لاحقاً عند الإزالة يُضبط removed_at. عند إعادة الإضافة،
-       كانت removed_at تُصفَّر فقط → banned=1 يبقى → القناة لا تنشر
-       أبداً. الآن: استرجاع كامل (removed_at=NULL, banned=0).
-
-    ✅ v1.3.1 FIX-B: التسجيل رُفع لمستوى أوضح:
-       - نجاح حقيقي → logger.info (كان debug)
-       - فشل استعلام → logger.warning (كان debug في caller)
-       - عدم وجود علامة → logger.debug (طبيعي، لا يهم)
+    ✅ v1.3.3 FIX-J: fallback تلقائي بدون removal_reason عند
+        schema قديم لا يحتوي العمود.
 
     Args:
         chat_id: معرّف القناة/المجموعة في تيليجرام
@@ -372,43 +407,87 @@ async def _restore_channel_if_soft_deleted(chat_id: int) -> int:
     if not chat_id:
         return 0
 
+    # ═══ المسار 1: مع removal_reason (schema حديث) ═══
     try:
-        # ✅ FIX-D: تصفير banned=0 مع removed_at=NULL
         result = await DB.execute(
             "UPDATE user_channels "
             "SET removed_at = NULL, removal_reason = NULL, banned = 0 "
             "WHERE channel_id = ? AND removed_at IS NOT NULL",
             (chat_id,),
         )
-
-        # PG/MySQL/SQLite: DB.execute يُرجع rowcount (int)
-        restored = 0
-        if isinstance(result, int):
-            restored = result
+        restored = result if isinstance(result, int) else 0
 
         if restored > 0:
-            # ✅ FIX-D: رسالة دقيقة — N صف في user_channels (ليس منشورات)
             logger.info(
                 f"♻️ استُرجعت القناة {chat_id}: "
-                f"removed_at=NULL, banned=0 ({restored} صف في user_channels)"
+                f"removed_at=NULL, banned=0 "
+                f"({restored} صف في user_channels)"
             )
         else:
             logger.debug(
                 f"ℹ️ القناة {chat_id} لم تكن مُعلَّمة كمُزالة"
             )
-
         return restored
 
     except Exception as e:
-        # ✅ FIX-B: warning بدل debug — الأخطاء الفعلية يجب أن تظهر
         err_type = type(e).__name__
         err_msg = str(e)[:200]
-        # كشف شائع: عمود غير موجود (schema قديم)
-        if "column" in err_msg.lower() or "unknown" in err_msg.lower():
+        err_low = err_msg.lower()
+
+        # ✅ FIX-J: كشف "عمود مفقود" → fallback
+        is_column_missing = (
+            "column" in err_low
+            and (
+                "removal_reason" in err_low
+                or "does not exist" in err_low
+                or "unknown" in err_low
+            )
+        ) or (
+            "no such column" in err_low
+            and "removal_reason" in err_low
+        )
+
+        if is_column_missing:
+            logger.info(
+                f"ℹ️ _restore_channel_if_soft_deleted({chat_id}): "
+                f"removal_reason غير موجود (schema قديم) — "
+                f"محاولة fallback"
+            )
+            # ═══ المسار 2: fallback بدون removal_reason ═══
+            try:
+                result = await DB.execute(
+                    "UPDATE user_channels "
+                    "SET removed_at = NULL, banned = 0 "
+                    "WHERE channel_id = ? AND removed_at IS NOT NULL",
+                    (chat_id,),
+                )
+                restored = result if isinstance(result, int) else 0
+
+                if restored > 0:
+                    logger.info(
+                        f"♻️ استُرجعت القناة {chat_id} (fallback): "
+                        f"removed_at=NULL, banned=0 "
+                        f"({restored} صف في user_channels)"
+                    )
+                else:
+                    logger.debug(
+                        f"ℹ️ القناة {chat_id} لم تكن مُعلَّمة "
+                        f"كمُزالة (fallback)"
+                    )
+                return restored
+            except Exception as e2:
+                logger.warning(
+                    f"⚠️ _restore_channel_if_soft_deleted "
+                    f"fallback({chat_id}): "
+                    f"{type(e2).__name__}: {str(e2)[:200]}"
+                )
+                return 0
+
+        # خطأ آخر — warning
+        if "column" in err_low or "unknown" in err_low:
             logger.warning(
                 f"⚠️ _restore_channel_if_soft_deleted({chat_id}): "
-                f"عمود removed_at/removal_reason/banned غير موجود "
-                f"في schema — تأكد من migrations "
+                f"عمود مفقود في schema — تأكد من migrations "
                 f"({err_type}: {err_msg})"
             )
         else:
@@ -421,7 +500,7 @@ async def _restore_channel_if_soft_deleted(chat_id: int) -> int:
 
 # ═════════════════════════════════════════════════════════════════════
 # قناة السجل الفعّالة
-# ✅ v1.3.1 FIX-A: استخدام _sql_get_setting_value() في المسار الأخير
+# ✅ v1.3.1 FIX-A: _sql_get_setting_value()
 # ═════════════════════════════════════════════════════════════════════
 
 async def _get_effective_log_channel(
@@ -470,7 +549,7 @@ async def _get_effective_log_channel(
     except Exception as e:
         logger.debug(f"DB.get_setting failed: {e}")
 
-    # 4: استعلام مباشر — ✅ FIX-A: عبر _sql_get_setting_value()
+    # 4: استعلام مباشر — ✅ FIX-A
     try:
         row = await DB.fetchone(
             _sql_get_setting_value(),
@@ -496,7 +575,7 @@ async def _get_effective_log_channel(
 
 # ═════════════════════════════════════════════════════════════════════
 # حفظ في قاعدة البيانات
-# ✅ v1.3.2 FIX-F: رفع مستوى الفشل من debug → warning
+# ✅ v1.3.2 FIX-F: warning بدل debug
 # ═════════════════════════════════════════════════════════════════════
 
 async def _save_addition_to_db(
@@ -511,7 +590,6 @@ async def _save_addition_to_db(
 ) -> bool:
     """
     حفظ حدث الإضافة في قاعدة البيانات.
-
     ✅ v1.2.2 (FIX-9): يمرر datetime دائماً لـ added_at.
     ✅ v1.3.2 FIX-F: الفشل يُسجَّل كـ warning مع نوع الاستثناء.
     """
@@ -544,10 +622,8 @@ async def _save_addition_to_db(
         )
         return True
     except Exception as e:
-        # ✅ FIX-F: warning بدل debug — الفشل المتكرر يجب أن يظهر
         err_type = type(e).__name__
         err_msg = str(e)[:200]
-        # كشف خاص: جدول مفقود (schema قديم على PG/MySQL)
         if "does not exist" in err_msg.lower() or \
            "no such table" in err_msg.lower():
             logger.warning(
@@ -626,9 +702,10 @@ def _build_report_text(
 
     if chat_username:
         clean_chat_username = str(chat_username).lstrip('@')
+        # defensive: HTML-escape (آمن عملياً لأن username له rules صارمة)
         text += (
             f"   • الرابط: "
-            f"https://t.me/{clean_chat_username}\n"
+            f"https://t.me/{_safe_html(clean_chat_username)}\n"
         )
 
     text += (
@@ -687,8 +764,6 @@ async def _try_get_chat_photo(
 ) -> Optional[str]:
     """
     ✅ v1.3.1 FIX-C: توسيع fallback ليشمل "channel" أيضاً.
-    بعض تحديثات my_chat_member لا تحمل صورة القناة/المجموعة،
-    لذا نجلبها عبر get_chat في هذه الحالة.
     """
     try:
         photo = getattr(chat, 'photo', None)
@@ -697,7 +772,6 @@ async def _try_get_chat_photo(
             if file_id:
                 return file_id
 
-        # ✅ FIX-C: channel + group + supergroup
         if chat_type in ('group', 'supergroup', 'channel'):
             try:
                 full_chat = await bot.get_chat(chat.id)
@@ -714,6 +788,177 @@ async def _try_get_chat_photo(
 
 
 # ═════════════════════════════════════════════════════════════════════
+# ✅ v1.3.3 FIX-K: شجرة إرسال موحّدة مع HTML-strip fallback
+# ═════════════════════════════════════════════════════════════════════
+
+async def _send_with_html_fallback(
+    bot,
+    log_channel,
+    text: str,
+    keyboard: Optional[InlineKeyboardMarkup],
+    photo_id: Optional[str],
+    chat_id_for_log,
+    user_id_for_log,
+    log_scope: str,
+) -> bool:
+    """
+    ✅ v1.3.3 FIX-K: شجرة إرسال موحّدة:
+      1. photo + caption (إن وُجدت photo)
+      2. text + buttons (HTML)
+      3. text + buttons (plain — عند can't parse)
+      4. text بدون أزرار (HTML)
+      5. text بدون أزرار (plain — عند can't parse)
+    """
+    sent = False
+
+    # ═══ محاولة 1: صورة + caption ═══
+    if photo_id:
+        try:
+            await bot.send_photo(
+                chat_id=log_channel,
+                photo=photo_id,
+                caption=text,
+                parse_mode='HTML',
+                reply_markup=keyboard,
+            )
+            sent = True
+            logger.info(
+                f"📬 تقرير أُرسل مع صورة "
+                f"(chat={chat_id_for_log}, adder={user_id_for_log}, "
+                f"scope={log_scope})")
+            return True
+        except BadRequest as e:
+            if _is_parse_error(str(e)):
+                logger.warning(
+                    f"⚠️ send_photo HTML parse failed — "
+                    f"retry plain caption: {str(e)[:100]}")
+                try:
+                    plain = _strip_html_tags(text)
+                    await bot.send_photo(
+                        chat_id=log_channel,
+                        photo=photo_id,
+                        caption=plain,
+                        parse_mode=None,
+                        reply_markup=keyboard,
+                    )
+                    sent = True
+                    logger.info(
+                        f"📬 تقرير أُرسل مع صورة (plain) "
+                        f"(chat={chat_id_for_log})")
+                    return True
+                except Exception as e2:
+                    logger.debug(
+                        f"send_photo plain fallback failed: {e2}")
+                    sent = False
+            else:
+                logger.debug(
+                    f"send_photo failed, fallback to text: {e}")
+                sent = False
+        except Exception as e:
+            logger.debug(
+                f"send_photo failed, fallback to text: {e}")
+            sent = False
+
+    # ═══ محاولة 2: نص + أزرار (HTML) ═══
+    if not sent:
+        try:
+            await bot.send_message(
+                chat_id=log_channel,
+                text=text,
+                parse_mode='HTML',
+                disable_web_page_preview=True,
+                reply_markup=keyboard,
+            )
+            sent = True
+            logger.info(
+                f"📬 تقرير أُرسل "
+                f"(chat={chat_id_for_log}, adder={user_id_for_log}, "
+                f"scope={log_scope})")
+            return True
+        except BadRequest as e:
+            if _is_parse_error(str(e)):
+                # ═══ محاولة 3: نص + أزرار (plain) ═══
+                logger.warning(
+                    f"⚠️ send_message HTML parse failed — "
+                    f"retry plain: {str(e)[:100]}")
+                try:
+                    plain = _strip_html_tags(text)
+                    await bot.send_message(
+                        chat_id=log_channel,
+                        text=plain,
+                        parse_mode=None,
+                        disable_web_page_preview=True,
+                        reply_markup=keyboard,
+                    )
+                    sent = True
+                    logger.info(
+                        f"📬 تقرير أُرسل (plain) "
+                        f"(chat={chat_id_for_log})")
+                    return True
+                except Exception as e2:
+                    logger.debug(
+                        f"send_message plain fallback failed: {e2}")
+            else:
+                logger.debug(
+                    f"send_message failed: {e}")
+        except Exception as e:
+            logger.debug(f"send_message failed: {e}")
+
+    # ═══ محاولة 4: نص بدون أزرار (HTML) ═══
+    if not sent:
+        try:
+            await bot.send_message(
+                chat_id=log_channel,
+                text=text,
+                parse_mode='HTML',
+                disable_web_page_preview=True,
+            )
+            sent = True
+            logger.info(
+                f"📬 تقرير أُرسل (بدون أزرار) "
+                f"(chat={chat_id_for_log})")
+            return True
+        except BadRequest as e:
+            if _is_parse_error(str(e)):
+                # ═══ محاولة 5: نص بدون أزرار (plain) ═══
+                logger.warning(
+                    f"⚠️ send_message (no buttons) HTML parse "
+                    f"failed — retry plain: {str(e)[:100]}")
+                try:
+                    plain = _strip_html_tags(text)
+                    await bot.send_message(
+                        chat_id=log_channel,
+                        text=plain,
+                        parse_mode=None,
+                        disable_web_page_preview=True,
+                    )
+                    sent = True
+                    logger.info(
+                        f"📬 تقرير أُرسل (plain, بدون أزرار) "
+                        f"(chat={chat_id_for_log})")
+                    return True
+                except Exception as e2:
+                    logger.error(
+                        f"❌ فشل الإرسال حتى مع plain: "
+                        f"{type(e2).__name__}: {e2}")
+            else:
+                logger.error(
+                    f"❌ فشل الإرسال (no buttons): "
+                    f"{type(e).__name__}: {e}")
+        except Exception as e:
+            logger.error(
+                f"❌ فشل الإرسال (no buttons): "
+                f"{type(e).__name__}: {e}")
+
+    if not sent:
+        logger.error(
+            f"❌ تقرير إضافة البوت لم يُرسل بعد كل المحاولات "
+            f"(chat={chat_id_for_log}, scope={log_scope})")
+
+    return sent
+
+
+# ═════════════════════════════════════════════════════════════════════
 # Handler الرئيسي
 # ═════════════════════════════════════════════════════════════════════
 
@@ -724,9 +969,10 @@ async def handle_my_chat_member(
     """
     معالج تغيّر حالة البوت في الدردشات.
 
-    يُرسل تقريراً لقناة السجل عند الإضافة.
-    ✅ v1.3.0: يستدعي _restore_channel_if_soft_deleted تلقائياً.
-    ✅ v1.3.2 FIX-D: الاسترجاع يُصفّر banned=0 أيضاً.
+    ✅ v1.3.0: يستدعي _restore_channel_if_soft_deleted.
+    ✅ v1.3.2 FIX-D: الاسترجاع يُصفّر banned=0.
+    ✅ v1.3.3 FIX-I: إزالة _prune_recent_reports المُكرَّر (موجود
+        داخل _should_send بـ throttle).
     """
     result = update.my_chat_member
     if result is None:
@@ -759,14 +1005,12 @@ async def handle_my_chat_member(
         logger.debug("my_chat_member: private chat ignored")
         return
 
+    # ✅ FIX-I: _should_send يُشغّل prune داخلياً بـ throttle
     if not _should_send(chat.id):
         return
 
-    _prune_recent_reports()
-
     # ═══════════════════════════════════════════════════════════
-    # ✅ v1.3.0 (FIX-11) + v1.3.2 (FIX-D):
-    # استرجاع تلقائي إن كانت مُعلَّمة كمُزالة (مع banned=0)
+    # استرجاع تلقائي إن كانت مُعلَّمة كمُزالة
     # ═══════════════════════════════════════════════════════════
     try:
         restored = await _restore_channel_if_soft_deleted(chat.id)
@@ -832,65 +1076,17 @@ async def handle_my_chat_member(
     except Exception:
         photo_id = None
 
-    sent = False
-
-    # محاولة 1: مع الصورة
-    if photo_id:
-        try:
-            await context.bot.send_photo(
-                chat_id=log_channel,
-                photo=photo_id,
-                caption=text,
-                parse_mode='HTML',
-                reply_markup=keyboard,
-            )
-            sent = True
-            logger.info(
-                f"📬 تقرير إضافة البوت أُرسل مع صورة "
-                f"(chat={chat.id}, adder={user.id}, "
-                f"scope={log_scope})")
-        except Exception as e:
-            logger.debug(
-                f"send_photo failed, fallback to text: {e}")
-            sent = False
-
-    # محاولة 2: نصية + أزرار
-    if not sent:
-        try:
-            await context.bot.send_message(
-                chat_id=log_channel,
-                text=text,
-                parse_mode='HTML',
-                disable_web_page_preview=True,
-                reply_markup=keyboard,
-            )
-            sent = True
-            logger.info(
-                f"📬 تقرير إضافة البوت أُرسل "
-                f"(chat={chat.id}, adder={user.id}, "
-                f"scope={log_scope})")
-        except Exception as e:
-            logger.error(
-                f"❌ فشل إرسال تقرير قناة السجل: "
-                f"{type(e).__name__}: {e}")
-            sent = False
-
-    # محاولة 3: بدون أزرار
-    if not sent:
-        try:
-            await context.bot.send_message(
-                chat_id=log_channel,
-                text=text,
-                parse_mode='HTML',
-                disable_web_page_preview=True,
-            )
-            logger.info(
-                f"📬 تقرير أُرسل (بدون أزرار) "
-                f"(chat={chat.id}, scope={log_scope})")
-        except Exception as e:
-            logger.error(
-                f"❌ فشل إرسال تقرير حتى بدون أزرار: "
-                f"{type(e).__name__}: {e}")
+    # ✅ FIX-K: شجرة إرسال موحّدة مع HTML-strip fallback
+    await _send_with_html_fallback(
+        bot=context.bot,
+        log_channel=log_channel,
+        text=text,
+        keyboard=keyboard,
+        photo_id=photo_id,
+        chat_id_for_log=chat.id,
+        user_id_for_log=user.id,
+        log_scope=log_scope,
+    )
 
 
 # ═════════════════════════════════════════════════════════════════════
@@ -907,7 +1103,7 @@ def register_handlers(application) -> None:
         application.add_handler(handler, group=-1)
         logger.info(
             "✅ تم تسجيل ChatMemberHandler لمراقبة "
-            "إضافة/إزالة البوت (v1.3.2)"
+            "إضافة/إزالة البوت (v1.3.3)"
         )
     except Exception as e:
         logger.error(
@@ -929,14 +1125,20 @@ __all__ = [
     "_save_addition_to_db",
     "_ensure_table_exists",
     "_normalize_datetime",
-    "_restore_channel_if_soft_deleted",   # ✅ v1.3.0 + v1.3.2 FIX-D
+    "_restore_channel_if_soft_deleted",
     "_build_report_text",
     "_build_report_keyboard",
     "_try_get_chat_photo",
+    "_send_with_html_fallback",       # ✅ v1.3.3 FIX-K
+    "_strip_html_tags",               # ✅ v1.3.3 FIX-K
+    "_is_parse_error",                # ✅ v1.3.3 FIX-K
     "_recent_reports",
+    "_last_prune_ts",                 # ✅ v1.3.3 FIX-I
     "_table_created",
-    "_table_lock",                         # ✅ v1.3.2 FIX-G
-    "_MAX_RECENT_REPORTS",                 # ✅ v1.3.2 FIX-E
+    "_table_lock",
+    "_table_missing_warned",          # ✅ v1.3.3 FIX-L
+    "_MAX_RECENT_REPORTS",
+    "_PRUNE_INTERVAL_SEC",            # ✅ v1.3.3 FIX-I
     "_DEBOUNCE_SECONDS",
     "_DEBOUNCE_STALE_AGE",
     "_OUT_STATUSES",
