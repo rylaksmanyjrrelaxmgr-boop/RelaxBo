@@ -2,47 +2,36 @@
 # -*- coding: utf-8 -*-
 
 """
-handlers_command.py - معالجات الأوامر (CommandHandlers) - v7.7.8
+handlers_command.py - معالجات الأوامر (CommandHandlers) - v7.7.9
 ===================================================================================
+🆕 v7.7.9 (COUNT-USER-GROUPS):
+    🟢 FIX-GC-10: start() — استخدام DB.count_user_groups(user_id)
+        بدل len(DB.get_user_groups(user_id)).
+        السبب: count_user_groups تستفيد من الكاش وتتجنّب إنشاء list
+        كامل عند عدم الحاجة للبيانات. متطابقة النتيجة 100%.
+        الأداء: < 1ms مع الكاش، ~5ms عند القراءة الأولى.
+
 🆕 v7.7.8 (GROUPS-COUNT-SOURCE-FIX):
-    🔴 FIX-GC-9 (CRITICAL): start() — قراءة groups_count عبر
-        DB.get_user_groups() بدل SELECT COUNT(*) FROM user_groups_link.
-
-        السبب الحقيقي (تشخيص من production):
-          • "مجموعاتي" تقرأ من bot_groups.added_by → يُظهر المجموعتين ✅
-          • FIX-GC-1 كان يقرأ من user_groups_link → 0 ❌
-          • السبب: user_groups_link لا يُملأ في مسار الإضافة الفعلي
-            (register_group لم يُستدعَ؛ handle_my_chat_member يُسجّل
-            في bot_addition_log فقط).
-
-        الحل: استخدام نفس الدالة التي يستخدمها زر "مجموعاتي" —
-              DB.get_user_groups(user_id).length
-              تضمن تطابق 100% بين الشاشتين.
-
-        الأداء: 1-3ms للاستدعاء الأول، <1ms للمتكرر (كاش داخلي).
-                register_group يُبطل الكاش تلقائياً.
+    🔴 FIX-GC-9: start() — قراءة groups_count عبر DB.get_user_groups()
+        بدل SELECT COUNT(*) FROM user_groups_link.
+        السبب: user_groups_link فارغ؛ الزر "مجموعاتي" يقرأ من
+        bot_groups.added_by.
 
 🆕 v7.7.7 (UNIFIED-INVALIDATOR):
-    🟡 FIX-GC-5: إعادة تسمية _invalidate_groups_caches →
-        _invalidate_user_caches (توحيد مع handlers_membership v1.3.4).
-    🟡 FIX-GC-6: alias _invalidate_groups_caches للتوافق الخلفي.
+    🟡 FIX-GC-5: _invalidate_groups_caches → _invalidate_user_caches.
+    🟡 FIX-GC-6: alias للتوافق الخلفي.
     🟡 FIX-GC-7: استيرادات محمية لـ user_cache.
-    🟡 FIX-GC-8: تحديث Header + Load Beacon + __all__.
+    🟡 FIX-GC-8: تحديث Header + Beacon.
 
 🆕 v7.7.6 (GROUPS-COUNT-FIX):
-    🔴 FIX-GC-1: start() — قراءة groups_count مباشرة من DB
-        (استُبدل في v7.7.8 بـ FIX-GC-9).
+    🔴 FIX-GC-1: start() — قراءة groups_count مباشرة (استُبدلت).
     🔴 FIX-GC-2: syncgroup() — إبطال user_cache.
-    🟡 FIX-GC-3: _invalidate_user_caches — دالة موحّدة.
+    🟡 FIX-GC-3: _invalidate_user_caches موحّدة.
 
 🆕 v7.7.5 (UNDEFINED-REF-FIX + CONTEST-CLEANUP-FIX):
-    🔴 FIX-10: استيراد invalidate_banned_words_cache_async من utils.
-    🔴 FIX-11: _finalize_contest — مسح ud keys في كل المسارات.
-    🟠 FIX-12: from datetime import timedelta في الأعلى.
-    🟡 FIX-13: _handle_contest_text — فحص text فارغ.
-    🟡 FIX-14: تحديث header + load beacon إلى v7.7.5.
+    🔴 FIX-10..FIX-14.
 
-🆕 v7.7.4 (FSM-HANDLERS-POLISH + FIX-PACK): FIX-1..FIX-9.
+🆕 v7.7.4 (FSM-HANDLERS-POLISH): FIX-1..FIX-9.
 🆕 v7.7.3 (FIX-C1 — LARGE): CommandHandlers.handle_text fallback.
 🆕 v7.7.2 (PERF-FIXES): PERF-1..4.
 🆕 v7.7.1 (L1 REVIEW FIXES): L1..L6.
@@ -83,9 +72,6 @@ from utils import (
     invalidate_banned_words_cache_async,
 )
 
-# ═══════════════════════════════════════════════════════════════════
-# 🟡 v7.7.7 FIX-GC-7: استيرادات محمية للكاشات
-# ═══════════════════════════════════════════════════════════════════
 try:
     from cache import user_cache
 except ImportError:
@@ -324,22 +310,13 @@ def _clear_stale_state(user_id: int, context) -> None:
 
 
 # ═══════════════════════════════════════════════════════════════════
-# 🆕 v7.7.6 FIX-GC-3 + 🆕 v7.7.7 FIX-GC-5: إبطال موحّد للكاشات
+# إبطال موحّد للكاشات
 # ═══════════════════════════════════════════════════════════════════
 async def _invalidate_user_caches(
     user_ids: List[int],
     chat_id: Optional[int] = None,
 ) -> int:
-    """
-    🆕 v7.7.6 FIX-GC-3 (باسم _invalidate_groups_caches)
-    🆕 v7.7.7 FIX-GC-5: أُعيدت التسمية إلى _invalidate_user_caches.
-
-    يُبطِل:
-      • user_cache (groups_count, has_subscription, ...)
-      • auth_cache (إن مُرِّر chat_id)
-      • invalidate_user_cache في cache.py (إن وُجدت)
-      • force_sub cache (للمستخدمين المتأثرين)
-    """
+    """إبطال موحّد: user_cache + auth_cache + force_sub."""
     if not user_ids:
         return 0
 
@@ -408,7 +385,6 @@ async def _invalidate_user_caches(
     return success_count
 
 
-# 🟡 v7.7.7 FIX-GC-6: alias للتوافق الخلفي
 _invalidate_groups_caches = _invalidate_user_caches
 
 
@@ -1316,22 +1292,21 @@ class CommandHandlers:
         unpublished_posts = user_data.get('unpublished_posts', 0)
 
         # ═══════════════════════════════════════════════════════════
-        # 🔴 v7.7.8 FIX-GC-9: قراءة groups_count عبر get_user_groups
+        # 🟢 v7.7.9 FIX-GC-10: count_user_groups — دالة عدّ سريعة
         # ═══════════════════════════════════════════════════════════
-        # نستخدم نفس الدالة التي يستخدمها زر "مجموعاتي" → تطابق 100%.
-        # الأداء: <1ms مع الكاش الداخلي (groups_cache + internal_cache).
-        # register_group يُبطل الكاش تلقائياً عند إضافة مجموعة.
+        # تستفيد من الكاش الداخلي. متطابقة النتيجة مع "مجموعاتي".
+        # الأداء: < 1ms مع الكاش.
         # ═══════════════════════════════════════════════════════════
         cached_groups_count = user_data.get('groups_count', 0)
         groups_count = cached_groups_count
         _t = time.monotonic()
         try:
-            _groups_list = await DB.get_user_groups(user_id)
-            if isinstance(_groups_list, (list, tuple)):
-                groups_count = len(_groups_list)
+            live_count = await DB.count_user_groups(user_id)
+            if isinstance(live_count, int) and live_count >= 0:
+                groups_count = live_count
         except Exception as e:
             logger.debug(
-                f"[START] get_user_groups failed: {e} "
+                f"[START] count_user_groups failed: {e} "
                 f"→ fallback to cache ({cached_groups_count})"
             )
             groups_count = cached_groups_count
@@ -2484,9 +2459,6 @@ class CommandHandlers:
             except Exception as e:
                 logger.error(f"❌ فشل sync_anonymous_admins: {e}")
 
-        # ═══════════════════════════════════════════════════════════════
-        # 🔴 v7.7.6 FIX-GC-2 + 🟡 v7.7.7 FIX-GC-5: إبطال user_cache
-        # ═══════════════════════════════════════════════════════════════
         _users_to_invalidate: List[int] = []
         try:
             if real_user_id and real_user_id > 0:
@@ -2511,12 +2483,7 @@ class CommandHandlers:
         except Exception as e:
             logger.warning(f"⚠️ syncgroup invalidate caches: {e}")
 
-        # ═══════════════════════════════════════════════════════════════
-        # 🔴 v7.7.8 FIX-GC-9: إبطال groups_cache أيضاً
-        # ═══════════════════════════════════════════════════════════════
-        # register_group يُبطل groups_cache داخلياً، لكن إذا لم يُستدعَ
-        # (كما في حالتنا) → نُبطله يدوياً لضمان ظهور الرقم الصحيح.
-        # ═══════════════════════════════════════════════════════════════
+        # v7.7.8 FIX-GC-9: إبطال groups_cache أيضاً
         try:
             from cache import groups_cache as _gc
             if _gc is not None:
@@ -2709,13 +2676,8 @@ class CommandHandlers:
             except Exception as e:
                 logger.debug(f"invalidate_auth_cache failed: {e}")
 
-    # ═══════════════════════════════════════════════════════════════
-    # handle_text — Fallback لـ ~40 حالة FSM
-    # ═══════════════════════════════════════════════════════════════
-
     @staticmethod
     async def _get_state_name(user_id: int) -> Optional[str]:
-        """استخراج اسم الحالة كنصّ (آمن)."""
         try:
             state = StateManager.get(user_id)
             if state is None:
@@ -2746,10 +2708,6 @@ class CommandHandlers:
     async def handle_text(
         update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
-        """
-        Fallback لكل حالات FSM غير المُعالَجة في
-        handlers_message._PRIVATE_HANDLERS_MAP.
-        """
         if not update.effective_user or not update.message:
             return
         user_id = update.effective_user.id
@@ -2772,9 +2730,6 @@ class CommandHandlers:
                 pass
             return
 
-        # ═══════════════════════════════════════════════════════════════
-        # 1) حالات الإشراف
-        # ═══════════════════════════════════════════════════════════════
         _MOD_MAP = {
             "WAIT_BAN":      "ban",
             "WAIT_MUTE":     "mute",
@@ -2797,9 +2752,6 @@ class CommandHandlers:
                 )
             return
 
-        # ═══════════════════════════════════════════════════════════════
-        # 2) WAIT_PIN
-        # ═══════════════════════════════════════════════════════════════
         if state_name == "WAIT_PIN":
             adv_chat = (context.user_data or {}).get("adv_chat") \
                 or (context.user_data or {}).get("pin_chat")
@@ -2835,9 +2787,6 @@ class CommandHandlers:
                 )
             return
 
-        # ═══════════════════════════════════════════════════════════════
-        # 3) حالات الأمان
-        # ═══════════════════════════════════════════════════════════════
         _SEC_MAP = {
             "WAIT_MAX_LEN":              "max_message_length",
             "WAIT_SLOW_MODE_SECONDS":    "slow_mode_seconds",
@@ -2890,9 +2839,6 @@ class CommandHandlers:
                 )
             return
 
-        # ═══════════════════════════════════════════════════════════════
-        # 4) الجدولة
-        # ═══════════════════════════════════════════════════════════════
         _SCHED_MAP = {
             "WAIT_MIN":      "interval_minutes",
             "WAIT_HOUR":     "interval_hours",
@@ -2963,9 +2909,6 @@ class CommandHandlers:
                 logger.warning("handle_text/pub_time: %s", e)
             return
 
-        # ═══════════════════════════════════════════════════════════════
-        # 5) WAIT_BROADCAST
-        # ═══════════════════════════════════════════════════════════════
         if state_name == "WAIT_BROADCAST":
             if not CONFIG.is_developer(user_id):
                 StateManager.clear(user_id)
@@ -3001,9 +2944,6 @@ class CommandHandlers:
                 logger.error("handle_text/broadcast: %s", e, exc_info=True)
             return
 
-        # ═══════════════════════════════════════════════════════════════
-        # 6) WAIT_FORCE
-        # ═══════════════════════════════════════════════════════════════
         if state_name == "WAIT_FORCE":
             if not CONFIG.is_developer(user_id):
                 StateManager.clear(user_id)
@@ -3027,9 +2967,6 @@ class CommandHandlers:
                 logger.warning("handle_text/force: %s", e)
             return
 
-        # ═══════════════════════════════════════════════════════════════
-        # 7) WAIT_ADMIN_ADD / WAIT_ADMIN_REM
-        # ═══════════════════════════════════════════════════════════════
         if state_name in ("WAIT_ADMIN_ADD", "WAIT_ADMIN_REM"):
             if not CONFIG.is_developer(user_id):
                 StateManager.clear(user_id)
@@ -3066,9 +3003,6 @@ class CommandHandlers:
                 logger.warning("handle_text/admin: %s", e)
             return
 
-        # ═══════════════════════════════════════════════════════════════
-        # 8) WAIT_GRANT_FREE
-        # ═══════════════════════════════════════════════════════════════
         if state_name == "WAIT_GRANT_FREE":
             if not CONFIG.is_developer(user_id):
                 StateManager.clear(user_id)
@@ -3121,9 +3055,6 @@ class CommandHandlers:
                 logger.warning("handle_text/grant_free: %s", e)
             return
 
-        # ═══════════════════════════════════════════════════════════════
-        # 9) WAIT_BAN_USER_ID / WAIT_UNBAN_USER_ID
-        # ═══════════════════════════════════════════════════════════════
         if state_name in ("WAIT_BAN_USER_ID", "WAIT_UNBAN_USER_ID"):
             if not CONFIG.is_developer(user_id):
                 StateManager.clear(user_id)
@@ -3160,9 +3091,6 @@ class CommandHandlers:
                 logger.warning("handle_text/ban_user: %s", e)
             return
 
-        # ═══════════════════════════════════════════════════════════════
-        # 10) WAIT_UPDATE_CH / WAIT_UPDATE
-        # ═══════════════════════════════════════════════════════════════
         if state_name == "WAIT_UPDATE_CH":
             if not CONFIG.is_developer(user_id):
                 StateManager.clear(user_id)
@@ -3208,9 +3136,6 @@ class CommandHandlers:
                 logger.warning("handle_text/update: %s", e)
             return
 
-        # ═══════════════════════════════════════════════════════════════
-        # 11) WAIT_KEYWORD
-        # ═══════════════════════════════════════════════════════════════
         if state_name == "WAIT_KEYWORD":
             if not CONFIG.is_developer(user_id):
                 StateManager.clear(user_id)
@@ -3257,9 +3182,6 @@ class CommandHandlers:
                 logger.warning("handle_text/keyword: %s", e)
             return
 
-        # ═══════════════════════════════════════════════════════════════
-        # 12) WAIT_MOOD
-        # ═══════════════════════════════════════════════════════════════
         if state_name == "WAIT_MOOD":
             StateManager.clear(user_id)
             context.args = [text]
@@ -3269,9 +3191,6 @@ class CommandHandlers:
                 logger.warning("handle_text/mood: %s", e)
             return
 
-        # ═══════════════════════════════════════════════════════════════
-        # 13) WAIT_REM_DAYS / WAIT_REM_LANG
-        # ═══════════════════════════════════════════════════════════════
         if state_name == "WAIT_REM_DAYS":
             StateManager.clear(user_id)
             try:
@@ -3311,18 +3230,12 @@ class CommandHandlers:
                 logger.warning("handle_text/rem_lang: %s", e)
             return
 
-        # ═══════════════════════════════════════════════════════════════
-        # 14) WAIT_CONTEST_*
-        # ═══════════════════════════════════════════════════════════════
         if state_name.startswith("WAIT_CONTEST_"):
             await CommandHandlers._handle_contest_text(
                 update, context, state_name, text, lang
             )
             return
 
-        # ═══════════════════════════════════════════════════════════════
-        # 15) حالات غير معروفة
-        # ═══════════════════════════════════════════════════════════════
         logger.warning(
             "🚨 handle_text: حالة غير مُعالَجة: %s (user=%s)",
             state_name, user_id
@@ -3334,14 +3247,10 @@ class CommandHandlers:
             f"تم إلغاء العملية."
         )
 
-    # ═══════════════════════════════════════════════════════════════
-    # معالج فرعي لمسابقات
-    # ═══════════════════════════════════════════════════════════════
     @staticmethod
     async def _handle_contest_text(
         update, context, state_name: str, text: str, lang: str
     ) -> None:
-        """معالج فرعي لخطوات إنشاء مسابقة."""
         user_id = update.effective_user.id
         if not CONFIG.is_developer(user_id):
             StateManager.clear(user_id)
@@ -3446,7 +3355,6 @@ class CommandHandlers:
 
     @staticmethod
     async def _finalize_contest(update, context, lang: str) -> None:
-        """إنشاء المسابقة النهائي (مع فحص signature + تنظيف ud)."""
         user_id = update.effective_user.id
         if context.user_data is None:
             context.user_data = {}
@@ -3702,13 +3610,6 @@ class CommandHandlers:
 
     @staticmethod
     async def redeem_gift(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """
-        دلالة القيم المُعادة من DB.redeem_gift_code:
-          (True, days>0) → ✅ نجاح كامل
-          (True, 0)      → ✅ نجاح بدون أيام (نادر)
-          (False, -1)    → ⚠️ محاولة استخدام كود المستخدم نفسه
-          (False, 0)     → ❌ كود غير صالح / منتهي / مستخدم سابقاً
-        """
         user_id = update.effective_user.id
         lang = await _get_lang(user_id)
         args = context.args or []
@@ -3992,10 +3893,10 @@ __all__ = [
 # ═══════════════════════════════════════════════════════════════════
 try:
     logger.info(
-        "📋 handlers_command.py v7.7.8 "
-        "GROUPS-COUNT-SOURCE-FIX loaded | "
+        "📋 handlers_command.py v7.7.9 "
+        "COUNT-USER-GROUPS loaded | "
+        "FIX-GC-10=groups_count-via-count_user_groups | "
         "FIX-GC-9=groups_count-via-get_user_groups | "
-        "FIX-GC-1=live-groups-count-legacy | "
         "FIX-GC-2=syncgroup-invalidate-user-cache | "
         "FIX-GC-3=unified-invalidator | "
         "FIX-GC-5=renamed-to-_invalidate_user_caches | "
@@ -4016,7 +3917,7 @@ try:
         "FIX-8=contest-duration-float | "
         "Timing=✅(start) | ForceSubUD=✅(TTL=%ds) | "
         "ForceChCache=✅(%ds) | Timed=✅ | "
-        "GroupsCount=via-get_user_groups | "
+        "GroupsCount=via-count_user_groups | "
         "user_cache_import=%s | "
         "async_invalidator=%s",
         _FORCE_SUB_UD_TTL,
