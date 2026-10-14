@@ -1,72 +1,38 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-handlers_message.py - v7.18.37 (POLISH-PLUS-2)
+handlers_message.py - v7.18.38 (UPDATE-CHANNEL-STATE-FIX)
 (متوافق مع detectors v4.1.0 + banned_words_manager v1.2.0)
 =============================================================================
-🆕 v7.18.37 (POLISH-PLUS-2) — تحسينات مراجعة (بلا تغيير سلوكي):
-    🟡 POLISH-13-ENHANCED: logger.warning بدل debug في partial_return
-        → الفشل نادر جداً (get_security_settings_cached تلتقط
-          الاستثناءات داخلياً) — رؤيته في السجل = شذوذ حقيقي.
-        → رسالة أوضح: "falling back to full BATCH path".
+🆕 v7.18.38 (UPDATE-CHANNEL-STATE-FIX) — إصلاح باغ تعيين قناة التحديثات:
+    🔴 FIX-STATE-1 (CRITICAL): حذف WAIT_UPDATE_CHANNEL من
+        _PRIVATE_HANDLERS_MAP.
+        السبب: السطر القديم كان:
+            "WAIT_UPDATE_CHANNEL": "_handle_wait_channel_text",
+        الاسم "WAIT_UPDATE_CHANNEL" يشبه WAIT_UPDATE_CH (قناة
+        التحديثات) لكنه في الواقع كان يُشغّل _handle_wait_channel_text
+        الذي يُضيف القناة كـ **قناة نشطة** (user_channels).
+        الأثر المُبلَّغ عنه من production:
+          • المشرف يضغط "تعيين قناة التحديثات" → يرسل @channel
+          • القناة تظهر في "القناة النشطة" (❌ خطأ)
+          • قناة التحديثات تبقى فارغة (❌ خطأ)
+        الإصلاح: حذف السطر + إضافة WAIT_UPDATE_CHANNEL إلى
+        _EXTERNAL_HANDLED_STATES (يُعالَج في handlers_command).
 
-    🟡 THREADING-NOTE: توثيق صريح لافتراض single event loop على
-        كل الـcaches المحلية (_sec_settings_local_cache,
-        _ars_local_cache, _admin_check_cache,
-        _PENALTY_DURATION_OVERRIDE_CACHE, _group_log_channel_cache).
-        → في asyncio، dict ops ذرّية ما لم يوجد await بينها.
-        → _prune_perf_caches يستخدم sorted(...) = لقطة كاملة.
-        → لو انتقل النظام لـmulti-thread: أضف threading.Lock.
+    🟡 FIX-STATE-2: _EXTERNAL_HANDLED_STATES — إضافة WAIT_UPDATE_CHANNEL.
+        ملاحظة مهمة: لا نُضيفها كـ "silent ignore" — بل كإشارة
+        إلى أن handlers_command.handle_text يتولاها. لهذا يحتاج
+        handlers_command إلى تعديل مماثل (accept both names).
 
-    🟡 LAYER-ENABLED-DOC: توثيق سبب استيراد *_LAYER_ENABLED
-        من _detectors_module رغم عدم استخدامها محلياً.
-        → bot.py يقرؤها مباشرة من _detectors_module.
-        → إزالتها ستكسر الـimport العلوي (توافق م backwards).
+🆕 v7.18.37 (POLISH-PLUS-2) — محفوظ:
+    🟡 POLISH-13-ENHANCED, THREADING-NOTE, LAYER-ENABLED-DOC.
 
-    🟢 محفوظ من v7.18.36 (POLISH-PLUS):
-        POLISH-9-ENHANCED, POLISH-12, POLISH-13, POLISH-14.
-=============================================================================
-🆕 v7.18.36 (POLISH-PLUS) — تصحيحات وتحسينات مكمّلة:
-    🔴 POLISH-9-ENHANCED: فحص وجود قبل DELETE في _handle_wait_auto_del_text
-        → يمنع الإيجابيات الكاذبة عند rc=None من DB.execute.
-        قبل: rc=None → removed=True (قد يكون خطأ إن لم يكن الصف موجوداً).
-        بعد: fetchval SELECT 1 قبل الحذف — definitive دقيق.
-        Fallback عند تعذّر fetchval → السلوك القديم (توافق).
-
-    🟠 POLISH-12: عكس أولوية ars في _get_batched_message_settings.
-        السبب: _get_batched_message_settings يكتب _ars_local_cache من
-        PG مباشرة (الأحدث)، بينما SmartCache قد يحمل بيانات أقدم.
-        قبل: ars_cached (SmartCache) يفوز عند جاهزية الاثنين.
-        بعد: ars_local يفوز — يضمن رؤية آخر تغيير خلال 5s.
-
-    🟢 POLISH-13: partial_return — تجنّب BATCH عند sec غير جاهز
-        لكن ars جاهز محلياً.
-        قبل: sec_ready=False, ars_ready_local=True → PG BATCH (2 استعلام).
-        بعد: استعلام sec فقط عبر get_security_settings_cached.
-        التوفير: ~50% زمن الاستجابة لهذه الحالة النادرة.
-
-    🟡 POLISH-14: توثيق صريح لسلوك fetchval عند غيابه في
-        _handle_wait_auto_del_text.
-
-🆕 v7.18.35 (POLISH-1-COMPLETE) — محفوظة:
-    🟠 POLISH-2-COMPLETE: كاش ars محلي (_ars_local_cache, 5s TTL).
-    🟡 POLISH-9: DB.execute يُعيد None عند نجاح الحذف.
-    🟡 POLISH-10: توثيق _get_penalty_duration_override (عالمي).
-    🟡 POLISH-11: توثيق ترتيب الأسبقية في _resolve_penalty.
-
-🆕 v7.18.34 (POLISH-1) — محفوظة:
-    🔴 POLISH-1: جسر penalty_duration_* (يكتب→كاش→يقرأ).
-    🟠 POLISH-2: كاش {} للمجموعات الفارغة (بسيط).
-    🟠 POLISH-3: asyncio.gather لكتابة الكاش.
-    🟠 POLISH-4: stored يعتمد على نتيجة set_setting.
-    🟠 POLISH-5: WAIT_AUTO_DEL — إبقاء الحالة عند فشل استثنائي.
-    🟡 POLISH-6: _is_dev_user helper موحّد.
-    🟡 POLISH-7: logger.warning عند غياب دوال DB.import_*.
-    🟡 POLISH-8: توثيق _EXTERNAL_HANDLED_STATES.
-
-🆕 v7.18.33 (BATCH-SETTINGS) — محفوظة.
-🆕 v7.18.32 (FSM-COVERAGE) — محفوظة.
-🆕 v7.18.31..v7.18.14 — محفوظة.
+🆕 v7.18.36 (POLISH-PLUS) — محفوظ.
+🆕 v7.18.35 (POLISH-1-COMPLETE) — محفوظ.
+🆕 v7.18.34 (POLISH-1) — محفوظ.
+🆕 v7.18.33 (BATCH-SETTINGS) — محفوظ.
+🆕 v7.18.32 (FSM-COVERAGE) — محفوظ.
+🆕 v7.18.31..v7.18.14 — محفوظ.
 =============================================================================
 """
 
@@ -257,14 +223,6 @@ for _path in (
         FINAL_THRESHOLD = getattr(_mod, "FINAL_THRESHOLD", 5)
         LAYER_WEIGHTS = getattr(_mod, "LAYER_WEIGHTS", {}) or {}
 
-        # ───────────────────────────────────────────────────────────
-        # 🟡 v7.18.37 LAYER-ENABLED-DOC:
-        #   هذه الثوابت تُستورَد من _detectors_module للتوافق مع
-        #   bot.py الذي يقرؤها مباشرة من نفس الـmodule.
-        #   لا تُستعمل داخل handlers_message — تُصدَّر للأعلى فقط.
-        #   ⚠️ إزالتها ستكسر الـimport العلوي في bot.py إذا استُوردت
-        #   من handlers_message بدل _detectors_module في نسخ أقدم.
-        # ───────────────────────────────────────────────────────────
         TEXT_LAYER_ENABLED = getattr(_mod, "TEXT_LAYER_ENABLED", False)
         OCR_LAYER_ENABLED = getattr(_mod, "OCR_LAYER_ENABLED", False)
         AUDIO_LAYER_ENABLED = getattr(_mod, "AUDIO_LAYER_ENABLED", False)
@@ -403,7 +361,6 @@ def _as_bool(value, default=False) -> bool:
     return default
 
 
-# 🆕 v7.18.34 POLISH-6: فحص موحّد لصلاحيات المطوّر
 def _is_dev_user(user_id) -> bool:
     """فحص موحّد لصلاحيات المطور (developer/owner)."""
     try:
@@ -628,11 +585,6 @@ _DEBUG_SPAM = DEBUG_SPAM
 _GROUP_LOG_CHANNEL_CACHE_TTL = 60.0
 _GROUP_LOG_CHANNEL_CACHE_MAX = 2000
 _GROUP_LOG_CHANNEL_CACHE_MAX_STALE = 600.0
-# 🟡 v7.18.37 THREADING-NOTE:
-#   dict يستخدم من event loop واحد فقط (single asyncio loop).
-#   في asyncio: dict ops ذرّية (GIL) ما لم يوجد await بينها.
-#   _prune_perf_caches يستخدم sorted(...) = لقطة كاملة قبل الحذف.
-#   لو انتقل النظام لـmulti-thread: أضف threading.Lock.
 _group_log_channel_cache: Dict[int, Tuple[Any, float]] = {}
 
 
@@ -683,17 +635,10 @@ async def _get_group_log_channel_cached(chat_id: int):
     return value
 
 
-# 🟡 v7.18.37 THREADING-NOTE:
-#   كل الكاشات أدناه تُستخدم من event loop واحد فقط.
-#   عمليات dict الذرّية مضمونة في asyncio — لا حاجة لـlock.
-#   الأنماط الحساسة (sorted/iteration) تعمل على لقطة كاملة.
-#   في حال الانتقال لـmulti-thread: أضف threading.Lock.
 _SEC_SETTINGS_LOCAL_TTL = 5.0
 _SEC_SETTINGS_LOCAL_MAX = 3000
 _sec_settings_local_cache: Dict[int, Tuple[Dict[str, Any], float]] = {}
 
-# 🆕 v7.18.35 POLISH-2-COMPLETE: كاش ars محلي (بدل الاعتماد على
-# SmartCache الفارغ للمجموعات بلا صف). يمنع PG query متكرر.
 _ARS_LOCAL_TTL = 5.0
 _ARS_LOCAL_MAX = 3000
 _ars_local_cache: Dict[int, Tuple[Dict[str, Any], float]] = {}
@@ -710,7 +655,7 @@ def _invalidate_sec_settings_local(chat_id: Optional[int] = None) -> None:
 
 
 def _invalidate_ars_local_cache(chat_id: Optional[int] = None) -> None:
-    """🆕 v7.18.35 POLISH-2-COMPLETE: مسح كاش ars المحلي."""
+    """مسح كاش ars المحلي."""
     try:
         if chat_id is None:
             _ars_local_cache.clear()
@@ -720,7 +665,6 @@ def _invalidate_ars_local_cache(chat_id: Optional[int] = None) -> None:
         pass
 
 
-# 🆕 v7.18.34 POLISH-1: كاش مدة العقوبات (من DB.set_setting)
 _PENALTY_DURATION_OVERRIDE_CACHE: Dict[str, Tuple[Optional[int], float]] = {}
 _PENALTY_DURATION_OVERRIDE_TTL = 60.0
 _PENALTY_DURATION_OVERRIDE_MAX = 64
@@ -741,15 +685,6 @@ def _invalidate_penalty_duration_override_cache(
 async def _get_penalty_duration_override(
     penalty_type: str,
 ) -> Optional[int]:
-    """
-    🆕 v7.18.34 POLISH-1: قراءة مدة العقوبة من DB.set_setting
-    (المفتاح: penalty_duration_{ptype}) مع كاش 60s.
-
-    🟡 POLISH-10: النطاق عالمي (global) — المفتاح مشترك بين
-    كل المجموعات. أزرار pen_<type> في لوحة الأدمن عامة.
-    للمجموعات المنفردة مستقبلاً، أضف:
-        penalty_duration_{ptype}_chat_{chat_id}
-    """
     if not penalty_type:
         return None
     now = time.monotonic()
@@ -1114,7 +1049,7 @@ async def _lazy_init_columns(bot=None):
         _columns_last_attempt_ts = now
 
         db_type = getattr(DB, "DB_TYPE", "sqlite")
-        logger.info("🔧 v7.18.37: Auto-migration (DB_TYPE=%s)", db_type)
+        logger.info("🔧 v7.18.38: Auto-migration (DB_TYPE=%s)", db_type)
 
         cols = [
             ("delete_protected_any", "INTEGER DEFAULT 0",
@@ -1220,7 +1155,7 @@ async def _lazy_init_columns(bot=None):
 
         _invalidate_group_log_cache()
         _invalidate_sec_settings_local()
-        _invalidate_ars_local_cache()  # 🆕 v7.18.35
+        _invalidate_ars_local_cache()
         _invalidate_admin_check_cache()
         _invalidate_penalty_duration_override_cache()
 
@@ -2565,7 +2500,6 @@ def _prune_perf_caches() -> int:
         removed += len(stale)
     except Exception:
         pass
-    # 🆕 v7.18.35 POLISH-2-COMPLETE: prune ars local cache
     try:
         stale = [
             k for k, (_, ts) in _ars_local_cache.items()
@@ -2586,7 +2520,6 @@ def _prune_perf_caches() -> int:
         removed += len(stale)
     except Exception:
         pass
-    # 🆕 v7.18.34 POLISH-1: prune penalty override cache
     try:
         stale = [
             k for k, (_, ts) in _PENALTY_DURATION_OVERRIDE_CACHE.items()
@@ -2651,11 +2584,6 @@ async def _release_group_limiter(limiter, acquired):
 
 
 async def _trans(key, lang, default=""):
-    """
-    ترجمة آمنة مع fallback.
-
-    🟡 FIX-D4 (v7.18.30): توثيق صريح للسلوك الحقيقي.
-    """
     if not key:
         return default or ""
     try:
@@ -2770,55 +2698,15 @@ async def get_security_settings_cached(chat_id) -> dict:
     return settings
 
 
-# ═══════════════════════════════════════════════════════════════════
-# 🆕 v7.18.33 BATCH-SETTINGS
-# 🆕 v7.18.34 POLISH-2
-# 🆕 v7.18.35 POLISH-2-COMPLETE
-# 🆕 v7.18.36 POLISH-12 + POLISH-13 (partial_return)
-# 🆕 v7.18.37 POLISH-13-ENHANCED (warning بدل debug)
-# ═══════════════════════════════════════════════════════════════════
-
 async def _get_batched_message_settings(
     chat_id: int,
 ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
-    """
-    v7.18.33 BATCH-SETTINGS + v7.18.34 POLISH-2 + v7.18.35 COMPLETE
-    + v7.18.36 POLISH-12 + POLISH-13 + v7.18.37 POLISH-13-ENHANCED:
-
-        جلب group_security + auto_reply_settings في استعلام واحد
-        على PostgreSQL (1 RTT بدل 2).
-
-    🟠 v7.18.35 POLISH-2-COMPLETE:
-      • _ars_local_cache (5s TTL) — بديل عن SmartCache الفارغ.
-      • المجموعات الجديدة: 0 round-trips خلال 5s.
-
-    🟠 v7.18.36 POLISH-12:
-      • عند جاهزية ars_local و ars_smart معاً → ars_local يفوز
-        (الأحدث، يُكتب من PG مباشرة في _get_batched_message_settings).
-
-    🟢 v7.18.36 POLISH-13 (partial_return):
-      • sec غير جاهز + ars جاهز → استعلام sec فقط
-        (تجنّب BATCH PG بلا داعٍ).
-      • التوفير: ~50% من زمن الاستعلام لهذه الحالة النادرة.
-
-    🟡 v7.18.37 POLISH-13-ENHANCED:
-      • عند فشل partial_return → logger.warning (بدل debug).
-      • السبب: get_security_settings_cached تلتقط الاستثناءات
-        داخلياً، لذا فشلها = شذوذ حقيقي يستحق الظهور في السجل.
-
-    ملاحظات المراجعة (v7.18.33):
-      🔴 _row_to_dict_local بدل isinstance(row, dict).
-      🟠 EXISTS(...) للتفريق بين "صف موجود" و "لا صف".
-      🟡 لا دمج _DEFAULT_SECURITY_SETTINGS.
-      🟡 json.loads داخل try/except.
-    """
     now = time.monotonic()
     try:
         chat_id_int = int(chat_id)
     except (TypeError, ValueError):
         return {}, {}
 
-    # ─── 1) caches ──────────────────────────────────────────────
     sec_entry = _sec_settings_local_cache.get(chat_id_int)
     sec_ready = (
         sec_entry is not None
@@ -2833,14 +2721,12 @@ async def _get_batched_message_settings(
         ars_cached = None
     ars_ready_smart = isinstance(ars_cached, dict)
 
-    # 🆕 v7.18.35 POLISH-2-COMPLETE: كاش ars محلي
     ars_local_entry = _ars_local_cache.get(chat_id_int)
     ars_ready_local = (
         ars_local_entry is not None
         and (now - ars_local_entry[1]) < _ARS_LOCAL_TTL
     )
 
-    # 🟠 v7.18.36 POLISH-12: ars_local يفوز (الأحدث)
     def _pick_ars():
         if ars_ready_local:
             return ars_local_entry[0]
@@ -2849,8 +2735,6 @@ async def _get_batched_message_settings(
     if sec_ready and (ars_ready_smart or ars_ready_local):
         return sec_entry[0], _pick_ars()
 
-    # 🟢 v7.18.36 POLISH-13: partial_return
-    # sec غير جاهز لكن ars جاهز → استعلم sec فقط (single query)
     if not sec_ready and (ars_ready_smart or ars_ready_local):
         try:
             sec_data = await get_security_settings_cached(chat_id_int)
@@ -2861,16 +2745,11 @@ async def _get_batched_message_settings(
                 "local" if ars_ready_local else "smart")
             return sec_data, _pick_ars()
         except Exception as _pe:
-            # 🟡 v7.18.37 POLISH-13-ENHANCED: warning بدل debug —
-            #   الفشل نادر جداً (get_security_settings_cached تلتقط
-            #   الاستثناءات داخلياً). ظهوره = شذوذ حقيقي.
             logger.warning(
                 "POLISH-13 partial_return failed: %s — "
                 "falling back to full BATCH path",
                 _pe)
-            # fallback إلى BATCH
 
-    # ─── 2) PG batched ──────────────────────────────────────────
     if bool(getattr(DB, "USE_POSTGRES", False)):
         try:
             row = await DB.fetchone(
@@ -2918,7 +2797,6 @@ async def _get_batched_message_settings(
                     logger.debug(
                         "BATCH-SETTINGS: ars JSON parse: %s", _je)
 
-            # ─── كاش محلي (حتى الفارغ) — 5s TTL ───
             if isinstance(sec_data, dict):
                 try:
                     if (len(_sec_settings_local_cache)
@@ -2934,7 +2812,6 @@ async def _get_batched_message_settings(
                 except Exception:
                     pass
 
-            # 🆕 v7.18.35 POLISH-2-COMPLETE: كاش ars محلي (حتى الفارغ)
             if isinstance(ars_data, dict):
                 try:
                     if len(_ars_local_cache) >= _ARS_LOCAL_MAX:
@@ -2948,8 +2825,6 @@ async def _get_batched_message_settings(
                 except Exception:
                     pass
 
-            # SmartCache: فقط عند وجود صف فعلي
-            # 🟠 POLISH-3: كتابات متوازية
             gather_coros = []
             if sec_exists and isinstance(sec_data, dict):
                 gather_coros.append(
@@ -2977,7 +2852,6 @@ async def _get_batched_message_settings(
                 "BATCH-SETTINGS PG failed: %s — "
                 "fallback to 2 queries", e)
 
-    # ─── 3) fallback (SQLite / MySQL / فشل PG) ──────────────────
     sec_data = await get_security_settings_cached(chat_id_int)
     try:
         ars_data = await get_auto_reply_settings_cached(chat_id_int)
@@ -2987,17 +2861,12 @@ async def _get_batched_message_settings(
 
 
 async def get_auto_reply_settings_cached(chat_id) -> dict:
-    """
-    🆕 v7.18.35 POLISH-2-COMPLETE: يستخدم _ars_local_cache (5s TTL)
-        قبل SmartCache، لمنع PG query متكرر للمجموعات بلا صف.
-    """
     now = time.monotonic()
     try:
         chat_id_int = int(chat_id)
     except (TypeError, ValueError):
         chat_id_int = None
 
-    # كاش محلي أولاً
     if chat_id_int is not None:
         entry = _ars_local_cache.get(chat_id_int)
         if entry is not None and (now - entry[1]) < _ARS_LOCAL_TTL:
@@ -3036,15 +2905,10 @@ async def get_auto_reply_settings_cached(chat_id) -> dict:
 async def invalidate_security_cache(chat_id=None):
     await settings_cache.invalidate_security(chat_id)
     _invalidate_sec_settings_local(chat_id)
-    # 🆕 v7.18.34: أعد تعيين كاش تجاوزات المدة أيضاً
     _invalidate_penalty_duration_override_cache()
 
 
 async def invalidate_auto_reply_cache(chat_id=None):
-    """
-    🆕 v7.18.35 POLISH-2-COMPLETE: يمسح الكاش المحلي أيضاً.
-    chat_id=-1 → مسح الكل (توافق مع السلوك القديم).
-    """
     await settings_cache.invalidate_auto_reply(chat_id)
     try:
         if chat_id is None or int(chat_id) == -1:
@@ -3195,7 +3059,6 @@ def _parse_contest_date(date_str):
 
 
 def _parse_channel_ref(raw: str) -> Tuple[bool, str]:
-    """v7.18.21 FIX-ROUTE-2: التحقق من صيغة معرف قناة."""
     if not raw:
         return False, "empty"
     s = raw.strip()
@@ -3459,20 +3322,27 @@ def _accepts_state_arg(handler, handler_name: str) -> bool:
 
 
 # ═══════════════════════════════════════════════════════════════════
-# 🆕 v7.18.32 FIX-FSM-2/3 + v7.18.34 POLISH-8: توثيق مُحسَّن
+# 🆕 v7.18.32 FIX-FSM-2/3 + v7.18.38 FIX-STATE-2:
+#     _EXTERNAL_HANDLED_STATES — حالات يُسجَّل لها handler في ملف آخر
 # ═══════════════════════════════════════════════════════════════════
 # الحالات التي يُسجَّل لها handler في ملف آخر (خارج handle_private).
 # PTB v20+ ينفّذ كل الـ handlers المطابقة بالترتيب في نفس الـgroup.
 # بدون هذا الفلتر، handle_private قد يُظهر رسالة "لم أتعرف على
 # العملية" حتى لو تولّى handler آخر الرسالة بالفعل.
 #
-# الحل: تجاهل صامت (لا رسالة، لا إشعار مطوّر) عند رؤية أي من هذه
-# الحالات في handle_private.
+# ⚠️ v7.18.38 FIX-STATE-2:
+#   أُضيفت WAIT_UPDATE_CHANNEL إلى هذه القائمة (كانت في السابق
+#   في _PRIVATE_HANDLERS_MAP مربوطة بـ _handle_wait_channel_text
+#   → باغ: قناة التحديثات تُضاف كـ "قناة نشطة").
+#
+#   ملاحظة: handlers_command.handle_text (الـ fallback) مُعدَّل
+#   ليقبل WAIT_UPDATE_CH أو WAIT_UPDATE_CHANNEL.
 _EXTERNAL_HANDLED_STATES = frozenset({
     # ─── handlers_group_log.receive_log_channel ───
     "WAIT_LOG_CH",
-    # ─── CommandHandlers.handle_text (تحديث قناة التحديثات) ───
+    # ─── CommandHandlers.handle_text (قناة التحديثات) ───
     "WAIT_UPDATE_CH",
+    "WAIT_UPDATE_CHANNEL",   # 🆕 v7.18.38 FIX-STATE-2
     # ─── (TODO) معالج Documents مستقبلي ───
     "WAIT_IMPORT_FILE",
     "WAIT_BACKUP_FILE",
@@ -3491,14 +3361,26 @@ class MessageHandlers:
         "WAIT_REPLY_RESPONSE": "handle_add_reply",
         "WAIT_REPLY_ADD": "handle_add_reply",
         "WAIT_REPLY_REMOVE": "handle_remove_reply",
-        # 🆕 v7.18.21 FIX-ROUTE-2: حالات إدخال القناة
+        # 🆕 v7.18.21 FIX-ROUTE-2: حالات إدخال القناة النشطة
         "WAIT_CHANNEL": "_handle_wait_channel_text",
         "WAIT_ADD_CHANNEL": "_handle_wait_channel_text",
-        # WAIT_UPDATE_CHANNEL يبقى (alias قديم لـ WAIT_ADD_CHANNEL).
-        "WAIT_UPDATE_CHANNEL": "_handle_wait_channel_text",
+        # ═══════════════════════════════════════════════════════════════
+        # 🔴 v7.18.38 FIX-STATE-1: أُزيل السطر التالي (كان السبب في باغ
+        #    "قناة التحديثات تظهر كقناة نشطة"):
+        #
+        #    كان: "WAIT_UPDATE_CHANNEL": "_handle_wait_channel_text",
+        #
+        #    السبب: الاسم يشبه WAIT_UPDATE_CH (قناة التحديثات) لكنه
+        #    كان يُشغّل _handle_wait_channel_text (القناة النشطة).
+        #    النتيجة: المستخدم يضغط "تعيين قناة التحديثات" → يرسل
+        #    @channel → البوت يُضيف القناة كقناة نشر (user_channels)
+        #    بدل حفظها في settings.updates_channel.
+        #
+        #    الإصلاح: حذف السطر + إضافة WAIT_UPDATE_CHANNEL إلى
+        #    _EXTERNAL_HANDLED_STATES (يُعالَج في handlers_command).
+        # ═══════════════════════════════════════════════════════════════
         # 🆕 v7.18.28 FIX-ADDING-1: حالات إضافة المنشورات
         "ADDING_POSTS": "_handle_adding_posts_text",
-        # 🟡 FIX-DEAD-1 (v7.18.32): "WAIT_POST" — dead entry
         "WAIT_POST": "_handle_adding_posts_text",
         # 🆕 v7.18.29 FIX-SUPPORT-1: حالة الدعم الفني
         "SUPPORT_MODE": "_handle_support_mode_text",
@@ -3691,8 +3573,6 @@ class MessageHandlers:
         except Exception:
             pass
 
-        # 🆕 v7.18.33 BATCH-SETTINGS + v7.18.35 POLISH-2-COMPLETE
-        # + v7.18.36 POLISH-12/13 + v7.18.37 POLISH-13-ENHANCED
         settings, _preloaded_ars = await _get_batched_message_settings(
             chat_id)
         if not isinstance(settings, dict):
@@ -4148,7 +4028,6 @@ class MessageHandlers:
 
         _reply_source = ctx.text or ctx.caption
         if _reply_source and not is_anonymous:
-            # 🆕 v7.18.33: تمرير الـars الجاهزة (0 round-trips)
             await MessageHandlers._process_auto_reply(
                 update, context, chat_id, _reply_source, user_id,
                 preloaded_ars=_preloaded_ars)
@@ -4227,18 +4106,6 @@ class MessageHandlers:
 
     @staticmethod
     async def _resolve_penalty(chat_id, violation_type, settings):
-        """
-        🆕 v7.18.34 POLISH-1 + v7.18.35 POLISH-11 (توثيق):
-
-        ترتيب أسبقية حساب مدة العقوبة:
-          1. settings dict (defaults + DB group_security).
-          2. override من DB.set_setting (penalty_duration_{ptype}).
-          3. override يفوز دائماً — إعداد الأدمن يُلغي defaults.
-
-        الاستثناء الوحيد: penalty_rule من DB.get_violation_penalty
-        (base rule للمخالفة المحددة) — يُعيد duration مباشرة بدون
-        المرور بـ override (لأنه قاعدة مخالفة، لا default عام).
-        """
         penalty_rule = None
         try:
             penalty_rule = await DB.get_violation_penalty(
@@ -4283,12 +4150,11 @@ class MessageHandlers:
         duration = MessageHandlers._get_penalty_duration(
             settings, violation_type)
 
-        # 🆕 v7.18.34 POLISH-1 + v7.18.35 POLISH-11: override يفوز
         try:
             override = await _get_penalty_duration_override(ptype)
             if override is not None:
                 if override <= 0:
-                    duration = 0  # دائم
+                    duration = 0
                 else:
                     duration = override
                 logger.debug(
@@ -4533,11 +4399,16 @@ class MessageHandlers:
             return False
 
     # ═══════════════════════════════════════════════════════════════════
-    # 🆕 v7.18.21 FIX-ROUTE-2: معالج مباشر لإدخال معرف القناة
+    # v7.18.21 FIX-ROUTE-2: معالج القناة النشطة
     # ═══════════════════════════════════════════════════════════════════
     @staticmethod
     async def _handle_wait_channel_text(update, context, state=None):
-        """v7.18.21 FIX-ROUTE-2: معالجة إدخال معرف القناة."""
+        """
+        v7.18.21 FIX-ROUTE-2: معالجة إدخال معرف القناة النشطة.
+
+        ⚠️ v7.18.38: هذه الدالة تخدم WAIT_CHANNEL و WAIT_ADD_CHANNEL
+        فقط (القناة النشطة). ليست لقناة التحديثات.
+        """
         user_id = (
             update.effective_user.id if update.effective_user else None)
         if not user_id:
@@ -4654,7 +4525,7 @@ class MessageHandlers:
                 pass
 
     # ═══════════════════════════════════════════════════════════════════
-    # 🆕 v7.18.28 FIX-ADDING-1: معالج إضافة المنشورات
+    # v7.18.28 FIX-ADDING-1: معالج إضافة المنشورات
     # ═══════════════════════════════════════════════════════════════════
     @staticmethod
     async def _handle_adding_posts_text(update, context, state=None):
@@ -4795,15 +4666,10 @@ class MessageHandlers:
                 user_id, active_db_id)
 
     # ═══════════════════════════════════════════════════════════════════
-    # 🆕 v7.18.29 FIX-SUPPORT-2: معالج الدعم الفني
+    # v7.18.29 FIX-SUPPORT-2: معالج الدعم الفني
     # ═══════════════════════════════════════════════════════════════════
     @staticmethod
     async def _handle_support_mode_text(update, context, state=None):
-        """
-        🆕 v7.18.29 FIX-SUPPORT-2: معالجة رسائل الدعم الفني.
-        🔴 FIX-C11 (v7.18.30): 3 مسارات لـ ticket_id.
-        🟠 FIX-BOOL-1 (v7.18.32): فحص bool قبل int.
-        """
         user_id = (
             update.effective_user.id if update.effective_user else None)
         if not user_id:
@@ -4864,7 +4730,6 @@ class MessageHandlers:
         ticket_id = None
         ticket_error = None
 
-        # المسار 1: DB.create_support_ticket
         try:
             create_fn = getattr(DB, "create_support_ticket", None)
             if callable(create_fn):
@@ -4878,7 +4743,6 @@ class MessageHandlers:
                 if isinstance(result, dict):
                     ticket_id = result.get("id") or result.get("ticket_id")
                 elif isinstance(result, bool):
-                    # 🟠 FIX-BOOL-1: bool قبل int
                     ticket_id = None
                 elif isinstance(result, int):
                     ticket_id = result
@@ -4889,7 +4753,6 @@ class MessageHandlers:
             logger.debug(
                 "_handle_support_mode: create_support_ticket: %s", e)
 
-        # المسار 2: DB.add_support_ticket
         if ticket_id is None:
             try:
                 add_fn = getattr(DB, "add_support_ticket", None)
@@ -4915,7 +4778,6 @@ class MessageHandlers:
                 logger.debug(
                     "_handle_support_mode: add_support_ticket: %s", e)
 
-        # المسار 3: DB.execute مباشر (مع 3 فروع DB)
         if ticket_id is None:
             try:
                 insert_fn = getattr(DB, "execute", None)
@@ -4977,7 +4839,6 @@ class MessageHandlers:
                 logger.debug(
                     "_handle_support_mode: raw insert outer: %s", e)
 
-        # إشعار المطور
         try:
             owner_id = int(getattr(CONFIG, 'PRIMARY_OWNER_ID', 0) or 0)
             if owner_id and owner_id != user_id:
@@ -5026,7 +4887,6 @@ class MessageHandlers:
             logger.warning(
                 "_handle_support_mode: notify owner: %s", e)
 
-        # إشعار قناة Dev Log
         try:
             dev_log_text = (
                 f"🆘 <b>Support ticket</b>\n"
@@ -5037,7 +4897,6 @@ class MessageHandlers:
         except Exception:
             pass
 
-        # الرد على المستخدم
         try:
             if ticket_id is not None:
                 reply_msg = (
@@ -5063,14 +4922,14 @@ class MessageHandlers:
             len(text), ticket_error or "—")
 
     # ═══════════════════════════════════════════════════════════════════
-    # 🆕 v7.18.32 FIX-FSM-1: معالجات FSM ناقصة
+    # v7.18.32 FIX-FSM-1: معالجات FSM ناقصة
     # ═══════════════════════════════════════════════════════════════════
 
     @staticmethod
     async def _handle_wait_auto_key_text(
         update, context, state=None
     ):
-        """🆕 v7.18.32 FIX-FSM-1: إدخال كلمة مفتاحية لرد تلقائي."""
+        """v7.18.32 FIX-FSM-1: إدخال كلمة مفتاحية لرد تلقائي."""
         user_id = (
             update.effective_user.id if update.effective_user else None)
         if not user_id:
@@ -5120,15 +4979,7 @@ class MessageHandlers:
     async def _handle_wait_auto_del_text(
         update, context, state=None
     ):
-        """
-        🆕 v7.18.32 FIX-FSM-1: حذف رد تلقائي بالكلمة المفتاحية.
-        🆕 v7.18.34 POLISH-5: clear فقط عند نتيجة نهائية.
-        🆕 v7.18.35 POLISH-9: DB.execute قد يُعيد None عند نجاح
-            الحذف (بعض المكتبات) → نعتبره نجاحاً.
-        🆕 v7.18.36 POLISH-9-ENHANCED: فحص وجود قبل DELETE عبر
-            DB.fetchval لتجنّب الإيجابية الكاذبة عند rc=None.
-        🆕 v7.18.36 POLISH-14: توثيق صريح لسلوك fetchval الغائب.
-        """
+        """حذف رد تلقائي بالكلمة المفتاحية."""
         user_id = (
             update.effective_user.id if update.effective_user else None)
         if not user_id:
@@ -5185,14 +5036,8 @@ class MessageHandlers:
                     removed_error = str(e)[:100]
                     continue
 
-            # ─── Fallback مباشر عبر SQL ───
-            # 🆕 v7.18.36 POLISH-9-ENHANCED: فحص وجود قبل الحذف
-            # لتجنّب إيجابيات كاذبة عند rc=None.
             if not definitive and removed_error is None:
                 try:
-                    # ─── 1) فحص الوجود (إن توفر fetchval) ───
-                    # POLISH-14: إن غاب fetchval → exists يبقى None
-                    # → نعتمد على سلوك execute القديم (توافق).
                     exists = None
                     fetchval = getattr(DB, "fetchval", None)
                     if callable(fetchval):
@@ -5210,20 +5055,16 @@ class MessageHandlers:
                             exists = None
 
                     if exists:
-                        # ─── 2) الصف موجود — احذف ───
                         rc = await DB.execute(
                             "DELETE FROM auto_replies "
                             "WHERE chat_id = ? AND keyword = ?",
                             (chat_id, keyword))
-                        # POLISH-9: None → نجاح (بلا rowcount)
                         removed = True if rc is None else bool(rc)
                         definitive = True
                     elif exists is not None:
-                        # ─── 3) الصف غير موجود (تحقق مؤكد) ───
                         removed = False
                         definitive = True
                     else:
-                        # ─── 4) لا يمكن التحقق — اعتمد على execute ───
                         rc = await DB.execute(
                             "DELETE FROM auto_replies "
                             "WHERE chat_id = ? AND keyword = ?",
@@ -5237,7 +5078,6 @@ class MessageHandlers:
             logger.warning(
                 "_handle_wait_auto_del: %s", e)
 
-        # إبلاغ المستخدم
         try:
             if removed:
                 try:
@@ -5266,7 +5106,6 @@ class MessageHandlers:
         except Exception:
             pass
 
-        # 🟠 POLISH-5: مسح الحالة عند نتيجة نهائية فقط
         if removed or definitive:
             _clear_state()
         else:
@@ -5285,17 +5124,7 @@ class MessageHandlers:
     async def _handle_wait_penalty_duration_text(
         update, context, state=None
     ):
-        """
-        🆕 v7.18.32 FIX-FSM-1: مدة العقوبة الافتراضية.
-
-        🆕 v7.18.34 POLISH-1 + POLISH-4:
-          • stored يعتمد على نتيجة set_setting الفعلية.
-          • عند النجاح: تحديث _PENALTY_DURATION_OVERRIDE_CACHE فوراً.
-          • _resolve_penalty يقرأ من هذا الكاش.
-
-        🟡 v7.18.35 POLISH-10: النطاق عالمي (global) — المفتاح
-        penalty_duration_{ptype} مشترك بين كل المجموعات.
-        """
+        """مدة العقوبة الافتراضية."""
         user_id = (
             update.effective_user.id if update.effective_user else None)
         if not user_id:
@@ -5330,7 +5159,6 @@ class MessageHandlers:
                 parse_mode='HTML')
             return
 
-        # 🟠 POLISH-4: stored يعتمد على نتيجة set_setting
         stored = False
         set_error = None
         try:
@@ -5351,7 +5179,6 @@ class MessageHandlers:
             logger.debug(
                 "_handle_wait_penalty_duration: set_setting: %s", e)
 
-        # 🟠 POLISH-1: تحديث كاش التجاوز فوراً عند النجاح
         if stored:
             try:
                 _PENALTY_DURATION_OVERRIDE_CACHE[penalty_type] = (
@@ -5397,11 +5224,7 @@ class MessageHandlers:
     async def _handle_wait_github_url_text(
         update, context, state=None
     ):
-        """
-        🆕 v7.18.32 FIX-FSM-1: استيراد ردود من GitHub URL.
-        🆕 v7.18.34 POLISH-6/7: _is_dev_user + warning عند غياب
-            دوال DB.import_*.
-        """
+        """استيراد ردود من GitHub URL."""
         user_id = (
             update.effective_user.id if update.effective_user else None)
         if not user_id:
@@ -5412,7 +5235,6 @@ class MessageHandlers:
         lang = await _ensure_lang(update, context)
         raw_url = message.text.strip()
 
-        # 🟡 POLISH-6: فحص موحّد
         is_dev = _is_dev_user(user_id)
 
         StateManager.clear(user_id)
@@ -5461,7 +5283,6 @@ class MessageHandlers:
                     "_handle_wait_github_url: %s: %s", name, e)
                 continue
 
-        # 🟡 POLISH-7: تشخيص أوضح عند غياب الدوال
         if not imported and not attempted:
             logger.warning(
                 "🚨 WAIT_GITHUB_URL: لا توجد دالة استيراد في DB "
@@ -5505,11 +5326,17 @@ class MessageHandlers:
             raw_url[:80], user_id, imported, count, attempted)
 
     # ═══════════════════════════════════════════════════════════════════
-    # 🆕 v7.18.21 FIX-ROUTE-2: handle_private مع 7 مسارات fallback
+    # v7.18.21 FIX-ROUTE-2: handle_private مع 7 مسارات fallback
     # ═══════════════════════════════════════════════════════════════════
     @staticmethod
     async def handle_private(update, context):
-        """معالج الرسائل الخاصة."""
+        """
+        معالج الرسائل الخاصة.
+
+        v7.18.38: تحقّق من _EXTERNAL_HANDLED_STATES أولاً — إذا كانت
+        الحالة في هذه القائمة (مثل WAIT_UPDATE_CHANNEL)، يتم تجاهلها
+        بصمت لأن handler خارجي (handlers_command.handle_text) يتولاها.
+        """
         try:
             if not update.effective_user:
                 return
@@ -5875,7 +5702,6 @@ class MessageHandlers:
         if not user_id:
             return
         lang = await _ensure_lang(update, context)
-        # 🟡 POLISH-6: فحص موحّد
         if not _is_dev_user(user_id):
             try:
                 msg = await _trans(
@@ -6075,7 +5901,6 @@ class MessageHandlers:
         if not user_id:
             return
         lang = await _ensure_lang(update, context)
-        # 🟡 POLISH-6: فحص موحّد
         if not _is_dev_user(user_id):
             try:
                 msg = await _trans(
@@ -6571,7 +6396,6 @@ async def handle_cache_stats_command(update, context):
             _SEC_SETTINGS_LOCAL_MAX,
             _SEC_SETTINGS_LOCAL_TTL,
         ),
-        # 🆕 v7.18.35 POLISH-2-COMPLETE
         (
             "ars_local",
             _ars_local_cache,
@@ -6936,7 +6760,6 @@ __all__ = [
     "_SEC_SETTINGS_LOCAL_MAX",
     "_sec_settings_local_cache",
     "_invalidate_sec_settings_local",
-    # 🆕 v7.18.35 POLISH-2-COMPLETE
     "_ARS_LOCAL_TTL",
     "_ARS_LOCAL_MAX",
     "_ars_local_cache",
@@ -6969,9 +6792,7 @@ __all__ = [
     "_bwm_is_greeting",
     "_parse_channel_ref",
     "_EXTERNAL_HANDLED_STATES",
-    # 🆕 v7.18.33
     "_get_batched_message_settings",
-    # 🆕 v7.18.34
     "_is_dev_user",
     "_PENALTY_DURATION_OVERRIDE_CACHE",
     "_PENALTY_DURATION_OVERRIDE_TTL",
@@ -6987,31 +6808,27 @@ __all__ = [
 
 try:
     logger.info(
-        "✅ handlers_message v7.18.37 loaded | "
+        "✅ handlers_message v7.18.38 loaded | "
         "BWM=%s | PRIVATE_HANDLERS=%d | "
         "external_handled=%d | "
         "routing-fallback=7-paths | "
         "WAIT_CHANNEL=direct-handler | "
-        "WAIT_LOG_CH=EXTERNAL (group_log) | "
+        "WAIT_UPDATE_CHANNEL=EXTERNAL (FIX-STATE-1/2) | "
         "WAIT_UPDATE_CH=EXTERNAL (command) | "
+        "WAIT_LOG_CH=EXTERNAL (group_log) | "
         "WAIT_IMPORT_FILE/WAIT_BACKUP_FILE=EXTERNAL (document-TODO) | "
         "ADDING_POSTS=direct-handler | "
         "SUPPORT_MODE=direct-handler | "
         "AUTO_KEY/AUTO_DEL/PENALTY_DURATION/GITHUB_URL=direct-handler | "
         "BATCH-SETTINGS=PG-1RTT+empty-cache+partial_return | "
-        "ars_local_cache=5s-TTL (POLISH-2-COMPLETE) | "
-        "ars-priority=local-first (POLISH-12) | "
-        "auto-del=existence-check (POLISH-9-ENHANCED) | "
-        "partial-fallback=warning (POLISH-13-ENHANCED) | "
-        "threading-note=caches (THREADING-NOTE) | "
-        "penalty-duration=bridged (DB.set_setting↔_resolve_penalty) | "
+        "ars_local_cache=5s-TTL | "
+        "ars-priority=local-first | "
+        "auto-del=existence-check | "
+        "threading-note=caches | "
+        "penalty-duration=bridged | "
         "detectors-compat=v4.1.0 | "
         "commands=(cache_stats, db_idle, autoblocked) | "
-        "fixes=(POLISH-1..14, POLISH-9-ENHANCED, POLISH-12, POLISH-13, "
-        "POLISH-13-ENHANCED, THREADING-NOTE, LAYER-ENABLED-DOC, "
-        "BATCH-SETTINGS, REVIEW-FIX-1..5, FSM-COVERAGE, AL1-FOLLOWUP, "
-        "AL1-FOLLOWUP-2, C11, D3, D4, SUPPORT-1..3, ADDING-1, "
-        "ROUTE-1, ROUTE-2, BWM-3, COL-1, EDIT-1, STATE-1, BUG-1..BUG-12)",
+        "fixes=(FIX-STATE-1, FIX-STATE-2, UPDATE-CHANNEL-STATE-FIX)",
         "yes" if _HAS_BWM else "no",
         len(MessageHandlers._PRIVATE_HANDLERS_MAP),
         len(_EXTERNAL_HANDLED_STATES),
