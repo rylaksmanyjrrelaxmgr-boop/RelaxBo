@@ -1,70 +1,23 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-database_groups.py - دوال المجموعات (v7.4.16)
+database_groups.py - دوال المجموعات (v7.4.17)
 ================================================================================
-GroupsMixin:
-  1.  كاش الكلمات المحظورة المحلي
-  2.  تسجيل المجموعات وإدارتها
-  3.  مشرفو المجموعات (Group Admins)
-  4.  المشرفون المخفيون (Hidden Admins)
-  5.  المشرفون المجهولون (Anonymous Admins)
-  6.  إعدادات الأمان (Security)
-  7.  التحذيرات (Warnings)
-  8.  سجلات المشرفين (Admin Logs)
-  9.  الردود التلقائية (Auto Replies)
-  10. الكلمات المحظورة (Banned Words)
-  11. إعدادات العقوبات (Penalty Settings)
-  12. قناة السجل للمجموعة (Group Log Channel)
-  13. المخالفات (Violations)
-  14. انتهاء العقوبات (Expire Penalties — fallback)
-
-🆕 v7.4.16 — AUTH-CACHE-FIX:
-  🔴 FIX-AC2: sync_group_admins — إبطال utils._auth_cache_smart
-             الحقيقي عبر invalidate_auth_cache_async.
-             السبب: cache.auth_cache (TTL=10s) كاش شبح لا يُقرَأ من
-             is_authorized_in_group؛ الكاش الفعلي هو utils._auth_cache_smart
-             (TTL=60s). بدونه: ترقية/تخفيض مشرف لا تُطبَّق لمدة 60s.
-  🆕 FIX-C4: add_group_admin + remove_group_admin — تحديث فردي لمشرف
-             واحد بدون استدعاء Telegram API.
-             السبب: handlers/chat_member.py يستدعيهما عند كل
-             ChatMemberUpdated؛ بدونهما fallback = sync_group_admins
-             → get_chat_administrators (بطيء).
-             الأثر: تسريع ~95% لتغييرات المشرفين.
-
-🆕 v7.4.15 — POLISH:
-  🟢 P1: إضافة shebang + coding utf-8 (كانا ناقصين)
-  🟢 P2: _MAX_WORD_LENGTH = 100 (رفض الكلمات الطويلة جداً)
-  🟢 P3: _MAX_KEYWORD_LENGTH = 255 (رفض الـ keywords الطويلة)
-  🟢 P4: get_auto_reply_settings — return آمن عند فشل DB
-  🟢 P5: get_auto_reply — return آمن (dict فارغ عند فشل DB)
-
-🆕 v7.4.14 — IS-GROUP-OWNER (تحسين ملكية المجموعة):
-  🟢 O1: is_group_owner — فحص سريع لملكية المجموعة
-  🟢 O2: فحص مزدوج: bot_groups.added_by + user_groups_link.user_id
-
-🆕 v7.4.13 — ROOT-CAUSE-FIX (نهائي):
-  🔴 F1: عكس ترتيب المعاملات في add_banned_word / remove_banned_word
-  🔴 F2: add_banned_word تُعيد (bool, bool) — والمُنادي يفكّها.
-  🔴 F3: remove_banned_word مع fallback تشخيصي عند عدم العثور.
-
-🆕 v7.4.12 — CRITICAL-FIX:
-  🔴 F1: add_banned_word — تحقق نوع شامل قبل .strip()
-  🔴 F2: remove_banned_word — نفس التحقق + fallback تشخيصي
-
-🆕 v7.4.11 — REVIEW-FIXES:
-  🟠 M1: increment_violation_count — قفل per-(user,chat)
-  🟠 M2: update_penalty_settings — try/except + أعمدة فعلية
-  🟠 M3: reset_auto_replies — إبطال settings_cache
-  🟠 M4: get_auto_reply — _spawn_bg_task
-  🟡 m1: get_violation_count — last_violation_time=NULL
-  🟡 m2: add_user_warning — ON CONFLICT صريح
-  🟡 m3: _get_group_security_columns — قفل مخصص
-
-🆕 v7.4.11 — NEW FALLBACKS:
-  🔴 _expire_penalties_pg / _expire_penalties_mysql /
-     _expire_penalties_sqlite + _expire_penalties_generic
-
+🆕 v7.4.17 — CACHE-INVALIDATION-COMPLETE:
+  🔴 FIX-CACHE-1: add/remove_group_admin → إبطال groups_cache.
+  🔴 FIX-CACHE-2: add/remove_anonymous_admin → إبطال groups_cache.
+  🔴 FIX-CACHE-3: sync_group_admins / sync_anonymous_admins →
+                 إبطال groups_cache لكل المتأثرين.
+  🆕 FIX-CACHE-4: count_user_groups(user_id) — دالة عدّ سريعة.
+  🟢 FIX-CACHE-5: _invalidate_user_groups_cache(user_id) موحّدة.
+  🟡 FIX-CACHE-6: get_user_groups(force_refresh=False).
+🆕 v7.4.16 — AUTH-CACHE-FIX: FIX-AC2 + FIX-C4.
+🆕 v7.4.15 — POLISH: P1..P5.
+🆕 v7.4.14 — IS-GROUP-OWNER: O1..O2.
+🆕 v7.4.13 — ROOT-CAUSE-FIX: F1..F3.
+🆕 v7.4.12 — CRITICAL-FIX: F1..F2.
+🆕 v7.4.11 — REVIEW-FIXES: M1..M4 + m1..m3.
+🆕 v7.4.11 — NEW FALLBACKS: _expire_penalties_*.
 🆕 v7.4.10 — add_banned_word fallback 500 → 10000
 🆕 v7.4.9  — قراءة آمنة لـ MAX_GLOBAL_BANNED_WORDS
 🆕 v7.4.8  — PERFORMANCE (get_user_groups ~50ms)
@@ -86,25 +39,13 @@ from typing import Dict, List, Optional, Tuple, Any
 
 logger = logging.getLogger(__name__)
 
-
-# ✅ v7.4.10: القيمة الافتراضية للحد الأقصى للكلمات المحظورة العالمية
 _DEFAULT_MAX_GLOBAL_BANNED_WORDS = 10000
-
-# 🆕 v7.4.15: حدود الطول
-_MAX_WORD_LENGTH = 100      # الحد الأقصى لطول الكلمة المحظورة
-_MAX_KEYWORD_LENGTH = 255   # الحد الأقصى لطول keyword الرد التلقائي
+_MAX_WORD_LENGTH = 100
+_MAX_KEYWORD_LENGTH = 255
 
 
 def _safe_normalize_word(word: Any) -> Optional[str]:
-    """
-    🆕 v7.4.12: تطبيع آمن لكلمة محظورة مع كشف انعكاس المعاملات.
-    🆕 v7.4.15: رفض الكلمات الطويلة جداً (> _MAX_WORD_LENGTH).
-
-    يُرجع:
-      - النص المُطبَّع (str) إذا كان word نصاً صالحاً
-      - None إذا كان word غير نصي (int/None/...) → يعني خطأ في المُنادي
-      - None إذا تجاوز الحد الأقصى للطول
-    """
+    """تطبيع آمن لكلمة محظورة."""
     if word is None:
         return None
     if not isinstance(word, str):
@@ -120,9 +61,9 @@ def _safe_normalize_word(word: Any) -> Optional[str]:
 class GroupsMixin:
     """Mixin يحتوي كل دوال المجموعات"""
 
-    # =====================================================================
+    # ═════════════════════════════════════════════════════════════════
     # 1) كاش الكلمات المحظورة (داخلي)
-    # =====================================================================
+    # ═════════════════════════════════════════════════════════════════
 
     async def _get_banned_words_from_local_cache(
         self, chat_id: int
@@ -144,7 +85,6 @@ class GroupsMixin:
     async def _invalidate_banned_words_local_cache(
         self, chat_id: int = None
     ):
-        """إبطال الكاش العالمي عند chat_id=-1"""
         if chat_id is not None:
             self._banned_words_local_cache.pop(chat_id, None)
             if chat_id == -1:
@@ -155,17 +95,56 @@ class GroupsMixin:
             self._global_banned_words_cache = []
             self._global_banned_words_loaded = False
 
-    # =====================================================================
+    # ═════════════════════════════════════════════════════════════════
+    # 🆕 v7.4.17 FIX-CACHE-5: إبطال موحّد لكاش مجموعات المستخدم
+    # ═════════════════════════════════════════════════════════════════
+
+    async def _invalidate_user_groups_cache(
+        self, user_id: int
+    ) -> bool:
+        """
+        🆕 v7.4.17: إبطال كاش مجموعات مستخدم واحد.
+
+        يُبطِل: groups_cache + internal_cache[groups_{user_id}]
+        """
+        if not isinstance(user_id, int) or user_id <= 0:
+            return False
+
+        invalidated = False
+
+        try:
+            if self.CACHE_AVAILABLE:
+                result = self.groups_cache.invalidate(user_id)
+                if asyncio.iscoroutine(result):
+                    await result
+                invalidated = True
+        except Exception as e:
+            logger.debug(
+                f"_invalidate_user_groups_cache "
+                f"groups_cache({user_id}): {e}"
+            )
+
+        try:
+            result = self.internal_cache.invalidate(f"groups_{user_id}")
+            if asyncio.iscoroutine(result):
+                await result
+            invalidated = True
+        except Exception as e:
+            logger.debug(
+                f"_invalidate_user_groups_cache "
+                f"internal_cache({user_id}): {e}"
+            )
+
+        return invalidated
+
+    # ═════════════════════════════════════════════════════════════════
     # 2) تسجيل المجموعات وإدارتها
-    # =====================================================================
+    # ═════════════════════════════════════════════════════════════════
 
     async def register_group(
         self, chat_id: int, chat_name: str, user_id: int,
         username: str = None,
     ) -> bool:
-        """
-        ✅ v7.4.3: transaction() بدل connection() لضمان الذرّية
-        """
         try:
             async with self.transaction() as conn:
                 if self.USE_POSTGRES:
@@ -235,9 +214,7 @@ class GroupsMixin:
                 f"✅ تم تسجيل المجموعة {chat_id} "
                 f"بواسطة المستخدم {user_id}"
             )
-            if self.CACHE_AVAILABLE:
-                await self.groups_cache.invalidate(user_id)
-            await self.internal_cache.invalidate(f"groups_{user_id}")
+            await self._invalidate_user_groups_cache(user_id)
             return True
         except Exception as e:
             logger.error(
@@ -245,20 +222,19 @@ class GroupsMixin:
             )
             return False
 
-    async def get_user_groups(self, user_id: int) -> List[Dict]:
-        """
-        🆕 v7.4.8: PERFORMANCE-FIX — استعلامان بسيطان + دمج Python.
-        """
-        # ─── 1) الكاش ───
-        if self.CACHE_AVAILABLE:
-            cached = await self.groups_cache.get(user_id)
+    async def get_user_groups(
+        self, user_id: int, force_refresh: bool = False
+    ) -> List[Dict]:
+        """🆕 v7.4.17: force_refresh لتخطي الكاش."""
+        if not force_refresh:
+            if self.CACHE_AVAILABLE:
+                cached = await self.groups_cache.get(user_id)
+                if cached is not None:
+                    return cached
+            cached = await self.internal_cache.get(f"groups_{user_id}")
             if cached is not None:
                 return cached
-        cached = await self.internal_cache.get(f"groups_{user_id}")
-        if cached is not None:
-            return cached
 
-        # ─── 2) استعلامان منفصلان ───
         query1 = """
             SELECT chat_id, chat_name, username, banned
             FROM bot_groups WHERE added_by = ?
@@ -300,7 +276,6 @@ class GroupsMixin:
             rows1 = []
             rows2 = []
 
-        # ─── 3) دمج في Python مع dedup ───
         seen: set = set()
         groups: List[Dict] = []
         for row in rows1:
@@ -316,40 +291,72 @@ class GroupsMixin:
             seen.add(cid)
             groups.append(row)
 
-        # ─── 4) ترتيب + حد 100 ───
         groups.sort(key=lambda r: r.get("chat_id") or 0)
         groups = groups[:100]
 
-        # ─── 5) التخزين في الكاش ───
-        await self.internal_cache.set(f"groups_{user_id}", groups)
+        try:
+            await self.internal_cache.set(f"groups_{user_id}", groups)
+        except Exception:
+            pass
         if self.CACHE_AVAILABLE:
-            await self.groups_cache.set(user_id, groups)
+            try:
+                await self.groups_cache.set(user_id, groups)
+            except Exception:
+                pass
         return groups
 
     # ═════════════════════════════════════════════════════════════════
-    # 🆕 v7.4.14: is_group_owner — فحص سريع لملكية المجموعة
+    # 🆕 v7.4.17 FIX-CACHE-4: count_user_groups — دالة عدّ سريعة
     # ═════════════════════════════════════════════════════════════════
+
+    async def count_user_groups(
+        self, user_id: int, force_refresh: bool = False
+    ) -> int:
+        """
+        🆕 v7.4.17: عدّ المجموعات بسرعة.
+
+        - إن وُجد الكاش → يرجع فوراً.
+        - وإلا → يستدعي get_user_groups (يملأ الكاش).
+
+        Returns:
+            عدد المجموعات (0 عند أي فشل).
+        """
+        if not isinstance(user_id, int) or user_id <= 0:
+            return 0
+
+        try:
+            if not force_refresh:
+                if self.CACHE_AVAILABLE:
+                    cached = await self.groups_cache.get(user_id)
+                    if cached is not None and isinstance(
+                            cached, (list, tuple)):
+                        return len(cached)
+                cached = await self.internal_cache.get(
+                    f"groups_{user_id}")
+                if cached is not None and isinstance(
+                        cached, (list, tuple)):
+                    return len(cached)
+
+            groups = await self.get_user_groups(
+                user_id, force_refresh=force_refresh
+            )
+            if isinstance(groups, (list, tuple)):
+                return len(groups)
+            return 0
+        except Exception as e:
+            logger.debug(
+                f"count_user_groups({user_id}): {e}"
+            )
+            return 0
+
     async def is_group_owner(
         self, user_id: int, chat_id: int
     ) -> bool:
-        """
-        🆕 v7.4.14: فحص سريع لملكية المجموعة.
-
-        يُرجع True إذا كان user_id:
-          - هو من أضاف البوت للمجموعة (bot_groups.added_by)
-          - أو مرتبط بالمجموعة في user_groups_link
-
-        ✅ يستخدم SELECT 1 ... LIMIT 1 (سريع جداً مع فهرس chat_id).
-
-        📌 INTEG: يُستدعى من handlers_callback._is_group_owner
-            بدلاً من fallback عبر get_user_groups (أسرع 10x).
-        """
         if not isinstance(user_id, int) or user_id <= 0:
             return False
         if not isinstance(chat_id, int) or chat_id == 0:
             return False
 
-        # ─── فحص 1: من أضاف البوت؟ ───
         try:
             r1 = await self.fetchval(
                 "SELECT 1 FROM bot_groups "
@@ -364,7 +371,6 @@ class GroupsMixin:
                 f"{chat_id}): {e}"
             )
 
-        # ─── فحص 2: مرتبط في user_groups_link؟ ───
         try:
             r2 = await self.fetchval(
                 "SELECT 1 FROM user_groups_link "
@@ -382,13 +388,8 @@ class GroupsMixin:
         return False
 
     async def delete_group(self, chat_id: int) -> bool:
-        """
-        🟢 v7.4.11: تحذير صيانة — قائمة الجداول تحتاج تحديثاً يدوياً
-        عند إضافة جداول جديدة بـ `chat_id`.
-        """
         try:
             async with self.transaction() as conn:
-                # ⚠️ صيانة: كل جدول جديد بمفتاح chat_id يجب أن يُضاف هنا
                 tables = [
                     "user_groups_link", "group_admins",
                     "hidden_owner_groups", "hidden_admins",
@@ -414,7 +415,6 @@ class GroupsMixin:
                 await self.groups_cache.invalidate()
                 await self.settings_cache.invalidate_security(chat_id)
                 await self.settings_cache.invalidate_auto_reply(chat_id)
-            # ✅ v7.4.5: إبطال كاش قناة السجل
             try:
                 await self.internal_cache.invalidate(
                     f"group_log_{chat_id}"
@@ -431,14 +431,18 @@ class GroupsMixin:
             )
             return False
 
-    # =====================================================================
+    # ═════════════════════════════════════════════════════════════════
     # 3) مشرفو المجموعات (Group Admins)
-    # =====================================================================
+    # ═════════════════════════════════════════════════════════════════
 
     async def sync_group_admins(
         self, chat_id: int, admin_ids: List[int]
     ) -> int:
+        """🔴 v7.4.17 FIX-CACHE-3: + إبطال groups_cache للمتأثرين."""
         try:
+            removed_ids: set = set()
+            added_ids: set = set()
+
             async with await self._get_group_lock(chat_id):
                 async with self.transaction() as conn:
                     existing = await self._fetchall_with_conn(
@@ -483,9 +487,11 @@ class GroupsMixin:
                                 "(chat_id, user_id) VALUES (?,?)",
                                 chat_id, uid,
                             )
+                    removed_ids = set(to_remove)
+                    added_ids = set(to_add)
+
                 if self.CACHE_AVAILABLE:
                     await self.auth_cache.invalidate(chat_id)
-                # ✅ FIX-AC2: إبطال الكاش الحقيقي في utils
                 try:
                     from utils import invalidate_auth_cache_async as _inv_auth
                     await _inv_auth(chat_id=chat_id)
@@ -494,6 +500,22 @@ class GroupsMixin:
                         "invalidate_auth_cache_async(%s): %s",
                         chat_id, e,
                     )
+
+                affected = removed_ids | added_ids
+                for uid in affected:
+                    try:
+                        await self._invalidate_user_groups_cache(uid)
+                    except Exception as e:
+                        logger.debug(
+                            f"sync_group_admins invalidate "
+                            f"groups_cache({uid}): {e}"
+                        )
+                if affected:
+                    logger.debug(
+                        f"♻️ sync_group_admins({chat_id}): "
+                        f"أُبطل كاش {len(affected)} مستخدم"
+                    )
+
                 return len(admin_ids)
         except Exception as e:
             logger.error(
@@ -501,16 +523,8 @@ class GroupsMixin:
             )
             return 0
 
-    # ═════════════════════════════════════════════════════════════════
-    # 🆕 v7.4.16 FIX-C4: تحديث فردي لمشرف واحد
-    #                    (بدون استدعاء Telegram API)
-    # ═════════════════════════════════════════════════════════════════
-
     async def add_group_admin(self, chat_id: int, user_id: int) -> bool:
-        """
-        ✅ FIX-C4: إضافة مشرف واحد إلى group_admins.
-        يستخدمه handlers/chat_member.py لتحديث فوري بدون API.
-        """
+        """✅ FIX-C4 + 🔴 v7.4.17 FIX-CACHE-1."""
         if not chat_id or not user_id:
             return False
         try:
@@ -542,6 +556,8 @@ class GroupsMixin:
                 await _inv(chat_id=chat_id, user_id=user_id)
             except Exception:
                 pass
+
+            await self._invalidate_user_groups_cache(user_id)
             return True
         except Exception as e:
             logger.error(
@@ -550,9 +566,7 @@ class GroupsMixin:
             return False
 
     async def remove_group_admin(self, chat_id: int, user_id: int) -> bool:
-        """
-        ✅ FIX-C4: إزالة مشرف واحد من group_admins.
-        """
+        """✅ FIX-C4 + 🔴 v7.4.17 FIX-CACHE-1."""
         if not chat_id or not user_id:
             return False
         try:
@@ -570,6 +584,8 @@ class GroupsMixin:
                 await _inv(chat_id=chat_id, user_id=user_id)
             except Exception:
                 pass
+
+            await self._invalidate_user_groups_cache(user_id)
             return True
         except Exception as e:
             logger.error(
@@ -577,9 +593,9 @@ class GroupsMixin:
             )
             return False
 
-    # =====================================================================
+    # ═════════════════════════════════════════════════════════════════
     # 4) المشرفون المخفيون (Hidden Admins)
-    # =====================================================================
+    # ═════════════════════════════════════════════════════════════════
 
     async def add_hidden_admin(
         self, chat_id: int, admin_id: int, added_by: int
@@ -594,6 +610,11 @@ class GroupsMixin:
             ) > 0
             if result and self.CACHE_AVAILABLE:
                 await self.auth_cache.invalidate(chat_id, admin_id)
+            if result:
+                try:
+                    await self._invalidate_user_groups_cache(admin_id)
+                except Exception:
+                    pass
             return result
         except Exception as e:
             logger.error(
@@ -614,6 +635,11 @@ class GroupsMixin:
                 )
             if deleted > 0 and self.CACHE_AVAILABLE:
                 await self.auth_cache.invalidate(chat_id, admin_id)
+            if deleted > 0:
+                try:
+                    await self._invalidate_user_groups_cache(admin_id)
+                except Exception:
+                    pass
             return deleted > 0
         except Exception as e:
             logger.error(
@@ -630,14 +656,15 @@ class GroupsMixin:
             (chat_id,),
         )
 
-    # =====================================================================
+    # ═════════════════════════════════════════════════════════════════
     # 5) المشرفون المجهولون (Anonymous Admins)
-    # =====================================================================
+    # ═════════════════════════════════════════════════════════════════
 
     async def add_anonymous_admin(
         self, chat_id: int, anonymous_id: int,
         added_by: int = None, user_id: int = None,
     ) -> bool:
+        """🔴 v7.4.17 FIX-CACHE-2."""
         try:
             result = await self.execute(
                 "INSERT OR IGNORE INTO anonymous_admins "
@@ -648,6 +675,11 @@ class GroupsMixin:
             ) > 0
             if result and self.CACHE_AVAILABLE:
                 await self.auth_cache.invalidate(chat_id)
+            if result and user_id:
+                try:
+                    await self._invalidate_user_groups_cache(user_id)
+                except Exception:
+                    pass
             return result
         except Exception as e:
             logger.error(
@@ -659,7 +691,18 @@ class GroupsMixin:
     async def remove_anonymous_admin(
         self, chat_id: int, anonymous_id: int
     ) -> bool:
+        """🔴 v7.4.17 FIX-CACHE-2."""
         try:
+            linked_user_id = None
+            try:
+                linked_user_id = await self.fetchval(
+                    "SELECT user_id FROM anonymous_admins "
+                    "WHERE chat_id = ? AND anonymous_id = ?",
+                    (chat_id, anonymous_id),
+                )
+            except Exception:
+                pass
+
             async with self.connection() as conn:
                 deleted = await self._execute_with_conn(
                     conn,
@@ -669,6 +712,13 @@ class GroupsMixin:
                 )
             if deleted > 0 and self.CACHE_AVAILABLE:
                 await self.auth_cache.invalidate(chat_id)
+            if deleted > 0 and linked_user_id:
+                try:
+                    await self._invalidate_user_groups_cache(
+                        int(linked_user_id)
+                    )
+                except Exception:
+                    pass
             return deleted > 0
         except Exception as e:
             logger.error(
@@ -704,7 +754,10 @@ class GroupsMixin:
         added_by: int = None,
         user_id_map: Optional[Dict[int, int]] = None,
     ) -> int:
+        """🔴 v7.4.17 FIX-CACHE-3."""
         try:
+            affected_users: set = set()
+
             async with await self._get_group_lock(chat_id):
                 async with self.transaction() as conn:
                     existing = await self._fetchall_with_conn(
@@ -774,6 +827,30 @@ class GroupsMixin:
                                 real_user_id,
                                 self.TimeUtils.sql_iso(),
                             )
+
+                if user_id_map:
+                    for _aid, _uid in user_id_map.items():
+                        try:
+                            iuid = int(_uid)
+                            if iuid > 0:
+                                affected_users.add(iuid)
+                        except (TypeError, ValueError):
+                            pass
+
+                for uid in affected_users:
+                    try:
+                        await self._invalidate_user_groups_cache(uid)
+                    except Exception as e:
+                        logger.debug(
+                            f"sync_anonymous_admins invalidate "
+                            f"({uid}): {e}"
+                        )
+                if affected_users:
+                    logger.debug(
+                        f"♻️ sync_anonymous_admins({chat_id}): "
+                        f"أُبطل كاش {len(affected_users)} مستخدم"
+                    )
+
                 return len(anonymous_ids)
         except Exception as e:
             logger.error(
@@ -782,9 +859,9 @@ class GroupsMixin:
             )
             return 0
 
-    # =====================================================================
+    # ═════════════════════════════════════════════════════════════════
     # 6) إعدادات الأمان (Security)
-    # =====================================================================
+    # ═════════════════════════════════════════════════════════════════
 
     async def get_security_settings(self, chat_id: int) -> Dict:
         if self.CACHE_AVAILABLE:
@@ -810,21 +887,15 @@ class GroupsMixin:
         return settings if settings else {}
 
     async def _get_group_security_columns(self) -> set:
-        """
-        جلب أعمدة group_security الفعلية (مع كاش).
-        """
-        # fast path (بلا قفل)
         if self._group_security_columns_cache is not None:
             return self._group_security_columns_cache
 
-        # قفل مخصص (lazy init)
         lock = getattr(self, "_gsc_columns_lock", None)
         if lock is None:
             self._gsc_columns_lock = asyncio.Lock()
             lock = self._gsc_columns_lock
 
         async with lock:
-            # double-check بعد اكتساب القفل
             if self._group_security_columns_cache is not None:
                 return self._group_security_columns_cache
 
@@ -878,11 +949,9 @@ class GroupsMixin:
                 return set()
 
     async def get_group_security_columns(self) -> set:
-        """دالة عامة لجلب أعمدة group_security"""
         return await self._get_group_security_columns()
 
     def invalidate_group_security_columns_cache(self):
-        """إبطال كاش أعمدة group_security"""
         self._group_security_columns_cache = None
         logger.info(
             "🔄 group_security columns cache invalidated"
@@ -894,15 +963,11 @@ class GroupsMixin:
         conn: Optional[Any] = None,
         **kwargs,
     ) -> bool:
-        """
-        ✅ v7.4.4: يقبل `conn` للتوحيد داخل معاملة موجودة.
-        """
         if not kwargs:
             return False
 
         original_keys = set(kwargs.keys())
 
-        # ─── 1) معالجة المرادفات ───
         aliased_keys = []
         for alias, real_col in self.COLUMN_ALIASES.items():
             if alias in kwargs:
@@ -915,7 +980,6 @@ class GroupsMixin:
                         (alias, f"{real_col} (already present)")
                     )
 
-        # ─── 2) جلب الأعمدة الفعلية (مع كاش) ───
         actual_columns = await self._get_group_security_columns()
         if not actual_columns:
             logger.error(
@@ -924,7 +988,6 @@ class GroupsMixin:
             )
             return False
 
-        # ─── 3) فلترة kwargs ───
         valid_kwargs = {}
         skipped_keys = []
         for key, value in kwargs.items():
@@ -933,7 +996,6 @@ class GroupsMixin:
             else:
                 skipped_keys.append(key)
 
-        # ─── 4) Logging مختصر ───
         summary = (
             f"🔧 update_security_settings chat={chat_id} | "
             f"{len(valid_kwargs)} valid"
@@ -972,7 +1034,6 @@ class GroupsMixin:
             )
             return False
 
-        # ─── 5) INSERT OR IGNORE + UPDATE ───
         query = ""
         try:
             updates = [f"{key} = ?" for key in valid_kwargs]
@@ -983,7 +1044,6 @@ class GroupsMixin:
             )
 
             if conn is not None:
-                # ✅ v7.4.4: استخدم conn المُمرَّر
                 await self._execute_with_conn(
                     conn,
                     "INSERT OR IGNORE INTO group_security "
@@ -994,7 +1054,6 @@ class GroupsMixin:
                     conn, query, *values
                 )
             else:
-                # السلوك القديم: افتح معاملة مستقلة
                 async with self.transaction() as own_conn:
                     await self._execute_with_conn(
                         own_conn,
@@ -1013,7 +1072,6 @@ class GroupsMixin:
                 )
                 return False
 
-            # ─── 6) إبطال الكاش على التوازي ───
             try:
                 invalidations = [
                     self.internal_cache.invalidate(
@@ -1059,9 +1117,9 @@ class GroupsMixin:
             )
             return False
 
-    # =====================================================================
+    # ═════════════════════════════════════════════════════════════════
     # 7) التحذيرات (Warnings)
-    # =====================================================================
+    # ═════════════════════════════════════════════════════════════════
 
     async def get_user_warnings(
         self, user_id: int, chat_id: int
@@ -1075,9 +1133,6 @@ class GroupsMixin:
     async def add_user_warning(
         self, user_id: int, chat_id: int
     ) -> int:
-        """
-        🟡 v7.4.11: ON CONFLICT ... DO UPDATE بصيغة صريحة.
-        """
         await self.execute(
             """INSERT INTO user_warnings (user_id, chat_id, warnings)
                VALUES (?,?,1)
@@ -1096,9 +1151,9 @@ class GroupsMixin:
             (user_id, chat_id),
         ) > 0
 
-    # =====================================================================
+    # ═════════════════════════════════════════════════════════════════
     # 8) سجلات المشرفين (Admin Logs)
-    # =====================================================================
+    # ═════════════════════════════════════════════════════════════════
 
     async def add_admin_log(
         self,
@@ -1109,9 +1164,6 @@ class GroupsMixin:
         reason: str = "",
         conn: Optional[Any] = None,
     ) -> bool:
-        """
-        ✅ v7.4.4: يقبل `conn` للتوحيد داخل معاملة موجودة.
-        """
         try:
             sql = (
                 "INSERT INTO admin_logs "
@@ -1145,9 +1197,9 @@ class GroupsMixin:
             (chat_id, limit),
         )
 
-    # =====================================================================
+    # ═════════════════════════════════════════════════════════════════
     # 9) الردود التلقائية (Auto Replies)
-    # =====================================================================
+    # ═════════════════════════════════════════════════════════════════
 
     async def get_auto_reply_settings(self, chat_id: int) -> Dict:
         if self.CACHE_AVAILABLE:
@@ -1174,7 +1226,6 @@ class GroupsMixin:
             await self.settings_cache.set_auto_reply_settings(
                 chat_id, settings
             )
-        # 🆕 P4 (v7.4.15): return آمن عند فشل DB
         return settings if settings else {
             "enabled": 0, "only_admins": 0, "ignore_bots": 1
         }
@@ -1182,9 +1233,6 @@ class GroupsMixin:
     async def update_auto_reply_settings(
         self, chat_id: int, **kwargs
     ) -> bool:
-        """
-        ✅ v7.4.3: أُزيل `updated_at` — غير مضمون في المخطط
-        """
         if not kwargs:
             return False
         await self.execute(
@@ -1215,7 +1263,6 @@ class GroupsMixin:
         reply_type: str = "text", media_id: str = None,
         buttons: str = None,
     ) -> bool:
-        # 🆕 P3 (v7.4.15): رفض الـ keywords الطويلة
         keyword = keyword.lower().strip()
         if not keyword:
             logger.error("❌ Empty keyword")
@@ -1314,10 +1361,6 @@ class GroupsMixin:
     async def get_auto_reply(
         self, keyword: str, chat_id: int
     ) -> Optional[Dict]:
-        """
-        🟠 v7.4.11: استخدام _spawn_bg_task بدل create_task اليدوي.
-        🆕 P5 (v7.4.15): return آمن عند فشل DB.
-        """
         keyword = keyword.lower().strip()
         if not keyword:
             return None
@@ -1376,9 +1419,6 @@ class GroupsMixin:
         )
 
     async def reset_auto_replies(self, chat_id: int) -> bool:
-        """
-        🟠 v7.4.11: إبطال الكاش بعد الحذف.
-        """
         try:
             rc = await self.execute(
                 "DELETE FROM auto_replies WHERE chat_id = ?",
@@ -1490,12 +1530,11 @@ class GroupsMixin:
             )
             return 0
 
-    # =====================================================================
+    # ═════════════════════════════════════════════════════════════════
     # 10) الكلمات المحظورة (Banned Words)
-    # =====================================================================
+    # ═════════════════════════════════════════════════════════════════
 
     async def _load_global_banned_words(self) -> List[str]:
-        """قفل لمنع cache stampede"""
         if self._global_banned_words_loaded:
             return self._global_banned_words_cache
         async with self._global_words_lock:
@@ -1535,32 +1574,9 @@ class GroupsMixin:
             await self.banned_words_cache.set(chat_id, result)
         return result
 
-    # ═════════════════════════════════════════════════════════════════
-    # ✅ v7.4.13: التوقيع = (chat_id, word, added_by)
-    #             يُرجع: (added_ok, is_duplicate)
-    # ═════════════════════════════════════════════════════════════════
     async def add_banned_word(
         self, chat_id: int, word: str, added_by: int
     ) -> Tuple[bool, bool]:
-        """
-        إضافة كلمة محظورة.
-
-        ⚠️ التوقيع الحالي: (chat_id, word, added_by)
-        ⚠️ القيمة المُرجعة: tuple (added_ok: bool, is_duplicate: bool)
-
-        ⚠️ تحذير مهم للمُنادِين:
-            هذه الدالة تُعيد **tuple** وليس bool مفرد!
-            في Python: if (False, True): → truthy!
-            لا تكتب: `if await add_banned_word(...):` — بل افكّها:
-                added_ok, is_dup = await add_banned_word(...)
-                if added_ok: ...
-
-        يُرجع:
-            (True,  False) → أُضيفت بنجاح
-            (False, True)  → موجودة مسبقاً
-            (False, False) → رُفضت (تجاوز الحد / فشل DB)
-        """
-        # ─── ✅ v7.4.12/13: تحقق نوع شامل ───
         if not isinstance(chat_id, int):
             logger.error(
                 f"❌ add_banned_word: chat_id يجب أن يكون int، "
@@ -1575,7 +1591,6 @@ class GroupsMixin:
                 f"وصل {type(word).__name__}={word!r} | "
                 f"chat_id={chat_id!r}, added_by={added_by!r}"
             )
-            # رصد انعكاس معاملات محتمل
             if isinstance(word, int) and isinstance(chat_id, int):
                 logger.error(
                     f"   💡 السبب المُرجَّح: انعكاس ترتيب المعاملات "
@@ -1595,7 +1610,6 @@ class GroupsMixin:
             )
             return False, False
 
-        # ─── التطبيع بعد التحقق ───
         normalized = _safe_normalize_word(word)
         if not normalized:
             logger.warning(
@@ -1679,7 +1693,6 @@ class GroupsMixin:
                         return False, True
                     raise
 
-            # ✅ v7.4.3: بعد commit
             await self._invalidate_banned_words_local_cache(chat_id)
             if self.CACHE_AVAILABLE:
                 await self.banned_words_cache.invalidate(chat_id)
@@ -1697,22 +1710,9 @@ class GroupsMixin:
             )
             return False, False
 
-    # ═════════════════════════════════════════════════════════════════
-    # ✅ v7.4.13: التوقيع = (chat_id, word)
-    #             يُرجع: bool
-    # ═════════════════════════════════════════════════════════════════
     async def remove_banned_word(
         self, chat_id: int, word: str
     ) -> bool:
-        """
-        إزالة كلمة محظورة.
-
-        ⚠️ التوقيع الحالي: (chat_id, word)
-
-        عند فشل الحذف، يبحث بدون lower/strip لعرض ما هو موجود فعلاً
-        في DB — يساعد على كشف اختلافات التطبيع.
-        """
-        # ─── ✅ v7.4.12/13: تحقق نوع شامل ───
         if not isinstance(chat_id, int):
             logger.error(
                 f"❌ remove_banned_word: chat_id يجب أن يكون int، "
@@ -1748,7 +1748,6 @@ class GroupsMixin:
                     word, chat_id,
                 )
 
-                # ─── 🆕 v7.4.12: fallback تشخيصي عند عدم العثور ───
                 if deleted == 0:
                     try:
                         all_words = await self._fetchall_with_conn(
@@ -1845,9 +1844,9 @@ class GroupsMixin:
             )
             return False
 
-    # =====================================================================
+    # ═════════════════════════════════════════════════════════════════
     # 11) إعدادات العقوبات (Penalty Settings)
-    # =====================================================================
+    # ═════════════════════════════════════════════════════════════════
 
     async def get_penalty_settings(self, chat_id: int) -> Dict:
         await self.execute(
@@ -1866,9 +1865,6 @@ class GroupsMixin:
     async def update_penalty_settings(
         self, chat_id: int, **kwargs
     ) -> bool:
-        """
-        🟠 v7.4.11: try/except + فحص فعلي للأعمدة.
-        """
         if not kwargs:
             return False
 
@@ -1927,9 +1923,9 @@ class GroupsMixin:
             )
             return False
 
-    # =====================================================================
+    # ═════════════════════════════════════════════════════════════════
     # 12) قناة السجل للمجموعة (Group Log Channel)
-    # =====================================================================
+    # ═════════════════════════════════════════════════════════════════
 
     async def set_group_log_channel(
         self, chat_id: int, channel_id: int
@@ -2073,9 +2069,9 @@ class GroupsMixin:
             )
             return []
 
-    # =====================================================================
+    # ═════════════════════════════════════════════════════════════════
     # 13) المخالفات (Violations)
-    # =====================================================================
+    # ═════════════════════════════════════════════════════════════════
 
     async def get_violation_penalty(
         self, chat_id: int, violation_type: str
@@ -2142,10 +2138,6 @@ class GroupsMixin:
     async def get_violation_count(
         self, user_id: int, chat_id: int
     ) -> int:
-        """
-        ✅ v7.4.3: .get() بدل [] لتجنب KeyError
-        🟡 v7.4.11: إضافة last_violation_time=NULL عند الـreset
-        """
         violation = await self.fetchone(
             "SELECT violation_count, last_violation_time "
             "FROM user_violations "
@@ -2176,9 +2168,6 @@ class GroupsMixin:
     async def increment_violation_count(
         self, user_id: int, chat_id: int
     ) -> int:
-        """
-        🟠 v7.4.11: قفل per-(user, chat) بدل self._lock العالمي.
-        """
         lock = None
         try:
             get_plock = getattr(self, "_get_penalty_lock", None)
@@ -2246,17 +2235,11 @@ class GroupsMixin:
             (user_id, chat_id),
         ) > 0
 
-    # =====================================================================
-    # 14) ✅ v7.4.11: انتهاء العقوبات (Expire Penalties — fallback)
-    # =====================================================================
+    # ═════════════════════════════════════════════════════════════════
+    # 14) انتهاء العقوبات (Expire Penalties — fallback)
+    # ═════════════════════════════════════════════════════════════════
 
     async def _expire_penalties_generic(self, conn, batch: int):
-        """
-        منطق مشترك: يُجد expired penalties في دفعة، يؤرشفها،
-        ويُعلّمها كـ 'expired'.
-
-        يُرجع: (batch_expired, got_rows)
-        """
         try:
             now = self.TimeUtils.utc_now()
 
@@ -2279,7 +2262,6 @@ class GroupsMixin:
             if not ids:
                 return 0, 0
 
-            # محاولة الأرشفة (best-effort — لا نُفشل إن فشلت)
             try:
                 placeholders = ",".join(["?"] * len(ids))
                 await self._execute_with_conn(
@@ -2299,7 +2281,6 @@ class GroupsMixin:
                     f"penalty_archive insert (best-effort): {arc_e}"
                 )
 
-            # تعليم كـ expired
             placeholders = ",".join(["?"] * len(ids))
             await self._execute_with_conn(
                 conn,
@@ -2317,15 +2298,12 @@ class GroupsMixin:
             return 0, 0
 
     async def _expire_penalties_pg(self, conn, batch: int):
-        """PG wrapper — see _expire_penalties_generic."""
         return await self._expire_penalties_generic(conn, batch)
 
     async def _expire_penalties_mysql(self, conn, batch: int):
-        """MySQL wrapper — see _expire_penalties_generic."""
         return await self._expire_penalties_generic(conn, batch)
 
     async def _expire_penalties_sqlite(self, conn, batch: int):
-        """SQLite wrapper — see _expire_penalties_generic."""
         return await self._expire_penalties_generic(conn, batch)
 
 
