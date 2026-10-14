@@ -2,17 +2,29 @@
 # -*- coding: utf-8 -*-
 
 """
-🌿 Relax Manager – البوت الرئيسي (bot.py v5.6.28-APP-START-FIX)
+🌿 Relax Manager – البوت الرئيسي (bot.py v5.6.29-FIX-SLOWQ)
 ================================================================================
 📌 نقطة الدخول الرسمية للتطبيق (entrypoint).
 
-🆕 v5.6.28 (APP-START-FIX + ROBUST-SHUTDOWN):
+🆕 v5.6.29 (FIX-SLOWQ-5):
+    🔴 FIX-SLOWQ-5: إزالة ازدواجية استعلام pg_stat_activity.
+       • _fetch_pg_activity_cached في bot.py كان يُكرِّر نفس الاستعلام
+         الذي يُنفّذه BackgroundTasks._read_pg_activity (في utils.py)
+         بالتوازي، في نفس الفترات → حمل DB مضاعف + استعلامان بطيئان.
+       • الحل: _fetch_pg_activity_cached يُفوَّض إلى
+         BackgroundTasks._read_pg_activity (كاش 120s + GROUP BY
+         بدل 6 FILTER aggregates).
+       • حُذف "monitor_pool_alert" من _bg_task_specs — كان يشغّل
+         استعلاماً ثانياً متطابقاً كل 300s.
+    🟡 FIX-SLOWQ-5b: _PM_QUERY_TTL: 290 → 900 (بعد التفويض، الكاش
+       الداخلي هو الأساسي؛ هذه القيمة احتياطية).
+    🟢 التنظيف: توثيق صريح لدور كل مهمة pool.
+
+🆕 v5.6.28 (APP-START-FIX + ROBUST-SHUTDOWN) — محفوظ:
     🔴 FIX-BOT-1: await app.start() في main() — ضروري لـ PTB v20+.
-    🔴 FIX-BOT-2: _start_polling_mode — توافق مع FIX-BOT-1 (يدعم
-        app.running و app._running).
-    🟠 FIX-BOT-3: _shutdown_detector_tasks — دعم توقيعات متعددة
-        لـ shutdown_default_executor.
-    🟡 FIX-BOT-4: _WATCHER_INTERVAL: 10s → 30s (تقليل log noise).
+    🔴 FIX-BOT-2: _start_polling_mode — توافق مع FIX-BOT-1.
+    🟠 FIX-BOT-3: _shutdown_detector_tasks — دعم توقيعات متعددة.
+    🟡 FIX-BOT-4: _WATCHER_INTERVAL: 10s → 30s.
     🟡 FIX-BOT-5: تسجيل تشخيصي لأخطاء استيراد /db_idle و /cache_stats.
 
 🆕 v5.6.27 (SLEEP-PROBE) — محفوظ.
@@ -550,7 +562,6 @@ logger = logging.getLogger(__name__)
 
 # ═══════════════════════════════════════════════════════════════════
 # 🟡 FIX-BOT-5: تسجيل تشخيصي لأخطاء استيراد /db_idle و /cache_stats
-# (كانت متغيّرات ميتة — الآن مفيدة للتشخيص).
 # ═══════════════════════════════════════════════════════════════════
 if not _HAS_DB_IDLE_CMD:
     logger.debug(
@@ -600,9 +611,6 @@ _NOTIFY_SHUTDOWN_TIMEOUT = 5.0
 _BG_TASKS_SHUTDOWN_TIMEOUT = 10.0
 
 # 🟡 FIX-BOT-4: 10 → 30 (تقليل log noise + probe overhead).
-# السبب: `_watch_runner` يعمل في كل دورات البوت. 10s كانت مرتفعة
-# (6 probes/دقيقة) مما يضيف ضغطاً على event loop ويولّد سجلات زائدة.
-# 30s متوازنة — تكتشف الأعطال خلال 90s كحد أقصى مع 3 retries.
 _WATCHER_INTERVAL = 30.0
 _WATCHER_HEALTH_TIMEOUT = 5.0
 _WATCHER_MAX_PROBE_FAILURES = 3
@@ -639,7 +647,10 @@ _KEEP_ALIVE_INITIAL_DELAY = 30.0
 
 _TG_WARMUP_TIMEOUT = 10.0
 
-_PM_QUERY_TTL = 290.0
+# 🟡 FIX-SLOWQ-5b: بعد تفويض _fetch_pg_activity_cached إلى
+# BackgroundTasks._read_pg_activity (كاش داخلي 120s)، هذه القيمة
+# أصبحت احتياطية — نضعها كبيرة (900s) لتقليل أي استدعاءات متبقية.
+_PM_QUERY_TTL = 900.0
 _pm_last_query_ts = 0.0
 _pm_last_query_result: Optional[Dict[str, Any]] = None
 _pm_slow_query_warned = False
@@ -933,9 +944,11 @@ def _log_perf_tuning_status() -> None:
             "SLOW_QUERY_THRESHOLD=%ss | "
             "PG_STMT_TIMEOUT=%sms | "
             "DB_POOL_SIZE=%s | "
-            "PM_SLOW_WARN=%sms",
+            "PM_SLOW_WARN=%sms | "
+            "PM_QUERY_TTL=%.0fs",
             _max_ch, _slow_q, _stmt_to, _pool_size,
             int(_PM_SLOW_QUERY_WARN_MS),
+            _PM_QUERY_TTL,
         )
 
         try:
@@ -2211,67 +2224,47 @@ async def _fetch_pool_data(total: int, active: int) -> Optional[Dict[str, Any]]:
     return None
 
 async def _fetch_pg_activity_cached() -> Dict[str, Any]:
-    global _pm_last_query_ts, _pm_last_query_result, _pm_slow_query_warned
+    """
+    🔴 FIX-SLOWQ-5 (v5.6.29): يُفوَّض إلى
+    BackgroundTasks._read_pg_activity (من utils.py).
 
-    now = time.monotonic()
-    if (
-        _pm_last_query_result is not None
-        and (now - _pm_last_query_ts) < _PM_QUERY_TTL
-    ):
-        return _pm_last_query_result
+    السبب: قبل هذا الإصلاح، كانت هذه الدالة تُنفّذ استعلاماً مطابقاً
+    تماماً لـ BackgroundTasks._read_pg_activity في نفس الفترات
+    (كل 300s)، مما ضاعف الحمل على pg_stat_activity وأدى إلى:
+      • استعلامان بطيئان (200-400ms) في تقرير slow-queries.
+      • استهلاك مضاعف لـ DB pool.
+      • تنبيهات مزدوجة عند المشاكل.
 
-    t0 = time.monotonic()
-    row = await DB.fetchone(
-        """
-        SELECT 
-            count(*) AS total,
-            count(*) FILTER (WHERE state = 'active') AS active,
-            count(*) FILTER (WHERE state = 'idle') AS idle,
-            count(*) FILTER (WHERE state = 'idle in transaction') 
-                AS idle_in_tx,
-            count(*) FILTER (WHERE wait_event_type = 'Lock') 
-                AS lock_waits,
-            count(*) FILTER (
-                WHERE wait_event_type IN ('Lock', 'LWLock', 'BufferPin')
-            ) AS waiting
-        FROM pg_stat_activity
-        WHERE datname = current_database()
-        """
-    )
-    elapsed_ms = (time.monotonic() - t0) * 1000
+    بعد الإصلاح:
+      • استعلام واحد فقط، مُحسَّن (GROUP BY بدل 6 FILTER aggregates).
+      • كاش داخلي 120s (من _read_pg_activity) بدل 290s كان يُنتهي
+        دائماً قبل الاستدعاء التالي (300s > 290s).
 
-    if (
-        elapsed_ms > _PM_SLOW_QUERY_WARN_MS
-        and not _pm_slow_query_warned
-    ):
-        logger.warning(
-            "⚠️ pool_health_monitor: استعلام بطيء (%.0fms > %.0fms) — "
-            "قد يكون cold-start، سيتحسّن في الدورات القادمة",
-            elapsed_ms, _PM_SLOW_QUERY_WARN_MS,
-        )
-        _pm_slow_query_warned = True
-    elif elapsed_ms < 50 and _pm_slow_query_warned:
-        logger.info(
-            "✅ pool_health_monitor: تعافى — %.0fms (كان >%.0fms)",
-            elapsed_ms, _PM_SLOW_QUERY_WARN_MS,
-        )
-        _pm_slow_query_warned = False
-
-    if isinstance(row, dict):
-        data = row
-    elif row is None:
-        data = {}
-    else:
-        try:
-            data = dict(row)
-        except (TypeError, ValueError):
-            data = {}
-
-    _pm_last_query_ts = now
-    _pm_last_query_result = data
-    return data
+    المعاملات:
+      (لا معاملات — القيم تُقرأ من BackgroundTasks مباشرة)
+    """
+    try:
+        data = await BackgroundTasks._read_pg_activity()
+        if isinstance(data, dict):
+            return data
+        return {}
+    except Exception as e:
+        logger.debug("_fetch_pg_activity_cached (delegate): %s", e)
+        return {}
 
 async def pool_health_monitor() -> None:
+    """
+    🟢 مراقبة صحة DB pool — v5.6.29.
+
+    ملاحظة معمارية (FIX-SLOWQ-5):
+      هذا المراقب هو المصدر الوحيد لاستعلام pg_stat_activity.
+      BackgroundTasks.monitor_pool_alert (في utils.py) كان يعمل
+      بالتوازي → حُذف من _bg_task_specs في هذا الإصدار.
+
+      عند الحاجة لإعادة تفعيل monitor_pool_alert في المستقبل،
+      تأكّد أن لا يقرأ pg_stat_activity مباشرة — استخدم
+      BackgroundTasks._read_pg_activity.
+    """
     _task_start_mono = time.monotonic()
     _idle_tx_streak = 0
     _last_details_dump_mono = 0.0
@@ -2298,7 +2291,7 @@ async def pool_health_monitor() -> None:
             total = int(data.get("total") or 0)
             active = int(data.get("active") or 0)
             idle = int(data.get("idle") or 0)
-            idle_in_tx = int(data.get("idle_in_tx") or 0)
+            idle_in_tx = int(data.get("idle_tx") or 0)
             lock_waits = int(data.get("lock_waits") or 0)
             waiting = int(data.get("waiting") or 0)
 
@@ -2831,14 +2824,15 @@ async def main():
     logger.info("👨‍💼 المالك: %s", CONFIG.PRIMARY_OWNER_ID)
 
     logger.info(
-        "📦 bot.py: v5.6.28 | "
+        "📦 bot.py: v5.6.29 | "
         "detectors=%s | layers=%d | helpers=%s | "
         "db_idle=%s | cache_stats=%s | analytics=%s | "
         "fullhealth=%s | latency=%s | maint_cmds=%s | "
-        "pool_cache_ttl=%ds | nav_fix=%s | perf_sessions=on | "
+        "pool_cache_ttl=%.0fs | nav_fix=%s | perf_sessions=on | "
         "nav_fix_mode=trace-only | handle_reg=always | "
         "dup_fix=on | sleep_probe=%s | app_start_fix=on | "
-        "shutdown_sig=multi | watcher_interval=%.0fs",
+        "shutdown_sig=multi | watcher_interval=%.0fs | "
+        "slowq5=delegate+dedupe",
         _SPAM_DETECTOR_VERSION or "N/A",
         _SPAM_DETECTOR_LAYERS_COUNT,
         (
@@ -2855,7 +2849,7 @@ async def main():
         "yes" if _cmd_fullhealth is not None else "no",
         "yes" if _cmd_latency is not None else "no",
         "yes" if _MAINT_CMDS_AVAILABLE else "no",
-        int(_PM_QUERY_TTL),
+        _PM_QUERY_TTL,
         "yes" if _NAV_FIX_AVAILABLE else "no",
         (
             "available" if _sleep_probe_available else "missing"
@@ -3465,6 +3459,12 @@ async def main():
 
     tasks: List[asyncio.Task] = []
 
+    # 🔴 FIX-SLOWQ-5: حُذف "monitor_pool_alert" من هذه القائمة.
+    #    السبب: كان يشغّل استعلاماً ثانياً متطابقاً لـ pg_stat_activity
+    #    بالتوازي مع pool_health_monitor → حمل DB مضاعف + استعلامان
+    #    بطيئان في تقرير slow-queries.
+    #    pool_health_monitor هو المصدر الوحيد الآن، ويستخدم
+    #    BackgroundTasks._read_pg_activity (كاش 120s + GROUP BY).
     _bg_task_specs: List[Tuple[str, Any, tuple]] = [
         ("keep_alive", keep_alive, ()),
         ("auto_publish", BackgroundTasks.auto_publish, (app.bot,)),
@@ -3479,7 +3479,7 @@ async def main():
         ("cache_cleanup", cache_cleanup_task, ()),
         ("cleanup_locks", cleanup_locks, ()),
         ("periodic_cleanup", GroupRateLimiterManager.periodic_cleanup_task, ()),
-        ("monitor_pool_alert", BackgroundTasks.monitor_pool_alert, (app.bot,)),
+        # ("monitor_pool_alert", BackgroundTasks.monitor_pool_alert, (app.bot,)),  ← 🔴 محذوف (FIX-SLOWQ-5)
         ("contest_cleanup", contest_cleanup, (app,)),
         ("pool_health_monitor", pool_health_monitor, ()),
         ("admin_logs_cleanup", cleanup_admin_logs_periodically, ()),
@@ -3515,10 +3515,6 @@ async def main():
             "⚠️ maintenance غير متاح — الصيانة التلقائية معطّلة: %s",
             _MAINTENANCE_IMPORT_ERROR or "module missing",
         )
-
-    # 🆕 v5.6.26 FIX-DUP-1: تمت إزالة الاستدعاء المكرر لـ
-    # start_weekly_diagnostic_task — register_maintenance_commands()
-    # يتكفّل بتشغيلها.
 
     logger.info("✅ تم تشغيل %d مهمة خلفية", len(tasks))
     if _ADMIN_LOGS_CLEANUP_AVAILABLE:
@@ -3727,7 +3723,6 @@ async def main():
         except Exception as _e:
             logger.debug("shutdown_delete_tasks (bot): %s", _e)
 
-        # 🆕 v5.6.27: إلغاء تفعيل sleep_probe
         if _sleep_probe_available:
             try:
                 from sleep_probe import uninstall_sleep_probe as _sp_uninstall
