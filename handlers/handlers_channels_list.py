@@ -2,32 +2,31 @@
 # -*- coding: utf-8 -*-
 
 """
-handlers_channels_list.py - واجهة قائمة القنوات مع حالتها (v2.1.7)
+handlers_channels_list.py - واجهة قائمة القنوات مع حالتها (v2.1.8)
 ================================================================================
-🆕 v2.1.7 (SECURITY-COMPLETENESS-FIX):
-    🔴 FIX-ESC-1: HTML escaping شامل — `_esc()` تُطبَّق على كل
-        حقل ديناميكي (channel_name, chat.title, ch_name) داخل
-        سلاسل parse_mode="HTML".
-        السبب: v2.1.6 كانت تُرسل أسماء القنوات الخام → كسر
-        parsing عند `<`, `>`, `&` في الاسم.
+🆕 v2.1.8 (UPDATES-CHANNEL-STATE-COLLISION-FIX):
+    🔴 FIX-STATE-3 (CRITICAL): حذف WAIT_UPDATE_CH و WAIT_UPDATE_CHANNEL
+        من _CHANNEL_ADD_STATES.
 
-    🔴 FIX-STATE-1: `add_channel_redirect_callback` تُعيّن
-        `UserState.WAIT_CHANNEL` بعد `_clear_user_state`.
-        السبب: كان fallback (handlers_callback) يُعيّنها، بينما
-        primary لا → regression سلوكي.
+        السبب الجذري لباغ "قناة التحديثات تظهر كقناة نشطة":
+          1. add_channel_from_message مُسجَّل في group=-1
+             (يعمل قبل كل handlers أخرى).
+          2. كان _CHANNEL_ADD_STATES يحتوي على:
+                "WAIT_UPDATE_CH", "WAIT_UPDATE_CHANNEL"
+          3. _is_channel_add_state(state_str) في هذا السياق → True.
+          4. _user_has_pending_state → False (لأن الحالة "معروفة").
+          5. المعالج لا يتخطى → يُنفّذ DB.add_channel(..., set_active=True).
+          6. يستدعي _clear_user_state(user_id) → يمسح الحالة.
+          7. handlers_command.handle_text لا يرى أي حالة → لا يكتب
+             في settings.updates_channel.
 
-    🔴 FIX-STATE-2: `posts_add_callback` تُعيّن
-        `UserState.ADDING_POSTS`.
-        السبب: نفس المنطق — handlers_message يعتمد عليها.
+        الإصلاح: إزالة الحالتين من _CHANNEL_ADD_STATES. قناة
+        التحديثات تُعالج في handlers_command.handle_text حصراً.
 
-    🔴 FIX-DATE-1: `_format_date` تستخدم `TimeUtils.utc_to_mecca`
-        مع fallback آمن يتحقق من tz-aware.
-        السبب: `+timedelta(hours=3)` على dt tz-aware يعطي ساعة
-        خاطئة.
+    🟡 FIX-STATE-4: إضافة ملاحظة صريحة تحت _CHANNEL_ADD_STATES تُوضّح
+        أن الحالات المدرجة تُخصّ إضافة **قناة نشطة** فقط.
 
-    🔴 FIX-PATTERN-1: كل patterns ديناميكية من CB.* — نفس فكرة
-        FIX-BACK-1 في v2.1.6 لكن مُعمّمة.
-
+🆕 v2.1.7 (SECURITY-COMPLETENESS-FIX) — محفوظ.
 🆕 v2.1.6 (BACK-BUTTON-FIX) — محفوظ.
 🆕 v2.1.5 (UNIFIED-PREFIXES) — محفوظ.
 🆕 v2.1.4 (PTB-V20-MULTI-HANDLER-FIX) — محفوظ.
@@ -83,11 +82,6 @@ def _stop_after(fn):
     """
     🔴 FIX-CB1 (v2.1.4): يضمن أن PTB v20+ لا ينفّذ handlers لاحقة
     على نفس الـ update.
-
-    ملاحظة: الـ decorator يُغلِّف الدالة فقط وقت التسجيل
-    (داخل register_channels_list_handlers)، لذا الاستدعاءات
-    الداخلية مثل show_channels_list(update, context) تبقى تعمل
-    بدون رفع Stop (لأنها تستدعي الدالة الأصلية، لا المُغلَّفة).
     """
     @functools.wraps(fn)
     async def _wrapped(update, context):
@@ -223,7 +217,7 @@ def _build_main_menu_pattern() -> str:
 
     pattern = _build_exact_pattern(*names)
     logger.debug(
-        "🔍 [v2.1.7] main_menu pattern = %s | CB=%s",
+        "🔍 [v2.1.8] main_menu pattern = %s | CB=%s",
         pattern,
         "available" if _CB_AVAILABLE else "unavailable",
     )
@@ -290,14 +284,29 @@ def _is_banned(ch_row: dict) -> bool:
 
 
 # =====================================================================
-# 🆕 v2.1.0: حالات إضافة القناة المسموح بها
+# 🔴 v2.1.8 FIX-STATE-3: حالات إضافة القناة النشطة فقط
 # =====================================================================
-
+# ⚠️ مهم جداً: هذه القائمة تُحدّد الحالات التي يُسمح فيها لهذا الملف
+#    بمعالجة رسالة نصية كـ "محاولة إضافة قناة نشطة".
+#
+#    ❌ لا تُضِف: WAIT_UPDATE_CH أو WAIT_UPDATE_CHANNEL
+#       لأن هذه الحالات مُخصّصة لقناة التحديثات (تُعالَج في
+#       handlers_command.handle_text وتُخزَّن في settings.updates_channel).
+#       وجودها هنا يُسبّب:
+#         1. add_channel_from_message يستقبل الرسالة (group=-1)
+#         2. يرى WAIT_UPDATE_CH → يعتقد أنه في سياق "إضافة قناة"
+#         3. يُضيف القناة كـ user_channels + set_active=True
+#         4. يمسح الحالة → handlers_command لا يراها أبداً
+#       النتيجة: قناة التحديثات تظهر كقناة نشطة!
+#
+#    ✅ القائمة تحتوي فقط على: قنوات النشر النشطة.
+# =====================================================================
 _CHANNEL_ADD_STATES = (
     "WAIT_CHANNEL",
     "WAIT_ADD_CHANNEL",
-    "WAIT_UPDATE_CH",
-    "WAIT_UPDATE_CHANNEL",
+    # 🔴 v2.1.8 FIX-STATE-3: REMOVED
+    # "WAIT_UPDATE_CH",        ← محذوف
+    # "WAIT_UPDATE_CHANNEL",   ← محذوف
 )
 
 
@@ -419,9 +428,6 @@ async def _safe_answer(query, text: str = None, show_alert: bool = False) -> Non
 def _format_date(dt_value) -> str:
     """
     🆕 v2.1.7 FIX-DATE-1: تنسيق التاريخ بتوقيت مكة.
-
-    - يُفضّل `TimeUtils.utc_to_mecca` إن وُجد.
-    - fallback: يعالج tz-aware قبل الإضافة اليدوية.
     """
     if not dt_value:
         return "غير محدد"
@@ -432,7 +438,6 @@ def _format_date(dt_value) -> str:
         if not dt:
             return "غير محدد"
 
-        # ✅ المسار المفضّل: TimeUtils.utc_to_mecca
         utc_to_mecca = getattr(TimeUtils, "utc_to_mecca", None)
         if callable(utc_to_mecca):
             try:
@@ -440,7 +445,6 @@ def _format_date(dt_value) -> str:
             except Exception as e:
                 logger.debug(f"utc_to_mecca فشل، fallback: {e}")
 
-        # ⚠️ fallback آمن: تعامل مع tz-aware
         if dt.tzinfo is not None:
             dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
         local_dt = dt + timedelta(hours=3)
@@ -659,10 +663,8 @@ def _build_channels_text(channels, active_channel_id) -> str:
             status = ""
 
         badge = _short_channel_badge(ch)
-        # ✅ badge آمن (أرقام فقط) — لكن نُبقي _esc للاتساق
         badge_txt = f" <code>{_esc(badge)}</code>" if badge else ""
 
-        # 🆕 v2.1.7 FIX-ESC-1
         safe_name = _esc(_truncate_name(name, max_len=22))
 
         lines.append(
@@ -694,7 +696,6 @@ def _build_channels_keyboard(channels, active_channel_id):
         if badge:
             label = f"{label} {badge}"
 
-        # ملاحظة: أزرار InlineKeyboard لا تدعم HTML → لا حاجة لـ _esc
         keyboard.append([
             InlineKeyboardButton(
                 label,
@@ -800,12 +801,10 @@ async def _render_channel_info(query, user_id: int, ch_db_id: int) -> None:
         )
 
         badge = _short_channel_badge(ch)
-        # 🆕 v2.1.7 FIX-ESC-1
         badge_line = (
             f"<b>البادج:</b> <code>{_esc(badge)}</code>\n" if badge else ""
         )
 
-        # 🆕 v2.1.7 FIX-ESC-1
         name_esc = _esc(name)
         ch_telegram_id_esc = _esc(ch_telegram_id)
 
@@ -932,7 +931,6 @@ async def channel_delete_menu_callback(
         if badge:
             label = f"{label} {badge}"
 
-        # ملاحظة: زر InlineKeyboard لا يدعم HTML — لا حاجة لـ _esc
         buttons.append([
             InlineKeyboardButton(
                 label,
@@ -983,7 +981,6 @@ async def channel_delete_confirm_callback(
         stats = _row_to_dict(stats_raw)
 
         badge = _short_channel_badge(ch)
-        # 🆕 v2.1.7 FIX-ESC-1
         badge_line = f"  <code>{_esc(badge)}</code>\n" if badge else ""
         name_esc = _esc(name)
 
@@ -1228,7 +1225,7 @@ async def channel_schedule_set_callback(
 
 
 # =====================================================================
-# 7. الرجوع للقائمة الرئيسية (v2.1.6 مُحصَّن)
+# 7. الرجوع للقائمة الرئيسية
 # =====================================================================
 
 async def back_to_main_menu_callback(
@@ -1236,7 +1233,6 @@ async def back_to_main_menu_callback(
 ):
     """
     🆕 v2.1.6 FIX-BACK-2: أكثر صلابة.
-    🆕 v2.1.7: لم يتغير — يستفيد من pattern الديناميكي الجديد.
     """
     query = update.callback_query
     if query is None:
@@ -1314,7 +1310,6 @@ async def add_channel_redirect_callback(
     user_id = query.from_user.id
 
     _clear_user_state(user_id)
-    # 🆕 v2.1.7 FIX-STATE-1: تعيين WAIT_CHANNEL بعد clear
     _set_user_state(
         user_id,
         getattr(UserState, "WAIT_CHANNEL", None) if UserState else None,
@@ -1350,7 +1345,7 @@ async def add_channel_redirect_callback(
 
 
 # =====================================================================
-# 9. معالج الرسائل النصية لإضافة قناة
+# 9. معالج الرسائل النصية لإضافة قناة نشطة
 # =====================================================================
 
 _USERNAME_RE = re.compile(r"^@([a-zA-Z][a-zA-Z0-9_]{4,31})$")
@@ -1418,6 +1413,10 @@ async def add_channel_from_message(
                 f"المستخدم {user_id} في حالة معلقة ({state_str})"
             )
             return
+
+        # 🔴 v2.1.8 FIX-STATE-3: الآن WAIT_UPDATE_CH/CHANNEL يصل إلى هنا
+        #    لأنها ليست في _CHANNEL_ADD_STATES → _user_has_pending_state
+        #    يُرجع True → نُتجاهل. handlers_command.handle_text يعالجها.
 
         text = message.text.strip()
 
@@ -1542,7 +1541,6 @@ async def add_channel_from_message(
                 bot_status = getattr(bot_member, "status", "")
 
                 if bot_status not in ("administrator", "creator"):
-                    # 🆕 v2.1.7 FIX-ESC-1
                     chat_title_esc = _esc(chat.title)
                     username_esc = _esc(channel_username)
                     await _edit_or_send(
@@ -1610,7 +1608,6 @@ async def add_channel_from_message(
                 posts_count = _safe_int(
                     (result_d.get("posts_count") if result_d else 0), 0)
 
-                # 🆕 v2.1.7 FIX-ESC-1
                 channel_name_esc = _esc(channel_name)
                 chat_id_esc = _esc(chat.id)
                 username_esc = _esc(channel_username)
@@ -1732,7 +1729,6 @@ async def posts_add_callback(
     user_id = query.from_user.id
     await _safe_answer(query)
 
-    # 🆕 v2.1.7 FIX-STATE-2: تعيين ADDING_POSTS
     _set_user_state(
         user_id,
         getattr(UserState, "ADDING_POSTS", None) if UserState else None,
@@ -1756,7 +1752,6 @@ async def posts_add_callback(
         logger.error(f"posts_add_callback query: {e}")
 
     if ch_name:
-        # 🆕 v2.1.7 FIX-ESC-1
         ch_name_esc = _esc(ch_name)
         text = (
             f"➕ <b>إضافة منشورات</b>\n\n"
@@ -1768,7 +1763,6 @@ async def posts_add_callback(
             f"💡 <i>ابدأ بإرسال المحتوى الآن</i>"
         )
     else:
-        # لا قناة نشطة → امسح ADDING_POSTS (لا معنى للـ state)
         _clear_user_state(user_id)
         text = (
             "⚠️ <b>لا توجد قناة نشطة</b>\n\n"
@@ -1804,13 +1798,9 @@ def register_channels_list_handlers(application):
     """
     تسجيل كل handlers قائمة القنوات.
 
-    🆕 v2.1.7 FIX-PATTERN-1:
-        كل patterns ديناميكية من CB.* — نفس فكرة v2.1.6 لكن
-        مُعمَّمة على كل الأزرار، لا القائمة فقط.
-
-    🆕 v2.1.6 — FIX-BACK-1 (محفوظ).
-    🆕 v2.1.5 — UNIFIED-PREFIXES (محفوظ).
-    🆕 v2.1.4 — FIX-CB1 (محفوظ).
+    🆕 v2.1.8 FIX-STATE-3:
+        _CHANNEL_ADD_STATES لم يعد يحتوي WAIT_UPDATE_CH/CHANNEL.
+        هذا يضمن أن قناة التحديثات لا تُعالَج كقناة نشطة.
     """
     try:
         # ═══ الرجوع للقائمة الرئيسية ═══
@@ -1821,7 +1811,7 @@ def register_channels_list_handlers(application):
             )
         )
         logger.info(
-            "✅ [v2.1.7] back-to-main pattern = %s",
+            "✅ [v2.1.8] back-to-main pattern = %s",
             _MAIN_MENU_PATTERN,
         )
 
@@ -1906,6 +1896,10 @@ def register_channels_list_handlers(application):
         )
 
         # ═══ معالج الرسائل النصية لإضافة قناة ═══
+        # ⚠️ v2.1.8: group=-1 يجعله يعمل قبل handlers أخرى.
+        #    لهذا السبب كان الباغ خطيراً: كان يسرق رسائل قناة
+        #    التحديثات. الآن الحالات محذوفة من _CHANNEL_ADD_STATES
+        #    → لن يستقبلها.
         application.add_handler(
             MessageHandler(
                 filters.TEXT
@@ -1918,7 +1912,8 @@ def register_channels_list_handlers(application):
         )
 
         logger.info(
-            "✅ تم تسجيل handlers قائمة القنوات (v2.1.7 — "
+            "✅ تم تسجيل handlers قائمة القنوات (v2.1.8 — "
+            "UPDATES-CHANNEL-STATE-COLLISION-FIX + "
             "SECURITY-COMPLETENESS-FIX + BACK-BUTTON-FIX + "
             "UNIFIED-PREFIXES + PTB-V20-MULTI-HANDLER-FIX)"
         )
@@ -1956,7 +1951,6 @@ __all__ = [
     "_build_main_menu_pattern",
     "_MAIN_MENU_PATTERN",
     "_CHANNEL_ADD_STATES",
-    # 🆕 v2.1.7
     "_esc",
     "_cb_value",
     "_build_exact_pattern",
@@ -1981,16 +1975,17 @@ __all__ = [
 
 try:
     logger.info(
-        "✅ handlers_channels_list v2.1.7 loaded | "
-        "fixes=(SECURITY-COMPLETENESS-FIX + BACK-BUTTON-FIX + "
-        "UNIFIED-PREFIXES + PTB-V20-MULTI-HANDLER-FIX + "
-        "UI-DEDUP + BANNED-TRUTHY + REGEX-FIX + URL-QUERY-SUPPORT) | "
+        "✅ handlers_channels_list v2.1.8 loaded | "
+        "fixes=(UPDATES-CHANNEL-STATE-COLLISION-FIX + "
+        "SECURITY-COMPLETENESS-FIX + BACK-BUTTON-FIX + "
+        "UNIFIED-PREFIXES + PTB-V20-MULTI-HANDLER-FIX) | "
+        "_CHANNEL_ADD_STATES=(WAIT_CHANNEL+WAIT_ADD_CHANNEL) | "
+        "removed=(WAIT_UPDATE_CH+WAIT_UPDATE_CHANNEL) | "
         "main_menu_pattern=%s | "
         "ch_add_pattern=%s | "
         "ch_list_pattern=%s | "
         "stop_after=wraps-all-callbacks | "
         "html_escape=applied-everywhere | "
-        "states=(WAIT_CHANNEL+ADDING_POSTS) | "
         "date=utc_to_mecca-with-tz-aware-fallback | "
         "CB_module=%s | row_to_dict=%s",
         _MAIN_MENU_PATTERN,
