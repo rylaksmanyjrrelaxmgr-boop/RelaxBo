@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-migrate_to_timescale.py
-نقل كل البيانات من Aiven (DATABASE_URL) إلى Timescale (TIMESCALE_URL)
-- ينسخ: القنوات، المجموعات، المستخدمين، المنشورات، الاشتراكات، كل شيء
-- لا يحذف شيئًا من Aiven
-- يمكن إعادة تشغيله بأمان (idempotent)
+migrate_to_timescale.py — v2 (BATCH-COPY)
+- يستخدم executemany بدل execute فردي
+- يتخطى الجداول الكبيرة غير الضرورية (اختياري)
+- يعرض تقدمًا كل 5000 صف
 """
 
 import os
@@ -38,6 +37,10 @@ SOURCE = os.getenv("DATABASE_URL", "").strip().strip('"')
 TARGET = os.getenv("TIMESCALE_URL", "").strip().strip('"')
 
 BATCH = 500
+# جداول ثقيلة يمكن تخطيها (اختياري)
+SKIP_TABLES = set(os.getenv(
+    "MIGRATE_SKIP", ""
+).strip().split(",")) - {""}
 
 
 def mask(url):
@@ -77,76 +80,33 @@ async def get_pk(conn, table):
     return [r["attname"] for r in rows]
 
 
-async def create_table_on_target(src, tgt, table):
-    """ينشئ نفس بنية الجدول في Timescale"""
-    row = await src.fetchval("""
-        SELECT EXISTS (
-            SELECT 1 FROM pg_tables
-            WHERE schemaname = current_schema() AND tablename = $1)
-    """, table)
-    if not row:
-        return
-
-    exists = await tgt.fetchval("""
-        SELECT EXISTS (
-            SELECT 1 FROM pg_tables
-            WHERE schemaname = current_schema() AND tablename = $1)
-    """, table)
-    if exists:
-        return
-
-    # ننشئ الجدول عبر نسخ DDL مبسط
-    cols = await src.fetch("""
-        SELECT column_name, data_type, is_nullable, column_default
-        FROM information_schema.columns
-        WHERE table_schema = current_schema() AND table_name = $1
-        ORDER BY ordinal_position
-    """, table)
-
-    defs = []
-    for c in cols:
-        name = c["column_name"]
-        dtype = c["data_type"]
-        # تخطي SERIAL — نستخدم BIGINT يدويًا
-        if dtype == "integer":
-            dtype = "integer"
-        elif dtype == "bigint":
-            dtype = "bigint"
-        elif dtype == "character varying":
-            dtype = "text"
-        elif dtype == "timestamp without time zone":
-            dtype = "timestamp"
-        elif dtype == "timestamp with time zone":
-            dtype = "timestamptz"
-        elif dtype == "USER-DEFINED":
-            dtype = "text"
-        d = f'"{name}" {dtype}'
-        if c["is_nullable"] == "NO":
-            d += " NOT NULL"
-        defs.append(d)
-
-    ddl = f'CREATE TABLE IF NOT EXISTS "{table}" ({", ".join(defs)})'
-    await tgt.execute(ddl)
-    log.info(f"   🔨 جدول {table} أُنشئ في Timescale")
-
-
 async def copy_table(src, tgt, table):
     try:
-        # 1) إنشاء الجدول في الهدف إن لم يكن موجودًا
-        await create_table_on_target(src, tgt, table)
+        if table in SKIP_TABLES:
+            log.info(f"   ⏭️ {table}: متخطى (SKIP_TABLES)")
+            return 0
 
-        # 2) الأعمدة والمفتاح الأساسي
+        # هل الجدول موجود في الهدف؟
+        exists = await tgt.fetchval("""
+            SELECT EXISTS (
+                SELECT 1 FROM pg_tables
+                WHERE schemaname = current_schema() AND tablename = $1)
+        """, table)
+        if not exists:
+            log.warning(f"   ⚠️ {table}: غير موجود في Timescale — تخطي")
+            return 0
+
         cols = await get_columns(src, table)
         if not cols:
             return 0
 
-        pk = await get_pk(src, table)
-
-        # 3) قراءة كل الصفوف من المصدر
-        rows = await src.fetch(f'SELECT * FROM "{table}"')
-        if not rows:
+        # عدد الصفوف
+        total_rows = await src.fetchval(f'SELECT COUNT(*) FROM "{table}"')
+        if not total_rows:
             log.info(f"   ⏭️ {table}: فارغ")
             return 0
+
+        pk = await get_pk(src, table)
 
         cols_csv = ", ".join(f'"{c}"' for c in cols)
         placeholders = ", ".join(f"${i+1}" for i in range(len(cols)))
@@ -164,28 +124,51 @@ async def copy_table(src, tgt, table):
         else:
             sql = (
                 f'INSERT INTO "{table}" ({cols_csv}) '
-                f"VALUES ({placeholders}) "
-                f"ON CONFLICT DO NOTHING"
+                f"VALUES ({placeholders}) ON CONFLICT DO NOTHING"
             )
 
-        # 4) إدراج على دفعات
-        total = 0
-        async with tgt.transaction():
+        # قراءة على دفعات
+        inserted = 0
+        offset = 0
+        while offset < total_rows:
+            rows = await src.fetch(
+                f'SELECT * FROM "{table}" '
+                f"ORDER BY 1 LIMIT {BATCH} OFFSET {offset}"
+            )
+            if not rows:
+                break
+
+            # تحويل القيم
+            params_list = []
             for r in rows:
-                values = []
+                vals = []
                 for c in cols:
                     v = r[c]
                     if isinstance(v, datetime) and v.tzinfo is not None:
                         v = v.astimezone(timezone.utc).replace(tzinfo=None)
-                    values.append(v)
-                try:
-                    await tgt.execute(sql, *values)
-                    total += 1
-                except Exception as ie:
-                    log.debug(f"⚠️ {table}: صف فشل — {ie}")
+                    vals.append(v)
+                params_list.append(tuple(vals))
 
-        log.info(f"   ✅ {table}: {total} صف")
-        return total
+            # إدراج جماعي
+            try:
+                async with tgt.transaction():
+                    await tgt.executemany(sql, params_list)
+                    inserted += len(params_list)
+            except Exception as be:
+                # fallback فردي
+                for p in params_list:
+                    try:
+                        await tgt.execute(sql, *p)
+                        inserted += 1
+                    except Exception as ie:
+                        log.debug(f"⚠️ {table}: صف فشل — {ie}")
+
+            offset += BATCH
+            if offset % (BATCH * 10) == 0 or offset >= total_rows:
+                log.info(f"      ↳ {min(offset, total_rows)}/{total_rows} صف")
+
+        log.info(f"   ✅ {table}: {inserted} صف")
+        return inserted
 
     except Exception as e:
         log.warning(f"   ⚠️ {table}: {e}")
@@ -197,9 +180,11 @@ async def migrate():
         log.error("❌ DATABASE_URL أو TIMESCALE_URL غير موجود")
         return
 
-    log.info("🚀 بدء النقل الكامل...")
-    log.info(f"   المصدر  : {mask(SOURCE)}")
-    log.info(f"   الهدف   : {mask(TARGET)}")
+    log.info("🚀 بدء النقل الكامل (v2)...")
+    log.info(f"   المصدر: {mask(SOURCE)}")
+    log.info(f"   الهدف : {mask(TARGET)}")
+    if SKIP_TABLES:
+        log.info(f"   متخطى: {sorted(SKIP_TABLES)}")
     log.info("")
 
     try:
@@ -210,9 +195,14 @@ async def migrate():
         return
 
     try:
+        # مهم: إخبار Timescale بعدم احتساب FK أثناء النقل
+        try:
+            await tgt.execute("SET session_replication_role = replica")
+        except Exception:
+            pass
+
         tables = await get_tables(src)
-        log.info(f"📋 عدد الجداول: {len(tables)}")
-        log.info("")
+        log.info(f"📋 عدد الجداول: {len(tables)}\n")
 
         total = 0
         for i, t in enumerate(tables, 1):
@@ -222,6 +212,12 @@ async def migrate():
 
         log.info("")
         log.info(f"🎉 انتهى النقل: {total} صف إجمالًا")
+
+        # إعادة تفعيل FK
+        try:
+            await tgt.execute("SET session_replication_role = DEFAULT")
+        except Exception:
+            pass
     finally:
         await src.close()
         await tgt.close()
