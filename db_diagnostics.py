@@ -1,25 +1,63 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-db_diagnostics.py — واجهة تشخيص وصيانة قاعدة البيانات (v7.2.7 — PK-TIMING-FIX)
+db_diagnostics.py — واجهة تشخيص وصيانة قاعدة البيانات (v7.2.8 — CROSS-REGION-ACCURACY)
 ================================================================================
-🆕 v7.2.7 — PK-TIMING-FIX:
+🆕 v7.2.8 — CROSS-REGION-ACCURACY:
 
-    🔴 FIX-PK-TIMING (جذري):
-        المشكلة المُكتشَفة:
-            PK SELECT في التقرير كان يُظهر 162ms (4 RTT) بينما
-            الاستعلام الفعلي = 1 RTT (40ms). السبب: استدعاء
-            `_detect_users_pk_col(conn)` كان **داخل نافذة التوقيت**.
-            هذه الدالة تنفّذ JOIN على 4 جداول نظام
-            (pg_index + pg_class + pg_namespace + pg_attribute)
-            يستغرق ~120ms على Aiven.
+    🔴 FIX-NETWORK-THRESHOLDS (جذري):
+        المشكلة المُكتشَفة من التقارير الحقيقية:
+            تقرير Full Health يُظهر "السبب الرئيسي: DB نفسه بطيء:
+            warm query = 41ms" بينما الأرقام تُثبت أن RTT الشبكة
+            = 42ms (warm ≈ RTT). السبب: عتبات `network_db` كانت
+            فضفاضة جداً (100ms = "low")، بينما `database_internal`
+            كانت صارمة (60ms = "medium"). النتيجة:
+            network_db=low لكن database_internal=medium → يفوز
+            database_internal خطأً في `_identify_bottleneck`.
         الإصلاح:
-          • فصل `_detect_users_pk_col` خارج نافذة التوقيت.
-          • `users_pk_col` يُسجَّل في result قبل القياس.
-          • قياس PK SELECT يعكس الاستعلام الفعلي فقط (1 RTT).
+          • عتبات network_db الجديدة (سياق DB):
+               < 5ms    low      (نفس DC/AZ)
+               < 15ms   low      (نفس المنطقة)
+               < 50ms   medium   (عبر مناطق ⚠️)
+               < 150ms  high
+               ≥ 150ms  critical
 
-    🟡 تحديث VERSION إلى "7.2.7" + load beacon.
+    🔴 FIX-INTERNAL-DB-CALC (جذري):
+        المشكلة:
+            `database_internal` كان يستخدم `warm_median_ms` مباشرة
+            (41ms)، فيُبالغ في تقييم "بطء DB" بينما القيمة الفعلية
+            داخل DB = warm - RTT ≈ 0ms.
+        الإصلاح:
+          • internal_ms = max(0, warm_median_ms - tcp_rtt)
+          • عتبات جديدة للـ internal: <5ms low، <20ms medium
+          • إذا كان internal < 5ms → لن يُبلَّغ عنه كسبب بطء.
 
+    🟠 FIX-PK-WARMUP (PERF):
+        المشكلة:
+            PK SELECT كان يُقاس على أول تنفيذ لـ asyncpg = 2 RTT
+            (Parse+Describe ثم Bind+Execute+Sync) = 84ms مع RTT=42.
+            هذا ليس خطأ DB، بل سلوك asyncpg الطبيعي (prepared
+            statement cache miss).
+        الإصلاح:
+          • warm-up صريح خارج نافذة التوقيت.
+          • القياس الفعلي = 1 RTT نظيف.
+
+    🟠 FIX-PROBE-DEDUP (PERF):
+        المشكلة:
+            `_build_sections` كان يستدعي `_probe_db_latency()` و
+            `_probe_full_health()` بالتوازي. لكن `_probe_full_health`
+            يستدعي `_probe_db_latency` داخلياً. على cache miss:
+            TCP probe + pool acquire ×2.
+        الإصلاح:
+          • استدعاء واحد فقط (`_probe_full_health`) ثم استخراج
+            `full_health["database"]` كـ latency_probe.
+
+    🟡 FIX-CROSS-REGION-VERDICT:
+        `_compute_latency_verdict` الآن يتعرّف على نمط cross-region
+        بوضوح (TCP>30ms + internal<15ms) ويُرجع verdict="acceptable"
+        مع توصية صحيحة (نقل DB، تقليل N+1).
+
+🆕 v7.2.7 — PK-TIMING-FIX — محفوظ.
 🆕 v7.2.6 — POOL-AWARE + TLS-ASYNC-FIX — محفوظ.
 🆕 v7.2.5 — TLS-DEADLINE + EL-P90-FIX — محفوظ.
 🆕 v7.2.4 — MISLEADING-FIX — محفوظ.
@@ -54,7 +92,7 @@ logger = logging.getLogger(__name__)
 # الإصدار
 # ═══════════════════════════════════════════════════════════════════════
 
-VERSION = "7.2.7"
+VERSION = "7.2.8"
 
 _MIN_DEAD_FOR_CRITICAL = 50
 _MIN_DEAD_FOR_COLOR = 10
@@ -63,6 +101,17 @@ _MIN_DEAD_FOR_COLOR = 10
 _LONG_TX_THRESHOLD_SECONDS = 300  # 5 دقائق
 _TELEGRAM_PROBE_CACHE_TTL = 300.0  # 5 دقائق — TLS مع Telegram مكلف
 _CONN_CLOSE_TIMEOUT = 2.0  # ثواني — تجنّب hang على close
+
+# 🆕 v7.2.8: عتبات cross-region (سياق DB)
+#   استُخرجت كثوابت لتسهيل التعديل والاختبار.
+_NET_DB_RTT_LOW_SAME_DC = 5.0     # < 5ms → نفس DC
+_NET_DB_RTT_LOW_SAME_REGION = 15.0  # < 15ms → نفس المنطقة
+_NET_DB_RTT_MEDIUM = 50.0         # < 50ms → عبر مناطق
+_NET_DB_RTT_HIGH = 150.0          # < 150ms → عالي
+
+_INTERNAL_DB_LOW = 5.0            # < 5ms → ممتاز (بعد خصم RTT)
+_INTERNAL_DB_MEDIUM = 20.0        # < 20ms → جيد
+_INTERNAL_DB_HIGH = 100.0         # < 100ms → بطيء
 
 # ═══════════════════════════════════════════════════════════════════════
 # طبقة Cache مركزية بـ TTL
@@ -410,6 +459,10 @@ async def _probe_db_latency(
         استخدام pool موجود بدل اتصال جديد.
     🆕 v7.2.7 FIX-PK-TIMING:
         فصل `_detect_users_pk_col` خارج نافذة توقيت PK SELECT.
+    🆕 v7.2.8 FIX-PK-WARMUP:
+        إضافة warm-up صريح لـ PK SELECT. السبب: أول تنفيذ لاستعلام
+        جديد على asyncpg = 2 RTT (Parse+Describe ثم Bind+Execute+Sync).
+        بعد الـwarm-up: القياس = 1 RTT نظيف.
     """
     if not force:
         cached = _cache_get("latency_probe")
@@ -651,20 +704,40 @@ async def _probe_db_latency(
                 logger.debug(f"_detect_users_pk_col: {e}")
         result["users_pk_col"] = pk_col
 
-        # قياس الاستعلام الفعلي فقط.
+        # 🆕 v7.2.8 FIX-PK-WARMUP:
+        #   أول تنفيذ لـ `SELECT 1 FROM users WHERE ... = $1` على
+        #   asyncpg = 2 RTT (Parse+Describe ثم Bind+Execute+Sync)
+        #   = 84ms مع RTT=42ms. هذا سلوك normal (cache miss على
+        #   الـ prepared statement)، ليس بطء DB.
+        #   → نُشغّل نسخة warm-up **خارج نافذة التوقيت** أولاً.
+        pk_sql_pg = (
+            f'SELECT 1 FROM users WHERE {pk_col} = $1 LIMIT 1'
+        )
+        pk_sql_mysql = (
+            "SELECT 1 FROM users WHERE user_id = %s LIMIT 1"
+        )
+        try:
+            if db_type == "postgres":
+                await conn.fetchval(pk_sql_pg, 1)
+            else:
+                cur = await conn.cursor()
+                await cur.execute(pk_sql_mysql, (1,))
+                await cur.fetchone()
+                try:
+                    await cur.close()
+                except Exception:
+                    pass
+        except Exception as e:
+            logger.debug(f"pk_select warmup: {e}")
+
+        # الآن القياس الفعلي (ساخن → 1 RTT نظيف).
         try:
             t0 = time.monotonic()
             if db_type == "postgres":
-                await conn.fetchval(
-                    f'SELECT 1 FROM users WHERE {pk_col} = $1 LIMIT 1',
-                    1,
-                )
+                await conn.fetchval(pk_sql_pg, 1)
             else:
                 cur = await conn.cursor()
-                await cur.execute(
-                    "SELECT 1 FROM users WHERE user_id = %s LIMIT 1",
-                    (1,),
-                )
+                await cur.execute(pk_sql_mysql, (1,))
                 await cur.fetchone()
                 try:
                     await cur.close()
@@ -747,12 +820,21 @@ def _verdict_from_warm(warm_ms: float) -> str:
 
 
 def _compute_latency_verdict(result: Dict[str, Any]) -> Tuple[str, str, str]:
+    """
+    🆕 v7.2.8 FIX-CROSS-REGION-VERDICT:
+        يتعرّف على نمط cross-region بوضوح:
+          tcp_rtt > 30ms و internal_db (=warm-tcp) < 15ms.
+        في هذه الحالة: البطء من الشبكة، ليس DB.
+    """
     tcp = float(result.get("tcp_connect_ms") or 0)
     conn = float(result.get("asyncpg_connect_ms") or 0)
     warm = float(result.get("warm_median_ms") or 0)
     first = float(result.get("first_query_ms") or 0)
     pk = float(result.get("pk_select_ms") or 0)
     used_pool = bool(result.get("used_pool", False))
+
+    # 🆕 v7.2.8: الوقت الفعلي داخل DB = warm - RTT
+    internal_db = max(0.0, warm - tcp) if tcp > 0 else warm
 
     if tcp < 0:
         return (
@@ -769,6 +851,20 @@ def _compute_latency_verdict(result: Dict[str, Any]) -> Tuple[str, str, str]:
             "شغّل VACUUM ANALYZE فورًا، راجع pg_stat_statements، "
             "افحص CPU/RAM على الخادم — قد يكون autovacuum يجري "
             "أو shared_buffers منخفضة.",
+        )
+
+    # 🆕 v7.2.8: نمط cross-region — شبكة معتدلة + DB داخلي سريع
+    #   مثال: tcp=42ms، warm=41ms → internal_db=0ms
+    if tcp > 30 and warm < 50 and internal_db < 15:
+        return (
+            "acceptable",
+            f"🟡 الشبكة بين البوت و DB تُضيف ~{tcp:.0f}ms لكل "
+            f"استعلام (RTT). DB داخلياً سريع جداً "
+            f"(~{internal_db:.0f}ms). المشكلة في المسافة الجغرافية.",
+            f"مع {tcp:.0f}ms ذهاب-وإياب، كل استعلام معقّد (3-5 RTTs) "
+            f"يستغرق ~{tcp*3:.0f}-{tcp*5:.0f}ms. "
+            "انقل البوت وDB إلى نفس المنطقة، أو قلّل عدد الاستعلامات "
+            "في المسارات الساخنة (N+1).",
         )
 
     if tcp > 300 and warm < 50:
@@ -1220,7 +1316,19 @@ async def _probe_system(*, prime_cpu: bool = False) -> Dict[str, Any]:
 
 def _identify_bottleneck(data: Dict[str, Any]) -> Dict[str, Any]:
     """
-    v7.2.4 FIX-RANK-VALUE (مستمر في v7.2.7).
+    🆕 v7.2.8 FIX-NETWORK-THRESHOLDS + FIX-INTERNAL-DB-CALC:
+
+        1) عتبات network_db الجديدة تعكس سياق DB (نفس DC < 5ms):
+              < 5ms    low      (نفس DC/AZ)
+              < 15ms   low      (نفس المنطقة)
+              < 50ms   medium   (عبر مناطق ⚠️)
+              < 150ms  high
+              ≥ 150ms  critical
+
+        2) database_internal يحسب الزمن الفعلي داخل DB:
+              internal_ms = max(0, warm_median_ms - tcp_rtt)
+
+           بهذا لا يُبلَّغ عن "DB بطيء" عندما يكون السبب RTT عالياً.
     """
     comps: List[Dict[str, Any]] = []
 
@@ -1234,33 +1342,42 @@ def _identify_bottleneck(data: Dict[str, Any]) -> Dict[str, Any]:
             "weight": round(float(weight), 2),
         })
 
-    # ─── 1) network_db ─────────────────────────────────────
+    # ─── مرجع مشترك: RTT إلى DB ───────────────────────────────
     net_db = data.get("network_db") or {}
     db_tcp = float(net_db.get("tcp_ms") or 0)
+
+    # ─── 1) network_db — عتبات جديدة (سياق DB) ────────────────
     if db_tcp > 0:
-        if db_tcp < 100:
-            sev = "low"
-        elif db_tcp < 250:
-            sev = "medium"
-        elif db_tcp < 500:
+        if db_tcp < _NET_DB_RTT_LOW_SAME_DC:
+            sev = "low"       # نفس DC/AZ
+        elif db_tcp < _NET_DB_RTT_LOW_SAME_REGION:
+            sev = "low"       # نفس المنطقة
+        elif db_tcp < _NET_DB_RTT_MEDIUM:
+            sev = "medium"    # عبر مناطق ⚠️
+        elif db_tcp < _NET_DB_RTT_HIGH:
             sev = "high"
         else:
             sev = "critical"
         _add("network_db", "time", db_tcp, "ms", sev, db_tcp * 3.0)
 
-    # ─── 2) database_internal ──────────────────────────────
+    # ─── 2) database_internal — اطرح RTT من warm ──────────────
     db_p = data.get("database") or {}
     warm = float(db_p.get("warm_median_ms") or 0)
     if warm > 0:
-        if warm < 20:
+        # ✅ FIX: الوقت الفعلي داخل DB = warm - RTT
+        internal_ms = max(0.0, warm - db_tcp) if db_tcp > 0 else warm
+        if internal_ms < _INTERNAL_DB_LOW:
             sev = "low"
-        elif warm < 60:
+        elif internal_ms < _INTERNAL_DB_MEDIUM:
             sev = "medium"
-        elif warm < 200:
+        elif internal_ms < _INTERNAL_DB_HIGH:
             sev = "high"
         else:
             sev = "critical"
-        _add("database_internal", "time", warm, "ms", sev, warm * 3.0)
+        _add(
+            "database_internal", "time", internal_ms, "ms",
+            sev, internal_ms * 3.0,
+        )
 
     # ─── 3) event_loop ─────────────────────────────────────
     loop_p = data.get("event_loop") or {}
@@ -1360,14 +1477,17 @@ def _identify_bottleneck(data: Dict[str, Any]) -> Dict[str, Any]:
     tv = top["value"]
     tu = top["unit"]
 
+    # 🆕 v7.2.8: رسائل مُحدَّثة تعكس المعنى الجديد.
     explanations = {
         "network_db": (
             f"🟠 الشبكة بين البوت و DB تُضيف ~{tv:.0f}{tu} "
-            f"لكل استعلام (TCP RTT)."
+            f"لكل استعلام (TCP RTT). كل استعلام معقّد (3-5 RTTs) "
+            f"يُضاعف هذا."
         ),
         "database_internal": (
-            f"🟠 DB نفسه بطيء: warm query = {tv:.0f}{tu} "
-            f"(المتوقع < 20ms)."
+            f"🟠 DB نفسه بطيء: زمن داخلي = {tv:.0f}{tu} "
+            f"(بعد خصم RTT الشبكة — المتوقع < "
+            f"{_INTERNAL_DB_LOW:.0f}ms)."
         ),
         "event_loop": (
             f"🟠 Event loop lag (p90) = {tv:.0f}{tu} — "
@@ -1390,12 +1510,15 @@ def _identify_bottleneck(data: Dict[str, Any]) -> Dict[str, Any]:
 
     recommendations = {
         "network_db": (
-            "✅ انقل DB إلى نفس منطقة البوت، أو استخدم "
-            "connection pooler قريب (PgBouncer)."
+            "✅ انقل البوت و DB إلى نفس المنطقة الجغرافية "
+            "(نفس DC إن أمكن). استخدم PgBouncer قريباً من البوت "
+            "لتقليل round-trips. قلّل عدد الاستعلامات في المسارات "
+            "الساخنة (N+1 patterns)."
         ),
         "database_internal": (
             "✅ راجع pg_stat_activity، شغّل VACUUM ANALYZE، "
-            "اضبط shared_buffers (≥ 25% RAM)."
+            "اضبط shared_buffers (≥ 25% RAM)، وافحص "
+            "pg_stat_statements لكشف استعلامات ثقيلة."
         ),
         "event_loop": (
             "✅ ابحث عن استدعاءات sync في async code: "
@@ -1437,6 +1560,8 @@ async def _probe_full_health(
     v7.2.5: TLS timeout مضبوط → نافذة أقصر.
     v7.2.6: TLS عبر async (لا ثريد)، Telegram له TTL منفصل.
     v7.2.7: FIX-PK-TIMING منقول إلى `_probe_db_latency`.
+    v7.2.8: FIX-NETWORK-THRESHOLDS + FIX-INTERNAL-DB-CALC في
+        `_identify_bottleneck`.
     """
     if not force:
         cached = _cache_get("full_health")
@@ -2813,8 +2938,11 @@ async def _build_sections(*, include_probes: bool = True) -> List[str]:
     """
     include_probes=True (افتراضي): يشغّل Full/Latency probes.
 
-    🆕 v7.2.6 FIX-PARALLEL-PROBES:
-        latency_probe + full_health بالتوازي بعد gather.
+    🆕 v7.2.6 FIX-PARALLEL-PROBES: probes بالتوازي.
+    🆕 v7.2.8 FIX-PROBE-DEDUP:
+        `_probe_full_health()` يستدعي `_probe_db_latency()` داخلياً
+        ويُخزّن نتيجته في `full_health["database"]`. الاستدعاء المزدوج
+        السابق كان يُشغّل TCP probe + pool acquire ×2 على cache miss.
     """
     parts: List[str] = []
 
@@ -3095,14 +3223,23 @@ async def _build_sections(*, include_probes: bool = True) -> List[str]:
         logger.warning(f"maintenance preview in sections: {e}")
 
     # SECTION 12/13 — اختيارية
+    # 🆕 v7.2.8 FIX-PROBE-DEDUP:
+    #   _probe_full_health() يستدعي _probe_db_latency() داخلياً
+    #   ويُخزّن نتيجته في full_health["database"]. لذا الاستدعاء
+    #   المزدوج السابق كان يُشغّل TCP probe + pool acquire ×2.
     if include_probes:
         probes = await asyncio.gather(
-            _probe_db_latency(),
             _probe_full_health(),
             return_exceptions=True,
         )
-        latency_probe = probes[0] if not isinstance(probes[0], BaseException) else {}
-        full_health = probes[1] if not isinstance(probes[1], BaseException) else {}
+        full_health = (
+            probes[0] if not isinstance(probes[0], BaseException) else {}
+        )
+        latency_probe = (
+            (full_health.get("database") or {})
+            if isinstance(full_health, dict)
+            else {}
+        )
 
         try:
             verdict = (latency_probe.get("verdict", "unknown")
@@ -3365,21 +3502,27 @@ __all__ = [
 ]
 
 # ═══════════════════════════════════════════════════════════════════════
-# LOAD BEACON — v7.2.7
+# LOAD BEACON — v7.2.8
 # ═══════════════════════════════════════════════════════════════════════
 
 try:
     logger.info(
         "🛡️ db_diagnostics.py v%s loaded | "
-        "PK-TIMING ✅ (_detect_users_pk_col خارج نافذة التوقيت) | "
+        "CROSS-REGION-ACCURACY ✅ | "
+        "NETWORK-THRESHOLDS ✅ (5/15/50/150ms) | "
+        "INTERNAL-DB-CALC ✅ (warm − RTT) | "
+        "PK-WARMUP ✅ (2 RTT → 1 RTT) | "
+        "PROBE-DEDUP ✅ (single probe) | "
+        "CROSS-REGION-VERDICT ✅ | "
+        "PK-TIMING ✅ | "
         "POOL-AWARE ✅ | "
-        "PK-DETECT ✅ (current_schema) | "
-        "TLS-ASYNC ✅ (open_connection، لا ثريد) | "
+        "PK-DETECT ✅ | "
+        "TLS-ASYNC ✅ | "
         "PARALLEL-PROBES ✅ | "
-        "FS-SHM ✅ (/dev/shm fallback) | "
+        "FS-SHM ✅ | "
         "SCORE-GRADUAL ✅ | "
-        "CACHE-IMMUTABLE ✅ (deepcopy) | "
-        "QUICK-PATH ✅ (cache-only) | "
+        "CACHE-IMMUTABLE ✅ | "
+        "QUICK-PATH ✅ | "
         "MYSQL-SCHEMA-ALIAS ✅ | "
         "CONN-CLOSE-TIMEOUT ✅ | "
         "TLS-DEADLINE ✅ | EL-P90 ✅ | "
@@ -3394,7 +3537,6 @@ try:
         "subscribers protected 🔒 | "
         "abs-threshold=%d dead | "
         "auto-vacuum API ✅ | "
-        "AF1+AF2+AF3+AF4 ✅ | "
         "cache_keys=%d | exports=%d",
         VERSION,
         _MIN_DEAD_FOR_CRITICAL,
