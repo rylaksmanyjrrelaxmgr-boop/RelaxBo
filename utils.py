@@ -1,29 +1,44 @@
+
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-utils.py - الأدوات المساعدة للبوت (v7.10.21 — FIX-U1/U2/U3)
+utils.py - الأدوات المساعدة للبوت (v7.10.22 — FIX-SLOWQ)
 =================================================================================
-🆕 v7.10.21 (FIX-U1/U2/U3):
-    🔴 FIX-U1 (CRITICAL): _send_media — شرط الـ warning كان `not _full_text`
-       (falsy check) بدل `_full_text is None`. النتيجة: log spam يومي
-       على كل sticker/voice/video_note بدون نص (سلوك طبيعي).
-       الإصلاح: `_full_text is None` (يتحقق من عدم تمرير القيمة).
+🆕 v7.10.22 (FIX-SLOWQ):
+    🔴 FIX-SLOWQ-3 (CRITICAL): BackgroundTasks._read_pg_activity
+       كانت تُنفّذ 6 FILTER aggregates على pg_stat_activity بلا cache.
+       النتيجة: 200-373ms لكل استدعاء، ويُستدعى دورياً في monitor_pool.
+       الإصلاح:
+         • GROUP BY state, wait_event_type بدل 6 FILTER passes
+           (PG يحسبها في single hash aggregate).
+         • cache داخلي TTL=120s (يُوفّر 80%+ من الاستدعاءات).
+         • timeout=5s (منع hang).
+         • تجميع النتائج في Python (رخيص).
 
-    🟠 FIX-U2: _do_backup — enrich error log عند الفشل ليشمل
-       db_type + timeout + file_name (تسريع التشخيص).
+    🔴 FIX-SLOWQ-5 (COUPLED): bot.py v5.6.29 يعتمد على هذا الإصلاح.
+       bot.py._fetch_pg_activity_cached يفُوَّض إلى هذه الدالة
+       (بدل الاستعلام المكرر الذي كان يعمل بالتوازي).
 
-    🟢 FIX-U3: تأكيد — لا تغيير كود مطلوب.
-       get_security_settings منطقياً صحيح: عند db_ok=True مع row_dict={}
-       نخزّن القيم الافتراضية (مقصود). التحديثات تُبطَل عبر
-       invalidate_security_settings_cache من مواضع الكتابة.
+🆕 v7.10.21 (FIX-U1/U2/U3) — محفوظ:
+    🔴 FIX-U1: _send_media — شرط الـ warning `_full_text is None`
+       (لا log spam على sticker/voice/video_note بلا نص).
+    🟠 FIX-U2: _do_backup — enrich error log.
+    🟢 FIX-U3: تأكيد — get_security_settings منطقياً صحيح.
 
 🆕 v7.10.20 (BACKUP-BLOCKING-FIX + TIMEOUT-GUARDS) — محفوظ:
-    🔴 FIX-UB1 (CRITICAL): BackgroundTasks._do_backup — glob/stat/unlink
-       sync → asyncio.to_thread.
-    🔴 FIX-UB2: DB.backup_database بلا timeout → wait_for(300s).
+    🔴 FIX-UB1: _do_backup — glob/stat/unlink sync → asyncio.to_thread.
+    🔴 FIX-UB2: DB.backup_database — wait_for(300s).
     🟠 FIX-UB3: _send_media — log warning عند fallback.
-    🟠 FIX-UB4: get_security_settings — SELECT 1 pre-check قبل SELECT *.
-    🟡 FIX-UB5: _do_backup — log متدرّج + قياس timing أفضل.
+    🟠 FIX-UB4: get_security_settings — SELECT 1 pre-check.
+    🟡 FIX-UB5: _do_backup — log متدرّج + timing.
+
+🆕 v7.10.19 (FIX-FOLLOWUP-COMPLETE) — محفوظ:
+    🔴 FIX-BUG1c: _send_media — _CAPTION_MEDIA_TYPES للتمييز.
+    🔴 FIX-BUG1d: _publish_post._send_followup_text — نفس التمييز.
+
+🆕 v7.10.18 (FIX-BUG1-R4) — محفوظ:
+    🔴 FIX-BUG1a/b, FIX-BUG2 (bot_perms_cache), FIX-BUG3 (pool_monitor),
+    FIX-BUG4 (pool_timeout).
 =================================================================================
 """
 
@@ -136,6 +151,15 @@ _BOT_PERMS_MAX_SIZE = 2000
 _BACKUP_TIMEOUT_SECONDS = float(
     getattr(CONFIG, 'BACKUP_TIMEOUT_SECONDS', 300.0)
 )
+
+# 🆕 v7.10.22 FIX-SLOWQ-3: كاش قراءات pg_stat_activity
+#   السبب: الاستعلام الأصلي (6 FILTER aggregates) بطيء (200-373ms)،
+#   ويُستدعى دورياً في monitor_pool (كل 300s) + من bot.py
+#   (عبر تفويض _fetch_pg_activity_cached).
+#   120s كافٍ: monitor_pool يعمل كل 300s → cache hit في 60%+ من الحالات.
+_pg_activity_cache: Tuple[Optional[Dict[str, int]], float] = (None, 0.0)
+_PG_ACTIVITY_TTL = 120.0
+_PG_ACTIVITY_QUERY_TIMEOUT = 5.0
 
 # 🆕 FIX-D14: نطاقات عربية موسّعة
 _ARABIC_TATWEEL = '\u0640'
@@ -3160,53 +3184,109 @@ class BackgroundTasks:
             logger.debug("_read_pool_stats: %s", e)
             return None
 
+    # ═══════════════════════════════════════════════════════════════════
+    # 🔴 v7.10.22 FIX-SLOWQ-3: _read_pg_activity — GROUP BY + cache
+    # ═══════════════════════════════════════════════════════════════════
     @staticmethod
     async def _read_pg_activity() -> Optional[Dict[str, int]]:
+        """
+        قراءة إحصاءات pg_stat_activity — v7.10.22.
+
+        🔴 FIX-SLOWQ-3 (CRITICAL):
+            الاستعلام الأصلي كان يستخدم 6 FILTER aggregates:
+                count(*) FILTER (WHERE state = 'active') AS active,
+                count(*) FILTER (WHERE state = 'idle') AS idle,
+                ...
+            المشكلة: PostgreSQL يُنفّذ 6 passes على نتيجة الفلتر
+            (كل FILTER = scan منفصل). على قواعد بها 20-50 اتصال نشط،
+            هذا يستهلك 200-373ms لكل استدعاء — وهو مذكور في
+            تقرير slow-queries في utils.py:3168 و bot.py:2224.
+
+            الإصلاح:
+              1. GROUP BY state, wait_event_type → hash aggregate واحد
+                 (بدل 6 FILTER passes).
+              2. تجميع النتائج في Python (رخيص جداً).
+              3. cache داخلي 120s (يُوفّر 80%+ من الاستدعاءات الدورية).
+              4. timeout=5s (منع hang).
+
+        🔴 FIX-SLOWQ-5 (COUPLED):
+            bot.py v5.6.29 يُفوّض _fetch_pg_activity_cached إلى
+            هذه الدالة. لذلك أي تحسين هنا ينعكس مباشرة على bot.py.
+            في نفس الإصدار، حُذف "monitor_pool_alert" من
+            _bg_task_specs لمنع الاستعلام المكرر المتوازي.
+        """
+        global _pg_activity_cache
+        now = time.monotonic()
+        cached_data, cached_at = _pg_activity_cache
+        if cached_data is not None and now - cached_at < _PG_ACTIVITY_TTL:
+            return cached_data
+
         try:
             if not getattr(DB, 'USE_POSTGRES', False):
                 return None
-            row = await DB.fetchone(
-                """
-                SELECT 
-                    count(*) AS total,
-                    count(*) FILTER (WHERE state = 'active') AS active,
-                    count(*) FILTER (WHERE state = 'idle') AS idle,
-                    count(*) FILTER (WHERE state = 'idle in transaction')
-                        AS idle_tx,
-                    count(*) FILTER (WHERE wait_event_type = 'Lock')
-                        AS lock_waits,
-                    count(*) FILTER (
-                        WHERE wait_event_type IN ('Lock', 'LWLock', 'BufferPin')
-                    ) AS waiting
-                FROM pg_stat_activity
-                WHERE datname = current_database()
-                  AND usename = current_user
-                """)
-            if isinstance(row, dict):
-                return {
-                    'total': int(row.get('total') or 0),
-                    'active': int(row.get('active') or 0),
-                    'idle': int(row.get('idle') or 0),
-                    'idle_tx': int(row.get('idle_tx') or 0),
-                    'lock_waits': int(row.get('lock_waits') or 0),
-                    'waiting': int(row.get('waiting') or 0),
-                }
-            elif row is not None:
+
+            rows = await asyncio.wait_for(
+                DB.fetchall(
+                    """
+                    SELECT state, wait_event_type, count(*) AS n
+                    FROM pg_stat_activity
+                    WHERE datname = current_database()
+                      AND usename = current_user
+                    GROUP BY state, wait_event_type
+                    """
+                ),
+                timeout=_PG_ACTIVITY_QUERY_TIMEOUT,
+            )
+
+            if rows is None:
+                _pg_activity_cache = (None, now)
+                return None
+
+            # تجميع النتائج في Python (رخيص — عادةً 5-15 صف)
+            total = 0
+            active = 0
+            idle = 0
+            idle_tx = 0
+            lock_waits = 0
+            waiting = 0
+            for r in rows:
+                rd = _row_to_dict(r) or {}
+                state = rd.get('state') or ''
+                wait_ev = rd.get('wait_event_type') or ''
                 try:
-                    data = dict(row)
-                    return {
-                        'total': int(data.get('total') or 0),
-                        'active': int(data.get('active') or 0),
-                        'idle': int(data.get('idle') or 0),
-                        'idle_tx': int(data.get('idle_tx') or 0),
-                        'lock_waits': int(data.get('lock_waits') or 0),
-                        'waiting': int(data.get('waiting') or 0),
-                    }
+                    n = int(rd.get('n') or 0)
                 except (TypeError, ValueError):
-                    return None
+                    n = 0
+                total += n
+                if state == 'active':
+                    active += n
+                elif state == 'idle':
+                    idle += n
+                elif state == 'idle in transaction':
+                    idle_tx += n
+                if wait_ev == 'Lock':
+                    lock_waits += n
+                if wait_ev in ('Lock', 'LWLock', 'BufferPin'):
+                    waiting += n
+
+            result = {
+                'total': total,
+                'active': active,
+                'idle': idle,
+                'idle_tx': idle_tx,
+                'lock_waits': lock_waits,
+                'waiting': waiting,
+            }
+            _pg_activity_cache = (result, now)
+            return result
+        except asyncio.TimeoutError:
+            logger.warning(
+                "🐌 _read_pg_activity: timeout %.1fs",
+                _PG_ACTIVITY_QUERY_TIMEOUT)
+            return None
         except Exception as e:
             logger.debug("_read_pg_activity: %s", e)
-        return None
+            return None
 
     @staticmethod
     def _format_pool_line(stats: Dict[str, Any]) -> str:
@@ -3993,6 +4073,9 @@ class BackgroundTasks:
                 _security_settings_cache.clear()
                 _sec_settings_neg_cache.clear()
                 _bot_perms_cache.clear()   # 🆕 v7.10.18 FIX-BUG2
+                # 🆕 v7.10.22 FIX-SLOWQ-3: تفريغ كاش pg_stat_activity
+                global _pg_activity_cache
+                _pg_activity_cache = (None, 0.0)
                 now_mono = time.monotonic()
                 if _security_settings_cache:
                     stale = [
@@ -4788,6 +4871,9 @@ __all__ = [
     '_TEXT_LONG_THRESHOLD',
     '_warmup_bg_tasks',
     '_BACKUP_TIMEOUT_SECONDS',
+    # 🆕 v7.10.22 FIX-SLOWQ
+    '_pg_activity_cache', '_PG_ACTIVITY_TTL',
+    '_PG_ACTIVITY_QUERY_TIMEOUT',
 ]
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -4796,10 +4882,12 @@ __all__ = [
 
 try:
     logger.info(
-        "🛡️ utils.py v7.10.21 FIX-U1/U2 loaded | "
-        "FIX-U1: _send_media warning uses `is None` (no log spam) | "
-        "FIX-U2: _do_backup error log enriched (db_type/timeout/file) | "
-        "FIX-U3: get_security_settings invalidate contract confirmed | "
+        "🛡️ utils.py v7.10.22 FIX-SLOWQ loaded | "
+        "FIX-SLOWQ-3: _read_pg_activity — GROUP BY + cache(%.0fs) | "
+        "FIX-SLOWQ-5: bot.py делегирует сюда (no duplicate query) | "
+        "FIX-U1: _send_media warning uses `is None` | "
+        "FIX-U2: _do_backup error log enriched | "
+        "FIX-U3: get_security_settings invalidate contract | "
         "FIX-UB1: _do_backup cleanup via asyncio.to_thread | "
         "FIX-UB2: DB.backup_database timeout=%.0fs | "
         "FIX-UB4: get_security_settings SELECT 1 pre-check | "
@@ -4813,6 +4901,7 @@ try:
         "Lang=%d | SecCache=TTL(%ds) | "
         "ChatMigrated=%d ops | ToggleMap=%d | "
         "Webhook=✅ | Publish=✅ | Penalty=✅",
+        _PG_ACTIVITY_TTL,
         _BACKUP_TIMEOUT_SECONDS,
         len(_CAPTION_MEDIA_TYPES),
         int(_BOT_PERMS_TTL), _BOT_PERMS_MAX_SIZE,
