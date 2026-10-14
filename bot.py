@@ -2,21 +2,21 @@
 # -*- coding: utf-8 -*-
 
 """
-🌿 Relax Manager – البوت الرئيسي (bot.py v5.6.27-SLEEP-PROBE)
+🌿 Relax Manager – البوت الرئيسي (bot.py v5.6.28-APP-START-FIX)
 ================================================================================
 📌 نقطة الدخول الرسمية للتطبيق (entrypoint).
 
-🆕 v5.6.27 (SLEEP-PROBE):
-    🔵 ADD-SP-1: تكامل sleep_probe.py — كاشف تأخيرات event loop.
-        • auto_install عند الإقلاع (env: SLEEP_PROBE_ENABLED=1).
-        • uninstall عند الإغلاق (استعادة asyncio.sleep الأصلي).
-        • اختياري بالكامل — لا يؤثر إذا كان الملف مفقوداً.
-        الهدف: كشف asyncio.sleep overshoots الناتجة عن عمليات sync.
+🆕 v5.6.28 (APP-START-FIX + ROBUST-SHUTDOWN):
+    🔴 FIX-BOT-1: await app.start() في main() — ضروري لـ PTB v20+.
+    🔴 FIX-BOT-2: _start_polling_mode — توافق مع FIX-BOT-1 (يدعم
+        app.running و app._running).
+    🟠 FIX-BOT-3: _shutdown_detector_tasks — دعم توقيعات متعددة
+        لـ shutdown_default_executor.
+    🟡 FIX-BOT-4: _WATCHER_INTERVAL: 10s → 30s (تقليل log noise).
+    🟡 FIX-BOT-5: تسجيل تشخيصي لأخطاء استيراد /db_idle و /cache_stats.
 
-🆕 v5.6.26 (DUP-FIX):
-    🟠 FIX-DUP-1: إزالة الاستدعاء المكرر لـ
-        `start_weekly_diagnostic_task` من main().
-
+🆕 v5.6.27 (SLEEP-PROBE) — محفوظ.
+🆕 v5.6.26 (DUP-FIX) — محفوظ.
 🆕 v5.6.25 (NAV-FIX-COMPAT) — محفوظ.
 🆕 v5.6.24 (ORDER-FIX) — محفوظ.
 🆕 v5.6.23 (PERF-SESSIONS) — محفوظ.
@@ -355,6 +355,7 @@ from handlers.handlers_message import (
 # ═════════════════════════════════════════════════════════════════════
 _HAS_DB_IDLE_CMD = False
 _handle_db_idle_command = None
+_DB_IDLE_IMPORT_ERROR = None
 
 try:
     from handlers.handlers_message import (
@@ -379,6 +380,7 @@ except ImportError as _e_dbidle1:
 # ═════════════════════════════════════════════════════════════════════
 _HAS_CACHE_STATS_CMD = False
 _handle_cache_stats_command = None
+_CACHE_STATS_IMPORT_ERROR = None
 
 try:
     from handlers.handlers_message import (
@@ -546,6 +548,21 @@ for _noisy in (
 
 logger = logging.getLogger(__name__)
 
+# ═══════════════════════════════════════════════════════════════════
+# 🟡 FIX-BOT-5: تسجيل تشخيصي لأخطاء استيراد /db_idle و /cache_stats
+# (كانت متغيّرات ميتة — الآن مفيدة للتشخيص).
+# ═══════════════════════════════════════════════════════════════════
+if not _HAS_DB_IDLE_CMD:
+    logger.debug(
+        "db_idle import failed: %s",
+        globals().get("_DB_IDLE_IMPORT_ERROR", "unknown"),
+    )
+if not _HAS_CACHE_STATS_CMD:
+    logger.debug(
+        "cache_stats import failed: %s",
+        globals().get("_CACHE_STATS_IMPORT_ERROR", "unknown"),
+    )
+
 # ═══════════════════════════════════════════════════════════════════════
 # 🆕 v5.6.27 SLEEP-PROBE — تفعيل كاشف تأخيرات event loop
 # ═══════════════════════════════════════════════════════════════════════
@@ -582,7 +599,11 @@ except Exception as _sp_import_e:
 _NOTIFY_SHUTDOWN_TIMEOUT = 5.0
 _BG_TASKS_SHUTDOWN_TIMEOUT = 10.0
 
-_WATCHER_INTERVAL = 10.0
+# 🟡 FIX-BOT-4: 10 → 30 (تقليل log noise + probe overhead).
+# السبب: `_watch_runner` يعمل في كل دورات البوت. 10s كانت مرتفعة
+# (6 probes/دقيقة) مما يضيف ضغطاً على event loop ويولّد سجلات زائدة.
+# 30s متوازنة — تكتشف الأعطال خلال 90s كحد أقصى مع 3 retries.
+_WATCHER_INTERVAL = 30.0
 _WATCHER_HEALTH_TIMEOUT = 5.0
 _WATCHER_MAX_PROBE_FAILURES = 3
 
@@ -1230,7 +1251,18 @@ async def _shutdown_detector_tasks(timeout: float = 3.0) -> None:
 
     if _DETECTORS_HAS_SHUTDOWN_HELPER:
         try:
-            result = _shutdown_default_executor_fn(timeout=timeout)
+            # 🟠 FIX-BOT-3: دعم توقيعين محتملين:
+            #   1) (loop, timeout=...) — الأكثر شيوعاً
+            #   2) (timeout=...) — بعض الإصدارات القديمة
+            result = None
+            try:
+                _loop = asyncio.get_running_loop()
+                result = _shutdown_default_executor_fn(
+                    _loop, timeout=timeout,
+                )
+            except TypeError:
+                result = _shutdown_default_executor_fn(timeout=timeout)
+
             if asyncio.iscoroutine(result):
                 await asyncio.wait_for(result, timeout=timeout + 0.5)
             logger.info(
@@ -2682,8 +2714,17 @@ async def _start_polling_mode(app: Application) -> None:
     if _polling_state["running"]:
         raise RuntimeError("Application is already running!")
 
-    if getattr(app, "running", False):
-        raise RuntimeError("Application.running=True — تعارض حالة")
+    # 🔴 FIX-BOT-2: بعد استدعاء app.start() في main()،
+    # نتوقّع app.running=True. نتحقّق فقط من الاتساق.
+    # ملاحظة: PTB v20+ يخزّنها في _running؛ بعض الإصدارات تعرض .running.
+    if not (
+        getattr(app, "running", False)
+        or getattr(app, "_running", False)
+    ):
+        raise RuntimeError(
+            "app.running=False — يجب استدعاء app.start() قبل "
+            "_start_polling_mode()"
+        )
 
     _polling_state["running"] = True
 
@@ -2790,13 +2831,14 @@ async def main():
     logger.info("👨‍💼 المالك: %s", CONFIG.PRIMARY_OWNER_ID)
 
     logger.info(
-        "📦 bot.py: v5.6.27 | "
+        "📦 bot.py: v5.6.28 | "
         "detectors=%s | layers=%d | helpers=%s | "
         "db_idle=%s | cache_stats=%s | analytics=%s | "
         "fullhealth=%s | latency=%s | maint_cmds=%s | "
         "pool_cache_ttl=%ds | nav_fix=%s | perf_sessions=on | "
         "nav_fix_mode=trace-only | handle_reg=always | "
-        "dup_fix=on | sleep_probe=%s",
+        "dup_fix=on | sleep_probe=%s | app_start_fix=on | "
+        "shutdown_sig=multi | watcher_interval=%.0fs",
         _SPAM_DETECTOR_VERSION or "N/A",
         _SPAM_DETECTOR_LAYERS_COUNT,
         (
@@ -2818,6 +2860,7 @@ async def main():
         (
             "available" if _sleep_probe_available else "missing"
         ),
+        _WATCHER_INTERVAL,
     )
 
     try:
@@ -2903,6 +2946,19 @@ async def main():
         "⏱️ تم تهيئة التطبيق في %.2f ثانية",
         time.monotonic() - t_app,
     )
+
+    # 🔴 FIX-BOT-1 (CRITICAL): app.start() مطلوب في PTB v20+
+    # السبب: Application.process_update() يتحقّق من self._running
+    # قبل معالجة أي update. بدون app.start()، لن تُعالَج أي تحديثات
+    # (لا polling ولا webhook).
+    try:
+        await app.start()
+        logger.info("✅ app.start() — التطبيق جاهز لمعالجة التحديثات")
+    except RuntimeError as _e:
+        if "already running" in str(_e).lower():
+            logger.debug("app.start(): التطبيق يعمل مسبقاً")
+        else:
+            raise
 
     _tg_warm_ok = await _warmup_telegram_api(app)
     if not _tg_warm_ok:
@@ -3565,7 +3621,7 @@ async def main():
         else:
             logger.info(
                 "⚠️ وضع Polling (لا يوجد hostname) — "
-                "باستخدام start_polling() + محاكاة app.start()"
+                "باستخدام start_polling() + app.start()"
             )
 
             runner = await setup_webhook(app, port)
@@ -3758,9 +3814,15 @@ if __name__ == "__main__":
 
                 try:
                     if _DETECTORS_HAS_SHUTDOWN_HELPER:
-                        _loop.run_until_complete(
-                            _shutdown_default_executor_fn(_loop)
-                        )
+                        # 🟠 FIX-BOT-3: نفس دعم التوقيعات
+                        try:
+                            _loop.run_until_complete(
+                                _shutdown_default_executor_fn(_loop)
+                            )
+                        except TypeError:
+                            _loop.run_until_complete(
+                                _shutdown_default_executor_fn()
+                            )
                         logger.info(
                             "✅ detectors: default executor shutdown"
                         )
