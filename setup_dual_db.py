@@ -8,24 +8,20 @@ setup_dual_db.py — إعداد تلقائي للتزامن بين Aiven و Time
 
 🧠 الآلية:
    1) يُحاول تفعيل PostgreSQL Logical Replication.
-      - Aiven = Publisher
-      - Timescale = Subscriber
-   2) إذا فشل (خطة مجانية بدون superuser)، يتحوّل تلقائيًا إلى:
-      - نسخ دوري (Scheduled Sync) كل SYNC_INTERVAL_SEC.
+   2) إذا فشل، يتحوّل تلقائيًا إلى نسخ دوري.
 
 🚀 التشغيل:
-   python setup_dual_db.py setup      # يُعدّ النسخ التلقائي (مرة واحدة)
-   python setup_dual_db.py status     # يعرض الحالة
-   python setup_dual_db.py sync       # نسخة يدوية كاملة
-   python setup_dual_db.py worker     # يشغّل العامل الدوري (fallback)
-   python setup_dual_db.py teardown   # يحذف كل شيء
+   python setup_dual_db.py setup      # إعداد مرة واحدة
+   python setup_dual_db.py status     # الحالة
+   python setup_dual_db.py sync       # نسخة يدوية
+   python setup_dual_db.py worker     # العامل الدوري (لا ينتهي)
+   python setup_dual_db.py teardown   # حذف كل شيء
 
-⚠️ لن يعدّل أي شيء في database.py أو .env تلقائيًا.
+⚠️ على Render: استخدم "Background Worker" لا "Web Service".
 """
 
 import os
 import sys
-import time
 import asyncio
 import logging
 from datetime import datetime, timezone
@@ -58,22 +54,16 @@ SECONDARY_URL = os.getenv("TIMESCALE_URL", "").strip().strip('"')
 
 PUBLICATION_NAME  = "relax_pub"
 SUBSCRIPTION_NAME = "relax_sub"
+SYNC_STATE_TABLE  = "_dual_sync_state"
 
-# جدول تتبّع آخر مزامنة
-SYNC_STATE_TABLE = "_dual_sync_state"
-
-# فاصل النسخ الدوري (ثواني)
 SYNC_INTERVAL_SEC = int(os.getenv("DUAL_SYNC_INTERVAL_SEC", "300"))
-
-# أقصى عدد صفوف لكل دفعة
-SYNC_BATCH_SIZE = int(os.getenv("DUAL_SYNC_BATCH", "500"))
+SYNC_BATCH_SIZE   = int(os.getenv("DUAL_SYNC_BATCH", "500"))
 
 
 # ═══════════════════════════════════════════════════════════════════
-# أدوات مساعدة
+# أدوات
 # ═══════════════════════════════════════════════════════════════════
 def _mask(url: str) -> str:
-    """إخفاء كلمة المرور من الرابط."""
     try:
         p = urlparse(url)
         if p.password:
@@ -84,7 +74,6 @@ def _mask(url: str) -> str:
 
 
 def _to_naive_utc(dt) -> datetime:
-    """يحوّل أي datetime إلى naive UTC."""
     if dt is None:
         return datetime(1970, 1, 1)
     if dt.tzinfo is not None:
@@ -92,16 +81,17 @@ def _to_naive_utc(dt) -> datetime:
     return dt
 
 
-def _naive_now_utc() -> datetime:
-    """الآن بتوقيت UTC بدون tzinfo."""
-    return datetime.now(timezone.utc).replace(tzinfo=None)
+def _to_aware_utc(dt) -> datetime:
+    if dt is None:
+        return datetime(1970, 1, 1, tzinfo=timezone.utc)
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
 
 
 async def _fetch_table_list(conn) -> list:
-    """قائمة الجداول في الـ schema العام (بدون views)."""
     rows = await conn.fetch("""
-        SELECT tablename
-        FROM pg_tables
+        SELECT tablename FROM pg_tables
         WHERE schemaname = current_schema()
           AND tablename NOT LIKE '\\_%'
         ORDER BY tablename
@@ -110,10 +100,8 @@ async def _fetch_table_list(conn) -> list:
 
 
 async def _table_columns(conn, table: str) -> list:
-    """أسماء أعمدة الجدول بالترتيب."""
     rows = await conn.fetch("""
-        SELECT column_name
-        FROM information_schema.columns
+        SELECT column_name FROM information_schema.columns
         WHERE table_schema = current_schema()
           AND table_name = $1
         ORDER BY ordinal_position
@@ -121,8 +109,16 @@ async def _table_columns(conn, table: str) -> list:
     return [r["column_name"] for r in rows]
 
 
+async def _column_data_type(conn, table: str, col: str) -> str:
+    row = await conn.fetchrow("""
+        SELECT data_type FROM information_schema.columns
+        WHERE table_schema = current_schema()
+          AND table_name = $1 AND column_name = $2
+    """, table, col)
+    return (row["data_type"] or "") if row else ""
+
+
 async def _table_has_pk(conn, table: str) -> bool:
-    """هل الجدول فيه Primary Key؟"""
     row = await conn.fetchval("""
         SELECT EXISTS (
             SELECT 1 FROM pg_index i
@@ -146,10 +142,9 @@ async def _pk_columns(conn, table: str) -> list:
 
 
 # ═══════════════════════════════════════════════════════════════════
-# 1) PostgreSQL Logical Replication
+# 1) Logical Replication
 # ═══════════════════════════════════════════════════════════════════
 async def try_logical_replication() -> bool:
-    """يُحاول تفعيل Logical Replication. True=نجح، False=فشل."""
     logger.info("🔍 [1/4] التحقق من إمكانية Logical Replication...")
 
     try:
@@ -165,8 +160,7 @@ async def try_logical_replication() -> bool:
         if wal_level != "logical":
             logger.warning(
                 "⚠️ Aiven wal_level ليس 'logical'. "
-                "فعّله من لوحة Aiven (Advanced Configuration → "
-                "pg.wal_level)."
+                "فعّله من Aiven Console → Advanced Configuration."
             )
             return False
 
@@ -174,15 +168,12 @@ async def try_logical_replication() -> bool:
             await pri_conn.execute(
                 f"DROP PUBLICATION IF EXISTS {PUBLICATION_NAME}")
             await pri_conn.execute(
-                f"CREATE PUBLICATION {PUBLICATION_NAME} "
-                f"FOR ALL TABLES")
+                f"CREATE PUBLICATION {PUBLICATION_NAME} FOR ALL TABLES")
             logger.info(f"✅ [2/4] أُنشئ Publication: {PUBLICATION_NAME}")
         except Exception as e:
             logger.warning(
-                f"⚠️ فشل CREATE PUBLICATION على Aiven: {e}\n"
-                f"   السبب: خطة Aiven لا تسمح بالـ replication. "
-                f"سننتقل إلى النسخ الدوري."
-            )
+                f"⚠️ فشل CREATE PUBLICATION: {e}\n"
+                f"   خطة Aiven لا تسمح. سننتقل للنسخ الدوري.")
             return False
     finally:
         await pri_conn.close()
@@ -194,7 +185,6 @@ async def try_logical_replication() -> bool:
         return False
 
     try:
-        # حذف أي subscription سابقة
         try:
             await sec_conn.execute(
                 f"ALTER SUBSCRIPTION {SUBSCRIPTION_NAME} DISABLE")
@@ -212,24 +202,16 @@ async def try_logical_replication() -> bool:
             CREATE SUBSCRIPTION {SUBSCRIPTION_NAME}
             CONNECTION '{primary_clean}'
             PUBLICATION {PUBLICATION_NAME}
-            WITH (
-                copy_data = true,
-                create_slot = true,
-                enabled = true
-            )
+            WITH (copy_data = true, create_slot = true, enabled = true)
         """)
         logger.info(
             f"✅ [3/4] أُنشئ Subscription: {SUBSCRIPTION_NAME}")
-        logger.info("✅ [4/4] Logical Replication يعمل الآن تلقائيًا 🎉")
-        logger.info(
-            "💡 كل INSERT/UPDATE/DELETE في Aiven تُنسخ لحظيًا إلى "
-            "Timescale بدون أي تعديل في كود البوت.")
+        logger.info("✅ [4/4] Logical Replication يعمل لحظيًا 🎉")
         return True
     except Exception as e:
         logger.warning(
-            f"⚠️ فشل CREATE SUBSCRIPTION على Timescale: {e}\n"
-            f"   السبب: خطة Timescale لا تسمح بالـ replication. "
-            f"سننتقل إلى النسخ الدوري.")
+            f"⚠️ فشل CREATE SUBSCRIPTION: {e}\n"
+            f"   سننتقل للنسخ الدوري.")
         return False
     finally:
         await sec_conn.close()
@@ -239,7 +221,6 @@ async def try_logical_replication() -> bool:
 # 2) Fallback: نسخ دوري
 # ═══════════════════════════════════════════════════════════════════
 async def _ensure_sync_state_table(sec_conn):
-    """ينشئ جدول تتبّع آخر نسخة."""
     await sec_conn.execute(f"""
         CREATE TABLE IF NOT EXISTS {SYNC_STATE_TABLE} (
             table_name TEXT PRIMARY KEY,
@@ -250,13 +231,13 @@ async def _ensure_sync_state_table(sec_conn):
 
 
 async def _get_last_sync(sec_conn, table: str) -> datetime:
-    """يعيد آخر وقت مزامنة (naive UTC)."""
     row = await sec_conn.fetchrow(
         f"SELECT last_sync FROM {SYNC_STATE_TABLE} "
         f"WHERE table_name = $1", table)
     if row and row["last_sync"]:
-        return _to_naive_utc(row["last_sync"])
-    return datetime(1970, 1, 1)
+        # نعيدها aware دائمًا، وسنحوّلها حسب نوع العمود
+        return _to_aware_utc(row["last_sync"])
+    return datetime(1970, 1, 1, tzinfo=timezone.utc)
 
 
 async def _set_last_sync(sec_conn, table: str, rows: int):
@@ -265,12 +246,12 @@ async def _set_last_sync(sec_conn, table: str, rows: int):
         VALUES ($1, NOW(), $2)
         ON CONFLICT (table_name) DO UPDATE SET
             last_sync = NOW(),
-            rows_synced = {SYNC_STATE_TABLE}.rows_synced + EXCLUDED.rows_synced
+            rows_synced = {SYNC_STATE_TABLE}.rows_synced
+                        + EXCLUDED.rows_synced
     """, table, rows)
 
 
-async def _table_has_timestamp(conn, table: str) -> str:
-    """هل الجدول فيه updated_at أو created_at؟"""
+async def _table_timestamp_col(conn, table: str) -> str:
     cols = await _table_columns(conn, table)
     if "updated_at" in cols:
         return "updated_at"
@@ -280,7 +261,10 @@ async def _table_has_timestamp(conn, table: str) -> str:
 
 
 async def sync_table(pri_conn, sec_conn, table: str, full: bool = False):
-    """ينسخ جدولًا واحدًا من Aiven إلى Timescale."""
+    """
+    ينسخ جدولًا واحدًا من Aiven إلى Timescale.
+    يعيد عدد الصفوف المُدرَجة/المُحدَّثة.
+    """
     try:
         if not await _table_has_pk(pri_conn, table):
             logger.debug(f"⏭️ {table}: بدون PK — تخطي")
@@ -290,30 +274,35 @@ async def sync_table(pri_conn, sec_conn, table: str, full: bool = False):
         if not cols:
             return 0
 
-        ts_col = await _table_has_timestamp(pri_conn, table)
-        since = (datetime(1970, 1, 1)
-                 if full or not ts_col
-                 else await _get_last_sync(sec_conn, table))
+        ts_col = await _table_timestamp_col(pri_conn, table)
 
-        # استخراج الصفوف الجديدة/المعدّلة
-        if ts_col and not full:
-            # تمرير التاريخ كنص + cast إلى timestamp
-            # (يعمل مع TIMESTAMP و TIMESTAMPTZ)
-            since_str = since.strftime("%Y-%m-%d %H:%M:%S")
-            rows = await pri_conn.fetch(
-                f"SELECT * FROM {table} "
-                f"WHERE {ts_col} > $1::timestamp "
-                f"ORDER BY {ts_col} ASC "
-                f"LIMIT {SYNC_BATCH_SIZE}",
-                since_str)
-        else:
+        if not ts_col or full:
             rows = await pri_conn.fetch(
                 f"SELECT * FROM {table} LIMIT {SYNC_BATCH_SIZE}")
+        else:
+            # نحدّد نوع العمود: timestamp بدون منطقة زمنية
+            # أو timestamptz معها
+            col_type = await _column_data_type(
+                pri_conn, table, ts_col)
+            is_aware_col = "with time zone" in (col_type or "").lower()
+
+            since = await _get_last_sync(sec_conn, table)
+            # نحوّل القيمة بحسب نوع العمود لتفادي خطأ asyncpg
+            if is_aware_col:
+                since_param = _to_aware_utc(since)
+            else:
+                since_param = _to_naive_utc(since)
+
+            rows = await pri_conn.fetch(
+                f"SELECT * FROM {table} "
+                f"WHERE {ts_col} > $1 "
+                f"ORDER BY {ts_col} ASC "
+                f"LIMIT {SYNC_BATCH_SIZE}",
+                since_param)
 
         if not rows:
             return 0
 
-        # بناء UPSERT
         cols_csv = ", ".join(cols)
         placeholders = ", ".join(f"${i+1}" for i in range(len(cols)))
         pk_cols = await _pk_columns(pri_conn, table)
@@ -322,9 +311,7 @@ async def sync_table(pri_conn, sec_conn, table: str, full: bool = False):
             conflict_cols = ", ".join(pk_cols)
             set_clause = ", ".join(
                 f"{c} = EXCLUDED.{c}" for c in cols
-                if c not in pk_cols)
-            if not set_clause:
-                set_clause = f"{pk_cols[0]} = EXCLUDED.{pk_cols[0]}"
+                if c not in pk_cols) or f"{pk_cols[0]} = EXCLUDED.{pk_cols[0]}"
             sql = (
                 f"INSERT INTO {table} ({cols_csv}) "
                 f"VALUES ({placeholders}) "
@@ -332,23 +319,24 @@ async def sync_table(pri_conn, sec_conn, table: str, full: bool = False):
                 f"DO UPDATE SET {set_clause}"
             )
         else:
-            # بدون PK — تجاهل التكرار
             sql = (
                 f"INSERT INTO {table} ({cols_csv}) "
                 f"VALUES ({placeholders}) "
                 f"ON CONFLICT DO NOTHING"
             )
 
-        # تنفيذ في transaction واحدة
+        # نحوّل قيم datetime لكل عمود بحسب نوعه في القاعدة الهدف
+        # (مبسّط: نحوّل aware → naive إن كان العمود بدون منطقة زمنية)
         inserted = 0
         async with sec_conn.transaction():
             for r in rows:
-                values = [r[c] for c in cols]
-                # تحويل datetime-aware إلى naive UTC
-                for i, v in enumerate(values):
+                values = []
+                for c in cols:
+                    v = r[c]
                     if isinstance(v, datetime) and v.tzinfo is not None:
-                        values[i] = v.astimezone(
-                            timezone.utc).replace(tzinfo=None)
+                        v = v.astimezone(timezone.utc).replace(
+                            tzinfo=None)
+                    values.append(v)
                 try:
                     await sec_conn.execute(sql, *values)
                     inserted += 1
@@ -367,7 +355,6 @@ async def sync_table(pri_conn, sec_conn, table: str, full: bool = False):
 
 
 async def do_full_sync():
-    """نسخة كاملة من كل الجداول."""
     logger.info("🔄 بدء جلسة النسخ...")
     try:
         pri = await asyncpg.connect(PRIMARY_URL, timeout=15)
@@ -394,7 +381,6 @@ async def do_full_sync():
 
 
 async def worker_loop():
-    """يعمل كخلفية ينسخ كل SYNC_INTERVAL_SEC."""
     logger.info(f"🔁 Worker: نسخ كل {SYNC_INTERVAL_SEC} ثانية")
     while True:
         try:
@@ -417,18 +403,13 @@ async def cmd_setup():
     logger.info("")
 
     if not PRIMARY_URL or not SECONDARY_URL:
-        logger.error(
-            "❌ DATABASE_URL أو TIMESCALE_URL غير موجود. "
-            "تأكد من وجودهما في .env")
+        logger.error("❌ DATABASE_URL أو TIMESCALE_URL غير موجود.")
         return
 
     ok = await try_logical_replication()
-
     if ok:
         logger.info("")
-        logger.info(
-            "🎉 تم الإعداد بنجاح! النسخ يعمل لحظيًا تلقائيًا.\n"
-            "لا تحتاج أي شيء آخر.")
+        logger.info("🎉 الإعداد نجح! النسخ يعمل لحظيًا تلقائيًا.")
         return
 
     logger.info("")
@@ -436,10 +417,7 @@ async def cmd_setup():
     logger.info(
         f"   🕒 سيُنسخ كل {SYNC_INTERVAL_SEC} ثانية.\n"
         f"   ▶️ لتشغيل العامل الدائم: "
-        f"python setup_dual_db.py worker\n"
-        f"   💡 لتفعيل النسخ الحقيقي: راجع Aiven Console "
-        f"وخطة الاشتراك.")
-    # نسخة أولية فورية
+        f"python setup_dual_db.py worker")
     await do_full_sync()
 
 
@@ -457,8 +435,8 @@ async def cmd_status():
         wal_level = await pri.fetchval("SHOW wal_level")
         logger.info(f"   wal_level : {wal_level}")
         pub = await pri.fetchrow(
-            "SELECT pubname FROM pg_publication "
-            "WHERE pubname = $1", PUBLICATION_NAME)
+            "SELECT pubname FROM pg_publication WHERE pubname = $1",
+            PUBLICATION_NAME)
         logger.info(f"   publication: {pub['pubname'] if pub else '—'}")
 
         logger.info("\n─── Secondary (Timescale) ───")
@@ -517,8 +495,7 @@ async def cmd_teardown():
         except Exception as e:
             logger.debug(f"subscription drop: {e}")
         try:
-            await sec.execute(
-                f"DROP TABLE IF EXISTS {SYNC_STATE_TABLE}")
+            await sec.execute(f"DROP TABLE IF EXISTS {SYNC_STATE_TABLE}")
         except Exception:
             pass
         await sec.close()
@@ -555,9 +532,7 @@ COMMANDS = {
 def main():
     if len(sys.argv) < 2 or sys.argv[1] not in COMMANDS:
         print(__doc__)
-        print("الأوامر المتاحة:")
-        for k in COMMANDS:
-            print(f"  {k}")
+        print("الأوامر المتاحة:", ", ".join(COMMANDS))
         sys.exit(1)
 
     cmd = sys.argv[1]
