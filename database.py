@@ -1,28 +1,38 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-database.py - قاعدة البيانات المتكاملة (v7.7.69 — STATEMENT-CACHE-REVERT-FIX)
+database.py - قاعدة البيانات المتكاملة (v7.7.70 — MAINTENANCE-BG-FIX)
 ================================================================================
+🆕 v7.7.70 (MAINTENANCE-BG-FIX):
+  🔴 FIX-DB19 (CRITICAL): نقل _run_maintenance_postgres في bootstrap
+     إلى مهمة خلفية بدل `await` مباشر.
+     السبب الجذري المُكتشف من السجل:
+       🐢 sleep overshoot: delay=10000ms actual=16257ms overshoot=6257ms
+       🐢 sleep overshoot: delay=10000ms actual=15903ms overshoot=5903ms
+       كل المهام تأخّرت بنفس اللحظة → event loop محجوب بمصدر مشترك.
+     التحليل:
+       `_run_maintenance_postgres` يمر على ~47 جدول/MV:
+         for tbl in merged_targets:  # ~47
+             await conn.fetchval("SELECT c.relkind = 'm' ...")  # ~45ms
+             await conn.execute("VACUUM ANALYZE ...")           # ~200ms
+             await asyncio.sleep(0.1)                            # 100ms
+       المجموع ≈ 47 × 345ms ≈ 16.2 ثانية — يطابق `actual=16257ms`.
+     الأثر قبل الإصلاح:
+       • خلال هذه الـ 16s، كل asyncio.sleep في المهام الأخرى يتأخّر.
+       • pool connection واحد محجوز 16s.
+       • I/O من VACUUM على Aiven يُبطئ الاستعلامات الأخرى.
+     الإصلاح:
+       • _spawn_bg_task → event loop يبقى حرّاً.
+       • _bootstrap_lock يُحرَّر فوراً.
+       • maintenance يعمل في الخلفية.
+
 🆕 v7.7.69 (STATEMENT-CACHE-REVERT-FIX):
   🔴 FIX-DB16 (CRITICAL): إلغاء الكشف التلقائي لـ statement_cache_size=0
      في PgBouncer endpoint.
-     السبب الجذري:
-       في v7.7.68، افترضنا أن أي منفذ ":21834" = PgBouncer tx-mode →
-       فرضنا statement_cache_size=0. الاختبار الفعلي أظهر:
-         - قبل (cache=100): warm = 42ms (1 RTT) ✅
-         - بعد (cache=0):   warm = 84ms (2 RTT) ❌
-       أي أن Aiven endpoint ":21834" **يدعم prepared statements** بنجاح.
-     الإصلاح:
-       • العودة إلى statement_cache_size=100 (asyncpg default).
-       • إلغاء فرض القيمة عند كشف ":21834".
-       • إبقاء كشف "-pooler." كتحذير فقط (بدون فرض).
-       • env var PG_STATEMENT_CACHE_SIZE للتحكم اليدوي.
-
   🟠 FIX-DB17: PG_STATEMENT_CACHE_SIZE default 0 → 100.
   🟠 FIX-DB18: PG_MAX_CACHED_STATEMENT_LIFETIME default 0 → 300.
 
 🆕 v7.7.68 (DB-POOL-LATENCY-FIX):
-  🔴 FIX-DB10 (CRITICAL): ... (تم التراجع عن الكشف التلقائي)
   🔴 FIX-DB11: PG_MAX_INACTIVE_LIFETIME 15s → 300s.
   🟠 FIX-DB12: PG_CONN_PING_IDLE_THRESHOLD 5s → 60s.
   🟡 FIX-DB13: _conn_last_used → weakref.WeakKeyDictionary.
@@ -85,6 +95,8 @@ database.py - قاعدة البيانات المتكاملة (v7.7.69 — STATEM
 #              + WeakKeyDictionary + DB_TIMEOUT 10s
 # [29] v7.7.69: REVERT statement_cache_size=0 (كان يسبب بطء 2x)
 #              — Aiven ":21834" يدعم prepared statements بنجاح.
+# [30] v7.7.70: نقل _run_maintenance_postgres إلى مهمة خلفية
+#              (كان يحجب event loop ~16s في bootstrap).
 # =====================================================================
 
 import os
@@ -319,16 +331,11 @@ def _load_mixin(module_name: str, class_name: str):
     """
     🆕 v7.7.65 FIX-MIXIN-1: التقاط كل الاستثناءات + تشخيص واضح.
     🆕 v7.7.67 FIX-DB6: except BaseException → except Exception.
-
-    السبب: BaseException يلتقط KeyboardInterrupt/SystemExit/
-    CancelledError → يحوّلها إلى "fallback صامت"، فيخفي أعطال
-    حقيقية عن المُشغّل. Exception يغطي كل أخطاء التحميل المتوقعة.
     """
     try:
         module = __import__(module_name, fromlist=[class_name])
         cls = getattr(module, class_name)
 
-        # 🆕 v7.7.65 FIX-MIXIN-3: فحص مسبق لـ AnalyticsMixin
         if class_name == "AnalyticsMixin":
             if not hasattr(cls, "get_user_growth"):
                 logger.error(
@@ -354,7 +361,6 @@ def _load_mixin(module_name: str, class_name: str):
         )
         return fallback, False
     except Exception as e:
-        # 🆕 v7.7.67 FIX-DB6: Exception بدل BaseException
         import traceback as _tb
         logger.error(
             f"❌ فشل تحميل {module_name}.{class_name}: "
@@ -620,23 +626,6 @@ PG_ROLLBACK_ON_RETURN_TIMEOUT = float(
 # ═══════════════════════════════════════════════════════════════════════
 # 🔴 v7.7.69 FIX-DB16/17/18: REVERT statement_cache_size
 # ═══════════════════════════════════════════════════════════════════════
-#
-# التصحيح السابق (v7.7.68 FIX-DB10) كان يفرض statement_cache_size=0
-# عند كشف ":21834" (منفذ Aiven) — بناءً على افتراض أنه PgBouncer
-# في transaction mode.
-#
-# الاختبار الفعلي على Aiven ":21834":
-#   • cache=100 → warm = 42ms (1 RTT)  ✅
-#   • cache=0   → warm = 84ms (2 RTT)  ❌
-#
-# أي أن Aiven ":21834" يدعم prepared statements بنجاح. الافتراض كان
-# خاطئاً. الفرض كان يُضعف الأداء بدل تحسينه.
-#
-# القاعدة الجديدة:
-#   • default = 100 (asyncpg default) — الأداء الأمثل.
-#   • env var PG_STATEMENT_CACHE_SIZE للتحكم اليدوي (0 = تعطيل).
-#   • كشف "-pooler." صريح → تحذير فقط (بدون فرض قيمة).
-#
 PG_STATEMENT_CACHE_SIZE = int(
     os.getenv("PG_STATEMENT_CACHE_SIZE", "100"))
 PG_MAX_CACHED_STATEMENT_LIFETIME = float(
@@ -646,7 +635,6 @@ PG_MAX_CACHED_STATEMENT_LIFETIME = float(
 _PG_IS_POOLED = False
 if USE_POSTGRES and DATABASE_URL:
     _url_low = DATABASE_URL.lower()
-    # نتحقق فقط من مؤشرات واضحة '-pooler.' (بدون فرض قيمة).
     if "-pooler." in _url_low or "pgbouncer" in _url_low:
         _PG_IS_POOLED = True
         logger.info(
@@ -657,7 +645,6 @@ if USE_POSTGRES and DATABASE_URL:
             f"PG_STATEMENT_CACHE_SIZE=0 في env."
         )
     elif ":21834" in _url_low:
-        # ملاحظة توثيقية فقط
         logger.debug(
             "ℹ️ v7.7.69: Aiven ':21834' — "
             f"statement_cache_size={PG_STATEMENT_CACHE_SIZE} "
@@ -2243,7 +2230,6 @@ class Database(
             self._overflow_user_lock_warned = False
 
             self._backup_lock = asyncio.Lock()
-            # 🟡 FIX-DB4 (v7.7.66): توحيد القيمة الافتراضية مع config.py.
             self._slow_query_log_threshold = float(
                 os.getenv("SLOW_QUERY_LOG_THRESHOLD", "0.2"))
             self._max_post_text_length = MAX_POST_TEXT_LENGTH
@@ -2703,10 +2689,6 @@ class Database(
         🆕 v7.7.69 FIX-DB16: pool PG محسّن مع statement cache.
         🆕 v7.7.68 FIX-DB11: max_inactive_lifetime=300s.
         🆕 v7.7.69 FIX-DB17: statement_cache_size=100 (default).
-
-        Aiven ":21834" يدعم prepared statements بنجاح (warm=42ms=1 RTT).
-        إذا لاحظت أخطاء "prepared statement does not exist"، اضبط
-        PG_STATEMENT_CACHE_SIZE=0 في env.
         """
         try:
             create_kwargs: Dict[str, Any] = {
@@ -2718,7 +2700,6 @@ class Database(
                 "server_settings": {
                     "application_name": "relax_bot",
                     "synchronous_commit": "off",
-                    # 🔴 FIX-DB1 (v7.7.66): ضبط timezone = UTC.
                     "timezone": "UTC",
                     "tcp_keepalives_idle": str(PG_TCP_KEEPIDLE),
                     "tcp_keepalives_interval": str(PG_TCP_KEEPINTVL),
@@ -2728,7 +2709,6 @@ class Database(
                         PG_IDLE_TX_TIMEOUT_MS),
                 },
             }
-            # 🆕 v7.7.69 FIX-DB17: statement cache قابل للضبط
             try:
                 create_kwargs["statement_cache_size"] = int(
                     PG_STATEMENT_CACHE_SIZE)
@@ -2820,7 +2800,6 @@ class Database(
         conn = await asyncio.wait_for(
             pool.acquire(), timeout=self._connection_timeout)
         try:
-            # 🆕 v7.7.67 FIX-DB8: فحص idle-in-transaction قبل VACUUM.
             try:
                 if _pg_in_transaction(conn):
                     logger.warning(
@@ -2832,7 +2811,6 @@ class Database(
             except Exception as _tx_e:
                 logger.debug("vacuum pre-tx check: %s", _tx_e)
 
-            # 🔴 FIX-DB3 (v7.7.66): تعطيل statement_timeout مؤقتاً.
             _original_timeout: Optional[str] = None
             try:
                 _original_timeout = await conn.fetchval(
@@ -3082,7 +3060,6 @@ class Database(
                 logger.warning(f"⚠️ MV refresh: {e}")
                 return False
             finally:
-                # 🆕 v7.7.67 FIX-DB9: توضيح منطق cooldown.
                 if success:
                     self._mv_last_refresh_mono = time.monotonic()
                 else:
@@ -3601,8 +3578,6 @@ class Database(
                         pass
                 elif USE_POSTGRES:
                     try:
-                        # 🆕 v7.7.68 FIX-DB13: WeakKeyDictionary —
-                        # نستخدم conn مباشرة كمفتاح.
                         now = time.monotonic()
                         last_used = self._conn_last_used.get(conn, 0.0)
                         if now - last_used > PG_CONN_PING_IDLE_THRESHOLD:
@@ -3722,7 +3697,6 @@ class Database(
     async def _return_connection(self, conn):
         try:
             if USE_POSTGRES:
-                # 🆕 v7.7.68 FIX-DB13: conn كمفتاح مباشرة.
                 try:
                     self._conn_last_used[conn] = time.monotonic()
                 except (TypeError, KeyError):
@@ -3824,7 +3798,6 @@ class Database(
                             await result
                     except Exception as e:
                         logger.debug(f"PG close: {e}")
-            # 🆕 v7.7.68 FIX-DB13: WeakKeyDictionary pop by conn
             try:
                 self._conn_last_used.pop(conn, None)
             except (TypeError, KeyError):
@@ -5938,17 +5911,57 @@ class Database(
                     except Exception as e:
                         logger.warning(
                             f"⚠️ الفهارس المؤجلة: {e}")
+
+                # ═══════════════════════════════════════════════════════
+                # 🆕 v7.7.70 FIX-DB19 (CRITICAL): تشغيل maintenance
+                # في مهمة خلفية بدل await مباشر.
+                #
+                # السبب الجذري المُكتشف من السجل:
+                #   🐢 sleep overshoot: delay=10000ms actual=16257ms
+                #   🐢 sleep overshoot: delay=10000ms actual=15903ms
+                #   كل المهام تأخّرت بنفس اللحظة → event loop محجوب.
+                #
+                # التحليل:
+                #   _run_maintenance_postgres يمر على ~47 جدول/MV:
+                #     for tbl in merged_targets:  # ~47
+                #         await conn.fetchval("SELECT c.relkind = 'm'...")
+                #         await conn.execute("VACUUM ANALYZE ...")
+                #         await asyncio.sleep(0.1)
+                #   المجموع ≈ 47 × 345ms ≈ 16.2s — يطابق actual=16257ms.
+                #
+                # الأثر قبل الإصلاح:
+                #   • خلال 16s، كل asyncio.sleep في المهام الأخرى يتأخّر.
+                #   • pool connection محجوز 16s.
+                #   • I/O من VACUUM على Aiven يُبطئ الاستعلامات الأخرى.
+                #
+                # الإصلاح:
+                #   • _spawn_bg_task → event loop يبقى حرّاً.
+                #   • _bootstrap_lock يُحرَّر فوراً.
+                #   • maintenance يعمل في الخلفية بأولويّة منخفضة.
+                # ═══════════════════════════════════════════════════════
                 if USE_POSTGRES:
-                    try:
-                        from database_tables import (
-                            _run_maintenance_postgres)
-                        async with self._connection() as _vac_conn:
-                            await _run_maintenance_postgres(
-                                _vac_conn, logger)
-                    except Exception as _vac_e:
-                        logger.debug(
-                            f"⚠️ maintenance post-bootstrap: "
-                            f"{_vac_e}")
+                    async def _run_maint_bg():
+                        try:
+                            from database_tables import (
+                                _run_maintenance_postgres)
+                            async with self._connection() as _vac_conn:
+                                await _run_maintenance_postgres(
+                                    _vac_conn, logger)
+                            logger.info(
+                                "✅ maintenance post-bootstrap اكتمل "
+                                "(خلفية)")
+                        except asyncio.CancelledError:
+                            logger.debug(
+                                "⏹️ maintenance post-bootstrap "
+                                "cancelled")
+                            raise
+                        except Exception as _vac_e:
+                            logger.debug(
+                                f"⚠️ maintenance post-bootstrap "
+                                f"(bg): {_vac_e}")
+
+                    self._spawn_bg_task(_run_maint_bg())
+
                 if with_background:
                     if CACHE_AVAILABLE and (
                         self._cache_cleanup_task is None
@@ -7959,22 +7972,23 @@ __all__ = [
 
 
 # =====================================================================
-# LOAD BEACON — v7.7.69
+# LOAD BEACON — v7.7.70
 # =====================================================================
 
 try:
     _analytics_status = (
         "✅" if hasattr(Database, "get_user_growth") else "❌")
     logger.info(
-        "🛡️ database.py v7.7.69 STATEMENT-CACHE-REVERT-FIX loaded | "
+        "🛡️ database.py v7.7.70 MAINTENANCE-BG-FIX loaded | "
         "DB=%s | Analytics=%s (available=%s) | "
         "Migrations=%s | Refactor=%s | Caches=%s | "
         "Idle-TX-Audit=%s (interval=%.0fs, threshold=%d) | "
         "PG-rollback-on-return=%.1fs | "
-        "PG-stmt-cache=%d (pooled=%s) ← REVERTED | "
+        "PG-stmt-cache=%d (pooled=%s) | "
         "PG-max-inactive=%.0fs | "
         "PG-ping-idle=%.0fs | "
-        "Fixes: DB16 (REVERT stmt_cache=0)، "
+        "Fixes: DB19 (maintenance bg task) ← NEW، "
+        "DB16 (REVERT stmt_cache=0)، "
         "DB17 (stmt_cache default 100)، "
         "DB18 (cache lifetime default 300s)، "
         "DB11..DB15 (v7.7.68)، "
