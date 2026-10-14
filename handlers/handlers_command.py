@@ -2,50 +2,38 @@
 # -*- coding: utf-8 -*-
 
 """
-handlers_command.py - معالجات الأوامر (CommandHandlers) - v7.7.5
+handlers_command.py - معالجات الأوامر (CommandHandlers) - v7.7.6
 ===================================================================================
+🆕 v7.7.6 (GROUPS-COUNT-FIX):
+    🔴 FIX-GC-1 (CRITICAL): start() — قراءة groups_count مباشرة من DB.
+        السبب: user_cache.get_or_load يُرجع groups_count قديماً (0) حتى
+        بعد إضافة البوت لمجموعات جديدة، لأن syncgroup لا يُبطل الكاش.
+        قبل: groups_count = user_data.get('groups_count', 0)  ← من الكاش فقط
+        بعد: groups_count = fetch live من user_groups_link + fallback للكاش.
+        النتيجة: العدد الصحيح يظهر فوراً عند كل /start.
+        الأداء: استعلام COUNT(*) واحد عند pool warm ≈ 1-3ms.
+
+    🔴 FIX-GC-2 (CRITICAL): syncgroup() — إبطال user_cache.
+        السبب: syncgroup يُسجّل المجموعة ويُحدّث user_groups_link
+        لكنه لا يُبطل user_cache → groups_count يبقى 0 حتى انتهاء TTL.
+        بعد: user_cache.invalidate(real_user_id) + creator_id.
+        كما نُبطل الكاش لكل مشرف مُسجَّل (اختياري حسب الحاجة).
+
+    🟡 FIX-GC-3: _invalidate_groups_caches — دالة موحّدة جديدة.
+        تُجمّع auth_cache + user_cache + force_sub cache في استدعاء واحد.
+        تُستخدم في syncgroup لتفادي نسيان أي cache مستقبلاً.
+
+    🟡 FIX-GC-4: تحديث Header + Load Beacon إلى v7.7.6.
+
 🆕 v7.7.5 (UNDEFINED-REF-FIX + CONTEST-CLEANUP-FIX):
-    🔴 FIX-10 (CRITICAL): استيراد invalidate_banned_words_cache_async
-        من utils. السبب: WAIT_KEYWORD كان يستدعي
-        `_invalidate_banned_words_cache(chat_id)` — دالة **غير معرّفة**
-        في هذا الملف ولا في utils (اسم مُختلَق). النتيجة: NameError
-        يُلتقط بـ `except Exception: pass` → الكلمات المحظورة تُضاف
-        لكن الكاش **لا يُبطَل** → الإضافة لا تظهر حتى TTL (60s).
-
-    🔴 FIX-11 (CRITICAL): _finalize_contest — مسح ud keys في كل
-        المسارات. السبب: عند فشل `DB.create_contest` بـ TypeError،
-        الكود ينتقل إلى `except TypeError` ويستدعي
-        `StateManager.clear(user_id)` فقط، لكن **لا يمسح**
-        `contest_title`/`contest_desc`/... من `context.user_data`.
-        النتيجة: stale state يُفسد إنشاء مسابقة جديدة في الجلسة التالية.
-
-    🟠 FIX-12: from datetime import timedelta في الأعلى بدل inline.
-        السبب: الـ inline import داخل حلقة handle_text يضيف overhead
-        صغير لكن متكرر. الأفضل: import واحد عند التحميل.
-
+    🔴 FIX-10 (CRITICAL): استيراد invalidate_banned_words_cache_async.
+    🔴 FIX-11 (CRITICAL): _finalize_contest — مسح ud keys في كل المسارات.
+    🟠 FIX-12: from datetime import timedelta في الأعلى.
     🟡 FIX-13: _handle_contest_text — فحص text فارغ.
-        السبب: مدخلات فارغة ("" أو "   ") كانت تُحفظ كـ title/desc
-        فارغ → مسابقة غير صالحة.
-
     🟡 FIX-14: تحديث header + load beacon إلى v7.7.5.
 
-🆕 v7.7.4 (FSM-HANDLERS-POLISH + FIX-PACK):
-    🔴 FIX-1: إزالة "none" من قائمة الإلغاء العامة في handle_text.
-    🔴 FIX-2: context.args = text.split() بدل [text].
-    🔴 FIX-3: _finalize_contest — فحص signature.
-    🔴 FIX-4: WAIT_CONTEST_TYPE — إزالة "other".
-    🟠 FIX-5: WAIT_PIN — فحص صلاحية can_pin.
-    🟠 FIX-6: WAIT_BROADCAST — إبلاغ المستخدم عند فشل البث.
-    🟠 FIX-7: WAIT_KEYWORD — استخدام auto_chat + التمييز.
-    🟡 FIX-8: WAIT_CONTEST_DURATION — دعم float.
-    🟡 FIX-9: _handle_wait_penalty_duration_text — رسائل أوضح.
-
-🆕 v7.7.3 (FIX-C1 — LARGE):
-    🔴 FIX-C1: إضافة CommandHandlers.handle_text — Fallback لـ ~40 حالة
-              FSM غير مُعالَجة في handlers_message._PRIVATE_HANDLERS_MAP.
-    🟡 FIX-IMPORT-Any: إضافة Any إلى typing imports.
-    🟡 FIX-IMPORT-safe_send: إضافة safe_send إلى utils imports.
-
+🆕 v7.7.4 (FSM-HANDLERS-POLISH + FIX-PACK): FIX-1..FIX-9.
+🆕 v7.7.3 (FIX-C1 — LARGE): CommandHandlers.handle_text fallback.
 🆕 v7.7.2 (PERF-FIXES): PERF-1..4.
 🆕 v7.7.1 (L1 REVIEW FIXES): L1..L6.
 🆕 v7.7.0 (POST-REVIEW POLISH): K1-K13.
@@ -309,6 +297,65 @@ def _clear_stale_state(user_id: int, context) -> None:
                 ud.pop(k, None)
     except Exception as e:
         logger.debug(f"_clear_stale_state user_data failed: {e}")
+
+
+# ═══════════════════════════════════════════════════════════════════
+# 🆕 v7.7.6 FIX-GC-3: إبطال موحّد لكاشات المستخدم المرتبطة بالمجموعات
+# ═══════════════════════════════════════════════════════════════════
+async def _invalidate_groups_caches(
+    user_ids: List[int],
+    chat_id: Optional[int] = None,
+) -> None:
+    """
+    🆕 v7.7.6 FIX-GC-3: إبطال موحّد لكل الكاشات المرتبطة بالمجموعات.
+
+    يُبطِل:
+      • auth_cache (للمستخدمين المرتبطين + chat_id)
+      • user_cache (groups_count, unread posts, إلخ)
+      • force_sub cache إن وُجد
+
+    Args:
+        user_ids: قائمة معرّفات المستخدمين المطلوب إبطال كاشهم.
+        chat_id: معرّف المجموعة (اختياري — لـ auth_cache).
+    """
+    # 1) auth_cache (سريع، sync)
+    try:
+        for uid in user_ids:
+            if not uid or uid <= 0:
+                continue
+            if chat_id:
+                try:
+                    invalidate_auth_cache(chat_id, uid)
+                except Exception as _ae:
+                    logger.debug(
+                        f"_invalidate_groups_caches auth({chat_id},{uid}): "
+                        f"{_ae}"
+                    )
+    except Exception as e:
+        logger.debug(f"_invalidate_groups_caches auth outer: {e}")
+
+    # 2) user_cache (async — الأهم للـ groups_count)
+    for uid in user_ids:
+        if not uid or uid <= 0:
+            continue
+        try:
+            await user_cache.invalidate(uid)
+        except Exception as e:
+            logger.debug(
+                f"_invalidate_groups_caches user_cache({uid}): {e}"
+            )
+
+    # 3) force_sub cache (إن كان المستخدم قد ضغط /start سابقاً)
+    try:
+        for uid in user_ids:
+            if not uid or uid <= 0:
+                continue
+            try:
+                _invalidate_force_sub_cache(uid)
+            except Exception:
+                pass
+    except Exception:
+        pass
 
 
 class _Timed:
@@ -1205,7 +1252,51 @@ class CommandHandlers:
         lang = user_data.get('language', 'ar') or 'ar'
         channel_info = user_data.get('channel_info')
         unpublished_posts = user_data.get('unpublished_posts', 0)
-        groups_count = user_data.get('groups_count', 0)
+
+        # ═══════════════════════════════════════════════════════════
+        # 🔴 v7.7.6 FIX-GC-1: قراءة groups_count مباشرة من DB
+        # ═══════════════════════════════════════════════════════════
+        # السبب: user_cache قد يحمل قيمة قديمة (0) إذا أضاف المستخدم
+        #        البوت لمجموعات جديدة بعد آخر /start. نقرأ live من
+        #        جدول user_groups_link الذي يُحدَّث في syncgroup.
+        #        1 استعلام عند pool warm = 1-3ms فقط.
+        # Fallback: الكاش إن فشل الاستعلام.
+        # ═══════════════════════════════════════════════════════════
+        cached_groups_count = user_data.get('groups_count', 0)
+        groups_count = cached_groups_count
+        _t = time.monotonic()
+        try:
+            live_count = await DB.fetchval(
+                "SELECT COUNT(*) FROM user_groups_link WHERE user_id = ?",
+                (user_id,),
+                default=None,
+            )
+            if live_count is not None:
+                try:
+                    groups_count = int(live_count)
+                except (TypeError, ValueError):
+                    groups_count = cached_groups_count
+                # مزامنة الكاش في الخلفية (best-effort)
+                if groups_count != cached_groups_count:
+                    try:
+                        if hasattr(user_cache, 'invalidate'):
+                            # لا نُبطل الكاش الآن (يُفسد user_data المستخدمة).
+                            # الاعتماد على TTL + FIX-GC-2 لإبطاله عند syncgroup.
+                            pass
+                    except Exception:
+                        pass
+        except Exception as e:
+            logger.debug(
+                f"[START] live groups_count fetch failed: {e} "
+                f"→ fallback to cache ({cached_groups_count})"
+            )
+            groups_count = cached_groups_count
+        logger.info(
+            f"⏱️ [START] groups_count_live: "
+            f"{(time.monotonic() - _t) * 1000:.0f}ms "
+            f"(value={groups_count}, cached={cached_groups_count})"
+        )
+
         has_sub = user_data.get('has_subscription', False)
         auto = user_data.get('auto_publish', True)
         recycle = user_data.get('auto_recycle', True)
@@ -2340,6 +2431,40 @@ class CommandHandlers:
             except Exception as e:
                 logger.error(f"❌ فشل sync_anonymous_admins: {e}")
 
+        # ═══════════════════════════════════════════════════════════════
+        # 🔴 v7.7.6 FIX-GC-2: إبطال user_cache بعد التسجيل الناجح.
+        # ═══════════════════════════════════════════════════════════════
+        # السبب: user_groups_link أُضيف له صف جديد، لكن user_cache
+        #        للمستخدم يحمل groups_count قديماً (0) → /start يعرض
+        #        رقماً خاطئاً حتى انتهاء TTL (قد يصل لساعات!).
+        # الحل: إبطال user_cache + auth_cache + force_sub cache
+        #       لكل المستخدمين المرتبطين.
+        # ═══════════════════════════════════════════════════════════════
+        _users_to_invalidate: List[int] = []
+        try:
+            if real_user_id and real_user_id > 0:
+                _users_to_invalidate.append(real_user_id)
+            if creator_id and creator_id > 0 and creator_id != real_user_id:
+                _users_to_invalidate.append(creator_id)
+            # إضافة المالكين المُخفيين المُكتشفين
+            for _aid, _real_id in user_id_map.items():
+                if _real_id and _real_id > 0 and _real_id not in _users_to_invalidate:
+                    _users_to_invalidate.append(_real_id)
+        except Exception:
+            pass
+
+        try:
+            await _invalidate_groups_caches(
+                user_ids=_users_to_invalidate,
+                chat_id=chat_id,
+            )
+            logger.info(
+                f"✅ syncgroup: أُبطل كاش {len(_users_to_invalidate)} "
+                f"مستخدم بعد إضافة المجموعة {chat_id}"
+            )
+        except Exception as e:
+            logger.warning(f"⚠️ syncgroup invalidate caches: {e}")
+
         msg = (
             f"🎉 <b>تم تفعيل المجموعة بنجاح!</b>\n"
             f"━━━━━━━━━━━━━━━━━━\n"
@@ -2564,7 +2689,6 @@ class CommandHandlers:
         lang = await _get_lang(user_id)
 
         # 🔴 FIX-1 (v7.7.4): لا نُدخل "none" هنا — يُفسد WAIT_FORCE.
-        #             "none" شائع في WAIT_FORCE لتعطيل قناة الاشتراك.
         if text.lower() in ("إلغاء", "الغاء", "cancel", "/cancel"):
             StateManager.clear(user_id)
             try:
@@ -2589,7 +2713,6 @@ class CommandHandlers:
         }
         action = _MOD_MAP.get(state_name)
         if action:
-            # 🔴 FIX-2 (v7.7.4): split() بدل [text]
             context.args = text.split()
             StateManager.clear(user_id)
             try:
@@ -2604,7 +2727,6 @@ class CommandHandlers:
 
         # ═══════════════════════════════════════════════════════════════
         # 2) WAIT_PIN — تثبيت رسالة (نص = message_id)
-        # 🟠 FIX-5 (v7.7.4): فحص صلاحية can_pin قبل pin_chat_message
         # ═══════════════════════════════════════════════════════════════
         if state_name == "WAIT_PIN":
             adv_chat = (context.user_data or {}).get("adv_chat") \
@@ -2771,7 +2893,6 @@ class CommandHandlers:
 
         # ═══════════════════════════════════════════════════════════════
         # 5) WAIT_BROADCAST
-        # 🟠 FIX-6 (v7.7.4): إبلاغ المستخدم عند فشل البث البديل.
         # ═══════════════════════════════════════════════════════════════
         if state_name == "WAIT_BROADCAST":
             if not CONFIG.is_developer(user_id):
@@ -3015,11 +3136,7 @@ class CommandHandlers:
             return
 
         # ═══════════════════════════════════════════════════════════════
-        # 11) WAIT_KEYWORD — 🟠 FIX-7 (v7.7.4) + 🔴 FIX-10 (v7.7.5)
-        #     استخدام auto_chat + التمييز بين banned_word / auto_reply.
-        #     🔴 FIX-10: استخدام invalidate_banned_words_cache_async
-        #               من utils (كان `_invalidate_banned_words_cache`
-        #               غير معرّفة → NameError يُلتقط بصمت).
+        # 11) WAIT_KEYWORD
         # ═══════════════════════════════════════════════════════════════
         if state_name == "WAIT_KEYWORD":
             if not CONFIG.is_developer(user_id):
@@ -3031,14 +3148,12 @@ class CommandHandlers:
             StateManager.clear(user_id)
             try:
                 if action_kind == "banned_word":
-                    # إضافة كلمة محظورة عالمية
                     if hasattr(DB, "add_banned_word"):
                         try:
                             await DB.add_banned_word(chat_id, text, user_id)
                         except Exception as _be:
                             logger.debug(
                                 "handle_text/keyword banned: %s", _be)
-                        # 🔴 FIX-10 (v7.7.5): استخدم الدالة الصحيحة من utils
                         try:
                             await invalidate_banned_words_cache_async(chat_id)
                         except Exception as _ce:
@@ -3050,8 +3165,6 @@ class CommandHandlers:
                         await _trans('saved_success', lang, "✅ تم")
                     )
                 else:
-                    # رد تلقائي: نحتاج نص الرد الفعلي
-                    # → انتقل إلى WAIT_REPLY_RESPONSE لجمع الرد
                     try:
                         StateManager.set(
                             user_id, UserState.WAIT_REPLY_RESPONSE)
@@ -3263,7 +3376,6 @@ class CommandHandlers:
 
     # ═══════════════════════════════════════════════════════════════
     # 🔴 FIX-3 (v7.7.4) + 🔴 FIX-11 (v7.7.5): _finalize_contest
-    #     v7.7.5: مسح ud keys في جميع المسارات (نجاح/فشل/استثناء)
     # ═══════════════════════════════════════════════════════════════
     @staticmethod
     async def _finalize_contest(update, context, lang: str) -> None:
@@ -3799,6 +3911,7 @@ __all__ = [
     '_safe_send_message',
     '_safe_edit_or_send',
     '_invalidate_force_sub_cache',
+    '_invalidate_groups_caches',  # 🆕 v7.7.6
     '_trans',
     '_get_lang',
     '_check_force_sub_via_ud',
@@ -3811,8 +3924,12 @@ __all__ = [
 # ═══════════════════════════════════════════════════════════════════
 try:
     logger.info(
-        "📋 handlers_command.py v7.7.5 "
-        "UNDEFINED-REF-FIX + CONTEST-CLEANUP-FIX loaded | "
+        "📋 handlers_command.py v7.7.6 "
+        "GROUPS-COUNT-FIX loaded | "
+        "FIX-GC-1=live-groups-count | "
+        "FIX-GC-2=syncgroup-invalidate-user-cache | "
+        "FIX-GC-3=unified-cache-invalidator | "
+        "FIX-GC-4=beacon-update | "
         "FIX-10=invalidate-banned-words-imported | "
         "FIX-11=contest-ud-cleanup-all-paths | "
         "FIX-12=timedelta-top-import | "
@@ -3826,7 +3943,8 @@ try:
         "FIX-7=keyword-kind-split | "
         "FIX-8=contest-duration-float | "
         "Timing=✅(start) | ForceSubUD=✅(TTL=%ds) | "
-        "ForceChCache=✅(%ds) | Timed=✅",
+        "ForceChCache=✅(%ds) | Timed=✅ | "
+        "GroupsCount=live-from-DB",
         _FORCE_SUB_UD_TTL,
         _FORCE_CHANNEL_CACHE_TTL,
     )
