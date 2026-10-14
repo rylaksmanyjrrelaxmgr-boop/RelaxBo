@@ -10,6 +10,8 @@ handlers_callback.py - معالج الأزرار (v9.7.29-BACKUP-BLOCKING-FIX)
        → asyncio.wait_for(..., timeout=_BACKUP_TIMEOUT_SECONDS).
     🟠 FIX-CB-3: _show_restore_backups — glob+stat sync → to_thread.
     🟡 FIX-CB-4: except (AttributeError, Exception) → except Exception.
+    🔴 FIX-CB-5: تصحيح SyntaxError في _show_restore_backups
+       (أقواس زائدة حول callback_data=).
 
 🆕 v9.7.28-CONTEST-JOIN-FIX — محفوظ:
     🔴 FIX-CJ-1: زر "المشاركة" في المسابقات:
@@ -3680,7 +3682,7 @@ class CallbackHandlers:
             except Exception: pass
 
     # ═════════════════════════════════════════════════════════════════
-    # 🟠 v9.7.29 FIX-CB-3: _show_restore_backups — glob/stat في thread
+    # 🟠 v9.7.29 FIX-CB-3 + 🔴 FIX-CB-5: _show_restore_backups
     # ═════════════════════════════════════════════════════════════════
     @staticmethod
     async def _show_restore_backups(update, context, query, user_id, lang):
@@ -3688,6 +3690,7 @@ class CallbackHandlers:
         عرض قائمة النسخ الاحتياطية.
 
         🟠 FIX-CB-3: glob+stat كانت sync في async → to_thread.
+        🔴 FIX-CB-5: إصلاح SyntaxError (أقواس زائدة حول callback_data).
         """
         try:
             PATHS.BACKUPS.mkdir(parents=True, exist_ok=True)
@@ -3745,10 +3748,10 @@ class CallbackHandlers:
                 text += (f"📁 <code>{_html.escape(info['name'])}</code>\n"
                          f"   📅 {info['mtime']} • "
                          f"💾 {info['size_kb']:.1f} KB\n\n")
+                # 🔴 FIX-CB-5: إزالة الأقواس الزائدة حول callback_data
                 kb.append([InlineKeyboardButton(
                     f"♻️ استرجاع {info['name'][:30]}",
-                    callback_data=(
-                        f"admin_restore_file:{info['name']}")])
+                    callback_data=f"admin_restore_file:{info['name']}")])
             kb.append([InlineKeyboardButton(
                 await _trans('upload_backup_btn', lang, "📤 رفع نسخة"),
                 callback_data="admin_upload_backup")])
@@ -5240,6 +5243,7 @@ try:
             "FIX-CB-2: backup_database timeout=%.0fs | "
             "FIX-CB-3: _show_restore_backups glob/stat via to_thread | "
             "FIX-CB-4: except (AttributeError, Exception) → Exception | "
+            "FIX-CB-5: _show_restore_backups SyntaxError fixed | "
             "KEPT FIX-CJ-1: contest_join:<id> + correct args order | "
             "max_tasks_per_user=%d",
             _BACKUP_TIMEOUT_SECONDS, _MAX_TASKS_PER_USER)
