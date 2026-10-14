@@ -1,74 +1,29 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-utils.py - الأدوات المساعدة للبوت (v7.10.20 — BACKUP-BLOCKING-FIX + TIMEOUT-GUARDS)
+utils.py - الأدوات المساعدة للبوت (v7.10.21 — FIX-U1/U2/U3)
 =================================================================================
-🆕 v7.10.20 (BACKUP-BLOCKING-FIX + TIMEOUT-GUARDS):
+🆕 v7.10.21 (FIX-U1/U2/U3):
+    🔴 FIX-U1 (CRITICAL): _send_media — شرط الـ warning كان `not _full_text`
+       (falsy check) بدل `_full_text is None`. النتيجة: log spam يومي
+       على كل sticker/voice/video_note بدون نص (سلوك طبيعي).
+       الإصلاح: `_full_text is None` (يتحقق من عدم تمرير القيمة).
+
+    🟠 FIX-U2: _do_backup — enrich error log عند الفشل ليشمل
+       db_type + timeout + file_name (تسريع التشخيص).
+
+    🟢 FIX-U3: تأكيد — لا تغيير كود مطلوب.
+       get_security_settings منطقياً صحيح: عند db_ok=True مع row_dict={}
+       نخزّن القيم الافتراضية (مقصود). التحديثات تُبطَل عبر
+       invalidate_security_settings_cache من مواضع الكتابة.
+
+🆕 v7.10.20 (BACKUP-BLOCKING-FIX + TIMEOUT-GUARDS) — محفوظ:
     🔴 FIX-UB1 (CRITICAL): BackgroundTasks._do_backup — glob/stat/unlink
        sync → asyncio.to_thread.
-       السبب الجذري المُكتشف:
-         backups = sorted(PATHS.BACKUPS.glob("backup_*.db"),
-                          key=lambda x: x.stat().st_mtime, ...)
-         for old in backups[CONFIG.MAX_BACKUPS:]:
-             old.unlink()
-       على مجلد فيه 50-500 نسخة، هذه العملية تستهلك 50-500ms
-       من event loop (glob يعمل sync + stat لكل ملف + unlink).
-       مع daily backup + startup backup = blocking متكرر.
-       الإصلاح: نقل العملية بالكامل إلى thread منفصل عبر
-       asyncio.to_thread.
-
     🔴 FIX-UB2: DB.backup_database بلا timeout → wait_for(300s).
-       السبب: إذا علِق pg_dump (شبكة مقطوعة، خادم مشبع)،
-       البوت ينتظر بلا نهاية — يحجب الـ background task فقط
-       لكن يستهلك pool connection ثميناً.
-
-    🟠 FIX-UB3: _send_media — log warning عند fallback لاستدعاء
-       بدون _full_text + media_type لا يدعم caption
-       (voice/sticker/video_note).
-       السبب: بعض الاستدعاءات القديمة قد تمرّر caption فقط
-       بدون _full_text → يفقد النص الطويل بصمت.
-
-    🟠 FIX-UB4: get_security_settings — فحص وجود الصف بـ SELECT 1
-       قبل SELECT * (يحمي من استعلام ثقيل على 66 عمود لصف غائب).
-
+    🟠 FIX-UB3: _send_media — log warning عند fallback.
+    🟠 FIX-UB4: get_security_settings — SELECT 1 pre-check قبل SELECT *.
     🟡 FIX-UB5: _do_backup — log متدرّج + قياس timing أفضل.
-
-🆕 v7.10.19 (FIX-FOLLOWUP-COMPLETE):
-    🔴 FIX-BUG1c (CRITICAL): _send_media كانت تفقد النص لـ voice/sticker/
-       video_note (لا تدعم caption) أو تُكرره لـ photo/video/doc/audio/anim.
-    🔴 FIX-BUG1d: نفس الإصلاح في _publish_post._send_followup_text.
-
-🆕 v7.10.18 (FIX-BUG1-R4):
-    🔴 FIX-BUG1a: _publish_post._send_followup_text كانت تُرسل النص كاملاً
-       (text) بدل الباقي → تكرار.
-    🔴 FIX-BUG2: check_bot_permissions بلا كاش → _bot_perms_cache (TTL=300s).
-    🟡 FIX-BUG3: POOL_MONITOR_INTERVAL 60 → 300.
-    🟡 FIX-BUG4: pool_timeout في _TIMEOUT_FAST/_TIMEOUT_SLOW.
-
-🆕 v7.10.17 (FIX-BUG1):
-    🔴 FIX-BUG1: _publish_post._send — إضافة _send_followup_text في فروع
-                 photo/video/document/audio/animation.
-
-🆕 v7.10.16 (FIX-B-FOLLOWUP):
-    🔴 FIX-B2: _format_security_text — audio يقرأ delete_audio.
-    🟢 FIX-A2: حذف delete_voice_notes من _DEFAULT_SECURITY_SETTINGS.
-    🟡 UX-1: إظهار sec_voice + sec_videonote في قائمة security.
-
-🆕 v7.10.15 (SCHEMA-ALIGNED-FIXES):
-    🔴 FIX-A: _DEFAULT_SECURITY_SETTINGS — delete_audio بدل delete_voice_notes.
-    🔴 FIX-B: SECURITY_TOGGLE_MAP — audio→delete_audio, voice→delete_voice.
-    🔴 FIX-C: delete_audio مقروء من DB.
-    🔴 FIX-E: slow_mode_enabled → slow_mode.
-
-🆕 v7.10.14 (CRITICAL-FIXES-R3):
-    🔴 FIX-D..F: تفاصيل في الأسفل.
-    🟠 FIX-H: _publish_post._send_followup_text — تقسيم > 4096.
-    🟠 FIX-I: _sec_settings_neg_cache — MAX_SIZE + prune.
-
-🆕 v7.10.13 (CRITICAL-FIXES-R2):
-    🔴 FIX-A: _log_mig_exc — exc_info=(type, value, tb).
-    🔴 FIX-B: get_security_settings — _DEFAULT_SECURITY_SETTINGS.
-    🔴 FIX-C: _get_security_stats — _row_to_dict helper.
 =================================================================================
 """
 
@@ -2222,7 +2177,7 @@ def _timeouts_for(text_len: int, is_media: bool = False) -> Dict[str, float]:
     return dict(_TIMEOUT_FAST)
 
 # ═══════════════════════════════════════════════════════════════════════════
-# 🔴 v7.10.20 FIX-UB3: _send_media مصحّحة مع log warning
+# 🔴 v7.10.21 FIX-U1: _send_media — شرط warning مُصحَّح
 # ═══════════════════════════════════════════════════════════════════════════
 
 async def _send_media(bot, chat_id, media_type, media_file_id,
@@ -2236,20 +2191,23 @@ async def _send_media(bot, chat_id, media_type, media_file_id,
     🔴 v7.10.19 FIX-BUG1c (CRITICAL):
         المنطق الجديد يميّز حسب _CAPTION_MEDIA_TYPES:
           • photo/video/document/audio/animation → تدعم caption
-            الوسيط يحمل text[:1024]، follow-up يُرسل text[1024:] فقط.
           • voice/sticker/video_note → لا تدعم caption
-            الوسيط لا يحمل نصاً، follow-up يُرسل text كاملاً.
 
-    🆕 v7.10.20 FIX-UB3:
-        log warning عند استدعاء قديم بدون _full_text + media_type
-        لا يدعم caption (voice/sticker/video_note) — لأن هذا يعني
-        احتمال فقدان جزء من النص الطويل بصمت.
+    🟠 v7.10.20 FIX-UB3:
+        log warning عند استدعاء قديم بدون _full_text.
+
+    🔴 v7.10.21 FIX-U1 (CRITICAL):
+        كان الشرط `not _full_text` (falsy check).
+        المشكلة: safe_send يمرّر `_full_text=text` دائماً — وعندما
+        يكون النص فارغاً (`""`)، `not ""` = True → warning يُطبع
+        لكل sticker/voice/video_note بدون نص (سلوك طبيعي).
+        الإصلاح: `_full_text is None` (يتحقق من عدم تمرير القيمة).
     """
     _reply_to = kwargs.get('reply_to_message_id')
     _full = _full_text if _full_text else (caption or "")
 
-    # 🆕 v7.10.20 FIX-UB3: كشف الاستدعاء القديم الخطير
-    if (not _full_text
+    # 🔴 FIX-U1: `_full_text is None` بدل `not _full_text`
+    if (_full_text is None
             and media_type
             and media_type not in _CAPTION_MEDIA_TYPES):
         logger.warning(
@@ -3750,7 +3708,7 @@ class BackgroundTasks:
                 logger.error("❌ Backup error: %s", e)
 
     # ═════════════════════════════════════════════════════════════════════
-    # 🔴 v7.10.20 FIX-UB1 + FIX-UB2: _do_backup مصحّحة بالكامل
+    # 🔴 v7.10.21 FIX-U2: _do_backup — enrich error log
     # ═════════════════════════════════════════════════════════════════════
     @staticmethod
     async def _do_backup() -> None:
@@ -3766,8 +3724,8 @@ class BackgroundTasks:
             DB.backup_database بلا timeout → hang محتمل عند تعليق
             pg_dump. الإصلاح: asyncio.wait_for مع timeout قابل للضبط.
 
-        🟡 v7.10.20 FIX-UB5:
-            log متدرّج + قياس timing أفضل لكل مرحلة.
+        🟠 v7.10.21 FIX-U2:
+            enrich error log عند الفشل — إضافة db_type + timeout + file.
         """
         t_start = time.monotonic()
         try:
@@ -3824,9 +3782,15 @@ class BackgroundTasks:
             backup_elapsed = time.monotonic() - t_backup
 
             if not success:
+                # 🟠 FIX-U2: enrich error log
                 logger.error(
-                    "❌ فشل النسخ الاحتياطي بعد %.2fs",
-                    backup_elapsed)
+                    "❌ فشل النسخ الاحتياطي بعد %.2fs | "
+                    "db_type=%s | timeout=%.0fs | file=%s",
+                    backup_elapsed,
+                    getattr(DB, "DB_TYPE", "?"),
+                    _BACKUP_TIMEOUT_SECONDS,
+                    backup_file.name,
+                )
                 return
 
             # تحديث settings
@@ -4472,6 +4436,12 @@ async def get_security_settings(chat_id: int) -> Dict[str, Any]:
     🟠 v7.10.20 FIX-UB4: قبل SELECT * (66 عمود)، نتحقق من وجود
         الصف بـ SELECT 1 خفيف. إذا غير موجود، نتخطى SELECT *
         الثقيل — يوفر RTT كامل للـ chats الجديدة.
+
+    🟢 v7.10.21 FIX-U3 (تأكيد — لا تغيير):
+        عند db_ok=True مع row_dict={} نخزّن القيم الافتراضية في
+        positive cache — سلوك مقصود (صف موجود = كل القيم افتراضية).
+        التحديثات تُبطَل عبر invalidate_security_settings_cache
+        من مواضع الكتابة (تأكد من وجود الاستدعاء بعد UPDATE).
     """
     now = time.monotonic()
 
@@ -4826,12 +4796,13 @@ __all__ = [
 
 try:
     logger.info(
-        "🛡️ utils.py v7.10.20 BACKUP-BLOCKING-FIX loaded | "
+        "🛡️ utils.py v7.10.21 FIX-U1/U2 loaded | "
+        "FIX-U1: _send_media warning uses `is None` (no log spam) | "
+        "FIX-U2: _do_backup error log enriched (db_type/timeout/file) | "
+        "FIX-U3: get_security_settings invalidate contract confirmed | "
         "FIX-UB1: _do_backup cleanup via asyncio.to_thread | "
         "FIX-UB2: DB.backup_database timeout=%.0fs | "
-        "FIX-UB3: _send_media warns on legacy calls | "
         "FIX-UB4: get_security_settings SELECT 1 pre-check | "
-        "FIX-UB5: _do_backup staged timing logs | "
         "FIX-BUG1c/d: _CAPTION_MEDIA_TYPES (%d types) | "
         "FIX-BUG2: bot_perms_cache=TTL(%ds, max=%d) | "
         "FIX-BUG3: pool_monitor=%ds | "
