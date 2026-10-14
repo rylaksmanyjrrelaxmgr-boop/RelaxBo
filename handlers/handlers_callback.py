@@ -1,19 +1,22 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-handlers_callback.py - معالج الأزرار (v9.7.28-CONTEST-JOIN-FIX)
+handlers_callback.py - معالج الأزرار (v9.7.29-BACKUP-BLOCKING-FIX)
 =====================================================================
-🆕 v9.7.28-CONTEST-JOIN-FIX:
-    🔴 FIX-CJ-1: إصلاح زر "المشاركة" في المسابقات.
-       السبب: الزر يُرسل `contest_join:<id>` (يحمل ID ديناميكي)،
-              بينما المعالج كان يقارن بـ `data == "contest_join"`
-              (exact match فقط) → يسقط إلى fallback "not_available".
-       الإصلاح:
-         • قبول `contest_join` أو `contest_join:<id>`
-         • استخراج contest_id من data بعد ':' (أو user_data)
-         • تمرير الوسائط بالترتيب الصحيح:
-              DB.join_contest(contest_id, user_id)
-         • فحص check_contest_joined قبل المحاولة.
+🆕 v9.7.29-BACKUP-BLOCKING-FIX:
+    🔴 FIX-CB-1: _do_backup — glob/stat/unlink كان sync داخل async
+       → asyncio.to_thread. نفس مشكلة FIX-UB1 في utils.py.
+    🔴 FIX-CB-2: _do_backup — DB.backup_database بلا timeout
+       → asyncio.wait_for(..., timeout=_BACKUP_TIMEOUT_SECONDS).
+    🟠 FIX-CB-3: _show_restore_backups — glob+stat sync → to_thread.
+    🟡 FIX-CB-4: except (AttributeError, Exception) → except Exception.
+
+🆕 v9.7.28-CONTEST-JOIN-FIX — محفوظ:
+    🔴 FIX-CJ-1: زر "المشاركة" في المسابقات:
+       • قبول `contest_join` أو `contest_join:<id>`
+       • استخراج contest_id من data بعد ':' (أو user_data)
+       • join_contest(contest_id, user_id) بالترتيب الصحيح
+       • فحص check_contest_joined قبل المحاولة
 =====================================================================
 """
 import asyncio, importlib, logging, json, time, shutil, os, re
@@ -141,6 +144,10 @@ except ImportError:
     from handlers_command import CommandHandlers, _invalidate_force_sub_cache
 
 logger = logging.getLogger(__name__)
+
+# 🟠 FIX-CB-2: timeout للنسخ الاحتياطي (يُقرأ من CONFIG أو default=300)
+_BACKUP_TIMEOUT_SECONDS = float(
+    getattr(CONFIG, 'BACKUP_TIMEOUT_SECONDS', 300.0))
 
 try:
     from .handlers_callback_base import (
@@ -3560,18 +3567,35 @@ class CallbackHandlers:
                     bot=context.bot)
             except Exception: pass
 
+    # ═════════════════════════════════════════════════════════════════
+    # 🔴 v9.7.29 FIX-CB-1 + FIX-CB-2: _do_backup مُصحَّحة
+    # ═════════════════════════════════════════════════════════════════
     @staticmethod
     async def _do_backup(context, user_id, lang):
+        """
+        نسخة احتياطية عبر الزر.
+
+        🔴 FIX-CB-1: glob/stat/unlink → asyncio.to_thread.
+        🔴 FIX-CB-2: DB.backup_database مع wait_for(timeout).
+        """
         try:
             PATHS.BACKUPS.mkdir(parents=True, exist_ok=True)
             backup_file = (PATHS.BACKUPS /
                 f"backup_"
-                f"{TimeUtils.mecca_now().strftime('%Y%m%d_%H%M%S')}.db")
+                f"{TimeUtils.utc_now().strftime('%Y%m%d_%H%M%S')}.db")
             success = False
             if hasattr(DB, "backup_database"):
                 try:
-                    result = await DB.backup_database(backup_file)
+                    # 🔴 FIX-CB-2: timeout لمنع hang
+                    result = await asyncio.wait_for(
+                        DB.backup_database(backup_file),
+                        timeout=_BACKUP_TIMEOUT_SECONDS)
                     success = bool(result)
+                except asyncio.TimeoutError:
+                    logger.error(
+                        "❌ DB.backup_database timeout بعد %.0fs",
+                        _BACKUP_TIMEOUT_SECONDS)
+                    success = False
                 except Exception as e:
                     logger.warning(f"DB.backup_database: {e}")
                     success = False
@@ -3594,15 +3618,29 @@ class CallbackHandlers:
                     await DB.set_setting(
                         'last_backup', TimeUtils.sql_iso())
                 except Exception: pass
+                # 🔴 FIX-CB-1: glob/stat/unlink في thread منفصل
                 try:
-                    backups = sorted(
-                        PATHS.BACKUPS.glob("backup_*.db"),
-                        key=lambda x: x.stat().st_mtime,
-                        reverse=True)
-                    for old in backups[MAX_BACKUPS:]:
-                        try: old.unlink()
-                        except Exception: pass
-                except Exception: pass
+                    def _cleanup_old_backups() -> int:
+                        backups = sorted(
+                            PATHS.BACKUPS.glob("backup_*.db"),
+                            key=lambda x: x.stat().st_mtime,
+                            reverse=True)
+                        removed = 0
+                        for old in backups[MAX_BACKUPS:]:
+                            try:
+                                old.unlink()
+                                removed += 1
+                            except Exception:
+                                pass
+                        return removed
+                    _removed = await asyncio.to_thread(
+                        _cleanup_old_backups)
+                    if _removed:
+                        logger.debug(
+                            "🧹 cleanup old backups: %d محذوف",
+                            _removed)
+                except Exception as _ce:
+                    logger.debug("cleanup old backups: %s", _ce)
                 text = _fmt(await _trans(
                     'backup_success_full', lang,
                     "✅ <b>تم إنشاء نسخة احتياطية</b>\n"
@@ -3641,15 +3679,52 @@ class CallbackHandlers:
                     f"❌ {str(e)[:100]}")
             except Exception: pass
 
+    # ═════════════════════════════════════════════════════════════════
+    # 🟠 v9.7.29 FIX-CB-3: _show_restore_backups — glob/stat في thread
+    # ═════════════════════════════════════════════════════════════════
     @staticmethod
     async def _show_restore_backups(update, context, query, user_id, lang):
+        """
+        عرض قائمة النسخ الاحتياطية.
+
+        🟠 FIX-CB-3: glob+stat كانت sync في async → to_thread.
+        """
         try:
             PATHS.BACKUPS.mkdir(parents=True, exist_ok=True)
-            backups = sorted(
-                PATHS.BACKUPS.glob("backup_*.db"),
-                key=lambda x: x.stat().st_mtime,
-                reverse=True)[:MAX_BACKUPS]
-            if not backups:
+
+            def _collect_backups():
+                """🟠 FIX-CB-3: كل عمليات I/O في thread منفصل."""
+                try:
+                    items = sorted(
+                        PATHS.BACKUPS.glob("backup_*.db"),
+                        key=lambda x: x.stat().st_mtime,
+                        reverse=True)[:MAX_BACKUPS]
+                except Exception:
+                    return []
+                result = []
+                for b in items:
+                    try:
+                        st = b.stat()
+                        dt_utc = datetime.fromtimestamp(
+                            st.st_mtime, tz=timezone.utc)
+                        mtime = TimeUtils.utc_to_mecca(
+                            dt_utc).strftime('%Y-%m-%d %H:%M')
+                        result.append({
+                            'name': b.name,
+                            'size_kb': st.st_size / 1024,
+                            'mtime': mtime,
+                        })
+                    except Exception as _e:
+                        logger.debug(f"backup stat: {_e}")
+                        result.append({
+                            'name': b.name,
+                            'size_kb': 0,
+                            'mtime': '?',
+                        })
+                return result
+
+            backups_info = await asyncio.to_thread(_collect_backups)
+            if not backups_info:
                 kb = InlineKeyboardMarkup([
                     [InlineKeyboardButton(
                         await _trans('upload_backup_btn', lang,
@@ -3666,22 +3741,14 @@ class CallbackHandlers:
                                  "📦 النسخ الاحتياطية")
             text = f"{title}\n━━━━━━━━━━━━━━━━━━━━━━\n\n"
             kb = []
-            for b in backups:
-                try:
-                    st = b.stat()
-                    size_kb = st.st_size / 1024
-                    dt_utc = datetime.fromtimestamp(
-                        st.st_mtime, tz=timezone.utc)
-                    mtime = TimeUtils.utc_to_mecca(dt_utc).strftime(
-                        '%Y-%m-%d %H:%M')
-                except Exception as _e:
-                    logger.debug(f"backup stat: {_e}")
-                    size_kb = 0; mtime = '?'
-                text += (f"📁 <code>{_html.escape(b.name)}</code>\n"
-                         f"   📅 {mtime} • 💾 {size_kb:.1f} KB\n\n")
+            for info in backups_info:
+                text += (f"📁 <code>{_html.escape(info['name'])}</code>\n"
+                         f"   📅 {info['mtime']} • "
+                         f"💾 {info['size_kb']:.1f} KB\n\n")
                 kb.append([InlineKeyboardButton(
-                    f"♻️ استرجاع {b.name[:30]}",
-                    callback_data=f"admin_restore_file:{b.name}")])
+                    f"♻️ استرجاع {info['name'][:30]}",
+                    callback_data=(
+                        f"admin_restore_file:{info['name']}")])
             kb.append([InlineKeyboardButton(
                 await _trans('upload_backup_btn', lang, "📤 رفع نسخة"),
                 callback_data="admin_upload_backup")])
@@ -4054,7 +4121,7 @@ class CallbackHandlers:
             except Exception: pass
 
     # ═══════════════════════════════════════════════════════════════
-    # 🔴 v9.7.28 FIX-CJ-1: _handle_contests — إصلاح زر المشاركة
+    # 🔴 v9.7.28 FIX-CJ-1 (محفوظ): _handle_contests
     # ═══════════════════════════════════════════════════════════════
     @staticmethod
     async def _handle_contests(update, context, query, user_id, lang):
@@ -4113,16 +4180,14 @@ class CallbackHandlers:
                         bot=context.bot)
                 return
 
-            # 🔴 v9.7.28 FIX-CJ-1: قبول "contest_join" أو "contest_join:<id>"
+            # 🔴 FIX-CJ-1: قبول "contest_join" أو "contest_join:<id>"
             if data == "contest_join" or data.startswith("contest_join:"):
-                # استخراج contest_id من data أولاً
                 contest_id = 0
                 if ':' in data:
                     try:
                         contest_id = _coerce_int(data.split(":", 1)[1])
                     except Exception:
                         contest_id = 0
-                # fallback: من user_data (للتوافق الخلفي)
                 if contest_id <= 0:
                     contest_id = _coerce_int(
                         context.user_data.get('contest_id'), 0)
@@ -4986,9 +5051,10 @@ class CallbackHandlers:
                 await safe_edit(query, text, reply_markup=kb,
                     bot=context.bot); return
             if data == CB.ADMIN_EXPORT_REPLIES:
+                # 🟡 FIX-CB-4: except (AttributeError, Exception) → except Exception
                 try:
                     file_path = await DB.export_auto_replies_to_file()
-                except (AttributeError, Exception):
+                except Exception:
                     file_path = None
                 if file_path:
                     try:
@@ -5166,17 +5232,16 @@ try:
             _missing_check.append(_name)
     if _missing_check:
         logger.critical(
-            f"🚨 v9.7.28: دوال مفقودة: {_missing_check}")
+            f"🚨 v9.7.29: دوال مفقودة: {_missing_check}")
     else:
         logger.info(
-            "🛡️ handlers_callback.py v9.7.28-CONTEST-JOIN-FIX | "
-            "FIX-CJ-1: contest_join:<id> pattern + correct "
-            "join_contest(contest_id, user_id) order | "
-            "KEPT: 16/16 methods (fallbacks) | "
-            "v9.7.27: FIX-1..6 (post_list escape, tz-aware, "
-            "sched ownership recheck, _is_banned unified, "
-            "buy_sub parse, toggle_ch _is_banned) | "
+            "🛡️ handlers_callback.py v9.7.29-BACKUP-BLOCKING-FIX | "
+            "FIX-CB-1: _do_backup cleanup via asyncio.to_thread | "
+            "FIX-CB-2: backup_database timeout=%.0fs | "
+            "FIX-CB-3: _show_restore_backups glob/stat via to_thread | "
+            "FIX-CB-4: except (AttributeError, Exception) → Exception | "
+            "KEPT FIX-CJ-1: contest_join:<id> + correct args order | "
             "max_tasks_per_user=%d",
-            _MAX_TASKS_PER_USER)
+            _BACKUP_TIMEOUT_SECONDS, _MAX_TASKS_PER_USER)
 except Exception as _be:
     logger.debug(f"load beacon: {_be}")
