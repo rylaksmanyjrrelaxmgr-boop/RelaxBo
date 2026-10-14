@@ -2,41 +2,62 @@
 # -*- coding: utf-8 -*-
 
 """
-database_tables.py — إنشاء الجداول والفهارس لكل قواعد البيانات (v7.9.8)
+database_tables.py — إنشاء الجداول والفهارس لكل قواعد البيانات (v7.9.9)
 ================================================================================
+🆕 v7.9.9 (BOT-GROUPS-INDEX + MAINTENANCE-COOLDOWN-FIX):
+  🔴 FIX-C12a (HIGH): VACUUM_INTER_TABLE_DELAY_SECONDS 0.1 → 0.05.
+      السبب: `_run_maintenance_postgres` يمر على ~47 جدول/MV.
+      delay=0.1s × 47 = 4.7s إضافية فقط في sleep. خفضها إلى 0.05s
+      يوفر ~2.4s من زمن maintenance الكلي.
+
+  🔴 FIX-C12b (CRITICAL): إضافة `_ensure_critical_small_indexes_postgres`.
+      السبب المُكتشف من السجل:
+        SELECT chat_id, chat_name, username, banned
+        FROM bot_groups WHERE added_by = ?
+        ⏱️ 1.36s  @ bot.py:3724
+      التحليل: bot_groups فيه 44 صف فقط. Seq Scan على 44 صف = <1ms.
+      1.36s يعني إما الفهرس مفقود أو lock contention. الفهارس على
+      bot_groups تُنشأ في `_run_combined_index_checks_postgres`، لكن
+      إذا تأخر هذا (خلفية بعد FIX-DB19)، تصبح الاستعلامات الأولى
+      بدون فهرس.
+      الإصلاح: دالة سريعة تُنشئ الفهارس الحرجة الصغيرة
+      (`idx_bot_groups_added_by` + قائمة CRITICAL_SMALL_INDEXES)
+      بشكل **متزامن** قبل تشغيل maintenance في الخلفية.
+
+  🟠 FIX-C12c: `_create_indexes_postgres` — تسجيل صريح لأسماء
+      الفهارس التي فشل إنشاؤها (بدلاً من العدّاد فقط).
+
+  🟠 FIX-C12d: `_run_maintenance_postgres` — فحص `pg_stat_activity`
+      قبل كل VACUUM. إذا كان هناك استعلام نشط على الجدول (state =
+      'active'), نتخطاه — يمنع lock contention.
+
+  🟡 FIX-C12e: `_run_maintenance_postgres` — cooldown داخلي 1h.
+      السبب: كان يعمل في كل bootstrap (حتى لو سبق أن عمل قبل 5 دقائق).
+      الآن: إذا `last_maintenance_at < 1h` → تخطي.
+
 🆕 v7.9.8 (CORRECTNESS-PERF-HARDENING):
   🔴 C11-A: إضافة "last_startup_checks_at" إلى DEFAULT_SETTINGS
-      (كان يفشل بصمت عند غيابه).
   🔴 C11-B: فحص rollback — إذا DB schema > code version، إنذار صارخ.
   🔴 C11-C: EXPECTED_INDEX_COUNT شرطي عبر env DB_STRICT_INDEX_CHECK.
-  🔴 C11-D: _adapt_cols_for_db — إصلاح منطق INCLUDE لـ MySQL/SQLite
-      (كان ينتج SQL خاطئ عند وجود WHERE + INCLUDE).
-  🔴 C11-E: MYSQL_SKIP_INDEXES تُحسب تلقائياً من الفهارس المتقدمة.
+  🔴 C11-D: _adapt_cols_for_db — إصلاح INCLUDE لـ MySQL/SQLite.
+  🔴 C11-E: MYSQL_SKIP_INDEXES تُحسب تلقائياً.
   🔴 C11-F: _get_table_row_count_postgres — fallback إلى COUNT(*) فعلي.
-  🔴 C11-G: _cleanup_old_admin_logs_postgres — CTE + RETURNING COUNT
-      بدل الاعتماد على نص "DELETE N" غير الموثّق.
-  🔴 C11-H: _run_maintenance_postgres — معامل in_transaction لتجنّب
-      VACUUM داخل transaction (يمنع ABORTED).
-  🟠 C11-I: فصل GROWING_TABLES عن SMALL_TABLES — autovacuum معقول
-      (0.05 للصغيرة، 0.1 للنّامية).
-  🟠 C11-J: _tune_autovacuum_postgres — استعلام bulk واحد بدل 47.
-  🟠 C11-K: VACUUM_INTER_TABLE_DELAY_SECONDS 0.5→0.1 (أسرع 5×).
+  🔴 C11-G: _cleanup_old_admin_logs_postgres — CTE + RETURNING COUNT.
+  🔴 C11-H: _run_maintenance_postgres — معامل in_transaction.
+  🟠 C11-I: فصل GROWING_TABLES عن SMALL_TABLES.
+  🟠 C11-J: _tune_autovacuum_postgres — bulk fetch.
+  🟠 C11-K: VACUUM_INTER_TABLE_DELAY_SECONDS 0.5 → 0.1.
   🟡 C11-L: exc_info=True في السجلات الحرجة.
-  🟡 C11-M: __version__ + توثيق أوضح لـ C10-G.
+  🟡 C11-M: __version__ + توثيق.
 
-🔴 v7.9.7 (FIX-C10-CONCURRENTLY-IN-TX):
-  🔴 C10-A..C10-G كما هي (بدون تغيير).
-  🟡 C10-F: حذف "user_reminder_settings" المكرر.
-
-🆕 v7.9.6 (PERF-STARTUP-COOLDOWN):
-  🟢 PERF-1..PERF-5 كما هي.
-
-🆕 v7.9.5 (CONCURRENT-INDEX-FOR-LARGE-TABLES): CC-1..CC-10
-🆕 v7.9.4 (CRITICAL-FIXES-MV-VACUUM): FIX-1..FIX-13
+🔴 v7.9.7 (FIX-C10-CONCURRENTLY-IN-TX): C10-A..C10-G.
+🆕 v7.9.6 (PERF-STARTUP-COOLDOWN): PERF-1..PERF-5.
+🆕 v7.9.5 (CONCURRENT-INDEX-FOR-LARGE-TABLES): CC-1..CC-10.
+🆕 v7.9.4 (CRITICAL-FIXES-MV-VACUUM): FIX-1..FIX-13.
 ================================================================================
 """
 
-__version__ = "7.9.8"
+__version__ = "7.9.9"
 
 import asyncio
 import logging
@@ -48,31 +69,57 @@ from datetime import datetime, timezone, timedelta
 # 0. ثوابت
 # =====================================================================
 
-# ✅ v7.9.8: يبقى 29 (لا تغيير بنيوي — إضافات idempotent فقط)
 CURRENT_SCHEMA_VERSION = 29
 
 CLEANUP_ANONYMOUS_BOT_IDS = (1087968824, 136817688)
 
 MAINTENANCE_INTERVAL_SECONDS = 86400
 
-# 🟠 C11-K: 0.5 → 0.1 (كان 47 × 0.5 = 23.5s)
-VACUUM_INTER_TABLE_DELAY_SECONDS = 0.1
+# 🔴 FIX-C12a: 0.1 → 0.05 (maintenance أسرع بـ ~2.4s على 47 جدول)
+VACUUM_INTER_TABLE_DELAY_SECONDS = 0.05
+
+# 🟡 FIX-C12e: cooldown داخلي لمنع تشغيل maintenance في كل bootstrap
+MAINTENANCE_BOOTSTRAP_COOLDOWN_SECONDS = 3600  # 1 ساعة
 
 ADMIN_LOGS_RETENTION_DAYS = 30
-
 ADMIN_LOGS_MAX_ROWS = 5000
-
 REMOVED_CHANNELS_GRACE_DAYS = 30
 
-# ✅ v7.9.4 FIX-5: عتبة استخدام CREATE INDEX CONCURRENTLY
 CONCURRENT_INDEX_MIN_ROWS = 10000
 
-# 🆕 v7.9.6 PERF-1: فترة تهدئة فحوصات الإقلاع الثقيلة
-STARTUP_MAINTENANCE_COOLDOWN_SECONDS = 6 * 3600  # 6 ساعات
+STARTUP_MAINTENANCE_COOLDOWN_SECONDS = 6 * 3600
 
 # ═══════════════════════════════════════════════════════════════════════
-# ✅ v7.9.2: MAINTENANCE_TABLES موسّع
+# الفهارس الحرجة على الجداول الصغيرة — تُنشأ متزامناً قبل أي شيء
+# 🔴 FIX-C12b: قائمة صغيرة جداً تُنشأ بسرعة (< 100ms) بدون CONCURRENTLY
 # ═══════════════════════════════════════════════════════════════════════
+CRITICAL_SMALL_TABLE_INDEXES = (
+    # 🔴 FIX-C12b: هذا الفهرس مُكتشف من السجل —
+    #   SELECT ... FROM bot_groups WHERE added_by = ?  @ 1.36s
+    ("bot_groups", "idx_bot_groups_added_by",
+     "CREATE INDEX IF NOT EXISTS idx_bot_groups_added_by "
+     "ON bot_groups(added_by)"),
+    # الفهارس الحرجة الأخرى على جداول صغيرة (لن تحتاج CONCURRENTLY)
+    ("bot_groups", "idx_groups_banned",
+     "CREATE INDEX IF NOT EXISTS idx_groups_banned "
+     "ON bot_groups(banned)"),
+    ("bot_groups", "idx_bot_groups_log_channel",
+     "CREATE INDEX IF NOT EXISTS idx_bot_groups_log_channel "
+     "ON bot_groups(log_channel_id)"),
+    ("bot_groups", "idx_bot_groups_banned_cover",
+     "CREATE INDEX IF NOT EXISTS idx_bot_groups_banned_cover "
+     "ON bot_groups(banned) INCLUDE (chat_id, chat_name, username)"),
+    ("user_groups_link", "idx_user_groups_link_user_id",
+     "CREATE INDEX IF NOT EXISTS idx_user_groups_link_user_id "
+     "ON user_groups_link(user_id)"),
+    ("group_admins", "idx_group_admins_user_chat",
+     "CREATE INDEX IF NOT EXISTS idx_group_admins_user_chat "
+     "ON group_admins(user_id, chat_id)"),
+    ("settings", "idx_settings_key",
+     "CREATE INDEX IF NOT EXISTS idx_settings_key "
+     "ON settings(key)"),
+)
+
 MAINTENANCE_TABLES = (
     "posts",
     "users",
@@ -94,10 +141,6 @@ MAINTENANCE_TABLES = (
     "bot_addition_log",
 )
 
-# ═══════════════════════════════════════════════════════════════════════
-# 🟠 C11-I: فصل جداول autovacuum إلى صغيرة ونّامية
-# ═══════════════════════════════════════════════════════════════════════
-# صغيرة/محدودة النمو — autovacuum عدواني (scale=0.05)
 SMALL_TABLES_FOR_AGGRESSIVE_AUTOVACUUM = (
     "auto_replies",
     "auto_reply_settings",
@@ -121,7 +164,6 @@ SMALL_TABLES_FOR_AGGRESSIVE_AUTOVACUUM = (
     "violation_penalties",
 )
 
-# 🟠 C11-I: نامية — autovacuum معتدل (scale=0.1) لتجنّب إفراط VACUUM
 GROWING_TABLES_FOR_MODERATE_AUTOVACUUM = (
     "admin_logs",
     "user_violations",
@@ -145,21 +187,17 @@ GROWING_TABLES_FOR_MODERATE_AUTOVACUUM = (
     "contests",
 )
 
-# 🆕 v7.9.8 C11-A: last_startup_checks_at لتتبّع فترة التهدئة
 DEFAULT_SETTINGS = (
     ("publish_interval", "12"),
     ("auto_backup", "1"),
     ("last_ticket_number", "0"),
     ("last_backup", ""),
     ("last_startup_checks_at", ""),
+    ("last_maintenance_at", ""),  # 🟡 FIX-C12e
 )
 
-# ✅ v7.9.4 FIX-8: 82 فهرس (لا تغيير في v7.9.8)
 EXPECTED_INDEX_COUNT = 82
 
-# ═══════════════════════════════════════════════════════════════════════
-# قائمة الفهارس — لا تغيير (نفس v7.9.7)
-# ═══════════════════════════════════════════════════════════════════════
 COMMON_INDEXES = [
     ("users", "idx_users_banned", "users(banned)"),
     ("users", "idx_users_active_channel", "users(active_channel)"),
@@ -416,6 +454,7 @@ DEPRECATED_INDEXES = [
 
 CRITICAL_INDEX_NAMES = frozenset({
     "idx_bot_groups_log_channel",
+    "idx_bot_groups_added_by",
     "idx_posts_channel_pub_fail_created",
     "idx_posts_channel_pub_at",
     "idx_posts_channel_unpub_fresh_created",
@@ -443,11 +482,11 @@ CRITICAL_INDEX_NAMES = frozenset({
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# 🟡 C11: دوال مساعدة للتحقق من صحة البيانات الثابتة
+# دوال مساعدة
 # ═══════════════════════════════════════════════════════════════════════
 
 def _is_valid_index_name(name: str) -> bool:
-    """فحص صحة اسم الفهرس/الجدول (يُستخدم كثيراً قبل f-string)."""
+    """فحص صحة اسم الفهرس/الجدول."""
     if not name or not isinstance(name, str):
         return False
     return bool(re.match(r"^[a-zA-Z_][a-zA-Z0-9_]*$", name))
@@ -461,7 +500,7 @@ def _is_advanced_index(cols: str) -> bool:
     return " WHERE " in s or " INCLUDE " in s
 
 
-# 🟡 C11-E: MYSQL_SKIP_INDEXES تُحسب تلقائياً من الفهارس المتقدمة
+# 🟡 C11-E: MYSQL_SKIP_INDEXES تُحسب تلقائياً
 MYSQL_SKIP_INDEXES = frozenset(
     n for _, n, c in COMMON_INDEXES if _is_advanced_index(c)
 )
@@ -477,7 +516,6 @@ if _STRICT_INDEX_CHECK:
             f"متوقع {EXPECTED_INDEX_COUNT}، وُجد {len(COMMON_INDEXES)}."
         )
 
-# فحص التكرار مُفعّل دائماً (رخيص + حماية حقيقية)
 _index_names = [n for _, n, _ in COMMON_INDEXES]
 _duplicates = [n for n in set(_index_names) if _index_names.count(n) > 1]
 if _duplicates:
@@ -501,7 +539,7 @@ def _safe_now_iso(TimeUtils) -> str:
 
 
 def _safe_now_dt(TimeUtils):
-    """يعيد datetime UTC بلا TZinfo (متوافق مع asyncpg TIMESTAMP)."""
+    """يعيد datetime UTC بلا TZinfo."""
     if TimeUtils:
         try:
             return TimeUtils.utc_now()
@@ -511,21 +549,18 @@ def _safe_now_dt(TimeUtils):
 
 
 def _now_utc_iso_aware() -> str:
-    """يعيد ISO 8601 بصيغة TZ-aware (للتخزين في settings)."""
+    """ISO 8601 بصيغة TZ-aware."""
     return datetime.now(timezone.utc).isoformat()
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# 🆕 v7.9.6 PERF: فترة تهدئة الإقلاع
+# فترة تهدئة الإقلاع
 # ═══════════════════════════════════════════════════════════════════════
 
 async def _should_run_startup_maintenance(
     conn, db_type: str, logger=None,
 ) -> bool:
-    """
-    🆕 v7.9.6: يقرر إن كانت الفحوصات الثقيلة مطلوبة.
-    🔴 C11-A: قيمة افتراضية "" في DEFAULT_SETTINGS → لن يفشل الاستعلام.
-    """
+    """يقرر إن كانت الفحوصات الثقيلة مطلوبة."""
     try:
         if db_type == "postgres":
             val = await conn.fetchval(
@@ -572,13 +607,13 @@ async def _should_run_startup_maintenance(
     except Exception as e:
         if logger:
             logger.debug(f"_should_run_startup_maintenance: {e}")
-        return True  # عند الشك — نفّذ (آمن)
+        return True
 
 
 async def _mark_startup_maintenance_done(
     conn, db_type: str, logger=None,
 ) -> None:
-    """🆕 v7.9.6: يسجل وقت آخر فحوصات إقلاع ناجحة."""
+    """يسجل وقت آخر فحوصات إقلاع ناجحة."""
     now_iso = _now_utc_iso_aware()
     try:
         if db_type == "postgres":
@@ -657,8 +692,6 @@ def _adapt_cols_for_db(cols: str, db_type: str) -> str:
     🔴 C11-D: الإصلاح الحرج — INCLUDE + WHERE:
       - PostgreSQL: كما هو.
       - MySQL/SQLite: حذف INCLUDE كاملاً (غير مدعوم).
-        (الكود السابق كان يُدخل الأعمدة في القائمة الأساسية
-         وينتج SQL خاطئ عند وجود WHERE).
     """
     if not cols:
         return cols
@@ -667,14 +700,12 @@ def _adapt_cols_for_db(cols: str, db_type: str) -> str:
 
     s = cols
 
-    # 🔴 C11-D: احذف INCLUDE كاملاً (لا محاولة لدمجه — غير مدعوم في MySQL/SQLite)
     include_match = re.search(
         r"\s+INCLUDE\s*\([^)]*\)", s, re.IGNORECASE
     )
     if include_match:
         s = (s[:include_match.start()] + s[include_match.end():]).rstrip()
 
-    # MySQL: احذف WHERE (لا يدعم partial indexes)
     if db_type == "mysql":
         s = re.sub(
             r"\s+WHERE\s+.*$", "", s,
@@ -695,15 +726,13 @@ def _get_expected_cols_for_index(
 
 
 # =====================================================================
-# 🆕 v7.9.5 CC-1/CC-3: أدوات CONCURRENTLY للفهارس على الجداول الكبيرة
+# أدوات CONCURRENTLY للفهارس
 # =====================================================================
 
 async def _get_table_row_count_postgres(conn, table_name: str) -> int:
     """
-    🆕 v7.9.5 CC-1: تقدير سريع لعدد صفوف الجدول.
-
-    🔴 C11-F: إذا أعادت الإحصاءات 0 (لم يُنفَّذ ANALYZE بعد)،
-        نستخدم COUNT(*) فعلياً مع حد أقصى للأمان.
+    تقدير سريع لعدد صفوف الجدول.
+    🔴 C11-F: fallback إلى COUNT(*) فعلي.
     """
     if not _is_valid_index_name(table_name):
         return 0
@@ -731,8 +760,6 @@ async def _get_table_row_count_postgres(conn, table_name: str) -> int:
         if est > 0:
             return est
 
-        # 🔴 C11-F: fallback إلى COUNT(*) فعلي (محدود لتفادي البطء)
-        #    نأخذ عيّنة عشوائية لتقدير الحجم بسرعة
         actual = await conn.fetchval(f"""
             SELECT COUNT(*) FROM (
                 SELECT 1 FROM {table_name} LIMIT $1
@@ -745,14 +772,9 @@ async def _get_table_row_count_postgres(conn, table_name: str) -> int:
 
 async def _safe_drop_index_postgres(
     conn, logger, idx_name: str,
-    force_non_concurrent: bool = False,     # ← 🆕 v7.9.7 C10-G
+    force_non_concurrent: bool = False,
 ) -> bool:
-    """
-    🆕 v7.9.5 CC-5: حذف فهرس بأمان.
-
-    🔴 v7.9.7 C10-G: force_non_concurrent لتجنّب DROP INDEX
-        CONCURRENTLY داخل transaction.
-    """
+    """حذف فهرس بأمان."""
     if not _is_valid_index_name(idx_name):
         return False
 
@@ -789,12 +811,9 @@ async def _safe_drop_index_postgres(
 
 async def _drop_invalid_indexes_postgres(
     conn, logger,
-    force_non_concurrent: bool = False,     # ← 🆕 C10-G
+    force_non_concurrent: bool = False,
 ) -> int:
-    """
-    🆕 v7.9.5 CC-4: حذف الفهارس INVALID الناتجة عن فشل CONCURRENTLY.
-    🔴 v7.9.7 C10-G: تمرير force_non_concurrent.
-    """
+    """حذف الفهارس INVALID."""
     try:
         rows = await conn.fetch("""
             SELECT c.relname AS index_name
@@ -835,19 +854,10 @@ async def _drop_invalid_indexes_postgres(
 async def _create_index_postgres_smart(
     conn, logger, idx_name: str, cols: str,
     table_row_cache=None,
-    force_non_concurrent: bool = False,     # ← 🆕 v7.9.7 C10-A
+    force_non_concurrent: bool = False,
 ) -> str:
     """
-    🆕 v7.9.5 CC-1/CC-2: إنشاء فهرس مع قرار CONCURRENTLY التلقائي.
-
-    🔴 v7.9.7 C10-A: force_non_concurrent لتجنّب CONCURRENTLY
-        داخل transaction (يمنع ABORTED tx).
-
-    🟡 C11-L: عند force_non_concurrent + جدول ضخم، نسجّل تحذيراً
-        (قد يحصل قفل طويل — يُنصح بالإنشاء خارج tx).
-
-    Returns:
-        "created" / "created_cc" / "duplicate" / "failed"
+    إنشاء فهرس مع قرار CONCURRENTLY التلقائي.
     """
     if not _is_valid_index_name(idx_name):
         return "failed"
@@ -869,7 +879,6 @@ async def _create_index_postgres_smart(
         if row_count >= CONCURRENT_INDEX_MIN_ROWS:
             use_concurrently = True
     elif force_non_concurrent and CONCURRENT_INDEX_MIN_ROWS > 0:
-        # 🟡 C11-L: تنبيه الجداول الضخمة داخل tx
         if table_row_cache is not None and table_name in table_row_cache:
             row_count = table_row_cache[table_name]
         else:
@@ -950,16 +959,86 @@ async def _create_index_postgres_smart(
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# 🆕 v7.9.6 PERF-3: دمج فحوصات الفهارس في استعلام واحد
+# 🔴 FIX-C12b: ضمان الفهارس الحرجة على الجداول الصغيرة
+# ═══════════════════════════════════════════════════════════════════════
+
+async def _ensure_critical_small_indexes_postgres(conn, logger) -> int:
+    """
+    🔴 FIX-C12b (CRITICAL): ينشئ الفهارس الحرجة على الجداول الصغيرة
+    بشكل **متزامن** وسريع (< 500ms) قبل بدء maintenance في الخلفية.
+
+    السبب المُكتشف من السجل:
+      SELECT chat_id, chat_name, username, banned
+      FROM bot_groups WHERE added_by = ?  @ 1.36s
+
+      إذا لم يُنشأ `idx_bot_groups_added_by` قبل الاستعلام الأول،
+      فإن PG يستخدم Seq Scan (بطيء نسبياً حتى على 44 صف مع lock
+      contention أثناء bootstrap).
+    """
+    if not _is_valid_index_name("bot_groups"):
+        return 0
+    try:
+        created = 0
+        skipped = 0
+        failed = 0
+
+        for table, idx_name, stmt in CRITICAL_SMALL_TABLE_INDEXES:
+            if not _is_valid_index_name(table):
+                continue
+            if not _is_valid_index_name(idx_name):
+                continue
+
+            try:
+                exists = await conn.fetchval(
+                    "SELECT 1 FROM pg_indexes "
+                    "WHERE indexname = $1 "
+                    "  AND schemaname = ANY(current_schemas(false)) "
+                    "  AND tablename = $2 LIMIT 1",
+                    idx_name, table,
+                )
+                if exists:
+                    skipped += 1
+                    continue
+
+                await conn.execute(stmt)
+                created += 1
+                if logger:
+                    logger.info(
+                        f"⚡ FIX-C12b: أُنشئ فهرس حرج {idx_name} "
+                        f"على {table}"
+                    )
+            except Exception as e:
+                failed += 1
+                if logger:
+                    logger.warning(
+                        f"⚠️ FIX-C12b: فشل فهرس {idx_name} على "
+                        f"{table}: {e}"
+                    )
+
+        if logger and (created or failed):
+            logger.info(
+                f"⚡ FIX-C12b: critical small indexes → "
+                f"created={created} skipped={skipped} failed={failed}"
+            )
+        return created
+    except Exception as e:
+        if logger:
+            logger.warning(
+                f"⚠️ _ensure_critical_small_indexes_postgres: {e}"
+            )
+        return 0
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# PERF-3: دمج فحوصات الفهارس
 # ═══════════════════════════════════════════════════════════════════════
 
 async def _run_combined_index_checks_postgres(
     conn, logger,
-    in_transaction: bool = False,           # ← 🆕 v7.9.7 C10-B
+    in_transaction: bool = False,
 ) -> None:
     """
-    🆕 v7.9.6: استعلام واحد يجلب كل شيء ثم يوزّع الفحوصات على الذاكرة.
-    🔴 v7.9.7 C10-B: in_transaction لتجنّب CONCURRENTLY داخل bootstrap tx.
+    استعلام واحد يجلب كل شيء ثم يوزّع الفحوصات على الذاكرة.
     """
     try:
         _force_nc = bool(in_transaction)
@@ -968,13 +1047,19 @@ async def _run_combined_index_checks_postgres(
                 "⚙️ FIX-C10: CONCURRENTLY معطّل (داخل transaction)"
             )
 
-        # 1) تنظيف INVALID أولاً
+        # 🔴 FIX-C12b: ضمان الفهارس الحرجة الصغيرة أولاً
+        # (متزامن، سريع، مهم قبل أي استعلام).
+        try:
+            await _ensure_critical_small_indexes_postgres(conn, logger)
+        except Exception as _c12_e:
+            if logger:
+                logger.debug(f"FIX-C12b pre-step: {_c12_e}")
+
         await _drop_invalid_indexes_postgres(
             conn, logger,
             force_non_concurrent=_force_nc,
         )
 
-        # 2) استعلام واحد يجلب كل الفهارس المعنية
         all_names = [n for _, n, _ in COMMON_INDEXES]
         rows = await conn.fetch(
             "SELECT indexname, indexdef FROM pg_indexes "
@@ -985,7 +1070,6 @@ async def _run_combined_index_checks_postgres(
         existing_defs = {r["indexname"]: (r["indexdef"] or "") for r in rows}
         existing_names = set(existing_defs.keys())
 
-        # 3) فحص الفهارس الحرجة
         missing_critical = CRITICAL_INDEX_NAMES - existing_names
         if missing_critical and logger:
             logger.warning(
@@ -993,7 +1077,6 @@ async def _run_combined_index_checks_postgres(
                 f"{sorted(missing_critical)[:5]}..."
             )
 
-        # 4) تحديد ما يجب إنشاؤه / حذفه
         to_create: list = []
         to_drop_def_mismatch: list = []
 
@@ -1023,7 +1106,6 @@ async def _run_combined_index_checks_postgres(
             if actual_cols != expected_cols:
                 to_drop_def_mismatch.append((idx_name, cols))
 
-        # 5) حذف الفهارس ذات التعريف الخاطئ
         dropped = 0
         for idx_name, _cols in to_drop_def_mismatch:
             if await _safe_drop_index_postgres(
@@ -1032,7 +1114,6 @@ async def _run_combined_index_checks_postgres(
             ):
                 dropped += 1
 
-        # 6) إنشاء المفقودة + المُعاد بناؤها
         created = 0
         created_cc = 0
         row_cache: dict = {}
@@ -1053,7 +1134,6 @@ async def _run_combined_index_checks_postgres(
                 if result == "created_cc":
                     created_cc += 1
 
-        # 7) حذف الفهارس القديمة (DEPRECATED)
         dropped_dep = 0
         try:
             dep_rows = await conn.fetch(
@@ -1073,7 +1153,6 @@ async def _run_combined_index_checks_postgres(
             if logger:
                 logger.debug(f"drop deprecated: {_e}")
 
-        # 8) سجل موحّد
         if logger and (created or dropped or dropped_dep):
             logger.info(
                 f"✅ PG combined-index-check: "
@@ -1168,10 +1247,7 @@ async def _ensure_auto_blocked_table_mysql(conn, logger):
 # =====================================================================
 
 async def _cleanup_old_admin_logs_postgres(conn, logger):
-    """
-    🔴 C11-G: استخدام CTE + RETURNING COUNT بدل نص "DELETE N"
-        (كان يعتمد على شكل غير موثّق من asyncpg).
-    """
+    """CTE + RETURNING COUNT."""
     total_deleted = 0
 
     try:
@@ -1380,14 +1456,11 @@ async def _cleanup_old_admin_logs_mysql(conn, logger):
 
 
 # =====================================================================
-# autovacuum — 🟠 C11-I + C11-J
+# autovacuum
 # =====================================================================
 
 async def _tune_autovacuum_postgres(conn, logger):
-    """
-    🟠 C11-I: 0.05 للصغيرة، 0.1 للنّامية.
-    🟠 C11-J: استعلام bulk واحد بدل 47 استعلام SELECT.
-    """
+    """0.05 للصغيرة، 0.1 للنّامية. استعلام bulk واحد."""
     all_tables = list(dict.fromkeys(
         list(SMALL_TABLES_FOR_AGGRESSIVE_AUTOVACUUM)
         + list(GROWING_TABLES_FOR_MODERATE_AUTOVACUUM)
@@ -1461,15 +1534,15 @@ async def _tune_autovacuum_postgres(conn, logger):
     return tuned
 
 
-# =====================================================================
-# 🆕 v7.9.5 CC-6: فحص جماعي — يستخدم smart creation
-# =====================================================================
+# ═══════════════════════════════════════════════════════════════════════
+# فحص جماعي
+# ═══════════════════════════════════════════════════════════════════════
 
 async def _ensure_all_indexes_exist_postgres(
     conn, logger,
-    in_transaction: bool = False,           # ← 🆕 v7.9.7 C10-E
+    in_transaction: bool = False,
 ):
-    """🔴 v7.9.7 C10-E: دعم in_transaction لتجنّب CONCURRENTLY داخل tx."""
+    """دعم in_transaction لتجنّب CONCURRENTLY داخل tx."""
     try:
         await _drop_invalid_indexes_postgres(
             conn, logger,
@@ -1491,7 +1564,7 @@ async def _ensure_all_indexes_exist_postgres(
         if logger:
             logger.warning(
                 f"⚠️ PG: {len(missing)} فهرس مفقود في fast-path "
-                f"— إعادة إنشاء"
+                f"— إعادة إنشاء: {sorted(missing)[:5]}..."
             )
 
         row_cache = {}
@@ -1499,11 +1572,13 @@ async def _ensure_all_indexes_exist_postgres(
         created_cc = 0
         duplicate = 0
         failed = 0
+        failed_names = []  # 🟠 FIX-C12c
 
         for idx_name in missing:
             cols = _get_expected_cols_for_index(idx_name, "postgres")
             if not cols:
                 failed += 1
+                failed_names.append(f"{idx_name}(no-cols)")
                 continue
             result = await _create_index_postgres_smart(
                 conn, logger, idx_name, cols, row_cache,
@@ -1518,11 +1593,18 @@ async def _ensure_all_indexes_exist_postgres(
                 duplicate += 1
             else:
                 failed += 1
+                failed_names.append(idx_name)
 
         if logger and created:
             logger.info(
                 f"✅ PG fast-path: أُعيد إنشاء {created} فهرس "
                 f"({created_cc} بـ CONCURRENTLY، {failed} فشل)"
+            )
+        # 🟠 FIX-C12c: تسجيل صريح للفهارس الفاشلة
+        if logger and failed_names:
+            logger.warning(
+                f"⚠️ PG fast-path: فهارس فشلت ({len(failed_names)}): "
+                f"{failed_names[:10]}"
             )
         return created
     except Exception as e:
@@ -1563,13 +1645,16 @@ async def _ensure_all_indexes_exist_sqlite(conn, logger):
 
         created = 0
         failed = 0
+        failed_names = []  # 🟠 FIX-C12c
         for idx_name in missing:
             if not _is_valid_index_name(idx_name):
                 failed += 1
+                failed_names.append(f"{idx_name}(invalid)")
                 continue
             cols = _get_expected_cols_for_index(idx_name, "sqlite")
             if not cols:
                 failed += 1
+                failed_names.append(f"{idx_name}(no-cols)")
                 continue
             try:
                 await conn.execute(
@@ -1578,6 +1663,7 @@ async def _ensure_all_indexes_exist_sqlite(conn, logger):
                 created += 1
             except Exception as e:
                 failed += 1
+                failed_names.append(idx_name)
                 if logger:
                     logger.warning(
                         f"⚠️ SQLite fast-path فهرس {idx_name}: {e}"
@@ -1591,6 +1677,11 @@ async def _ensure_all_indexes_exist_sqlite(conn, logger):
             logger.info(
                 f"✅ SQLite fast-path: أُعيد إنشاء {created} فهرس "
                 f"({failed} فشل)"
+            )
+        if logger and failed_names:
+            logger.warning(
+                f"⚠️ SQLite fast-path: فهارس فشلت ({len(failed_names)}): "
+                f"{failed_names[:10]}"
             )
         return created
     except Exception as e:
@@ -1630,13 +1721,16 @@ async def _ensure_all_indexes_exist_mysql(conn, logger):
 
         created = 0
         failed = 0
+        failed_names = []  # 🟠 FIX-C12c
         for _table, idx_name, cols in missing:
             if not _is_valid_index_name(idx_name):
                 failed += 1
+                failed_names.append(f"{idx_name}(invalid)")
                 continue
             adapted = _adapt_cols_for_db(cols, "mysql")
             if not adapted:
                 failed += 1
+                failed_names.append(f"{idx_name}(no-adapt)")
                 continue
             try:
                 await conn.execute(
@@ -1652,6 +1746,7 @@ async def _ensure_all_indexes_exist_mysql(conn, logger):
                 ):
                     continue
                 failed += 1
+                failed_names.append(idx_name)
                 if logger:
                     logger.warning(
                         f"⚠️ MySQL fast-path فهرس {idx_name}: {e}"
@@ -1660,6 +1755,11 @@ async def _ensure_all_indexes_exist_mysql(conn, logger):
             logger.info(
                 f"✅ MySQL fast-path: أُنشئ {created} فهرس "
                 f"({failed} فشل)"
+            )
+        if logger and failed_names:
+            logger.warning(
+                f"⚠️ MySQL fast-path: فهارس فشلت ({len(failed_names)}): "
+                f"{failed_names[:10]}"
             )
         return created
     except Exception as e:
@@ -1827,16 +1927,67 @@ async def _vacuum_dirty_mvs_postgres(conn, logger, min_dead: int = 10):
 
 
 # =====================================================================
-# VACUUM ANALYZE الدوري — 🔴 C11-H
+# VACUUM ANALYZE الدوري — FIX-C12d + FIX-C12e
 # =====================================================================
+
+async def _pg_has_active_query_on(conn, table_name: str) -> bool:
+    """
+    🟠 FIX-C12d: هل يوجد استعلام نشط على الجدول الآن؟
+    """
+    if not _is_valid_index_name(table_name):
+        return False
+    try:
+        row = await conn.fetchval("""
+            SELECT EXISTS(
+                SELECT 1 FROM pg_stat_activity
+                WHERE state = 'active'
+                  AND pid <> pg_backend_pid()
+                  AND query ILIKE $1
+            )
+        """, f"%{table_name}%")
+        return bool(row)
+    except Exception:
+        return False
+
+
+async def _should_skip_maintenance_bootstrap(conn, logger) -> bool:
+    """
+    🟡 FIX-C12e: cooldown داخلي 1h لمنع تشغيل maintenance
+    في كل bootstrap.
+    """
+    try:
+        val = await conn.fetchval(
+            "SELECT value FROM settings "
+            "WHERE key = 'last_maintenance_at'"
+        )
+        if not val:
+            return False
+        last_dt = datetime.fromisoformat(str(val))
+        if last_dt.tzinfo is None:
+            last_dt = last_dt.replace(tzinfo=timezone.utc)
+        age = (datetime.now(timezone.utc) - last_dt).total_seconds()
+        if age < MAINTENANCE_BOOTSTRAP_COOLDOWN_SECONDS:
+            if logger:
+                logger.info(
+                    f"⏩ PG maintenance: تخطي (cooldown — آخر صيانة "
+                    f"منذ {age / 60:.1f} دقيقة)"
+                )
+            return True
+    except Exception as e:
+        if logger:
+            logger.debug(f"_should_skip_maintenance_bootstrap: {e}")
+    return False
+
 
 async def _run_maintenance_postgres(
     conn, logger,
-    in_transaction: bool = False,           # ← 🆕 C11-H
+    in_transaction: bool = False,
 ):
     """
+    VACUUM ANALYZE الدوري.
     🔴 C11-H: if in_transaction, نتخطى VACUUM (يفشل داخل tx).
-        نُبقي ANALYZE الذي يعمل داخل tx.
+    🟠 FIX-C12d: فحص pg_stat_activity قبل كل VACUUM.
+    🟡 FIX-C12e: cooldown داخلي 1h.
     """
     try:
         try:
@@ -1898,11 +2049,27 @@ async def _run_maintenance_postgres(
         done = 0
         analyzed = 0
         failed = 0
+        skipped_busy = 0  # 🟠 FIX-C12d
 
         for tbl in merged_targets:
             if not _is_valid_index_name(tbl):
                 failed += 1
                 continue
+
+            # 🟠 FIX-C12d: تخطي إذا كان هناك استعلام نشط
+            if not in_transaction:
+                try:
+                    busy = await _pg_has_active_query_on(conn, tbl)
+                    if busy:
+                        skipped_busy += 1
+                        if logger:
+                            logger.debug(
+                                f"⏩ FIX-C12d: تخطي VACUUM {tbl} "
+                                f"(استعلام نشط)"
+                            )
+                        continue
+                except Exception:
+                    pass
 
             try:
                 is_mv = await conn.fetchval(
@@ -1916,7 +2083,6 @@ async def _run_maintenance_postgres(
                 is_mv = False
 
             try:
-                # 🔴 C11-H: داخل tx → ANALYZE فقط
                 if in_transaction:
                     await conn.execute(f'ANALYZE "{tbl}"')
                     analyzed += 1
@@ -1966,10 +2132,11 @@ async def _run_maintenance_postgres(
             if logger:
                 logger.debug(f"⚠️ record maintenance time: {e}")
 
-        if logger and (done or analyzed):
+        if logger and (done or analyzed or skipped_busy):
             logger.info(
                 f"✅ PG: VACUUM={done}, ANALYZE={analyzed}, "
-                f"فشل={failed}, MVs إضافي={mvs_cleaned} (PG {pg_version})"
+                f"فشل={failed}, تخطي (مشغول)={skipped_busy}, "
+                f"MVs إضافي={mvs_cleaned} (PG {pg_version})"
             )
         return done + analyzed
     except asyncio.CancelledError:
@@ -2725,9 +2892,7 @@ async def _get_current_schema_version_mysql(conn):
 
 
 def _warn_if_schema_ahead(current: int, logger):
-    """
-    🔴 C11-B: إنذار صارخ إذا كانت DB أحدث من الكود (rollback deployment).
-    """
+    """إنذار صارخ إذا كانت DB أحدث من الكود (rollback deployment)."""
     if current > CURRENT_SCHEMA_VERSION and logger:
         logger.error(
             f"🚨🚨 DB schema v{current} > code v{CURRENT_SCHEMA_VERSION} — "
@@ -2872,14 +3037,14 @@ async def _cleanup_stale_links_mysql(conn, logger):
 
 
 # =====================================================================
-# 🆕 v7.9.5 CC-7: فحص الفهارس الحرجة
+# فحص الفهارس الحرجة
 # =====================================================================
 
 async def _verify_critical_indexes_postgres(
     conn, logger,
-    in_transaction: bool = False,           # ← 🆕 v7.9.7 C10-E
+    in_transaction: bool = False,
 ):
-    """🔴 v7.9.7 C10-E: دعم in_transaction لتجنّب CONCURRENTLY داخل tx."""
+    """دعم in_transaction لتجنّب CONCURRENTLY داخل tx."""
     try:
         await _drop_invalid_indexes_postgres(
             conn, logger,
@@ -3119,9 +3284,9 @@ async def _fetch_existing_indexes_mysql(conn, tables):
 
 async def _ensure_index_definitions_match_postgres(
     conn, logger,
-    in_transaction: bool = False,           # ← 🆕 v7.9.7 C10-G
+    in_transaction: bool = False,
 ):
-    """🔴 v7.9.7 C10-G: دعم in_transaction لتفادي DROP CONCURRENTLY في tx."""
+    """دعم in_transaction لتفادي DROP CONCURRENTLY في tx."""
     checked = 0
     dropped = 0
     missing = 0
@@ -3309,9 +3474,9 @@ async def _ensure_index_definitions_match_mysql(conn, logger):
 
 async def _drop_deprecated_indexes_postgres(
     conn, logger,
-    force_non_concurrent: bool = False,     # ← 🆕 v7.9.7 C10-G
+    force_non_concurrent: bool = False,
 ):
-    """🔴 v7.9.7 C10-G: دعم force_non_concurrent لتفادي DROP CONCURRENTLY في tx."""
+    """دعم force_non_concurrent لتفادي DROP CONCURRENTLY في tx."""
     if not DEPRECATED_INDEXES:
         return 0
     dropped = 0
@@ -3440,9 +3605,11 @@ async def _create_indexes_generic(
 
     created = 0
     failed = 0
+    failed_names = []  # 🟠 FIX-C12c
     for _table, idx_name, cols in to_create:
         if not _is_valid_index_name(idx_name):
             failed += 1
+            failed_names.append(f"{idx_name}(invalid)")
             continue
         try:
             await conn.execute(
@@ -3451,6 +3618,7 @@ async def _create_indexes_generic(
             created += 1
         except Exception as e:
             failed += 1
+            failed_names.append(idx_name)
             if logger:
                 logger.warning(f"⚠️ {db_name} فهرس {idx_name}: {e}")
 
@@ -3459,6 +3627,11 @@ async def _create_indexes_generic(
         logger.info(
             f"✅ {db_name}: {created} فهرس جديد، "
             f"{skipped} موجود، {failed} فشل"
+        )
+    if logger and failed_names:
+        logger.warning(
+            f"⚠️ {db_name}: فهارس فشلت ({len(failed_names)}): "
+            f"{failed_names[:10]}"
         )
 
 
@@ -3471,14 +3644,14 @@ async def _create_indexes_sqlite(conn, logger):
 
 
 # =====================================================================
-# 🆕 v7.9.5 CC-8: إنشاء فهارس PostgreSQL — smart creation
+# إنشاء فهارس PostgreSQL — smart creation
 # =====================================================================
 
 async def _create_indexes_postgres(
     conn, logger,
-    in_transaction: bool = False,           # ← 🆕 v7.9.7 C10-E
+    in_transaction: bool = False,
 ):
-    """🔴 v7.9.7 C10-E: دعم in_transaction لتجنّب CONCURRENTLY داخل tx."""
+    """دعم in_transaction لتجنّب CONCURRENTLY داخل tx."""
     index_names = [idx_name for _, idx_name, _ in COMMON_INDEXES]
     try:
         existing = await _fetch_existing_indexes_postgres(
@@ -3513,10 +3686,12 @@ async def _create_indexes_postgres(
     created_cc = 0
     duplicate = 0
     failed = 0
+    failed_names = []  # 🟠 FIX-C12c
 
     for _table, idx_name, cols in to_create:
         if not cols:
             failed += 1
+            failed_names.append(f"{idx_name}(no-cols)")
             continue
         result = await _create_index_postgres_smart(
             conn, logger, idx_name, cols, row_cache,
@@ -3531,6 +3706,7 @@ async def _create_indexes_postgres(
             duplicate += 1
         else:
             failed += 1
+            failed_names.append(idx_name)
 
     skipped = len(COMMON_INDEXES) - len(to_create) + duplicate
     if logger:
@@ -3538,6 +3714,12 @@ async def _create_indexes_postgres(
             f"✅ PostgreSQL: {created} فهرس جديد "
             f"({created_cc} بـ CONCURRENTLY)، "
             f"{skipped} موجود، {failed} فشل"
+        )
+    # 🟠 FIX-C12c: تسجيل صريح للفهارس الفاشلة
+    if logger and failed_names:
+        logger.warning(
+            f"⚠️ PostgreSQL: فهارس فشلت ({len(failed_names)}): "
+            f"{failed_names[:10]}"
         )
 
 
@@ -3553,6 +3735,7 @@ async def _create_indexes_mysql(conn, logger):
     created = 0
     skipped = 0
     failed = 0
+    failed_names = []  # 🟠 FIX-C12c
     for table, idx_name, cols in COMMON_INDEXES:
         if idx_name in MYSQL_SKIP_INDEXES:
             skipped += 1
@@ -3562,10 +3745,12 @@ async def _create_indexes_mysql(conn, logger):
             continue
         if not _is_valid_index_name(idx_name):
             failed += 1
+            failed_names.append(f"{idx_name}(invalid)")
             continue
         adapted = _adapt_cols_for_db(cols, "mysql")
         if not adapted:
             failed += 1
+            failed_names.append(f"{idx_name}(no-adapt)")
             continue
         try:
             await conn.execute(
@@ -3582,6 +3767,7 @@ async def _create_indexes_mysql(conn, logger):
                 skipped += 1
             else:
                 failed += 1
+                failed_names.append(idx_name)
                 if logger:
                     logger.warning(f"⚠️ MySQL فهرس {idx_name}: {e}")
 
@@ -3589,6 +3775,11 @@ async def _create_indexes_mysql(conn, logger):
         logger.info(
             f"✅ MySQL: {created} فهرس جديد، "
             f"{skipped} موجود، {failed} فشل"
+        )
+    if logger and failed_names:
+        logger.warning(
+            f"⚠️ MySQL: فهارس فشلت ({len(failed_names)}): "
+            f"{failed_names[:10]}"
         )
 
 
@@ -3599,7 +3790,6 @@ async def _create_indexes_mysql(conn, logger):
 async def create_tables_sqlite(conn, logger, TimeUtils):
     current = await _get_current_schema_version_sqlite(conn)
     if current >= CURRENT_SCHEMA_VERSION:
-        # 🔴 C11-B: إنذار rollback
         _warn_if_schema_ahead(current, logger)
 
         do_heavy = await _should_run_startup_maintenance(
@@ -4278,7 +4468,7 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
             "(version, applied_at, description) "
             "VALUES (?, ?, ?) ON CONFLICT(version) DO NOTHING",
             (CURRENT_SCHEMA_VERSION, _safe_now_iso(TimeUtils),
-             "v7.9.8-correctness"),
+             "v7.9.9-bot-groups-index"),
         )
         await conn.commit()
     except Exception as e:
@@ -4290,7 +4480,7 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
     if logger:
         logger.info(
             "✅ تم إنشاء جميع جداول SQLite مع الفهارس المحسنة "
-            "(v7.9.8)"
+            "(v7.9.9 — BOT-GROUPS-INDEX)"
         )
 
 
@@ -4300,16 +4490,28 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
 
 async def create_tables_postgres(
     conn, logger, TimeUtils,
-    in_transaction: bool = False,           # ← 🆕 v7.9.7 C10-C
+    in_transaction: bool = False,
 ):
     """
-    🔴 v7.9.7 C10-C: قبول in_transaction لتجنّب CREATE/DROP INDEX
-        CONCURRENTLY داخل bootstrap tx (الذي يفشل ويُسبّب ABORTED tx).
+    🔴 v7.9.9 FIX-C12b: يضمن الفهارس الحرجة على الجداول الصغيرة
+    بشكل **متزامن** قبل أي فحوصات أخرى.
+
+    هذا يحل مشكلة: SELECT ... FROM bot_groups WHERE added_by = ?
+    التي كانت تستغرق 1.36s لأن الفهارس الحرجة كانت تُنشأ في
+    background (بعد FIX-DB19) — فيسبقها استعلام المستخدم.
     """
     current = await _get_current_schema_version_postgres(conn)
     if current >= CURRENT_SCHEMA_VERSION:
-        # 🔴 C11-B: إنذار rollback
         _warn_if_schema_ahead(current, logger)
+
+        # 🔴 FIX-C12b (CRITICAL): ضمان الفهارس الحرجة الصغيرة
+        # بشكل متزامن قبل أي شيء — سريعة جداً (< 500ms).
+        if not in_transaction:
+            try:
+                await _ensure_critical_small_indexes_postgres(conn, logger)
+            except Exception as _c12_e:
+                if logger:
+                    logger.debug(f"FIX-C12b pre-step: {_c12_e}")
 
         do_heavy = await _should_run_startup_maintenance(
             conn, "postgres", logger,
@@ -4339,11 +4541,27 @@ async def create_tables_postgres(
             await _cleanup_old_admin_logs_postgres(conn, logger)
             await _tune_autovacuum_postgres(conn, logger)
             await _quick_analyze_postgres(conn, logger)
-            # 🔴 C11-H: تمرير in_transaction
-            await _run_maintenance_postgres(
-                conn, logger,
-                in_transaction=in_transaction,
-            )
+
+            # 🟡 FIX-C12e: cooldown check قبل maintenance
+            skip_maint = False
+            if not in_transaction:
+                try:
+                    skip_maint = await _should_skip_maintenance_bootstrap(
+                        conn, logger
+                    )
+                except Exception:
+                    skip_maint = False
+
+            if not skip_maint:
+                await _run_maintenance_postgres(
+                    conn, logger,
+                    in_transaction=in_transaction,
+                )
+            else:
+                if logger:
+                    logger.debug(
+                        "⏩ FIX-C12e: تخطي maintenance (cooldown)"
+                    )
 
             await _mark_startup_maintenance_done(
                 conn, "postgres", logger,
@@ -5012,11 +5230,22 @@ async def create_tables_postgres(
     await _cleanup_old_admin_logs_postgres(conn, logger)
     await _tune_autovacuum_postgres(conn, logger)
     await _quick_analyze_postgres(conn, logger)
-    # 🔴 C11-H: تمرير in_transaction
-    await _run_maintenance_postgres(
-        conn, logger,
-        in_transaction=in_transaction,
-    )
+
+    # 🟡 FIX-C12e: cooldown check
+    skip_maint = False
+    if not in_transaction:
+        try:
+            skip_maint = await _should_skip_maintenance_bootstrap(
+                conn, logger
+            )
+        except Exception:
+            skip_maint = False
+
+    if not skip_maint:
+        await _run_maintenance_postgres(
+            conn, logger,
+            in_transaction=in_transaction,
+        )
 
     try:
         await conn.execute(
@@ -5025,7 +5254,7 @@ async def create_tables_postgres(
             "VALUES ($1, $2, $3) ON CONFLICT (version) DO NOTHING",
             CURRENT_SCHEMA_VERSION,
             _safe_now_dt(TimeUtils),
-            "v7.9.8-correctness",
+            "v7.9.9-bot-groups-index",
         )
     except Exception as e:
         if logger:
@@ -5036,7 +5265,7 @@ async def create_tables_postgres(
     if logger:
         logger.info(
             "✅ تم إنشاء جميع جداول PostgreSQL مع الفهارس المحسنة "
-            "(v7.9.8)"
+            "(v7.9.9 — BOT-GROUPS-INDEX)"
         )
 
 
@@ -5047,7 +5276,6 @@ async def create_tables_postgres(
 async def create_tables_mysql(conn, logger, TimeUtils):
     current = await _get_current_schema_version_mysql(conn)
     if current >= CURRENT_SCHEMA_VERSION:
-        # 🔴 C11-B: إنذار rollback
         _warn_if_schema_ahead(current, logger)
 
         do_heavy = await _should_run_startup_maintenance(
@@ -5740,7 +5968,7 @@ async def create_tables_mysql(conn, logger, TimeUtils):
                 (
                     CURRENT_SCHEMA_VERSION,
                     _safe_now_iso(TimeUtils),
-                    "v7.9.8-correctness",
+                    "v7.9.9-bot-groups-index",
                 ),
             )
         except Exception as e:
@@ -5752,7 +5980,7 @@ async def create_tables_mysql(conn, logger, TimeUtils):
         if logger:
             logger.info(
                 "✅ تم إنشاء جميع جداول MySQL مع الفهارس المحسنة "
-                "(v7.9.8)"
+                "(v7.9.9 — BOT-GROUPS-INDEX)"
             )
 
     finally:
@@ -5777,9 +6005,11 @@ __all__ = [
     "COMMON_INDEXES",
     "EXPECTED_INDEX_COUNT",
     "CRITICAL_INDEX_NAMES",
+    "CRITICAL_SMALL_TABLE_INDEXES",
     "DEPRECATED_INDEXES",
     "DEFAULT_SETTINGS",
     "MAINTENANCE_INTERVAL_SECONDS",
+    "MAINTENANCE_BOOTSTRAP_COOLDOWN_SECONDS",
     "MAINTENANCE_TABLES",
     "VACUUM_INTER_TABLE_DELAY_SECONDS",
     "MYSQL_SKIP_INDEXES",
@@ -5793,6 +6023,9 @@ __all__ = [
     "_should_run_startup_maintenance",
     "_mark_startup_maintenance_done",
     "_run_combined_index_checks_postgres",
+    "_ensure_critical_small_indexes_postgres",
+    "_should_skip_maintenance_bootstrap",
+    "_pg_has_active_query_on",
     "_adapt_cols_for_db",
     "_cleanup_old_admin_logs_postgres",
     "_cleanup_old_admin_logs_sqlite",
@@ -5812,3 +6045,23 @@ __all__ = [
     "_BANNED_WORDS_NEW_COLUMNS",
     "_AUTO_REPLIES_NEW_COLUMNS",
 ]
+
+# =====================================================================
+# LOAD BEACON — v7.9.9
+# =====================================================================
+
+try:
+    _beacon_parts = [
+        f"🛡️ database_tables.py v{__version__} loaded",
+        f"FIX-C12a VACUUM_DELAY={VACUUM_INTER_TABLE_DELAY_SECONDS}s",
+        f"FIX-C12b CRITICAL_SMALL_INDEXES={len(CRITICAL_SMALL_TABLE_INDEXES)}",
+        f"FIX-C12c explicit-failed-names=✅",
+        f"FIX-C12d skip-busy-tables=✅",
+        f"FIX-C12e MAINTENANCE_COOLDOWN={MAINTENANCE_BOOTSTRAP_COOLDOWN_SECONDS}s",
+        f"indexes={len(COMMON_INDEXES)}",
+        f"critical={len(CRITICAL_INDEX_NAMES)}",
+        f"deprecated={len(DEPRECATED_INDEXES)}",
+    ]
+    logging.getLogger(__name__).info(" | ".join(_beacon_parts))
+except Exception:
+    pass
