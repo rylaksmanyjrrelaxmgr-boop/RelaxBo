@@ -2,35 +2,30 @@
 # -*- coding: utf-8 -*-
 
 """
-handlers_membership.py - مراقبة إضافة/إزالة البوت (v1.3.3-final)
+handlers_membership.py - مراقبة إضافة/إزالة البوت (v1.3.4-final)
 =====================================================================
+🆕 v1.3.4-final — CACHE-INVALIDATE-ON-ADD:
+    🔴 FIX-M: handle_my_chat_member — إبطال user_cache للمُضيف.
+              السبب: عند إضافة البوت لمجموعة، قد يكون المستخدم قد
+              زرع cache يحمل groups_count=0 سابقاً. إذا لم يُبطَل،
+              اللوحة تُظهر رقماً خاطئاً حتى انتهاء TTL (قد يصل لساعات).
+              بعد: user_cache.invalidate(user.id) + creator_id إن وُجد.
+              ملاحظة: هذا إجراء دفاعي متكامل مع FIX-GC-2 في
+              handlers_command.py (syncgroup) + FIX-GC-1 (live read).
+
+    🟠 FIX-N: _invalidate_user_caches — دالة موحّدة جديدة.
+              تُجمّع auth_cache + user_cache + force_sub cache.
+              الاستيراد محمي (try/except) — لا يكسر التحميل لو
+              cache أو utils لم تُصدَّر بعد.
+
+    🟡 FIX-O: تحديث Header + Load Beacon + __all__ إلى v1.3.4.
+
 🆕 v1.3.3-final — POST-AUDIT FIXES (I–L):
-    🔴 FIX-I: _should_send — throttle لـ _prune_recent_reports.
-              السبب: كان يُستدعى في كل استدعاء → O(n) على كل
-              my_chat_member، وعند 10K إدخال يصبح مساراً حاراً
-              مكلفاً. الآن: throttle 60s + إزالة الاستدعاء المُكرَّر
-              في handle_my_chat_member.
-              الأثر قبل الإصلاح: عند 10K قناة في _recent_reports،
-              كل my_chat_member = iterate 10K (×2 بسبب التكرار في
-              handler). الآن: iterate مرة كل 60s.
-
-    🟠 FIX-J: _restore_channel_if_soft_deleted — fallback تلقائي
-              بدون removal_reason عند schema قديم.
-              السبب: بعض deployments قديمة قد لا تحتوي عمود
-              removal_reason → UPDATE يفشل بالكامل → لا استرجاع
-              ولا استرداد. الآن: try مع العمود، عند فشل بسبب
-              "column not found" → fallback بدون العمود.
-
+    🔴 FIX-I: _should_send — throttle لـ _prune_recent_reports (60s).
+    🟠 FIX-J: _restore_channel_if_soft_deleted — fallback بدون
+              removal_reason عند schema قديم.
     🟠 FIX-K: شجرة الإرسال — HTML-strip fallback عند parse error.
-              السبب: لو _build_report_text أنتج HTML مكسور (اسم قناة
-              أو مستخدم غريب)، كل المحاولات الثلاث تفشل بصمت (مع
-              log debug فقط) → لا شيء يُرسل. الآن: BadRequest مع
-              "can't parse" → strip HTML → retry بنفس الشجرة.
-
-    🟠 FIX-L: _ensure_table_exists — warn مرة واحدة للجدول المفقود.
-              السبب: عند schema قديم على PG/MySQL، كل استدعاء لاحق
-              يُكرّر نفس الـ warning → log noise. الآن: flag
-              _table_missing_warned — warning مرة واحدة.
+    🟠 FIX-L: _ensure_table_exists — warn-once للجدول المفقود.
 
 🆕 v1.3.2-final — POST-AUDIT FIXES (D–H):
     🔴 FIX-D: _restore_channel_if_soft_deleted — banned=0 أيضاً.
@@ -59,7 +54,7 @@ import html
 import logging
 import time
 from datetime import datetime, timezone
-from typing import Optional, Dict, Any, Tuple
+from typing import Optional, Dict, Any, Tuple, List
 
 from telegram import (
     Update, InlineKeyboardButton, InlineKeyboardMarkup,
@@ -80,6 +75,27 @@ except ImportError:
         if getattr(DB, "USE_POSTGRES", False):
             return 'SELECT "value" FROM settings WHERE "key" = ? LIMIT 1'
         return "SELECT value FROM settings WHERE key = ? LIMIT 1"
+
+# ✅ v1.3.4 FIX-N: استيرادات محمية للكاشات (لا تكسر التحميل)
+try:
+    from cache import user_cache as _user_cache
+except ImportError:
+    try:
+        from cache import UserCache as _UC  # noqa: F401
+        _user_cache = None
+    except Exception:
+        _user_cache = None
+
+try:
+    from utils import invalidate_auth_cache as _invalidate_auth_cache
+except ImportError:
+    def _invalidate_auth_cache(chat_id, user_id=None):
+        pass
+
+try:
+    from cache import invalidate_user_cache as _invalidate_user_cache_async
+except ImportError:
+    _invalidate_user_cache_async = None
 
 logger = logging.getLogger(__name__)
 
@@ -195,6 +211,95 @@ async def _ensure_table_exists() -> None:
         except Exception as e:
             logger.debug(
                 f"_ensure_table_exists: {type(e).__name__}: {e}")
+
+
+# ═════════════════════════════════════════════════════════════════════
+# ✅ v1.3.4 FIX-N: إبطال موحّد لكاشات المستخدمين
+# ═════════════════════════════════════════════════════════════════════
+
+async def _invalidate_user_caches(
+    user_ids: List[int],
+    chat_id: Optional[int] = None,
+) -> int:
+    """
+    ✅ v1.3.4 FIX-N: إبطال موحّد لكل الكاشات المرتبطة بالمستخدم.
+
+    يُبطِل:
+      • user_cache (groups_count, has_subscription, ...)
+      • auth_cache (إن مررنا chat_id)
+      • invalidate_user_cache في cache.py (إن وُجدت)
+
+    الاستيرادات محمية — لا تكسر التحميل لو ملفات لم تُصدَّر بعد.
+
+    Args:
+        user_ids: قائمة معرّفات المستخدمين.
+        chat_id: معرّف المجموعة (اختياري — لـ auth_cache).
+
+    Returns:
+        عدد المستخدمين الذين نجح إبطالهم (تقريبي).
+    """
+    if not user_ids:
+        return 0
+
+    # تنظيف + de-dup
+    seen = set()
+    clean_ids: List[int] = []
+    for uid in user_ids:
+        try:
+            iuid = int(uid)
+        except (TypeError, ValueError):
+            continue
+        if iuid <= 0:
+            continue
+        if iuid in seen:
+            continue
+        seen.add(iuid)
+        clean_ids.append(iuid)
+
+    if not clean_ids:
+        return 0
+
+    success_count = 0
+
+    # ─── 1) user_cache (الأهم) ───
+    for uid in clean_ids:
+        invalidated = False
+
+        # الطريق 1: كائن user_cache المستورَد
+        if _user_cache is not None:
+            try:
+                result = _user_cache.invalidate(uid)
+                if asyncio.iscoroutine(result):
+                    await result
+                invalidated = True
+            except Exception as e:
+                logger.debug(
+                    f"_invalidate_user_caches user_cache({uid}): {e}")
+
+        # الطريق 2: دالة invalidate_user_cache المباشرة
+        if not invalidated and _invalidate_user_cache_async is not None:
+            try:
+                result = _invalidate_user_cache_async(uid)
+                if asyncio.iscoroutine(result):
+                    await result
+                invalidated = True
+            except Exception as e:
+                logger.debug(
+                    f"_invalidate_user_caches async_direct({uid}): {e}")
+
+        if invalidated:
+            success_count += 1
+
+    # ─── 2) auth_cache (إن مررنا chat_id) ───
+    if chat_id is not None:
+        for uid in clean_ids:
+            try:
+                _invalidate_auth_cache(chat_id, uid)
+            except Exception as e:
+                logger.debug(
+                    f"_invalidate_user_caches auth({chat_id},{uid}): {e}")
+
+    return success_count
 
 
 # ═════════════════════════════════════════════════════════════════════
@@ -702,7 +807,6 @@ def _build_report_text(
 
     if chat_username:
         clean_chat_username = str(chat_username).lstrip('@')
-        # defensive: HTML-escape (آمن عملياً لأن username له rules صارمة)
         text += (
             f"   • الرابط: "
             f"https://t.me/{_safe_html(clean_chat_username)}\n"
@@ -973,6 +1077,7 @@ async def handle_my_chat_member(
     ✅ v1.3.2 FIX-D: الاسترجاع يُصفّر banned=0.
     ✅ v1.3.3 FIX-I: إزالة _prune_recent_reports المُكرَّر (موجود
         داخل _should_send بـ throttle).
+    ✅ v1.3.4 FIX-M: إبطال user_cache للمُضيف بعد الحفظ الناجح.
     """
     result = update.my_chat_member
     if result is None:
@@ -1024,8 +1129,9 @@ async def handle_my_chat_member(
     # ═══════════════════════════════════════════════════════════
     # الحفظ في قاعدة البيانات
     # ═══════════════════════════════════════════════════════════
+    save_ok = False
     try:
-        await _save_addition_to_db(
+        save_ok = await _save_addition_to_db(
             chat_id=chat.id,
             chat_title=chat.title or '',
             chat_type=chat.type or '',
@@ -1039,6 +1145,36 @@ async def handle_my_chat_member(
         )
     except Exception as e:
         logger.debug(f"save_addition_to_db outer: {e}")
+
+    # ═══════════════════════════════════════════════════════════
+    # ✅ v1.3.4 FIX-M: إبطال user_cache بعد الحفظ الناجح.
+    # ═══════════════════════════════════════════════════════════
+    # السبب: لو حُفظ الحدث بنجاح، فهناك احتمال أن اللوحة قريباً
+    #        ستقرأ user_data المُخزَّن (groups_count) → القيمة
+    #        القديمة تبقى إن لم نُبطِل. حتى لو syncgroup هو المصدر
+    #        الحقيقي، الإبطال هنا إجراء دفاعي متكامل.
+    # ═══════════════════════════════════════════════════════════
+    if save_ok:
+        try:
+            _uids_to_invalidate: List[int] = []
+            try:
+                if user and getattr(user, 'id', None):
+                    _uids_to_invalidate.append(int(user.id))
+            except (TypeError, ValueError):
+                pass
+
+            if _uids_to_invalidate:
+                invalidated = await _invalidate_user_caches(
+                    user_ids=_uids_to_invalidate,
+                    chat_id=chat.id,
+                )
+                if invalidated > 0:
+                    logger.info(
+                        f"♻️ FIX-M: أُبطل كاش {invalidated} مستخدم "
+                        f"بعد إضافة البوت للمجموعة {chat.id}"
+                    )
+        except Exception as e:
+            logger.debug(f"FIX-M invalidate user caches: {e}")
 
     # ═══════════════════════════════════════════════════════════
     # جلب قناة السجل الفعّالة
@@ -1103,7 +1239,7 @@ def register_handlers(application) -> None:
         application.add_handler(handler, group=-1)
         logger.info(
             "✅ تم تسجيل ChatMemberHandler لمراقبة "
-            "إضافة/إزالة البوت (v1.3.3)"
+            "إضافة/إزالة البوت (v1.3.4)"
         )
     except Exception as e:
         logger.error(
@@ -1129,18 +1265,49 @@ __all__ = [
     "_build_report_text",
     "_build_report_keyboard",
     "_try_get_chat_photo",
-    "_send_with_html_fallback",       # ✅ v1.3.3 FIX-K
-    "_strip_html_tags",               # ✅ v1.3.3 FIX-K
-    "_is_parse_error",                # ✅ v1.3.3 FIX-K
+    "_send_with_html_fallback",
+    "_strip_html_tags",
+    "_is_parse_error",
     "_recent_reports",
-    "_last_prune_ts",                 # ✅ v1.3.3 FIX-I
+    "_last_prune_ts",
     "_table_created",
     "_table_lock",
-    "_table_missing_warned",          # ✅ v1.3.3 FIX-L
+    "_table_missing_warned",
     "_MAX_RECENT_REPORTS",
-    "_PRUNE_INTERVAL_SEC",            # ✅ v1.3.3 FIX-I
+    "_PRUNE_INTERVAL_SEC",
     "_DEBOUNCE_SECONDS",
     "_DEBOUNCE_STALE_AGE",
     "_OUT_STATUSES",
     "_IN_STATUSES",
+    # 🆕 v1.3.4 FIX-N
+    "_invalidate_user_caches",
 ]
+
+
+# ═════════════════════════════════════════════════════════════════════
+# LOAD BEACON
+# ═════════════════════════════════════════════════════════════════════
+
+try:
+    logger.info(
+        "📋 handlers_membership.py v1.3.4 "
+        "CACHE-INVALIDATE-ON-ADD loaded | "
+        "FIX-M=invalidate-user-cache-on-add | "
+        "FIX-N=unified-invalidator | "
+        "FIX-I=prune-throttle(%ds) | "
+        "FIX-J=restore-fallback-no-removal-reason | "
+        "FIX-K=send-html-strip-fallback | "
+        "FIX-L=table-missing-warn-once | "
+        "FIX-D=restore-banned-0 | "
+        "FIX-E=recent-reports-cap(%d) | "
+        "FIX-G=table-lock | "
+        "FIX-A=sql-get-setting-value | "
+        "user_cache_import=%s | "
+        "async_invalidator=%s",
+        int(_PRUNE_INTERVAL_SEC),
+        _MAX_RECENT_REPORTS,
+        "yes" if _user_cache is not None else "no",
+        "yes" if _invalidate_user_cache_async is not None else "no",
+    )
+except Exception:
+    pass
