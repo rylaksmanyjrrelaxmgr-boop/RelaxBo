@@ -1,34 +1,54 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-database.py - قاعدة البيانات المتكاملة (v7.7.70 — MAINTENANCE-BG-FIX)
+database.py - قاعدة البيانات المتكاملة (v7.7.72 — FAST-CALLER-TX-DIAG)
 ================================================================================
+🆕 v7.7.72 (FAST-CALLER-TX-DIAG):
+  🟢 FIX-DB23 (PERF): _get_caller_info_fast() — بديل سريع لـ inspect.stack().
+     السبب: inspect.stack(context=0) ~5-10ms يُدفع لكل استعلام بطيء
+     حتى عندما SLOW_QUERY_FULL_STACK=false (يُستخدم فقط للأداء التشخيصي).
+     الإصلاح: استخدام sys._getframe مباشرة (أسرع 10-20x).
+     _execute_with_logging يستخدم fast path عندما SLOW_QUERY_FULL_STACK=false.
+  🟢 FIX-DB24: _pg_check_tx_alive — تمييز تشخيصي بين "tx aborted"
+     و"conn dead" (كلاهما يُرجع False — لكن التسجيل مختلف).
+  🟢 FIX-DB25: حفظ tables_hash مباشرة بعد _create_tables في tx مستقلة
+     (دفاعياً — يمنع إعادة البناء في الإقلاع التالي إذا فشلت tx الأم).
+  🟡 FIX-DB26: تحديث LOAD BEACON.
+
+🆕 v7.7.71 (BOOTSTRAP-TX-PROTECT):
+  🔴 FIX-DB20 (CRITICAL): 
+     • _create_tables في transaction مستقلة (بدون conn).
+       السبب الجذري المُكتشف من السجل:
+         ✅ جداول PG
+         ❌ فشل: SELECT EXISTS (... pg_constraint)
+            | current transaction is aborted
+         ❌ فشل: INSERT INTO settings ... tables_hash
+         ❌ فشل حفظ tables_hash
+         ❌ فشلت المعاملة: current transaction is aborted
+       التحليل:
+         create_tables_postgres أرجعت "بنجاح" لكن DDL داخلي
+         فشل وابتُلع بدون تمرير → tx الـ bootstrap أُجهضت →
+         فُقد tables_hash + bootstrap_hash → إعادة البناء في كل إقلاع.
+       الإصلاح:
+         `_create_tables()` بدون conn → اتصال جديد من الـ pool →
+         DDL معزول في tx مستقلة → فشل داخلي لا يمسّ bootstrap.
+     • _pg_check_tx_alive(conn) للتحقق من سلامة tx.
+     • _run_with_savepoint() لعزل كل عملية خطرة في savepoint.
+     • حماية _migrate_schema، _init_default_data،
+       _ensure_materialized_views_postgres، _tune_heavy_tables_autovacuum،
+       _import_banned_words، _import_auto_replies.
+     • تحقّق من وجود جدول settings قبل قراءة tables_hash
+       (تفادي إجهاض tx على DB فارغة — أول تشغيل).
+  🟠 FIX-DB21: إضافة _pg_check_tx_alive + _run_with_savepoint
+     + _safe_rollback_savepoint.
+  🟡 FIX-DB22: تحديث LOAD BEACON.
+
 🆕 v7.7.70 (MAINTENANCE-BG-FIX):
   🔴 FIX-DB19 (CRITICAL): نقل _run_maintenance_postgres في bootstrap
      إلى مهمة خلفية بدل `await` مباشر.
-     السبب الجذري المُكتشف من السجل:
-       🐢 sleep overshoot: delay=10000ms actual=16257ms overshoot=6257ms
-       🐢 sleep overshoot: delay=10000ms actual=15903ms overshoot=5903ms
-       كل المهام تأخّرت بنفس اللحظة → event loop محجوب بمصدر مشترك.
-     التحليل:
-       `_run_maintenance_postgres` يمر على ~47 جدول/MV:
-         for tbl in merged_targets:  # ~47
-             await conn.fetchval("SELECT c.relkind = 'm' ...")  # ~45ms
-             await conn.execute("VACUUM ANALYZE ...")           # ~200ms
-             await asyncio.sleep(0.1)                            # 100ms
-       المجموع ≈ 47 × 345ms ≈ 16.2 ثانية — يطابق `actual=16257ms`.
-     الأثر قبل الإصلاح:
-       • خلال هذه الـ 16s، كل asyncio.sleep في المهام الأخرى يتأخّر.
-       • pool connection واحد محجوز 16s.
-       • I/O من VACUUM على Aiven يُبطئ الاستعلامات الأخرى.
-     الإصلاح:
-       • _spawn_bg_task → event loop يبقى حرّاً.
-       • _bootstrap_lock يُحرَّر فوراً.
-       • maintenance يعمل في الخلفية.
 
 🆕 v7.7.69 (STATEMENT-CACHE-REVERT-FIX):
-  🔴 FIX-DB16 (CRITICAL): إلغاء الكشف التلقائي لـ statement_cache_size=0
-     في PgBouncer endpoint.
+  🔴 FIX-DB16 (CRITICAL): إلغاء الكشف التلقائي لـ statement_cache_size=0.
   🟠 FIX-DB17: PG_STATEMENT_CACHE_SIZE default 0 → 100.
   🟠 FIX-DB18: PG_MAX_CACHED_STATEMENT_LIFETIME default 0 → 300.
 
@@ -95,8 +115,11 @@ database.py - قاعدة البيانات المتكاملة (v7.7.70 — MAINTE
 #              + WeakKeyDictionary + DB_TIMEOUT 10s
 # [29] v7.7.69: REVERT statement_cache_size=0 (كان يسبب بطء 2x)
 #              — Aiven ":21834" يدعم prepared statements بنجاح.
-# [30] v7.7.70: نقل _run_maintenance_postgres إلى مهمة خلفية
-#              (كان يحجب event loop ~16s في bootstrap).
+# [30] v7.7.70: نقل _run_maintenance_postgres إلى مهمة خلفية.
+# [31] v7.7.71: bootstrap tx protect (savepoints + tx مستقلة
+#              لـ _create_tables + _pg_check_tx_alive).
+# [32] v7.7.72: fast caller (sys._getframe) + tx_alive log
+#              differentiation + early tables_hash save.
 # =====================================================================
 
 import os
@@ -2298,7 +2321,50 @@ class Database(
             self._singleton_init_done = False
             raise
 
+    # ═════════════════════════════════════════════════════════════════
+    # 🆕 v7.7.72 FIX-DB23 (PERF): Fast caller — sys._getframe
+    # ═════════════════════════════════════════════════════════════════
+
+    def _get_caller_info_fast(self) -> Dict[str, Any]:
+        """
+        🆕 v7.7.72 FIX-DB23: بديل سريع لـ inspect.stack().
+
+        يستخدم sys._getframe مباشرة — أسرع ~10-20x من inspect.stack().
+        يُستخدم عندما SLOW_QUERY_FULL_STACK=False (الوضع الافتراضي
+        في الإنتاج عندما لا نريد stack كامل).
+
+        Returns:
+            dict بنفس بنية _get_caller_info لكن 'stack' فارغة دائماً.
+        """
+        empty: Dict[str, Any] = {
+            'file': '?', 'line': 0, 'func': '?', 'stack': [],
+        }
+        try:
+            # skip: _get_caller_info_fast → _execute_with_logging → caller
+            frame = sys._getframe(2)
+            hops = 0
+            while frame is not None and hops < 30:
+                fn = frame.f_code.co_filename
+                if not _is_internal_frame(fn):
+                    return {
+                        'file': os.path.basename(fn),
+                        'line': frame.f_lineno,
+                        'func': frame.f_code.co_name,
+                        'stack': [],
+                    }
+                frame = frame.f_back
+                hops += 1
+            return empty
+        except Exception as e:
+            logger.debug(f"_get_caller_info_fast: {e}")
+            return empty
+
     def _get_caller_info(self, skip_frames: int = 0) -> Dict[str, Any]:
+        """
+        🆕 v7.7.72: يستخدم fast path عندما SLOW_QUERY_FULL_STACK=False.
+        """
+        if not SLOW_QUERY_FULL_STACK:
+            return self._get_caller_info_fast()
         try:
             stack = inspect.stack(context=0)
             result: Dict[str, Any] = {
@@ -2322,13 +2388,12 @@ class Database(
             result['file'] = os.path.basename(top.filename)
             result['line'] = top.lineno
             result['func'] = top.function
-            if SLOW_QUERY_FULL_STACK:
-                for fr in selected[:3]:
-                    result['stack'].append({
-                        'file': os.path.basename(fr.filename),
-                        'line': fr.lineno,
-                        'func': fr.function,
-                    })
+            for fr in selected[:3]:
+                result['stack'].append({
+                    'file': os.path.basename(fr.filename),
+                    'line': fr.lineno,
+                    'func': fr.function,
+                })
             return result
         except Exception as e:
             logger.debug(f"_get_caller_info: {e}")
@@ -3068,6 +3133,130 @@ class Database(
                     self._mv_last_refresh_mono = (
                         time.monotonic()
                         - (self._mv_refresh_cooldown - short_cooldown))
+
+    # ═════════════════════════════════════════════════════════════
+    # 🆕 v7.7.71 FIX-DB21: دوال مساعدة لحماية tx
+    # 🆕 v7.7.72 FIX-DB24: log differentiation في _pg_check_tx_alive
+    # ═════════════════════════════════════════════════════════════
+
+    async def _pg_check_tx_alive(self, conn) -> bool:
+        """
+        🆕 v7.7.71 FIX-DB21: يتحقق أن tx PG لا تزال سليمة.
+        🆕 v7.7.72 FIX-DB24: تمييز تشخيصي (log differentiation)
+            بين "tx aborted" و"conn dead".
+
+        Returns:
+            True إذا كانت tx سليمة أو ليست PG.
+            False إذا كانت مُجهَضة أو الاتصال غير قابل للاستخدام.
+        """
+        if not USE_POSTGRES:
+            return True
+        try:
+            await conn.fetchval("SELECT 1")
+            return True
+        except Exception as e:
+            msg = str(e).lower()
+            if ("current transaction is aborted" in msg
+                    or "infailedsqltransaction" in msg):
+                logger.debug(
+                    f"_pg_check_tx_alive: tx aborted — {e}")
+            else:
+                # 🆕 FIX-DB24: اتصال ميت/انقطاع شبكة — نفس القرار
+                # (return False) لكن التسجيل مختلف (warning).
+                logger.warning(
+                    f"_pg_check_tx_alive: conn unusable "
+                    f"(likely dead/network) — {e}")
+            return False
+
+    async def _run_with_savepoint(
+        self, conn, sp_name: str, func,
+        *args, on_fail: str = "log", **kwargs,
+    ) -> Tuple[bool, Optional[Exception]]:
+        """
+        🆕 v7.7.71 FIX-DB21: تشغيل دالة داخل SAVEPOINT.
+
+        يحمي المعاملة الأم من إجهاض داخلي عندما تبتلع الدالة
+        الاستثناء بدل تمريره (وهو ما يحدث في database_tables.py).
+
+        Args:
+            conn: الاتصال (يجب أن يكون داخل tx — PG فقط).
+            sp_name: اسم فريد للـ savepoint.
+            func: الدالة (async) لتشغيلها.
+            *args: وسائط موضعية للدالة.
+            on_fail: "log" (تحذير فقط) أو "raise".
+            **kwargs: وسائط مُسمّاة للدالة.
+
+        Returns:
+            (success: bool, exception: Optional[Exception])
+        """
+        # على MySQL/SQLite: لا savepoints — نستدعي مباشرة
+        if not USE_POSTGRES:
+            try:
+                await func(*args, **kwargs)
+                return True, None
+            except Exception as e:
+                if on_fail == "raise":
+                    raise
+                logger.warning(f"⚠️ {sp_name}: {e}")
+                return False, e
+
+        # تنظيف اسم الـ savepoint
+        sp_safe = re.sub(r"[^a-zA-Z0-9_]", "_", sp_name)
+
+        # محاولة إنشاء SAVEPOINT
+        try:
+            await conn.execute(f"SAVEPOINT {sp_safe}")
+        except Exception as sp_e:
+            logger.error(
+                f"❌ SAVEPOINT {sp_safe} فشل: {sp_e} "
+                f"— tx الأم قد تكون مُجهَضة")
+            return False, sp_e
+
+        # تنفيذ الدالة
+        try:
+            await func(*args, **kwargs)
+        except Exception as e:
+            # فشل صريح — rollback للـ savepoint
+            logger.warning(f"⚠️ {sp_safe} رمت استثناء: {e}")
+            await self._safe_rollback_savepoint(conn, sp_safe)
+            if on_fail == "raise":
+                raise
+            return False, e
+
+        # الدالة أرجعت بنجاح — نحاول RELEASE
+        try:
+            await conn.execute(f"RELEASE SAVEPOINT {sp_safe}")
+            return True, None
+        except Exception as rel_e:
+            # ⚠️ الدالة أرجعت "بنجاح" لكن tx مُجهَضة داخلياً
+            # (سلوك database_tables.py / database_settings.py)
+            logger.warning(
+                f"⚠️ {sp_safe}: الدالة أرجعت بنجاح لكن tx مُجهَضة "
+                f"— استرجاع عبر ROLLBACK TO SAVEPOINT: {rel_e}"
+            )
+            await self._safe_rollback_savepoint(conn, sp_safe)
+            if on_fail == "raise":
+                raise RuntimeError(
+                    f"{sp_safe}: function returned but tx was aborted"
+                ) from rel_e
+            return False, rel_e
+
+    async def _safe_rollback_savepoint(
+        self, conn, sp_safe: str,
+    ) -> None:
+        """
+        🆕 v7.7.71 FIX-DB21: ROLLBACK TO SAVEPOINT بشكل آمن.
+        """
+        if not USE_POSTGRES:
+            return
+        try:
+            await conn.execute(f"ROLLBACK TO SAVEPOINT {sp_safe}")
+            await conn.execute(f"RELEASE SAVEPOINT {sp_safe}")
+            logger.debug(f"✅ استُعيدت tx من {sp_safe}")
+        except Exception as rb_e:
+            logger.error(
+                f"❌ ROLLBACK TO SAVEPOINT {sp_safe} فشل: {rb_e} "
+                f"— tx الأم قد لا تُستعاد")
 
     def _spawn_bg_task(self, coro) -> Optional[asyncio.Task]:
         """
@@ -3999,6 +4188,10 @@ class Database(
                 logger.warning(
                     f"🐌 بطيء ({elapsed:.2f}s): {safe_query}")
                 try:
+                    # 🆕 v7.7.72 FIX-DB23: fast path عبر
+                    # _get_caller_info (التي تتحول داخلياً إلى
+                    # _get_caller_info_fast عندما
+                    # SLOW_QUERY_FULL_STACK=False).
                     caller_info = self._get_caller_info(skip_frames=0)
                     entry = {
                         'time': time.time(),
@@ -5784,11 +5977,37 @@ class Database(
                 "updated_at = ? WHERE user_id = ?",
                 end, TimeUtils.sql_iso(), user_id)
 
+    # ═════════════════════════════════════════════════════════════════
+    # 🔴 v7.7.71 FIX-DB20 (CRITICAL): bootstrap tx protect
+    # 🆕 v7.7.72 FIX-DB25: حفظ tables_hash مبكراً
+    # ═════════════════════════════════════════════════════════════════
     async def _do_bootstrap_inner(self, conn) -> bool:
+        # 🔴 FIX-DB20: تحقّق من سلامة tx الـ bootstrap أولاً
+        if USE_POSTGRES and not await self._pg_check_tx_alive(conn):
+            logger.error(
+                "❌ bootstrap استلم tx مُجهضة — إيقاف فوري")
+            raise RuntimeError(
+                "v7.7.71: bootstrap received aborted tx")
+
         tables_hash = self._compute_tables_hash()
         legacy_tables_hash = self._compute_legacy_tables_hash()
-        stored_tables_hash = await self._fetchval_with_conn(
-            conn, _sql_get_setting_value(), "tables_hash")
+
+        # 🔴 FIX-DB20: تحقّق من وجود جدول settings قبل القراءة
+        try:
+            has_settings = await _table_exists(conn, "settings")
+        except Exception as _te:
+            logger.debug(f"_table_exists(settings): {_te}")
+            has_settings = True
+
+        if has_settings:
+            stored_tables_hash = await self._fetchval_with_conn(
+                conn, _sql_get_setting_value(), "tables_hash")
+        else:
+            stored_tables_hash = None
+            logger.info(
+                "🆕 v7.7.71: جدول settings غير موجود — "
+                "أول تشغيل، سيُنشأ عبر _create_tables")
+
         if stored_tables_hash == legacy_tables_hash:
             logger.info(
                 "🔄 ترقية tables_hash من v7.7.28 → v7.7.29 "
@@ -5798,18 +6017,56 @@ class Database(
             if not ok:
                 logger.error("❌ فشل حفظ tables_hash الجديد")
             stored_tables_hash = tables_hash
+
         if stored_tables_hash != tables_hash:
             t_tables = time.monotonic()
-            await self._create_tables(conn=conn)
+
+            # 🔴 FIX-DB20 (CRITICAL): تشغيل _create_tables في
+            # transaction **مستقلة** (بدون تمرير conn).
+            try:
+                await self._create_tables()
+                logger.info(
+                    f"✅ create_tables (tx مستقلة) في "
+                    f"{time.monotonic() - t_tables:.2f}s")
+            except Exception as _ct_e:
+                logger.error(
+                    f"❌ _create_tables فشل: {_ct_e} — "
+                    f"تحقّق من database_tables.py",
+                    exc_info=True)
+
+            # ✅ تحقّق أن tx الـ bootstrap ما زالت سليمة
+            if USE_POSTGRES and not await self._pg_check_tx_alive(conn):
+                logger.error(
+                    "❌ tx الـ bootstrap أُجهضت بعد _create_tables — "
+                    "سبب غير متوقّع (يجب أن تكون مستقلة). "
+                    "إيقاف bootstrap بأمان."
+                )
+                raise RuntimeError(
+                    "bootstrap tx aborted after _create_tables")
+
+            # 🆕 v7.7.72 FIX-DB25: حفظ tables_hash في tx مستقلة
+            # مباشرة بعد create_tables (دفاعياً — يمنع إعادة
+            # البناء في الإقلاع التالي إذا فشلت tx الأم).
+            try:
+                async with self.connection() as _hconn:
+                    await self._upsert_setting(
+                        _hconn, "tables_hash", tables_hash)
+                logger.info(
+                    "✅ v7.7.72 FIX-DB25: tables_hash محفوظ مباشرة "
+                    "بعد create_tables (tx مستقلة)")
+            except Exception as _he:
+                logger.warning(
+                    f"⚠️ v7.7.72 FIX-DB25: فشل حفظ tables_hash "
+                    f"المبكر: {_he} — سيُحاول في tx الأم")
+
+            # الآن نحفظ tables_hash في tx الأم (idempotent)
             ok = await self._upsert_setting(
                 conn, "tables_hash", tables_hash)
             if not ok:
                 logger.error("❌ فشل حفظ tables_hash")
-            logger.info(
-                f"✅ create_tables في "
-                f"{time.monotonic() - t_tables:.2f}s")
         else:
             logger.info("⏩ الجداول موجودة — تخطي create_tables")
+
         current_hash = self._compute_bootstrap_hash()
         stored_hash = await self._fetchval_with_conn(
             conn, _sql_get_setting_value(), "bootstrap_hash")
@@ -5817,9 +6074,24 @@ class Database(
             logger.info("⏩ bootstrap محدّث — تخطي migrate")
         else:
             t_mig = time.monotonic()
-            await self._migrate_schema(conn)
-            await self._init_default_data(conn)
+
+            # 🔴 FIX-DB20: savepoint حول _migrate_schema
+            await self._run_with_savepoint(
+                conn, "sp_migrate_schema",
+                self._migrate_schema, conn,
+                on_fail="log",
+            )
+
+            # 🔴 FIX-DB20: savepoint حول _init_default_data
+            await self._run_with_savepoint(
+                conn, "sp_init_default_data",
+                self._init_default_data, conn,
+                on_fail="log",
+            )
+
             elapsed = time.monotonic() - t_mig
+
+            # حفظ bootstrap_hash (يعمل لأن savepoints استُعيدت)
             ok = await self._upsert_setting(
                 conn, "bootstrap_hash", current_hash)
             if not ok:
@@ -5837,18 +6109,34 @@ class Database(
                 await self._create_secondary_indexes(secondary_indexes)
         except Exception as e:
             logger.warning(f"⚠️ _create_secondary_indexes: {e}")
+
         if USE_POSTGRES:
-            try:
-                await self._ensure_materialized_views_postgres(conn)
-            except Exception as e:
-                logger.warning(f"⚠️ MV init: {e}")
-                self._mv_available = False
-            try:
-                await self._tune_heavy_tables_autovacuum(conn)
-            except Exception as e:
-                logger.debug(f"autovacuum tune: {e}")
-        await self._import_banned_words(conn)
-        await self._import_auto_replies(conn)
+            # 🔴 FIX-DB20: savepoint حول MV
+            await self._run_with_savepoint(
+                conn, "sp_mv_init",
+                self._ensure_materialized_views_postgres, conn,
+                on_fail="log",
+            )
+            # 🔴 FIX-DB20: savepoint حول autovacuum tuning
+            await self._run_with_savepoint(
+                conn, "sp_tune_autovacuum",
+                self._tune_heavy_tables_autovacuum, conn,
+                on_fail="log",
+            )
+
+        # 🔴 FIX-DB20: savepoint حول استيراد الكلمات المحظورة
+        await self._run_with_savepoint(
+            conn, "sp_import_bw",
+            self._import_banned_words, conn,
+            on_fail="log",
+        )
+        # 🔴 FIX-DB20: savepoint حول استيراد الردود
+        await self._run_with_savepoint(
+            conn, "sp_import_ar",
+            self._import_auto_replies, conn,
+            on_fail="log",
+        )
+
         if USE_POSTGRES:
             try:
                 await self._analyze_after_tune(conn)
@@ -5915,29 +6203,6 @@ class Database(
                 # ═══════════════════════════════════════════════════════
                 # 🆕 v7.7.70 FIX-DB19 (CRITICAL): تشغيل maintenance
                 # في مهمة خلفية بدل await مباشر.
-                #
-                # السبب الجذري المُكتشف من السجل:
-                #   🐢 sleep overshoot: delay=10000ms actual=16257ms
-                #   🐢 sleep overshoot: delay=10000ms actual=15903ms
-                #   كل المهام تأخّرت بنفس اللحظة → event loop محجوب.
-                #
-                # التحليل:
-                #   _run_maintenance_postgres يمر على ~47 جدول/MV:
-                #     for tbl in merged_targets:  # ~47
-                #         await conn.fetchval("SELECT c.relkind = 'm'...")
-                #         await conn.execute("VACUUM ANALYZE ...")
-                #         await asyncio.sleep(0.1)
-                #   المجموع ≈ 47 × 345ms ≈ 16.2s — يطابق actual=16257ms.
-                #
-                # الأثر قبل الإصلاح:
-                #   • خلال 16s، كل asyncio.sleep في المهام الأخرى يتأخّر.
-                #   • pool connection محجوز 16s.
-                #   • I/O من VACUUM على Aiven يُبطئ الاستعلامات الأخرى.
-                #
-                # الإصلاح:
-                #   • _spawn_bg_task → event loop يبقى حرّاً.
-                #   • _bootstrap_lock يُحرَّر فوراً.
-                #   • maintenance يعمل في الخلفية بأولويّة منخفضة.
                 # ═══════════════════════════════════════════════════════
                 if USE_POSTGRES:
                     async def _run_maint_bg():
@@ -7972,14 +8237,14 @@ __all__ = [
 
 
 # =====================================================================
-# LOAD BEACON — v7.7.70
+# LOAD BEACON — v7.7.72
 # =====================================================================
 
 try:
     _analytics_status = (
         "✅" if hasattr(Database, "get_user_growth") else "❌")
     logger.info(
-        "🛡️ database.py v7.7.70 MAINTENANCE-BG-FIX loaded | "
+        "🛡️ database.py v7.7.72 FAST-CALLER-TX-DIAG loaded | "
         "DB=%s | Analytics=%s (available=%s) | "
         "Migrations=%s | Refactor=%s | Caches=%s | "
         "Idle-TX-Audit=%s (interval=%.0fs, threshold=%d) | "
@@ -7987,7 +8252,15 @@ try:
         "PG-stmt-cache=%d (pooled=%s) | "
         "PG-max-inactive=%.0fs | "
         "PG-ping-idle=%.0fs | "
-        "Fixes: DB19 (maintenance bg task) ← NEW، "
+        "SLOW_QUERY_FULL_STACK=%s | "
+        "Fixes: DB23 (fast caller sys._getframe) ← NEW، "
+        "DB24 (tx_alive log differentiation) ← NEW، "
+        "DB25 (early tables_hash save) ← NEW، "
+        "DB26 (beacon update)، "
+        "DB20 (bootstrap tx protect)، "
+        "DB21 (savepoint helpers)، "
+        "DB22 (beacon)، "
+        "DB19 (maintenance bg task)، "
         "DB16 (REVERT stmt_cache=0)، "
         "DB17 (stmt_cache default 100)، "
         "DB18 (cache lifetime default 300s)، "
@@ -8009,6 +8282,7 @@ try:
         "yes" if _PG_IS_POOLED else "no",
         PG_MAX_INACTIVE_LIFETIME,
         PG_CONN_PING_IDLE_THRESHOLD,
+        "on" if SLOW_QUERY_FULL_STACK else "off (fast path)",
         MAX_SQL_IN_PARAMS,
     )
 except Exception:
