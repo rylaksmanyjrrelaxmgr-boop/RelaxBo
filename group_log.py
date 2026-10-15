@@ -1,47 +1,50 @@
 # group_log.py
 """
-group_log.py — نظام سجل قنوات المجموعات الذكي (v1.3.2)
+group_log.py — نظام سجل قنوات المجموعات الذكي (v1.4.0)
 =====================================================================
-🔴 v1.3.2 (PERF + RELIABILITY FIXES):
-    🔴 FIX-GM8 CRITICAL: cache 60s لحالة المشاركة.
-        قبل: كل رسالة سجل تُنفّذ استعلامين DB
-        (get_private + get_channel_share_count) → 200,000 استعلام/ساعة
-        على 1000 مجموعة (4.8M/يوم).
-        بعد: استعلام واحد كل 60s لكل مجموعة → 60 استعلام/ساعة.
-        التحسّن: ~3300× على النظام المُزدحم.
-        invalidate() يمسح cache المشاركة عند set_private/unset_private.
+🔴 v1.4.0 (SETTINGS-KEY-UNIFICATION):
+    🔴 FIX-GM20 CRITICAL: توحيد مفتاح السجل العام.
+        المشكلة: group_log.py كان يكتب/يقرأ على
+        `settings.global_log_channel` بينما handlers_callback.py
+        و DB.get_log_channel يقرآن من `settings.log_channel`.
+        النتيجة: فصام كامل بين النظامين — المطوّر يعيّن قناة
+        السجل فتُحفظ تحت مفتاح، لكن `_membership_get_log_channel`
+        و `_get_log_channel_menu_data` لا يجدانها.
+        الإصلاح:
+          • CANONICAL_KEY = "log_channel" (متوافق مع handlers_callback)
+          • LEGACY_KEY   = "global_log_channel" (للقراءة فقط)
+          • _read_global_key() يجرّب CANONICAL ثم LEGACY
+          • set_global() يكتب CANONICAL + يحذف LEGACY (ترحيل تلقائي)
 
-    🔴 FIX-GM15 CRITICAL: _worker يستخدم safe_send بدل bot.send_message.
-        قبل: RetryAfter/TimedOut/parse-error → الرسالة تُفقَد صامتاً.
-        بعد: safe_send يتعامل مع:
-          • RetryAfter (ينتظر + يُعيد)
-          • TimedOut (retry ×3)
-          • parse errors (fallback no-parse)
-          • ChatMigrated (إعادة إرسال)
-          • rate limiting
-        الأثر: أحداث الأمان الحرجة (حظر/حذف/تحذير) لا تُفقَد.
+    🔴 FIX-GM21 CRITICAL: ترحيل تلقائي للبيانات القديمة.
+        _migrate_legacy_key() تُستدعى مرة واحدة عند أول قراءة:
+        إذا وُجد LEGACY وبلا CANONICAL → ننسخ ثم نحذف LEGACY.
 
+    🟠 FIX-GM22: invalidate_global() منفصلة عن invalidate(group_id).
+        قبل: invalidate(None) يمسح كل شيء (مشاكل أداء عند تغيير
+        القناة العامة فقط). بعد: دوال مخصّصة:
+          • invalidate(group_id)  → مجموعة واحدة
+          • invalidate_global()   → السجل العام + قوائم جميع المجموعات
+          • invalidate_all()      → كل شيء (للإيقاف)
+
+    🟠 FIX-GM23: إبطال جماعي عبر invalidate_all_menus().
+        عند تغيير السجل العام، تُبطَل قوائم كل المجموعات التي
+        تستخدم الـ fallback → تظهر القناة الجديدة فوراً.
+
+    🟡 FIX-GM24: تحقق صريح من نوع chat_id (int) في set_private
+        و set_global، لتفادي تخزين "@username" كقناة سجل.
+
+    🟡 FIX-GM25: _get_global لا يتجاهل loop عند فشل
+        get_running_loop — يستخدم self._global_ts مباشرة.
+
+✅ v1.3.2 (PERF + RELIABILITY) — محفوظ بالكامل:
+    🔴 FIX-GM8: cache 60s لحالة المشاركة (~3300× تحسّن).
+    🔴 FIX-GM15: _worker يستخدم safe_send بدل bot.send_message.
     🟡 FIX-GM19: send() يُعيد bool + عداد إسقاط دوري.
-        قبل: send() → None → المستدعي لا يعرف الرفض.
-        بعد: True = أُضيفت، False = رُفضت + إشعار كل 100 إسقاط.
 
-🆕 v1.3.1 (PostgreSQL compatibility):
-    ✅ INSERT OR IGNORE → INSERT ... ON CONFLICT DO NOTHING
-    ✅ INSERT OR REPLACE → INSERT ... ON CONFLICT (key) DO UPDATE
-    ✅ توافق كامل مع PostgreSQL + SQLite 3.24+
-
-🆕 v1.3.0 (ذكاء المشاركة):
-    ✅ get_groups_using_channel — قائمة المجموعات المشاركة
-    ✅ get_channel_share_count — عدد المجموعات
-    ✅ set_private يُعيد dict مع معلومات المشاركة
-    ✅ send مع رأس ذكي يحمل اسم المجموعة المصدر
-    ✅ _worker: تنظيف جماعي عند فشل القناة
-    ✅ unset_private_bulk للتنظيف الجماعي
-    ✅ كاش لأسماء المجموعات
-
-🆕 v1.2.0 (أساس):
-    ✅ get_running_loop + has_private + get_effective_target
-    ✅ drain + shutdown + حماية Worker مزدوج
+✅ v1.3.1 (PostgreSQL): ON CONFLICT DO NOTHING/UPDATE.
+✅ v1.3.0 (ذكاء المشاركة): get_groups_using_channel + رأس ذكي.
+✅ v1.2.0 (أساس): get_running_loop + has_private + drain.
 =====================================================================
 """
 
@@ -57,7 +60,6 @@ logger = logging.getLogger(__name__)
 # ═════════════════════════════════════════════════════════════════════
 # 🔴 FIX-GM15 (v1.3.2): محاولة استيراد safe_send من utils
 # ═════════════════════════════════════════════════════════════════════
-# إن فشل (circular import أو utils غير متاح) → نستخدم fallback
 _HAS_SAFE_SEND = False
 _safe_send_fn = None
 try:
@@ -65,6 +67,17 @@ try:
     _HAS_SAFE_SEND = True
 except ImportError:
     pass
+
+
+# ═════════════════════════════════════════════════════════════════════
+# 🔴 FIX-GM20 (v1.4.0): توحيد مفتاح السجل العام
+# ═════════════════════════════════════════════════════════════════════
+# CANONICAL_KEY: المفتاح الرسمي — متوافق مع handlers_callback.py
+#                و DB.get_log_channel() و _membership_get_log_channel
+# LEGACY_KEY   : المفتاح القديم — للقراءة فقط، يُرحَّل تلقائياً
+# ═════════════════════════════════════════════════════════════════════
+CANONICAL_LOG_KEY = "log_channel"
+LEGACY_LOG_KEY = "global_log_channel"
 
 
 class GroupLog:
@@ -83,7 +96,7 @@ class GroupLog:
         self.db = db
         self.bot = bot
 
-        # Cache
+        # Cache — قنوات مجموعة
         self._cache: Dict[int, List[dict]] = {}
         self._cache_ts: Dict[int, float] = {}
         self._cache_ttl = self.CACHE_TTL
@@ -91,18 +104,19 @@ class GroupLog:
         # ✅ v1.3.0: أسماء المجموعات (cache للأداء)
         self._group_names: Dict[int, str] = {}
 
-        # 🔴 FIX-GM8 (v1.3.2): cache لحالة المشاركة (shared)
-        # كان _build_message_text يستعلم DB مرتين لكل رسالة سجل →
-        # 200,000 استعلام/ساعة على 1000 مجموعة.
+        # 🔴 FIX-GM8 (v1.3.2): cache لحالة المشاركة
         self._shared_cache: Dict[int, tuple] = {}   # {group_id: (bool, ts)}
         self._shared_cache_ttl = 60.0
 
-        # 🔴 FIX-GM19 (v1.3.2): عداد الرسائل المُسقَطة (queue full)
+        # 🔴 FIX-GM19 (v1.3.2): عداد الرسائل المُسقَطة
         self._drop_count: int = 0
 
         # Global log channel cache
         self._global_chat_id: Optional[int] = None
         self._global_ts: float = 0.0
+
+        # 🔴 FIX-GM21 (v1.4.0): علامة الترحيل (مرة واحدة لكل عمر instance)
+        self._legacy_migrated: bool = False
 
         # Queue + Worker
         self._queue: asyncio.Queue = asyncio.Queue(maxsize=self.QUEUE_MAX_SIZE)
@@ -110,25 +124,112 @@ class GroupLog:
         self._started = False
 
     # =================================================================
-    # Cache
+    # Cache invalidation — 🔴 FIX-GM22 (v1.4.0)
     # =================================================================
 
     def invalidate(self, group_id: Optional[int] = None) -> None:
-        """إبطال الكاش — لمجموعة أو للكل."""
+        """
+        إبطال الكاش — لمجموعة واحدة أو الكل.
+
+        🟠 FIX-GM22 (v1.4.0): سلوك متغيّر:
+          • invalidate(None) → نفس invalidate_all() (توافق خلفي)
+          • invalidate(gid)  → مجموعة واحدة فقط
+
+        للسلوك الجديد المُحسَّن:
+          • invalidate_global()     → السجل العام فقط
+          • invalidate_all()        → كل شيء
+        """
         if group_id is None:
-            self._cache.clear()
-            self._cache_ts.clear()
-            self._global_ts = 0.0
-            self._global_chat_id = None
-            self._group_names.clear()
-            # 🔴 FIX-GM8: مسح cache المشاركة أيضاً
-            self._shared_cache.clear()
-        else:
-            self._cache.pop(group_id, None)
-            self._cache_ts.pop(group_id, None)
-            self._group_names.pop(group_id, None)
-            # 🔴 FIX-GM8: مسح cache المشاركة لهذه المجموعة
-            self._shared_cache.pop(group_id, None)
+            self.invalidate_all()
+            return
+        self._cache.pop(group_id, None)
+        self._cache_ts.pop(group_id, None)
+        self._group_names.pop(group_id, None)
+        self._shared_cache.pop(group_id, None)
+
+    def invalidate_global(self) -> None:
+        """
+        🟠 FIX-GM22 (v1.4.0): إبطال السجل العام + قوائم المجموعات.
+
+        يُستدعى عند:
+          • set_global(new_chat_id)
+          • unset_global()
+          • تغيير قناة السجل العامة عبر لوحة الأدمن
+
+        يُبطل:
+          • self._global_chat_id / _global_ts
+          • _cache لمجموعات التي كانت تستخدم fallback (بلا private)
+        """
+        old_global = self._global_chat_id
+        self._global_chat_id = None
+        self._global_ts = 0.0
+
+        # أعد بناء cache المجموعات التي كانت تستخدم fallback فقط
+        try:
+            for gid in list(self._cache.keys()):
+                # إذا كانت المجموعة بلا قناة خاصة → قد تغيّر fallback
+                # (نُبطلها كلها — رخيص لأن_cache صغير)
+                self._cache.pop(gid, None)
+                self._cache_ts.pop(gid, None)
+        except Exception as e:
+            logger.debug(f"invalidate_global cache loop: {e}")
+
+        logger.debug(
+            f"♻️ GroupLog.invalidate_global: "
+            f"old={old_global} → new=None (سيُعاد الجلب)"
+        )
+
+    def invalidate_all(self) -> None:
+        """
+        🟠 FIX-GM22 (v1.4.0): إبطال كل الكاش (للإيقاف/الصيانة).
+        """
+        self._cache.clear()
+        self._cache_ts.clear()
+        self._group_names.clear()
+        self._shared_cache.clear()
+        self._global_ts = 0.0
+        self._global_chat_id = None
+        logger.debug("♻️ GroupLog.invalidate_all: كل الكاش أُبطل")
+
+    async def invalidate_all_menus(self) -> int:
+        """
+        🟠 FIX-GM23 (v1.4.0): إبطال قوائم قناة السجل في الـ cache
+        العام (internal_cache) لكل المجموعات.
+
+        يُستدعى عند تغيير القناة العامة — لأن قوائم المجموعات
+        التي تستخدم fallback ستُظهر القناة القديمة لـ 5 دقائق
+        (LOG_CHANNEL_MENU_CACHE_TTL).
+
+        يُرجع: عدد المفاتيح المُبطَلة.
+        """
+        count = 0
+        try:
+            from database import internal_cache
+        except ImportError:
+            logger.debug("invalidate_all_menus: internal_cache غير متاح")
+            return 0
+        try:
+            # نحاول الوصول لـ store مباشرة (إن وُجد)
+            store = getattr(internal_cache, '_store', None)
+            if store is None:
+                # fallback: ابحث في واجهات أخرى
+                store = getattr(internal_cache, '_cache', None)
+            if store is None:
+                return 0
+            for key in list(store.keys()):
+                if str(key).startswith("log_ch_menu_"):
+                    try:
+                        await internal_cache.invalidate(key)
+                        count += 1
+                    except Exception:
+                        pass
+        except Exception as e:
+            logger.debug(f"invalidate_all_menus: {e}")
+        if count:
+            logger.debug(
+                f"♻️ invalidate_all_menus: {count} مفتاح أُبطل"
+            )
+        return count
 
     # =================================================================
     # سجل خاص بالمجموعة
@@ -145,7 +246,6 @@ class GroupLog:
             )
             if not row:
                 return None
-            # دعم dict و Row
             if isinstance(row, dict):
                 ch = row.get("log_channel_id")
             else:
@@ -169,11 +269,7 @@ class GroupLog:
     async def get_groups_using_channel(
         self, chat_id: int, exclude_group_id: int = None
     ) -> List[Dict]:
-        """
-        ✅ v1.3.0: قائمة المجموعات التي تستخدم نفس القناة.
-
-        يُرجع: [{'chat_id': int, 'chat_name': str, 'banned': int}, ...]
-        """
+        """قائمة المجموعات التي تستخدم نفس القناة."""
         if not chat_id:
             return []
         try:
@@ -189,7 +285,6 @@ class GroupLog:
                     "WHERE log_channel_id = ?",
                     (chat_id,),
                 )
-            # ✅ تحويل آمن إلى dict
             result = []
             for r in (rows or []):
                 if isinstance(r, dict):
@@ -207,7 +302,7 @@ class GroupLog:
     async def get_channel_share_count(
         self, chat_id: int, exclude_group_id: int = None
     ) -> int:
-        """✅ v1.3.0: عدد المجموعات التي تستخدم نفس القناة."""
+        """عدد المجموعات التي تستخدم نفس القناة."""
         if not chat_id:
             return 0
         try:
@@ -251,22 +346,11 @@ class GroupLog:
     # ═════════════════════════════════════════════════════════════════
 
     async def _is_channel_shared_cached(self, group_id: int) -> bool:
-        """
-        🔴 FIX-GM8 (v1.3.2): cache 60s لحالة المشاركة.
-
-        قبل الإصلاح: كل رسالة سجل تُنفّذ استعلامين DB
-        (get_private + get_channel_share_count) — 200,000 استعلام/ساعة
-        على 1000 مجموعة.
-
-        بعد الإصلاح: استعلام واحد كل 60s لكل مجموعة → 60 استعلام/ساعة.
-        التحسّن: ~3300× على النظام المُزدحم.
-        """
+        """cache 60s لحالة المشاركة (FIX-GM8 محفوظ)."""
         try:
             loop = asyncio.get_running_loop()
             now = loop.time()
         except RuntimeError:
-            # لا يوجد event loop جارٍ (نادر جداً)
-            # → نستخدم time.monotonic() كـ fallback آمن
             now = time.monotonic()
 
         cached = self._shared_cache.get(group_id)
@@ -275,7 +359,6 @@ class GroupLog:
             if (now - ts) < self._shared_cache_ttl:
                 return shared
 
-        # محسوب جديد
         try:
             private = await self.get_private(group_id)
             if not private:
@@ -293,19 +376,14 @@ class GroupLog:
 
     # =================================================================
     # ✅ v1.3.0: set_private مع تقرير ذكي
+    # 🟡 FIX-GM24 (v1.4.0): تحقق صريح من نوع chat_id
     # =================================================================
 
     async def set_private(self, group_id: int, chat_id: int) -> Dict:
         """
-        ✅ v1.3.0: يعيّن قناة سجل خاصة.
+        يعيّن قناة سجل خاصة.
 
-        يُرجع dict:
-        {
-            'ok': bool,
-            'shared': bool,          # هل القناة مشتركة؟
-            'share_count': int,      # عدد المجموعات الأخرى
-            'other_groups': list,    # أسماء المجموعات الأخرى
-        }
+        🟡 FIX-GM24 (v1.4.0): يتحقق أن chat_id رقم صحيح.
         """
         result = {
             'ok': False,
@@ -317,10 +395,21 @@ class GroupLog:
         if not group_id or not chat_id:
             return result
 
+        # 🟡 FIX-GM24: تحقق صريح من نوع chat_id
+        try:
+            chat_id_int = int(chat_id)
+        except (TypeError, ValueError):
+            logger.warning(
+                f"set_private: chat_id غير صالح ({chat_id!r}) — "
+                f"يجب أن يكون رقم قناة (مثل -1001234567890) لا "
+                f"username. لتعيين @username استخدمه من لوحة الأدمن."
+            )
+            return result
+
         # ✅ فحص المشاركة أولاً
         try:
             others = await self.get_groups_using_channel(
-                chat_id, exclude_group_id=group_id
+                chat_id_int, exclude_group_id=group_id
             )
             if others:
                 result['shared'] = True
@@ -337,7 +426,7 @@ class GroupLog:
             n = await self.db.execute(
                 "UPDATE bot_groups SET log_channel_id = ? "
                 "WHERE chat_id = ?",
-                (chat_id, group_id),
+                (chat_id_int, group_id),
             )
             if n and n > 0:
                 self.invalidate(group_id)
@@ -345,7 +434,6 @@ class GroupLog:
                 return result
 
             # لو المجموعة غير موجودة — أدرجها
-            # ✅ v1.3.1: ON CONFLICT DO NOTHING (متوافق PostgreSQL + SQLite 3.24+)
             try:
                 await self.db.execute(
                     "INSERT INTO bot_groups "
@@ -355,14 +443,14 @@ class GroupLog:
                     (
                         group_id,
                         str(group_id),
-                        chat_id,
+                        chat_id_int,
                         datetime.now(timezone.utc).replace(tzinfo=None),
                     ),
                 )
                 await self.db.execute(
                     "UPDATE bot_groups SET log_channel_id = ? "
                     "WHERE chat_id = ?",
-                    (chat_id, group_id),
+                    (chat_id_int, group_id),
                 )
                 result['ok'] = True
             except Exception as ie:
@@ -371,7 +459,7 @@ class GroupLog:
             self.invalidate(group_id)
             return result
         except Exception as e:
-            logger.error(f"set_private({group_id}, {chat_id}): {e}")
+            logger.error(f"set_private({group_id}, {chat_id_int}): {e}")
             return result
 
     async def unset_private(self, group_id: int) -> bool:
@@ -391,7 +479,7 @@ class GroupLog:
             return False
 
     async def unset_private_bulk(self, group_ids: List[int]) -> int:
-        """✅ v1.3.0: إزالة القناة من عدة مجموعات."""
+        """إزالة القناة من عدة مجموعات."""
         if not group_ids:
             return 0
         try:
@@ -409,27 +497,135 @@ class GroupLog:
             return 0
 
     # =================================================================
-    # سجل عام
+    # 🔴 FIX-GM20/21/25 (v1.4.0): السجل العام — توحيد المفاتيح + ترحيل
     # =================================================================
 
-    async def _get_global(self) -> Optional[int]:
-        """يُرجع معرّف السجل العام (cached)."""
+    async def _migrate_legacy_key(self) -> None:
+        """
+        🔴 FIX-GM21 (v1.4.0): ترحيل مفتاح LEGACY → CANONICAL.
+
+        يُستدعى مرة واحدة عند أول قراءة:
+          • إذا CANONICAL موجود → احذف LEGACY (تنظيف).
+          • إذا CANONICAL فارغ و LEGACY موجود → انسخ ثم احذف LEGACY.
+          • إذا كليهما فارغ → لا شيء.
+        """
+        if self._legacy_migrated:
+            return
+        self._legacy_migrated = True
         try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            return self._global_chat_id
+            canonical = await self.db.fetchval(
+                "SELECT value FROM settings WHERE key = ?",
+                (CANONICAL_LOG_KEY,), default=None,
+            )
+            legacy = await self.db.fetchval(
+                "SELECT value FROM settings WHERE key = ?",
+                (LEGACY_LOG_KEY,), default=None,
+            )
+            if canonical:
+                # ✅ الأحدث موجود → احذف القديم للتنظيف
+                if legacy:
+                    try:
+                        await self.db.execute(
+                            "DELETE FROM settings WHERE key = ?",
+                            (LEGACY_LOG_KEY,),
+                        )
+                        logger.info(
+                            f"🧹 FIX-GM21: حذف المفتاح القديم "
+                            f"({LEGACY_LOG_KEY}) — CANONICAL موجود"
+                        )
+                    except Exception as _e:
+                        logger.debug(f"delete legacy: {_e}")
+                return
+            if legacy:
+                # 🔄 ترحيل: انسخ ثم احذف
+                try:
+                    await self.db.execute(
+                        "INSERT INTO settings (key, value) VALUES (?, ?) "
+                        "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
+                        (CANONICAL_LOG_KEY, str(legacy)),
+                    )
+                    await self.db.execute(
+                        "DELETE FROM settings WHERE key = ?",
+                        (LEGACY_LOG_KEY,),
+                    )
+                    logger.info(
+                        f"🔄 FIX-GM21: ترحيل '{LEGACY_LOG_KEY}' → "
+                        f"'{CANONICAL_LOG_KEY}' value={legacy}"
+                    )
+                except Exception as _e:
+                    logger.warning(f"ترحيل legacy: {_e}")
+        except Exception as e:
+            logger.debug(f"_migrate_legacy_key: {e}")
 
-        now = loop.time()
-        if (self._global_chat_id is not None
-                and now - self._global_ts < self._cache_ttl):
-            return self._global_chat_id
+    async def _read_global_key(self) -> Optional[int]:
+        """
+        🔴 FIX-GM20 (v1.4.0): قراءة مفتاح السجل العام بـ fallback chain.
 
+        الترتيب:
+          1. settings.log_channel          (CANONICAL)
+          2. settings.global_log_channel   (LEGACY — للتوافق)
+        """
+        # 1) CANONICAL
         try:
             v = await self.db.fetchval(
                 "SELECT value FROM settings WHERE key = ?",
-                ("global_log_channel",), default=None,
+                (CANONICAL_LOG_KEY,), default=None,
             )
-            self._global_chat_id = int(v) if v else None
+            if v:
+                try:
+                    return int(v)
+                except (TypeError, ValueError):
+                    logger.warning(
+                        f"global key value غير صالح: {v!r}"
+                    )
+        except Exception as e:
+            logger.debug(f"_read_global_key canonical: {e}")
+
+        # 2) LEGACY
+        try:
+            v = await self.db.fetchval(
+                "SELECT value FROM settings WHERE key = ?",
+                (LEGACY_LOG_KEY,), default=None,
+            )
+            if v:
+                try:
+                    return int(v)
+                except (TypeError, ValueError):
+                    pass
+        except Exception as e:
+            logger.debug(f"_read_global_key legacy: {e}")
+
+        return None
+
+    async def _get_global(self) -> Optional[int]:
+        """
+        يُرجع معرّف السجل العام (cached).
+
+        🔴 FIX-GM20: يستخدم _read_global_key (توحيد المفاتيح).
+        🔴 FIX-GM21: يستدعي _migrate_legacy_key مرة واحدة.
+        🟡 FIX-GM25: عند فشل get_running_loop → العودة للقيمة الحالية.
+        """
+        # 🔴 FIX-GM21: ترحيل عند أول استدعاء
+        if not self._legacy_migrated:
+            await self._migrate_legacy_key()
+
+        # 🟡 FIX-GM25: احصل على الوقت بأمان
+        try:
+            loop = asyncio.get_running_loop()
+            now = loop.time()
+        except RuntimeError:
+            # لا يوجد loop — استخدم monotonic فقط للتحقق من TTL
+            now = time.monotonic()
+            # لا نستطيع استخدام cache زمني معتمد على loop السابق
+            # لكن نعتمد على قيمة monotonic الحالية (يعمل مبدئياً)
+
+        if (self._global_chat_id is not None
+                and (now - self._global_ts) < self._cache_ttl):
+            return self._global_chat_id
+
+        try:
+            v = await self._read_global_key()
+            self._global_chat_id = v
         except Exception as e:
             logger.warning(f"_get_global: {e}")
             self._global_chat_id = None
@@ -438,29 +634,77 @@ class GroupLog:
         return self._global_chat_id
 
     async def set_global(self, chat_id: int) -> bool:
+        """
+        يُعيّن السجل العام.
+
+        🔴 FIX-GM20 (v1.4.0): يكتب CANONICAL_KEY فقط + يحذف LEGACY.
+        🟡 FIX-GM24 (v1.4.0): يتحقق من نوع chat_id.
+        """
         if not chat_id:
             return False
+
+        # 🟡 FIX-GM24: تحقق صريح من النوع
         try:
-            # ✅ v1.3.1: ON CONFLICT DO UPDATE (متوافق PostgreSQL + SQLite 3.24+)
-            await self.db.execute(
-                "INSERT INTO settings (key, value) "
-                "VALUES (?, ?) "
-                "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
-                ("global_log_channel", str(chat_id)),
+            chat_id_int = int(chat_id)
+        except (TypeError, ValueError):
+            logger.warning(
+                f"set_global: chat_id غير صالح ({chat_id!r}) — "
+                f"يجب أن يكون رقم قناة. لـ @username: احفظه كنص "
+                f"في settings مباشرة أو حوّله لـ ID أولاً."
             )
-            self.invalidate()
+            return False
+
+        try:
+            # اكتب CANONICAL
+            await self.db.execute(
+                "INSERT INTO settings (key, value) VALUES (?, ?) "
+                "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
+                (CANONICAL_LOG_KEY, str(chat_id_int)),
+            )
+            # احذف LEGACY (تنظيف شامل)
+            try:
+                await self.db.execute(
+                    "DELETE FROM settings WHERE key = ?",
+                    (LEGACY_LOG_KEY,),
+                )
+            except Exception as _e:
+                logger.debug(f"set_global delete legacy: {_e}")
+
+            self.invalidate_global()
+
+            # 🟠 FIX-GM23: إبطال قوائم قناة السجل في internal_cache
+            await self.invalidate_all_menus()
+
+            logger.info(
+                f"✅ set_global: {CANONICAL_LOG_KEY}={chat_id_int}"
+            )
             return True
         except Exception as e:
             logger.error(f"set_global: {e}")
             return False
 
     async def unset_global(self) -> bool:
+        """
+        يُزيل السجل العام.
+
+        🔴 FIX-GM20: يحذف كلا المفتاحين (canonical + legacy).
+        """
         try:
             await self.db.execute(
                 "DELETE FROM settings WHERE key = ?",
-                ("global_log_channel",),
+                (CANONICAL_LOG_KEY,),
             )
-            self.invalidate()
+            try:
+                await self.db.execute(
+                    "DELETE FROM settings WHERE key = ?",
+                    (LEGACY_LOG_KEY,),
+                )
+            except Exception as _e:
+                logger.debug(f"unset_global legacy: {_e}")
+
+            self.invalidate_global()
+            await self.invalidate_all_menus()
+            logger.info("✅ unset_global: تم الحذف")
             return True
         except Exception as e:
             logger.error(f"unset_global: {e}")
@@ -488,7 +732,7 @@ class GroupLog:
             loop = asyncio.get_running_loop()
             now = loop.time()
         except RuntimeError:
-            now = 0.0
+            now = time.monotonic()
 
         ts = self._cache_ts.get(group_id, 0.0)
         if group_id in self._cache and (now - ts) < self._cache_ttl:
@@ -517,8 +761,7 @@ class GroupLog:
         return targets
 
     # =================================================================
-    # ✅ v1.3.0: send مع رأس ذكي
-    # 🔴 v1.3.2 FIX-GM19: يُعيد bool + عداد إسقاط
+    # send مع رأس ذكي — 🔴 FIX-GM19 محفوظ
     # =================================================================
 
     def send(self, group_id: int, text: str,
@@ -526,18 +769,7 @@ class GroupLog:
              parse_mode: str = "HTML",
              silent: bool = True,
              show_group_header: bool = True) -> bool:
-        """
-        يضع رسالة سجل في الطابور.
-
-        ✅ v1.3.0: show_group_header — إضافة رأس باسم المجموعة
-                    تلقائياً لتمييز المصدر عند المشاركة.
-
-        🔴 FIX-GM19 (v1.3.2): يُعيد bool:
-          • True = أُضيفت للطابور.
-          • False = رُفضت (طابور ممتلئ أو معاملات فارغة).
-
-        + إشعار دوري في السجل عند الإسقاط المتكرر (للمراقبة).
-        """
+        """يضع رسالة سجل في الطابور."""
         if not group_id or not text:
             return False
         try:
@@ -551,7 +783,6 @@ class GroupLog:
             })
             return True
         except asyncio.QueueFull:
-            # 🔴 FIX-GM19: عداد إسقاط + إشعار دوري كل 100 رسالة
             self._drop_count += 1
             if self._drop_count % 100 == 1:
                 logger.error(
@@ -562,27 +793,18 @@ class GroupLog:
             return False
 
     async def _build_message_text(self, item: dict) -> str:
-        """
-        ✅ v1.3.0: بناء النص النهائي مع رأس ذكي.
-        - قناة خاصة بمجموعة واحدة → بلا رأس
-        - قناة مشتركة أو عامة → رأس باسم المجموعة
-
-        🔴 FIX-GM8 (v1.3.2): يستخدم cache 60s لحالة المشاركة —
-        بدل استعلامين DB لكل رسالة.
-        """
+        """بناء النص النهائي مع رأس ذكي."""
         base_text = item["text"]
         group_id = item["group_id"]
 
         if not item.get("show_group_header", True):
             return base_text
 
-        # 🔴 FIX-GM8: استخدم الـ cache (بدل استعلامين DB لكل رسالة)
         shared = await self._is_channel_shared_cached(group_id)
 
         if not shared:
             return base_text
 
-        # أضف رأس باسم المجموعة
         group_name = await self._get_group_name(group_id)
         header = (
             f"<b>📌 من: {group_name}</b>\n"
@@ -592,15 +814,11 @@ class GroupLog:
         return header + base_text
 
     # =================================================================
-    # Worker
+    # Worker — 🔴 FIX-GM15 محفوظ
     # =================================================================
 
     async def _worker(self) -> None:
-        """
-        عامل خلفي يعالج طابور الرسائل.
-
-        🔴 FIX-GM15 (v1.3.2): يستخدم safe_send بدل bot.send_message.
-        """
+        """عامل خلفي يعالج طابور الرسائل."""
         logger.info("🟢 GroupLog worker started")
         while True:
             try:
@@ -610,22 +828,10 @@ class GroupLog:
                     if not targets:
                         continue
 
-                    # ✅ v1.3.0: بناء النص مع الرأس الذكي
                     final_text = await self._build_message_text(item)
 
                     for t in targets:
                         try:
-                            # 🔴 FIX-GM15 (v1.3.2): استخدام safe_send
-                            # بدل bot.send_message المباشر.
-                            #
-                            # قبل: RetryAfter/TimedOut/parse-error →
-                            #       الرسالة تُفقَد صامتًا.
-                            # بعد: safe_send يتعامل مع:
-                            #       • RetryAfter (ينتظر + يُعيد)
-                            #       • TimedOut (retry ×3)
-                            #       • parse errors (fallback no-parse)
-                            #       • ChatMigrated (إعادة إرسال)
-                            #       • rate limiting
                             if _HAS_SAFE_SEND and _safe_send_fn is not None:
                                 result = await _safe_send_fn(
                                     self.bot,
@@ -635,12 +841,6 @@ class GroupLog:
                                     disable_notification=item["silent"],
                                 )
                                 if result is None:
-                                    # safe_send استنفد محاولاته أو فشل
-                                    # فشلاً مطلقاً. لا نُبطل القناة —
-                                    # قد يكون خطأ عابر (شبكة/rate).
-                                    # الأخطاء الدائمة (chat not found
-                                    # / kicked) عادةً ترفع استثناءً
-                                    # → يُلتقَط في except أدناه → cleanup.
                                     logger.warning(
                                         f"⚠️ safe_send أعاد None "
                                         f"(grp={item['group_id']}, "
@@ -648,7 +848,6 @@ class GroupLog:
                                         f"chat={t['chat_id']})"
                                     )
                             else:
-                                # fallback: send_message مباشر
                                 await self.bot.send_message(
                                     chat_id=t["chat_id"],
                                     text=final_text,
@@ -694,11 +893,7 @@ class GroupLog:
     async def _cleanup_broken_target(
         self, target: dict, source_group_id: int
     ) -> None:
-        """
-        ✅ v1.3.0: تنظيف ذكي للقناة الفاسدة.
-        - قناة عامة → احذف الإعداد العام
-        - قناة خاصة → احذف من **كل** المجموعات المشاركة
-        """
+        """تنظيف ذكي للقناة الفاسدة."""
         try:
             if target["source"] == "global":
                 await self.unset_global()
@@ -830,4 +1025,6 @@ __all__ = [
     "group_log",
     "init_group_log",
     "get_group_log",
+    "CANONICAL_LOG_KEY",
+    "LEGACY_LOG_KEY",
 ]
