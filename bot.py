@@ -2,30 +2,31 @@
 # -*- coding: utf-8 -*-
 
 """
-🌿 Relax Manager – البوت الرئيسي (bot.py v5.6.29-PERF-TELEGRAM-POOL-FIX)
+🌿 Relax Manager – البوت الرئيسي (bot.py v5.6.30-DB-DIAG-MARK)
 ================================================================================
 📌 نقطة الدخول الرسمية للتطبيق (entrypoint).
 
-🆕 v5.6.29 (PERF-TELEGRAM-POOL-FIX):
+🆕 v5.6.30 (DB-DIAG-MARK):
+    🟢 MARK-1: استدعاء db_diagnostics.mark_process_start() عند بدء
+        main() — يُفعّل نافذة السماح (STARTUP-GRACE) بدقة عبر
+        قياس وقت العملية الفعلي بدل وقت الاستيراد.
+        الأثر: /fullhealth و/latency يعرضان "نافذة إقلاع" صحيحة
+        خلال أول 60s، و تتجاهل _identify_bottleneck قياس event_loop
+        المضخّم خلال هذه الفترة.
+
+    🟢 MARK-2: تسجيل حالة تكامل db_diagnostics في Startup Log.
+
+    🟢 MARK-3: اكتشاف تلقائي للـ API — إن كان db_diagnostics أقدم
+        من v7.2.17 (بلا mark_process_start)، البوت يستمر بدون خطأ
+        (fallback لوقت الاستيراد).
+
+🆕 v5.6.29 (PERF-TELEGRAM-POOL-FIX) — محفوظ:
     🔴 FIX-BOT-6 (CRITICAL): إضافة HTTPXRequest مع
         connection_pool_size=32 (بدل الافتراضي 1).
-        السبب: PTB v20+ يستخدم pool=1 افتراضياً → كل send_message
-        ينتظر انتهاء السابق. على Render + Telegram البعيد (305ms
-        TCP + 409ms TLS)، هذا يسبب send=554ms لكل /start.
-        الأثر المتوقع: /start من ~590ms → ~200-250ms (تسريع 2.5×).
-
     🟡 FIX-BOT-7: keepalive_expiry=120.0 ثانية + pool أكبر.
-        إعادة استخدام اتصالات Telegram بدل فتح جديد لكل رسالة.
-
     🟡 FIX-BOT-8: تحديث Header + Load Beacon.
 
-🆕 v5.6.28 (APP-START-FIX + ROBUST-SHUTDOWN) — محفوظ:
-    🔴 FIX-BOT-1: app.start() بعد app.initialize().
-    🔴 FIX-BOT-2: توافق _start_polling_mode مع FIX-BOT-1.
-    🟠 FIX-BOT-3: shutdown signatures متعددة.
-    🟡 FIX-BOT-4: _WATCHER_INTERVAL: 10s → 30s.
-    🟡 FIX-BOT-5: تنظيف متغيرات ميتة.
-
+🆕 v5.6.28 (APP-START-FIX + ROBUST-SHUTDOWN) — محفوظ.
 🆕 v5.6.27 (SLEEP-PROBE) — محفوظ.
 🆕 v5.6.26 (DUP-FIX) — محفوظ.
 🆕 v5.6.25 (NAV-FIX-COMPAT) — محفوظ.
@@ -76,6 +77,29 @@ try:
 except ImportError:
     TypeHandler = None
     _HAS_TYPE_HANDLER = False
+
+# ═════════════════════════════════════════════════════════════════════
+# 🆕 v5.6.30 MARK-1/MARK-3: db_diagnostics integration (lazy, optional)
+# ═════════════════════════════════════════════════════════════════════
+_DB_DIAG_AVAILABLE = False
+_DB_DIAG_VERSION = None
+_MARK_PROCESS_START_FN = None
+_DB_DIAG_IMPORT_ERROR = None
+
+try:
+    import db_diagnostics as _db_diag_mod
+    _DB_DIAG_AVAILABLE = True
+    _DB_DIAG_VERSION = getattr(_db_diag_mod, "VERSION", "unknown")
+    _MARK_PROCESS_START_FN = getattr(
+        _db_diag_mod, "mark_process_start", None,
+    )
+    if not callable(_MARK_PROCESS_START_FN):
+        # db_diagnostics أقدم من v7.2.17 — لا mark_process_start
+        _MARK_PROCESS_START_FN = None
+except ImportError as _e_dbdiag:
+    _DB_DIAG_IMPORT_ERROR = str(_e_dbdiag)
+except Exception as _e_dbdiag:
+    _DB_DIAG_IMPORT_ERROR = f"unexpected: {_e_dbdiag}"
 
 from config import CONFIG
 
@@ -595,6 +619,33 @@ except ImportError:
     logger.debug("ℹ️ sleep_probe.py غير موجود — تخطي كاشف التأخيرات")
 except Exception as _sp_import_e:
     logger.warning("⚠️ sleep_probe import: %s", _sp_import_e)
+
+# ═══════════════════════════════════════════════════════════════════════
+# 🆕 v5.6.30 MARK-2: تقرير حالة db_diagnostics
+# ═══════════════════════════════════════════════════════════════════════
+
+def _log_db_diagnostics_status() -> None:
+    """🆕 v5.6.30: تسجيل حالة تكامل db_diagnostics في Startup."""
+    if not _DB_DIAG_AVAILABLE:
+        logger.info(
+            "ℹ️ db_diagnostics: غير متاح — %s "
+            "(سيستمر البوت بدون MARK-PROCESS-START)",
+            _DB_DIAG_IMPORT_ERROR or "module missing",
+        )
+        return
+
+    if _MARK_PROCESS_START_FN is not None:
+        logger.info(
+            "✅ db_diagnostics: v%s متاح | mark_process_start ✅ "
+            "(نافذة السماح ستُحسب بدقة)",
+            _DB_DIAG_VERSION,
+        )
+    else:
+        logger.warning(
+            "⚠️ db_diagnostics: v%s محمّل لكن بلا mark_process_start "
+            "(يتطلب v7.2.17+) — نافذة السماح ستعتمد على وقت الاستيراد",
+            _DB_DIAG_VERSION,
+        )
 
 # ═══════════════════════════════════════════════════════════════════
 # Constants
@@ -1220,6 +1271,9 @@ else:
 
 _log_spam_detector_status()
 _log_security_bridge_status()
+
+# 🆕 v5.6.30 MARK-2: تقرير db_diagnostics
+_log_db_diagnostics_status()
 
 _log_perf_tuning_status()
 
@@ -2868,6 +2922,23 @@ async def _diag_incoming(update, context):
 async def main():
     t_start = time.monotonic()
 
+    # ═══════════════════════════════════════════════════════════════
+    # 🆕 v5.6.30 MARK-1: إخطار db_diagnostics ببدء العملية الفعلي
+    # ═══════════════════════════════════════════════════════════════
+    # يجب أن يكون هذا النداء الأول في main() — قبل أي انتظار/شبكة —
+    # لكي يُحسب وقت بدء نافذة السماح (STARTUP-GRACE) بدقة.
+    if _MARK_PROCESS_START_FN is not None:
+        try:
+            _MARK_PROCESS_START_FN()
+            logger.info(
+                "🕐 db_diagnostics.mark_process_start() — "
+                "نافذة السماح بدأت الآن (60s)"
+            )
+        except Exception as _e:
+            logger.debug(
+                "mark_process_start فشل (سيستمر البوت): %s", _e
+            )
+
     try:
         CONFIG.validate()
     except ValueError as e:
@@ -2883,7 +2954,7 @@ async def main():
     logger.info("👨‍💼 المالك: %s", CONFIG.PRIMARY_OWNER_ID)
 
     logger.info(
-        "📦 bot.py: v5.6.29 | "
+        "📦 bot.py: v5.6.30 | "
         "detectors=%s | layers=%d | helpers=%s | "
         "db_idle=%s | cache_stats=%s | analytics=%s | "
         "fullhealth=%s | latency=%s | maint_cmds=%s | "
@@ -2891,7 +2962,8 @@ async def main():
         "nav_fix_mode=trace-only | handle_reg=always | "
         "dup_fix=on | sleep_probe=%s | app_start=on | "
         "watcher_interval=%.0fs | shutdown_robust=on | "
-        "httpx_pool=%s",
+        "httpx_pool=%s | "
+        "db_diag=%s | db_diag_mark=%s",
         _SPAM_DETECTOR_VERSION or "N/A",
         _SPAM_DETECTOR_LAYERS_COUNT,
         (
@@ -2915,6 +2987,8 @@ async def main():
         ),
         _WATCHER_INTERVAL,
         "32" if _HAS_HTTPX_REQUEST else "default(1)",
+        _DB_DIAG_VERSION or "N/A",
+        "on" if _MARK_PROCESS_START_FN is not None else "off",
     )
 
     try:
