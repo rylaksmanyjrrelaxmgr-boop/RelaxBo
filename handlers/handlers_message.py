@@ -1,44 +1,51 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-handlers_message.py - v7.18.39 (SPAM-TIMEOUT + SLOW-MODE-FIX)
-(متوافق مع detectors v4.1.0 + banned_words_manager v1.2.0)
+handlers_message.py - v7.18.40 (LOG-CHANNEL-STATE-FIX)
+(متوافق مع detectors v4.1.0 + banned_words_manager v1.2.0 + group_log v1.4.0)
 =============================================================================
-🆕 v7.18.39 (SPAM-TIMEOUT + SLOW-MODE-FIX):
+🆕 v7.18.40 (LOG-CHANNEL-STATE-FIX):
 
-    🔴 FIX-TIMEOUT-1 (CRITICAL): إضافة timeout صريح حول
-        analyze_message_full_async + sync-pool fallback.
-        السبب: cold-start لمجمع detectors كان يستهلك ~8 ثواني في
-        أول رسالة بعد الإقلاع (قياس: 8220ms للرسالة الأولى مقابل
-        284ms للثانية — فرق 29×).
-        الأثر: overshoots متزامنة في keep_alive/monitor_pool/
-        _watch_runner لأن الـevent loop كان محجوباً.
+    🔴 FIX-LOGCH-1 (CRITICAL): إضافة معالج محلي WAIT_LOG_CH.
+        المشكلة: عند إدخال معرف قناة السجل من لوحة الأدمن،
+        كانت تُحفظ كـ"قناة نشطة" بدل حفظها في settings.log_channel.
+        السبب: WAIT_LOG_CH كان في _EXTERNAL_HANDLED_STATES فقط،
+        والـhandler الخارجي (handlers_group_log) إما غير مسجّل أو
+        يسقط في fallback لـ CommandHandlers.handle_text الذي يعالج
+        الإدخال كقناة نشطة (WAIT_CHANNEL).
         الإصلاح:
-          • _SPAM_ASYNC_TIMEOUT = 2.5s (ثابت جديد)
-          • asyncio.wait_for(analyze_message_full_async, timeout=...)
-          • تخفيض sync-pool timeout من 30.0s → _SPAM_ASYNC_TIMEOUT
-          • fallback تلقائي إلى text-only عند timeout
+          • إضافة static method _handle_wait_log_ch_text.
+          • إزالة WAIT_LOG_CH من _EXTERNAL_HANDLED_STATES.
+          • إضافة WAIT_LOG_CH إلى _PRIVATE_HANDLERS_MAP.
+          • الحفظ على settings.log_channel (CANONICAL).
+          • حذف global_log_channel القديم (توحيد مع group_log v1.4.0).
+          • إبطال caches بعد الحفظ.
 
-    🟢 FIX-WARMUP-1: دالة warmup_detectors_pool() جديدة.
-        الهدف: تهيئة مجمع detectors + استيراد الوحدات الثقيلة
-        (PIL/numpy/cv2/pytesseract) عند الإقلاع — قبل أول رسالة.
-        الاستخدام (في bot.py/main.py بعد post_init):
-            asyncio.create_task(warmup_detectors_pool())
+    🔴 FIX-LOGCH-2: تصحيح توحيد المفاتيح.
+        group_log.py v1.4.0 يعرّف CANONICAL_LOG_KEY = "log_channel".
+        handlers_message.py كان يترك مفتاحاً مختلفاً في بعض المسارات.
+        الحل: الحفظ على "log_channel" + حذف "global_log_channel".
 
-    🟡 FIX-SLOWMODE-1: إصلاح منطق _SLOW_MODE_UNSUPPORTED.
-        السبب: رسالة "not found" عامة كانت تُعطّل slow-mode نهائياً
-        (permanent flag) — حتى لو كانت المشكلة chat_id/token.
-        الإصلاح:
-          • فحص أكثر تحديداً: "method not found" / "unknown method"
-            أو 404 مع ذكر "setChatSlowModeDelay" صريحاً.
-          • فحص bot.token قبل HTTP fallback + error واضح.
-          • سجل تفصيلي عند التعطيل الدائم (لمرة واحدة).
+    🟠 FIX-LOGCH-3: إبطال شاشات قناة السجل بعد التغيير.
+        بعد الحفظ: _invalidate_group_log_cache(None) +
+        _invalidate_dev_log_cache() + مسح log_ch_menu_* من
+        internal_cache. يحل مشكلة ظهور القناة القديمة لـ 5 دقائق
+        في شاشات المجموعات (LOG_CHANNEL_MENU_CACHE_TTL).
 
-    🟢 KEPT: كل إصلاحات v7.18.38 ومحتوى v7.18.37 وما قبله.
+    🟠 FIX-LOGCH-4: تحقق صريح من صلاحيات المطور.
+        يُرفض الإدخال بصمت + رسالة خطأ إذا لم يكن المستخدم developer.
 
-🆕 v7.18.38 (UPDATE-CHANNEL-STATE-FIX) — محفوظ:
-    🔴 FIX-STATE-1: حذف WAIT_UPDATE_CHANNEL من _PRIVATE_HANDLERS_MAP.
-    🟡 FIX-STATE-2: _EXTERNAL_HANDLED_STATES — إضافة WAIT_UPDATE_CHANNEL.
+    🟢 FIX-LOGCH-5: دعم صيغ متعددة (ID، @username، رابط t.me).
+        يستخدم _parse_channel_ref الموجود. يحفظ النص كما هو
+        (يدعم @username للقنوات العامة).
+
+✅ v7.18.39 (SPAM-TIMEOUT + SLOW-MODE-FIX) — محفوظ بالكامل:
+    🔴 FIX-TIMEOUT-1: timeout 2.5s حول detectors.
+    🟢 FIX-WARMUP-1: warmup_detectors_pool().
+    🟡 FIX-SLOWMODE-1: منطق _SLOW_MODE_UNSUPPORTED مُحسَّن.
+
+✅ v7.18.38 (UPDATE-CHANNEL-STATE-FIX) — محفوظ.
+✅ v7.18.37 وما قبله — محفوظ.
 =============================================================================
 """
 
@@ -81,10 +88,8 @@ logger = logging.getLogger(__name__)
 
 
 # ═════════════════════════════════════════════════════════════════════
-# 🆕 v7.18.39 FIX-TIMEOUT-1: مهلة كشف Spam (كانت غير محدودة)
+# 🆕 v7.18.39 FIX-TIMEOUT-1: مهلة كشف Spam
 # ═════════════════════════════════════════════════════════════════════
-# القياس في production: 8220ms للرسالة الأولى بعد الإقلاع (cold-start)،
-# 284ms للثانية. الحد 2.5s كافٍ جداً لأي نص قصير، ويمنع حجب event loop.
 _SPAM_ASYNC_TIMEOUT: float = 2.5
 
 
@@ -345,25 +350,12 @@ except ImportError:
 # ═════════════════════════════════════════════════════════════════════
 # 🆕 v7.18.39 FIX-WARMUP-1: تسخين مجمع detectors
 # ═════════════════════════════════════════════════════════════════════
-# الغرض: تهيئة ThreadPoolExecutor + استيراد الوحدات الثقيلة (PIL/numpy/
-# cv2/pytesseract) عند الإقلاع — بدل أول رسالة حقيقية.
-#
-# الاستخدام (في bot.py أو main.py بعد post_init):
-#     asyncio.create_task(warmup_detectors_pool())
-#
-# النتيجة المتوقعة: أول رسالة حقيقية → ~250ms بدل ~8000ms.
 
 async def warmup_detectors_pool() -> bool:
-    """
-    v7.18.39 FIX-WARMUP-1: تسخين مجمع detectors + الوحدات الثقيلة.
-
-    Returns:
-        True إذا نجح التسخين الكامل، False عند أي فشل جزئي.
-    """
+    """v7.18.39 FIX-WARMUP-1: تسخين مجمع detectors + الوحدات الثقيلة."""
     import importlib as _importlib
     ok = True
 
-    # 1) إنشاء المجمع المشترك إن وُجد
     if _detectors_module is not None:
         try:
             get_pool = getattr(_detectors_module, "_get_shared_pool", None)
@@ -374,18 +366,15 @@ async def warmup_detectors_pool() -> bool:
             logger.debug("warmup: _get_shared_pool: %s", e)
             ok = False
 
-    # 2) تحميل الوحدات الثقيلة (يُسرّع أول استدعاء فعلي)
     for _mod_name in ("PIL", "PIL.Image", "numpy",
                       "cv2", "pytesseract", "aiohttp"):
         try:
             _importlib.import_module(_mod_name)
         except ImportError:
-            # غير مثبت — ليس خطأً، فقط لا يوجد
             continue
         except Exception as e:
             logger.debug("warmup: import %s: %s", _mod_name, e)
 
-    # 3) تسخين دوال التحليل نفسها بمدخل فارغ (اختياري، آمن)
     try:
         from handlers.handlers_message_detectors import (
             _normalize_text as _warm_norm,
@@ -1122,7 +1111,7 @@ async def _lazy_init_columns(bot=None):
         _columns_last_attempt_ts = now
 
         db_type = getattr(DB, "DB_TYPE", "sqlite")
-        logger.info("🔧 v7.18.39: Auto-migration (DB_TYPE=%s)", db_type)
+        logger.info("🔧 v7.18.40: Auto-migration (DB_TYPE=%s)", db_type)
 
         cols = [
             ("delete_protected_any", "INTEGER DEFAULT 0",
@@ -3395,18 +3384,22 @@ def _accepts_state_arg(handler, handler_name: str) -> bool:
 
 
 # ═══════════════════════════════════════════════════════════════════
-# v7.18.32 FIX-FSM-2/3 + v7.18.38 FIX-STATE-2 + v7.18.39 KEPT:
-#     _EXTERNAL_HANDLED_STATES — حالات يُسجَّل لها handler في ملف آخر
+# v7.18.40 FIX-LOGCH-2: _EXTERNAL_HANDLED_STATES — أُزيل WAIT_LOG_CH
+# ═══════════════════════════════════════════════════════════════════
+# ملاحظة: بعد FIX-LOGCH-1، أصبح WAIT_LOG_CH يُعالَج محلياً في
+# handlers_message.py عبر _handle_wait_log_ch_text. إزالتها من هذه
+# القائمة تمنع early-return الذي كان يُسقط الرسالة (أو يسمح لـ
+# CommandHandlers.handle_text بالتقاطها كقناة نشطة).
 # ═══════════════════════════════════════════════════════════════════
 _EXTERNAL_HANDLED_STATES = frozenset({
-    # ─── handlers_group_log.receive_log_channel ───
-    "WAIT_LOG_CH",
     # ─── CommandHandlers.handle_text (قناة التحديثات) ───
     "WAIT_UPDATE_CH",
     "WAIT_UPDATE_CHANNEL",   # v7.18.38 FIX-STATE-2
-    # ─── (TODO) معالج Documents مستقبلي ───
+    # ─── معالجات Documents مستقبلية ───
     "WAIT_IMPORT_FILE",
     "WAIT_BACKUP_FILE",
+    # ملاحظة: WAIT_LOG_CH أُزيل في v7.18.40 (FIX-LOGCH-2)
+    # → أصبح يُعالَج محلياً في _PRIVATE_HANDLERS_MAP
 })
 
 
@@ -3436,6 +3429,10 @@ class MessageHandlers:
         "WAIT_AUTO_DEL": "_handle_wait_auto_del_text",
         "WAIT_PENALTY_DURATION": "_handle_wait_penalty_duration_text",
         "WAIT_GITHUB_URL": "_handle_wait_github_url_text",
+        # ═══════════════════════════════════════════════════════════
+        # 🆕 v7.18.40 FIX-LOGCH-1: WAIT_LOG_CH — معالج محلي جديد
+        # ═══════════════════════════════════════════════════════════
+        "WAIT_LOG_CH": "_handle_wait_log_ch_text",
     }
 
     @staticmethod
@@ -3478,9 +3475,6 @@ class MessageHandlers:
         finally:
             await _release_group_limiter(limiter, limiter_acquired)
 
-    # ═══════════════════════════════════════════════════════════════
-    # 🆕 v7.18.39 FIX-SLOWMODE-1: منطق _apply_slow_mode مُحسَّن
-    # ═══════════════════════════════════════════════════════════════
     @staticmethod
     async def _apply_slow_mode(context, chat_id, settings):
         global _SLOW_MODE_UNSUPPORTED
@@ -3551,7 +3545,6 @@ class MessageHandlers:
             if not _api_success:
                 try:
                     import aiohttp
-                    # 🆕 FIX-SLOWMODE-1: فحص token صريح
                     _token = getattr(context.bot, "token", None)
                     if not _token:
                         _token = os.getenv("BOT_TOKEN", "")
@@ -3590,9 +3583,6 @@ class MessageHandlers:
                     "🐌 SLOW-MODE | chat=%s requested=%d applied=%d",
                     chat_id, target, _target_tg)
             else:
-                # 🆕 FIX-SLOWMODE-1: فحص أكثر تحديداً لـ"not found"
-                # قديم: أي "not found"/"404" يعطّل الميزة نهائياً — خاطئ
-                # جديد: فقط إن كان الخطأ صريحاً في اسم الطريقة
                 _err_lower = (_api_error or "").lower()
                 _method_unsupported = (
                     "method not found" in _err_lower
@@ -3610,7 +3600,6 @@ class MessageHandlers:
                             "setChatSlowModeDelay | err=%s",
                             _api_error)
                 else:
-                    # خطأ عابر (chat_id خاطئ، صلاحيات، شبكة) — لا نُعطّل
                     logger.debug(
                         "🐌 SLOW-MODE failed (transient) | "
                         "chat=%s err=%s",
@@ -3738,9 +3727,6 @@ class MessageHandlers:
         _verdict = None
         _analysis_mode = "text-only"
 
-        # ═══════════════════════════════════════════════════════════════
-        # 🆕 v7.18.39 FIX-TIMEOUT-1: timeout صريح لكل مسارات Spam
-        # ═══════════════════════════════════════════════════════════════
         if _spam_enabled:
             if _MULTILAYER_ENABLED and _HAS_ASYNC_DETECTORS:
                 try:
@@ -4490,8 +4476,8 @@ class MessageHandlers:
         """
         v7.18.21 FIX-ROUTE-2: معالجة إدخال معرف القناة النشطة.
 
-        ⚠️ v7.18.38: هذه الدالة تخدم WAIT_CHANNEL و WAIT_ADD_CHANNEL
-        فقط (القناة النشطة). ليست لقناة التحديثات.
+        ⚠️ هذه الدالة تخدم WAIT_CHANNEL و WAIT_ADD_CHANNEL
+        فقط (القناة النشطة). ليست لقناة السجل.
         """
         user_id = (
             update.effective_user.id if update.effective_user else None)
@@ -4607,6 +4593,204 @@ class MessageHandlers:
                 await safe_send(context.bot, user_id, msg)
             except Exception:
                 pass
+
+    # ═══════════════════════════════════════════════════════════════════
+    # 🆕 v7.18.40 FIX-LOGCH-1: معالج قناة السجل (WAIT_LOG_CH)
+    # ═══════════════════════════════════════════════════════════════════
+    @staticmethod
+    async def _handle_wait_log_ch_text(update, context, state=None):
+        """
+        v7.18.40 FIX-LOGCH-1: معالجة إدخال معرف قناة السجل العامة.
+
+        ⚠️ هذا معالج المطوّر لقناة السجل العامة (settings.log_channel).
+        ليس لإضافة قناة نشطة (user_channels)!
+
+        السلوك:
+          1) تحقق أن المستخدم مطوّر (وإلا: clear + رفض بصمت).
+          2) تحقق من صحة الصيغة (_parse_channel_ref).
+          3) احفظ على settings.log_channel (CANONICAL).
+          4) احذف settings.global_log_channel (توحيد مع group_log v1.4.0).
+          5) أبطِل caches: dev_log + group_log + log_ch_menu_*.
+          6) clear state + context keys.
+          7) أرسل تأكيد.
+        """
+        user_id = (
+            update.effective_user.id if update.effective_user else None)
+        if not user_id:
+            return
+        message = update.effective_message
+        if not message or not message.text:
+            return
+
+        lang = await _ensure_lang(update, context)
+
+        # 1) تحقق صريح من صلاحيات المطوّر
+        if not _is_dev_user(user_id):
+            logger.warning(
+                "🚫 WAIT_LOG_CH: مستخدم غير مطوّر حاول "
+                "تعيين قناة سجل | user=%s", user_id)
+            try:
+                StateManager.clear(user_id)
+            except Exception:
+                pass
+            try:
+                context.user_data.pop('awaiting_log_channel_for', None)
+            except Exception:
+                pass
+            try:
+                msg = await _trans(
+                    'unauthorized', lang,
+                    "❌ صلاحيات غير كافية.")
+                await safe_send(context.bot, user_id, msg)
+            except Exception:
+                pass
+            return
+
+        raw = message.text.strip()
+
+        # 2) تحقق من صحة الصيغة
+        valid, err_reason = _parse_channel_ref(raw)
+        if not valid:
+            # لا نمسح الحالة — نسمح بإعادة الإدخال
+            msg = await _trans(
+                'log_channel_invalid_ref', lang,
+                "❌ صيغة معرف قناة السجل غير صحيحة.\n\n"
+                "✅ <b>الصيغ المدعومة:</b>\n"
+                "• <code>@username</code> (قناة عامة)\n"
+                "• <code>-100xxxxxxxxx</code> (رقم القناة)\n"
+                "• <code>https://t.me/username</code>\n\n"
+                "💡 أعد الإدخال أو استخدم /cancel للإلغاء.")
+            try:
+                await safe_send(
+                    context.bot, user_id, msg, parse_mode='HTML')
+            except Exception:
+                pass
+            logger.warning(
+                "⚠️ WAIT_LOG_CH: صيغة خاطئة | user=%s raw=%r reason=%s",
+                user_id, raw[:40], err_reason)
+            return
+
+        # 3-4) الحفظ على CANONICAL + حذف LEGACY
+        saved_ok = False
+        saved_error = None
+        try:
+            # حاول أولاً DB.set_setting (CANONICAL)
+            setter = getattr(DB, 'set_setting', None)
+            if callable(setter):
+                try:
+                    result = setter('log_channel', raw)
+                    if asyncio.iscoroutine(result):
+                        result = await result
+                    saved_ok = True
+                except Exception as _e:
+                    saved_error = str(_e)[:120]
+                    logger.warning(
+                        "WAIT_LOG_CH: DB.set_setting(log_channel) "
+                        "فشل: %s — محاولة SQL مباشرة", _e)
+            # Fallback: SQL مباشر
+            if not saved_ok:
+                try:
+                    await DB.execute(
+                        "INSERT INTO settings (key, value) VALUES (?, ?) "
+                        "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
+                        ('log_channel', raw))
+                    saved_ok = True
+                except Exception as _e2:
+                    saved_error = saved_error or str(_e2)[:120]
+                    logger.error(
+                        "WAIT_LOG_CH: SQL fallback فشل: %s", _e2)
+            # احذف LEGACY إن وُجد
+            if saved_ok:
+                try:
+                    await DB.execute(
+                        "DELETE FROM settings WHERE key = ?",
+                        ('global_log_channel',))
+                except Exception as _e3:
+                    logger.debug(
+                        "WAIT_LOG_CH: حذف legacy فشل: %s", _e3)
+        except Exception as e:
+            saved_error = saved_error or str(e)[:120]
+            logger.error(
+                "WAIT_LOG_CH: حفظ فشل كلياً: %s", e, exc_info=True)
+
+        # 5) إبطال caches
+        if saved_ok:
+            try:
+                _invalidate_group_log_cache(None)
+            except Exception:
+                pass
+            try:
+                _invalidate_dev_log_cache()
+            except Exception:
+                pass
+            try:
+                # إبطال قوائم قناة السجل في internal_cache
+                store = getattr(internal_cache, '_store', None)
+                if store is None:
+                    store = getattr(internal_cache, '_cache', None)
+                if store is not None:
+                    keys_to_clear = [
+                        k for k in list(store.keys())
+                        if str(k).startswith('log_ch_menu_')
+                    ]
+                    for k in keys_to_clear:
+                        try:
+                            await internal_cache.invalidate(k)
+                        except Exception:
+                            pass
+            except Exception as _ie:
+                logger.debug(
+                    "WAIT_LOG_CH: invalidate menus: %s", _ie)
+
+        # 6) clear state + context keys
+        try:
+            StateManager.clear(user_id)
+        except Exception:
+            pass
+        for _k in (
+            'awaiting_log_channel_for',
+            'log_channel_id',
+            'log_group_id',
+        ):
+            try:
+                context.user_data.pop(_k, None)
+            except Exception:
+                pass
+
+        # 7) أرسل تأكيد
+        if saved_ok:
+            try:
+                tmpl = await _trans(
+                    'log_channel_set_success', lang,
+                    "✅ تم تعيين قناة السجل:\n<code>{ch}</code>\n\n"
+                    "📌 ستستقبل أحداث الحماية والتنبيهات هنا.")
+                try:
+                    msg = tmpl.format(ch=escape(raw))
+                except (KeyError, IndexError):
+                    msg = tmpl
+                await safe_send(
+                    context.bot, user_id, msg, parse_mode='HTML')
+            except Exception as _se:
+                logger.debug(
+                    "WAIT_LOG_CH: send ack فشل: %s", _se)
+            logger.info(
+                "✅ WAIT_LOG_CH: قناة السجل عُيّنت | "
+                "user=%s ch=%r", user_id, raw[:60])
+        else:
+            try:
+                msg = await _trans(
+                    'log_channel_set_failed', lang,
+                    "❌ فشل حفظ قناة السجل. حاول مجدداً أو "
+                    "راجع سجلات البوت.")
+                if saved_error:
+                    msg += f"\n\n<code>{escape(saved_error)}</code>"
+                await safe_send(
+                    context.bot, user_id, msg, parse_mode='HTML')
+            except Exception:
+                pass
+            logger.error(
+                "❌ WAIT_LOG_CH: فشل الحفظ | user=%s ch=%r err=%s",
+                user_id, raw[:60], saved_error or '—')
 
     # ═══════════════════════════════════════════════════════════════════
     # v7.18.28 FIX-ADDING-1: معالج إضافة المنشورات
@@ -5417,9 +5601,9 @@ class MessageHandlers:
         """
         معالج الرسائل الخاصة.
 
-        v7.18.38: تحقّق من _EXTERNAL_HANDLED_STATES أولاً — إذا كانت
-        الحالة في هذه القائمة (مثل WAIT_UPDATE_CHANNEL)، يتم تجاهلها
-        بصمت لأن handler خارجي (handlers_command.handle_text) يتولاها.
+        v7.18.40: WAIT_LOG_CH يُعالَج محلياً الآن (FIX-LOGCH-1/2)
+        عبر _PRIVATE_HANDLERS_MAP. WAIT_UPDATE_CH/CHANNEL لا يزالان
+        external (CommandHandlers.handle_text).
         """
         try:
             if not update.effective_user:
@@ -5593,6 +5777,7 @@ class MessageHandlers:
             context.user_data.pop('reply_trigger_pending', None)
             context.user_data.pop('auto_chat', None)
             context.user_data.pop('penalty_type', None)
+            context.user_data.pop('awaiting_log_channel_for', None)
             clear_lang_cache(context)
             lang = await _ensure_lang(update, context)
             msg = await _trans(
@@ -6883,19 +7068,19 @@ __all__ = [
     "_PENALTY_DURATION_OVERRIDE_MAX",
     "_get_penalty_duration_override",
     "_invalidate_penalty_duration_override_cache",
-    # 🆕 v7.18.39
     "_SPAM_ASYNC_TIMEOUT",
     "warmup_detectors_pool",
+    "_invalidate_dev_log_cache",
 ]
 
 
 # ═════════════════════════════════════════════════════════════════════
-# LOAD BEACON — v7.18.39
+# LOAD BEACON — v7.18.40
 # ═════════════════════════════════════════════════════════════════════
 
 try:
     logger.info(
-        "✅ handlers_message v7.18.39 loaded | "
+        "✅ handlers_message v7.18.40 loaded | "
         "BWM=%s | PRIVATE_HANDLERS=%d | "
         "external_handled=%d | "
         "routing-fallback=7-paths | "
@@ -6903,23 +7088,19 @@ try:
         "WARMUP=available | "
         "SLOW-MODE-FIX=active | "
         "WAIT_CHANNEL=direct-handler | "
+        "WAIT_LOG_CH=direct-handler (FIX-LOGCH-1) | "
         "WAIT_UPDATE_CHANNEL=EXTERNAL (FIX-STATE-1/2) | "
         "WAIT_UPDATE_CH=EXTERNAL (command) | "
-        "WAIT_LOG_CH=EXTERNAL (group_log) | "
         "WAIT_IMPORT_FILE/WAIT_BACKUP_FILE=EXTERNAL (document-TODO) | "
         "ADDING_POSTS=direct-handler | "
         "SUPPORT_MODE=direct-handler | "
         "AUTO_KEY/AUTO_DEL/PENALTY_DURATION/GITHUB_URL=direct-handler | "
+        "LOG-CHANNEL-KEY=log_channel (CANONICAL, unified with group_log) | "
         "BATCH-SETTINGS=PG-1RTT+empty-cache+partial_return | "
         "ars_local_cache=5s-TTL | "
-        "ars-priority=local-first | "
-        "auto-del=existence-check | "
-        "threading-note=caches | "
-        "penalty-duration=bridged | "
         "detectors-compat=v4.1.0 | "
-        "commands=(cache_stats, db_idle, autoblocked) | "
-        "fixes=(FIX-TIMEOUT-1, FIX-WARMUP-1, FIX-SLOWMODE-1, "
-        "FIX-STATE-1, FIX-STATE-2, UPDATE-CHANNEL-STATE-FIX)",
+        "fixes=(FIX-LOGCH-1..5, FIX-TIMEOUT-1, FIX-WARMUP-1, "
+        "FIX-SLOWMODE-1, FIX-STATE-1/2)",
         "yes" if _HAS_BWM else "no",
         len(MessageHandlers._PRIVATE_HANDLERS_MAP),
         len(_EXTERNAL_HANDLED_STATES),
