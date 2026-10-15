@@ -1,42 +1,42 @@
 r"""
-handlers_group_log.py — MessageHandler لاستقبال معرّف قناة السجل (v1.7.0)
+handlers_group_log.py — MessageHandler لاستقبال معرّف قناة السجل (v1.7.1)
 =====================================================================
-🆕 v1.7.0 (DEV-LOG-CHANNEL-FIX):
-    🔴 FIX-DEV-LOG-1 (CRITICAL): دعم تعيين قناة السجلات العامة للمطور.
+🆕 v1.7.1 (SETTINGS-KEY-UNIFICATION):
+    🔴 FIX-DEV-LOG-2 (CRITICAL): حذف settings.global_log_channel
+        بعد حفظ قناة السجلات العامة.
+        السبب:
+          • group_log.py v1.4.0 يستخدم CANONICAL_KEY="log_channel"
+            ويحاول ترحيل LEGACY_KEY="global_log_channel" تلقائياً.
+          • إذا تركنا LEGACY في DB بعد الحفظ الجديد، فـ fallback
+            chain في group_log._read_global_key قد يقرأ القديم
+            في بعض السيناريوهات (مثلاً لو فشل ترحيل أول قراءة).
+        الإصلاح:
+          • helper _delete_legacy_log_key() يحذف المفتاح القديم.
+          • _save_dev_log_channel() تستدعيه بعد كل حفظ ناجح.
 
-    المشكلة المُبلَّغ عنها:
-        • المطور يفتح لوحة الأدمن → يضغط "تعيين قناة السجلات"
-        • StateManager.set(user_id, WAIT_LOG_CH) ✅
-        • يرسل @channel
-        • handle_private يرى WAIT_LOG_CH في _EXTERNAL_HANDLED_STATES
-          → يتخطى (يترك المسؤولية لـ handlers_group_log)
-        • receive_log_channel يبحث عن log_group_id في user_data
-          → لا يجده (يُضبط فقط من لوحة أمان مجموعة)
-        • يرد: "❌ انتهت الجلسة. ابدأ من جديد من لوحة الأمان."
-        • ❌ لا يُحفظ شيء → المطور يظن الزر معطّل
+    🔴 FIX-DEV-LOG-3 (CRITICAL): إبطال كل قوائم log_ch_menu_*.
+        المشكلة:
+          قبل: _invalidate_log_channel_menu_cache(chat_id) يُبطل فقط
+                مفتاح log_ch_menu_{chat_id} — مجموعة واحدة.
+          لكن عند تغيير القناة العامة، يجب إبطال قوائم **كل**
+          المجموعات التي كانت تستخدم fallback (وإلا سترى القناة
+          القديمة لـ 5 دقائق = LOG_CHANNEL_MENU_CACHE_TTL).
+        الإصلاح:
+          • _invalidate_dev_log_caches يُبطل كل مفاتيح log_ch_menu_*
+            عبر internal_cache._store.
+          • الإبطال القديم (لمجموعة واحدة) بقي كاحتياطي.
 
-    السبب الجذري:
-        receive_log_channel لا يفرّق بين حالتين:
-          (أ) مجموعة:  log_group_id موجود في user_data
-              → احفظ في bot_groups.log_channel_id (via gl.set_private)
-          (ب) مطور:    log_group_id غير موجود
-              → احفظ في settings.log_channel (قناة عامة)
+    🟠 FIX-DEV-LOG-4: helper _delete_legacy_log_key() مُصدَّر.
+    🟡 FIX-DEV-LOG-5: تحديث رسائل الـ load beacon.
 
-    الإصلاح:
-        1) إضافة helper _is_developer_user(user_id) لفحص المطور
-        2) إضافة _handle_developer_log_input() — يحفظ قناة عامة للمطور
-        3) تعديل receive_log_channel:
-           - إذا log_group_id موجود → السلوك القديم (مجموعة)
-           - إذا غير موجود + المستخدم مطوّر → استدعاء Handler المطور
-           - إذا غير موجود + ليس مطوّر → رسالة خطأ
-
-    النتيجة المتوقعة:
-        ✅ المطور يضغط الزر → يرسل @channel → تُحفظ في settings.log_channel
-        ✅ لم تعد تظهر كـ "قناة نشطة"
-        ✅ لا مزيد من "انتهت الجلسة" المضلِّلة
+🆕 v1.7.0 (DEV-LOG-CHANNEL-FIX) — محفوظ:
+    🔴 FIX-DEV-LOG-1: معالج قناة السجلات العامة للمطور.
+        • _is_developer_user() لكشف المطورين
+        • _handle_developer_log_input() — يحفظ قناة عامة
+        • receive_log_channel يفرّق بين مجموعة/مطور
 
 🆕 v1.6.8 (POST-REVIEW FIXES) — محفوظ:
-    🔴 AL3  register_group_log_handlers — إزالة `return` المُبكِّر
+    🔴 AL3  register_group_log_handlers — إزالة return المُبكِّر
     🟠 AL4  _resolve_username_with_retry — chat_obj.id is None → continue
     🟠 AL5  receive_log_channel — فحص حالة FSM متين
     🟠 AL6  _normalize_channel_input — رفض chat_id == 0
@@ -117,6 +117,17 @@ _GET_CHAT_TITLE_TIMEOUT = 6.0
 _USERNAME_RESOLVE_ATTEMPT_TIMEOUT = 5.0
 _USERNAME_RESOLVE_ATTEMPTS = 2
 _USERNAME_RESOLVE_DELAY = 0.5
+
+
+# =====================================================================
+# 🆕 FIX-DEV-LOG-2: ثوابت المفاتيح
+# =====================================================================
+# CANONICAL: متوافق مع group_log.py v1.4.0
+# LEGACY: يجب حذفه بعد كل حفظ لتفادي fallback chain
+# =====================================================================
+
+_CANONICAL_LOG_KEY = "log_channel"
+_LEGACY_LOG_KEY = "global_log_channel"
 
 
 # =====================================================================
@@ -353,6 +364,9 @@ def _is_forwarded(msg) -> bool:
 
 
 async def _invalidate_log_channel_menu_cache(chat_id: int) -> None:
+    """
+    احتياطي: يُبطل مفتاح log_ch_menu_ لمجموعة واحدة.
+    """
     if not _INTERNAL_CACHE_AVAILABLE or _internal_cache is None:
         return
     try:
@@ -498,12 +512,60 @@ def _passes_initial_validation(text: str) -> bool:
 
 
 # =====================================================================
+# 🆕 FIX-DEV-LOG-2 (v1.7.1): حذف المفتاح القديم
+# =====================================================================
+
+async def _delete_legacy_log_key() -> bool:
+    """
+    🆕 FIX-DEV-LOG-2 (v1.7.1): يحذف settings.global_log_channel.
+
+    الهدف: ضمان توحيد المفتاح مع group_log.py v1.4.0 الذي يستخدم
+    CANONICAL_KEY="log_channel". لو تُرك LEGACY، فقد يتسبب في
+    قراءات قديمة إذا فشل الترحيل التلقائي.
+
+    Returns:
+        True إذا نجح الحذف (أو لم يوجد المفتاح أصلاً)، False عند فشل DB.
+    """
+    if not _DB_AVAILABLE or _DB is None:
+        return False
+    try:
+        execute = getattr(_DB, 'execute', None)
+        if not callable(execute):
+            logger.debug(
+                "_delete_legacy_log_key: DB.execute غير متاح"
+            )
+            return False
+        try:
+            r = execute(
+                "DELETE FROM settings WHERE key = ?",
+                (_LEGACY_LOG_KEY,),
+            )
+            if _is_awaitable(r):
+                await r
+            logger.debug(
+                "🧹 حذف %s (legacy) — توحيد مع group_log v1.4.0",
+                _LEGACY_LOG_KEY,
+            )
+            return True
+        except Exception as e:
+            logger.warning(
+                "_delete_legacy_log_key: DELETE فشل: %s", e
+            )
+            return False
+    except Exception as e:
+        logger.debug("_delete_legacy_log_key: %s", e)
+        return False
+
+
+# =====================================================================
 # 🆕 FIX-DEV-LOG-1: حفظ قناة السجلات العامة للمطور
+# 🆕 FIX-DEV-LOG-2 (v1.7.1): حذف legacy بعد الحفظ
 # =====================================================================
 
 async def _save_dev_log_channel(chat_id: int) -> bool:
     """
     🆕 FIX-DEV-LOG-1: يحفظ قناة السجلات العامة في settings.log_channel.
+    🆕 FIX-DEV-LOG-2 (v1.7.1): يحذف settings.global_log_channel بعد النجاح.
 
     يجرب بالترتيب:
       1) DB.set_log_channel(chat_id) — إن وُجدت
@@ -515,6 +577,8 @@ async def _save_dev_log_channel(chat_id: int) -> bool:
     if not _DB_AVAILABLE or _DB is None:
         logger.error("_save_dev_log_channel: DB غير متاح")
         return False
+
+    saved = False
 
     # ─── 1) محاولة DB.set_log_channel ───
     setter = getattr(_DB, 'set_log_channel', None)
@@ -528,7 +592,7 @@ async def _save_dev_log_channel(chat_id: int) -> bool:
                     "✅ dev_log_channel saved via set_log_channel: %s",
                     chat_id,
                 )
-                return True
+                saved = True
         except Exception as e:
             logger.warning(
                 "DB.set_log_channel(%s) فشل: %s — fallback set_setting",
@@ -536,36 +600,64 @@ async def _save_dev_log_channel(chat_id: int) -> bool:
             )
 
     # ─── 2) Fallback: DB.set_setting ───
-    setter = getattr(_DB, 'set_setting', None)
-    if callable(setter):
-        try:
-            result = setter('log_channel', str(chat_id))
-            if _is_awaitable(result):
-                result = await result
-            logger.info(
-                "✅ dev_log_channel saved via set_setting: %s",
-                chat_id,
-            )
-            return True
-        except Exception as e:
+    if not saved:
+        setter = getattr(_DB, 'set_setting', None)
+        if callable(setter):
+            try:
+                result = setter(_CANONICAL_LOG_KEY, str(chat_id))
+                if _is_awaitable(result):
+                    result = await result
+                logger.info(
+                    "✅ dev_log_channel saved via set_setting: %s",
+                    chat_id,
+                )
+                saved = True
+            except Exception as e:
+                logger.error(
+                    "DB.set_setting('%s', %s) فشل: %s",
+                    _CANONICAL_LOG_KEY, chat_id, e, exc_info=True,
+                )
+                return False
+        else:
             logger.error(
-                "DB.set_setting('log_channel', %s) فشل: %s",
-                chat_id, e, exc_info=True,
+                "_save_dev_log_channel: لا توجد دالة حفظ متاحة في DB "
+                "(set_log_channel / set_setting)"
             )
             return False
 
-    logger.error(
-        "_save_dev_log_channel: لا توجد دالة حفظ متاحة في DB "
-        "(set_log_channel / set_setting)"
-    )
-    return False
+    # ─── 🆕 FIX-DEV-LOG-2: حذف LEGACY بعد النجاح ───
+    if saved:
+        try:
+            deleted = await _delete_legacy_log_key()
+            if not deleted:
+                logger.debug(
+                    "⚠️ لم يُحذف %s (ربما لم يكن موجوداً)",
+                    _LEGACY_LOG_KEY,
+                )
+        except Exception as e:
+            logger.debug(
+                "_delete_legacy_log_key بعد الحفظ: %s", e
+            )
+
+    return saved
 
 
-async def _invalidate_dev_log_caches(chat_id: int) -> None:
+# =====================================================================
+# 🆕 FIX-DEV-LOG-1: إبطال الكاشات
+# 🆕 FIX-DEV-LOG-3 (v1.7.1): إبطال كل log_ch_menu_*
+# =====================================================================
+
+async def _invalidate_dev_log_caches(chat_id: Optional[int] = None) -> int:
     """
     🆕 FIX-DEV-LOG-1: إبطال الكاشات ذات الصلة بعد تغيير قناة السجلات.
+    🆕 FIX-DEV-LOG-3 (v1.7.1): يُبطل كل مفاتيح log_ch_menu_*.
+
+    Returns:
+        عدد مفاتيح log_ch_menu_* التي أُبطلت.
     """
-    # 1) handlers_message._invalidate_dev_log_cache
+    cleared = 0
+
+    # ─── 1) handlers_message._invalidate_dev_log_cache ───
     try:
         mod = None
         import sys as _sys
@@ -580,17 +672,60 @@ async def _invalidate_dev_log_caches(chat_id: int) -> None:
                     r = inv()
                     if _is_awaitable(r):
                         await r
+                    logger.debug(
+                        "🧹 _invalidate_dev_log_cache: done"
+                    )
                 except Exception as _e:
-                    logger.debug("_invalidate_dev_log_cache: %s", _e)
+                    logger.debug(
+                        "_invalidate_dev_log_cache: %s", _e
+                    )
     except Exception as e:
         logger.debug("invalidate dev_log cache: %s", e)
 
-    # 2) قائمة قناة السجل للمجموعة (احتياطي)
-    try:
-        await _invalidate_log_channel_menu_cache(chat_id)
-    except Exception as e:
-        logger.debug("invalidate menu cache: %s", e)
+    # ─── 2) 🆕 FIX-DEV-LOG-3: إبطال **كل** log_ch_menu_* ───
+    if _INTERNAL_CACHE_AVAILABLE and _internal_cache is not None:
+        try:
+            # ابحث عن store مباشرة
+            store = getattr(_internal_cache, '_store', None)
+            if store is None:
+                store = getattr(_internal_cache, '_cache', None)
+            if store is not None:
+                keys = [
+                    k for k in list(store.keys())
+                    if str(k).startswith('log_ch_menu_')
+                ]
+                for k in keys:
+                    try:
+                        await _internal_cache.invalidate(k)
+                        cleared += 1
+                    except Exception:
+                        pass
+                if cleared:
+                    logger.debug(
+                        "🧹 أُبطل %d مفتاح log_ch_menu_* "
+                        "(تغيير القناة العامة)",
+                        cleared,
+                    )
+        except Exception as e:
+            logger.debug(
+                "invalidate all log_ch_menu_*: %s", e
+            )
 
+    # ─── 3) احتياطي: مفتاح المجموعة المصدر (إن وُجد) ───
+    if chat_id:
+        try:
+            await _invalidate_log_channel_menu_cache(chat_id)
+        except Exception as e:
+            logger.debug(
+                "invalidate menu cache (fallback): %s", e
+            )
+
+    return cleared
+
+
+# =====================================================================
+# 🆕 FIX-DEV-LOG-1: معالج قناة السجلات العامة للمطور
+# =====================================================================
 
 async def _handle_developer_log_input(
     update: Update,
@@ -759,9 +894,12 @@ async def _handle_developer_log_input(
             logger.warning("reply_text (dev-save-fail): %s", e)
         return
 
-    # ─── إبطال الكاشات ───
+    # ─── إبطال الكاشات (كل log_ch_menu_*) ───
     try:
-        await _invalidate_dev_log_caches(chat_id)
+        cleared = await _invalidate_dev_log_caches(chat_id)
+        logger.debug(
+            "🧹 [DEV-LOG] أُبطلت %d قوائم log_ch_menu_*", cleared
+        )
     except Exception as e:
         logger.debug("_invalidate_dev_log_caches: %s", e)
 
@@ -1317,6 +1455,10 @@ __all__ = [
     "_handle_developer_log_input",
     "_save_dev_log_channel",
     "_invalidate_dev_log_caches",
+    # 🆕 v1.7.1 FIX-DEV-LOG-2/3
+    "_delete_legacy_log_key",
+    "_CANONICAL_LOG_KEY",
+    "_LEGACY_LOG_KEY",
     # ثوابت المهلات الزمنية
     "_RESOLVE_TOTAL_TIMEOUT",
     "_GET_CHAT_TITLE_TIMEOUT",
@@ -1338,16 +1480,19 @@ __all__ = [
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# LOAD BEACON
+# LOAD BEACON — v1.7.1
 # ═══════════════════════════════════════════════════════════════════════
 
 try:
     logger.info(
-        "✅ handlers_group_log v1.7.0 loaded | "
+        "✅ handlers_group_log v1.7.1 loaded | "
         "module=%s | "
         "PTB_v20=%s | "
         "config=%s | db=%s | "
-        "fixes=(FIX-DEV-LOG-1:dev-general-log-channel, "
+        "canonical_key=%s | legacy_key=%s | "
+        "fixes=(FIX-DEV-LOG-2:delete-legacy-key, "
+        "FIX-DEV-LOG-3:invalidate-all-log-menus, "
+        "FIX-DEV-LOG-1:dev-general-log-channel, "
         "AL2:ChatType.PRIVATE, "
         "AL3:no-early-return, "
         "AL4:resolve-cid-None, "
@@ -1359,6 +1504,8 @@ try:
         "yes" if _PTB_V20_PLUS else "no",
         "yes" if _CONFIG_AVAILABLE else "no",
         "yes" if _DB_AVAILABLE else "no",
+        _CANONICAL_LOG_KEY,
+        _LEGACY_LOG_KEY,
     )
 except Exception:
     pass
