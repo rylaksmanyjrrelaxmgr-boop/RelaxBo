@@ -1,45 +1,38 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-db_diagnostics.py — واجهة تشخيص وصيانة قاعدة البيانات (v7.2.11 — RTT-REGION-INFERENCE)
+db_diagnostics.py — واجهة تشخيص وصيانة قاعدة البيانات (v7.2.13 — MULTI-DB-DISCOVERY)
 ================================================================================
-🆕 v7.2.11 — RTT-REGION-INFERENCE:
+🆕 v7.2.13 — MULTI-DB-DISCOVERY:
 
-    🔴 FIX-REGION-1: استنتاج المنطقة تلقائياً من RTT.
-        السبب: Render لا يُصدّر RENDER_REGION افتراضياً → البوت
-        يُظهر "unknown"، والفحص يقول "لا يمكن التحديد" حتى لو كان
-        TCP=4ms (نفس المنطقة قطعياً).
-        الإصلاح: إذا كان tcp_connect_ms < 15ms → نفس المنطقة
-        (confidence=high). وإذا 15-50ms → نفس المنطقة (medium).
-        وإذا > 100ms → مناطق مختلفة قطعياً.
+    🟢 NEW: _detect_active_db_source() — يكتشف أي DB نشطة فعلاً.
+    🟢 NEW: _get_all_configured_databases() — يمسح كل env vars للـ DB.
+    🟢 NEW: format_multi_db_report() — تقرير كامل عن كل DB مُعدّة.
+    🟢 NEW: diagnose_databases() — public API.
+    🟢 NEW: _mask_db_url() — إخفاء كلمات المرور في التقارير.
+    🟢 NEW: detect في /latency و /fullhealth أن البوت يستخدم أي DB.
+    🟢 NEW: تحذير عند تكرار نفس host في env vars متعددة.
 
-    🟡 FIX-REGION-2: دعم متغيرات Render إضافية.
-        أُضيفت: RENDER_SERVICE_REGION, RENDER_REGION_NAME,
-                RENDER_REGION_ID, RENDER_APP_REGION.
+🆕 v7.2.12 — REGION-ENV-OVERRIDE — محفوظ:
+    🔴 FIX-REGION-5: حذف "REGION" من _RENDER_REGION_ENV_VARS.
+    🔴 FIX-REGION-6: تفريغ _TIMESCALE_REGION_MAP.
+    🟡 FIX-REGION-7: دعم DB_REGION / TIMESCALE_REGION.
+    🟡 FIX-REGION-8: RTT حكم نهائي.
+    🟡 FIX-REGION-9: إصلاح format string "RTT=RTT=".
 
-    🟡 FIX-REGION-3: _detect_cross_region(tcp_ms=...).
-        parameter جديد لتلقّي RTT من _probe_db_latency.
-        عند وجوده → استنتاج قطعي بدل "unknown".
-
-    🟡 FIX-REGION-4: تحديث Header + Load Beacon.
-
-🆕 v7.2.10 — QUERY-PERF-FIX — محفوظ:
-    🔴 FIX-PERF-1: _get_all_tables_health — driving table = pg_stat_user_tables.
-    🟠 FIX-PERF-2: _get_cleanup_status — schemaname filter.
-    🟠 FIX-PERF-3: preview_maintenance — schemaname filter.
-    🟡 FIX-PERF-4: _get_db_metadata — توثيق Timescale.
-
-🆕 v7.2.9 — CROSS-REGION-DETECTOR — محفوظ.
-🆕 v7.2.8 — CROSS-REGION-ACCURACY — محفوظ.
-🆕 v7.2.7 — PK-TIMING-FIX — محفوظ.
-🆕 v7.2.6 — POOL-AWARE + TLS-ASYNC-FIX — محفوظ.
-🆕 v7.2.5 — TLS-DEADLINE + EL-P90-FIX — محفوظ.
-🆕 v7.2.4 — MISLEADING-FIX — محفوظ.
-🆕 v7.2.3 — MYSQL-PARITY-FIX — محفوظ.
-🆕 v7.2.2 — PROBE-ACCURACY — محفوظ.
-🆕 v7.2.1 — FIXES-BUNDLE — محفوظ.
-🆕 v7.2.0 — FULL-HEALTH-PROBE — محفوظ.
-🆕 v7.1.0 — LATENCY-PROBE — محفوظ.
+🆕 v7.2.11 — RTT-REGION-INFERENCE — محفوظ.
+🆕 v7.2.10 — QUERY-PERF-FIX — محفوظ.
+🆕 v7.2.9  — CROSS-REGION-DETECTOR — محفوظ.
+🆕 v7.2.8  — CROSS-REGION-ACCURACY — محفوظ.
+🆕 v7.2.7  — PK-TIMING-FIX — محفوظ.
+🆕 v7.2.6  — POOL-AWARE + TLS-ASYNC-FIX — محفوظ.
+🆕 v7.2.5  — TLS-DEADLINE + EL-P90-FIX — محفوظ.
+🆕 v7.2.4  — MISLEADING-FIX — محفوظ.
+🆕 v7.2.3  — MYSQL-PARITY-FIX — محفوظ.
+🆕 v7.2.2  — PROBE-ACCURACY — محفوظ.
+🆕 v7.2.1  — FIXES-BUNDLE — محفوظ.
+🆕 v7.2.0  — FULL-HEALTH-PROBE — محفوظ.
+🆕 v7.1.0  — LATENCY-PROBE — محفوظ.
 ================================================================================
 """
 
@@ -64,7 +57,7 @@ logger = logging.getLogger(__name__)
 # الإصدار
 # ═══════════════════════════════════════════════════════════════════════
 
-VERSION = "7.2.11"
+VERSION = "7.2.13"
 
 _MIN_DEAD_FOR_CRITICAL = 50
 _MIN_DEAD_FOR_COLOR = 10
@@ -73,11 +66,7 @@ _LONG_TX_THRESHOLD_SECONDS = 300
 _TELEGRAM_PROBE_CACHE_TTL = 300.0
 _CONN_CLOSE_TIMEOUT = 2.0
 
-# 🆕 v7.2.11: عتبات RTT-REGION-INFERENCE
-#   • TCP < 15ms     → نفس المنطقة قطعياً (same-region / same-DC)
-#   • 15ms ≤ TCP < 50ms → نفس المنطقة (medium confidence)
-#   • 50ms ≤ TCP < 150ms → مناطق قريبة (cross-region احتمالي)
-#   • TCP ≥ 150ms    → مناطق مختلفة قطعياً (cross-region)
+# عتبات RTT-REGION-INFERENCE
 _RTT_SAME_REGION_HIGH = 15.0
 _RTT_SAME_REGION_MEDIUM = 50.0
 _RTT_CROSS_REGION_MIN = 150.0
@@ -92,35 +81,78 @@ _INTERNAL_DB_MEDIUM = 20.0
 _INTERNAL_DB_HIGH = 100.0
 
 # ═══════════════════════════════════════════════════════════════════════
+# 🆕 v7.2.13: Multi-DB Discovery — قوائم env vars المحتملة
+# ═══════════════════════════════════════════════════════════════════════
+
+# كل متغيرات URL لقواعد بيانات (name, hint_type)
+_DB_URL_ENV_VARS: Tuple[Tuple[str, str], ...] = (
+    # PostgreSQL family
+    ("DATABASE_URL",     "postgres"),
+    ("TIMESCALE_URL",    "postgres"),
+    ("POSTGRES_URL",     "postgres"),
+    ("POSTGRESQL_URL",   "postgres"),
+    ("PG_URL",           "postgres"),
+    ("POSTGRES_URI",     "postgres"),
+    ("TIMESCALE_URI",    "postgres"),
+    ("PG_URI",           "postgres"),
+    # MySQL family
+    ("MYSQL_URL",        "mysql"),
+    ("MARIADB_URL",      "mysql"),
+    ("MYSQL_URI",        "mysql"),
+    ("MARIADB_URI",      "mysql"),
+    # Generic
+    ("DB_URL",           "unknown"),
+    ("DATABASE_URI",     "unknown"),
+    ("DB_URI",           "unknown"),
+    ("SQLALCHEMY_DATABASE_URL", "unknown"),
+)
+
+# متغيرات SQLite (مسار ملف، ليس URL)
+_SQLITE_PATH_VARS: Tuple[str, ...] = (
+    "SQLITE_PATH", "SQLITE_DB", "SQLITE_FILE",
+    "SQLITE_DATABASE", "DB_PATH",
+)
+
+# ترتيب الأولوية عندما يقرأ الـ DB class من متغيراته
+_DB_URL_PRIORITY: Tuple[str, ...] = (
+    "DATABASE_URL",
+    "TIMESCALE_URL",
+    "POSTGRES_URL",
+    "POSTGRESQL_URL",
+    "PG_URL",
+    "MYSQL_URL",
+    "MARIADB_URL",
+    "DB_URL",
+    "DATABASE_URI",
+)
+
+# ═══════════════════════════════════════════════════════════════════════
 # خرائط المناطق السحابية
 # ═══════════════════════════════════════════════════════════════════════
 
-# مزودو الاستضافة على البوت — من متغيرات البيئة
 _CLOUD_ENV_KEYS: Dict[str, str] = {
     "RENDER_SERVICE_ID":        "render",
     "RENDER":                   "render",
     "FLY_APP_NAME":             "fly",
     "HEROKU_APP_NAME":          "heroku",
     "RAILWAY_ENVIRONMENT":      "railway",
-    "DYNO":                     "heroku",     # Heroku dyno
+    "DYNO":                     "heroku",
     "K_SERVICE":                "gcp_cloudrun",
     "AWS_LAMBDA_FUNCTION_NAME": "aws_lambda",
     "VERCEL":                   "vercel",
     "NETLIFY":                  "netlify",
 }
 
-# 🆕 v7.2.11 FIX-REGION-2: متغيرات إضافية لمنطقة Render
+# v7.2.12 FIX-REGION-5: حذف "REGION" — متغير عام خطر.
 _RENDER_REGION_ENV_VARS = (
     "RENDER_SERVICE_REGION",
     "RENDER_REGION_NAME",
     "RENDER_REGION_ID",
     "RENDER_APP_REGION",
     "RENDER_REGION",
-    "REGION",
     "RENDER_DATACENTER",
 )
 
-# Render regions (من وثائق Render)
 _RENDER_REGION_CODES = {
     "oregon":       "us-west-2",
     "ohio":         "us-east-2",
@@ -129,15 +161,9 @@ _RENDER_REGION_CODES = {
     "singapore":    "ap-southeast-1",
 }
 
-# Timescale Cloud / AWS — نمط رمز مضيف Timescale
-_TIMESCALE_REGION_MAP = {
-    "ezck": "eu-central-1",  # Frankfurt
-    "ezce": "eu-central-1",
-    "kfup": "us-east-1",
-    "xdfg": "us-east-1",
-}
+# v7.2.12 FIX-REGION-6: فارغة — Timescale IDs عشوائية.
+_TIMESCALE_REGION_MAP: Dict[str, str] = {}
 
-# Aiven regions
 _AIVEN_REGION_HINTS = {
     "europe":    "eu-central-1",
     "frankfurt": "eu-central-1",
@@ -148,7 +174,7 @@ _AIVEN_REGION_HINTS = {
 }
 
 # ═══════════════════════════════════════════════════════════════════════
-# طبقة Cache مركزية
+# Cache
 # ═══════════════════════════════════════════════════════════════════════
 
 _CACHE: Dict[str, Dict[str, Any]] = {}
@@ -164,6 +190,7 @@ _CACHE_TTL: Dict[str, float] = {
     "full_health":       120.0,
     "telegram_network":  _TELEGRAM_PROBE_CACHE_TTL,
     "region_info":       3600.0,
+    "multi_db":          60.0,
 }
 
 
@@ -219,45 +246,18 @@ def get_cache_stats() -> Dict[str, Any]:
 # ═══════════════════════════════════════════════════════════════════════
 
 _CLEANUP_POLICY: Dict[str, Dict[str, Any]] = {
-    "admin_logs": {
-        "date_column": "created_at", "retention": 30,
-        "max_mb": 20, "extra_where": None,
-    },
-    "payment_logs": {
-        "date_column": "created_at", "retention": 90,
-        "max_mb": 20, "extra_where": None,
-    },
-    "bot_addition_log": {
-        "date_column": "added_at", "retention": 90,
-        "max_mb": 20, "extra_where": None,
-    },
-    "sentiment_history": {
-        "date_column": "created_at", "retention": 90,
-        "max_mb": 20, "extra_where": None,
-    },
+    "admin_logs":        {"date_column": "created_at", "retention": 30,  "max_mb": 20, "extra_where": None},
+    "payment_logs":      {"date_column": "created_at", "retention": 90,  "max_mb": 20, "extra_where": None},
+    "bot_addition_log":  {"date_column": "added_at",   "retention": 90,  "max_mb": 20, "extra_where": None},
+    "sentiment_history": {"date_column": "created_at", "retention": 90,  "max_mb": 20, "extra_where": None},
     "user_messages": {
-        "date_column": "message_time", "retention": 30,
-        "max_mb": 20,
-        "extra_where": (
-            "user_id NOT IN ("
-            "  SELECT user_id FROM subscriptions "
-            "  WHERE status = 'active'"
-            ")"
-        ),
+        "date_column": "message_time", "retention": 30, "max_mb": 20,
+        "extra_where": "user_id NOT IN (SELECT user_id FROM subscriptions WHERE status = 'active')",
     },
-    "penalty_archive": {
-        "date_column": "created_at", "retention": 90,
-        "max_mb": 20, "extra_where": None,
-    },
+    "penalty_archive":   {"date_column": "created_at", "retention": 90,  "max_mb": 20, "extra_where": None},
     "user_violations": {
-        "date_column": "last_violation_time", "retention": 180,
-        "max_mb": 20,
-        "extra_where": (
-            "user_id NOT IN ("
-            "  SELECT user_id FROM subscriptions "
-            "  WHERE status = 'active'"
-            ")"
-        ),
+        "date_column": "last_violation_time", "retention": 180, "max_mb": 20,
+        "extra_where": "user_id NOT IN (SELECT user_id FROM subscriptions WHERE status = 'active')",
     },
     "users":             {"protected": True},
     "subscriptions":     {"protected": True},
@@ -275,10 +275,7 @@ _CLEANUP_POLICY: Dict[str, Dict[str, Any]] = {
     "plans":             {"protected": True},
 }
 
-_CLEANUP_TABLES = tuple(
-    k for k, v in _CLEANUP_POLICY.items()
-    if not v.get("protected")
-)
+_CLEANUP_TABLES = tuple(k for k, v in _CLEANUP_POLICY.items() if not v.get("protected"))
 _CLEANUP_THRESHOLD_KB = 20 * 1024
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -418,30 +415,440 @@ def _percentile(sorted_vals: List[float], pct: float) -> float:
 
 
 # ═══════════════════════════════════════════════════════════════════════
+# 🆕 v7.2.13: MULTI-DB DISCOVERY
+# ═══════════════════════════════════════════════════════════════════════
+
+def _mask_db_url(url: str) -> str:
+    """يخفي كلمة المرور من URL لعرضه في التقارير."""
+    if not url:
+        return ""
+    try:
+        p = urlparse(url)
+        if p.password:
+            netloc = f"{p.username}:***@{p.hostname}"
+            if p.port:
+                netloc += f":{p.port}"
+            return f"{p.scheme}://{netloc}{p.path or ''}"
+    except Exception:
+        pass
+    return url
+
+
+def _extract_db_components(url: str) -> Dict[str, Any]:
+    """استخراج host/port/dbname/user من URL."""
+    out = {"host": "?", "port": 0, "database": "?", "user": "?", "scheme": "?"}
+    if not url:
+        return out
+    try:
+        p = urlparse(url)
+        out["scheme"] = p.scheme or "?"
+        out["host"] = p.hostname or "?"
+        out["port"] = p.port or 0
+        out["database"] = (p.path or "/").lstrip("/") or "?"
+        out["user"] = p.username or "?"
+    except Exception:
+        pass
+    return out
+
+
+def _guess_provider_from_host(host: str) -> str:
+    """يحدد مزود الاستضافة من اسم المضيف."""
+    h = (host or "").lower()
+    if "timescale.com" in h:
+        return "timescale"
+    if "aivencloud.com" in h:
+        return "aiven"
+    if "rds.amazonaws.com" in h:
+        return "aws_rds"
+    if "supabase" in h:
+        return "supabase"
+    if "neon.tech" in h:
+        return "neon"
+    if "render.com" in h:
+        return "render"
+    if "railway" in h:
+        return "railway"
+    if "heroku" in h:
+        return "heroku"
+    if "cloudsql" in h or "gcp" in h:
+        return "gcp"
+    if h in ("localhost", "127.0.0.1", "::1"):
+        return "local"
+    return "unknown"
+
+
+def _detect_active_db_source(db) -> Dict[str, Any]:
+    """
+    🆕 v7.2.13: يكتشف أي DB نشطة فعلاً ومن أي env var جاءت.
+
+    المنطق:
+      1. اقرأ db.DATABASE_URL (أو os.environ['DATABASE_URL'])
+      2. طبّعها وطبّع كل env var متاح
+      3. طابقها مع الأول في _DB_URL_PRIORITY
+      4. استخرج host/port/db/provider/region
+
+    يعيد dict مع:
+      active_url (الفعلية) — لا تطبعها!
+      active_masked (آمنة للعرض)
+      active_source (اسم env var)
+      db_type / provider / components / region
+      pool_size / pool_used
+    """
+    out: Dict[str, Any] = {
+        "active_url": "",
+        "active_masked": "",
+        "active_source": "unknown",
+        "db_type": "unknown",
+        "provider": "unknown",
+        "components": {"host": "?", "port": 0, "database": "?", "user": "?", "scheme": "?"},
+        "region": "unknown",
+        "region_confidence": "low",
+        "use_postgres": False,
+        "use_mysql": False,
+        "pool_size": 0,
+        "pool_used": 0,
+    }
+    if db is None:
+        return out
+
+    active_url = (
+        getattr(db, "DATABASE_URL", "")
+        or os.getenv("DATABASE_URL", "")
+    )
+    out["active_url"] = active_url
+    out["active_masked"] = _mask_db_url(active_url)
+    out["components"] = _extract_db_components(active_url)
+    out["db_type"] = str(getattr(db, "DB_TYPE", "sqlite")).lower()
+    out["use_postgres"] = bool(getattr(db, "USE_POSTGRES", False))
+    out["use_mysql"] = bool(getattr(db, "USE_MYSQL", False))
+
+    # Pool info
+    pool = getattr(db, "_pool", None)
+    if pool is not None:
+        try:
+            out["pool_size"] = int(
+                getattr(pool, "_maxsize", None)
+                or getattr(db, "DB_POOL_SIZE", 0)
+                or 0
+            )
+            # asyncpg pool
+            holders = getattr(pool, "_holders", None)
+            if holders is not None:
+                out["pool_used"] = len(holders)
+            else:
+                # أي pool آخر
+                used = getattr(pool, "size", None)
+                if callable(used):
+                    out["pool_used"] = int(used() or 0)
+                elif used is not None:
+                    out["pool_used"] = int(used)
+        except Exception:
+            pass
+
+    # Provider من host
+    out["provider"] = _guess_provider_from_host(
+        out["components"].get("host", "")
+    )
+
+    # Region
+    region_info = _guess_db_region(out["components"].get("host", ""))
+    out["region"] = region_info.get("region", "unknown")
+    out["region_confidence"] = region_info.get("confidence", "low")
+
+    # أي env var يطابق active_url؟
+    if active_url:
+        for var in _DB_URL_PRIORITY:
+            val = os.getenv(var, "")
+            if val and val == active_url:
+                out["active_source"] = var
+                break
+        else:
+            # تطابق جزئي (host:port/db)
+            comp = out["components"]
+            host_port = f"{comp['host']}"
+            if comp["port"]:
+                host_port += f":{comp['port']}"
+            for var, _ in _DB_URL_ENV_VARS:
+                val = os.getenv(var, "")
+                if not val:
+                    continue
+                if comp["host"] and comp["host"] in val and \
+                   comp["database"] and comp["database"] in val:
+                    out["active_source"] = f"{var} (تطابق جزئي)"
+                    break
+
+    return out
+
+
+def _get_all_configured_databases() -> List[Dict[str, Any]]:
+    """
+    🆕 v7.2.13: يمسح كل env vars المعروفة لقواعد البيانات.
+
+    يعيد قائمة بكل DB مُعدّة، مع:
+      env_var / db_type / provider / host / port / database
+      masked_url / is_active / region
+
+    مُرتّبة: النشطة أولاً، ثم حسب اسم env var.
+    """
+    active = _detect_active_db_source(_get_db())
+    active_url = active.get("active_url", "")
+
+    configured: List[Dict[str, Any]] = []
+    seen_keys = set()
+
+    # ─── URLs ───
+    for var, hint_type in _DB_URL_ENV_VARS:
+        val = os.getenv(var, "")
+        if not val or len(val) < 10:
+            continue
+        # تخطّي القيم غير الشبيهة بـ URL
+        if "://" not in val and not val.endswith(".db"):
+            continue
+
+        comp = _extract_db_components(val)
+        dedup_key = f"{comp['host']}:{comp['port']}/{comp['database']}"
+        is_active = (val == active_url)
+
+        # تجنّب التكرار (نفس host:port/db)
+        if dedup_key in seen_keys and not is_active:
+            continue
+        if is_active:
+            seen_keys.add(dedup_key)
+
+        # نوع DB
+        db_type = hint_type
+        scheme = (comp["scheme"] or "").lower()
+        if scheme in ("postgres", "postgresql"):
+            db_type = "postgres"
+        elif scheme in ("mysql", "mariadb"):
+            db_type = "mysql"
+        elif scheme == "sqlite" or val.endswith(".db"):
+            db_type = "sqlite"
+        elif db_type == "unknown" and scheme:
+            db_type = scheme
+
+        # Provider + Region
+        provider = _guess_provider_from_host(comp["host"])
+        region_info = _guess_db_region(comp["host"])
+
+        configured.append({
+            "env_var": var,
+            "db_type": db_type,
+            "provider": provider,
+            "host": comp["host"],
+            "port": comp["port"],
+            "database": comp["database"],
+            "user": comp["user"],
+            "masked_url": _mask_db_url(val),
+            "is_active": is_active,
+            "region": region_info.get("region", "unknown"),
+            "region_confidence": region_info.get("confidence", "low"),
+        })
+
+    # ─── SQLite paths (بدون URL) ───
+    for var in _SQLITE_PATH_VARS:
+        val = os.getenv(var, "")
+        if not val:
+            continue
+        if val in seen_keys:
+            continue
+        seen_keys.add(val)
+
+        is_active = (
+            val == active_url
+            or (active.get("db_type") == "sqlite"
+                and active.get("provider") == "sqlite_local")
+        )
+
+        configured.append({
+            "env_var": var,
+            "db_type": "sqlite",
+            "provider": "sqlite_local",
+            "host": "local",
+            "port": 0,
+            "database": val,
+            "user": "?",
+            "masked_url": val,
+            "is_active": is_active,
+            "region": "local",
+            "region_confidence": "high",
+        })
+
+    # ترتيب: النشطة أولاً، ثم env_var
+    configured.sort(key=lambda x: (not x["is_active"], x["env_var"]))
+    return configured
+
+
+def _get_multi_db_warnings(configured: List[Dict[str, Any]]) -> List[str]:
+    """يحلّل قائمة DB المُعدّة ويعيد تحذيرات."""
+    warnings: List[str] = []
+
+    # 1. نفس host:port في أكثر من env var
+    hosts: Dict[str, List[str]] = {}
+    for c in configured:
+        key = f"{c['host']}:{c['port']}"
+        hosts.setdefault(key, []).append(c["env_var"])
+
+    for key, vars_list in hosts.items():
+        if len(vars_list) > 1:
+            warnings.append(
+                f"⚠️ <b>تكرار</b>: <code>{_esc(key)}</code> "
+                f"مُعرّف في: <code>{_esc(', '.join(vars_list))}</code> "
+                f"→ نفس DB"
+            )
+
+    # 2. مزودون مختلفون
+    providers = set(
+        c["provider"] for c in configured
+        if c["provider"] not in ("unknown", "sqlite_local", "local")
+    )
+    if len(providers) > 1:
+        warnings.append(
+            f"⚠️ <b>مزودون متعددون</b>: "
+            f"<code>{_esc(', '.join(sorted(providers)))}</code> "
+            f"— تأكد أن البوت يستخدم الصحيح"
+        )
+
+    # 3. أنواع DB مختلفة (PostgreSQL + MySQL معاً)
+    types = set(c["db_type"] for c in configured)
+    if len(types) > 1:
+        warnings.append(
+            f"⚠️ <b>أنواع DB مختلفة</b>: "
+            f"<code>{_esc(', '.join(sorted(types)))}</code>"
+        )
+
+    # 4. لا توجد DB نشطة
+    if not any(c["is_active"] for c in configured):
+        warnings.append(
+            "⚠️ لم يتم تحديد أي DB كنشطة — قد يكون البوت يستخدم SQLite محلي."
+        )
+
+    return warnings
+
+
+def format_multi_db_report() -> str:
+    """
+    🆕 v7.2.13: تقرير كامل عن كل قواعد البيانات المُعدّة + النشطة.
+    """
+    lines: List[str] = []
+    lines.append("🗂️ <b>قواعد البيانات المُعدّة (Multi-DB Discovery)</b>")
+    lines.append("━━━━━━━━━━━━━━━━━━━━━━")
+    lines.append("")
+
+    active = _detect_active_db_source(_get_db())
+    configured = _get_all_configured_databases()
+
+    # ─── النشطة ───
+    lines.append("🟢 <b>النشطة حالياً:</b>")
+    if active.get("active_url"):
+        comp = active.get("components", {})
+        lines.append(
+            f"   📦 <b>{_esc(active.get('provider', '?')).upper()}</b> "
+            f"@ <code>{_esc(comp.get('host', '?'))}:{comp.get('port', 0)}</code>"
+        )
+        lines.append(f"   🗄️ DB: <code>{_esc(comp.get('database', '?'))}</code>")
+        lines.append(f"   🔌 المصدر: <code>{_esc(active.get('active_source', '?'))}</code>")
+        lines.append(f"   🌍 المنطقة: <code>{_esc(active.get('region', 'unknown'))}</code> "
+                     f"<i>({active.get('region_confidence', '?')})</i>")
+        lines.append(f"   🏊 Pool: {active.get('pool_used', 0)}/{active.get('pool_size', 0)}")
+        lines.append(f"   🔗 <code>{_esc(active.get('active_masked', ''))[:80]}</code>")
+    else:
+        lines.append("   ⚪ لم يتم الاتصال بعد، أو SQLite محلي.")
+    lines.append("")
+
+    # ─── كل المُعدّة ───
+    if not configured:
+        lines.append("⚠️ لا توجد قواعد بيانات مُعدّة في env vars.")
+        return "\n".join(lines)
+
+    lines.append(f"📋 <b>كل المُعدّة ({len(configured)}):</b>")
+    lines.append("")
+    for c in configured:
+        icon = "🟢" if c["is_active"] else "⚪"
+        active_tag = " ← <b>النشطة</b>" if c["is_active"] else ""
+        lines.append(
+            f"  {icon} <code>{_esc(c['env_var'])}</code>{active_tag}"
+        )
+        lines.append(
+            f"      {_esc(c['db_type'].upper())} | "
+            f"{_esc(c['provider'])} | "
+            f"{_esc(c['host'])}:{c['port']}"
+        )
+        lines.append(
+            f"      📦 <code>{_esc(c['database'])}</code> | "
+            f"🌍 {_esc(c['region'])}"
+        )
+        lines.append(f"      🔗 <code>{_esc(c['masked_url'][:80])}</code>")
+        lines.append("")
+
+    # ─── تحذيرات ───
+    warnings = _get_multi_db_warnings(configured)
+    if warnings:
+        lines.append("━━━━━━━━━━━━━━━━━━━━━━")
+        lines.append("⚠️ <b>تحذيرات:</b>")
+        for w in warnings:
+            lines.append(f"  {w}")
+        lines.append("")
+
+    # ─── توصية ───
+    if len(configured) == 1:
+        lines.append("✅ <b>إعداد نظيف</b>: DB واحدة فقط مُعرّفة.")
+    elif not warnings:
+        lines.append("✅ <b>إعداد سليم</b>: قواعد متعددة لكن النشطة واضحة.")
+
+    return "\n".join(lines)
+
+
+async def diagnose_databases() -> str:
+    """🆕 v7.2.13: Public API — تقرير Multi-DB."""
+    cached = _cache_get("multi_db")
+    if cached is not None:
+        return cached
+    text = format_multi_db_report()
+    _cache_set("multi_db", text, ttl=60.0)
+    return text
+
+
+def format_active_db_line() -> str:
+    """سطر مختصر يوضّح DB النشطة — لاستخدامه في /latency و /fullhealth."""
+    active = _detect_active_db_source(_get_db())
+    if not active.get("active_url"):
+        if active.get("db_type") == "sqlite":
+            return "🗄️ <b>DB النشطة:</b> SQLite (محلي)"
+        return ""
+
+    comp = active.get("components", {})
+    src = active.get("active_source", "?")
+    provider = active.get("provider", "?")
+    host = comp.get("host", "?")
+    port = comp.get("port", 0)
+    db_name = comp.get("database", "?")
+    region = active.get("region", "unknown")
+
+    return (
+        f"🗄️ <b>DB النشطة:</b> "
+        f"<code>{_esc(provider)}</code> @ "
+        f"<code>{_esc(host)}:{port}/{_esc(db_name)}</code>\n"
+        f"   🔌 من: <code>{_esc(src)}</code> | "
+        f"🌍 <code>{_esc(region)}</code>"
+    )
+
+
+# ═══════════════════════════════════════════════════════════════════════
 # كشف المناطق الجغرافية
-# 🆕 v7.2.11 FIX-REGION-1/2/3
 # ═══════════════════════════════════════════════════════════════════════
 
 def _normalize_render_region(raw: str) -> Optional[str]:
-    """
-    🆕 v7.2.11 FIX-REGION-2: تطبيع اسم منطقة Render.
-
-    يقبل: "frankfurt" / "Frankfurt" / "eu-central-1" / "eu-central"
-    يُرجع: "eu-central-1" أو None.
-    """
     if not raw:
         return None
     try:
         rl = str(raw).strip().lower()
         if not rl:
             return None
-        # اسم منطقة Render (frankfurt/oregon/...)
         if rl in _RENDER_REGION_CODES:
             return _RENDER_REGION_CODES[rl]
-        # رمز AWS مباشر (eu-central-1، us-east-1، ...)
         if any(rl.startswith(p) for p in ("eu-", "us-", "ap-", "ca-", "sa-")):
             return rl
-        # مطابقة جزئية (frankfurt-1 → frankfurt)
         for k, v in _RENDER_REGION_CODES.items():
             if k in rl:
                 return v
@@ -451,20 +858,6 @@ def _normalize_render_region(raw: str) -> Optional[str]:
 
 
 def _detect_bot_cloud() -> Dict[str, Any]:
-    """
-    يكتشف منصة استضافة البوت ومنطقتها من متغيرات البيئة.
-
-    🆕 v7.2.11 FIX-REGION-2: يفحص RENDER_SERVICE_REGION,
-        RENDER_REGION_NAME, RENDER_REGION_ID, RENDER_APP_REGION.
-
-    يعيد:
-        {
-          "provider": "render" | "fly" | ...,
-          "region": "eu-central-1" | "unknown",
-          "confidence": "high" | "medium" | "low",
-          "hints": ["RENDER_SERVICE_ID", ...],
-        }
-    """
     result: Dict[str, Any] = {
         "provider": "unknown",
         "region": "unknown",
@@ -481,7 +874,6 @@ def _detect_bot_cloud() -> Dict[str, Any]:
 
     provider = result["provider"]
 
-    # Render — 🆕 v7.2.11: 7 متغيرات بدل 3
     if provider == "render":
         for key in _RENDER_REGION_ENV_VARS:
             raw = os.getenv(key)
@@ -494,7 +886,6 @@ def _detect_bot_cloud() -> Dict[str, Any]:
                 result["hints"].append(f"{key}={raw}")
                 break
 
-        # fallback: من hostname
         if result["region"] == "unknown":
             hostname = os.getenv("RENDER_EXTERNAL_HOSTNAME", "")
             if hostname:
@@ -504,7 +895,6 @@ def _detect_bot_cloud() -> Dict[str, Any]:
                     result["confidence"] = "medium"
                     result["hints"].append(f"hostname={hostname}")
 
-    # Fly.io
     elif provider == "fly":
         region = os.getenv("FLY_REGION") or os.getenv("FLY_REGION_CODE")
         if region:
@@ -512,7 +902,6 @@ def _detect_bot_cloud() -> Dict[str, Any]:
             result["confidence"] = "high"
             result["hints"].append("FLY_REGION")
 
-    # Heroku
     elif provider == "heroku":
         region = os.getenv("HEROKU_REGION")
         if region:
@@ -520,7 +909,6 @@ def _detect_bot_cloud() -> Dict[str, Any]:
             result["confidence"] = "high"
             result["hints"].append("HEROKU_REGION")
 
-    # Railway
     elif provider == "railway":
         region = os.getenv("RAILWAY_REGION")
         if region:
@@ -532,26 +920,34 @@ def _detect_bot_cloud() -> Dict[str, Any]:
 
 
 def _guess_db_region(db_host: str) -> Dict[str, Any]:
-    """
-    يخمّن منطقة DB من اسم المضيف.
-
-    يعيد:
-        {
-          "provider": "aiven" | "timescale" | "aws_rds" | "unknown",
-          "region": "eu-central-1" | "unknown",
-          "confidence": "high" | "medium" | "low",
-        }
-    """
     result: Dict[str, Any] = {
         "provider": "unknown",
         "region": "unknown",
         "confidence": "low",
     }
     h = (db_host or "").lower().strip()
+
+    # env var له الأولوية القصوى
+    env_region = (
+        os.getenv("DB_REGION")
+        or os.getenv("TIMESCALE_REGION")
+        or os.getenv("DATABASE_REGION")
+    )
+    if env_region:
+        normalized = _normalize_render_region(env_region) or env_region
+        result["region"] = normalized
+        result["confidence"] = "high"
+        if "timescale.com" in h:
+            result["provider"] = "timescale"
+        elif "aivencloud.com" in h:
+            result["provider"] = "aiven"
+        elif "rds.amazonaws.com" in h:
+            result["provider"] = "aws_rds"
+        return result
+
     if not h:
         return result
 
-    # Aiven
     if "aivencloud.com" in h:
         result["provider"] = "aiven"
         for hint, region in _AIVEN_REGION_HINTS.items():
@@ -562,20 +958,11 @@ def _guess_db_region(db_host: str) -> Dict[str, Any]:
         result["confidence"] = "low"
         return result
 
-    # Timescale Cloud
     if "timescale.com" in h:
         result["provider"] = "timescale"
-        parts = h.split(".")
-        if len(parts) >= 2:
-            region_id = parts[1][:4]
-            if region_id in _TIMESCALE_REGION_MAP:
-                result["region"] = _TIMESCALE_REGION_MAP[region_id]
-                result["confidence"] = "high"
-                return result
         result["confidence"] = "low"
         return result
 
-    # AWS RDS
     if "rds.amazonaws.com" in h:
         result["provider"] = "aws_rds"
         for p in h.split("."):
@@ -586,7 +973,6 @@ def _guess_db_region(db_host: str) -> Dict[str, Any]:
                 return result
         return result
 
-    # Cloud SQL (GCP)
     if "cloudsql" in h or "gcp" in h:
         result["provider"] = "gcp"
         return result
@@ -599,18 +985,6 @@ def _infer_region_from_rtt(
     bot_info: Dict[str, Any],
     db_info: Dict[str, Any],
 ) -> Dict[str, Any]:
-    """
-    🆕 v7.2.11 FIX-REGION-1: استنتاج المنطقة من RTT.
-
-    إذا كان TCP → DB صغيراً (< 15ms) → نفس المنطقة قطعياً،
-    حتى لو كانت أسماء المناطق غير معروفة.
-
-    يعيد dict مع:
-        cross_region: True/False/None
-        confidence: "high" | "medium" | "low"
-        reason: نص توضيحي
-        inferred: True إذا كان الاستنتاج من RTT (لا من env vars)
-    """
     out: Dict[str, Any] = {
         "cross_region": None,
         "confidence": "low",
@@ -624,7 +998,6 @@ def _infer_region_from_rtt(
     t = float(tcp_ms)
 
     if t < _RTT_SAME_REGION_HIGH:
-        # < 15ms → نفس المنطقة/DC قطعياً
         out["cross_region"] = False
         out["confidence"] = "high"
         out["inferred"] = True
@@ -633,7 +1006,6 @@ def _infer_region_from_rtt(
             f"→ نفس المنطقة (استنتاج من RTT)"
         )
     elif t < _RTT_SAME_REGION_MEDIUM:
-        # 15-50ms → نفس المنطقة (احتمال مرتفع)
         out["cross_region"] = False
         out["confidence"] = "medium"
         out["inferred"] = True
@@ -643,7 +1015,6 @@ def _infer_region_from_rtt(
             f"→ نفس المنطقة (احتمال مرتفع)"
         )
     elif t < _RTT_CROSS_REGION_MIN:
-        # 50-150ms → مناطق قريبة (cross-region محتمل)
         out["cross_region"] = None
         out["confidence"] = "medium"
         out["inferred"] = True
@@ -653,7 +1024,6 @@ def _infer_region_from_rtt(
             f"→ احتمال cross-region"
         )
     else:
-        # ≥ 150ms → مناطق مختلفة قطعياً
         out["cross_region"] = True
         out["confidence"] = "high"
         out["inferred"] = True
@@ -670,22 +1040,6 @@ def _detect_cross_region(
     db_info: Dict[str, Any],
     tcp_ms: Optional[float] = None,
 ) -> Dict[str, Any]:
-    """
-    يقارن منطقتي البوت و DB.
-
-    🆕 v7.2.11 FIX-REGION-3: parameter tcp_ms لاستنتاج المنطقة
-        تلقائياً من RTT عند غياب env vars.
-
-    يعيد:
-        {
-          "cross_region": True/False/None,  # None = لا يمكن التحديد
-          "bot_region": "...",
-          "db_region": "...",
-          "recommendation": "...",
-          "inferred_from_rtt": True/False,  # 🆕
-          "inference_reason": "...",         # 🆕
-        }
-    """
     out: Dict[str, Any] = {
         "cross_region": None,
         "bot_region": bot_info.get("region", "unknown"),
@@ -701,9 +1055,31 @@ def _detect_cross_region(
     bot_r = bot_info.get("region", "unknown")
     db_r = db_info.get("region", "unknown")
 
-    # ═══════════════════════════════════════════════════════════════
-    # الحالة 1: المنطقتان معروفتان من env vars
-    # ═══════════════════════════════════════════════════════════════
+    # RTT حكم نهائي عند الثقة العالية
+    if tcp_ms is not None and tcp_ms > 0:
+        inference = _infer_region_from_rtt(tcp_ms, bot_info, db_info)
+        if inference.get("confidence") == "high":
+            out["cross_region"] = inference["cross_region"]
+            out["confidence"] = "high"
+            out["inferred_from_rtt"] = True
+            out["inference_reason"] = inference["reason"]
+
+            if inference["cross_region"] is False:
+                out["recommendation"] = (
+                    f"✅ {inference['reason']}.\n"
+                    f"   RTT={tcp_ms:.0f}ms → نفس المنطقة قطعياً.\n"
+                    f"   💡 لتحديد اسم المنطقة الدقيق، أضف "
+                    f"<code>RENDER_SERVICE_REGION=singapore</code> "
+                    f"و<code>DB_REGION=ap-southeast-1</code> في Render → Environment."
+                )
+            else:
+                out["recommendation"] = (
+                    f"🚨 {inference['reason']}.\n"
+                    f"   RTT={tcp_ms:.0f}ms → مناطق مختلفة.\n"
+                    f"   ✅ الحل: انقل البوت و DB إلى نفس المنطقة."
+                )
+            return out
+
     if bot_r != "unknown" and db_r != "unknown":
         out["confidence"] = (
             "high"
@@ -728,9 +1104,6 @@ def _detect_cross_region(
         )
         return out
 
-    # ═══════════════════════════════════════════════════════════════
-    # 🆕 v7.2.11 FIX-REGION-1: الحالة 2 — استنتاج من RTT
-    # ═══════════════════════════════════════════════════════════════
     inference = _infer_region_from_rtt(tcp_ms, bot_info, db_info)
     if inference.get("inferred"):
         out["cross_region"] = inference["cross_region"]
@@ -738,14 +1111,13 @@ def _detect_cross_region(
         out["inferred_from_rtt"] = True
         out["inference_reason"] = inference["reason"]
 
-        # بناء توصية مناسبة
         if inference["cross_region"] is False:
             out["recommendation"] = (
                 f"✅ {inference['reason']}.\n"
-                f"   RTT={tcp_ms:.0f}ms → نفس المنطقة قطعياً.\n"
+                f"   RTT={tcp_ms:.0f}ms → نفس المنطقة.\n"
                 f"   💡 لتحديد اسم المنطقة الدقيق، أضف "
-                f"<code>RENDER_SERVICE_REGION=frankfurt</code> "
-                f"في Render → Environment."
+                f"<code>RENDER_SERVICE_REGION</code> + "
+                f"<code>DB_REGION</code> في Render → Environment."
             )
         elif inference["cross_region"] is True:
             out["recommendation"] = (
@@ -758,19 +1130,19 @@ def _detect_cross_region(
                 f"🟡 {inference['reason']}.\n"
                 f"   RTT={tcp_ms:.0f}ms — غير حاسم.\n"
                 f"   💡 للحصول على تحديد دقيق، أضف "
-                f"<code>RENDER_SERVICE_REGION</code> env var."
+                f"<code>RENDER_SERVICE_REGION</code> + "
+                f"<code>DB_REGION</code> env vars."
             )
         return out
 
-    # ═══════════════════════════════════════════════════════════════
-    # الحالة 3: لا env vars ولا RTT — لا يمكن التحديد
-    # ═══════════════════════════════════════════════════════════════
     out["recommendation"] = (
         "ℹ️ لا يمكن تحديد المناطق:\n"
-        "   • bot_region=unknown (Render لا يُصدّر RENDER_REGION افتراضياً)\n"
+        "   • bot_region=unknown (أضف RENDER_SERVICE_REGION)\n"
+        "   • db_region=unknown (أضف DB_REGION)\n"
         "   • TCP=0 (لم يُقَس)\n"
-        "💡 الحل: أضف <code>RENDER_SERVICE_REGION=frankfurt</code> "
-        "في Render → Environment."
+        "💡 الحل: اضبط env vars في Render:\n"
+        "   RENDER_SERVICE_REGION=singapore\n"
+        "   DB_REGION=ap-southeast-1"
     )
     return out
 
@@ -808,7 +1180,7 @@ async def _probe_db_latency(
     force: bool = False,
     socket_timeout: float = 5.0,
 ) -> Dict[str, Any]:
-    """قياس كمون الشبكة/DB. v7.2.11: RTT inference للمناطق."""
+    """قياس كمون الشبكة/DB. v7.2.13: Multi-DB aware."""
     if not force:
         cached = _cache_get("latency_probe")
         if cached is not None:
@@ -824,6 +1196,10 @@ async def _probe_db_latency(
         "verdict": "unknown", "diagnosis": "",
         "recommendation": "", "used_pool": False,
     }
+
+    # 🆕 v7.2.13: أضف معلومات DB النشطة
+    active_info = _detect_active_db_source(db)
+    result["active_db"] = active_info
 
     if db_type == "sqlite":
         try:
@@ -853,7 +1229,8 @@ async def _probe_db_latency(
         _cache_set("latency_probe", result, ttl=120.0)
         return result
 
-    db_url = (
+    # 🆕 v7.2.13: استخدم الـ URL النشط الفعلي
+    db_url = active_info.get("active_url") or (
         getattr(db, "DATABASE_URL", "")
         or os.getenv("DATABASE_URL", "")
     )
@@ -865,16 +1242,15 @@ async def _probe_db_latency(
         port = parsed.port or (5432 if db_type == "postgres" else 3306)
         result["host"] = host
         result["port"] = port
+        result["active_db_source"] = active_info.get("active_source", "unknown")
     except Exception as e:
         logger.debug(f"parse DATABASE_URL: {e}")
 
     db_region = _guess_db_region(host)
     bot_region = _detect_bot_cloud()
-    # 🆕 v7.2.11: نُمرّر tcp_ms لاحقاً بعد قياسه
     result["db_region"] = db_region
     result["bot_region"] = bot_region
 
-    # TCP
     tcp_ms: Optional[float] = None
     if host != "?" and port > 0:
         try:
@@ -898,7 +1274,6 @@ async def _probe_db_latency(
                 f"🔴 لا يمكن الوصول إلى {host}:{port} خلال "
                 f"{socket_timeout}s — شبكة مقطوعة أو DB مُطفأ."
             )
-            # 🆕 v7.2.11: cross_region بدون tcp
             result["cross_region"] = _detect_cross_region(
                 bot_region, db_region, tcp_ms=None)
             _cache_set("latency_probe", result, ttl=120.0)
@@ -914,7 +1289,6 @@ async def _probe_db_latency(
     else:
         result["tcp_connect_ms"] = -1.0
 
-    # 🆕 v7.2.11 FIX-REGION-1/3: استنتاج المنطقة من RTT
     cross = _detect_cross_region(bot_region, db_region, tcp_ms=tcp_ms)
     result["cross_region"] = cross
 
@@ -950,7 +1324,7 @@ async def _probe_db_latency(
                         timeout=socket_timeout + 2.0,
                     )
                 except asyncio.TimeoutError:
-                    result["error"] = f"asyncpg.connect timeout"
+                    result["error"] = "asyncpg.connect timeout"
                     result["verdict"] = "critical"
                     _cache_set("latency_probe", result, ttl=120.0)
                     return result
@@ -1150,7 +1524,6 @@ def _compute_latency_verdict(result: Dict[str, Any]) -> Tuple[str, str, str]:
             "افحص CPU/RAM على الخادم.",
         )
 
-    # cross-region مؤكّد (env vars أو RTT inference)
     if cross.get("cross_region") is True and tcp > 30:
         bot_r = cross.get("bot_region", "?")
         db_r = cross.get("db_region", "?")
@@ -1176,7 +1549,6 @@ def _compute_latency_verdict(result: Dict[str, Any]) -> Tuple[str, str, str]:
         )
 
     if tcp > 30 and warm < 50 and internal_db < 15:
-        # 🆕 v7.2.11: ملاحظة الاستنتاج من RTT
         inferred_note = ""
         if cross.get("inferred_from_rtt"):
             inferred_note = (
@@ -1233,7 +1605,6 @@ def _compute_latency_verdict(result: Dict[str, Any]) -> Tuple[str, str, str]:
 
     if warm < 20 and tcp < 50:
         pool_note = " (pool warm)" if used_pool else ""
-        # 🆕 v7.2.11: توضيح أن الاتصالات قد تكون نفس المنطقة
         same_region_hint = ""
         if tcp < _RTT_SAME_REGION_HIGH:
             same_region_hint = " — نفس المنطقة (RTT منخفض)"
@@ -1273,11 +1644,16 @@ def format_latency_report(probe: Dict[str, Any]) -> str:
     lines.append("━━━━━━━━━━━━━━━━━━━━━━")
     lines.append("")
 
+    # 🆕 v7.2.13: سطر DB النشطة
+    active_line = format_active_db_line()
+    if active_line:
+        lines.append(active_line)
+        lines.append("")
+
     cross = probe.get("cross_region") or {}
     db_region = probe.get("db_region") or {}
     bot_region = probe.get("bot_region") or {}
 
-    # 🆕 v7.2.11: عرض المناطق + الاستنتاج
     if (bot_region.get("region", "unknown") != "unknown"
             or db_region.get("region", "unknown") != "unknown"
             or cross.get("inferred_from_rtt")):
@@ -1304,7 +1680,6 @@ def format_latency_report(probe: Dict[str, Any]) -> str:
                 lines.append(f"   ✅ نفس المنطقة")
         else:
             lines.append(f"   ℹ️ لا يمكن التحديد بدقة")
-        # 🆕 v7.2.11: عرض السبب عند الاستنتاج
         if cross.get("inference_reason"):
             lines.append(f"   💡 <i>{_esc(cross['inference_reason'])}</i>")
         lines.append("")
@@ -1421,6 +1796,7 @@ async def get_latency_verdict() -> Dict[str, Any]:
         "diagnosis": probe.get("diagnosis", ""),
         "recommendation": probe.get("recommendation", ""),
         "cross_region": probe.get("cross_region", {}),
+        "active_db": probe.get("active_db", {}),
     }
 
 
@@ -1846,7 +2222,6 @@ def _identify_bottleneck(data: Dict[str, Any]) -> Dict[str, Any]:
             f"منطقتين مختلفتين. RTT = {tv:.0f}{tu}."
         )
     elif top_name == "network_db" and cross.get("cross_region") is False:
-        # 🆕 v7.2.11: تطمين أن المناطق متطابقة
         recommendations["network_db"] = (
             f"✅ <b>البوت و DB في نفس المنطقة</b>"
             f"{' (مُستنتَج من RTT)' if cross.get('inferred_from_rtt') else ''}. "
@@ -1877,13 +2252,21 @@ async def _probe_full_health(*, force: bool = False) -> Dict[str, Any]:
     db_host = "?"
     db_port = 0
     if db is not None:
-        url = (getattr(db, "DATABASE_URL", "") or os.getenv("DATABASE_URL", ""))
-        try:
-            p = urlparse(url)
-            db_host = p.hostname or "?"
-            db_port = p.port or (5432 if "postgres" in url.lower() else 3306)
-        except Exception:
-            pass
+        # 🆕 v7.2.13: استخدم الـ URL النشط
+        active = _detect_active_db_source(db)
+        url = active.get("active_url", "")
+        if url:
+            comp = active.get("components", {})
+            db_host = comp.get("host", "?")
+            db_port = comp.get("port", 0) or (5432 if "postgres" in url.lower() else 3306)
+        else:
+            url = (getattr(db, "DATABASE_URL", "") or os.getenv("DATABASE_URL", ""))
+            try:
+                p = urlparse(url)
+                db_host = p.hostname or "?"
+                db_port = p.port or (5432 if "postgres" in url.lower() else 3306)
+            except Exception:
+                pass
 
     _cpu_primed = False
     try:
@@ -1958,6 +2341,12 @@ def format_full_health_report(data: Dict[str, Any]) -> str:
     lines.append("━━━━━━━━━━━━━━━━━━━━━━")
     lines.append("")
 
+    # 🆕 v7.2.13: سطر DB النشطة
+    active_line = format_active_db_line()
+    if active_line:
+        lines.append(active_line)
+        lines.append("")
+
     b = data.get("bottleneck") or {}
     severity = b.get("severity", "low")
     primary = b.get("primary", "none")
@@ -1978,11 +2367,10 @@ def format_full_health_report(data: Dict[str, Any]) -> str:
             f"جغرافية (~500-5000km)."
         )
         lines.append("")
-    # 🆕 v7.2.11: عرض تطمين عندما الاستنتاج يقول "نفس المنطقة"
     elif cross.get("cross_region") is False and cross.get("inferred_from_rtt"):
+        reason_txt = _esc(cross.get("inference_reason", ""))
         lines.append(
-            f"✅ <b>نفس المنطقة</b> "
-            f"<i>(مُستنتَج من RTT={cross.get('inference_reason', '')})</i>"
+            f"✅ <b>نفس المنطقة</b> <i>({reason_txt})</i>"
         )
         lines.append("")
 
@@ -2162,10 +2550,6 @@ async def _get_db_metadata() -> Dict[str, Any]:
 
     try:
         if _is_postgres():
-            # 🟡 FIX-PERF-4 (v7.2.10): توثيق صريح.
-            # pg_database_size() يمسح كل ملفات DB (بما فيها chunks
-            # Timescale). ~300ms طبيعي — لا يمكن تسريعه. مقبول لأنه
-            # cached 300s (لا يُستدعى أكثر من مرة كل 5 دقائق).
             size_b = await db.fetchval(
                 "SELECT pg_database_size(current_database())",
                 default=0) or 0
@@ -2223,7 +2607,6 @@ async def _get_db_metadata() -> Dict[str, Any]:
 
 # ═══════════════════════════════════════════════════════════════════════
 # 2) Dead Tuples
-# 🔴 FIX-PERF-1 (v7.2.10): استخدام pg_stat_user_tables كـ driving table
 # ═══════════════════════════════════════════════════════════════════════
 
 async def _get_all_tables_health() -> Tuple[List[Dict], List[Dict]]:
@@ -2238,12 +2621,6 @@ async def _get_all_tables_health() -> Tuple[List[Dict], List[Dict]]:
         return [], []
 
     try:
-        # 🔴 FIX-PERF-1 (v7.2.10): 
-        #   قبل: FROM pg_class + LEFT JOIN pg_stat_all_tables
-        #         → يمسح كل الجداول في كل الـ schemas (Timescale)
-        #   بعد:  FROM pg_stat_user_tables (driving table) + LEFT JOIN pg_class
-        #         → scan محدود في الـ schema الحالية فقط
-        #   الأثر: 1.49s → 50-100ms (تسريع 15-30×).
         rows = await db.fetchall("""
             SELECT
                 s.relname AS table_name,
@@ -2457,7 +2834,6 @@ async def _get_indexes(tables: List[str]) -> Dict[str, List[Dict[str, Any]]]:
 
 # ═══════════════════════════════════════════════════════════════════════
 # 6) Auto-Cleanup Status
-# 🟠 FIX-PERF-2 (v7.2.10): + schemaname filter
 # ═══════════════════════════════════════════════════════════════════════
 
 async def _get_cleanup_status() -> List[Dict[str, Any]]:
@@ -2471,7 +2847,6 @@ async def _get_cleanup_status() -> List[Dict[str, Any]]:
         return []
 
     try:
-        # 🟠 FIX-PERF-2 (v7.2.10): إضافة schemaname filter.
         rows = await db.fetchall("""
             SELECT relname AS table_name,
                    pg_total_relation_size(relid) AS total_bytes
@@ -2637,7 +3012,6 @@ def _calc_technical_score(
 
 # ═══════════════════════════════════════════════════════════════════════
 # 9) Maintenance
-# 🟠 FIX-PERF-3 (v7.2.10): + schemaname filter
 # ═══════════════════════════════════════════════════════════════════════
 
 async def preview_maintenance() -> Dict[str, Any]:
@@ -2660,7 +3034,6 @@ async def preview_maintenance() -> Dict[str, Any]:
 
     sizes_map: Dict[str, int] = {}
     try:
-        # 🟠 FIX-PERF-3 (v7.2.10): + schemaname filter (نفس FIX-PERF-2).
         rows = await db.fetchall("""
             SELECT relname AS table_name,
                    pg_total_relation_size(relid) AS total_bytes
@@ -2745,7 +3118,6 @@ async def run_maintenance() -> Dict[str, Any]:
                      if not v.get("protected")]
         sizes_map: Dict[str, int] = {}
         try:
-            # 🟠 FIX-PERF-3: + schemaname filter.
             rows = await db.fetchall("""
                 SELECT relname AS table_name,
                        pg_total_relation_size(relid) AS total_bytes
@@ -3161,6 +3533,23 @@ async def _build_sections(*, include_probes: bool = True) -> List[str]:
     total_dead = sum(t.get("dead", 0) for t in dirty)
     total_tables = len(dirty) + len(clean)
 
+    # 🆕 v7.2.13: قسم DB النشطة في أعلى التقرير
+    s0: List[str] = []
+    active_line = format_active_db_line()
+    if active_line:
+        s0.append(active_line)
+        s0.append("")
+
+    configured_dbs = _get_all_configured_databases()
+    if len(configured_dbs) > 1:
+        s0.append(
+            f"⚠️ <b>تحذير:</b> يوجد <b>{len(configured_dbs)}</b> "
+            f"قواعد بيانات مُعدّة — راجع /databases للتفاصيل."
+        )
+        s0.append("")
+    if s0:
+        parts.append("\n".join(s0))
+
     s1: List[str] = []
     s1.append(f"🔬 <b>تشخيص قاعدة البيانات v{VERSION}</b>")
     s1.append("━━━━━━━━━━━━━━━━━━━━━━")
@@ -3412,6 +3801,18 @@ async def diagnose_db_quick() -> str:
         return "❌ DB غير مستورد"
 
     lines: List[str] = []
+
+    # 🆕 v7.2.13: DB النشطة أولاً
+    active = _detect_active_db_source(db)
+    if active.get("active_url"):
+        comp = active.get("components", {})
+        lines.append(
+            f"🗄️ <b>DB النشطة:</b> "
+            f"<code>{_esc(active.get('provider', '?'))}</code> @ "
+            f"<code>{_esc(comp.get('host', '?'))}:{comp.get('port', 0)}"
+            f"/{_esc(comp.get('database', '?'))}</code>"
+        )
+
     try:
         meta = await _get_db_metadata()
         db_type = "PostgreSQL" if _is_postgres() else _get_db_type()
@@ -3492,6 +3893,14 @@ async def diagnose_db_quick() -> str:
     except Exception:
         pass
 
+    # 🆕 v7.2.13: تحذير عند تعدد DB
+    configured_dbs = _get_all_configured_databases()
+    if len(configured_dbs) > 1:
+        lines.append(
+            f"⚠️ <b>{len(configured_dbs)} قواعد بيانات مُعدّة</b> — "
+            f"استخدم /databases للتفاصيل"
+        )
+
     return "\n".join(lines)
 
 
@@ -3512,18 +3921,19 @@ async def get_region_info() -> Dict[str, Any]:
     db = _get_db()
     host = "?"
     if db is not None:
-        url = (getattr(db, "DATABASE_URL", "")
-               or os.getenv("DATABASE_URL", ""))
-        try:
-            p = urlparse(url)
-            host = p.hostname or "?"
-        except Exception:
-            pass
+        active = _detect_active_db_source(db)
+        host = active.get("components", {}).get("host", "?")
+        if host == "?":
+            url = (getattr(db, "DATABASE_URL", "")
+                   or os.getenv("DATABASE_URL", ""))
+            try:
+                p = urlparse(url)
+                host = p.hostname or "?"
+            except Exception:
+                pass
 
     bot_info = _detect_bot_cloud()
     db_info = _guess_db_region(host)
-    # 🆕 v7.2.11: نُمرّر tcp_ms=None (غير متاح من هنا)
-    # يمكن للـ caller استخدام _detect_cross_region مباشرة مع RTT
     cross = _detect_cross_region(bot_info, db_info, tcp_ms=None)
 
     result = {
@@ -3534,6 +3944,23 @@ async def get_region_info() -> Dict[str, Any]:
     }
     _cache_set("region_info", result, ttl=3600.0)
     return result
+
+
+async def get_all_databases_info() -> Dict[str, Any]:
+    """
+    🆕 v7.2.13: يعيد dict منظم بمعلومات كل قواعد البيانات المُعدّة.
+    مفيد للتكامل مع أوامر أخرى.
+    """
+    active = _detect_active_db_source(_get_db())
+    configured = _get_all_configured_databases()
+    warnings = _get_multi_db_warnings(configured)
+
+    return {
+        "active": active,
+        "configured": configured,
+        "warnings": warnings,
+        "count": len(configured),
+    }
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -3591,6 +4018,13 @@ detect_bot_region = _detect_bot_cloud
 detect_db_region = _guess_db_region
 get_cross_region_info = get_region_info
 
+# 🆕 v7.2.13 aliases
+databases_report = diagnose_databases
+list_databases = diagnose_databases
+multi_db_report = diagnose_databases
+show_databases = diagnose_databases
+get_active_db = _detect_active_db_source
+
 
 # ═══════════════════════════════════════════════════════════════════════
 # 15) __all__
@@ -3621,27 +4055,30 @@ __all__ = [
     "get_db_info", "get_database_info", "get_pg_info",
     "detect_bot_region", "detect_db_region", "get_cross_region_info",
     "get_region_info",
+    # 🆕 v7.2.13
+    "diagnose_databases", "get_all_databases_info", "format_multi_db_report",
+    "format_active_db_line", "databases_report", "list_databases",
+    "multi_db_report", "show_databases", "get_active_db",
 ]
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# LOAD BEACON — v7.2.11
+# LOAD BEACON — v7.2.13
 # ═══════════════════════════════════════════════════════════════════════
 
 try:
     logger.info(
         "🛡️ db_diagnostics.py v%s loaded | "
+        "MULTI-DB-DISCOVERY ✅ | "
+        "REGION-ENV-OVERRIDE ✅ | "
         "RTT-REGION-INFERENCE ✅ | "
-        "FIX-REGION-1=rtt-inference ✅ | "
-        "FIX-REGION-2=extra-render-env-vars ✅ | "
-        "FIX-REGION-3=tcp-ms-param ✅ | "
-        "FIX-REGION-4=beacon ✅ | "
         "QUERY-PERF-FIX ✅ | "
-        "CROSS-REGION-DETECTOR ✅ | "
+        "db-vars=%d | "
         "rtt-thresholds=(high=%d,medium=%d,cross=%d) | "
         "abs-threshold=%d | "
         "cache_keys=%d | exports=%d",
         VERSION,
+        len(_DB_URL_ENV_VARS),
         int(_RTT_SAME_REGION_HIGH),
         int(_RTT_SAME_REGION_MEDIUM),
         int(_RTT_CROSS_REGION_MIN),
