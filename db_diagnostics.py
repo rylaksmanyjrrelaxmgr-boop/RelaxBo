@@ -1,25 +1,31 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-db_diagnostics.py — واجهة تشخيص وصيانة قاعدة البيانات (v7.2.13 — MULTI-DB-DISCOVERY)
+db_diagnostics.py — واجهة تشخيص وصيانة قاعدة البيانات (v7.2.14 — TCP-CONSISTENCY-FIX)
 ================================================================================
-🆕 v7.2.13 — MULTI-DB-DISCOVERY:
+🆕 v7.2.14 — TCP-CONSISTENCY-FIX:
 
-    🟢 NEW: _detect_active_db_source() — يكتشف أي DB نشطة فعلاً.
-    🟢 NEW: _get_all_configured_databases() — يمسح كل env vars للـ DB.
-    🟢 NEW: format_multi_db_report() — تقرير كامل عن كل DB مُعدّة.
-    🟢 NEW: diagnose_databases() — public API.
-    🟢 NEW: _mask_db_url() — إخفاء كلمات المرور في التقارير.
-    🟢 NEW: detect في /latency و /fullhealth أن البوت يستخدم أي DB.
-    🟢 NEW: تحذير عند تكرار نفس host في env vars متعددة.
+    🔴 FIX-TCP-1: توحيد قياس TCP بين /latency و /fullhealth.
+        السبب: _probe_network_to (في full_health) كان يقيس TCP بشكل
+        مستقل ومتوازٍ مع 5 probes أخرى. تحت ضغط CPU/I/O، كان القياس
+        يتضخم (73ms) بينما latency probe يعطي الرقم الحقيقي (6ms).
+        النتيجة: bottleneck كاذب + تناقض داخلي في نفس التقرير.
+        الإصلاح: _probe_full_health يعيد استخدام tcp_connect_ms من
+        _probe_db_latency، ولا يقيس TCP مرة ثانية.
 
-🆕 v7.2.12 — REGION-ENV-OVERRIDE — محفوظ:
-    🔴 FIX-REGION-5: حذف "REGION" من _RENDER_REGION_ENV_VARS.
-    🔴 FIX-REGION-6: تفريغ _TIMESCALE_REGION_MAP.
-    🟡 FIX-REGION-7: دعم DB_REGION / TIMESCALE_REGION.
-    🟡 FIX-REGION-8: RTT حكم نهائي.
-    🟡 FIX-REGION-9: إصلاح format string "RTT=RTT=".
+    🔴 FIX-TCP-2: _identify_bottleneck يتجاهل network_db عند
+        same-region مؤكد من RTT inference.
+        السبب: حتى لو تسرّب قياس متضخم، نتجاهله لأن latency probe
+        أعطى حكماً قطعياً.
+        الإصلاح: فحص cross_region + inferred_from_rtt قبل إضافة
+        network_db إلى قائمة الـ bottleneck.
 
+    🟡 FIX-TCP-3: تعليقات توضيحية في _probe_network_to.
+    🟡 FIX-TCP-4: في حال فشل _probe_db_latency، نسقط إلى
+        _probe_network_to كـ fallback فقط.
+
+🆕 v7.2.13 — MULTI-DB-DISCOVERY — محفوظ.
+🆕 v7.2.12 — REGION-ENV-OVERRIDE — محفوظ.
 🆕 v7.2.11 — RTT-REGION-INFERENCE — محفوظ.
 🆕 v7.2.10 — QUERY-PERF-FIX — محفوظ.
 🆕 v7.2.9  — CROSS-REGION-DETECTOR — محفوظ.
@@ -57,7 +63,7 @@ logger = logging.getLogger(__name__)
 # الإصدار
 # ═══════════════════════════════════════════════════════════════════════
 
-VERSION = "7.2.13"
+VERSION = "7.2.14"
 
 _MIN_DEAD_FOR_CRITICAL = 50
 _MIN_DEAD_FOR_COLOR = 10
@@ -81,12 +87,10 @@ _INTERNAL_DB_MEDIUM = 20.0
 _INTERNAL_DB_HIGH = 100.0
 
 # ═══════════════════════════════════════════════════════════════════════
-# 🆕 v7.2.13: Multi-DB Discovery — قوائم env vars المحتملة
+# Multi-DB Discovery — قوائم env vars المحتملة
 # ═══════════════════════════════════════════════════════════════════════
 
-# كل متغيرات URL لقواعد بيانات (name, hint_type)
 _DB_URL_ENV_VARS: Tuple[Tuple[str, str], ...] = (
-    # PostgreSQL family
     ("DATABASE_URL",     "postgres"),
     ("TIMESCALE_URL",    "postgres"),
     ("POSTGRES_URL",     "postgres"),
@@ -95,25 +99,21 @@ _DB_URL_ENV_VARS: Tuple[Tuple[str, str], ...] = (
     ("POSTGRES_URI",     "postgres"),
     ("TIMESCALE_URI",    "postgres"),
     ("PG_URI",           "postgres"),
-    # MySQL family
     ("MYSQL_URL",        "mysql"),
     ("MARIADB_URL",      "mysql"),
     ("MYSQL_URI",        "mysql"),
     ("MARIADB_URI",      "mysql"),
-    # Generic
     ("DB_URL",           "unknown"),
     ("DATABASE_URI",     "unknown"),
     ("DB_URI",           "unknown"),
     ("SQLALCHEMY_DATABASE_URL", "unknown"),
 )
 
-# متغيرات SQLite (مسار ملف، ليس URL)
 _SQLITE_PATH_VARS: Tuple[str, ...] = (
     "SQLITE_PATH", "SQLITE_DB", "SQLITE_FILE",
     "SQLITE_DATABASE", "DB_PATH",
 )
 
-# ترتيب الأولوية عندما يقرأ الـ DB class من متغيراته
 _DB_URL_PRIORITY: Tuple[str, ...] = (
     "DATABASE_URL",
     "TIMESCALE_URL",
@@ -143,7 +143,6 @@ _CLOUD_ENV_KEYS: Dict[str, str] = {
     "NETLIFY":                  "netlify",
 }
 
-# v7.2.12 FIX-REGION-5: حذف "REGION" — متغير عام خطر.
 _RENDER_REGION_ENV_VARS = (
     "RENDER_SERVICE_REGION",
     "RENDER_REGION_NAME",
@@ -161,7 +160,6 @@ _RENDER_REGION_CODES = {
     "singapore":    "ap-southeast-1",
 }
 
-# v7.2.12 FIX-REGION-6: فارغة — Timescale IDs عشوائية.
 _TIMESCALE_REGION_MAP: Dict[str, str] = {}
 
 _AIVEN_REGION_HINTS = {
@@ -415,11 +413,10 @@ def _percentile(sorted_vals: List[float], pct: float) -> float:
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# 🆕 v7.2.13: MULTI-DB DISCOVERY
+# MULTI-DB DISCOVERY
 # ═══════════════════════════════════════════════════════════════════════
 
 def _mask_db_url(url: str) -> str:
-    """يخفي كلمة المرور من URL لعرضه في التقارير."""
     if not url:
         return ""
     try:
@@ -435,7 +432,6 @@ def _mask_db_url(url: str) -> str:
 
 
 def _extract_db_components(url: str) -> Dict[str, Any]:
-    """استخراج host/port/dbname/user من URL."""
     out = {"host": "?", "port": 0, "database": "?", "user": "?", "scheme": "?"}
     if not url:
         return out
@@ -452,7 +448,6 @@ def _extract_db_components(url: str) -> Dict[str, Any]:
 
 
 def _guess_provider_from_host(host: str) -> str:
-    """يحدد مزود الاستضافة من اسم المضيف."""
     h = (host or "").lower()
     if "timescale.com" in h:
         return "timescale"
@@ -478,22 +473,6 @@ def _guess_provider_from_host(host: str) -> str:
 
 
 def _detect_active_db_source(db) -> Dict[str, Any]:
-    """
-    🆕 v7.2.13: يكتشف أي DB نشطة فعلاً ومن أي env var جاءت.
-
-    المنطق:
-      1. اقرأ db.DATABASE_URL (أو os.environ['DATABASE_URL'])
-      2. طبّعها وطبّع كل env var متاح
-      3. طابقها مع الأول في _DB_URL_PRIORITY
-      4. استخرج host/port/db/provider/region
-
-    يعيد dict مع:
-      active_url (الفعلية) — لا تطبعها!
-      active_masked (آمنة للعرض)
-      active_source (اسم env var)
-      db_type / provider / components / region
-      pool_size / pool_used
-    """
     out: Dict[str, Any] = {
         "active_url": "",
         "active_masked": "",
@@ -522,7 +501,6 @@ def _detect_active_db_source(db) -> Dict[str, Any]:
     out["use_postgres"] = bool(getattr(db, "USE_POSTGRES", False))
     out["use_mysql"] = bool(getattr(db, "USE_MYSQL", False))
 
-    # Pool info
     pool = getattr(db, "_pool", None)
     if pool is not None:
         try:
@@ -531,12 +509,10 @@ def _detect_active_db_source(db) -> Dict[str, Any]:
                 or getattr(db, "DB_POOL_SIZE", 0)
                 or 0
             )
-            # asyncpg pool
             holders = getattr(pool, "_holders", None)
             if holders is not None:
                 out["pool_used"] = len(holders)
             else:
-                # أي pool آخر
                 used = getattr(pool, "size", None)
                 if callable(used):
                     out["pool_used"] = int(used() or 0)
@@ -545,17 +521,14 @@ def _detect_active_db_source(db) -> Dict[str, Any]:
         except Exception:
             pass
 
-    # Provider من host
     out["provider"] = _guess_provider_from_host(
         out["components"].get("host", "")
     )
 
-    # Region
     region_info = _guess_db_region(out["components"].get("host", ""))
     out["region"] = region_info.get("region", "unknown")
     out["region_confidence"] = region_info.get("confidence", "low")
 
-    # أي env var يطابق active_url؟
     if active_url:
         for var in _DB_URL_PRIORITY:
             val = os.getenv(var, "")
@@ -563,11 +536,7 @@ def _detect_active_db_source(db) -> Dict[str, Any]:
                 out["active_source"] = var
                 break
         else:
-            # تطابق جزئي (host:port/db)
             comp = out["components"]
-            host_port = f"{comp['host']}"
-            if comp["port"]:
-                host_port += f":{comp['port']}"
             for var, _ in _DB_URL_ENV_VARS:
                 val = os.getenv(var, "")
                 if not val:
@@ -581,27 +550,16 @@ def _detect_active_db_source(db) -> Dict[str, Any]:
 
 
 def _get_all_configured_databases() -> List[Dict[str, Any]]:
-    """
-    🆕 v7.2.13: يمسح كل env vars المعروفة لقواعد البيانات.
-
-    يعيد قائمة بكل DB مُعدّة، مع:
-      env_var / db_type / provider / host / port / database
-      masked_url / is_active / region
-
-    مُرتّبة: النشطة أولاً، ثم حسب اسم env var.
-    """
     active = _detect_active_db_source(_get_db())
     active_url = active.get("active_url", "")
 
     configured: List[Dict[str, Any]] = []
     seen_keys = set()
 
-    # ─── URLs ───
     for var, hint_type in _DB_URL_ENV_VARS:
         val = os.getenv(var, "")
         if not val or len(val) < 10:
             continue
-        # تخطّي القيم غير الشبيهة بـ URL
         if "://" not in val and not val.endswith(".db"):
             continue
 
@@ -609,13 +567,11 @@ def _get_all_configured_databases() -> List[Dict[str, Any]]:
         dedup_key = f"{comp['host']}:{comp['port']}/{comp['database']}"
         is_active = (val == active_url)
 
-        # تجنّب التكرار (نفس host:port/db)
         if dedup_key in seen_keys and not is_active:
             continue
         if is_active:
             seen_keys.add(dedup_key)
 
-        # نوع DB
         db_type = hint_type
         scheme = (comp["scheme"] or "").lower()
         if scheme in ("postgres", "postgresql"):
@@ -627,7 +583,6 @@ def _get_all_configured_databases() -> List[Dict[str, Any]]:
         elif db_type == "unknown" and scheme:
             db_type = scheme
 
-        # Provider + Region
         provider = _guess_provider_from_host(comp["host"])
         region_info = _guess_db_region(comp["host"])
 
@@ -645,7 +600,6 @@ def _get_all_configured_databases() -> List[Dict[str, Any]]:
             "region_confidence": region_info.get("confidence", "low"),
         })
 
-    # ─── SQLite paths (بدون URL) ───
     for var in _SQLITE_PATH_VARS:
         val = os.getenv(var, "")
         if not val:
@@ -674,16 +628,13 @@ def _get_all_configured_databases() -> List[Dict[str, Any]]:
             "region_confidence": "high",
         })
 
-    # ترتيب: النشطة أولاً، ثم env_var
     configured.sort(key=lambda x: (not x["is_active"], x["env_var"]))
     return configured
 
 
 def _get_multi_db_warnings(configured: List[Dict[str, Any]]) -> List[str]:
-    """يحلّل قائمة DB المُعدّة ويعيد تحذيرات."""
     warnings: List[str] = []
 
-    # 1. نفس host:port في أكثر من env var
     hosts: Dict[str, List[str]] = {}
     for c in configured:
         key = f"{c['host']}:{c['port']}"
@@ -697,7 +648,6 @@ def _get_multi_db_warnings(configured: List[Dict[str, Any]]) -> List[str]:
                 f"→ نفس DB"
             )
 
-    # 2. مزودون مختلفون
     providers = set(
         c["provider"] for c in configured
         if c["provider"] not in ("unknown", "sqlite_local", "local")
@@ -709,7 +659,6 @@ def _get_multi_db_warnings(configured: List[Dict[str, Any]]) -> List[str]:
             f"— تأكد أن البوت يستخدم الصحيح"
         )
 
-    # 3. أنواع DB مختلفة (PostgreSQL + MySQL معاً)
     types = set(c["db_type"] for c in configured)
     if len(types) > 1:
         warnings.append(
@@ -717,7 +666,6 @@ def _get_multi_db_warnings(configured: List[Dict[str, Any]]) -> List[str]:
             f"<code>{_esc(', '.join(sorted(types)))}</code>"
         )
 
-    # 4. لا توجد DB نشطة
     if not any(c["is_active"] for c in configured):
         warnings.append(
             "⚠️ لم يتم تحديد أي DB كنشطة — قد يكون البوت يستخدم SQLite محلي."
@@ -727,9 +675,6 @@ def _get_multi_db_warnings(configured: List[Dict[str, Any]]) -> List[str]:
 
 
 def format_multi_db_report() -> str:
-    """
-    🆕 v7.2.13: تقرير كامل عن كل قواعد البيانات المُعدّة + النشطة.
-    """
     lines: List[str] = []
     lines.append("🗂️ <b>قواعد البيانات المُعدّة (Multi-DB Discovery)</b>")
     lines.append("━━━━━━━━━━━━━━━━━━━━━━")
@@ -738,7 +683,6 @@ def format_multi_db_report() -> str:
     active = _detect_active_db_source(_get_db())
     configured = _get_all_configured_databases()
 
-    # ─── النشطة ───
     lines.append("🟢 <b>النشطة حالياً:</b>")
     if active.get("active_url"):
         comp = active.get("components", {})
@@ -756,7 +700,6 @@ def format_multi_db_report() -> str:
         lines.append("   ⚪ لم يتم الاتصال بعد، أو SQLite محلي.")
     lines.append("")
 
-    # ─── كل المُعدّة ───
     if not configured:
         lines.append("⚠️ لا توجد قواعد بيانات مُعدّة في env vars.")
         return "\n".join(lines)
@@ -781,7 +724,6 @@ def format_multi_db_report() -> str:
         lines.append(f"      🔗 <code>{_esc(c['masked_url'][:80])}</code>")
         lines.append("")
 
-    # ─── تحذيرات ───
     warnings = _get_multi_db_warnings(configured)
     if warnings:
         lines.append("━━━━━━━━━━━━━━━━━━━━━━")
@@ -790,7 +732,6 @@ def format_multi_db_report() -> str:
             lines.append(f"  {w}")
         lines.append("")
 
-    # ─── توصية ───
     if len(configured) == 1:
         lines.append("✅ <b>إعداد نظيف</b>: DB واحدة فقط مُعرّفة.")
     elif not warnings:
@@ -800,7 +741,6 @@ def format_multi_db_report() -> str:
 
 
 async def diagnose_databases() -> str:
-    """🆕 v7.2.13: Public API — تقرير Multi-DB."""
     cached = _cache_get("multi_db")
     if cached is not None:
         return cached
@@ -810,7 +750,6 @@ async def diagnose_databases() -> str:
 
 
 def format_active_db_line() -> str:
-    """سطر مختصر يوضّح DB النشطة — لاستخدامه في /latency و /fullhealth."""
     active = _detect_active_db_source(_get_db())
     if not active.get("active_url"):
         if active.get("db_type") == "sqlite":
@@ -927,7 +866,6 @@ def _guess_db_region(db_host: str) -> Dict[str, Any]:
     }
     h = (db_host or "").lower().strip()
 
-    # env var له الأولوية القصوى
     env_region = (
         os.getenv("DB_REGION")
         or os.getenv("TIMESCALE_REGION")
@@ -1180,7 +1118,7 @@ async def _probe_db_latency(
     force: bool = False,
     socket_timeout: float = 5.0,
 ) -> Dict[str, Any]:
-    """قياس كمون الشبكة/DB. v7.2.13: Multi-DB aware."""
+    """قياس كمون الشبكة/DB. v7.2.14: RTT inference للمناطق."""
     if not force:
         cached = _cache_get("latency_probe")
         if cached is not None:
@@ -1197,7 +1135,6 @@ async def _probe_db_latency(
         "recommendation": "", "used_pool": False,
     }
 
-    # 🆕 v7.2.13: أضف معلومات DB النشطة
     active_info = _detect_active_db_source(db)
     result["active_db"] = active_info
 
@@ -1229,7 +1166,6 @@ async def _probe_db_latency(
         _cache_set("latency_probe", result, ttl=120.0)
         return result
 
-    # 🆕 v7.2.13: استخدم الـ URL النشط الفعلي
     db_url = active_info.get("active_url") or (
         getattr(db, "DATABASE_URL", "")
         or os.getenv("DATABASE_URL", "")
@@ -1644,7 +1580,6 @@ def format_latency_report(probe: Dict[str, Any]) -> str:
     lines.append("━━━━━━━━━━━━━━━━━━━━━━")
     lines.append("")
 
-    # 🆕 v7.2.13: سطر DB النشطة
     active_line = format_active_db_line()
     if active_line:
         lines.append(active_line)
@@ -1808,6 +1743,13 @@ async def _probe_network_to(
     host: str, port: int, *, with_tls: bool = False,
     timeout: float = 5.0,
 ) -> Dict[str, Any]:
+    """
+    قياس شبكة مستقل (TCP + TLS).
+
+    ⚠️ ملاحظة v7.2.14 FIX-TCP-3: هذا القياس يُشغَّل في _probe_full_health
+    كـ fallback فقط عند فشل _probe_db_latency. لا يُستخدم بالتوازي معه
+    لتجنّب تضخّم القياسات تحت ضغط CPU/I/O.
+    """
     result: Dict[str, Any] = {
         "host": host, "port": port, "ok": False,
     }
@@ -2035,8 +1977,23 @@ def _identify_bottleneck(data: Dict[str, Any]) -> Dict[str, Any]:
             "weight": round(float(weight), 2),
         })
 
+    # ═══════════════════════════════════════════════════════════════
+    # 🆕 v7.2.14 FIX-TCP-2: فحص same-region قبل إضافة network_db
+    # ═══════════════════════════════════════════════════════════════
+    db_p = data.get("database") or {}
+    cross = db_p.get("cross_region") or {}
+    same_region_confirmed = (
+        cross.get("cross_region") is False
+        and cross.get("inferred_from_rtt") is True
+    )
+
     net_db = data.get("network_db") or {}
     db_tcp = float(net_db.get("tcp_ms") or 0)
+
+    if same_region_confirmed:
+        # latency probe أعطى حكماً قطعياً — تجاهل قياس network_db
+        # لأنه قد يكون متضخماً من ضغط CPU/I/O في full probe.
+        db_tcp = 0.0
 
     if db_tcp > 0:
         if db_tcp < _NET_DB_RTT_LOW_SAME_DC:
@@ -2051,7 +2008,6 @@ def _identify_bottleneck(data: Dict[str, Any]) -> Dict[str, Any]:
             sev = "critical"
         _add("network_db", "time", db_tcp, "ms", sev, db_tcp * 3.0)
 
-    db_p = data.get("database") or {}
     warm = float(db_p.get("warm_median_ms") or 0)
     if warm > 0:
         internal_ms = max(0.0, warm - db_tcp) if db_tcp > 0 else warm
@@ -2143,6 +2099,7 @@ def _identify_bottleneck(data: Dict[str, Any]) -> Dict[str, Any]:
             "explanation": "🟢 لا يوجد bottleneck — كل الأبعاد طبيعية.",
             "recommendation": "الأداء جيد — لا حاجة لتعديل.",
             "ranked": comps,
+            "cross_region": cross,
         }
 
     candidates = [c for c in comps if c["severity"] == max_sev]
@@ -2151,8 +2108,6 @@ def _identify_bottleneck(data: Dict[str, Any]) -> Dict[str, Any]:
     top_name = top["component"]
     tv = top["value"]
     tu = top["unit"]
-
-    cross = db_p.get("cross_region") or {}
 
     explanations = {
         "network_db": (
@@ -2241,6 +2196,13 @@ def _identify_bottleneck(data: Dict[str, Any]) -> Dict[str, Any]:
 
 
 async def _probe_full_health(*, force: bool = False) -> Dict[str, Any]:
+    """
+    Full Health Probe.
+
+    🆕 v7.2.14 FIX-TCP-1: يبدأ بـ _probe_db_latency أولاً، ثم يعيد
+    استخدام tcp_connect_ms الناتج منها لكي لا نقيس TCP مرتين متوازيتين
+    (وهو ما كان يُنتج 73ms بدل 6ms).
+    """
     if not force:
         cached = _cache_get("full_health")
         if cached is not None:
@@ -2252,7 +2214,6 @@ async def _probe_full_health(*, force: bool = False) -> Dict[str, Any]:
     db_host = "?"
     db_port = 0
     if db is not None:
-        # 🆕 v7.2.13: استخدم الـ URL النشط
         active = _detect_active_db_source(db)
         url = active.get("active_url", "")
         if url:
@@ -2286,15 +2247,22 @@ async def _probe_full_health(*, force: bool = False) -> Dict[str, Any]:
         _cache_set("telegram_network", res, ttl=_TELEGRAM_PROBE_CACHE_TTL)
         return res
 
+    # ═══════════════════════════════════════════════════════════════
+    # 🆕 v7.2.14 FIX-TCP-1: نسأل DB latency أولاً بشكل منفصل.
+    # ═══════════════════════════════════════════════════════════════
+    db_latency_result: Dict[str, Any] = {}
+    try:
+        db_latency_result = await _probe_db_latency(force=force)
+    except Exception as e:
+        logger.debug(f"_probe_db_latency in full_health: {e}")
+        db_latency_result = {"ok": False, "error": str(e)[:120]}
+
+    # شغّل باقي الـ probes بالتوازي (بدون DB latency)
     probes = await asyncio.gather(
-        (_probe_network_to(db_host, db_port, with_tls=True)
-         if db_host != "?" and db_port > 0
-         else asyncio.sleep(0, result={})),
         _cached_telegram_probe(),
         _probe_event_loop(),
         _probe_filesystem(),
         _probe_system(prime_cpu=False),
-        _probe_db_latency(force=force),
         return_exceptions=True,
     )
 
@@ -2303,12 +2271,39 @@ async def _probe_full_health(*, force: bool = False) -> Dict[str, Any]:
     def _safe(x, default):
         return default if isinstance(x, BaseException) else x
 
-    result["network_db"] = _safe(probes[0], {})
-    result["network_telegram"] = _safe(probes[1], {})
-    result["event_loop"] = _safe(probes[2], {})
-    result["filesystem"] = _safe(probes[3], {})
-    result["system"] = _safe(probes[4], {})
-    result["database"] = _safe(probes[5], {})
+    result["network_telegram"] = _safe(probes[0], {})
+    result["event_loop"] = _safe(probes[1], {})
+    result["filesystem"] = _safe(probes[2], {})
+    result["system"] = _safe(probes[3], {})
+    result["database"] = db_latency_result
+
+    # ═══════════════════════════════════════════════════════════════
+    # 🆕 v7.2.14 FIX-TCP-1: network_db يعيد استخدام tcp_connect_ms
+    # من latency probe. لا يقيس TCP ثانية.
+    # ═══════════════════════════════════════════════════════════════
+    tcp_from_latency = float(db_latency_result.get("tcp_connect_ms", 0) or 0)
+    if tcp_from_latency > 0:
+        result["network_db"] = {
+            "ok": True,
+            "host": db_latency_result.get("host", db_host),
+            "port": db_latency_result.get("port", db_port),
+            "tcp_ms": tcp_from_latency,
+            "dns_ms": 0,  # لم يُقس منفصلاً — التكلفة ضئيلة
+            "tls_ms": 0,
+            "_source": "reused_from_latency_probe",
+        }
+    elif db_host != "?" and db_port > 0:
+        # fallback: فقط إذا latency probe فشل
+        # 🟡 FIX-TCP-4: قياس مستقل هنا مقبول لأنه لا يوجد قياس آخر
+        try:
+            net_db = await _probe_network_to(db_host, db_port, with_tls=True)
+            net_db["_source"] = "fallback_standalone"
+            result["network_db"] = net_db
+        except Exception as e:
+            logger.debug(f"fallback network_db probe: {e}")
+            result["network_db"] = {}
+    else:
+        result["network_db"] = {}
 
     if _cpu_primed:
         try:
@@ -2341,7 +2336,6 @@ def format_full_health_report(data: Dict[str, Any]) -> str:
     lines.append("━━━━━━━━━━━━━━━━━━━━━━")
     lines.append("")
 
-    # 🆕 v7.2.13: سطر DB النشطة
     active_line = format_active_db_line()
     if active_line:
         lines.append(active_line)
@@ -2409,6 +2403,9 @@ def format_full_health_report(data: Dict[str, Any]) -> str:
     net_db = data.get("network_db") or {}
     if net_db.get("ok"):
         lines.append("🌐 <b>الشبكة → DB</b>")
+        source = net_db.get("_source", "")
+        if source == "reused_from_latency_probe":
+            lines.append("   <i>(قياس موحّد من latency probe)</i>")
         if net_db.get("dns_ms", 0) > 0:
             lines.append(f"   DNS: <b>{net_db['dns_ms']:.0f}ms</b>")
         if net_db.get("tcp_ms", 0) > 0:
@@ -3533,7 +3530,6 @@ async def _build_sections(*, include_probes: bool = True) -> List[str]:
     total_dead = sum(t.get("dead", 0) for t in dirty)
     total_tables = len(dirty) + len(clean)
 
-    # 🆕 v7.2.13: قسم DB النشطة في أعلى التقرير
     s0: List[str] = []
     active_line = format_active_db_line()
     if active_line:
@@ -3802,7 +3798,6 @@ async def diagnose_db_quick() -> str:
 
     lines: List[str] = []
 
-    # 🆕 v7.2.13: DB النشطة أولاً
     active = _detect_active_db_source(db)
     if active.get("active_url"):
         comp = active.get("components", {})
@@ -3893,7 +3888,6 @@ async def diagnose_db_quick() -> str:
     except Exception:
         pass
 
-    # 🆕 v7.2.13: تحذير عند تعدد DB
     configured_dbs = _get_all_configured_databases()
     if len(configured_dbs) > 1:
         lines.append(
@@ -3913,7 +3907,6 @@ async def get_diagnostics_data(top_n: int = 15) -> Dict[str, Any]:
 
 
 async def get_region_info() -> Dict[str, Any]:
-    """يعيد معلومات المنطقة (بدون RTT — للتشخيص السريع)."""
     cached = _cache_get("region_info")
     if cached is not None:
         return cached
@@ -3947,10 +3940,6 @@ async def get_region_info() -> Dict[str, Any]:
 
 
 async def get_all_databases_info() -> Dict[str, Any]:
-    """
-    🆕 v7.2.13: يعيد dict منظم بمعلومات كل قواعد البيانات المُعدّة.
-    مفيد للتكامل مع أوامر أخرى.
-    """
     active = _detect_active_db_source(_get_db())
     configured = _get_all_configured_databases()
     warnings = _get_multi_db_warnings(configured)
@@ -4018,7 +4007,6 @@ detect_bot_region = _detect_bot_cloud
 detect_db_region = _guess_db_region
 get_cross_region_info = get_region_info
 
-# 🆕 v7.2.13 aliases
 databases_report = diagnose_databases
 list_databases = diagnose_databases
 multi_db_report = diagnose_databases
@@ -4055,7 +4043,6 @@ __all__ = [
     "get_db_info", "get_database_info", "get_pg_info",
     "detect_bot_region", "detect_db_region", "get_cross_region_info",
     "get_region_info",
-    # 🆕 v7.2.13
     "diagnose_databases", "get_all_databases_info", "format_multi_db_report",
     "format_active_db_line", "databases_report", "list_databases",
     "multi_db_report", "show_databases", "get_active_db",
@@ -4063,22 +4050,24 @@ __all__ = [
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# LOAD BEACON — v7.2.13
+# LOAD BEACON — v7.2.14
 # ═══════════════════════════════════════════════════════════════════════
 
 try:
     logger.info(
         "🛡️ db_diagnostics.py v%s loaded | "
+        "TCP-CONSISTENCY-FIX ✅ | "
+        "FIX-TCP-1=reuse-latency-tcp ✅ | "
+        "FIX-TCP-2=skip-network-db-when-same-region ✅ | "
+        "FIX-TCP-3=docstring ✅ | "
+        "FIX-TCP-4=fallback-standalone ✅ | "
         "MULTI-DB-DISCOVERY ✅ | "
         "REGION-ENV-OVERRIDE ✅ | "
         "RTT-REGION-INFERENCE ✅ | "
-        "QUERY-PERF-FIX ✅ | "
-        "db-vars=%d | "
         "rtt-thresholds=(high=%d,medium=%d,cross=%d) | "
         "abs-threshold=%d | "
         "cache_keys=%d | exports=%d",
         VERSION,
-        len(_DB_URL_ENV_VARS),
         int(_RTT_SAME_REGION_HIGH),
         int(_RTT_SAME_REGION_MEDIUM),
         int(_RTT_CROSS_REGION_MIN),
