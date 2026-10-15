@@ -1,32 +1,28 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-db_diagnostics.py — واجهة تشخيص وصيانة قاعدة البيانات (v7.2.15 — PERF-OPTIMIZED)
+db_diagnostics.py — واجهة تشخيص وصيانة قاعدة البيانات (v7.2.16 — STARTUP-GRACE)
 ================================================================================
+🆕 v7.2.16 — STARTUP-GRACE:
+
+    🟢 GRACE-1: _probe_event_loop يتجاهل نافذة الإقلاع (60s).
+        السبب: في أول 60 ثانية بعد بدء العملية، 19 مهمة خلفية +
+        pool warmup + webhook تعمل بالتوازي، فيتضخم قياس event loop
+        (194ms بدل 50ms) ويظهر كـ bottleneck كاذب.
+        الإصلاح: warmup (2 samples مُهملة) + علامة _startup_window.
+
+    🟢 GRACE-2: _identify_bottleneck يتجاهل event_loop أثناء الإقلاع.
+        حتى لا يُعرض كـ primary bottleneck كاذب.
+
+    🟢 GRACE-3: format_full_health_report يعرض تنبيهاً واضحاً
+        "نافذة إقلاع — القياسات غير موثوقة" بدل عرض الرقم المضخّم.
+
 🆕 v7.2.15 — PERF-OPTIMIZED:
-
-    ⚡ PERF-1: _get_db_metadata يُنفّذ استعلاماً واحداً بدل 4.
-        قبل: 4 round-trips (pg_database_size + current_schema +
-              pg_namespace + current_database) ≈ 1.6s.
-        بعد: استعلام واحد بـ subqueries ≈ 15ms.
-        النتيجة: توفير ~1.5s لكل /db_diagnostics.
-
-    ⚡ PERF-2: _get_activity_stats يُخزَّن 5 ثوانٍ.
-        قبل: يُنفَّذ في كل /db_diagnostics و/quick.
-        بعد: cache قصير (5s) — استعلامات pg_stat_activity تقل 90%.
-
-    ⚡ PERF-3: استبدال pg_total_relation_size() بـ relpages.
-        قبل: pg_total_relation_size() يفتح ملفات على القرص لكل
-              جدول (~50ms × N جداول) → 400ms+.
-        بعد: قراءة من pg_class.relpages (~0.1ms/جدول) → 15ms.
-        الدقة: ±10% — كافٍ لسياسة cleanup بعتبة 20MB.
-        يُطبَّق على: _get_cleanup_status, preview_maintenance,
-                     run_maintenance.
-
-    ⚡ PERF-4: cache key جديد "activity_stats" = 5s.
-
-    🟡 PERF-5: _get_db_metadata يستخدم array_agg (asyncpg يُعيد
-        list[str] مباشرة — لا حاجة لـ json parsing).
+    ⚡ PERF-1: _get_db_metadata استعلام واحد بدل 4.
+    ⚡ PERF-2: _get_activity_stats مخزّن 5s.
+    ⚡ PERF-3: relpages بدل pg_total_relation_size.
+    ⚡ PERF-4: cache key "activity_stats".
+    ⚡ PERF-5: array_agg natural list.
 
 🆕 v7.2.14 — TCP-CONSISTENCY-FIX — محفوظ.
 🆕 v7.2.13 — MULTI-DB-DISCOVERY — محفوظ.
@@ -65,10 +61,14 @@ from typing import Dict, List, Any, Optional, Tuple
 logger = logging.getLogger(__name__)
 
 # ═══════════════════════════════════════════════════════════════════════
-# الإصدار
+# الإصدار + Startup grace
 # ═══════════════════════════════════════════════════════════════════════
 
-VERSION = "7.2.15"
+VERSION = "7.2.16"
+
+# 🆕 v7.2.16: نافذة سماح — في أول 60s بعد البدء، القياسات غير موثوقة
+_PROCESS_START_TS: float = time.monotonic()
+_STARTUP_GRACE_SEC = 60.0
 
 _MIN_DEAD_FOR_CRITICAL = 50
 _MIN_DEAD_FOR_COLOR = 10
@@ -1807,15 +1807,41 @@ async def _probe_network_to(
     result["ok"] = True
     return result
 
+# ═══════════════════════════════════════════════════════════════════════
+# 🆕 v7.2.16: _probe_event_loop مع Startup Grace
+# ═══════════════════════════════════════════════════════════════════════
+
 async def _probe_event_loop(
     samples: int = 10, sleep_ms: int = 50,
 ) -> Dict[str, Any]:
+    """
+    قياس event loop lag.
+
+    🆕 v7.2.16 STARTUP-GRACE:
+        في أول 60 ثانية بعد الإقلاع، event loop مشغول بـ 19 مهمة
+        خلفية + pool warmup + webhook. النتيجة: false positives
+        (e.g., 194ms بدل 50ms).
+        الحل:
+        1. warmup pass يُهمَل (2 samples بدون قياس).
+        2. إن كنا في نافذة الإقلاع، نُعلّم النتيجة بـ
+           `_startup_window=True` و _identify_bottleneck يتجاهلها.
+    """
     result: Dict[str, Any] = {
         "ok": False, "samples_ms": [],
         "median_ms": 0.0, "p90_ms": 0.0, "max_ms": 0.0,
+        "_startup_window": False,
     }
     try:
         loop = asyncio.get_running_loop()
+        uptime = time.monotonic() - _PROCESS_START_TS
+        in_startup = uptime < _STARTUP_GRACE_SEC
+        result["_startup_window"] = in_startup
+        result["_uptime_sec"] = round(uptime, 1)
+
+        # 🆕 WARMUP: أول 2 samples تُهمَل (event loop يستقر بعد startup)
+        for _ in range(2):
+            await asyncio.sleep(0.02)
+
         lags: List[float] = []
         for _ in range(samples):
             t0 = loop.time()
@@ -1823,6 +1849,7 @@ async def _probe_event_loop(
             actual_ms = (loop.time() - t0) * 1000
             lag = max(0.0, actual_ms - sleep_ms)
             lags.append(lag)
+
         result["samples_ms"] = [round(x, 2) for x in lags]
         result["median_ms"] = round(statistics.median(lags), 2)
         sorted_lags = sorted(lags)
@@ -1980,9 +2007,14 @@ def _identify_bottleneck(data: Dict[str, Any]) -> Dict[str, Any]:
         _add("database_internal", "time", internal_ms, "ms", sev,
              internal_ms * 3.0)
 
+    # ═══════════════════════════════════════════════════════════════════
+    # 🆕 v7.2.16 GRACE-2: تجاهل event_loop خلال نافذة الإقلاع
+    # ═══════════════════════════════════════════════════════════════════
     loop_p = data.get("event_loop") or {}
+    in_startup = bool(loop_p.get("_startup_window", False))
     lag = float(loop_p.get("p90_ms") or loop_p.get("median_ms") or 0)
-    if lag > 0:
+
+    if lag > 0 and not in_startup:
         if lag < 20:
             sev = "low"
         elif lag < 50:
@@ -2157,8 +2189,7 @@ async def _probe_full_health(*, force: bool = False) -> Dict[str, Any]:
     Full Health Probe.
 
     🆕 v7.2.14 FIX-TCP-1: يبدأ بـ _probe_db_latency أولاً، ثم يعيد
-    استخدام tcp_connect_ms الناتج منها لكي لا نقيس TCP مرتين متوازيتين
-    (وهو ما كان يُنتج 73ms بدل 6ms).
+    استخدام tcp_connect_ms الناتج منها لكي لا نقيس TCP مرتين متوازيتين.
     """
     if not force:
         cached = _cache_get("full_health")
@@ -2400,9 +2431,23 @@ def format_full_health_report(data: Dict[str, Any]) -> str:
                 f"   bulk 100: <b>{db_p['bulk_fetch_ms']:.0f}ms</b>")
         lines.append("")
 
+    # ═══════════════════════════════════════════════════════════════════
+    # 🆕 v7.2.16 GRACE-3: عرض تنبيه نافذة الإقلاع
+    # ═══════════════════════════════════════════════════════════════════
     loop_p = data.get("event_loop") or {}
     if loop_p.get("ok"):
         lines.append("🔄 <b>Event Loop</b>")
+        if loop_p.get("_startup_window"):
+            uptime = loop_p.get("_uptime_sec", 0)
+            lines.append(
+                f"   🟡 <i>نافذة إقلاع ({uptime:.0f}s منذ البدء) — "
+                f"القياسات غير موثوقة</i>"
+            )
+            lines.append(
+                "   <i>ستصبح دقيقة بعد 60s من التشغيل.</i>"
+            )
+            lines.append("")
+
         median_v = float(loop_p.get('median_ms', 0) or 0)
         p90_v = float(loop_p.get('p90_ms', 0) or 0)
         max_v = float(loop_p.get('max_ms', 0) or 0)
@@ -2488,13 +2533,6 @@ async def _get_db_metadata() -> Dict[str, Any]:
     if db is None:
         return meta
 
-    # ═══════════════════════════════════════════════════════════════════
-    # ⚡ PERF-1: استعلام واحد بدل 4 round-trips.
-    #    قبل: pg_database_size + current_schema + pg_namespace +
-    #          current_database = 4 queries × ~400ms = 1.6s.
-    #    بعد: query واحد بـ subqueries ≈ 15ms.
-    #    asyncpg يُعيد text[] كـ Python list مباشرة (لا json parsing).
-    # ═══════════════════════════════════════════════════════════════════
     try:
         if _is_postgres():
             row = await db.fetchone("""
@@ -2559,7 +2597,6 @@ async def _get_db_metadata() -> Dict[str, Any]:
                 meta["schemas"] = []
 
         else:
-            # SQLite
             size_kb = (await db.get_db_size_kb()
                        if hasattr(db, "get_db_size_kb") else 0)
             meta["size_bytes"]     = int(size_kb * 1024)
@@ -2670,7 +2707,6 @@ async def _get_all_tables_health() -> Tuple[List[Dict], List[Dict]]:
 # ═══════════════════════════════════════════════════════════════════════
 
 async def _get_activity_stats() -> Dict[str, Any]:
-    # ⚡ PERF-2: cache قصير — يمنع تكرار pg_stat_activity كل ثانية.
     cached = _cache_get("activity_stats")
     if cached is not None:
         return cached
@@ -2805,7 +2841,7 @@ async def _get_indexes(tables: List[str]) -> Dict[str, List[Dict[str, Any]]]:
         return {}
 
 # ═══════════════════════════════════════════════════════════════════════
-# 6) Auto-Cleanup Status — ⚡ PERF-3: relpages بدل pg_total_relation_size
+# 6) Auto-Cleanup Status — ⚡ PERF-3: relpages
 # ═══════════════════════════════════════════════════════════════════════
 
 async def _get_cleanup_status() -> List[Dict[str, Any]]:
@@ -2819,8 +2855,6 @@ async def _get_cleanup_status() -> List[Dict[str, Any]]:
         return []
 
     try:
-        # ⚡ PERF-3: relpages (من pg_class) بدل pg_total_relation_size
-        #    (يفتح ملفات على القرص — 50ms/جدول). الدقة ±10%.
         rows = await db.fetchall("""
             SELECT c.relname AS table_name,
                    (
@@ -3017,7 +3051,6 @@ async def preview_maintenance() -> Dict[str, Any]:
 
     sizes_map: Dict[str, int] = {}
     try:
-        # ⚡ PERF-3: relpages بدل pg_total_relation_size
         rows = await db.fetchall("""
             SELECT c.relname AS table_name,
                    (
@@ -3113,7 +3146,6 @@ async def run_maintenance() -> Dict[str, Any]:
                      if not v.get("protected")]
         sizes_map: Dict[str, int] = {}
         try:
-            # ⚡ PERF-3: relpages بدل pg_total_relation_size
             rows = await db.fetchall("""
                 SELECT c.relname AS table_name,
                        (
@@ -4045,12 +4077,16 @@ __all__ = [
 ]
 
 # ═══════════════════════════════════════════════════════════════════════
-# LOAD BEACON — v7.2.15
+# LOAD BEACON — v7.2.16
 # ═══════════════════════════════════════════════════════════════════════
 
 try:
     logger.info(
         "🛡️ db_diagnostics.py v%s loaded | "
+        "STARTUP-GRACE ✅ | "
+        "GRACE-1=event-loop-warmup+flag ✅ | "
+        "GRACE-2=bottleneck-skip-during-startup ✅ | "
+        "GRACE-3=report-notice-during-startup ✅ | "
         "PERF-OPTIMIZED ✅ | "
         "PERF-1=single-query-db-metadata ✅ | "
         "PERF-2=activity-stats-cached-5s ✅ | "
@@ -4059,16 +4095,10 @@ try:
         "PERF-5=array_agg-natural-list ✅ | "
         "TCP-CONSISTENCY-FIX ✅ | "
         "MULTI-DB-DISCOVERY ✅ | "
-        "REGION-ENV-OVERRIDE ✅ | "
-        "RTT-REGION-INFERENCE ✅ | "
-        "rtt-thresholds=(high=%d,medium=%d,cross=%d) | "
-        "abs-threshold=%d | "
+        "grace_sec=%d | "
         "cache_keys=%d | exports=%d",
         VERSION,
-        int(_RTT_SAME_REGION_HIGH),
-        int(_RTT_SAME_REGION_MEDIUM),
-        int(_RTT_CROSS_REGION_MIN),
-        _MIN_DEAD_FOR_CRITICAL,
+        int(_STARTUP_GRACE_SEC),
         len(_CACHE_TTL),
         len(__all__),
     )
