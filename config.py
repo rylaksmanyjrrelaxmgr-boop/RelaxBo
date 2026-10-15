@@ -2,40 +2,35 @@
 # -*- coding: utf-8 -*-
 
 """
-config.py - إعدادات البوت الأساسية (v7.0.8 — FIX-STMT-TIMEOUT)
+config.py - إعدادات البوت الأساسية (v7.0.9 — LOAD-TUNE-WARN)
 ================================================================================
-🆕 v7.0.8 (FIX-STMT-TIMEOUT):
-    🔴 FIX-ST-1: PG_STATEMENT_TIMEOUT_MS — إصلاح جذري لبقاء 3000ms.
-        السبب: .env يحتوي على 3000، والقيمة القديمة v7.0.7 كانت تعمل
-        auto-clamp لكن لم تُنشر بعد، أو أن .env تجاوز process لم يُعَد.
-        الإصلاح: دالة _clamp_stmt_timeout() مع رفع صامت إلى 60000ms،
-        وتسجيل تحذير واضح عند الرفع، + تسجيل القيمة النهائية عند الإقلاع.
-    🟢 FIX-ST-2: سجل إقلاع يُظهر الفرق (raw .env → القيمة الفعلية).
-    🟢 FIX-ST-3: PG_STATEMENT_TIMEOUT_MS_RAW للشفافية (يكشف ما كان في .env).
-    🟢 FIX-ST-4: validate() يُظهر تحذير عند وجود clamped_value.
+🆕 v7.0.9 (LOAD-TUNE-WARN):
+    🟢 FIX-LT-1: تشديد تحذير MAX_CHANNELS_PER_CYCLE من >10 إلى >5.
+        السبب: قياسات production أظهرت Load=7.12/6.35/5.99 على 8 CPUs
+        (89% إشباع مستدام) رغم event_loop=0ms. هذا النمط يعني أن الحمل
+        يأتي من مصادر خلفية (detectors pool + DB pool + auto-publish)،
+        لا من الـevent loop. تقليل MAX_CHANNELS_PER_CYCLE يُخفّض الحمل.
 
-🆕 v7.0.7 (FIX-NO-WARN):
-    🟢 FIX-NW-1: _parse_developer_ids — يستثني PRIMARY_OWNER_ID تلقائياً.
-    🟢 FIX-NW-2: PG_STATEMENT_TIMEOUT_MS — auto-clamp إلى ≥ 30000ms.
-    🟢 FIX-NW-3: validate() — حذف تحذيرات غير قابلة للحدوث.
+    🟢 FIX-LT-2: تحذير جديد DETECTOR_POOL_WORKERS > 4.
+        السبب: 8 workers (الافتراضي) يُسهمون في Load مرتفع على
+        خطط Render المتوسطة. الموصى به: 4.
 
-🆕 v7.0.6 (FIX-R12):
-    🔴 FIX-R12: PG_STATEMENT_TIMEOUT_MS — من 3000 إلى 60000.
-               السبب: VACUUM على جداول كبيرة يستغرق 20-60s. مع 3000
-               كان يُقتل دائماً → dead tuples تتراكم → DB ينتفخ.
+    🟢 FIX-LT-3: تحذير جديد DB_POOL_SIZE > 15.
+        السبب: كل اتصال = thread/async task على الـevent loop.
+        20 اتصالاً = 20 مهمة خلفية دائمة على الأقل.
 
-🆕 v7.0.5 (PERF-FIXES):
-    🟢 PERF-1: MAX_CHANNELS_PER_CYCLE — من 20 إلى 5.
-    🟢 PERF-2: SLOW_QUERY_LOG_THRESHOLD — من 1.0 إلى 0.2.
-    🟢 PERF-3: PG_STATEMENT_TIMEOUT_MS — من 8000 إلى 3000 (تراجع في v7.0.6).
-    🟢 PERF-4/5/6: تحذيرات وسجلات إقلاع.
+    🟢 FIX-LT-4: قسم "🚦 Load Tuning" في Startup Log يُظهر:
+        - MAX_CHANNELS/CYCLE + تحذير عند الارتفاع
+        - DETECTOR_POOL_WORKERS + تحذير عند الارتفاع
+        - DB_POOL_SIZE + تحذير عند الارتفاع
+        - إجمالي "workers" التقديري (= detectors + DB pool)
+        - اقتراح عملي لخفض Load إن كان مرتفعاً.
 
-🆕 v7.0.4:
-    ✅ إضافة PG_ROLLBACK_ON_RETURN_TIMEOUT (v7.7.61).
-    ✅ إضافة قسم 13.12: IDLE_TX_AUDIT_* (8 متغيرات — v7.7.62).
-    ✅ تحديث get_pg_pool_env().
-    ✅ تحققات validate().
-
+🆕 v7.0.8 (FIX-STMT-TIMEOUT) — محفوظ.
+🆕 v7.0.7 (FIX-NO-WARN) — محفوظ.
+🆕 v7.0.6 (FIX-R12) — محفوظ.
+🆕 v7.0.5 (PERF-FIXES) — محفوظ.
+🆕 v7.0.4 — محفوظ.
 🆕 v7.0.3: DIAG_INCOMING + تغطية كاملة + SB_SECRET + WEBHOOK_SECRET.
 🆕 v7.0.2: DEV-1/2/3 + توثيق المطورين.
 🆕 v7.0.1: إخفاء تحذير NSFW عند استخدام Sightengine.
@@ -71,6 +66,11 @@ logger = logging.getLogger(__name__)
 _PG_STMT_TIMEOUT_MIN_MS = 30000
 # 🟢 الافتراضي الآمن: 60s (يكشف الاستعلامات المتعثرة الحقيقية).
 _PG_STMT_TIMEOUT_DEFAULT_MS = 60000
+
+# 🆕 FIX-LT-1/2/3 (v7.0.9): حدود التوصية لخفض Load
+_MAX_CHANNELS_RECOMMENDED = 5      # FIX-LT-1
+_POOL_WORKERS_RECOMMENDED = 4      # FIX-LT-2
+_DB_POOL_RECOMMENDED = 15          # FIX-LT-3
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -829,6 +829,41 @@ class AppConfig:
         """🟢 FIX-ST-4 (v7.0.8): هل تم رفع القيمة؟"""
         return self.PG_STATEMENT_TIMEOUT_MS_RAW < _PG_STMT_TIMEOUT_MIN_MS
 
+    # 🆕 FIX-LT-1/2/3 (v7.0.9): خصائص لتشخيص Load
+    @property
+    def ESTIMATED_WORKERS_TOTAL(self) -> int:
+        """
+        🆕 FIX-LT-4: تقدير إجمالي الـworkers الخلفيين.
+        = detectors pool + DB pool.
+        ملاحظة: لا يشمل 19 مهمة خلفية في bot.py (كل مهمة = coroutine
+        وليس worker thread).
+        """
+        return int(self.DETECTOR_POOL_WORKERS) + int(self.DB_POOL_SIZE)
+
+    @property
+    def MAX_CHANNELS_HIGH(self) -> bool:
+        """🆕 FIX-LT-1: هل MAX_CHANNELS_PER_CYCLE مرتفع؟"""
+        return self.MAX_CHANNELS_PER_CYCLE > _MAX_CHANNELS_RECOMMENDED
+
+    @property
+    def DETECTOR_POOL_HIGH(self) -> bool:
+        """🆕 FIX-LT-2: هل DETECTOR_POOL_WORKERS مرتفع؟"""
+        return self.DETECTOR_POOL_WORKERS > _POOL_WORKERS_RECOMMENDED
+
+    @property
+    def DB_POOL_HIGH(self) -> bool:
+        """🆕 FIX-LT-3: هل DB_POOL_SIZE مرتفع؟"""
+        return self.DB_POOL_SIZE > _DB_POOL_RECOMMENDED
+
+    @property
+    def LOAD_TUNING_NEEDED(self) -> bool:
+        """🆕 FIX-LT-4: هل هناك مؤشر على حاجة لضبط Load؟"""
+        return (
+            self.MAX_CHANNELS_HIGH
+            or self.DETECTOR_POOL_HIGH
+            or self.DB_POOL_HIGH
+        )
+
     # ═══════════════════════════════════════════════════════════════
     # دوال مساعدة
     # ═══════════════════════════════════════════════════════════════
@@ -1030,11 +1065,14 @@ class AppConfig:
         if self.MAX_CHANNELS_PER_CYCLE < 1:
             errors.append("MAX_CHANNELS_PER_CYCLE يجب أن يكون أكبر من 0")
 
-        if self.MAX_CHANNELS_PER_CYCLE > 10:
+        # 🟢 FIX-LT-1 (v7.0.9): تشديد التحذير من >10 إلى >5
+        # السبب: قياسات production أظهرت Load=7.12/6.35/5.99 على 8 CPUs.
+        if self.MAX_CHANNELS_PER_CYCLE > _MAX_CHANNELS_RECOMMENDED:
             warnings.append(
-                f"⚠️ MAX_CHANNELS_PER_CYCLE={self.MAX_CHANNELS_PER_CYCLE} "
-                f"مرتفع — قد يُشبع DB Pool أثناء النشر التلقائي "
-                f"ويسبب بطء /start. الموصى به: 5-10."
+                f"🟡 MAX_CHANNELS_PER_CYCLE={self.MAX_CHANNELS_PER_CYCLE} "
+                f"> {_MAX_CHANNELS_RECOMMENDED} — قد يُشبع DB Pool أثناء "
+                f"النشر التلقائي ويرفع Load. الموصى به: 5. "
+                f"الحل: MAX_CHANNELS_PER_CYCLE=5 في .env."
             )
 
         # ─── 3. الموارد والشبكة ───
@@ -1060,11 +1098,14 @@ class AppConfig:
                 f"يجب أن يكون < DB_POOL_SIZE ({self.DB_POOL_SIZE})"
             )
 
-        if self.DB_POOL_SIZE > 20:
+        # 🟢 FIX-LT-3 (v7.0.9): تحذير جديد عند DB_POOL_SIZE > 15
+        # السبب: 20 اتصالاً = 20 مهمة دائمة على event loop.
+        if self.DB_POOL_SIZE > _DB_POOL_RECOMMENDED:
             warnings.append(
-                f"⚠️ DB_POOL_SIZE={self.DB_POOL_SIZE} > 20 — "
-                f"قد يتجاوز max_connections في Supabase Free Plan. "
-                f"راجع اشتراكك أو قلّل القيمة."
+                f"🟡 DB_POOL_SIZE={self.DB_POOL_SIZE} > "
+                f"{_DB_POOL_RECOMMENDED} — كل اتصال = مهمة دائمة "
+                f"على event loop. قد يرفع Load. الموصى به: 10-15. "
+                f"راجع اشتراك DB (Supabase Free: 60 اتصال كحد أقصى)."
             )
 
         if self.PUBLISH_DB_CONCURRENCY < 1 or self.PUBLISH_DB_CONCURRENCY > 10:
@@ -1102,7 +1143,6 @@ class AppConfig:
             )
 
         # 🟢 FIX-ST-4 (v7.0.8): تحذير عند وجود clamped value
-        # (القيمة الآمنة مُطبَّقة — لكن .env يحتاج تحديث)
         if self.STMT_TIMEOUT_WAS_CLAMPED:
             warnings.append(
                 f"🔧 PG_STATEMENT_TIMEOUT_MS في .env = "
@@ -1111,7 +1151,6 @@ class AppConfig:
                 f"يُنصح بتحديث .env إلى 60000ms."
             )
 
-        # يبقى فرع الحد الأعلى فقط (قابل للحدوث)
         if self.PG_STATEMENT_TIMEOUT_MS > 300000:
             warnings.append(
                 f"⚠️ PG_STATEMENT_TIMEOUT_MS="
@@ -1184,6 +1223,16 @@ class AppConfig:
             errors.append(
                 f"DETECTOR_POOL_WORKERS خارج النطاق [1-64]: "
                 f"{self.DETECTOR_POOL_WORKERS}"
+            )
+
+        # 🟢 FIX-LT-2 (v7.0.9): تحذير جديد عند DETECTOR_POOL_WORKERS > 4
+        # السبب: 8 workers (الافتراضي) يُسهمون في Load مرتفع.
+        if self.DETECTOR_POOL_WORKERS > _POOL_WORKERS_RECOMMENDED:
+            warnings.append(
+                f"🟡 DETECTOR_POOL_WORKERS={self.DETECTOR_POOL_WORKERS} > "
+                f"{_POOL_WORKERS_RECOMMENDED} — workers إضافيون يرفعون "
+                f"Load على خطط متوسطة. الموصى به: 4. "
+                f"الحل: DETECTOR_POOL_WORKERS=4 في .env."
             )
 
         if self.POOL_TASK_TIMEOUT < 1.0 or self.POOL_TASK_TIMEOUT > 600.0:
@@ -1458,6 +1507,46 @@ else:
         f"ping_idle={CONFIG.PG_CONN_PING_IDLE_THRESHOLD:.0f}s "
         f"stmt_timeout={CONFIG.PG_STATEMENT_TIMEOUT_MS}ms "
         f"rollback_timeout={CONFIG.PG_ROLLBACK_ON_RETURN_TIMEOUT:.1f}s"
+    )
+
+# 🆕 FIX-LT-4 (v7.0.9): قسم Load Tuning
+_lt_icon = "🟡" if CONFIG.LOAD_TUNING_NEEDED else "🟢"
+logger.info(
+    f"{_lt_icon} Load Tuning: "
+    f"MAX_CHANNELS/CYCLE={CONFIG.MAX_CHANNELS_PER_CYCLE}"
+    f"{' ⚠️' if CONFIG.MAX_CHANNELS_HIGH else ''} | "
+    f"DETECTOR_POOL_WORKERS={CONFIG.DETECTOR_POOL_WORKERS}"
+    f"{' ⚠️' if CONFIG.DETECTOR_POOL_HIGH else ''} | "
+    f"DB_POOL_SIZE={CONFIG.DB_POOL_SIZE}"
+    f"{' ⚠️' if CONFIG.DB_POOL_HIGH else ''} | "
+    f"workers≈{CONFIG.ESTIMATED_WORKERS_TOTAL} "
+    f"(detectors+DB)"
+)
+if CONFIG.LOAD_TUNING_NEEDED:
+    logger.info(
+        "   💡 لخفض Load: أضف هذه القيم إلى .env على Render:"
+    )
+    if CONFIG.MAX_CHANNELS_HIGH:
+        logger.info(
+            f"      MAX_CHANNELS_PER_CYCLE="
+            f"{_MAX_CHANNELS_RECOMMENDED}"
+        )
+    if CONFIG.DETECTOR_POOL_HIGH:
+        logger.info(
+            f"      DETECTOR_POOL_WORKERS="
+            f"{_POOL_WORKERS_RECOMMENDED}"
+        )
+    if CONFIG.DB_POOL_HIGH:
+        logger.info(
+            f"      DB_POOL_SIZE={_DB_POOL_RECOMMENDED}"
+        )
+    logger.info(
+        "   📊 ثم راقب /fullhealth بعد 10 دقائق — يجب أن ينخفض "
+        "Load من ~7 إلى <4 على 8 CPUs."
+    )
+else:
+    logger.info(
+        "   ✅ الإعدادات في النطاق الآمن — لا حاجة لضبط إضافي."
     )
 
 logger.info(
