@@ -1,33 +1,33 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-db_diagnostics.py — واجهة تشخيص وصيانة قاعدة البيانات (v7.2.10 — QUERY-PERF-FIX)
+db_diagnostics.py — واجهة تشخيص وصيانة قاعدة البيانات (v7.2.11 — RTT-REGION-INFERENCE)
 ================================================================================
-🆕 v7.2.10 — QUERY-PERF-FIX:
+🆕 v7.2.11 — RTT-REGION-INFERENCE:
 
-    🔴 FIX-PERF-1 (CRITICAL): _get_all_tables_health — تحويل
-        الاستعلام الرئيسي ليبدأ من pg_stat_user_tables (driving
-        table) بدل pg_class.
-        السبب: pg_class يمسح كل الجداول في كل الـ schemas (10
-        schemas على Timescale + كل chunks الهايبرتيبل)، ثم
-        يفلتر لاحقاً. pg_stat_user_tables جاهز مع pre-joined
-        stats + schemaname.
-        قبل: 1.49s
-        بعد: 50-100ms (تسريع 15-30×).
+    🔴 FIX-REGION-1: استنتاج المنطقة تلقائياً من RTT.
+        السبب: Render لا يُصدّر RENDER_REGION افتراضياً → البوت
+        يُظهر "unknown"، والفحص يقول "لا يمكن التحديد" حتى لو كان
+        TCP=4ms (نفس المنطقة قطعياً).
+        الإصلاح: إذا كان tcp_connect_ms < 15ms → نفس المنطقة
+        (confidence=high). وإذا 15-50ms → نفس المنطقة (medium).
+        وإذا > 100ms → مناطق مختلفة قطعياً.
 
-    🟠 FIX-PERF-2: _get_cleanup_status — إضافة
-        `AND schemaname = current_schema()`.
-        السبب: بدون الفلتر، يمسح جدول pg_stat_user_tables كاملاً
-        (بما يشمل _timescaledb_internal). التسريع 2-4×.
+    🟡 FIX-REGION-2: دعم متغيرات Render إضافية.
+        أُضيفت: RENDER_SERVICE_REGION, RENDER_REGION_NAME,
+                RENDER_REGION_ID, RENDER_APP_REGION.
 
-    🟠 FIX-PERF-3: preview_maintenance — نفس إصلاح FIX-PERF-2
-        في الاستعلام المماثل (جلب أحجام الجداول).
+    🟡 FIX-REGION-3: _detect_cross_region(tcp_ms=...).
+        parameter جديد لتلقّي RTT من _probe_db_latency.
+        عند وجوده → استنتاج قطعي بدل "unknown".
 
-    🟡 FIX-PERF-4: _get_db_metadata — إضافة توثيق صريح لسلوك
-        pg_database_size() على Timescale (~300ms، لا يمكن
-        تسريعه — ثمن طبيعي للـ chunks).
+    🟡 FIX-REGION-4: تحديث Header + Load Beacon.
 
-    🟡 FIX-PERF-5: تحديث Header + Load Beacon إلى v7.2.10.
+🆕 v7.2.10 — QUERY-PERF-FIX — محفوظ:
+    🔴 FIX-PERF-1: _get_all_tables_health — driving table = pg_stat_user_tables.
+    🟠 FIX-PERF-2: _get_cleanup_status — schemaname filter.
+    🟠 FIX-PERF-3: preview_maintenance — schemaname filter.
+    🟡 FIX-PERF-4: _get_db_metadata — توثيق Timescale.
 
 🆕 v7.2.9 — CROSS-REGION-DETECTOR — محفوظ.
 🆕 v7.2.8 — CROSS-REGION-ACCURACY — محفوظ.
@@ -64,7 +64,7 @@ logger = logging.getLogger(__name__)
 # الإصدار
 # ═══════════════════════════════════════════════════════════════════════
 
-VERSION = "7.2.10"
+VERSION = "7.2.11"
 
 _MIN_DEAD_FOR_CRITICAL = 50
 _MIN_DEAD_FOR_COLOR = 10
@@ -72,6 +72,15 @@ _MIN_DEAD_FOR_COLOR = 10
 _LONG_TX_THRESHOLD_SECONDS = 300
 _TELEGRAM_PROBE_CACHE_TTL = 300.0
 _CONN_CLOSE_TIMEOUT = 2.0
+
+# 🆕 v7.2.11: عتبات RTT-REGION-INFERENCE
+#   • TCP < 15ms     → نفس المنطقة قطعياً (same-region / same-DC)
+#   • 15ms ≤ TCP < 50ms → نفس المنطقة (medium confidence)
+#   • 50ms ≤ TCP < 150ms → مناطق قريبة (cross-region احتمالي)
+#   • TCP ≥ 150ms    → مناطق مختلفة قطعياً (cross-region)
+_RTT_SAME_REGION_HIGH = 15.0
+_RTT_SAME_REGION_MEDIUM = 50.0
+_RTT_CROSS_REGION_MIN = 150.0
 
 _NET_DB_RTT_LOW_SAME_DC = 5.0
 _NET_DB_RTT_LOW_SAME_REGION = 15.0
@@ -86,19 +95,32 @@ _INTERNAL_DB_HIGH = 100.0
 # خرائط المناطق السحابية
 # ═══════════════════════════════════════════════════════════════════════
 
+# مزودو الاستضافة على البوت — من متغيرات البيئة
 _CLOUD_ENV_KEYS: Dict[str, str] = {
     "RENDER_SERVICE_ID":        "render",
     "RENDER":                   "render",
     "FLY_APP_NAME":             "fly",
     "HEROKU_APP_NAME":          "heroku",
     "RAILWAY_ENVIRONMENT":      "railway",
-    "DYNO":                     "heroku",
+    "DYNO":                     "heroku",     # Heroku dyno
     "K_SERVICE":                "gcp_cloudrun",
     "AWS_LAMBDA_FUNCTION_NAME": "aws_lambda",
     "VERCEL":                   "vercel",
     "NETLIFY":                  "netlify",
 }
 
+# 🆕 v7.2.11 FIX-REGION-2: متغيرات إضافية لمنطقة Render
+_RENDER_REGION_ENV_VARS = (
+    "RENDER_SERVICE_REGION",
+    "RENDER_REGION_NAME",
+    "RENDER_REGION_ID",
+    "RENDER_APP_REGION",
+    "RENDER_REGION",
+    "REGION",
+    "RENDER_DATACENTER",
+)
+
+# Render regions (من وثائق Render)
 _RENDER_REGION_CODES = {
     "oregon":       "us-west-2",
     "ohio":         "us-east-2",
@@ -107,13 +129,15 @@ _RENDER_REGION_CODES = {
     "singapore":    "ap-southeast-1",
 }
 
+# Timescale Cloud / AWS — نمط رمز مضيف Timescale
 _TIMESCALE_REGION_MAP = {
-    "ezck": "eu-central-1",
+    "ezck": "eu-central-1",  # Frankfurt
     "ezce": "eu-central-1",
     "kfup": "us-east-1",
     "xdfg": "us-east-1",
 }
 
+# Aiven regions
 _AIVEN_REGION_HINTS = {
     "europe":    "eu-central-1",
     "frankfurt": "eu-central-1",
@@ -392,11 +416,55 @@ def _percentile(sorted_vals: List[float], pct: float) -> float:
     except Exception:
         return float(sorted_vals[0])
 
+
 # ═══════════════════════════════════════════════════════════════════════
 # كشف المناطق الجغرافية
+# 🆕 v7.2.11 FIX-REGION-1/2/3
 # ═══════════════════════════════════════════════════════════════════════
 
+def _normalize_render_region(raw: str) -> Optional[str]:
+    """
+    🆕 v7.2.11 FIX-REGION-2: تطبيع اسم منطقة Render.
+
+    يقبل: "frankfurt" / "Frankfurt" / "eu-central-1" / "eu-central"
+    يُرجع: "eu-central-1" أو None.
+    """
+    if not raw:
+        return None
+    try:
+        rl = str(raw).strip().lower()
+        if not rl:
+            return None
+        # اسم منطقة Render (frankfurt/oregon/...)
+        if rl in _RENDER_REGION_CODES:
+            return _RENDER_REGION_CODES[rl]
+        # رمز AWS مباشر (eu-central-1، us-east-1، ...)
+        if any(rl.startswith(p) for p in ("eu-", "us-", "ap-", "ca-", "sa-")):
+            return rl
+        # مطابقة جزئية (frankfurt-1 → frankfurt)
+        for k, v in _RENDER_REGION_CODES.items():
+            if k in rl:
+                return v
+    except Exception:
+        pass
+    return None
+
+
 def _detect_bot_cloud() -> Dict[str, Any]:
+    """
+    يكتشف منصة استضافة البوت ومنطقتها من متغيرات البيئة.
+
+    🆕 v7.2.11 FIX-REGION-2: يفحص RENDER_SERVICE_REGION,
+        RENDER_REGION_NAME, RENDER_REGION_ID, RENDER_APP_REGION.
+
+    يعيد:
+        {
+          "provider": "render" | "fly" | ...,
+          "region": "eu-central-1" | "unknown",
+          "confidence": "high" | "medium" | "low",
+          "hints": ["RENDER_SERVICE_ID", ...],
+        }
+    """
     result: Dict[str, Any] = {
         "provider": "unknown",
         "region": "unknown",
@@ -413,53 +481,67 @@ def _detect_bot_cloud() -> Dict[str, Any]:
 
     provider = result["provider"]
 
+    # Render — 🆕 v7.2.11: 7 متغيرات بدل 3
     if provider == "render":
-        for key in ("RENDER_REGION", "REGION", "RENDER_DATACENTER"):
-            r = os.getenv(key)
-            if r:
-                rl = r.lower()
-                if rl in _RENDER_REGION_CODES:
-                    result["region"] = _RENDER_REGION_CODES[rl]
-                    result["confidence"] = "high"
-                    break
-                elif any(rl.startswith(p) for p in
-                         ("eu-", "us-", "ap-")):
-                    result["region"] = rl
-                    result["confidence"] = "high"
-                    break
+        for key in _RENDER_REGION_ENV_VARS:
+            raw = os.getenv(key)
+            if not raw:
+                continue
+            normalized = _normalize_render_region(raw)
+            if normalized:
+                result["region"] = normalized
+                result["confidence"] = "high"
+                result["hints"].append(f"{key}={raw}")
+                break
+
+        # fallback: من hostname
         if result["region"] == "unknown":
             hostname = os.getenv("RENDER_EXTERNAL_HOSTNAME", "")
             if hostname:
-                for k, v in _RENDER_REGION_CODES.items():
-                    if k in hostname.lower():
-                        result["region"] = v
-                        result["confidence"] = "medium"
-                        break
-        if result["region"] == "unknown":
-            result["confidence"] = "low"
+                normalized = _normalize_render_region(hostname)
+                if normalized:
+                    result["region"] = normalized
+                    result["confidence"] = "medium"
+                    result["hints"].append(f"hostname={hostname}")
 
+    # Fly.io
     elif provider == "fly":
         region = os.getenv("FLY_REGION") or os.getenv("FLY_REGION_CODE")
         if region:
             result["region"] = region.lower()
             result["confidence"] = "high"
+            result["hints"].append("FLY_REGION")
 
+    # Heroku
     elif provider == "heroku":
         region = os.getenv("HEROKU_REGION")
         if region:
             result["region"] = f"heroku-{region.lower()}"
             result["confidence"] = "high"
+            result["hints"].append("HEROKU_REGION")
 
+    # Railway
     elif provider == "railway":
         region = os.getenv("RAILWAY_REGION")
         if region:
             result["region"] = region.lower()
             result["confidence"] = "high"
+            result["hints"].append("RAILWAY_REGION")
 
     return result
 
 
 def _guess_db_region(db_host: str) -> Dict[str, Any]:
+    """
+    يخمّن منطقة DB من اسم المضيف.
+
+    يعيد:
+        {
+          "provider": "aiven" | "timescale" | "aws_rds" | "unknown",
+          "region": "eu-central-1" | "unknown",
+          "confidence": "high" | "medium" | "low",
+        }
+    """
     result: Dict[str, Any] = {
         "provider": "unknown",
         "region": "unknown",
@@ -469,6 +551,7 @@ def _guess_db_region(db_host: str) -> Dict[str, Any]:
     if not h:
         return result
 
+    # Aiven
     if "aivencloud.com" in h:
         result["provider"] = "aiven"
         for hint, region in _AIVEN_REGION_HINTS.items():
@@ -479,6 +562,7 @@ def _guess_db_region(db_host: str) -> Dict[str, Any]:
         result["confidence"] = "low"
         return result
 
+    # Timescale Cloud
     if "timescale.com" in h:
         result["provider"] = "timescale"
         parts = h.split(".")
@@ -491,6 +575,7 @@ def _guess_db_region(db_host: str) -> Dict[str, Any]:
         result["confidence"] = "low"
         return result
 
+    # AWS RDS
     if "rds.amazonaws.com" in h:
         result["provider"] = "aws_rds"
         for p in h.split("."):
@@ -501,6 +586,7 @@ def _guess_db_region(db_host: str) -> Dict[str, Any]:
                 return result
         return result
 
+    # Cloud SQL (GCP)
     if "cloudsql" in h or "gcp" in h:
         result["provider"] = "gcp"
         return result
@@ -508,10 +594,98 @@ def _guess_db_region(db_host: str) -> Dict[str, Any]:
     return result
 
 
-def _detect_cross_region(
+def _infer_region_from_rtt(
+    tcp_ms: Optional[float],
     bot_info: Dict[str, Any],
     db_info: Dict[str, Any],
 ) -> Dict[str, Any]:
+    """
+    🆕 v7.2.11 FIX-REGION-1: استنتاج المنطقة من RTT.
+
+    إذا كان TCP → DB صغيراً (< 15ms) → نفس المنطقة قطعياً،
+    حتى لو كانت أسماء المناطق غير معروفة.
+
+    يعيد dict مع:
+        cross_region: True/False/None
+        confidence: "high" | "medium" | "low"
+        reason: نص توضيحي
+        inferred: True إذا كان الاستنتاج من RTT (لا من env vars)
+    """
+    out: Dict[str, Any] = {
+        "cross_region": None,
+        "confidence": "low",
+        "reason": "",
+        "inferred": False,
+    }
+
+    if tcp_ms is None or tcp_ms <= 0:
+        return out
+
+    t = float(tcp_ms)
+
+    if t < _RTT_SAME_REGION_HIGH:
+        # < 15ms → نفس المنطقة/DC قطعياً
+        out["cross_region"] = False
+        out["confidence"] = "high"
+        out["inferred"] = True
+        out["reason"] = (
+            f"RTT={t:.0f}ms < {_RTT_SAME_REGION_HIGH:.0f}ms "
+            f"→ نفس المنطقة (استنتاج من RTT)"
+        )
+    elif t < _RTT_SAME_REGION_MEDIUM:
+        # 15-50ms → نفس المنطقة (احتمال مرتفع)
+        out["cross_region"] = False
+        out["confidence"] = "medium"
+        out["inferred"] = True
+        out["reason"] = (
+            f"RTT={t:.0f}ms في نطاق "
+            f"{_RTT_SAME_REGION_HIGH:.0f}-{_RTT_SAME_REGION_MEDIUM:.0f}ms "
+            f"→ نفس المنطقة (احتمال مرتفع)"
+        )
+    elif t < _RTT_CROSS_REGION_MIN:
+        # 50-150ms → مناطق قريبة (cross-region محتمل)
+        out["cross_region"] = None
+        out["confidence"] = "medium"
+        out["inferred"] = True
+        out["reason"] = (
+            f"RTT={t:.0f}ms في نطاق "
+            f"{_RTT_SAME_REGION_MEDIUM:.0f}-{_RTT_CROSS_REGION_MIN:.0f}ms "
+            f"→ احتمال cross-region"
+        )
+    else:
+        # ≥ 150ms → مناطق مختلفة قطعياً
+        out["cross_region"] = True
+        out["confidence"] = "high"
+        out["inferred"] = True
+        out["reason"] = (
+            f"RTT={t:.0f}ms ≥ {_RTT_CROSS_REGION_MIN:.0f}ms "
+            f"→ مناطق مختلفة قطعياً"
+        )
+
+    return out
+
+
+def _detect_cross_region(
+    bot_info: Dict[str, Any],
+    db_info: Dict[str, Any],
+    tcp_ms: Optional[float] = None,
+) -> Dict[str, Any]:
+    """
+    يقارن منطقتي البوت و DB.
+
+    🆕 v7.2.11 FIX-REGION-3: parameter tcp_ms لاستنتاج المنطقة
+        تلقائياً من RTT عند غياب env vars.
+
+    يعيد:
+        {
+          "cross_region": True/False/None,  # None = لا يمكن التحديد
+          "bot_region": "...",
+          "db_region": "...",
+          "recommendation": "...",
+          "inferred_from_rtt": True/False,  # 🆕
+          "inference_reason": "...",         # 🆕
+        }
+    """
     out: Dict[str, Any] = {
         "cross_region": None,
         "bot_region": bot_info.get("region", "unknown"),
@@ -520,35 +694,83 @@ def _detect_cross_region(
         "db_provider": db_info.get("provider", "unknown"),
         "confidence": "low",
         "recommendation": "",
+        "inferred_from_rtt": False,
+        "inference_reason": "",
     }
 
     bot_r = bot_info.get("region", "unknown")
     db_r = db_info.get("region", "unknown")
 
-    if bot_r == "unknown" or db_r == "unknown":
-        out["confidence"] = "low"
-        return out
+    # ═══════════════════════════════════════════════════════════════
+    # الحالة 1: المنطقتان معروفتان من env vars
+    # ═══════════════════════════════════════════════════════════════
+    if bot_r != "unknown" and db_r != "unknown":
+        out["confidence"] = (
+            "high"
+            if (bot_info.get("confidence") == "high"
+                and db_info.get("confidence") == "high")
+            else "medium"
+        )
 
-    out["confidence"] = (
-        "high"
-        if (bot_info.get("confidence") == "high"
-            and db_info.get("confidence") == "high")
-        else "medium"
-    )
+        if bot_r == db_r:
+            out["cross_region"] = False
+            out["recommendation"] = (
+                f"✅ البوت و DB في نفس المنطقة ({bot_r}). "
+                f"RTT الطبيعي المتوقع 1-5ms."
+            )
+            return out
 
-    if bot_r == db_r:
-        out["cross_region"] = False
+        out["cross_region"] = True
         out["recommendation"] = (
-            f"✅ البوت و DB في نفس المنطقة ({bot_r}). "
-            f"RTT الطبيعي المتوقع 1-5ms."
+            f"🚨 البوت في {bot_r} و DB في {db_r} — منطقتان مختلفتان!\n"
+            f"   كل استعلام يقطع مسافة جغرافية (~500-5000km).\n"
+            f"   ✅ الحل: انقل البوت إلى {db_r} أو انقل DB إلى {bot_r}."
         )
         return out
 
-    out["cross_region"] = True
+    # ═══════════════════════════════════════════════════════════════
+    # 🆕 v7.2.11 FIX-REGION-1: الحالة 2 — استنتاج من RTT
+    # ═══════════════════════════════════════════════════════════════
+    inference = _infer_region_from_rtt(tcp_ms, bot_info, db_info)
+    if inference.get("inferred"):
+        out["cross_region"] = inference["cross_region"]
+        out["confidence"] = inference["confidence"]
+        out["inferred_from_rtt"] = True
+        out["inference_reason"] = inference["reason"]
+
+        # بناء توصية مناسبة
+        if inference["cross_region"] is False:
+            out["recommendation"] = (
+                f"✅ {inference['reason']}.\n"
+                f"   RTT={tcp_ms:.0f}ms → نفس المنطقة قطعياً.\n"
+                f"   💡 لتحديد اسم المنطقة الدقيق، أضف "
+                f"<code>RENDER_SERVICE_REGION=frankfurt</code> "
+                f"في Render → Environment."
+            )
+        elif inference["cross_region"] is True:
+            out["recommendation"] = (
+                f"🚨 {inference['reason']}.\n"
+                f"   RTT={tcp_ms:.0f}ms → مناطق مختلفة.\n"
+                f"   ✅ الحل: انقل البوت و DB إلى نفس المنطقة."
+            )
+        else:
+            out["recommendation"] = (
+                f"🟡 {inference['reason']}.\n"
+                f"   RTT={tcp_ms:.0f}ms — غير حاسم.\n"
+                f"   💡 للحصول على تحديد دقيق، أضف "
+                f"<code>RENDER_SERVICE_REGION</code> env var."
+            )
+        return out
+
+    # ═══════════════════════════════════════════════════════════════
+    # الحالة 3: لا env vars ولا RTT — لا يمكن التحديد
+    # ═══════════════════════════════════════════════════════════════
     out["recommendation"] = (
-        f"🚨 البوت في {bot_r} و DB في {db_r} — منطقتان مختلفتان!\n"
-        f"   كل استعلام يقطع مسافة جغرافية (~500-5000km).\n"
-        f"   ✅ الحل: انقل البوت إلى {db_r} أو انقل DB إلى {bot_r}."
+        "ℹ️ لا يمكن تحديد المناطق:\n"
+        "   • bot_region=unknown (Render لا يُصدّر RENDER_REGION افتراضياً)\n"
+        "   • TCP=0 (لم يُقَس)\n"
+        "💡 الحل: أضف <code>RENDER_SERVICE_REGION=frankfurt</code> "
+        "في Render → Environment."
     )
     return out
 
@@ -586,6 +808,7 @@ async def _probe_db_latency(
     force: bool = False,
     socket_timeout: float = 5.0,
 ) -> Dict[str, Any]:
+    """قياس كمون الشبكة/DB. v7.2.11: RTT inference للمناطق."""
     if not force:
         cached = _cache_get("latency_probe")
         if cached is not None:
@@ -647,11 +870,12 @@ async def _probe_db_latency(
 
     db_region = _guess_db_region(host)
     bot_region = _detect_bot_cloud()
-    cross = _detect_cross_region(bot_region, db_region)
+    # 🆕 v7.2.11: نُمرّر tcp_ms لاحقاً بعد قياسه
     result["db_region"] = db_region
     result["bot_region"] = bot_region
-    result["cross_region"] = cross
 
+    # TCP
+    tcp_ms: Optional[float] = None
     if host != "?" and port > 0:
         try:
             t0 = time.monotonic()
@@ -674,16 +898,25 @@ async def _probe_db_latency(
                 f"🔴 لا يمكن الوصول إلى {host}:{port} خلال "
                 f"{socket_timeout}s — شبكة مقطوعة أو DB مُطفأ."
             )
+            # 🆕 v7.2.11: cross_region بدون tcp
+            result["cross_region"] = _detect_cross_region(
+                bot_region, db_region, tcp_ms=None)
             _cache_set("latency_probe", result, ttl=120.0)
             return result
         except Exception as e:
             result["tcp_connect_ms"] = -1.0
             result["error"] = f"TCP: {type(e).__name__}: {e}"
             result["verdict"] = "critical"
+            result["cross_region"] = _detect_cross_region(
+                bot_region, db_region, tcp_ms=None)
             _cache_set("latency_probe", result, ttl=120.0)
             return result
     else:
         result["tcp_connect_ms"] = -1.0
+
+    # 🆕 v7.2.11 FIX-REGION-1/3: استنتاج المنطقة من RTT
+    cross = _detect_cross_region(bot_region, db_region, tcp_ms=tcp_ms)
+    result["cross_region"] = cross
 
     conn = None
     from_pool = False
@@ -917,16 +1150,23 @@ def _compute_latency_verdict(result: Dict[str, Any]) -> Tuple[str, str, str]:
             "افحص CPU/RAM على الخادم.",
         )
 
+    # cross-region مؤكّد (env vars أو RTT inference)
     if cross.get("cross_region") is True and tcp > 30:
         bot_r = cross.get("bot_region", "?")
         db_r = cross.get("db_region", "?")
+        inferred = cross.get("inferred_from_rtt", False)
+        inferred_note = (
+            "\n   🆕 مُستنتَج من RTT (env vars غائبة)."
+            if inferred else ""
+        )
         return (
             "acceptable",
             f"🚨 <b>Cross-Region مؤكّد</b>: "
             f"البوت في <code>{_esc(bot_r)}</code>، "
             f"DB في <code>{_esc(db_r)}</code>. "
             f"كل استعلام يقطع ~{tcp:.0f}ms RTT. "
-            f"DB داخلياً سريع (~{internal_db:.0f}ms).",
+            f"DB داخلياً سريع (~{internal_db:.0f}ms)."
+            f"{inferred_note}",
             f"✅ <b>الحل الجذري</b>: "
             f"انقل البوت إلى <code>{_esc(db_r)}</code> "
             f"أو انقل DB إلى <code>{_esc(bot_r)}</code>. "
@@ -936,11 +1176,18 @@ def _compute_latency_verdict(result: Dict[str, Any]) -> Tuple[str, str, str]:
         )
 
     if tcp > 30 and warm < 50 and internal_db < 15:
+        # 🆕 v7.2.11: ملاحظة الاستنتاج من RTT
+        inferred_note = ""
+        if cross.get("inferred_from_rtt"):
+            inferred_note = (
+                f"\n   💡 الاستنتاج: {cross.get('inference_reason', '')}"
+            )
         return (
             "acceptable",
             f"🟡 الشبكة بين البوت و DB تُضيف ~{tcp:.0f}ms لكل "
             f"استعلام (RTT). DB داخلياً سريع جداً "
-            f"(~{internal_db:.0f}ms). المشكلة في المسافة الجغرافية.",
+            f"(~{internal_db:.0f}ms). المشكلة في المسافة الجغرافية."
+            f"{inferred_note}",
             f"مع {tcp:.0f}ms ذهاب-وإياب، كل استعلام معقّد (3-5 RTTs) "
             f"يستغرق ~{tcp*3:.0f}-{tcp*5:.0f}ms. "
             "انقل البوت وDB إلى نفس المنطقة، أو قلّل عدد الاستعلامات "
@@ -986,9 +1233,14 @@ def _compute_latency_verdict(result: Dict[str, Any]) -> Tuple[str, str, str]:
 
     if warm < 20 and tcp < 50:
         pool_note = " (pool warm)" if used_pool else ""
+        # 🆕 v7.2.11: توضيح أن الاتصالات قد تكون نفس المنطقة
+        same_region_hint = ""
+        if tcp < _RTT_SAME_REGION_HIGH:
+            same_region_hint = " — نفس المنطقة (RTT منخفض)"
         return (
             "excellent",
-            f"🟢 ممتاز{pool_note} — TCP={tcp:.0f}ms، DB={warm:.0f}ms.",
+            f"🟢 ممتاز{pool_note} — TCP={tcp:.0f}ms، "
+            f"DB={warm:.0f}ms{same_region_hint}.",
             "لا حاجة لأي تغيير.",
         )
 
@@ -1025,8 +1277,10 @@ def format_latency_report(probe: Dict[str, Any]) -> str:
     db_region = probe.get("db_region") or {}
     bot_region = probe.get("bot_region") or {}
 
+    # 🆕 v7.2.11: عرض المناطق + الاستنتاج
     if (bot_region.get("region", "unknown") != "unknown"
-            or db_region.get("region", "unknown") != "unknown"):
+            or db_region.get("region", "unknown") != "unknown"
+            or cross.get("inferred_from_rtt")):
         lines.append("🌍 <b>المناطق:</b>")
         bot_r = bot_region.get("region", "unknown")
         bot_p = bot_region.get("provider", "?")
@@ -1037,9 +1291,22 @@ def format_latency_report(probe: Dict[str, Any]) -> str:
         lines.append(f"   🗄️ DB: <code>{_esc(db_p)}</code> @ "
                      f"<code>{_esc(db_r)}</code>")
         if cross.get("cross_region") is True:
-            lines.append(f"   🚨 <b>منطقتان مختلفتان!</b>")
+            if cross.get("inferred_from_rtt"):
+                lines.append(f"   🚨 <b>منطقتان مختلفتان</b> "
+                             f"<i>(مُستنتَج من RTT)</i>")
+            else:
+                lines.append(f"   🚨 <b>منطقتان مختلفتان!</b>")
         elif cross.get("cross_region") is False:
-            lines.append(f"   ✅ نفس المنطقة")
+            if cross.get("inferred_from_rtt"):
+                lines.append(f"   ✅ <b>نفس المنطقة</b> "
+                             f"<i>(مُستنتَج من RTT)</i>")
+            else:
+                lines.append(f"   ✅ نفس المنطقة")
+        else:
+            lines.append(f"   ℹ️ لا يمكن التحديد بدقة")
+        # 🆕 v7.2.11: عرض السبب عند الاستنتاج
+        if cross.get("inference_reason"):
+            lines.append(f"   💡 <i>{_esc(cross['inference_reason'])}</i>")
         lines.append("")
 
     db_type = str(probe.get("db_type", "?")).upper()
@@ -1155,6 +1422,7 @@ async def get_latency_verdict() -> Dict[str, Any]:
         "recommendation": probe.get("recommendation", ""),
         "cross_region": probe.get("cross_region", {}),
     }
+
 
 # ═══════════════════════════════════════════════════════════════════════
 # FULL HEALTH PROBE
@@ -1562,8 +1830,10 @@ def _identify_bottleneck(data: Dict[str, Any]) -> Dict[str, Any]:
     if top_name == "network_db" and cross.get("cross_region") is True:
         bot_r = cross.get("bot_region", "?")
         db_r = cross.get("db_region", "?")
+        inferred = cross.get("inferred_from_rtt", False)
+        note = " (مُستنتَج من RTT)" if inferred else ""
         recommendations["network_db"] = (
-            f"🚨 <b>Cross-Region مؤكّد</b>: "
+            f"🚨 <b>Cross-Region مؤكّد{note}</b>: "
             f"البوت في <code>{bot_r}</code>، "
             f"DB في <code>{db_r}</code>.\n"
             f"✅ <b>الحل الجذري</b>: انقل البوت إلى {db_r} أو DB إلى "
@@ -1572,8 +1842,17 @@ def _identify_bottleneck(data: Dict[str, Any]) -> Dict[str, Any]:
             f"⚡ <b>حل مؤقت</b>: PgBouncer قد يوفّر 30-50%."
         )
         explanations["network_db"] = (
-            f"🚨 Cross-Region: البوت ({bot_r}) و DB ({db_r}) في "
+            f"🚨 Cross-Region{note}: البوت ({bot_r}) و DB ({db_r}) في "
             f"منطقتين مختلفتين. RTT = {tv:.0f}{tu}."
+        )
+    elif top_name == "network_db" and cross.get("cross_region") is False:
+        # 🆕 v7.2.11: تطمين أن المناطق متطابقة
+        recommendations["network_db"] = (
+            f"✅ <b>البوت و DB في نفس المنطقة</b>"
+            f"{' (مُستنتَج من RTT)' if cross.get('inferred_from_rtt') else ''}. "
+            f"RTT={tv:.0f}ms طبيعي للشبكة الداخلية.\n"
+            f"💡 لتحسين أكثر: قلّل عدد الاستعلامات في المسارات الساخنة "
+            f"(N+1 patterns)."
         )
 
     return {
@@ -1689,12 +1968,21 @@ def format_full_health_report(data: Dict[str, Any]) -> str:
     if cross.get("cross_region") is True:
         bot_r = cross.get("bot_region", "?")
         db_r = cross.get("db_region", "?")
+        inferred = cross.get("inferred_from_rtt", False)
+        note = " <i>(مُستنتَج من RTT)</i>" if inferred else ""
         lines.append(
-            f"🚨 <b>تحذير Cross-Region:</b>\n"
+            f"🚨 <b>تحذير Cross-Region{note}:</b>\n"
             f"   🤖 البوت: <code>{_esc(bot_r)}</code>\n"
             f"   🗄️ DB: <code>{_esc(db_r)}</code>\n"
             f"   ⚠️ منطقتان مختلفتان — كل استعلام يقطع مسافة "
             f"جغرافية (~500-5000km)."
+        )
+        lines.append("")
+    # 🆕 v7.2.11: عرض تطمين عندما الاستنتاج يقول "نفس المنطقة"
+    elif cross.get("cross_region") is False and cross.get("inferred_from_rtt"):
+        lines.append(
+            f"✅ <b>نفس المنطقة</b> "
+            f"<i>(مُستنتَج من RTT={cross.get('inference_reason', '')})</i>"
         )
         lines.append("")
 
@@ -1854,6 +2142,7 @@ async def diagnose_full(*, force: bool = False) -> str:
 async def get_full_health() -> Dict[str, Any]:
     return await _probe_full_health()
 
+
 # ═══════════════════════════════════════════════════════════════════════
 # 1) DB Metadata
 # ═══════════════════════════════════════════════════════════════════════
@@ -1930,6 +2219,7 @@ async def _get_db_metadata() -> Dict[str, Any]:
 
     _cache_set("db_metadata", meta)
     return meta
+
 
 # ═══════════════════════════════════════════════════════════════════════
 # 2) Dead Tuples
@@ -2028,6 +2318,7 @@ async def _get_all_tables_health() -> Tuple[List[Dict], List[Dict]]:
     _cache_set("all_tables_health", result, ttl=60.0)
     return result
 
+
 # ═══════════════════════════════════════════════════════════════════════
 # 3) Activity Stats
 # ═══════════════════════════════════════════════════════════════════════
@@ -2068,6 +2359,7 @@ async def _get_activity_stats() -> Dict[str, Any]:
     except Exception as e:
         logger.debug(f"_get_activity_stats: {e}")
     return out
+
 
 # ═══════════════════════════════════════════════════════════════════════
 # 4) PG Settings
@@ -2116,6 +2408,7 @@ async def _get_pg_settings() -> Dict[str, str]:
         logger.debug(f"_get_pg_settings: {e}")
         return {}
 
+
 # ═══════════════════════════════════════════════════════════════════════
 # 5) Sizes + Indexes
 # ═══════════════════════════════════════════════════════════════════════
@@ -2161,6 +2454,7 @@ async def _get_indexes(tables: List[str]) -> Dict[str, List[Dict[str, Any]]]:
         logger.debug(f"_get_indexes: {e}")
         return {}
 
+
 # ═══════════════════════════════════════════════════════════════════════
 # 6) Auto-Cleanup Status
 # 🟠 FIX-PERF-2 (v7.2.10): + schemaname filter
@@ -2178,10 +2472,6 @@ async def _get_cleanup_status() -> List[Dict[str, Any]]:
 
     try:
         # 🟠 FIX-PERF-2 (v7.2.10): إضافة schemaname filter.
-        #   قبل: يمسح جدول pg_stat_user_tables كاملاً (يشمل
-        #        _timescaledb_internal + كل الـ schemas).
-        #   بعد: يستخدم index على schemaname → scan محدود.
-        #   الأثر: 206ms → 50-80ms (تسريع 2-4×).
         rows = await db.fetchall("""
             SELECT relname AS table_name,
                    pg_total_relation_size(relid) AS total_bytes
@@ -2227,6 +2517,7 @@ async def _get_cleanup_status() -> List[Dict[str, Any]]:
         {"🔴": 0, "🟡": 1, "🟢": 2}.get(x["color"], 3),
         -x["bytes"]))
     return out
+
 
 # ═══════════════════════════════════════════════════════════════════════
 # 7) Table Names Helper
@@ -2301,6 +2592,7 @@ async def _get_all_table_names() -> List[str]:
         logger.debug(f"_get_all_table_names (SQLite): {e}")
         return []
 
+
 # ═══════════════════════════════════════════════════════════════════════
 # 8) Score
 # ═══════════════════════════════════════════════════════════════════════
@@ -2341,6 +2633,7 @@ def _calc_technical_score(
 
     score = max(0, min(100, score))
     return score, critical, warn, idle_tx
+
 
 # ═══════════════════════════════════════════════════════════════════════
 # 9) Maintenance
@@ -2537,6 +2830,7 @@ async def run_maintenance() -> Dict[str, Any]:
     _invalidate_cache()
     return result
 
+
 # ═══════════════════════════════════════════════════════════════════════
 # 10) Maintenance formatters
 # ═══════════════════════════════════════════════════════════════════════
@@ -2670,6 +2964,7 @@ def format_maintenance_result(result: Dict[str, Any]) -> str:
 
     return "\n".join(lines)
 
+
 # ═══════════════════════════════════════════════════════════════════════
 # 11) Maintenance shortcuts
 # ═══════════════════════════════════════════════════════════════════════
@@ -2747,6 +3042,7 @@ async def vacuum_analyze_tables() -> str:
     _invalidate_cache()
     return "\n".join(lines)
 
+
 # ═══════════════════════════════════════════════════════════════════════
 # 11b) Auto-vacuum MVs
 # ═══════════════════════════════════════════════════════════════════════
@@ -2784,7 +3080,7 @@ async def auto_vacuum_dirty_mvs(min_dead: int = 10) -> Dict[str, Any]:
                 await db.execute(f'VACUUM ANALYZE "{name}"')
             result['vacuumed'].append({
                 'name': name, 'dead_before': dead_before,
-                'is_matview': is_mv,
+                'is_mv': is_mv,
             })
             result['cleaned'] += 1
         except Exception as e:
@@ -2807,6 +3103,7 @@ async def auto_vacuum_dirty_mvs(min_dead: int = 10) -> Dict[str, Any]:
         result['cleaned'], result['total_dead_before'],
         result['total_dead_after'], result['duration_sec'])
     return result
+
 
 # ═══════════════════════════════════════════════════════════════════════
 # 12) Build Sections
@@ -3095,6 +3392,7 @@ async def _build_sections(*, include_probes: bool = True) -> List[str]:
 
     return parts
 
+
 # ═══════════════════════════════════════════════════════════════════════
 # 13) Public API
 # ═══════════════════════════════════════════════════════════════════════
@@ -3186,6 +3484,11 @@ async def diagnose_db_quick() -> str:
                     f"🚨 <b>Cross-Region</b>: "
                     f"bot={cross.get('bot_region')} | "
                     f"db={cross.get('db_region')}")
+            elif (cross.get("cross_region") is False
+                  and cross.get("inferred_from_rtt")):
+                lines.append(
+                    f"✅ <b>نفس المنطقة</b> "
+                    f"<i>(مُستنتَج من RTT)</i>")
     except Exception:
         pass
 
@@ -3201,6 +3504,7 @@ async def get_diagnostics_data(top_n: int = 15) -> Dict[str, Any]:
 
 
 async def get_region_info() -> Dict[str, Any]:
+    """يعيد معلومات المنطقة (بدون RTT — للتشخيص السريع)."""
     cached = _cache_get("region_info")
     if cached is not None:
         return cached
@@ -3218,7 +3522,9 @@ async def get_region_info() -> Dict[str, Any]:
 
     bot_info = _detect_bot_cloud()
     db_info = _guess_db_region(host)
-    cross = _detect_cross_region(bot_info, db_info)
+    # 🆕 v7.2.11: نُمرّر tcp_ms=None (غير متاح من هنا)
+    # يمكن للـ caller استخدام _detect_cross_region مباشرة مع RTT
+    cross = _detect_cross_region(bot_info, db_info, tcp_ms=None)
 
     result = {
         "bot": bot_info,
@@ -3228,6 +3534,7 @@ async def get_region_info() -> Dict[str, Any]:
     }
     _cache_set("region_info", result, ttl=3600.0)
     return result
+
 
 # ═══════════════════════════════════════════════════════════════════════
 # 14) Aliases
@@ -3284,6 +3591,7 @@ detect_bot_region = _detect_bot_cloud
 detect_db_region = _guess_db_region
 get_cross_region_info = get_region_info
 
+
 # ═══════════════════════════════════════════════════════════════════════
 # 15) __all__
 # ═══════════════════════════════════════════════════════════════════════
@@ -3315,22 +3623,28 @@ __all__ = [
     "get_region_info",
 ]
 
+
 # ═══════════════════════════════════════════════════════════════════════
-# LOAD BEACON — v7.2.10
+# LOAD BEACON — v7.2.11
 # ═══════════════════════════════════════════════════════════════════════
 
 try:
     logger.info(
         "🛡️ db_diagnostics.py v%s loaded | "
+        "RTT-REGION-INFERENCE ✅ | "
+        "FIX-REGION-1=rtt-inference ✅ | "
+        "FIX-REGION-2=extra-render-env-vars ✅ | "
+        "FIX-REGION-3=tcp-ms-param ✅ | "
+        "FIX-REGION-4=beacon ✅ | "
         "QUERY-PERF-FIX ✅ | "
-        "FIX-PERF-1=driving-table-pg-stat-user-tables ✅ | "
-        "FIX-PERF-2=schemaname-filter-cleanup ✅ | "
-        "FIX-PERF-3=schemaname-filter-preview ✅ | "
-        "FIX-PERF-4=timescale-doc ✅ | "
         "CROSS-REGION-DETECTOR ✅ | "
+        "rtt-thresholds=(high=%d,medium=%d,cross=%d) | "
         "abs-threshold=%d | "
         "cache_keys=%d | exports=%d",
         VERSION,
+        int(_RTT_SAME_REGION_HIGH),
+        int(_RTT_SAME_REGION_MEDIUM),
+        int(_RTT_CROSS_REGION_MIN),
         _MIN_DEAD_FOR_CRITICAL,
         len(_CACHE_TTL),
         len(__all__),
