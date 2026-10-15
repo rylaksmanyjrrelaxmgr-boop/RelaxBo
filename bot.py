@@ -2,30 +2,31 @@
 # -*- coding: utf-8 -*-
 
 """
-🌿 Relax Manager – البوت الرئيسي (bot.py v5.6.30-DB-DIAG-MARK)
+🌿 Relax Manager – البوت الرئيسي (bot.py v5.6.31-WARMUP-DETECTORS)
 ================================================================================
 📌 نقطة الدخول الرسمية للتطبيق (entrypoint).
 
-🆕 v5.6.30 (DB-DIAG-MARK):
-    🟢 MARK-1: استدعاء db_diagnostics.mark_process_start() عند بدء
-        main() — يُفعّل نافذة السماح (STARTUP-GRACE) بدقة عبر
-        قياس وقت العملية الفعلي بدل وقت الاستيراد.
-        الأثر: /fullhealth و/latency يعرضان "نافذة إقلاع" صحيحة
-        خلال أول 60s، و تتجاهل _identify_bottleneck قياس event_loop
-        المضخّم خلال هذه الفترة.
+🆕 v5.6.31 (WARMUP-DETECTORS):
+    🟢 WARMUP-1: استدعاء handlers_message.warmup_detectors_pool() بعد
+        نجاح _warmup_telegram_api — كـ create_task (غير حاجب).
+        الهدف: تهيئة مجمع detectors + تحميل الوحدات الثقيلة
+        (PIL/numpy/cv2/pytesseract) قبل وصول أول رسالة حقيقية.
+        الأثر المتوقّع: أول رسالة → ~250ms بدل ~8000ms (قياس prod:
+        SPAM-TIMEOUT كان يستهلك 8.2s في أول رسالة بعد الإقلاع).
 
-    🟢 MARK-2: تسجيل حالة تكامل db_diagnostics في Startup Log.
+    🟢 WARMUP-2: تتبّع task التسخين في _WARMUP_TASKS، وإلغاؤه في
+        finally عند الإغلاق اللطيف (لا يفشل الـshutdown إن لم ينته).
 
-    🟢 MARK-3: اكتشاف تلقائي للـ API — إن كان db_diagnostics أقدم
-        من v7.2.17 (بلا mark_process_start)، البوت يستمر بدون خطأ
-        (fallback لوقت الاستيراد).
+    🟢 WARMUP-3: اكتشاف تلقائي لـ warmup_detectors_pool في
+        handlers_message — إن كان أقدم من v7.18.39، البوت يستمر
+        بدون خطأ (fallback آمن).
 
-🆕 v5.6.29 (PERF-TELEGRAM-POOL-FIX) — محفوظ:
-    🔴 FIX-BOT-6 (CRITICAL): إضافة HTTPXRequest مع
-        connection_pool_size=32 (بدل الافتراضي 1).
-    🟡 FIX-BOT-7: keepalive_expiry=120.0 ثانية + pool أكبر.
-    🟡 FIX-BOT-8: تحديث Header + Load Beacon.
+🆕 v5.6.30 (DB-DIAG-MARK) — محفوظ:
+    🟢 MARK-1: mark_process_start() عند بدء main().
+    🟢 MARK-2: تسجيل حالة db_diagnostics.
+    🟢 MARK-3: اكتشاف تلقائي للـAPI.
 
+🆕 v5.6.29 (PERF-TELEGRAM-POOL-FIX) — محفوظ.
 🆕 v5.6.28 (APP-START-FIX + ROBUST-SHUTDOWN) — محفوظ.
 🆕 v5.6.27 (SLEEP-PROBE) — محفوظ.
 🆕 v5.6.26 (DUP-FIX) — محفوظ.
@@ -394,6 +395,43 @@ from handlers.handlers_message import (
 )
 
 # ═════════════════════════════════════════════════════════════════════
+# 🆕 v5.6.31 WARMUP-1/WARMUP-3: warmup_detectors_pool (optional)
+# ═════════════════════════════════════════════════════════════════════
+# الغرض: تسخين مجمع detectors قبل أول رسالة حقيقية.
+# القياس في prod: أول رسالة بعد الإقلاع = ~8s، الثانية = ~284ms.
+# warmup_detectors_pool() — إن وجدت في handlers_message v7.18.39+ —
+# تستدعي _get_shared_pool + تستورد الوحدات الثقيلة مرة واحدة.
+#
+# إن كان handlers_message أقدم من v7.18.39، نستمر بدون خطأ.
+_warmup_detectors_pool_fn = None
+_HAS_WARMUP_DETECTORS = False
+_WARMUP_DETECTORS_IMPORT_ERROR = None
+
+try:
+    from handlers.handlers_message import (
+        warmup_detectors_pool as _warmup_detectors_pool_fn_imported,
+    )
+    if callable(_warmup_detectors_pool_fn_imported):
+        _warmup_detectors_pool_fn = _warmup_detectors_pool_fn_imported
+        _HAS_WARMUP_DETECTORS = True
+    else:
+        _WARMUP_DETECTORS_IMPORT_ERROR = "not callable"
+except ImportError as _e_wd1:
+    try:
+        from handlers_message import (  # type: ignore
+            warmup_detectors_pool as _warmup_detectors_pool_fn_imported,
+        )
+        if callable(_warmup_detectors_pool_fn_imported):
+            _warmup_detectors_pool_fn = _warmup_detectors_pool_fn_imported
+            _HAS_WARMUP_DETECTORS = True
+        else:
+            _WARMUP_DETECTORS_IMPORT_ERROR = "not callable"
+    except ImportError as _e_wd2:
+        _WARMUP_DETECTORS_IMPORT_ERROR = f"{_e_wd1} | {_e_wd2}"
+        _warmup_detectors_pool_fn = None
+        _HAS_WARMUP_DETECTORS = False
+
+# ═════════════════════════════════════════════════════════════════════
 # /db_idle
 # ═════════════════════════════════════════════════════════════════════
 _HAS_DB_IDLE_CMD = False
@@ -695,6 +733,9 @@ _pm_last_query_ts = 0.0
 _pm_last_query_result: Optional[Dict[str, Any]] = None
 _pm_slow_query_warned = False
 
+# 🆕 v5.6.31 WARMUP-2: تتبّع مهمة تسخين detectors
+_WARMUP_DETECTORS_TASK: Optional[asyncio.Task] = None
+
 # ═══════════════════════════════════════════════════════════════════
 # مساعد مقارنة المبالغ
 # ═══════════════════════════════════════════════════════════════════
@@ -731,6 +772,86 @@ def _spawn_notify_dev_log(context, text: str) -> None:
         task.add_done_callback(_cleanup)
     except Exception as _e:
         logger.debug("_spawn_notify_dev_log: %s", _e)
+
+# ═══════════════════════════════════════════════════════════════════
+# 🆕 v5.6.31 WARMUP-1: spawn warmup detectors pool (non-blocking)
+# ═══════════════════════════════════════════════════════════════════
+
+def _spawn_warmup_detectors_pool() -> Optional[asyncio.Task]:
+    """
+    🆕 v5.6.31 WARMUP-1: يُشغّل warmup_detectors_pool() كـtask خلفي.
+
+    الهدف: تهيئة مجمع detectors + استيراد الوحدات الثقيلة (PIL/numpy/
+    cv2/pytesseract) — بدل أول رسالة حقيقية (~8s).
+
+    لا يحجب main() — يُنفّذ بالتوازي مع تسجيل handlers.
+    """
+    global _WARMUP_DETECTORS_TASK
+
+    if not _HAS_WARMUP_DETECTORS or _warmup_detectors_pool_fn is None:
+        logger.debug(
+            "ℹ️ warmup_detectors_pool غير متاح — تخطي (handlers_message "
+            "أقدم من v7.18.39؟) | err=%s",
+            _WARMUP_DETECTORS_IMPORT_ERROR or "n/a",
+        )
+        return None
+
+    if _WARMUP_DETECTORS_TASK is not None and not _WARMUP_DETECTORS_TASK.done():
+        return _WARMUP_DETECTORS_TASK
+
+    try:
+        _WARMUP_DETECTORS_TASK = asyncio.create_task(
+            _warmup_detectors_pool_fn(),
+            name="warmup-detectors-pool",
+        )
+        logger.info(
+            "🔥 warmup_detectors_pool: task spawned "
+            "(non-blocking, سيُهيّئ المجمع + الوحدات الثقيلة)"
+        )
+        return _WARMUP_DETECTORS_TASK
+    except Exception as _e:
+        logger.warning(
+            "⚠️ فشل إنشاء task تسخين detectors: %s", _e, exc_info=True
+        )
+        return None
+
+async def _await_warmup_detectors_pool(
+    timeout: float = 15.0,
+) -> bool:
+    """
+    🆕 v5.6.31 WARMUP-2: ينتظر انتهاء مهمة التسخين (أو timeout).
+
+    Returns:
+        True إن انتهت بنجاح، False إن فشلت/انتهت المهلة/غير متاحة.
+    """
+    global _WARMUP_DETECTORS_TASK
+
+    if _WARMUP_DETECTORS_TASK is None:
+        return False
+
+    if _WARMUP_DETECTORS_TASK.done():
+        try:
+            return bool(_WARMUP_DETECTORS_TASK.result())
+        except Exception as _e:
+            logger.debug("warmup task done with exception: %s", _e)
+            return False
+
+    try:
+        result = await asyncio.wait_for(
+            _WARMUP_DETECTORS_TASK, timeout=timeout,
+        )
+        return bool(result)
+    except asyncio.TimeoutError:
+        logger.warning(
+            "⚠️ warmup_detectors_pool: لم ينتهِ خلال %.1fs — "
+            "سيكمل في الخلفية", timeout,
+        )
+        return False
+    except asyncio.CancelledError:
+        raise
+    except Exception as _e:
+        logger.debug("warmup_detectors_pool: %s", _e)
+        return False
 
 # ═══════════════════════════════════════════════════════════════════
 # 🔴 v5.6.29 FIX-BOT-6: HTTPXRequest factory
@@ -1242,6 +1363,19 @@ else:
         "ℹ️ /cache_stats غير متاح — يتطلب handlers_message.py v7.18.18+ | "
         "import_error=%s",
         _CACHE_STATS_IMPORT_ERROR or "n/a",
+    )
+
+# 🆕 v5.6.31 WARMUP-3: تقرير حالة warmup detectors
+if _HAS_WARMUP_DETECTORS:
+    logger.info(
+        "🔥 warmup_detectors_pool: ✅ متاح — سيُشغَّل بعد "
+        "نجاح Telegram API warmup (v7.18.39+ handlers_message)"
+    )
+else:
+    logger.debug(
+        "ℹ️ warmup_detectors_pool: غير متاح — "
+        "handlers_message أقدم من v7.18.39 | err=%s",
+        _WARMUP_DETECTORS_IMPORT_ERROR or "n/a",
     )
 
 if _ANALYTICS_HANDLERS_AVAILABLE:
@@ -2954,7 +3088,7 @@ async def main():
     logger.info("👨‍💼 المالك: %s", CONFIG.PRIMARY_OWNER_ID)
 
     logger.info(
-        "📦 bot.py: v5.6.30 | "
+        "📦 bot.py: v5.6.31 | "
         "detectors=%s | layers=%d | helpers=%s | "
         "db_idle=%s | cache_stats=%s | analytics=%s | "
         "fullhealth=%s | latency=%s | maint_cmds=%s | "
@@ -2963,7 +3097,8 @@ async def main():
         "dup_fix=on | sleep_probe=%s | app_start=on | "
         "watcher_interval=%.0fs | shutdown_robust=on | "
         "httpx_pool=%s | "
-        "db_diag=%s | db_diag_mark=%s",
+        "db_diag=%s | db_diag_mark=%s | "
+        "warmup_detectors=%s",
         _SPAM_DETECTOR_VERSION or "N/A",
         _SPAM_DETECTOR_LAYERS_COUNT,
         (
@@ -2989,6 +3124,7 @@ async def main():
         "32" if _HAS_HTTPX_REQUEST else "default(1)",
         _DB_DIAG_VERSION or "N/A",
         "on" if _MARK_PROCESS_START_FN is not None else "off",
+        "yes" if _HAS_WARMUP_DETECTORS else "no",
     )
 
     try:
@@ -3111,6 +3247,13 @@ async def main():
             "ℹ️ Telegram API warmup لم ينجح — البوت سيستمر "
             "(قد يكون أول /start أبطأ قليلاً)."
         )
+
+    # ═══════════════════════════════════════════════════════════════════
+    # 🆕 v5.6.31 WARMUP-1: تسخين مجمع detectors (غير حاجب)
+    # ═══════════════════════════════════════════════════════════════════
+    # يُشغَّل كـtask خلفي بالتوازي مع تسجيل handlers — لا يحجب main().
+    # الأثر: أول رسالة حقيقية ستجد المجمع جاهزاً → ~250ms بدل ~8000ms.
+    _spawn_warmup_detectors_pool()
 
     try:
         _register_message_shutdown(app)
@@ -3602,6 +3745,23 @@ async def main():
             _MEMBERSHIP_IMPORT_ERROR or "unknown",
         )
 
+    # ═══════════════════════════════════════════════════════════════
+    # 🆕 v5.6.31 WARMUP-2: انتظار قصير (≤2s) لانتهاء التسخين
+    # ═══════════════════════════════════════════════════════════════
+    # انتظار قصير جداً — إن انتهى التسخين فوراً، نعرض رسالة نجاح.
+    # إن استمر، نتركه في الخلفية (لا نحجب startup).
+    if _WARMUP_DETECTORS_TASK is not None and not _WARMUP_DETECTORS_TASK.done():
+        _warmup_ok = await _await_warmup_detectors_pool(timeout=2.0)
+        if _warmup_ok:
+            logger.info(
+                "✅ detectors pool: جاهز قبل أول رسالة حقيقية"
+            )
+        else:
+            logger.info(
+                "⏳ detectors pool: سيكمل في الخلفية "
+                "(محمي بـ _SPAM_ASYNC_TIMEOUT=2.5s في handlers_message)"
+            )
+
     tasks: List[asyncio.Task] = []
 
     _bg_task_specs: List[Tuple[str, Any, tuple]] = [
@@ -3817,6 +3977,19 @@ async def main():
                     _t.cancel()
             except asyncio.CancelledError:
                 raise
+
+        # 🆕 v5.6.31 WARMUP-2: إلغاء مهمة تسخين detectors إن لم تنتهِ
+        if _WARMUP_DETECTORS_TASK is not None and \
+                not _WARMUP_DETECTORS_TASK.done():
+            try:
+                _WARMUP_DETECTORS_TASK.cancel()
+                try:
+                    await _WARMUP_DETECTORS_TASK
+                except (asyncio.CancelledError, Exception):
+                    pass
+                logger.debug("🛑 warmup_detectors_pool: أُلغيت")
+            except Exception as _e:
+                logger.debug("cancel warmup task: %s", _e)
 
         for t in tasks:
             if not t.done():
