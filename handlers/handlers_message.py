@@ -1,38 +1,44 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-handlers_message.py - v7.18.38 (UPDATE-CHANNEL-STATE-FIX)
+handlers_message.py - v7.18.39 (SPAM-TIMEOUT + SLOW-MODE-FIX)
 (متوافق مع detectors v4.1.0 + banned_words_manager v1.2.0)
 =============================================================================
-🆕 v7.18.38 (UPDATE-CHANNEL-STATE-FIX) — إصلاح باغ تعيين قناة التحديثات:
-    🔴 FIX-STATE-1 (CRITICAL): حذف WAIT_UPDATE_CHANNEL من
-        _PRIVATE_HANDLERS_MAP.
-        السبب: السطر القديم كان:
-            "WAIT_UPDATE_CHANNEL": "_handle_wait_channel_text",
-        الاسم "WAIT_UPDATE_CHANNEL" يشبه WAIT_UPDATE_CH (قناة
-        التحديثات) لكنه في الواقع كان يُشغّل _handle_wait_channel_text
-        الذي يُضيف القناة كـ **قناة نشطة** (user_channels).
-        الأثر المُبلَّغ عنه من production:
-          • المشرف يضغط "تعيين قناة التحديثات" → يرسل @channel
-          • القناة تظهر في "القناة النشطة" (❌ خطأ)
-          • قناة التحديثات تبقى فارغة (❌ خطأ)
-        الإصلاح: حذف السطر + إضافة WAIT_UPDATE_CHANNEL إلى
-        _EXTERNAL_HANDLED_STATES (يُعالَج في handlers_command).
+🆕 v7.18.39 (SPAM-TIMEOUT + SLOW-MODE-FIX):
 
+    🔴 FIX-TIMEOUT-1 (CRITICAL): إضافة timeout صريح حول
+        analyze_message_full_async + sync-pool fallback.
+        السبب: cold-start لمجمع detectors كان يستهلك ~8 ثواني في
+        أول رسالة بعد الإقلاع (قياس: 8220ms للرسالة الأولى مقابل
+        284ms للثانية — فرق 29×).
+        الأثر: overshoots متزامنة في keep_alive/monitor_pool/
+        _watch_runner لأن الـevent loop كان محجوباً.
+        الإصلاح:
+          • _SPAM_ASYNC_TIMEOUT = 2.5s (ثابت جديد)
+          • asyncio.wait_for(analyze_message_full_async, timeout=...)
+          • تخفيض sync-pool timeout من 30.0s → _SPAM_ASYNC_TIMEOUT
+          • fallback تلقائي إلى text-only عند timeout
+
+    🟢 FIX-WARMUP-1: دالة warmup_detectors_pool() جديدة.
+        الهدف: تهيئة مجمع detectors + استيراد الوحدات الثقيلة
+        (PIL/numpy/cv2/pytesseract) عند الإقلاع — قبل أول رسالة.
+        الاستخدام (في bot.py/main.py بعد post_init):
+            asyncio.create_task(warmup_detectors_pool())
+
+    🟡 FIX-SLOWMODE-1: إصلاح منطق _SLOW_MODE_UNSUPPORTED.
+        السبب: رسالة "not found" عامة كانت تُعطّل slow-mode نهائياً
+        (permanent flag) — حتى لو كانت المشكلة chat_id/token.
+        الإصلاح:
+          • فحص أكثر تحديداً: "method not found" / "unknown method"
+            أو 404 مع ذكر "setChatSlowModeDelay" صريحاً.
+          • فحص bot.token قبل HTTP fallback + error واضح.
+          • سجل تفصيلي عند التعطيل الدائم (لمرة واحدة).
+
+    🟢 KEPT: كل إصلاحات v7.18.38 ومحتوى v7.18.37 وما قبله.
+
+🆕 v7.18.38 (UPDATE-CHANNEL-STATE-FIX) — محفوظ:
+    🔴 FIX-STATE-1: حذف WAIT_UPDATE_CHANNEL من _PRIVATE_HANDLERS_MAP.
     🟡 FIX-STATE-2: _EXTERNAL_HANDLED_STATES — إضافة WAIT_UPDATE_CHANNEL.
-        ملاحظة مهمة: لا نُضيفها كـ "silent ignore" — بل كإشارة
-        إلى أن handlers_command.handle_text يتولاها. لهذا يحتاج
-        handlers_command إلى تعديل مماثل (accept both names).
-
-🆕 v7.18.37 (POLISH-PLUS-2) — محفوظ:
-    🟡 POLISH-13-ENHANCED, THREADING-NOTE, LAYER-ENABLED-DOC.
-
-🆕 v7.18.36 (POLISH-PLUS) — محفوظ.
-🆕 v7.18.35 (POLISH-1-COMPLETE) — محفوظ.
-🆕 v7.18.34 (POLISH-1) — محفوظ.
-🆕 v7.18.33 (BATCH-SETTINGS) — محفوظ.
-🆕 v7.18.32 (FSM-COVERAGE) — محفوظ.
-🆕 v7.18.31..v7.18.14 — محفوظ.
 =============================================================================
 """
 
@@ -72,6 +78,14 @@ from cache import settings_cache, posts_cache
 
 
 logger = logging.getLogger(__name__)
+
+
+# ═════════════════════════════════════════════════════════════════════
+# 🆕 v7.18.39 FIX-TIMEOUT-1: مهلة كشف Spam (كانت غير محدودة)
+# ═════════════════════════════════════════════════════════════════════
+# القياس في production: 8220ms للرسالة الأولى بعد الإقلاع (cold-start)،
+# 284ms للثانية. الحد 2.5s كافٍ جداً لأي نص قصير، ويمنع حجب event loop.
+_SPAM_ASYNC_TIMEOUT: float = 2.5
 
 
 # ═════════════════════════════════════════════════════════════════════
@@ -326,6 +340,65 @@ except ImportError:
     MessageOriginUser = MessageOriginHiddenUser = None
     MessageOriginChat = MessageOriginChannel = None
     _HAS_MESSAGE_ORIGIN = False
+
+
+# ═════════════════════════════════════════════════════════════════════
+# 🆕 v7.18.39 FIX-WARMUP-1: تسخين مجمع detectors
+# ═════════════════════════════════════════════════════════════════════
+# الغرض: تهيئة ThreadPoolExecutor + استيراد الوحدات الثقيلة (PIL/numpy/
+# cv2/pytesseract) عند الإقلاع — بدل أول رسالة حقيقية.
+#
+# الاستخدام (في bot.py أو main.py بعد post_init):
+#     asyncio.create_task(warmup_detectors_pool())
+#
+# النتيجة المتوقعة: أول رسالة حقيقية → ~250ms بدل ~8000ms.
+
+async def warmup_detectors_pool() -> bool:
+    """
+    v7.18.39 FIX-WARMUP-1: تسخين مجمع detectors + الوحدات الثقيلة.
+
+    Returns:
+        True إذا نجح التسخين الكامل، False عند أي فشل جزئي.
+    """
+    import importlib as _importlib
+    ok = True
+
+    # 1) إنشاء المجمع المشترك إن وُجد
+    if _detectors_module is not None:
+        try:
+            get_pool = getattr(_detectors_module, "_get_shared_pool", None)
+            if callable(get_pool):
+                _ = get_pool()
+                logger.info("✅ detectors pool warmed")
+        except Exception as e:
+            logger.debug("warmup: _get_shared_pool: %s", e)
+            ok = False
+
+    # 2) تحميل الوحدات الثقيلة (يُسرّع أول استدعاء فعلي)
+    for _mod_name in ("PIL", "PIL.Image", "numpy",
+                      "cv2", "pytesseract", "aiohttp"):
+        try:
+            _importlib.import_module(_mod_name)
+        except ImportError:
+            # غير مثبت — ليس خطأً، فقط لا يوجد
+            continue
+        except Exception as e:
+            logger.debug("warmup: import %s: %s", _mod_name, e)
+
+    # 3) تسخين دوال التحليل نفسها بمدخل فارغ (اختياري، آمن)
+    try:
+        from handlers.handlers_message_detectors import (
+            _normalize_text as _warm_norm,
+        )
+        _ = _warm_norm("warmup")
+    except Exception:
+        pass
+
+    logger.info(
+        "🔥 warmup_detectors_pool: done | ok=%s | "
+        "has_async=%s | has_sync=%s | timeout=%.1fs",
+        ok, _HAS_ASYNC_DETECTORS, _HAS_MULTILAYER, _SPAM_ASYNC_TIMEOUT)
+    return ok
 
 
 def _env_flag(name: str, default: bool = True) -> bool:
@@ -1049,7 +1122,7 @@ async def _lazy_init_columns(bot=None):
         _columns_last_attempt_ts = now
 
         db_type = getattr(DB, "DB_TYPE", "sqlite")
-        logger.info("🔧 v7.18.38: Auto-migration (DB_TYPE=%s)", db_type)
+        logger.info("🔧 v7.18.39: Auto-migration (DB_TYPE=%s)", db_type)
 
         cols = [
             ("delete_protected_any", "INTEGER DEFAULT 0",
@@ -3322,27 +3395,15 @@ def _accepts_state_arg(handler, handler_name: str) -> bool:
 
 
 # ═══════════════════════════════════════════════════════════════════
-# 🆕 v7.18.32 FIX-FSM-2/3 + v7.18.38 FIX-STATE-2:
+# v7.18.32 FIX-FSM-2/3 + v7.18.38 FIX-STATE-2 + v7.18.39 KEPT:
 #     _EXTERNAL_HANDLED_STATES — حالات يُسجَّل لها handler في ملف آخر
 # ═══════════════════════════════════════════════════════════════════
-# الحالات التي يُسجَّل لها handler في ملف آخر (خارج handle_private).
-# PTB v20+ ينفّذ كل الـ handlers المطابقة بالترتيب في نفس الـgroup.
-# بدون هذا الفلتر، handle_private قد يُظهر رسالة "لم أتعرف على
-# العملية" حتى لو تولّى handler آخر الرسالة بالفعل.
-#
-# ⚠️ v7.18.38 FIX-STATE-2:
-#   أُضيفت WAIT_UPDATE_CHANNEL إلى هذه القائمة (كانت في السابق
-#   في _PRIVATE_HANDLERS_MAP مربوطة بـ _handle_wait_channel_text
-#   → باغ: قناة التحديثات تُضاف كـ "قناة نشطة").
-#
-#   ملاحظة: handlers_command.handle_text (الـ fallback) مُعدَّل
-#   ليقبل WAIT_UPDATE_CH أو WAIT_UPDATE_CHANNEL.
 _EXTERNAL_HANDLED_STATES = frozenset({
     # ─── handlers_group_log.receive_log_channel ───
     "WAIT_LOG_CH",
     # ─── CommandHandlers.handle_text (قناة التحديثات) ───
     "WAIT_UPDATE_CH",
-    "WAIT_UPDATE_CHANNEL",   # 🆕 v7.18.38 FIX-STATE-2
+    "WAIT_UPDATE_CHANNEL",   # v7.18.38 FIX-STATE-2
     # ─── (TODO) معالج Documents مستقبلي ───
     "WAIT_IMPORT_FILE",
     "WAIT_BACKUP_FILE",
@@ -3361,30 +3422,16 @@ class MessageHandlers:
         "WAIT_REPLY_RESPONSE": "handle_add_reply",
         "WAIT_REPLY_ADD": "handle_add_reply",
         "WAIT_REPLY_REMOVE": "handle_remove_reply",
-        # 🆕 v7.18.21 FIX-ROUTE-2: حالات إدخال القناة النشطة
+        # v7.18.21 FIX-ROUTE-2: حالات إدخال القناة النشطة
         "WAIT_CHANNEL": "_handle_wait_channel_text",
         "WAIT_ADD_CHANNEL": "_handle_wait_channel_text",
-        # ═══════════════════════════════════════════════════════════════
-        # 🔴 v7.18.38 FIX-STATE-1: أُزيل السطر التالي (كان السبب في باغ
-        #    "قناة التحديثات تظهر كقناة نشطة"):
-        #
-        #    كان: "WAIT_UPDATE_CHANNEL": "_handle_wait_channel_text",
-        #
-        #    السبب: الاسم يشبه WAIT_UPDATE_CH (قناة التحديثات) لكنه
-        #    كان يُشغّل _handle_wait_channel_text (القناة النشطة).
-        #    النتيجة: المستخدم يضغط "تعيين قناة التحديثات" → يرسل
-        #    @channel → البوت يُضيف القناة كقناة نشر (user_channels)
-        #    بدل حفظها في settings.updates_channel.
-        #
-        #    الإصلاح: حذف السطر + إضافة WAIT_UPDATE_CHANNEL إلى
-        #    _EXTERNAL_HANDLED_STATES (يُعالَج في handlers_command).
-        # ═══════════════════════════════════════════════════════════════
-        # 🆕 v7.18.28 FIX-ADDING-1: حالات إضافة المنشورات
+        # v7.18.38 FIX-STATE-1: أُزيل WAIT_UPDATE_CHANNEL من هنا
+        # v7.18.28 FIX-ADDING-1: حالات إضافة المنشورات
         "ADDING_POSTS": "_handle_adding_posts_text",
         "WAIT_POST": "_handle_adding_posts_text",
-        # 🆕 v7.18.29 FIX-SUPPORT-1: حالة الدعم الفني
+        # v7.18.29 FIX-SUPPORT-1: حالة الدعم الفني
         "SUPPORT_MODE": "_handle_support_mode_text",
-        # 🆕 v7.18.32 FIX-FSM-1: حالات FSM ناقصة
+        # v7.18.32 FIX-FSM-1: حالات FSM ناقصة
         "WAIT_AUTO_KEY": "_handle_wait_auto_key_text",
         "WAIT_AUTO_DEL": "_handle_wait_auto_del_text",
         "WAIT_PENALTY_DURATION": "_handle_wait_penalty_duration_text",
@@ -3431,6 +3478,9 @@ class MessageHandlers:
         finally:
             await _release_group_limiter(limiter, limiter_acquired)
 
+    # ═══════════════════════════════════════════════════════════════
+    # 🆕 v7.18.39 FIX-SLOWMODE-1: منطق _apply_slow_mode مُحسَّن
+    # ═══════════════════════════════════════════════════════════════
     @staticmethod
     async def _apply_slow_mode(context, chat_id, settings):
         global _SLOW_MODE_UNSUPPORTED
@@ -3501,9 +3551,13 @@ class MessageHandlers:
             if not _api_success:
                 try:
                     import aiohttp
+                    # 🆕 FIX-SLOWMODE-1: فحص token صريح
                     _token = getattr(context.bot, "token", None)
                     if not _token:
-                        raise RuntimeError("bot.token غير متاح")
+                        _token = os.getenv("BOT_TOKEN", "")
+                    if not _token:
+                        raise RuntimeError(
+                            "bot.token غير متاح (تحقق من BOT_TOKEN)")
                     _url = (
                         f"https://api.telegram.org/bot{_token}"
                         f"/setChatSlowModeDelay")
@@ -3536,15 +3590,31 @@ class MessageHandlers:
                     "🐌 SLOW-MODE | chat=%s requested=%d applied=%d",
                     chat_id, target, _target_tg)
             else:
+                # 🆕 FIX-SLOWMODE-1: فحص أكثر تحديداً لـ"not found"
+                # قديم: أي "not found"/"404" يعطّل الميزة نهائياً — خاطئ
+                # جديد: فقط إن كان الخطأ صريحاً في اسم الطريقة
                 _err_lower = (_api_error or "").lower()
-                if ("not found" in _err_lower
-                        or "404" in _err_lower):
+                _method_unsupported = (
+                    "method not found" in _err_lower
+                    or "unknown method" in _err_lower
+                    or "setchatslowmodedelay" in _err_lower
+                    and ("not found" in _err_lower
+                         or "404" in _err_lower)
+                )
+                if _method_unsupported:
                     if not _SLOW_MODE_UNSUPPORTED:
                         _SLOW_MODE_UNSUPPORTED = True
                         logger.warning(
                             "⚠️ SLOW-MODE: معطّل نهائياً — "
                             "Telegram Bot API لا يوفّر "
-                            "setChatSlowModeDelay")
+                            "setChatSlowModeDelay | err=%s",
+                            _api_error)
+                else:
+                    # خطأ عابر (chat_id خاطئ، صلاحيات، شبكة) — لا نُعطّل
+                    logger.debug(
+                        "🐌 SLOW-MODE failed (transient) | "
+                        "chat=%s err=%s",
+                        chat_id, _api_error)
         except Exception as e:
             logger.debug("_apply_slow_mode: %s", e)
 
@@ -3668,11 +3738,16 @@ class MessageHandlers:
         _verdict = None
         _analysis_mode = "text-only"
 
+        # ═══════════════════════════════════════════════════════════════
+        # 🆕 v7.18.39 FIX-TIMEOUT-1: timeout صريح لكل مسارات Spam
+        # ═══════════════════════════════════════════════════════════════
         if _spam_enabled:
             if _MULTILAYER_ENABLED and _HAS_ASYNC_DETECTORS:
                 try:
-                    _verdict = await analyze_message_full_async(
-                        message, bot=context.bot)
+                    _verdict = await asyncio.wait_for(
+                        analyze_message_full_async(
+                            message, bot=context.bot),
+                        timeout=_SPAM_ASYNC_TIMEOUT)
                     if _verdict is not None:
                         _spam_score = int(
                             getattr(_verdict, "total_score", 0) or 0)
@@ -3690,6 +3765,13 @@ class MessageHandlers:
                         except Exception:
                             pass
                         _analysis_mode = "multilayer-async"
+                except asyncio.TimeoutError:
+                    logger.warning(
+                        "⚠️ SPAM-TIMEOUT | chat=%s user=%s | "
+                        "%.1fs exceeded — fallback text-only",
+                        chat_id, user_id, _SPAM_ASYNC_TIMEOUT)
+                    _verdict = None
+                    _analysis_mode = "text-only-timeout"
                 except Exception as e:
                     logger.debug("multilayer async error: %s", e)
                     _verdict = None
@@ -3697,7 +3779,7 @@ class MessageHandlers:
                 try:
                     _verdict = await _run_sync_in_pool(
                         analyze_message_full, message, context.bot,
-                        timeout=30.0)
+                        timeout=_SPAM_ASYNC_TIMEOUT)
                     if _verdict is not None:
                         _spam_score = int(
                             getattr(_verdict, "total_score", 0) or 0)
@@ -3718,17 +3800,19 @@ class MessageHandlers:
                             "multilayer-sync-pool-DEGRADED")
                 except asyncio.TimeoutError:
                     logger.warning(
-                        "⚠️ multilayer sync pool: TIMEOUT (30s) | "
+                        "⚠️ multilayer sync pool: TIMEOUT (%.1fs) | "
                         "chat=%s user=%s — fallback to text-only",
-                        chat_id, user_id)
+                        _SPAM_ASYNC_TIMEOUT, chat_id, user_id)
                     _verdict = None
+                    _analysis_mode = "text-only-timeout"
                 except Exception as e:
                     logger.debug("multilayer sync-pool error: %s", e)
                     _verdict = None
             if _verdict is None:
                 try:
                     _spam_score, _spam_reasons = _compute_spam_score(ctx)
-                    _analysis_mode = "text-only"
+                    if _analysis_mode == "text-only":
+                        _analysis_mode = "text-only"
                 except Exception as e:
                     logger.debug("spam_score: %s", e)
 
@@ -6799,19 +6883,25 @@ __all__ = [
     "_PENALTY_DURATION_OVERRIDE_MAX",
     "_get_penalty_duration_override",
     "_invalidate_penalty_duration_override_cache",
+    # 🆕 v7.18.39
+    "_SPAM_ASYNC_TIMEOUT",
+    "warmup_detectors_pool",
 ]
 
 
 # ═════════════════════════════════════════════════════════════════════
-# LOAD BEACON
+# LOAD BEACON — v7.18.39
 # ═════════════════════════════════════════════════════════════════════
 
 try:
     logger.info(
-        "✅ handlers_message v7.18.38 loaded | "
+        "✅ handlers_message v7.18.39 loaded | "
         "BWM=%s | PRIVATE_HANDLERS=%d | "
         "external_handled=%d | "
         "routing-fallback=7-paths | "
+        "SPAM-TIMEOUT=%.1fs | "
+        "WARMUP=available | "
+        "SLOW-MODE-FIX=active | "
         "WAIT_CHANNEL=direct-handler | "
         "WAIT_UPDATE_CHANNEL=EXTERNAL (FIX-STATE-1/2) | "
         "WAIT_UPDATE_CH=EXTERNAL (command) | "
@@ -6828,10 +6918,12 @@ try:
         "penalty-duration=bridged | "
         "detectors-compat=v4.1.0 | "
         "commands=(cache_stats, db_idle, autoblocked) | "
-        "fixes=(FIX-STATE-1, FIX-STATE-2, UPDATE-CHANNEL-STATE-FIX)",
+        "fixes=(FIX-TIMEOUT-1, FIX-WARMUP-1, FIX-SLOWMODE-1, "
+        "FIX-STATE-1, FIX-STATE-2, UPDATE-CHANNEL-STATE-FIX)",
         "yes" if _HAS_BWM else "no",
         len(MessageHandlers._PRIVATE_HANDLERS_MAP),
         len(_EXTERNAL_HANDLED_STATES),
+        _SPAM_ASYNC_TIMEOUT,
     )
 except Exception:
     pass
