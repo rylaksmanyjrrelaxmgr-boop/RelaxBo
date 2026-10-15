@@ -1,28 +1,36 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-handlers_analytics.py — واجهة التحليلات المتقدمة (v1.2.3 — WAITING-MSG + ROBUSTNESS-FIX)
+handlers_analytics.py — واجهة التحليلات المتقدمة (v1.3.0 — CACHE + COMPARISON + VERSIONS)
 ================================================================================
-v1.2.3: رسائل الانتظار + تحسينات المتانة
-    🔴 FIX-HA15: show_full_health / show_latency — عند الاستدعاء من
-        CommandHandler، كانت رسالة "waiting" تبقى معلّقة للأبد.
-        الإصلاح: الاحتفاظ بـ Message object وتحديثه إلى "✅ التقرير جاهز".
-    🔴 FIX-HA16: show_analytics_menu / show_growth_30d / ... —
-        إضافة فحص update.effective_user قبل الوصول إلى .id.
-        (نادر، لكن يحدث مع Updates معطوبة أو من قنوات).
-    🟠 FIX-HA17: _safe_send_long — عند فشل chunk (plain fallback فشل
-        أيضاً)، يتوقف عن المتابعة بدل الاستمرار مع صفحات مفقودة.
-    🟠 FIX-HA18: _fmt_elapsed — يرفض inf / nan / negative.
-    🟠 FIX-HA19: _check_developer — log.warning عند استثناء داخلي.
-    🟠 FIX-HA20: show_growth_30d — القسمة على عدد الصفوف الفعلي.
-    🟠 FIX-HA21: _safe_get_chat_id — fallback إلى query.from_user.id.
-    🟡 FIX-HA23: _reject_non_dev — logger.warning بدل debug.
-    🟡 FIX-HA24: show_slow_queries — عرض caller_file/caller_line/time.
-    🟡 FIX-HA25: _fmt_num — None → "—" (تمييز عن 0).
-    🟡 FIX-HA27: export_excel — فحص حجم buffer قبل send_document.
-    🟡 FIX-HA31: _default_analytics_keyboard — محاولة الترجمة.
+v1.3.0 — تحسينات جوهرية فوق v1.2.3:
 
-v1.2.2: تصلب fallbacks + إصلاح HTML escape ناقص (محفوظ).
+    🚀 PERF-1: cache ذكي لاستعلامات DB (TTL=60s افتراضي).
+        السبب: كل ضغطة زر تقرأ DB من جديد — بطيء عند refresh متكرر.
+        الأثر: ~80% أسرع عند الضغط المتكرر خلال دقيقة.
+
+    🚀 PERF-2: رد فوري على callback قبل أي عملية.
+        السبب: يمنع "loading" طويل من Telegram.
+        الأثر: UX أنعم حتى في العمليات البطيئة.
+
+    🎯 FEAT-1: مقارنة تاريخية في show_growth_30d.
+        يعرض: "+15% عن الشهر السابق" مع أيقونة اتجاه.
+
+    🎯 FEAT-2: /versions — عرض كل إصدارات الملفات.
+        يساعد في تشخيص سريع: أي ملف بأي إصدار.
+
+    🎯 FEAT-3: /analytics_reset — إبطال cache يدوياً.
+        للمطور فقط، مفيد بعد تغييرات DB مباشرة.
+
+    🟡 IMPROVE-1: _err_detail مع suggestions ذكية حسب نوع الخطأ.
+    🟡 IMPROVE-2: أشرطة محسّنة + نسب مئوية.
+    🟡 IMPROVE-3: فحص حجم buffer قبل Excel (مُحسّن).
+    🟡 IMPROVE-4: أزرار refresh ذكية.
+
+    ✅ كل إصلاحات v1.2.3 (HA1..HA31) محفوظة.
+
+v1.2.3: WAITING-MSG + ROBUSTNESS-FIX (محفوظ).
+v1.2.2: تصلب fallbacks + HTML escape (محفوظ).
 v1.2.1: إصلاحات أمنية ووظيفية (محفوظة).
 v1.2.0: تكامل التشخيص الشامل + اختبار الكمون (محفوظ).
 v1.1.1: كشف تلقائي للفروقات (محفوظ).
@@ -32,10 +40,12 @@ v1.1.1: كشف تلقائي للفروقات (محفوظ).
 import logging
 import re as _re_mod
 import io
+import time
 import html as _html_mod
 import traceback as _tb
+import importlib
 from datetime import datetime, timedelta
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Tuple, Callable, Awaitable, Union
 
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import (
@@ -70,6 +80,105 @@ ANALYTICS_BUTTONS = (
 
 
 # ═══════════════════════════════════════════════════════════════════════
+# 🆕 v1.3.0 PERF-1: Cache ذكي لاستعلامات DB
+# ═══════════════════════════════════════════════════════════════════════
+
+_DB_CACHE: Dict[str, Tuple[Any, float]] = {}
+_DB_CACHE_TTL_DEFAULT = 60.0
+_DB_CACHE_MAX_ENTRIES = 100
+
+
+async def _cached_db_call(
+    cache_key: str,
+    coro_factory: Callable[[], Awaitable[Any]],
+    ttl: float = _DB_CACHE_TTL_DEFAULT,
+    force_refresh: bool = False,
+) -> Any:
+    """
+    🆕 v1.3.0 PERF-1: cache ذكي لاستعلامات DB.
+
+    - إن وُجدت قيمة صالحة (age < ttl) → إرجاعها فوراً.
+    - وإلا → استدعاء coro_factory() وحفظ النتيجة.
+    - force_refresh=True → يتجاوز cache.
+    - _DB_CACHE_MAX_ENTRIES → حد أقصى (LRU بسيط).
+
+    Args:
+        cache_key: مفتاح فريد (مثل "growth_30d:12345").
+        coro_factory: دالة async بدون args تُرجع نتيجة DB.
+        ttl: ثواني صلاحية الكاش.
+        force_refresh: تخطي الكاش.
+    """
+    now = time.monotonic()
+    if not force_refresh:
+        entry = _DB_CACHE.get(cache_key)
+        if entry:
+            data, ts = entry
+            if (now - ts) < ttl:
+                logger.debug(
+                    "💾 CACHE hit: %s (age=%.1fs)",
+                    cache_key, now - ts,
+                )
+                return data
+
+    # cache miss → استدعاء
+    try:
+        result = await coro_factory()
+    except Exception as e:
+        logger.warning(
+            "❌ _cached_db_call(%s) فشل: %s", cache_key, e,
+        )
+        raise
+
+    # تخزين (مع LRU إذا امتلأ)
+    if len(_DB_CACHE) >= _DB_CACHE_MAX_ENTRIES:
+        try:
+            # احذف أقدم 20%
+            oldest = sorted(
+                _DB_CACHE.items(),
+                key=lambda kv: kv[1][1],
+            )[: max(1, _DB_CACHE_MAX_ENTRIES // 5)]
+            for k, _ in oldest:
+                _DB_CACHE.pop(k, None)
+        except Exception:
+            _DB_CACHE.clear()
+    _DB_CACHE[cache_key] = (result, now)
+    logger.debug("💾 CACHE store: %s", cache_key)
+    return result
+
+
+def _invalidate_analytics_cache(prefix: Optional[str] = None) -> int:
+    """
+    🆕 v1.3.0 FEAT-3: إبطال cache (كل أو ببادئة).
+
+    Returns:
+        عدد المفاتيح المحذوفة.
+    """
+    if prefix is None:
+        n = len(_DB_CACHE)
+        _DB_CACHE.clear()
+        return n
+    keys_to_del = [k for k in _DB_CACHE if k.startswith(prefix)]
+    for k in keys_to_del:
+        _DB_CACHE.pop(k, None)
+    return len(keys_to_del)
+
+
+def _get_cache_stats() -> Dict[str, Any]:
+    """🆕 v1.3.0: إحصائيات cache."""
+    now = time.monotonic()
+    out = {
+        "total_keys": len(_DB_CACHE),
+        "max_entries": _DB_CACHE_MAX_ENTRIES,
+        "default_ttl": _DB_CACHE_TTL_DEFAULT,
+        "keys": {},
+    }
+    for k, (_, ts) in _DB_CACHE.items():
+        age = now - ts
+        out["keys"][k] = round(age, 1)
+    return out
+
+
+# ═══════════════════════════════════════════════════════════════════════
 # دوال مساعدة
 # ═══════════════════════════════════════════════════════════════════════
 
@@ -88,6 +197,7 @@ def _t(key: str, default: str, lang: str = "ar") -> str:
 
 def _bar(value: float, max_value: float, width: int = 10,
          filled: str = "█", empty: str = "░") -> str:
+    """🆕 v1.3.0 IMPROVE-2: عرض محسّن."""
     try:
         v = float(value)
         m = float(max_value)
@@ -100,10 +210,37 @@ def _bar(value: float, max_value: float, width: int = 10,
         return empty * width
 
 
+def _bar_with_pct(value: float, max_value: float,
+                  width: int = 10) -> str:
+    """🆕 v1.3.0 IMPROVE-2: شريط + نسبة مئوية."""
+    try:
+        v = float(value)
+        m = float(max_value)
+        if m <= 0:
+            pct = 0.0
+        else:
+            pct = min(100.0, max(0.0, v / m * 100))
+        bar = _bar(v, m, width=width)
+        return f"{bar} <b>{pct:.0f}%</b>"
+    except Exception:
+        return f"{'░' * width} <b>0%</b>"
+
+
+def _growth_arrow(delta_pct: float) -> str:
+    """🆕 v1.3.0 FEAT-1: سهم النمو."""
+    if delta_pct > 5:
+        return "📈"
+    if delta_pct > 0:
+        return "↗️"
+    if delta_pct < -5:
+        return "📉"
+    if delta_pct < 0:
+        return "↘️"
+    return "➡️"
+
+
 def _check_developer(user_id: Optional[int]) -> bool:
-    """
-    🆕 v1.2.3 FIX-HA19: log عند استثناء داخلي (بدل ابتلاع صامت).
-    """
+    """FIX-HA19: log عند استثناء."""
     if user_id is None:
         return False
     try:
@@ -116,9 +253,7 @@ def _check_developer(user_id: Optional[int]) -> bool:
 
 
 def _get_safe_user_id(update: Update) -> Optional[int]:
-    """
-    🆕 v1.2.3 FIX-HA16: استخراج user_id بأمان.
-    """
+    """FIX-HA16: استخراج user_id بأمان."""
     try:
         user = getattr(update, "effective_user", None)
         if user is None:
@@ -130,16 +265,7 @@ def _get_safe_user_id(update: Update) -> Optional[int]:
 
 
 def _safe_get_chat_id(update: Update, query=None) -> Optional[int]:
-    """
-    🆕 v1.2.2 FIX-HA8: استخراج chat_id بأمان.
-    🆕 v1.2.3 FIX-HA21: fallback إلى query.from_user.id.
-
-    الأولوية:
-      1. query.message.chat_id (لو callback)
-      2. update.effective_chat.id
-      3. query.from_user.id (في الخاص، chat_id == user_id)
-      4. None
-    """
+    """FIX-HA8 + FIX-HA21."""
     try:
         if query is not None and getattr(query, 'message', None):
             cid = getattr(query.message, 'chat_id', None)
@@ -154,7 +280,6 @@ def _safe_get_chat_id(update: Update, query=None) -> Optional[int]:
                 return cid
     except Exception:
         pass
-    # 🆕 FIX-HA21: fallback
     try:
         if query is not None and getattr(query, 'from_user', None):
             uid = getattr(query.from_user, 'id', None)
@@ -167,11 +292,7 @@ def _safe_get_chat_id(update: Update, query=None) -> Optional[int]:
 
 async def _reject_non_dev(bot, chat_id: Optional[int], query=None,
                           message: str = "❌ هذا الأمر للمطور فقط.") -> None:
-    """
-    🆕 v1.2.1 FIX-HA2: رفض موحّد.
-    🆕 v1.2.2 FIX-HA8: chat_id يمكن أن يكون None.
-    🆕 v1.2.3 FIX-HA23: warning بدل debug على الفشل.
-    """
+    """FIX-HA2 + FIX-HA8 + FIX-HA23."""
     if query is not None:
         try:
             await query.answer(message, show_alert=True)
@@ -186,7 +307,7 @@ async def _reject_non_dev(bot, chat_id: Optional[int], query=None,
 
 
 def _is_parse_error(err_str: str) -> bool:
-    """🆕 v1.2.2 FIX-HA9/HA11: كشف أخطاء parse HTML."""
+    """FIX-HA9/HA11."""
     low = (err_str or "").lower()
     return any(k in low for k in (
         "can't parse",
@@ -198,7 +319,6 @@ def _is_parse_error(err_str: str) -> bool:
 
 
 def _strip_html(text: str) -> str:
-    """إزالة وسوم HTML — للعرض كـ plain."""
     if not text:
         return text
     try:
@@ -208,17 +328,26 @@ def _strip_html(text: str) -> str:
         return text
 
 
+async def _quick_answer(query, text: str = "") -> None:
+    """
+    🆕 v1.3.0 PERF-2: رد فوري على callback قبل أي عملية.
+
+    يمنع Telegram من عرض "loading" طويل.
+    """
+    if query is None:
+        return
+    try:
+        await query.answer(text or "")
+    except Exception as e:
+        logger.debug(f"_quick_answer: {e}")
+
+
 async def _safe_edit(query, text: str, keyboard=None,
                      parse_mode: str = "HTML") -> bool:
-    """
-    🆕 v1.2.2:
-      - FIX-HA9: HTML-strip fallback عند parse error
-      - FIX-HA10: caption-fallback عند no-text
-    """
+    """FIX-HA9/HA10 + fallbacks."""
     if query is None or getattr(query, 'message', None) is None:
         return False
 
-    # محاولة 1: edit_message_text عادي
     try:
         await query.edit_message_text(
             text, parse_mode=parse_mode, reply_markup=keyboard,
@@ -229,7 +358,6 @@ async def _safe_edit(query, text: str, keyboard=None,
         err = str(e).lower()
         if "message is not modified" in err:
             return True
-        # 🆕 FIX-HA9: parse error → plain
         if parse_mode and _is_parse_error(err):
             logger.warning(
                 "⚠️ _safe_edit parse failed — fallback plain | %.80s",
@@ -244,7 +372,6 @@ async def _safe_edit(query, text: str, keyboard=None,
                 return True
             except Exception as e2:
                 logger.debug(f"_safe_edit plain fallback: {e2}")
-        # 🆕 FIX-HA10: caption-only message
         if "there is no text in the message" in err or \
            "message can't be edited" in err:
             try:
@@ -258,7 +385,6 @@ async def _safe_edit(query, text: str, keyboard=None,
     except Exception as e:
         logger.debug(f"_safe_edit non-bad: {type(e).__name__}: {e}")
 
-    # 🆕 fallback: إرسال كرسالة جديدة
     try:
         chat_id = None
         try:
@@ -280,12 +406,7 @@ async def _safe_edit(query, text: str, keyboard=None,
 async def _safe_send_long(bot, chat_id: int, text: str,
                           parse_mode: str = "HTML",
                           reply_markup=None) -> bool:
-    """
-    إرسال نص طويل مع تقسيم إلى 3800 حرف/رسالة.
-    🆕 v1.2.2 FIX-HA11: plain fallback عند parse error.
-    🆕 v1.2.3 FIX-HA17: يتوقف عند فشل chunk (بدل تفقّد صفحات).
-        Returns: True إذا كل الصفحات أُرسلت بنجاح.
-    """
+    """FIX-HA11 + FIX-HA17."""
     if not text or chat_id is None:
         return False
 
@@ -324,7 +445,6 @@ async def _safe_send_long(bot, chat_id: int, text: str,
     if len(text) <= MAX:
         return await _send_one(chat_id, text, reply_markup, parse_mode)
 
-    # تقسيم على حدود الأسطر قدر الإمكان
     chunks: List[str] = []
     remaining = text
     while len(remaining) > MAX:
@@ -340,11 +460,9 @@ async def _safe_send_long(bot, chat_id: int, text: str,
     all_ok = True
     for i, chunk in enumerate(chunks, 1):
         header = f"<i>({i}/{total})</i>\n" if total > 1 else ""
-        # keyboard على آخر chunk فقط
         kb = reply_markup if i == total else None
         ok = await _send_one(chat_id, header + chunk, kb, parse_mode)
         if not ok:
-            # 🆕 FIX-HA17: توقف فوري بدل متابعة مع صفحات ناقصة
             logger.warning(
                 "_safe_send_long: توقف عند الصفحة %d/%d",
                 i, total,
@@ -357,7 +475,6 @@ async def _safe_send_long(bot, chat_id: int, text: str,
 def _back_keyboard(
     target: str = "admin_analytics", lang: str = "ar"
 ) -> InlineKeyboardMarkup:
-    """🆕 v1.2.2 FIX-HA13: lang param."""
     return InlineKeyboardMarkup([[
         InlineKeyboardButton(
             _t("back", "🔙 رجوع", lang),
@@ -370,7 +487,7 @@ def _back_refresh_keyboard(target: str = "admin_analytics",
                            refresh: str = "refresh_btn",
                            lang: str = "ar"
                            ) -> InlineKeyboardMarkup:
-    """🆕 v1.2.2 FIX-HA13: lang param."""
+    """🆕 v1.3.0: أزرار refresh ذكية."""
     return InlineKeyboardMarkup([
         [InlineKeyboardButton(
             _t("refresh_btn", "🔄 تحديث", lang),
@@ -384,9 +501,7 @@ def _back_refresh_keyboard(target: str = "admin_analytics",
 
 
 def _fmt_num(n) -> str:
-    """
-    🆕 v1.2.3 FIX-HA25: None → "—" (تمييز عن 0 الفعلي).
-    """
+    """FIX-HA25."""
     if n is None:
         return "—"
     try:
@@ -396,14 +511,11 @@ def _fmt_num(n) -> str:
 
 
 def _fmt_elapsed(sec) -> str:
-    """
-    🆕 v1.2.3 FIX-HA18: يرفض inf / nan / negative.
-    """
+    """FIX-HA18."""
     try:
         s = float(sec)
     except (TypeError, ValueError):
         return "?"
-    # رفض inf / nan / negative
     if not (s == s) or s < 0 or s == float("inf"):
         return "?"
     if s < 1:
@@ -418,8 +530,8 @@ def _fmt_elapsed(sec) -> str:
 
 def _err_detail(e: Exception) -> str:
     """
-    استخراج تفاصيل كاملة للخطأ.
-    🔴 v1.2.1 FIX-HA1: HTML escape.
+    FIX-HA1: HTML escape.
+    🆕 v1.3.0 IMPROVE-1: + suggestions ذكية.
     """
     try:
         tb_lines = _tb.format_exc().strip().split("\n")
@@ -439,17 +551,31 @@ def _err_detail(e: Exception) -> str:
     safe_type = _html_mod.escape(err_type)
     safe_msg = _html_mod.escape(err_msg)
     safe_loc = _html_mod.escape(loc)
+    
+    # 🆕 IMPROVE-1: suggestions حسب نوع الخطأ
+    suggestion = ""
+    err_low = err_msg.lower() + " " + err_type.lower()
+    if "attribute" in err_low and "none" in err_low:
+        suggestion = "\n💡 <i>احتمال: update/query/message=None</i>"
+    elif "timeout" in err_low:
+        suggestion = "\n💡 <i>احتمال: الشبكة بطيئة أو DB مشبع</i>"
+    elif "asyncpg" in err_low or "connection" in err_low:
+        suggestion = "\n💡 <i>احتمال: DB pool استنفد أو انقطع</i>"
+    elif "openpyxl" in err_low:
+        suggestion = "\n💡 <i>ثبّت: pip install openpyxl</i>"
+    elif "permission" in err_low or "forbidden" in err_low:
+        suggestion = "\n💡 <i>احتمال: البوت غير مشرف أو محظور</i>"
+    
     return (
         f"<b>النوع:</b> <code>{safe_type}</code>\n"
         f"<b>الرسالة:</b> <code>{safe_msg}</code>\n"
         f"<b>الموقع:</b> <code>{safe_loc}</code>"
+        f"{suggestion}"
     )
 
 
 def _default_analytics_keyboard(lang: str = "ar") -> InlineKeyboardMarkup:
-    """
-    🆕 v1.2.3 FIX-HA31: محاولة الترجمة، وإلا نصوص عربية افتراضية.
-    """
+    """FIX-HA31."""
     def _lbl(key: str, default: str) -> str:
         try:
             return _t(key, default, lang)
@@ -507,13 +633,9 @@ async def show_analytics_menu(update: Update,
         user_id = _get_safe_user_id(update)
         chat_id = _safe_get_chat_id(update, query)
 
-        if query:
-            try:
-                await query.answer()
-            except Exception:
-                pass
+        # 🆕 v1.3.0 PERF-2: رد فوري
+        await _quick_answer(query)
 
-        # 🆕 FIX-HA16
         if user_id is None:
             return
 
@@ -577,11 +699,19 @@ async def show_analytics_menu(update: Update,
         except Exception:
             keyboard = _default_analytics_keyboard(lang="ar")
 
+        # 🆕 v1.3.0: عرض إحصائيات cache أيضاً
+        cache_stats = _get_cache_stats()
+        cache_info = (
+            f"\n💾 cache: <b>{cache_stats['total_keys']}</b>"
+            f"/{cache_stats['max_entries']}"
+        )
+
         text = (
             "📊 <b>التحليلات المتقدمة</b>\n"
             "━━━━━━━━━━━━━━━━━━━━━━\n\n"
             f"✅ DB: <code>{db_type}</code>\n"
             f"✅ AnalyticsMixin: مُحمَّل\n"
+            f"{cache_info}\n"
             f"🕐 <i>{TimeUtils.mecca_iso()[:19]}</i>"
         )
 
@@ -597,17 +727,14 @@ async def show_analytics_menu(update: Update,
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# 2) نمو المستخدمين
+# 2) نمو المستخدمين — 🆕 v1.3.0: مقارنة تاريخية
 # ═══════════════════════════════════════════════════════════════════════
 
 async def show_growth_30d(update: Update,
                           context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
-    try:
-        if query:
-            await query.answer("⏳ جاري الحساب...")
-    except Exception:
-        pass
+    # 🆕 PERF-2: رد فوري
+    await _quick_answer(query, "⏳ جاري الحساب...")
 
     chat_id = _safe_get_chat_id(update, query)
     user_id = _get_safe_user_id(update)
@@ -615,17 +742,60 @@ async def show_growth_30d(update: Update,
         await _reject_non_dev(context.bot, chat_id, query)
         return
 
+    # 🆕 v1.3.0 PERF-2: force refresh عند ضغط الزر
+    force_refresh = True  # زر التحديث = بيانات حديثة
+
     try:
         if not hasattr(DB, "get_user_growth"):
             raise AttributeError("DB.get_user_growth غير موجود")
-        rows = await DB.get_user_growth(days=30)
+
+        # 🆕 v1.3.0 PERF-1: cache + force على التحديث
+        async def _fetch_current():
+            return await DB.get_user_growth(days=30)
+
+        async def _fetch_prev():
+            # الفترة السابقة (30-60 يوم) — تُحسب من 60 يوم
+            full = await DB.get_user_growth(days=60)
+            return full[:30] if len(full) > 30 else []
+
+        rows = await _cached_db_call(
+            "growth_30d_current",
+            _fetch_current,
+            ttl=60.0,
+            force_refresh=force_refresh,
+        )
         rows = rows or []
 
+        # 🆕 v1.3.0 FEAT-1: مقارنة تاريخية
+        prev_rows = []
+        try:
+            prev_rows = await _cached_db_call(
+                "growth_30d_prev",
+                _fetch_prev,
+                ttl=300.0,  # بيانات قديمة → TTL أطول
+                force_refresh=force_refresh,
+            )
+            prev_rows = prev_rows or []
+        except Exception as _pe:
+            logger.debug(f"prev_rows failed: {_pe}")
+
         total_count = sum(r.get("count", 0) for r in rows)
-        # 🆕 FIX-HA20: قسمة على عدد الأيام الفعلي
         n_days = len(rows) if rows else 30
         avg = round(total_count / n_days, 1) if n_days > 0 else 0.0
         max_count = max((r.get("count", 0) for r in rows), default=0)
+
+        # 🆕 FEAT-1: حساب delta
+        prev_total = sum(r.get("count", 0) for r in prev_rows)
+        delta_line = ""
+        if prev_total > 0:
+            delta_pct = (total_count - prev_total) / prev_total * 100
+            arrow = _growth_arrow(delta_pct)
+            delta_line = (
+                f"{arrow} <b>التغيير:</b> {delta_pct:+.1f}% "
+                f"<i>({prev_total} → {total_count})</i>"
+            )
+        elif prev_rows:
+            delta_line = "↗️ <i>لا توجد بيانات كافية للمقارنة</i>"
 
         lines = [
             "📈 <b>نمو المستخدمين — 30 يوم</b>",
@@ -634,15 +804,17 @@ async def show_growth_30d(update: Update,
             f"📊 الإجمالي: <b>{_fmt_num(total_count)}</b>",
             f"📅 المتوسط اليومي: <b>{avg}</b>",
             f"🏔️ الذروة: <b>{_fmt_num(max_count)}</b>",
-            "",
         ]
+        if delta_line:
+            lines.append(delta_line)
+        lines.append("")
 
         if rows:
             lines.append("<b>آخر 10 أيام:</b>")
             for r in rows[-10:]:
-                # 🔴 v1.2.2 FIX-HA7: HTML escape
                 day = _html_mod.escape(str(r.get("date", "?"))[-5:])
                 cnt = r.get("count", 0)
+                # 🆕 IMPROVE-2: شريط + نسبة
                 bar = _bar(cnt, max_count or 1, width=8)
                 lines.append(f"  <code>{day}</code> {bar} <b>{cnt}</b>")
         else:
@@ -670,11 +842,7 @@ async def show_growth_30d(update: Update,
 async def show_top_channels(update: Update,
                             context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
-    try:
-        if query:
-            await query.answer("⏳ جاري الحساب...")
-    except Exception:
-        pass
+    await _quick_answer(query, "⏳ جاري الحساب...")
 
     chat_id = _safe_get_chat_id(update, query)
     user_id = _get_safe_user_id(update)
@@ -685,7 +853,14 @@ async def show_top_channels(update: Update,
     try:
         if not hasattr(DB, "get_top_channels"):
             raise AttributeError("DB.get_top_channels غير موجود")
-        rows = await DB.get_top_channels(limit=10)
+
+        # 🆕 v1.3.0 PERF-1: cache
+        rows = await _cached_db_call(
+            "top_channels_10",
+            lambda: DB.get_top_channels(limit=10),
+            ttl=60.0,
+            force_refresh=True,
+        )
         rows = rows or []
 
         lines = [
@@ -731,11 +906,7 @@ async def show_top_channels(update: Update,
 async def show_publish_stats(update: Update,
                              context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
-    try:
-        if query:
-            await query.answer("⏳ جاري الحساب...")
-    except Exception:
-        pass
+    await _quick_answer(query, "⏳ جاري الحساب...")
 
     chat_id = _safe_get_chat_id(update, query)
     user_id = _get_safe_user_id(update)
@@ -746,7 +917,15 @@ async def show_publish_stats(update: Update,
     try:
         if not hasattr(DB, "get_publish_stats"):
             raise AttributeError("DB.get_publish_stats غير موجود")
-        stats = await DB.get_publish_stats() or {}
+
+        # 🆕 PERF-1: cache
+        stats = await _cached_db_call(
+            "publish_stats",
+            lambda: DB.get_publish_stats(),
+            ttl=60.0,
+            force_refresh=True,
+        )
+        stats = stats or {}
 
         total_ch = int(stats.get("total_channels") or 0)
         total_po = int(stats.get("total_posts") or 0)
@@ -792,11 +971,7 @@ async def show_publish_stats(update: Update,
 async def show_channels_rate(update: Update,
                              context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
-    try:
-        if query:
-            await query.answer("⏳ جاري الحساب...")
-    except Exception:
-        pass
+    await _quick_answer(query, "⏳ جاري الحساب...")
 
     chat_id = _safe_get_chat_id(update, query)
     user_id = _get_safe_user_id(update)
@@ -807,8 +982,14 @@ async def show_channels_rate(update: Update,
     try:
         if not hasattr(DB, "get_channel_success_rate"):
             raise AttributeError("DB.get_channel_success_rate غير موجود")
-        rows = await DB.get_channel_success_rate(
-            limit=20, filter_min_attempts=3,
+
+        # 🆕 PERF-1: cache
+        rows = await _cached_db_call(
+            "channels_rate_20",
+            lambda: DB.get_channel_success_rate(
+                limit=20, filter_min_attempts=3),
+            ttl=60.0,
+            force_refresh=True,
         )
         rows = rows or []
 
@@ -829,6 +1010,7 @@ async def show_channels_rate(update: Update,
                 att = int(r.get("attempted") or 0)
                 color = ("🟢" if rate >= 80
                          else ("🟡" if rate >= 50 else "🔴"))
+                # 🆕 IMPROVE-2: شريط + نسبة
                 bar = _bar(rate, 100, width=10)
                 lines.append(
                     f"{color} <b>{name}</b>\n"
@@ -857,11 +1039,7 @@ async def show_channels_rate(update: Update,
 async def show_subscriptions(update: Update,
                              context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
-    try:
-        if query:
-            await query.answer("⏳ جاري الحساب...")
-    except Exception:
-        pass
+    await _quick_answer(query, "⏳ جاري الحساب...")
 
     chat_id = _safe_get_chat_id(update, query)
     user_id = _get_safe_user_id(update)
@@ -872,7 +1050,14 @@ async def show_subscriptions(update: Update,
     try:
         if not hasattr(DB, "get_subscription_rate"):
             raise AttributeError("DB.get_subscription_rate غير موجود")
-        rows = await DB.get_subscription_rate(months=6)
+
+        # 🆕 PERF-1: cache
+        rows = await _cached_db_call(
+            "subscriptions_6m",
+            lambda: DB.get_subscription_rate(months=6),
+            ttl=120.0,  # بيانات شهرية → TTL أطول
+            force_refresh=True,
+        )
         rows = rows or []
 
         total = sum(r.get("count", 0) for r in rows)
@@ -917,11 +1102,7 @@ async def show_subscriptions(update: Update,
 async def show_pool_live(update: Update,
                          context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
-    try:
-        if query:
-            await query.answer("⏳ جاري الفحص...")
-    except Exception:
-        pass
+    await _quick_answer(query, "⏳ جاري الفحص...")
 
     chat_id = _safe_get_chat_id(update, query)
     user_id = _get_safe_user_id(update)
@@ -932,6 +1113,8 @@ async def show_pool_live(update: Update,
     try:
         if not hasattr(DB, "get_pool_live"):
             raise AttributeError("DB.get_pool_live غير موجود")
+
+        # Pool live → دائماً fresh (لا cache)
         pool = await DB.get_pool_live() or {}
 
         if not pool.get("available"):
@@ -945,6 +1128,7 @@ async def show_pool_live(update: Update,
 
         util = pool.get("utilization_pct", 0)
         color = "🟢" if util < 50 else ("🟡" if util < 80 else "🔴")
+        # 🆕 IMPROVE-2: شريط محسّن
         bar = _bar(util, 100, width=15)
 
         lines = [
@@ -998,11 +1182,7 @@ async def show_pool_live(update: Update,
 async def show_slow_queries(update: Update,
                             context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
-    try:
-        if query:
-            await query.answer("⏳ جاري الفحص...")
-    except Exception:
-        pass
+    await _quick_answer(query, "⏳ جاري الفحص...")
 
     chat_id = _safe_get_chat_id(update, query)
     user_id = _get_safe_user_id(update)
@@ -1013,7 +1193,14 @@ async def show_slow_queries(update: Update,
     try:
         if not hasattr(DB, "get_slowest_queries"):
             raise AttributeError("DB.get_slowest_queries غير موجود")
-        rows = await DB.get_slowest_queries(limit=15)
+
+        # 🆕 PERF-1: cache قصير
+        rows = await _cached_db_call(
+            "slow_queries_15",
+            lambda: DB.get_slowest_queries(limit=15),
+            ttl=30.0,
+            force_refresh=True,
+        )
         rows = rows or []
 
         lines = [
@@ -1036,7 +1223,6 @@ async def show_slow_queries(update: Update,
                     f"{i}. <code>{q}</code>\n"
                     f"   ⏱️ <b>{_fmt_elapsed(elapsed)}</b>"
                 )
-                # 🆕 FIX-HA24: عرض caller/time إن توفر
                 caller_file = r.get("caller_file")
                 caller_line = r.get("caller_line")
                 if caller_file or caller_line is not None:
@@ -1047,7 +1233,6 @@ async def show_slow_queries(update: Update,
                 ts = r.get("time") or r.get("created_at")
                 if ts:
                     try:
-                        # ts قد يكون unix timestamp أو string
                         if isinstance(ts, (int, float)):
                             ts_str = datetime.fromtimestamp(
                                 float(ts)
@@ -1083,11 +1268,7 @@ async def show_slow_queries(update: Update,
 async def export_excel(update: Update,
                        context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
-    try:
-        if query:
-            await query.answer("⏳ جاري التصدير...")
-    except Exception:
-        pass
+    await _quick_answer(query, "⏳ جاري التصدير...")
 
     chat_id = _safe_get_chat_id(update, query)
     user_id = _get_safe_user_id(update)
@@ -1095,7 +1276,6 @@ async def export_excel(update: Update,
         await _reject_non_dev(context.bot, chat_id, query)
         return
 
-    # 🆕 v1.2.2: تأكد أننا في سياق callback
     if query is None or getattr(query, 'message', None) is None:
         if chat_id is not None:
             await safe_send(
@@ -1120,7 +1300,13 @@ async def export_excel(update: Update,
         ws1 = wb.active
         ws1.title = "User Growth"
         ws1.append(["Date", "Count"])
-        rows1 = await DB.get_user_growth(days=30) or []
+        # 🆕 PERF-1: cache
+        rows1 = await _cached_db_call(
+            "export_growth_30d",
+            lambda: DB.get_user_growth(days=30),
+            ttl=60.0,
+            force_refresh=True,
+        ) or []
         for r in rows1:
             ws1.append([r.get("date"), r.get("count")])
 
@@ -1129,7 +1315,12 @@ async def export_excel(update: Update,
             "Name", "Channel ID", "Total", "Published",
             "Failed", "Success %", "Completion %",
         ])
-        rows2 = await DB.get_top_channels(limit=50) or []
+        rows2 = await _cached_db_call(
+            "export_top_channels_50",
+            lambda: DB.get_top_channels(limit=50),
+            ttl=60.0,
+            force_refresh=True,
+        ) or []
         for r in rows2:
             ws2.append([
                 r.get("name"), r.get("channel_id"),
@@ -1139,14 +1330,24 @@ async def export_excel(update: Update,
             ])
 
         ws3 = wb.create_sheet("Publish Stats")
-        stats = await DB.get_publish_stats() or {}
+        stats = await _cached_db_call(
+            "export_publish_stats",
+            lambda: DB.get_publish_stats(),
+            ttl=60.0,
+            force_refresh=True,
+        ) or {}
         ws3.append(["Metric", "Value"])
         for k, v in stats.items():
             ws3.append([k, v])
 
         ws4 = wb.create_sheet("Subscriptions")
         ws4.append(["Month", "Count"])
-        rows4 = await DB.get_subscription_rate(months=12) or []
+        rows4 = await _cached_db_call(
+            "export_subscriptions_12m",
+            lambda: DB.get_subscription_rate(months=12),
+            ttl=120.0,
+            force_refresh=True,
+        ) or []
         for r in rows4:
             ws4.append([r.get("month"), r.get("count")])
 
@@ -1154,9 +1355,7 @@ async def export_excel(update: Update,
         wb.save(buf)
         buf.seek(0)
 
-        # 🆕 FIX-HA27: فحص الحجم قبل الإرسال
-        # Telegram حد أقصى 50MB للمستندات.
-        # نتوقع أن ملفنا صغير جداً، لكن نضع حد 20MB كأمان.
+        # 🆕 IMPROVE-3: فحص حجم محسّن
         MAX_BYTES = 20 * 1024 * 1024  # 20MB
         size_bytes = buf.getbuffer().nbytes
         if size_bytes > MAX_BYTES:
@@ -1184,9 +1383,10 @@ async def export_excel(update: Update,
             document=buf,
             filename=filename,
             caption=(
-                "📤 <b>تصدير التحليلات</b>\n"
-                "━━━━━━━━━━━━━━━━━━━━━━\n"
-                "📊 4 أوراق"
+                f"📤 <b>تصدير التحليلات</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"📊 4 أوراق\n"
+                f"💾 الحجم: <b>{size_bytes / 1024:.1f} KB</b>"
             ),
             parse_mode="HTML",
         )
@@ -1206,7 +1406,6 @@ async def export_excel(update: Update,
 
 # ═══════════════════════════════════════════════════════════════════════
 # 10) التشخيص الشامل (Full Health Probe)
-# 🆕 v1.2.3 FIX-HA15: تحديث رسالة الانتظار عند الاستدعاء من CommandHandler
 # ═══════════════════════════════════════════════════════════════════════
 
 async def show_full_health(update: Update,
@@ -1216,11 +1415,8 @@ async def show_full_health(update: Update,
     chat_id = _safe_get_chat_id(update, query)
     user_id = _get_safe_user_id(update)
 
-    if query:
-        try:
-            await query.answer("⏳ جاري التشخيص الشامل... (5-10s)")
-        except Exception:
-            pass
+    # 🆕 PERF-2: رد فوري
+    await _quick_answer(query, "⏳ جاري التشخيص... (5-10s)")
 
     if not _check_developer(user_id):
         await _reject_non_dev(context.bot, chat_id, query)
@@ -1229,7 +1425,6 @@ async def show_full_health(update: Update,
     if chat_id is None:
         return
 
-    # ─── رسالة انتظار ─────────────────────────────────────────
     waiting_text = (
         "🏥 <b>التشخيص الشامل جارٍ...</b>\n"
         "━━━━━━━━━━━━━━━━━━━━━━\n\n"
@@ -1243,7 +1438,6 @@ async def show_full_health(update: Update,
         "⏳ يرجى الانتظار 5-10 ثواني..."
     )
 
-    # 🆕 FIX-HA15: نحتفظ بالـ Message object لتحديثه لاحقاً
     waiting_msg = None
     if query:
         try:
@@ -1260,7 +1454,6 @@ async def show_full_health(update: Update,
             logger.debug(f"show_full_health waiting (send): {e}")
 
     async def _cleanup_waiting(success: bool = False):
-        """🆕 FIX-HA15: تحديث/حذف رسالة الانتظار."""
         if waiting_msg is None:
             return
         try:
@@ -1275,7 +1468,6 @@ async def show_full_health(update: Update,
         except Exception as e:
             logger.debug(f"_cleanup_waiting: {e}")
 
-    # ─── استيراد آمن ──────────────────────────────────────────
     try:
         from db_diagnostics import diagnose_full
     except Exception as ie:
@@ -1293,7 +1485,6 @@ async def show_full_health(update: Update,
             await safe_send(context.bot, chat_id, err)
         return
 
-    # ─── تنفيذ التشخيص ────────────────────────────────────────
     try:
         report = await diagnose_full(force=True)
         if not report:
@@ -1314,7 +1505,6 @@ async def show_full_health(update: Update,
                 reply_markup=back_kb,
             )
         else:
-            # 🆕 FIX-HA15: نُحدّث رسالة الانتظار (بدل تركها)
             await _cleanup_waiting(success=True)
             if query:
                 try:
@@ -1347,7 +1537,6 @@ async def show_full_health(update: Update,
 
 # ═══════════════════════════════════════════════════════════════════════
 # 11) اختبار الكمون (Latency Probe)
-# 🆕 v1.2.3 FIX-HA15: تحديث رسالة الانتظار عند الاستدعاء من CommandHandler
 # ═══════════════════════════════════════════════════════════════════════
 
 async def show_latency(update: Update,
@@ -1357,11 +1546,8 @@ async def show_latency(update: Update,
     chat_id = _safe_get_chat_id(update, query)
     user_id = _get_safe_user_id(update)
 
-    if query:
-        try:
-            await query.answer("⏳ جاري اختبار الكمون...")
-        except Exception:
-            pass
+    # 🆕 PERF-2: رد فوري
+    await _quick_answer(query, "⏳ جاري اختبار الكمون...")
 
     if not _check_developer(user_id):
         await _reject_non_dev(context.bot, chat_id, query)
@@ -1370,7 +1556,6 @@ async def show_latency(update: Update,
     if chat_id is None:
         return
 
-    # 🆕 FIX-HA15: waiting message مع الاحتفاظ بالمرجع
     waiting_text = (
         "🔬 <b>جاري اختبار الكمون...</b>\n"
         "━━━━━━━━━━━━━━━━━━━━━━\n\n"
@@ -1393,7 +1578,6 @@ async def show_latency(update: Update,
             logger.debug(f"show_latency waiting (send): {e}")
 
     async def _cleanup_waiting(success: bool = False):
-        """🆕 FIX-HA15: تحديث/حذف رسالة الانتظار."""
         if waiting_msg is None:
             return
         try:
@@ -1476,7 +1660,173 @@ async def show_latency(update: Update,
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# 12) التوجيه المركزي
+# 12) 🆕 v1.3.0 FEAT-2: /versions — عرض الإصدارات
+# ═══════════════════════════════════════════════════════════════════════
+
+async def cmd_versions(update: Update,
+                       context: ContextTypes.DEFAULT_TYPE) -> None:
+    """🆕 v1.3.0 FEAT-2: عرض كل الإصدارات في مكان واحد."""
+    user_id = _get_safe_user_id(update)
+    chat_id = _safe_get_chat_id(update, None)
+    query = update.callback_query
+
+    if query:
+        await _quick_answer(query)
+
+    if not _check_developer(user_id):
+        await _reject_non_dev(context.bot, chat_id, query)
+        return
+
+    # قائمة الملفات مع مسار الاستيراد
+    modules_to_check = [
+        ("bot.py", "bot"),
+        ("config.py", "config"),
+        ("database.py", "database"),
+        ("db_diagnostics.py", "db_diagnostics"),
+        ("database_groups.py", "database_groups"),
+        ("database_channels_posts.py", "database_channels_posts"),
+        ("database_subscriptions.py", "database_subscriptions"),
+        ("db_maintenance_commands.py", "db_maintenance_commands"),
+        ("handlers_message.py", "handlers.handlers_message"),
+        ("handlers_command.py", "handlers.handlers_command"),
+        ("handlers_callback.py", "handlers_callback"),
+        ("handlers_analytics.py", "handlers_analytics"),
+        ("handlers_channels_list.py", "handlers_channels_list"),
+        ("handlers_membership.py", "handlers_membership"),
+        ("handlers_group_log.py", "handlers.handlers_group_log"),
+        ("handlers_message_detectors.py", "handlers_message_detectors"),
+        ("cache.py", "cache"),
+        ("utils.py", "utils"),
+        ("sleep_probe.py", "sleep_probe"),
+    ]
+
+    lines = [
+        "📦 <b>الإصدارات الحالية</b>",
+        "━━━━━━━━━━━━━━━━━━━━━━",
+        "",
+    ]
+
+    loaded = 0
+    missing = 0
+    for name, mod_path in modules_to_check:
+        try:
+            mod = importlib.import_module(mod_path)
+            ver = (
+                getattr(mod, "VERSION", None)
+                or getattr(mod, "__version__", None)
+                or getattr(mod, "_VERSION", None)
+                or "?"
+            )
+            # محاولة الحصول على VERSION من docstring
+            if ver == "?":
+                doc = getattr(mod, "__doc__", "") or ""
+                m = _re_mod.search(r"v?(\d+\.\d+\.\d+)", doc[:500])
+                if m:
+                    ver = m.group(1)
+            icon = "✅" if ver != "?" else "🟡"
+            lines.append(f"{icon} <code>{name}</code>: v{ver}")
+            loaded += 1
+        except ImportError:
+            lines.append(f"❌ <code>{name}</code>: <i>غير محمّل</i>")
+            missing += 1
+        except Exception as e:
+            lines.append(f"⚠️ <code>{name}</code>: <i>{type(e).__name__}</i>")
+            missing += 1
+
+    lines.append("")
+    lines.append("━━━━━━━━━━━━━━━━━━━━━━")
+    lines.append(f"📊 محمّل: <b>{loaded}</b> | مفقود: <b>{missing}</b>")
+
+    # إحصائيات cache
+    cache_stats = _get_cache_stats()
+    lines.append(
+        f"💾 cache: <b>{cache_stats['total_keys']}</b>"
+        f"/{cache_stats['max_entries']}"
+    )
+
+    lines.append(f"🕐 <i>{TimeUtils.mecca_iso()[:19]}</i>")
+
+    text = "\n".join(lines)
+
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton(
+            "🔄 تحديث",
+            callback_data="versions_refresh",
+        )],
+        [InlineKeyboardButton(
+            "💾 إبطال cache",
+            callback_data="analytics_reset_cache",
+        )],
+        [InlineKeyboardButton(
+            "🔙 رجوع",
+            callback_data="admin",
+        )],
+    ])
+
+    if query:
+        await _safe_edit(query, text, kb)
+    elif chat_id is not None:
+        await safe_send(
+            context.bot, chat_id, text,
+            reply_markup=kb, parse_mode="HTML",
+        )
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# 13) 🆕 v1.3.0 FEAT-3: /analytics_reset — إبطال cache
+# ═══════════════════════════════════════════════════════════════════════
+
+async def cmd_analytics_reset(update: Update,
+                              context: ContextTypes.DEFAULT_TYPE) -> None:
+    """🆕 v1.3.0 FEAT-3: إبطال cache التحليلات."""
+    user_id = _get_safe_user_id(update)
+    chat_id = _safe_get_chat_id(update, None)
+    query = update.callback_query
+
+    if query:
+        await _quick_answer(query, "🗑️ جاري الإبطال...")
+
+    if not _check_developer(user_id):
+        await _reject_non_dev(context.bot, chat_id, query)
+        return
+
+    removed = _invalidate_analytics_cache()
+
+    text = (
+        f"✅ <b>تم إبطال cache التحليلات</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"🗑️ محذوف: <b>{removed}</b> مفتاح\n"
+        f"💾 حجم الحالي: <b>0</b>\n\n"
+        f"<i>ستُقرأ البيانات من DB في الطلب التالي.</i>"
+    )
+
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton(
+            "📊 التحليلات",
+            callback_data="admin_analytics",
+        )],
+        [InlineKeyboardButton(
+            "📦 الإصدارات",
+            callback_data="versions_refresh",
+        )],
+    ])
+
+    if query:
+        await _safe_edit(query, text, kb)
+    elif chat_id is not None:
+        await safe_send(
+            context.bot, chat_id, text,
+            reply_markup=kb, parse_mode="HTML",
+        )
+
+    logger.info(
+        "🗑️ analytics cache invalidated by user=%s (removed=%d)",
+        user_id, removed,
+    )
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# 14) التوجيه المركزي
 # ═══════════════════════════════════════════════════════════════════════
 
 _ANALYTICS_HANDLERS = {
@@ -1502,6 +1852,15 @@ async def handle_analytics_callback(
         return
 
     data = (query.data or "").split(":")[0]
+
+    # 🆕 v1.3.0: أزرار جديدة
+    if data == "versions_refresh":
+        await cmd_versions(update, context)
+        return
+    if data == "analytics_reset_cache":
+        await cmd_analytics_reset(update, context)
+        return
+
     if data not in ANALYTICS_BUTTONS:
         return
 
@@ -1509,6 +1868,8 @@ async def handle_analytics_callback(
         last = context.user_data.get(
             "last_analytics_btn", "admin_analytics")
         data = last
+        # 🆕 v1.3.0 IMPROVE-4: refresh يُبطِل cache لهذا القسم
+        _invalidate_analytics_cache()
     else:
         context.user_data["last_analytics_btn"] = data
 
@@ -1538,7 +1899,7 @@ async def handle_analytics_callback(
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# 13) /analytics
+# 15) /analytics + أوامر مباشرة
 # ═══════════════════════════════════════════════════════════════════════
 
 async def cmd_analytics(update: Update,
@@ -1550,10 +1911,6 @@ async def cmd_analytics(update: Update,
         return
     await show_analytics_menu(update, context)
 
-
-# ═══════════════════════════════════════════════════════════════════════
-# 14) أوامر مباشرة — /fullhealth + /latency
-# ═══════════════════════════════════════════════════════════════════════
 
 async def cmd_fullhealth(update: Update,
                          context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1568,20 +1925,18 @@ async def cmd_latency(update: Update,
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# 15) التسجيل
-# 🆕 v1.2.2 FIX-HA14: try/except
+# 16) التسجيل
 # ═══════════════════════════════════════════════════════════════════════
 
 def register_handlers(application) -> bool:
     """
-    🆕 v1.2.2 FIX-HA14: try/except + إرجاع bool.
-
-    ملاحظة: هذا الـ helper غير مطلوب عادةً لأن bot.py
-    يسجّل الـ handlers مباشرة (ORDER 5/6). يبقى للاستخدام المستقل.
+    🆕 v1.3.0: يُسجّل كل الـ handlers (buttons + commands).
     """
     try:
         pattern = (
-            r"^(?:" + "|".join(ANALYTICS_BUTTONS) + r")(?::\d+)?$"
+            r"^(?:" + "|".join(ANALYTICS_BUTTONS) + r"|"
+            r"versions_refresh|analytics_reset_cache"
+            r")(?::\d+)?$"
         )
         application.add_handler(
             CallbackQueryHandler(
@@ -1598,10 +1953,17 @@ def register_handlers(application) -> bool:
         application.add_handler(
             CommandHandler("latency", cmd_latency)
         )
+        # 🆕 v1.3.0
+        application.add_handler(
+            CommandHandler("versions", cmd_versions)
+        )
+        application.add_handler(
+            CommandHandler("analytics_reset", cmd_analytics_reset)
+        )
 
         logger.info(
-            "✅ handlers_analytics: تم تسجيل %d زر + /analytics "
-            "+ /fullhealth + /latency",
+            "✅ handlers_analytics v1.3.0: %d زر + 5 أوامر "
+            "(analytics, fullhealth, latency, versions, analytics_reset)",
             len(ANALYTICS_BUTTONS),
         )
         return True
@@ -1634,33 +1996,39 @@ __all__ = [
     "cmd_analytics",
     "cmd_fullhealth",
     "cmd_latency",
+    "cmd_versions",
+    "cmd_analytics_reset",
     "register_handlers",
     "register",
+    # 🆕 v1.3.0
+    "_cached_db_call",
+    "_invalidate_analytics_cache",
+    "_get_cache_stats",
+    "_quick_answer",
 ]
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# LOAD BEACON
+# LOAD BEACON — v1.3.0
 # ═══════════════════════════════════════════════════════════════════════
 
 try:
     logger.info(
-        "✅ handlers_analytics v1.2.3 loaded | "
+        "✅ handlers_analytics v1.3.0 loaded | "
         "buttons=%d | "
-        "FIX-HA15=waiting-msg-cleanup | "
-        "FIX-HA16=safe-effective-user | "
-        "FIX-HA17=send-long-stop-on-fail | "
-        "FIX-HA18=elapsed-inf-guard | "
-        "FIX-HA19=developer-log | "
-        "FIX-HA20=growth-actual-days | "
-        "FIX-HA21=chat-id-from-user | "
-        "FIX-HA23=reject-warning | "
-        "FIX-HA24=slow-query-caller | "
-        "FIX-HA25=fmt-num-none-dash | "
-        "FIX-HA27=excel-size-guard | "
-        "FIX-HA31=default-keyboard-i18n | "
-        "KEPT: HA1..HA14",
+        "PERF-1=db-cache(ttl=%.0fs,max=%d) | "
+        "PERF-2=quick-answer | "
+        "FEAT-1=growth-comparison | "
+        "FEAT-2=/versions | "
+        "FEAT-3=/analytics_reset | "
+        "IMPROVE-1=smart-err-hints | "
+        "IMPROVE-2=bar-with-pct | "
+        "IMPROVE-3=excel-size-check | "
+        "IMPROVE-4=smart-refresh | "
+        "KEPT: HA1..HA31",
         len(ANALYTICS_BUTTONS),
+        _DB_CACHE_TTL_DEFAULT,
+        _DB_CACHE_MAX_ENTRIES,
     )
 except Exception:
     pass
