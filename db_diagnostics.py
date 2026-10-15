@@ -1,35 +1,22 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-db_diagnostics.py — واجهة تشخيص وصيانة قاعدة البيانات (v7.2.18 — FIX-COMPLETE)
+db_diagnostics.py — واجهة تشخيص وصيانة قاعدة البيانات (v7.2.19 — GRACE-EXTENDED)
 ================================================================================
-🆕 v7.2.18 — FIX-COMPLETE:
+🆕 v7.2.19 — GRACE-EXTENDED:
 
-    🔴 FIX-11: _identify_bottleneck — _esc() على bot_region/db_region
-        (كانت ثغرة HTML-injection بعد أن أزال FIX-1 التهريب في
-        format_latency_report/format_full_health_report).
+    🟢 FIX-19: نافذة السماح موسَّعة لتشمل CPU / RAM / Filesystem —
+        كانت GRACE-1/2 تعالج event_loop فقط. القياسات الأخرى
+        (CPU=96%، load=7.11) تظهر مضخَّمة أثناء الإقلاع (19 مهمة +
+        pool warmup) وتُعرض كانها bottleneck حقيقي.
 
-    🔴 FIX-12: full_health cache — TTL قصير (10s) أثناء نافذة الإقلاع
-        بدل 120s كي لا تظل البانر والقياسات المضخّمة بعد الـ 60s.
+        التفاصيل:
+        - _probe_full_health: ينشر `_startup_window` إلى system dict.
+        - _identify_bottleneck: يتجاهل cpu/ram/filesystem خلال النافذة.
+        - format_full_health_report: بانر عام في الأعلى + وسم CPU
+          بـ «مضخَّم — إقلاع» بدل عرض الرقم بدون سياق.
 
-    🔴 FIX-13: _probe_filesystem — fsync على نفس الـ fd بعد flush
-        (كان no-op: fd جديد read-only لا يُفرِّغ dirty pages).
-
-    🔴 FIX-14: _get_all_tables_health — Sentinel للفشل (None,None)
-        بدل ([],[]) — كي لا نعرض «✅ نظيف» أثناء انقطاع DB.
-
-    🟡 FIX-15: _get_multi_db_warnings — استبعاد sqlite من تحذير
-        «أنواع DB مختلفة» (كان يظهر في بيئات التطوير).
-
-    🟡 FIX-16: run_maintenance / vacuum_analyze_tables — فرع MySQL
-        قبل db.vacuum() (لو كان DB.vacuum PG-only).
-
-    🟡 FIX-17: _PROCESS_IMPORT_TS يُحسَب عبر psutil.create_time()
-        عند الاستيراد كـ fallback أمتن لـ mark_process_start().
-
-    🟡 FIX-18: FIX-6 موسَّع — يحسب فهارس أبناء الجداول المُقسَّمة
-        (كان يعرض 0 B لجدول مُقسَّم عليه فهارس ثقيلة).
-
+🆕 v7.2.18 — FIX-COMPLETE — محفوظ.
 🆕 v7.2.17 — FULL-FIX — محفوظ.
 🆕 v7.2.16 — STARTUP-GRACE — محفوظ.
 🆕 v7.2.15 — PERF-OPTIMIZED — محفوظ.
@@ -73,15 +60,15 @@ logger = logging.getLogger(__name__)
 # الإصدار + Startup grace
 # ═══════════════════════════════════════════════════════════════════════
 
-VERSION = "7.2.18"
+VERSION = "7.2.19"
 
 
 def _compute_process_start_monotonic() -> float:
     """
-    🆕 v7.2.18 FIX-17: نحسب بدء العملية الفعلي عبر psutil عند الاستيراد
+    FIX-17 (v7.2.18): نحسب بدء العملية الفعلي عبر psutil عند الاستيراد
     كـ fallback أمتن من وقت الاستيراد.
 
-    لو لم يتوفر psutil، نتراجع إلى time.monotonic() (وقت الاستيراد).
+    لو لم يتوفر psutil، نتراجع إلى /proc/self/stat ثم time.monotonic().
     """
     try:
         import psutil  # type: ignore
@@ -89,10 +76,8 @@ def _compute_process_start_monotonic() -> float:
         return time.monotonic() - (time.time() - created)
     except Exception:
         try:
-            # Linux-only fallback عبر /proc
             with open("/proc/self/stat", "r") as f:
                 fields = f.read().split()
-            # starttime = field 22 (0-indexed: 21) بوحدات clock ticks منذ boot
             starttime_ticks = int(fields[21])
             hz = os.sysconf(os.sysconf_names.get("SC_CLK_TCK", 100))
             uptime_sys = float(open("/proc/uptime").read().split()[0])
@@ -109,7 +94,7 @@ _STARTUP_GRACE_SEC = 60.0
 
 def mark_process_start() -> None:
     """
-    🆕 v7.2.17 FIX-2: يجب استدعاؤها من main.py عند بدء العملية الفعلي.
+    FIX-2 (v7.2.17): يجب استدعاؤها من main.py عند بدء العملية الفعلي.
     إن لم تُستدعَ، نستخدم _PROCESS_IMPORT_TS (المُحسَّبة من psutil).
     """
     global _PROCESS_START_TS
@@ -747,8 +732,7 @@ def _get_multi_db_warnings(configured: List[Dict[str, Any]]) -> List[str]:
             f"— تأكد أن البوت يستخدم الصحيح"
         )
 
-    # 🆕 v7.2.18 FIX-15: استبعاد sqlite من تحذير «أنواع مختلفة»
-    # (يظهر عادة كـ sidecar في بيئات التطوير فقط).
+    # FIX-15 (v7.2.18): استبعاد sqlite من تحذير «أنواع مختلفة».
     types = {c["db_type"] for c in configured
              if c["db_type"] and c["db_type"] != "sqlite"}
     if len(types) > 1:
@@ -1981,7 +1965,7 @@ async def _probe_filesystem() -> Dict[str, Any]:
     """
     قياس سرعة القرص (write + fsync + read لـ 1MB).
 
-    🆕 v7.2.18 FIX-13: fsync على نفس الـ fd بعد flush (كان no-op
+    v7.2.18 FIX-13: fsync على نفس الـ fd بعد flush (كان no-op
     سابقاً لأن write_bytes() يغلق الـ fd ثم نفتح fd جديد read-only).
     """
     result: Dict[str, Any] = {"ok": False}
@@ -2091,6 +2075,16 @@ async def _probe_system(*, prime_cpu: bool = False) -> Dict[str, Any]:
 
 
 def _identify_bottleneck(data: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    تحديد الـ primary bottleneck.
+
+    🆕 v7.2.19 FIX-19: نتجاهل cpu/ram/filesystem/event_loop خلال
+    نافذة الإقلاع — لأن 19 مهمة خلفية + pool warmup + webhook
+    تُضخّم قياسات CPU/Load/FS بشكل مضلّل.
+
+    ملاحظة: network_db و database_internal يبقيان صالحَين دائماً
+    (measurements حقيقية للشبكة/DB، لا تتأثر بالإقلاع).
+    """
     comps: List[Dict[str, Any]] = []
 
     def _add(name, kind, value, unit, severity, weight):
@@ -2108,12 +2102,17 @@ def _identify_bottleneck(data: Dict[str, Any]) -> Dict[str, Any]:
         and cross.get("inferred_from_rtt") is True
     )
 
+    # 🆕 v7.2.19 FIX-19: نافذة الإقلاع — تُطبَّق على cpu/ram/fs/event_loop
+    loop_p = data.get("event_loop") or {}
+    in_startup = bool(loop_p.get("_startup_window", False))
+
     net_db = data.get("network_db") or {}
     db_tcp = float(net_db.get("tcp_ms") or 0)
 
     if same_region_confirmed:
         db_tcp = 0.0
 
+    # network_db صالح دائماً — حتى أثناء الإقلاع (قياس حقيقي TCP)
     if db_tcp > 0:
         if db_tcp < _NET_DB_RTT_LOW_SAME_DC:
             sev = "low"
@@ -2127,6 +2126,7 @@ def _identify_bottleneck(data: Dict[str, Any]) -> Dict[str, Any]:
             sev = "critical"
         _add("network_db", "time", db_tcp, "ms", sev, db_tcp * 3.0)
 
+    # database_internal صالح دائماً — قياس DB داخلي لا يتأثر بالبدء
     warm = float(db_p.get("warm_median_ms") or 0)
     if warm > 0:
         internal_ms = max(0.0, warm - db_tcp) if db_tcp > 0 else warm
@@ -2141,11 +2141,8 @@ def _identify_bottleneck(data: Dict[str, Any]) -> Dict[str, Any]:
         _add("database_internal", "time", internal_ms, "ms", sev,
              internal_ms * 3.0)
 
-    # GRACE-2: تجاهل event_loop خلال نافذة الإقلاع
-    loop_p = data.get("event_loop") or {}
-    in_startup = bool(loop_p.get("_startup_window", False))
+    # event_loop — GRACE-2 (v7.2.16): تجاهل خلال نافذة الإقلاع
     lag = float(loop_p.get("p90_ms") or loop_p.get("median_ms") or 0)
-
     if lag > 0 and not in_startup:
         if lag < 20:
             sev = "low"
@@ -2157,9 +2154,11 @@ def _identify_bottleneck(data: Dict[str, Any]) -> Dict[str, Any]:
             sev = "critical"
         _add("event_loop", "time", lag, "ms", sev, lag * 5.0)
 
+    # filesystem — 🆕 FIX-19: تجاهل خلال نافذة الإقلاع
+    # (I/O القرص مشبع بـ pool warmup + init writes)
     fs_p = data.get("filesystem") or {}
     fs_w = float(fs_p.get("write_1mb_ms") or 0)
-    if fs_w > 0:
+    if fs_w > 0 and not in_startup:
         if fs_w < 30:
             sev = "low"
         elif fs_w < 100:
@@ -2170,9 +2169,11 @@ def _identify_bottleneck(data: Dict[str, Any]) -> Dict[str, Any]:
             sev = "critical"
         _add("filesystem", "time", fs_w, "ms", sev, fs_w * 0.5)
 
+    # cpu — 🆕 FIX-19: تجاهل خلال نافذة الإقلاع
+    # (19 مهمة + pool warmup = CPU مرتفع مؤقتاً)
     sys_p = data.get("system") or {}
     cpu = float(sys_p.get("cpu_percent") or 0)
-    if cpu > 0:
+    if cpu > 0 and not in_startup:
         if cpu < 70:
             sev = "low"
         elif cpu < 85:
@@ -2183,8 +2184,10 @@ def _identify_bottleneck(data: Dict[str, Any]) -> Dict[str, Any]:
             sev = "critical"
         _add("cpu", "percent", cpu, "%", sev, cpu * 1.0)
 
+    # ram — 🆕 FIX-19: تجاهل خلال نافذة الإقلاع
+    # (caches warming + modules loading)
     ram = float(sys_p.get("ram_percent") or 0)
-    if ram > 0:
+    if ram > 0 and not in_startup:
         if ram < 85:
             sev = "low"
         elif ram < 92:
@@ -2195,6 +2198,7 @@ def _identify_bottleneck(data: Dict[str, Any]) -> Dict[str, Any]:
             sev = "critical"
         _add("ram", "percent", ram, "%", sev, ram * 0.8)
 
+    # network_telegram صالح دائماً — قياس حقيقي للشبكة
     net_tg = data.get("network_telegram") or {}
     tg_tcp = float(net_tg.get("tcp_ms") or 0)
     if tg_tcp > 0:
@@ -2222,6 +2226,7 @@ def _identify_bottleneck(data: Dict[str, Any]) -> Dict[str, Any]:
             "recommendation": "الأداء جيد — لا حاجة لتعديل.",
             "ranked": comps,
             "cross_region": cross,
+            "startup_window": in_startup,
         }
 
     candidates = [c for c in comps if c["severity"] == max_sev]
@@ -2281,7 +2286,7 @@ def _identify_bottleneck(data: Dict[str, Any]) -> Dict[str, Any]:
     }
 
     if top_name == "network_db" and cross.get("cross_region") is True:
-        # 🆕 v7.2.18 FIX-11: _esc() على bot_r/db_r — كانت هذه نقطة
+        # FIX-11 (v7.2.18): _esc() على bot_r/db_r — كانت نقطة
         # HTML-injection بعد أن أزال FIX-1 التهريب الخارجي.
         bot_r_raw = cross.get("bot_region", "?")
         db_r_raw = cross.get("db_region", "?")
@@ -2318,6 +2323,7 @@ def _identify_bottleneck(data: Dict[str, Any]) -> Dict[str, Any]:
         "recommendation": recommendations.get(top_name, ""),
         "ranked": comps,
         "cross_region": cross,
+        "startup_window": in_startup,
     }
 
 
@@ -2396,6 +2402,18 @@ async def _probe_full_health(*, force: bool = False) -> Dict[str, Any]:
     result["system"] = _safe(probes[3], {})
     result["database"] = db_latency_result
 
+    # 🆕 v7.2.19 FIX-19: ننشر _startup_window إلى system أيضاً —
+    # كي يستطيع formatter وسم CPU بـ «مضخَّم — إقلاع».
+    loop_dict = result.get("event_loop")
+    startup_window = bool(
+        isinstance(loop_dict, dict)
+        and loop_dict.get("_startup_window", False)
+    )
+    if isinstance(result["system"], dict):
+        result["system"]["_startup_window"] = startup_window
+    if isinstance(result["filesystem"], dict):
+        result["filesystem"]["_startup_window"] = startup_window
+
     tcp_from_latency = float(
         db_latency_result.get("tcp_connect_ms", 0) or 0)
     if tcp_from_latency > 0:
@@ -2437,7 +2455,7 @@ async def _probe_full_health(*, force: bool = False) -> Dict[str, Any]:
     result["ok"] = True
     result["bottleneck"] = _identify_bottleneck(result)
 
-    # 🆕 v7.2.18 FIX-12: TTL قصير أثناء نافذة الإقلاع — كي لا تظل
+    # FIX-12 (v7.2.18): TTL قصير أثناء نافذة الإقلاع — كي لا تظل
     # القياسات المضخّمة والبانر يظهران بعد الـ 60s.
     loop_win = bool((result.get("event_loop") or {}).get(
         "_startup_window", False))
@@ -2458,6 +2476,19 @@ def format_full_health_report(data: Dict[str, Any]) -> str:
     active_line = format_active_db_line()
     if active_line:
         lines.append(active_line)
+        lines.append("")
+
+    # 🆕 v7.2.19 FIX-19: بانر عام لنافذة الإقلاع في الأعلى — يُنبِّه
+    # أن CPU/RAM/FS/EventLoop غير موثوقة قبل 60s.
+    loop_p = data.get("event_loop") or {}
+    startup_window = bool(loop_p.get("_startup_window", False))
+    if startup_window:
+        uptime = loop_p.get("_uptime_sec", 0)
+        lines.append(
+            f"🟡 <b>نافذة إقلاع ({uptime:.0f}s منذ البدء)</b>\n"
+            f"   <i>قياسات CPU / RAM / Event Loop / القرص "
+            f"غير موثوقة حتى 60s — أعد التشخيص لاحقاً.</i>"
+        )
         lines.append("")
 
     b = data.get("bottleneck") or {}
@@ -2573,7 +2604,6 @@ def format_full_health_report(data: Dict[str, Any]) -> str:
                 f"   bulk 100: <b>{db_p['bulk_fetch_ms']:.0f}ms</b>")
         lines.append("")
 
-    loop_p = data.get("event_loop") or {}
     if loop_p.get("ok"):
         lines.append("🔄 <b>Event Loop</b>")
         if loop_p.get("_startup_window"):
@@ -2613,7 +2643,9 @@ def format_full_health_report(data: Dict[str, Any]) -> str:
     fs_p = data.get("filesystem") or {}
     if fs_p.get("ok"):
         lines.append("💾 <b>القرص (1MB)</b>")
-        lines.append(f"   write: <b>{fs_p.get('write_1mb_ms', 0):.0f}ms</b>")
+        fs_startup = bool(fs_p.get("_startup_window", False))
+        fs_note = " <i>(مضخَّم — إقلاع)</i>" if fs_startup else ""
+        lines.append(f"   write: <b>{fs_p.get('write_1mb_ms', 0):.0f}ms</b>{fs_note}")
         lines.append(f"   fsync: <b>{fs_p.get('fsync_ms', 0):.0f}ms</b>")
         lines.append(f"   read: <b>{fs_p.get('read_1mb_ms', 0):.0f}ms</b>")
         src = fs_p.get("tmp_source")
@@ -2624,22 +2656,30 @@ def format_full_health_report(data: Dict[str, Any]) -> str:
     sys_p = data.get("system") or {}
     if sys_p.get("ok"):
         lines.append("⚙️ <b>النظام</b>")
+        sys_startup = bool(sys_p.get("_startup_window", False))
+        cpu_startup_note = " <i>(مضخَّم — إقلاع)</i>" if sys_startup else ""
+
         if "cpu_percent" in sys_p:
             cpu_val = sys_p["cpu_percent"]
             window = sys_p.get("cpu_window_sec")
             if window:
-                lines.append(f"   CPU: <b>{cpu_val:.0f}%</b> "
+                lines.append(f"   CPU: <b>{cpu_val:.0f}%</b>"
+                             f"{cpu_startup_note} "
                              f"<i>(نافذة {window:.1f}s)</i>")
             else:
-                lines.append(f"   CPU: <b>{cpu_val:.0f}%</b>")
+                lines.append(f"   CPU: <b>{cpu_val:.0f}%</b>"
+                             f"{cpu_startup_note}")
         if "ram_percent" in sys_p:
+            ram_note = " <i>(إقلاع)</i>" if sys_startup else ""
             lines.append(
-                f"   RAM: <b>{sys_p['ram_percent']:.0f}%</b> "
+                f"   RAM: <b>{sys_p['ram_percent']:.0f}%</b>{ram_note} "
                 f"({sys_p.get('ram_used_mb', 0):.0f}/"
                 f"{sys_p.get('ram_total_mb', 0):.0f}MB)")
         if "load_avg_1m" in sys_p:
+            load_note = " <i>(مضخَّم — إقلاع)</i>" if sys_startup else ""
             lines.append(f"   Load: <b>{sys_p['load_avg_1m']}</b> / "
-                         f"{sys_p['load_avg_5m']} / {sys_p['load_avg_15m']}")
+                         f"{sys_p['load_avg_5m']} / {sys_p['load_avg_15m']}"
+                         f"{load_note}")
         if "cpu_count" in sys_p:
             lines.append(f"   CPUs: <b>{sys_p['cpu_count']}</b>")
         lines.append("")
@@ -2757,10 +2797,10 @@ async def _get_db_metadata() -> Dict[str, Any]:
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# 2) Dead Tuples — 🆕 FIX-14: Sentinel على الفشل
+# 2) Dead Tuples — FIX-14: Sentinel على الفشل
 # ═══════════════════════════════════════════════════════════════════════
 
-# 🆕 v7.2.18 FIX-14: حالة الفشل تُخزَّن كـ (None, None) — كي لا يفسّر
+# FIX-14 (v7.2.18): حالة الفشل تُخزَّن كـ (None, None) — كي لا يفسّر
 # المُتصل ([], []) على أنها «لا توجد جداول قذرة».
 _HEALTH_FAILED_SENTINEL: Tuple[None, None] = (None, None)
 
@@ -2800,7 +2840,7 @@ async def _get_all_tables_health() -> Tuple[Optional[List[Dict]], Optional[List[
         """) or []
     except Exception as e:
         logger.warning(f"_get_all_tables_health: {e}")
-        # 🆕 FIX-14: sentinel بدل ([], [])
+        # FIX-14: sentinel بدل ([], [])
         _cache_set("all_tables_health", _HEALTH_FAILED_SENTINEL,
                    ttl=_NEGATIVE_CACHE_TTL)
         return None, None
@@ -3003,10 +3043,10 @@ async def _get_indexes(tables: List[str]) -> Dict[str, List[Dict[str, Any]]]:
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# 6) Auto-Cleanup Status — FIX-6 + 🆕 FIX-18
+# 6) Auto-Cleanup Status — FIX-6 + FIX-18
 # ═══════════════════════════════════════════════════════════════════════
 
-# 🆕 v7.2.18 FIX-18: FIX-6 موسَّع — يحسب فهارس الأبناء في الجداول
+# FIX-6 (v7.2.17) + FIX-18 (v7.2.18): يحسب فهارس الأبناء في الجداول
 # المُقسَّمة (partitioned tables).
 # ملاحظة: يغطي مستوى تقسيم واحد (single-level) — وهو الأكثر شيوعاً.
 # الجداول المُقسَّمة هرمياً (nested partitions) تتطلب recursive CTE.
@@ -3318,7 +3358,7 @@ async def preview_maintenance() -> Dict[str, Any]:
 
 async def run_maintenance() -> Dict[str, Any]:
     """
-    🆕 v7.2.18 FIX-16: فرع MySQL قبل db.vacuum() — لو كان DB.vacuum()
+    FIX-16 (v7.2.18): فرع MySQL قبل db.vacuum() — لو كان DB.vacuum()
     PG-only لكن الـ object يعرّضه على MySQL أيضاً.
     """
     db = _get_db()
@@ -3376,7 +3416,7 @@ async def run_maintenance() -> Dict[str, Any]:
             result['deletions'][tbl] = 0
             result['deletion_errors'][tbl] = str(e)[:100]
 
-    # FIX-4 + 🆕 FIX-16
+    # FIX-4 + FIX-16
     if db_type == "SQLITE":
         try:
             await db.execute("VACUUM")
@@ -3394,7 +3434,7 @@ async def run_maintenance() -> Dict[str, Any]:
         tables = await _get_all_table_names()
         for t in tables:
             try:
-                # 🆕 FIX-16: MySQL أولاً — لا نفترض أن db.vacuum() يعمل مع MySQL
+                # FIX-16: MySQL أولاً — لا نفترض أن db.vacuum() يعمل مع MySQL
                 if db_type == "MYSQL":
                     await db.execute(f"ANALYZE TABLE `{t}`")
                     await db.execute(f"OPTIMIZE TABLE `{t}`")
@@ -3571,7 +3611,7 @@ async def run_db_maintenance() -> str:
 
 
 async def vacuum_analyze_tables() -> str:
-    """🆕 FIX-4 + FIX-16: VACUUM/OPTIMIZE حسب DB type، MySQL أولاً."""
+    """FIX-4 + FIX-16: VACUUM/OPTIMIZE حسب DB type، MySQL أولاً."""
     db = _get_db()
     if db is None:
         return "❌ DB غير مستورد"
@@ -3611,7 +3651,7 @@ async def vacuum_analyze_tables() -> str:
     fail = 0
     for t in tables:
         try:
-            # 🆕 FIX-16: MySQL أولاً
+            # FIX-16: MySQL أولاً
             if db_type == "MYSQL":
                 await db.execute(f"ANALYZE TABLE `{t}`")
                 await db.execute(f"OPTIMIZE TABLE `{t}`")
@@ -3659,7 +3699,7 @@ async def auto_vacuum_dirty_mvs(min_dead: int = 10) -> Dict[str, Any]:
     _invalidate_cache("all_tables_health")
     dirty, _ = await _get_all_tables_health()
 
-    # 🆕 FIX-14: dirty=None يعني فشل الفحص
+    # FIX-14: dirty=None يعني فشل الفحص
     if dirty is None:
         result['error'] = "فشل فحص dead tuples"
         result['duration_sec'] = round(time.monotonic() - start, 2)
@@ -4073,7 +4113,7 @@ async def diagnose_db_quick() -> str:
     critical = 0
     try:
         dirty, clean = await _get_all_tables_health()
-        # 🆕 FIX-14: dirty=None يعني فشل الفحص
+        # FIX-14: dirty=None يعني فشل الفحص
         if dirty is None:
             lines.append("🟠 فحص dead-tuples فشل مؤقتاً")
         else:
@@ -4309,23 +4349,16 @@ __all__ = [
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# LOAD BEACON — v7.2.18
+# LOAD BEACON — v7.2.19
 # ═══════════════════════════════════════════════════════════════════════
 
 try:
     logger.info(
         "🛡️ db_diagnostics.py v%s loaded | "
-        "FIX-COMPLETE ✅ | "
-        "FIX-11=escape-bot-db-region-in-bottleneck ✅ | "
-        "FIX-12=full-health-ttl-during-startup ✅ | "
-        "FIX-13=filesystem-fsync-real ✅ | "
-        "FIX-14=health-sentinel-on-failure ✅ | "
-        "FIX-15=multi-db-warnings-skip-sqlite ✅ | "
-        "FIX-16=mysql-vacuum-branch-first ✅ | "
-        "FIX-17=psutil-process-start-fallback ✅ | "
-        "FIX-18=partitioned-child-indexes ✅ | "
-        "FULL-FIX ✅ | STARTUP-GRACE ✅ | PERF-OPTIMIZED ✅ | "
-        "MULTI-DB-DISCOVERY ✅ | "
+        "GRACE-EXTENDED ✅ | "
+        "FIX-19=startup-grace-for-cpu-ram-fs ✅ | "
+        "FIX-11..FIX-18 ✅ | FULL-FIX ✅ | STARTUP-GRACE ✅ | "
+        "PERF-OPTIMIZED ✅ | MULTI-DB-DISCOVERY ✅ | "
         "grace_sec=%d | cache_keys=%d | exports=%d | "
         "process_start_age=%.1fs",
         VERSION,
