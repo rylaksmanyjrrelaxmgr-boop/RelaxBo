@@ -1,24 +1,31 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-handlers_callback.py - معالج الأزرار (v9.7.29-BACKUP-BLOCKING-FIX)
+handlers_callback.py - معالج الأزرار (v9.7.30-FREE-PLAN-BYPASS)
 =====================================================================
-🆕 v9.7.29-BACKUP-BLOCKING-FIX:
-    🔴 FIX-CB-1: _do_backup — glob/stat/unlink كان sync داخل async
-       → asyncio.to_thread. نفس مشكلة FIX-UB1 في utils.py.
-    🔴 FIX-CB-2: _do_backup — DB.backup_database بلا timeout
-       → asyncio.wait_for(..., timeout=_BACKUP_TIMEOUT_SECONDS).
-    🟠 FIX-CB-3: _show_restore_backups — glob+stat sync → to_thread.
-    🟡 FIX-CB-4: except (AttributeError, Exception) → except Exception.
+🆕 v9.7.30-FREE-PLAN-BYPASS:
+    🔴 FIX-FREE-1 (CRITICAL): إضافة طبقة حماية احتياطية للخطة المجانية.
+        المشكلة: المستخدم على الخطة المجانية (price=0) يضغط "نشر"
+        فتظهر له رسالة "انتهى اشتراكك" ظلماً.
+        السبب: DB.has_active_subscription(user_id) يرجع False
+        عندما لا يوجد اشتراك نشط (الحالة الفعلية للمستخدم المجاني).
+        الإصلاح:
+          1) إضافة helper موحّد CallbackHandlers._user_can_publish
+             يتحقق من: المالك → اشتراك نشط → خطة مجانية → None.
+          2) استخدام الـ helper في 3 مواضع:
+             • _handle_post_add
+             • _handle_post_publish (🔴 السبب الأساسي)
+             • _handle_publish_all
+
+🆕 v9.7.29-BACKUP-BLOCKING-FIX — محفوظ كاملاً:
+    🔴 FIX-CB-1: _do_backup — glob/stat/unlink → asyncio.to_thread
+    🔴 FIX-CB-2: _do_backup — DB.backup_database مع timeout
+    🟠 FIX-CB-3: _show_restore_backups — glob+stat → to_thread
+    🟡 FIX-CB-4: except Exception فقط
     🔴 FIX-CB-5: تصحيح SyntaxError في _show_restore_backups
-       (أقواس زائدة حول callback_data=).
 
 🆕 v9.7.28-CONTEST-JOIN-FIX — محفوظ:
-    🔴 FIX-CJ-1: زر "المشاركة" في المسابقات:
-       • قبول `contest_join` أو `contest_join:<id>`
-       • استخراج contest_id من data بعد ':' (أو user_data)
-       • join_contest(contest_id, user_id) بالترتيب الصحيح
-       • فحص check_contest_joined قبل المحاولة
+    🔴 FIX-CJ-1: زر "المشاركة" في المسابقات
 =====================================================================
 """
 import asyncio, importlib, logging, json, time, shutil, os, re
@@ -1344,6 +1351,39 @@ class CallbackHandlers:
     PUBLISH_DELAY_SECONDS = 0.2
     PUBLISH_BATCH_SIZE = 10
 
+    # ═══════════════════════════════════════════════════════════════
+    # 🔴🆕 FIX-FREE-1: helper موحّد للتحقق من صلاحية النشر
+    # ═══════════════════════════════════════════════════════════════
+    @staticmethod
+    async def _user_can_publish(user_id: int) -> bool:
+        """
+        🆕 FIX-FREE-1: فحص موحّد لصلاحية النشر.
+
+        الترتيب:
+          1) المالك الأساسي → True دائماً
+          2) اشتراك نشط عبر DB.has_active_subscription → True
+          3) 🆕 اشتراك في خطة مجانية (price=0) → True دائماً
+          4) خلاف ذلك → False
+        """
+        if _is_primary_owner(user_id):
+            return True
+        try:
+            if await DB.has_active_subscription(user_id):
+                return True
+        except Exception as e:
+            logger.debug(f"_user_can_publish has_active: {e}")
+        try:
+            free_sub = await DB.fetchval(
+                "SELECT 1 FROM subscriptions s "
+                "JOIN plans p ON s.plan_id = p.id "
+                "WHERE s.user_id = ? AND p.price = 0 LIMIT 1",
+                (user_id,))
+            if free_sub is not None:
+                return True
+        except Exception as e:
+            logger.debug(f"_user_can_publish free_fallback: {e}")
+        return False
+
     @staticmethod
     async def handle(update, context):
         query = update.callback_query
@@ -1614,8 +1654,7 @@ class CallbackHandlers:
                     await _trans('send_support_message', lang, "📞")); return
 
             if base_data == CB.CH_ADD or data == "add_channel":
-                has_sub = (_is_primary_owner(user_id)
-                           or await DB.has_active_subscription(user_id))
+                has_sub = await CallbackHandlers._user_can_publish(user_id)
                 if not has_sub:
                     await safe_edit(query,
                         await _trans('subscription_required', lang, "❌"),
@@ -2610,15 +2649,16 @@ class CallbackHandlers:
             reply_markup=InlineKeyboardMarkup(kb),
             parse_mode='HTML', bot=context.bot)
 
+    # ═══════════════════════════════════════════════════════════════
+    # 🔴🆕 FIX-FREE-1: _handle_post_add مع helper موحّد
+    # ═══════════════════════════════════════════════════════════════
     @staticmethod
     async def _handle_post_add(update, context, query, user_id):
         lang = 'ar'
         try: lang = await DB.get_user_language(user_id) or 'ar'
         except Exception: pass
         try:
-            is_owner = _is_primary_owner(user_id)
-            has_sub = (True if is_owner
-                       else await DB.has_active_subscription(user_id))
+            has_sub = await CallbackHandlers._user_can_publish(user_id)
             active = await DB.get_active_channel(user_id)
             if not has_sub:
                 await safe_edit(query,
@@ -2642,13 +2682,15 @@ class CallbackHandlers:
                 await _trans('error_occurred', lang, "❌"),
                 bot=context.bot)
 
+    # ═══════════════════════════════════════════════════════════════
+    # 🔴🆕 FIX-FREE-1: _handle_post_publish مع helper موحّد
+    # ═══════════════════════════════════════════════════════════════
     @staticmethod
     async def _handle_post_publish(update, context, query, user_id):
         lang = 'ar'
         try: lang = await DB.get_user_language(user_id) or 'ar'
         except Exception: pass
-        is_owner = _is_primary_owner(user_id)
-        if not is_owner and not await DB.has_active_subscription(user_id):
+        if not await CallbackHandlers._user_can_publish(user_id):
             await safe_edit(query,
                 await _trans('subscription_expired', lang, "❌"),
                 bot=context.bot); return
@@ -2797,13 +2839,15 @@ class CallbackHandlers:
                 bot=context.bot)
         except Exception: pass
 
+    # ═══════════════════════════════════════════════════════════════
+    # 🔴🆕 FIX-FREE-1: _handle_publish_all مع helper موحّد
+    # ═══════════════════════════════════════════════════════════════
     @staticmethod
     async def _handle_publish_all(update, context, query, user_id):
         lang = 'ar'
         try: lang = await DB.get_user_language(user_id) or 'ar'
         except Exception: pass
-        is_owner = _is_primary_owner(user_id)
-        if not is_owner and not await DB.has_active_subscription(user_id):
+        if not await CallbackHandlers._user_can_publish(user_id):
             await safe_edit(query,
                 await _trans('subscription_expired', lang, "❌"),
                 bot=context.bot); return
@@ -5230,22 +5274,21 @@ try:
                   '_show_admin_update_channel_menu', '_do_backup',
                   '_show_restore_backups', '_show_updates_channel',
                   '_show_channel_list', '_handle_channel_select',
-                  '_handle_channel_delete', '_handle_channel_stats'):
+                  '_handle_channel_delete', '_handle_channel_stats',
+                  '_user_can_publish'):
         if not hasattr(CallbackHandlers, _name):
             _missing_check.append(_name)
     if _missing_check:
         logger.critical(
-            f"🚨 v9.7.29: دوال مفقودة: {_missing_check}")
+            f"🚨 v9.7.30: دوال مفقودة: {_missing_check}")
     else:
         logger.info(
-            "🛡️ handlers_callback.py v9.7.29-BACKUP-BLOCKING-FIX | "
-            "FIX-CB-1: _do_backup cleanup via asyncio.to_thread | "
-            "FIX-CB-2: backup_database timeout=%.0fs | "
-            "FIX-CB-3: _show_restore_backups glob/stat via to_thread | "
-            "FIX-CB-4: except (AttributeError, Exception) → Exception | "
-            "FIX-CB-5: _show_restore_backups SyntaxError fixed | "
-            "KEPT FIX-CJ-1: contest_join:<id> + correct args order | "
+            "🛡️ handlers_callback.py v9.7.30-FREE-PLAN-BYPASS | "
+            "🆕 FIX-FREE-1: _user_can_publish helper + "
+            "bypass للخطة المجانية في 3 مواضع | "
+            "KEPT v9.7.29: backup timeouts + FIX-CB-1..5 | "
+            "KEPT v9.7.28: contest_join fix | "
             "max_tasks_per_user=%d",
-            _BACKUP_TIMEOUT_SECONDS, _MAX_TASKS_PER_USER)
+            _MAX_TASKS_PER_USER)
 except Exception as _be:
     logger.debug(f"load beacon: {_be}")
