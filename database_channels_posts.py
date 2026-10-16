@@ -4,42 +4,36 @@
 """
 database_channels_posts.py - دوال القنوات والمنشورات (Mixin)
 ================================================================================
-🆕 v7.5.29 (FIX-J1):
+🆕 v7.5.30 (FIX-PD-1: AUTO-PUBLISH-TRIGGER):
+    🔴 FIX-PD-1: إطلاق إشارة النشر الفوري بعد حفظ منشور جديد.
+       السبب المُكتشف من تحليل السجلات:
+         • عند إضافة منشور، auto_publish يستيقظ فقط عند انتهاء
+           دورة polling (asyncio.sleep(60) hardcoded).
+         • النتيجة: تأخير النشر حتى 60s (متوسط 30s).
+
+       الإصلاح (تكامل مع utils v7.10.23):
+         • في add_post: بعد نجاح INSERT → trigger_auto_publish()
+         • في add_posts: بعد نجاح الدفعة → trigger_auto_publish()
+         • lazy import (تجنّب circular import):
+           database_channels_posts → database → utils → database
+
+       الأثر المتوقّع:
+         • إضافة منشور → auto_publish يستيقظ فوراً → نشر خلال ~1-3s
+         • بدون هذا التعديل: تأخير ~7.5s (fallback 15s من utils)
+
+       ملاحظة: trigger_auto_publish() آمنة تماماً للاستدعاء حتى لو
+       كانت utils قديمة (بدون الدالة) — تفشل بصمت.
+
+🆕 v7.5.29 (FIX-J1) — محفوظ:
     🔴 FIX-J1: get_channel_by_id — تصحيح العمود المستعلَم عنه.
        كان يستعلم عن channel_id (تليجرام) بدل id (الداخلي).
-       المستدعون (handlers_channels_list._render_channel_info,
-       channel_delete_confirm_callback) يمرّرون ch_db_id (id
-       الداخلي) → الاستعلام كان يفشل دائماً.
-       الإصلاح:
-         • تغيير اسم المعامل من channel_id إلى channel_db_id.
-         • تصحيح العمود في WHERE إلى id.
-         • إضافة فلتر removed_at IS NULL (يحترم soft-delete).
-         • استخدام _has_removed_at_column() للتوافق مع DB قديمة.
 
-🆕 v7.5.28 (REVIEW-FIXES-2026):
-    🔴 FIX-NEW-1: إضافة `add_post` (مفرد) — كانت مفقودة، وهذا سبب فشل
-       حفظ منشور واحد من حالة ADDING_POSTS.
-    🟡 FIX-NEW-2: `add_post` تُعيد post_id (int) عند النجاح، None عند الفشل.
-    🟡 FIX-NEW-3: توثيق صريح لـ add_posts أنها للدفعات فقط.
-    🟢 FIX-NEW-4: توحيد أسلوب الفحوصات.
-
-🆕 v7.5.27 (SOFT-DELETE-CONSISTENCY):
-    🔒 GAP-1..4: فحوصات removed_at IS NULL في add_posts/reset_posts/
-                  delete_post/get_user_posts.
-
-🆕 v7.5.26 (CACHE-RACE-FIXES):
-    🎯 FIX-A: increment_post_fail — إبطال كاش القناة بعد كل فشل
-    🎯 FIX-B: mark_post_published — إبطال كاش القناة بدل الكاش العام
-    🎯 FIX-E: mark_post_published — UPDATE شرطي لمنع النشر المزدوج
-
-🆕 v7.5.25 (PRECISION-FIXES):
-    🔧 FIX-1..7: تفاصيل في الأسفل
-
-🆕 v7.5.24 (DEVELOPER-BYPASS-FIX):
-    🔴 DEV-FIX-1: add_channel — تجاوز فحص max_channels للمطور
-    🔴 DEV-FIX-2: add_posts — تجاوز فحص max_posts للمطور
-
-🆕 v7.5.23 (SOFT-DELETE-INTEGRATION)
+🆕 v7.5.28 (REVIEW-FIXES-2026) — محفوظ.
+🆕 v7.5.27 (SOFT-DELETE-CONSISTENCY) — محفوظ.
+🆕 v7.5.26 (CACHE-RACE-FIXES) — محفوظ.
+🆕 v7.5.25 (PRECISION-FIXES) — محفوظ.
+🆕 v7.5.24 (DEVELOPER-BYPASS-FIX) — محفوظ.
+🆕 v7.5.23 (SOFT-DELETE-INTEGRATION) — محفوظ.
 ================================================================================
 """
 
@@ -49,6 +43,31 @@ from datetime import timedelta
 from typing import Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
+
+
+def _fire_publish_trigger(source: str = "unknown") -> None:
+    """
+    🆕 v7.5.30 FIX-PD-1: إطلاق إشارة النشر الفوري.
+
+    lazy import لتجنّب circular import:
+      database_channels_posts → database → utils → database
+
+    آمنة تماماً — تفشل بصمت إذا كانت utils قديمة (بدون الدالة).
+    """
+    try:
+        from utils import trigger_auto_publish
+        trigger_auto_publish()
+        logger.debug(f"⚡ _fire_publish_trigger: ok (source={source})")
+    except ImportError as _ie:
+        logger.debug(
+            f"ℹ️ _fire_publish_trigger: "
+            f"utils.trigger_auto_publish غير متاح ({_ie})"
+        )
+    except Exception as _e:
+        logger.debug(
+            f"⚠️ _fire_publish_trigger ({source}): "
+            f"{type(_e).__name__}: {_e}"
+        )
 
 
 class ChannelsPostsMixin:
@@ -1023,7 +1042,7 @@ class ChannelsPostsMixin:
     #                    📝 دوال المنشورات
     # ═════════════════════════════════════════════════════════════════
 
-    # 🆕 v7.5.28 FIX-NEW-1 + FIX-NEW-2: دالة حفظ منشور واحد
+    # 🆕 v7.5.28 FIX-NEW-1 + FIX-NEW-2 + 🆕 v7.5.30 FIX-PD-1
     async def add_post(
         self,
         user_id: int,
@@ -1035,19 +1054,20 @@ class ChannelsPostsMixin:
         """
         🆕 v7.5.28 FIX-NEW-1: إضافة منشور واحد.
 
-        كانت مفقودة — ولهذا فشل معالج ADDING_POSTS في العثور على دالة
-        لحفظ منشور واحد.
+        🆕 v7.5.30 FIX-PD-1:
+            بعد نجاح INSERT → _fire_publish_trigger("add_post")
+            لإطلاق auto_publish فوراً (نشر خلال ~1-3s).
 
         Args:
             user_id: معرّف المستخدم (المالك)
             channel_db_id: معرّف القناة الداخلي (user_channels.id)
             text: نص المنشور
-            media_type: نوع الوسيط (photo/video/document/voice/audio/animation)
+            media_type: نوع الوسيط
             media_file_id: معرّف الملف في تلغرام
 
         Returns:
             post_id (int) عند النجاح
-            None عند الفشل (لا ملكية، لا اشتراك، حد أقصى، تكرار...)
+            None عند الفشل
         """
         from database import USE_POSTGRES, USE_MYSQL, TimeUtils
         from database import internal_cache, CACHE_AVAILABLE
@@ -1291,6 +1311,13 @@ class ChannelsPostsMixin:
                         f"(user={user_id}, ch={channel_db_id}, "
                         f"media={media_type or 'text'})"
                     )
+
+                    # 🆕 v7.5.30 FIX-PD-1: إطلاق إشارة النشر الفوري
+                    # بعد نجاح الإدراج مباشرة (خارج transaction
+                    # كفكرة — لكن داخل try/finally الخاص بالـwith).
+                    if post_id:
+                        _fire_publish_trigger("add_post")
+
                     return post_id
 
         except Exception as e:
@@ -1308,6 +1335,9 @@ class ChannelsPostsMixin:
 
         ⚠️ v7.5.28 FIX-NEW-3: هذه الدالة للدفعات فقط.
         لحفظ منشور واحد من معالج رسالة، استخدم add_post() (المفرد).
+
+        🆕 v7.5.30 FIX-PD-1:
+            بعد نجاح الدفعة → _fire_publish_trigger("add_posts")
 
         ✅ v7.5.24 DEV-FIX-2: تجاوز فحص max_posts للمطور/المالك.
         ✅ v7.5.25 FIX-5: للمطور — current_count الحقيقي.
@@ -1328,7 +1358,6 @@ class ChannelsPostsMixin:
             async with await self._get_user_lock(user_id):
                 async with self.transaction() as conn:
                     # ─── 1) فحص الملكية ───
-                    # 🔒 v7.5.27 GAP-1: فلترة removed_at إن وُجد العمود
                     if has_removed:
                         row = await self._fetchone_with_conn(
                             conn,
@@ -1354,8 +1383,7 @@ class ChannelsPostsMixin:
 
                     # ─── 2) فحص حدود الباقة ───
                     if is_dev:
-                        max_posts = 10**9  # بلا حد
-                        # ✅ v7.5.25 FIX-5: القيمة الحقيقية
+                        max_posts = 10**9
                         current_count = await self._fetchval_with_conn(
                             conn,
                             "SELECT COUNT(*) FROM posts "
@@ -1524,6 +1552,12 @@ class ChannelsPostsMixin:
                             await invalidate_user_cache(user_id)
                             await posts_cache.invalidate(channel_db_id)
                             await channels_cache.invalidate(user_id)
+
+                    # 🆕 v7.5.30 FIX-PD-1: إطلاق إشارة النشر الفوري
+                    # بعد نجاح الدفعة.
+                    if total > 0:
+                        _fire_publish_trigger("add_posts")
+
                     return total
         except Exception as e:
             logger.error(
