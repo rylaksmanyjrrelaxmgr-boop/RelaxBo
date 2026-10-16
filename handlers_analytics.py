@@ -1,17 +1,30 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-handlers_analytics.py — واجهة التحليلات المتقدمة (v1.3.1 — MULTI-DB + CACHE-FIX)
+handlers_analytics.py — واجهة التحليلات المتقدمة (v1.3.2 — INTEGRATION-CLEAN)
 ================================================================================
-v1.3.1 — فوق v1.3.0:
+v1.3.2 — فوق v1.3.1:
 
-    🔴 FIX-1: force_refresh=True → False في كل دوال العرض.
-        السبب: cache لم يكن يعمل أبداً — كل ضغطة تقرأ DB.
-        الإصلاح: قراءة طبيعية من cache. زر 🔄 يُبطله ثم يقرأ.
+    🟢 CLEAN-1: Regex-escape آمن في register_handlers() — يمنع كسر
+        الـpattern لو أُضيف زر جديد يحوي metachars في المستقبل.
 
-    🟢 NEW-1: /databases command — Multi-DB Discovery.
-    🟢 NEW-2: زر 🗂️ قواعد البيانات في القائمة.
-    🟢 NEW-3: show_databases() يستدعي diagnose_databases() من db_diagnostics.
+    🟢 CLEAN-2: cmd_analytics() — إزالة الفحص المزدوج للمطور
+        (كان _check_developer يُنفَّذ مرتين: في cmd_analytics + في
+        show_analytics_menu).
+
+    🟢 CLEAN-3: تصدير صريح لـ_register_analytics_handlers في __all__.
+
+    🟢 INTEGRATION: يعمل مع bot.py v5.6.32+ الذي يستدعي
+        register_handlers(app) مباشرة، فيسجّل:
+          • CallbackQueryHandler: 12 زر (بما فيها databases_btn)
+          • /analytics, /fullhealth, /latency, /versions,
+            /analytics_reset, /databases
+
+v1.3.1 — محفوظ:
+    🔴 FIX-1: force_refresh=True → False (cache يعمل الآن).
+    🟢 NEW-1: /databases command.
+    🟢 NEW-2: زر 🗂️ قواعد البيانات.
+    🟢 NEW-3: show_databases() يستدعي diagnose_databases().
 
 v1.3.0 — محفوظ:
     🚀 PERF-1: cache ذكي (TTL=60s).
@@ -65,7 +78,7 @@ ANALYTICS_BUTTONS = (
     "refresh_btn",
     "full_health_btn",
     "latency_btn",
-    "databases_btn",  # 🆕 v1.3.1
+    "databases_btn",
 )
 
 
@@ -557,7 +570,6 @@ def _default_analytics_keyboard(lang: str = "ar") -> InlineKeyboardMarkup:
          InlineKeyboardButton(
             _lbl("analytics_export", "📤 تصدير Excel"),
             callback_data="export_excel_btn")],
-        # 🆕 v1.3.1: صف التشخيص الموحّد
         [InlineKeyboardButton(
             _lbl("analytics_full_health", "🏥 التشخيص الشامل"),
             callback_data="full_health_btn"),
@@ -1593,7 +1605,7 @@ async def show_latency(update: Update,
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# 12) 🆕 v1.3.1: Multi-DB Discovery
+# 12) Multi-DB Discovery
 # ═══════════════════════════════════════════════════════════════════════
 
 async def show_databases(update: Update,
@@ -1853,7 +1865,7 @@ _ANALYTICS_HANDLERS = {
     "export_excel_btn": export_excel,
     "full_health_btn": show_full_health,
     "latency_btn": show_latency,
-    "databases_btn": show_databases,  # 🆕 v1.3.1
+    "databases_btn": show_databases,
 }
 
 
@@ -1916,11 +1928,10 @@ async def handle_analytics_callback(
 
 async def cmd_analytics(update: Update,
                         context: ContextTypes.DEFAULT_TYPE) -> None:
-    user_id = _get_safe_user_id(update)
-    if not _check_developer(user_id):
-        chat_id = _safe_get_chat_id(update, None)
-        await _reject_non_dev(context.bot, chat_id, None)
-        return
+    """
+    🆕 v1.3.2 CLEAN-2: نُفوّض التحقق الكامل إلى show_analytics_menu
+    (التي تفحص _check_developer بنفسها) — لتفادي التنفيذ المزدوج.
+    """
     await show_analytics_menu(update, context)
 
 
@@ -1945,10 +1956,22 @@ async def cmd_databases(update: Update,
 # ═══════════════════════════════════════════════════════════════════════
 
 def register_handlers(application) -> bool:
-    """v1.3.1: يُسجّل كل الـ handlers (buttons + commands)."""
+    """
+    v1.3.2: يُسجّل كل الـ handlers (buttons + commands).
+
+    يُستدعى من bot.py v5.6.32+ ضمن [ORDER 5/6].
+    في حال نجاحه، لا حاجة للتسجيل اليدوي في bot.py.
+
+    Returns:
+        True إن نجح التسجيل (كل الأوامر)، False إن فشل.
+    """
     try:
+        # 🆕 v1.3.2 CLEAN-1: regex-escape آمن للأزرار
+        _safe_buttons = "|".join(
+            _re_mod.escape(b) for b in ANALYTICS_BUTTONS
+        )
         pattern = (
-            r"^(?:" + "|".join(ANALYTICS_BUTTONS) + r"|"
+            r"^(?:" + _safe_buttons + r"|"
             r"versions_refresh|analytics_reset_cache"
             r")(?::\d+)?$"
         )
@@ -1973,13 +1996,12 @@ def register_handlers(application) -> bool:
         application.add_handler(
             CommandHandler("analytics_reset", cmd_analytics_reset)
         )
-        # 🆕 v1.3.1
         application.add_handler(
             CommandHandler("databases", cmd_databases)
         )
 
         logger.info(
-            "✅ handlers_analytics v1.3.1: %d زر + 6 أوامر "
+            "✅ handlers_analytics v1.3.2: %d زر + 6 أوامر "
             "(analytics, fullhealth, latency, versions, "
             "analytics_reset, databases)",
             len(ANALYTICS_BUTTONS),
@@ -2011,13 +2033,13 @@ __all__ = [
     "export_excel",
     "show_full_health",
     "show_latency",
-    "show_databases",  # 🆕 v1.3.1
+    "show_databases",
     "cmd_analytics",
     "cmd_fullhealth",
     "cmd_latency",
     "cmd_versions",
     "cmd_analytics_reset",
-    "cmd_databases",  # 🆕 v1.3.1
+    "cmd_databases",
     "register_handlers",
     "register",
     "_cached_db_call",
@@ -2028,13 +2050,16 @@ __all__ = [
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# LOAD BEACON — v1.3.1
+# LOAD BEACON — v1.3.2
 # ═══════════════════════════════════════════════════════════════════════
 
 try:
     logger.info(
-        "✅ handlers_analytics v1.3.1 loaded | "
+        "✅ handlers_analytics v1.3.2 loaded | "
         "buttons=%d | "
+        "CLEAN-1=regex-escape | "
+        "CLEAN-2=cmd-analytics-no-double-check | "
+        "INTEGRATION=bot.py-v5.6.32-register-handlers | "
         "FIX-1=force-refresh-false | "
         "NEW-1=/databases | "
         "NEW-2=databases-btn | "
