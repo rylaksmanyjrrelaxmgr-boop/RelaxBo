@@ -1,32 +1,27 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-handlers_message.py - v7.18.45 (PG-SQL-AUDIT + COUNTER-FIX)
+handlers_message.py - v7.18.46 (POST-AUDIT-CORRECTIONS)
 (متوافق مع detectors v4.1.0 + banned_words_manager v1.2.0 + group_log v1.4.0)
 =============================================================================
-🆕 v7.18.45 (PG-SQL-AUDIT + COUNTER-FIX — 10 إصلاحات):
+🆕 v7.18.46 (POST-AUDIT-CORRECTIONS — 5 إصلاحات):
 
-    🟢 FIX-PG-SUPPORT-INSERT: عناصر نائبة صحيحة ($1..$4) في
-        _handle_support_mode_text مع RETURNING id.
-    🟢 FIX-PG-ADMIN-CHECK: SQL متوافق مع نوع القاعدة في
-        _check_admin_in_chat (كان يفشل صامتاً على PG بدون ترجمة).
-    🟢 FIX-PG-AUTO-DEL: SQL متوافق مع PG في _handle_wait_auto_del_text.
-    🟢 FIX-VIOLATION-COUNTER: إعادة تصفير العدّاد عند غياب العقوبة
-        (penalty_type=None) لتفادي تضخّمه بلا فائدة.
-    🟢 FIX-MYSQL-UPSERT-MODERN: استخدام AS new syntax (MySQL 8.0.20+)
-        مع fallback آمن لـ VALUES() للنسخ الأقدم.
-    🟢 FIX-PRUNE-LOCK: إضافة asyncio.Lock حول _prune_perf_caches
-        وتحويلها لـ async.
-    🟢 FIX-LOGCH-NESTED-CODE: إزالة <code> المتداخل في رسالة تأكيد
-        قناة السجل.
-    🟢 FIX-DEV-IDS-INT: دعم OWNER_IDS/DEVELOPER_IDS كرقم مفرد.
-    🟢 FIX-DATETIME-DEPRECATED: استخدام datetime.now(timezone.utc)
-        بدل datetime.utcnow() (مُهمَل في Python 3.12+).
-    🟢 FIX-DETECTORS-IMPORT: توحيد استيراد detectors في حلقة واحدة.
-    🟢 FIX-RUN-SYNC-KWARGS: functools.partial موحّد قبل الفرعين.
-    🟢 FIX-VERIFY-RETRY-TAG: تصنيف دقيق لأخطاء الشبكة في retry.
+    🟢 FIX-LOGCH-SCHEMELESS-URL: دعم `t.me/username` و
+        `telegram.dog/username` و `telegram.me/username`
+        بدون scheme في _handle_wait_log_ch_text
+        (كانت مقبولة في _parse_channel_ref لكنها تفشل في المعالجة).
+    🟢 FIX-DEAD-CODE-REMOVE: إزالة if لا يفعل شيئاً في _handle_group_impl
+        (كان `if _analysis_mode == "text-only": _analysis_mode = "text-only"`).
+    🟢 FIX-PH-HELPERS-USE: استخدام `_pg_ph` و `_ph_list` فعلياً في
+        مسارات PG لتفادي hardcoded placeholders.
+    🟢 FIX-RUN-SYNC-SAFE-FALLBACK: fallback في _run_sync_in_pool
+        يقتصر على أخطاء الجدولة (RuntimeError/OSError) فقط لتفادي
+        التنفيذ المزدوج عند فشل التنفيذ الفعلي.
+    🟢 FIX-REPLY-FSM-CLEANUP: تنظيف منطق handle_add_reply بحيث
+        `state_name == "WAIT_REPLY_TRIGGER"` لا يتأثر بوجود ` | `
+        في نص المستخدم.
 
-✅ v7.18.44 وما قبله — محفوظ بالكامل.
+✅ v7.18.45 وما قبله — محفوظ بالكامل.
 =============================================================================
 """
 
@@ -107,7 +102,7 @@ def _pg_ph(n: int) -> str:
 def _ph_list(count: int) -> str:
     """يعيد قائمة عناصر نائبة مفصولة بفواصل حسب نوع القاعدة."""
     if _db_is_pg():
-        return ", ".join(f"${i+1}" for i in range(count))
+        return ", ".join(_pg_ph(i + 1) for i in range(count))
     return ", ".join("?" for _ in range(count))
 
 
@@ -442,7 +437,7 @@ def _as_bool(value, default=False) -> bool:
 
 # ═════════════════════════════════════════════════════════════════════
 # v7.18.42 FIX-DEV-IDS + v7.18.43 FIX-DEV-IDS-STR
-# 🆕 v7.18.45 FIX-DEV-IDS-INT: دعم الرقم المفرد
+# v7.18.45 FIX-DEV-IDS-INT: دعم الرقم المفرد
 # ═════════════════════════════════════════════════════════════════════
 def _is_dev_user(user_id) -> bool:
     """فحص موحّد لصلاحيات المطور (developer/owner).
@@ -465,7 +460,7 @@ def _is_dev_user(user_id) -> bool:
                 ids_attr = getattr(CONFIG, attr_name, None)
                 if ids_attr is None:
                     continue
-                # 🆕 v7.18.45 FIX-DEV-IDS-INT: تطبيع القيمة إلى iterable
+                # v7.18.45 FIX-DEV-IDS-INT: تطبيع القيمة إلى iterable
                 if isinstance(ids_attr, (int, float)):
                     ids_attr = [int(ids_attr)]
                 elif isinstance(ids_attr, str):
@@ -518,7 +513,8 @@ def _row_to_dict_local(row) -> Optional[Dict[str, Any]]:
 
 
 # ═════════════════════════════════════════════════════════════════════
-# 🆕 v7.18.45 FIX-RUN-SYNC-KWARGS: partial موحّد قبل الفرعين
+# v7.18.45 FIX-RUN-SYNC-KWARGS: partial موحّد قبل الفرعين
+# 🆕 v7.18.46 FIX-RUN-SYNC-SAFE-FALLBACK: fallback آمن
 # ═════════════════════════════════════════════════════════════════════
 async def _run_sync_in_pool(
     fn: Callable[..., Any],
@@ -537,9 +533,22 @@ async def _run_sync_in_pool(
                 "_run_sync_in_pool: timeout after %.1fs — fn=%s",
                 timeout, getattr(fn, "__name__", repr(fn)))
             raise
-        except Exception as _e:
+        except (RuntimeError, OSError) as _e:
+            # v7.18.46 FIX-RUN-SYNC-SAFE-FALLBACK:
+            # أخطاء الجدولة فقط (مجمع مُغلق، لا يمكن إنشاء future،
+            # أخطاء OS/قنوات) — نسمح بالـ fallback.
             logger.debug(
-                "_run_in_pool failed (%s) — using asyncio.to_thread", _e)
+                "_run_in_pool scheduling failed (%s: %s) — "
+                "falling back to asyncio.to_thread",
+                type(_e).__name__, _e)
+        except Exception as _e:
+            # v7.18.46: أي خطأ آخر = غالباً فشل تنفيذ فعلي —
+            # لا نعيد المحاولة لتفادي التنفيذ المزدوج.
+            logger.debug(
+                "_run_in_pool raised during execution (%s: %s) — "
+                "re-raising to avoid double execution",
+                type(_e).__name__, _e)
+            raise
 
     if timeout and timeout > 0:
         try:
@@ -888,7 +897,7 @@ _ban_add_lock = asyncio.Lock()
 _ban_add_last_cleanup = 0.0
 
 
-# 🆕 v7.18.45 FIX-PRUNE-LOCK: قفل لتنظيف الكاشات
+# v7.18.45 FIX-PRUNE-LOCK: قفل لتنظيف الكاشات
 _prune_caches_lock = asyncio.Lock()
 
 
@@ -2618,9 +2627,7 @@ class GroupRateLimiterManager:
                 logger.error("❌ periodic_cleanup: %s", e)
 
 
-# ═════════════════════════════════════════════════════════════════════
-# 🆕 v7.18.45 FIX-PRUNE-LOCK: تحويلها إلى async + قفل
-# ═════════════════════════════════════════════════════════════════════
+# v7.18.45 FIX-PRUNE-LOCK: تحويلها إلى async + قفل
 async def _prune_perf_caches() -> int:
     async with _prune_caches_lock:
         removed = 0
@@ -2899,6 +2906,7 @@ async def _get_batched_message_settings(
 
     if _db_is_pg():
         try:
+            # v7.18.46 FIX-PH-HELPERS-USE: نستخدم $1 مباشرة (placeholder واحد)
             row = await DB.fetchone(
                 """
                 SELECT
@@ -3253,6 +3261,44 @@ def _parse_channel_ref(raw: str) -> Tuple[bool, str]:
     return False, "unknown_format"
 
 
+# 🆕 v7.18.46 FIX-LOGCH-SCHEMELESS-URL: مساعد مشترك
+# يستخرج username من أنماط t.me بدون scheme
+_SCHEMELESS_TG_HOSTS_RE = re.compile(
+    r'^(?:www\.)?(?:t\.me|telegram\.me|telegram\.dog)/',
+    re.IGNORECASE,
+)
+
+
+def _extract_username_from_schemeless_url(raw: str) -> Optional[str]:
+    """
+    v7.18.46: يستخرج username من روابط Telegram بدون scheme.
+
+    يقبل:
+      • t.me/username
+      • www.t.me/username
+      • telegram.me/username
+      • telegram.dog/username
+      • أي منها مع / أو ? لاحقاً
+
+    يعيد None إذا لم يكن النمط مطابقاً أو كان الرابط للدعوة (+xxx).
+    """
+    if not raw:
+        return None
+    s = raw.strip()
+    if not _SCHEMELESS_TG_HOSTS_RE.match(s):
+        return None
+    path = _SCHEMELESS_TG_HOSTS_RE.sub('', s, count=1)
+    # قطع أي مسار لاحق أو query
+    path = re.split(r'[/?#]', path, maxsplit=1)[0]
+    if not path:
+        return None
+    if path.startswith(('+', 'joinchat')):
+        return None
+    if not re.match(r'^[a-zA-Z][a-zA-Z0-9_]{3,31}$', path):
+        return None
+    return path
+
+
 async def _check_admin_in_chat(context, chat_id, user_id) -> bool:
     if user_id == CONFIG.PRIMARY_OWNER_ID:
         return True
@@ -3274,12 +3320,14 @@ async def _check_admin_in_chat(context, chat_id, user_id) -> bool:
     except Exception:
         pass
     if not result:
-        # 🆕 v7.18.45 FIX-PG-ADMIN-CHECK: SQL متوافق مع النوع
+        # v7.18.45 FIX-PG-ADMIN-CHECK: SQL متوافق مع النوع
+        # v7.18.46 FIX-PH-HELPERS-USE: استخدام _pg_ph
         try:
             if _db_is_pg():
                 _admin_sql = (
                     "SELECT 1 FROM group_admins "
-                    "WHERE chat_id = $1 AND user_id = $2 LIMIT 1")
+                    f"WHERE chat_id = {_pg_ph(1)} "
+                    f"AND user_id = {_pg_ph(2)} LIMIT 1")
             else:
                 _admin_sql = (
                     "SELECT 1 FROM group_admins "
@@ -3311,7 +3359,7 @@ async def _check_admin_in_chat(context, chat_id, user_id) -> bool:
 
 # ═════════════════════════════════════════════════════════════════════
 # v7.18.43 FIX-FORBIDDEN + v7.18.44 FIX-LOGCH-RETRY
-# 🆕 v7.18.45 FIX-VERIFY-RETRY-TAG: تصنيف دقيق لأخطاء الشبكة
+# v7.18.45 FIX-VERIFY-RETRY-TAG: تصنيف دقيق لأخطاء الشبكة في retry
 # ═════════════════════════════════════════════════════════════════════
 async def _verify_bot_in_log_channel(context, channel_id):
     if not channel_id:
@@ -3923,10 +3971,10 @@ class MessageHandlers:
                     logger.debug("multilayer sync-pool error: %s", e)
                     _verdict = None
             if _verdict is None:
+                # v7.18.46 FIX-DEAD-CODE-REMOVE:
+                # أُزيل الفرع الذي كان يعيد تعيين _analysis_mode لنفسه.
                 try:
                     _spam_score, _spam_reasons = _compute_spam_score(ctx)
-                    if _analysis_mode == "text-only":
-                        _analysis_mode = "text-only"
                 except Exception as e:
                     logger.debug("spam_score: %s", e)
 
@@ -4365,9 +4413,7 @@ class MessageHandlers:
 
         return ptype, duration
 
-    # ═══════════════════════════════════════════════════════════════════
-    # 🆕 v7.18.45 FIX-VIOLATION-COUNTER: تصفير العدّاد عند غياب العقوبة
-    # ═══════════════════════════════════════════════════════════════════
+    # v7.18.45 FIX-VIOLATION-COUNTER: تصفير العدّاد عند غياب العقوبة
     @staticmethod
     async def _delete_and_warn(
         update, context, chat_id, user_id,
@@ -4507,7 +4553,7 @@ class MessageHandlers:
             context, chat_id, user_name, violation_type, lang,
             violation_count)
 
-        # 🆕 v7.18.45 FIX-VIOLATION-COUNTER: تصفير العدّاد عند غياب العقوبة
+        # v7.18.45 FIX-VIOLATION-COUNTER: تصفير العدّاد عند غياب العقوبة
         if not penalty_type:
             try:
                 await DB.reset_violation_count(user_id, chat_id)
@@ -4728,13 +4774,14 @@ class MessageHandlers:
 
     # ═══════════════════════════════════════════════════════════════════
     # v7.18.43 FIX-HTML-ESCAPE + v7.18.44 FIX-MYSQL-UPSERT
-    # 🆕 v7.18.45 FIX-MYSQL-UPSERT-MODERN + FIX-LOGCH-NESTED-CODE
+    # v7.18.45 FIX-MYSQL-UPSERT-MODERN + FIX-LOGCH-NESTED-CODE
+    # 🆕 v7.18.46 FIX-LOGCH-SCHEMELESS-URL
     #     معالج قناة السجل (WAIT_LOG_CH)
     # ═══════════════════════════════════════════════════════════════════
     @staticmethod
     async def _handle_wait_log_ch_text(update, context, state=None):
         """
-        v7.18.45: تنسيق موحّد بدون <code> متداخل + UPSERT حديث.
+        v7.18.46: دعم `t.me/username` بدون scheme + UPSERT حديث.
         """
         user_id = (
             update.effective_user.id if update.effective_user else None)
@@ -4777,7 +4824,8 @@ class MessageHandlers:
                 "✅ <b>الصيغ المدعومة:</b>\n"
                 "• <code>@username</code> (قناة عامة)\n"
                 "• <code>-100xxxxxxxxx</code> (رقم القناة)\n"
-                "• <code>https://t.me/username</code>\n\n"
+                "• <code>https://t.me/username</code>\n"
+                "• <code>t.me/username</code>\n\n"
                 "💡 أعد الإدخال أو استخدم /cancel للإلغاء.")
             try:
                 await safe_send(
@@ -4805,6 +4853,7 @@ class MessageHandlers:
         if numeric_id is None:
             username_to_resolve = None
             if cleaned.startswith(('https://', 'http://')):
+                # صيغة URL كاملة
                 try:
                     parsed = urlparse(cleaned)
                     path = (parsed.path or '').lstrip('/')
@@ -4814,6 +4863,13 @@ class MessageHandlers:
                     pass
             elif re.match(r'^[a-zA-Z][a-zA-Z0-9_]{3,31}$', cleaned):
                 username_to_resolve = cleaned
+            else:
+                # 🆕 v7.18.46 FIX-LOGCH-SCHEMELESS-URL:
+                # دعم t.me/username و telegram.dog/username
+                # بدون scheme (كانت مقبولة في _parse_channel_ref
+                # لكنها تفشل هنا سابقاً).
+                username_to_resolve = _extract_username_from_schemeless_url(
+                    raw)
 
             if username_to_resolve:
                 try:
@@ -4911,7 +4967,8 @@ class MessageHandlers:
                         value_to_save, _e)
 
             if not saved_ok:
-                # 🆕 v7.18.45 FIX-MYSQL-UPSERT-MODERN
+                # v7.18.45 FIX-MYSQL-UPSERT-MODERN
+                # v7.18.46 FIX-PH-HELPERS-USE: استخدام _ph_list
                 try:
                     if _db_is_mysql():
                         # MySQL 8.0.20+ modern syntax with fallback
@@ -4936,6 +4993,14 @@ class MessageHandlers:
                                 "ON DUPLICATE KEY UPDATE "
                                 "value = VALUES(value)",
                                 ('log_channel', value_to_save))
+                    elif _db_is_pg():
+                        _ph = _ph_list(2)
+                        await DB.execute(
+                            f"INSERT INTO settings (key, value) "
+                            f"VALUES ({_ph}) "
+                            f"ON CONFLICT (key) DO UPDATE "
+                            f"SET value = EXCLUDED.value",
+                            ('log_channel', value_to_save))
                     else:
                         await DB.execute(
                             "INSERT INTO settings (key, value) "
@@ -5010,7 +5075,7 @@ class MessageHandlers:
                     "✅ تم تعيين قناة السجل:\n<code>{ch}</code>\n\n"
                     "📌 ستستقبل أحداث الحماية والتنبيهات هنا.")
                 try:
-                    # 🆕 v7.18.45 FIX-LOGCH-NESTED-CODE:
+                    # v7.18.45 FIX-LOGCH-NESTED-CODE:
                     # نُدخل النص الإضافي كنص عادي لتجنّب تداخل <code>.
                     if (title_for_display
                             and title_for_display != str(numeric_id)):
@@ -5188,6 +5253,7 @@ class MessageHandlers:
 
     # ═══════════════════════════════════════════════════════════════════
     # v7.18.29 FIX-SUPPORT-2 + v7.18.45 FIX-PG-SUPPORT-INSERT
+    # 🆕 v7.18.46 FIX-PH-HELPERS-USE
     # ═══════════════════════════════════════════════════════════════════
     @staticmethod
     async def _handle_support_mode_text(update, context, state=None):
@@ -5312,12 +5378,12 @@ class MessageHandlers:
                     now_str = _utc_now_iso()
 
                     if _is_pg and callable(fetchone_fn):
-                        # 🆕 v7.18.45 FIX-PG-SUPPORT-INSERT:
-                        # استخدام $1..$4 مع RETURNING id
+                        # v7.18.45 FIX-PG-SUPPORT-INSERT:
+                        # v7.18.46 FIX-PH-HELPERS-USE
                         sql_pg = (
                             "INSERT INTO support_tickets "
                             "(user_id, message, media_type, created_at) "
-                            "VALUES ($1, $2, $3, $4) RETURNING id")
+                            f"VALUES ({_ph_list(4)}) RETURNING id")
                         res = fetchone_fn(
                             sql_pg,
                             (user_id, text, media_type, now_str))
@@ -5494,7 +5560,7 @@ class MessageHandlers:
             keyword[:40], user_id, chat_id)
 
     # ═══════════════════════════════════════════════════════════════════
-    # 🆕 v7.18.45 FIX-PG-AUTO-DEL: SQL متوافق مع نوع القاعدة
+    # v7.18.45 FIX-PG-AUTO-DEL: SQL متوافق مع نوع القاعدة
     # ═══════════════════════════════════════════════════════════════════
     @staticmethod
     async def _handle_wait_auto_del_text(
@@ -5563,11 +5629,13 @@ class MessageHandlers:
                     fetchval = getattr(DB, "fetchval", None)
                     if callable(fetchval):
                         try:
-                            # 🆕 v7.18.45 FIX-PG-AUTO-DEL
+                            # v7.18.45 FIX-PG-AUTO-DEL
+                            # v7.18.46 FIX-PH-HELPERS-USE
                             if _db_is_pg():
                                 _exists_sql = (
                                     "SELECT 1 FROM auto_replies "
-                                    "WHERE chat_id = $1 AND keyword = $2 "
+                                    f"WHERE chat_id = {_pg_ph(1)} "
+                                    f"AND keyword = {_pg_ph(2)} "
                                     "LIMIT 1")
                             else:
                                 _exists_sql = (
@@ -5583,11 +5651,13 @@ class MessageHandlers:
                                 "auto_del existence check: %s", _ee)
                             exists = None
 
-                    # 🆕 v7.18.45 FIX-PG-AUTO-DEL: DELETE متوافق
+                    # v7.18.45 FIX-PG-AUTO-DEL: DELETE متوافق
+                    # v7.18.46 FIX-PH-HELPERS-USE
                     if _db_is_pg():
                         _del_sql = (
                             "DELETE FROM auto_replies "
-                            "WHERE chat_id = $1 AND keyword = $2")
+                            f"WHERE chat_id = {_pg_ph(1)} "
+                            f"AND keyword = {_pg_ph(2)}")
                     else:
                         _del_sql = (
                             "DELETE FROM auto_replies "
@@ -6579,6 +6649,7 @@ class MessageHandlers:
             await MessageHandlers._finalize_ban_add(
                 context, user_id, success)
 
+    # 🆕 v7.18.46 FIX-REPLY-FSM-CLEANUP: تنظيف منطق FSM
     @staticmethod
     async def handle_add_reply(update, context, state=None):
         user_id = (
@@ -6605,26 +6676,11 @@ class MessageHandlers:
         raw = message.text.strip()
         if not raw:
             return
-        if state_name in (None, "WAIT_REPLY_ADD") or " | " in raw:
-            if " | " not in raw:
-                try:
-                    msg = await _trans(
-                        'reply_invalid_format', lang,
-                        "❌ الصيغة: <code>النص المُشغِّل | الرد</code>")
-                    await safe_send(
-                        context.bot, user_id, msg, parse_mode='HTML')
-                except Exception:
-                    pass
-                return
-            trigger, response = raw.split(" | ", 1)
-            trigger = trigger.strip()
-            response = response.strip()
-            if not trigger or not response:
-                return
-            await MessageHandlers._save_reply_and_finish(
-                update, context, chat_id, trigger, response,
-                lang, user_id)
-            return
+
+        # v7.18.46 FIX-REPLY-FSM-CLEANUP:
+        # ترتيب الفروع بحسب الحالة أولاً، ثم fallback للصيغة
+        # `trigger | response` عندما لا تكون الحالة محدّدة أو
+        # عندما تكون WAIT_REPLY_ADD.
         if state_name == "WAIT_REPLY_TRIGGER":
             trigger = raw
             context.user_data['reply_trigger_pending'] = trigger
@@ -6641,6 +6697,7 @@ class MessageHandlers:
             except Exception:
                 pass
             return
+
         if state_name == "WAIT_REPLY_RESPONSE":
             trigger = context.user_data.pop(
                 'reply_trigger_pending', None)
@@ -6660,6 +6717,28 @@ class MessageHandlers:
                 update, context, chat_id, trigger, response,
                 lang, user_id)
             return
+
+        if state_name in (None, "WAIT_REPLY_ADD"):
+            if " | " not in raw:
+                try:
+                    msg = await _trans(
+                        'reply_invalid_format', lang,
+                        "❌ الصيغة: <code>النص المُشغِّل | الرد</code>")
+                    await safe_send(
+                        context.bot, user_id, msg, parse_mode='HTML')
+                except Exception:
+                    pass
+                return
+            trigger, response = raw.split(" | ", 1)
+            trigger = trigger.strip()
+            response = response.strip()
+            if not trigger or not response:
+                return
+            await MessageHandlers._save_reply_and_finish(
+                update, context, chat_id, trigger, response,
+                lang, user_id)
+            return
+
         logger.debug(
             "handle_add_reply: state_name=%r غير متوقّع", state_name)
 
@@ -7351,22 +7430,25 @@ __all__ = [
     "_db_type",
     "_db_is_pg",
     "_db_is_mysql",
-    # 🆕 v7.18.45
+    # v7.18.45
     "_pg_ph",
     "_ph_list",
     "_utc_now_iso",
     "_utc_now_str",
     "_prune_caches_lock",
+    # 🆕 v7.18.46
+    "_extract_username_from_schemeless_url",
+    "_SCHEMELESS_TG_HOSTS_RE",
 ]
 
 
 # ═════════════════════════════════════════════════════════════════════
-# LOAD BEACON — v7.18.45
+# LOAD BEACON — v7.18.46
 # ═════════════════════════════════════════════════════════════════════
 
 try:
     logger.info(
-        "✅ handlers_message v7.18.45 loaded | "
+        "✅ handlers_message v7.18.46 loaded | "
         "BWM=%s | PRIVATE_HANDLERS=%d | "
         "external_handled=%d | "
         "routing-fallback=7-paths-deduped | "
@@ -7375,19 +7457,12 @@ try:
         "DB-TYPE=%s | "
         "WAIT_LOG_CH=direct-handler | "
         "detectors-compat=v4.1.0 | "
-        "fixes=(FIX-PG-SUPPORT-INSERT, "
-        "FIX-PG-ADMIN-CHECK, "
-        "FIX-PG-AUTO-DEL, "
-        "FIX-VIOLATION-COUNTER, "
-        "FIX-MYSQL-UPSERT-MODERN, "
-        "FIX-PRUNE-LOCK, "
-        "FIX-LOGCH-NESTED-CODE, "
-        "FIX-DEV-IDS-INT, "
-        "FIX-DATETIME-DEPRECATED, "
-        "FIX-DETECTORS-IMPORT, "
-        "FIX-RUN-SYNC-KWARGS, "
-        "FIX-VERIFY-RETRY-TAG, "
-        "v7.18.44-all-fixes, v7.18.43-all-fixes)",
+        "fixes=(FIX-LOGCH-SCHEMELESS-URL, "
+        "FIX-DEAD-CODE-REMOVE, "
+        "FIX-PH-HELPERS-USE, "
+        "FIX-RUN-SYNC-SAFE-FALLBACK, "
+        "FIX-REPLY-FSM-CLEANUP, "
+        "v7.18.45-all-fixes, v7.18.44-all-fixes, v7.18.43-all-fixes)",
         "yes" if _HAS_BWM else "no",
         len(MessageHandlers._PRIVATE_HANDLERS_MAP),
         len(_EXTERNAL_HANDLED_STATES),
