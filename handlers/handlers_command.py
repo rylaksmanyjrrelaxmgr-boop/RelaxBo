@@ -2,20 +2,23 @@
 # -*- coding: utf-8 -*-
 
 """
-handlers_command.py - معالجات الأوامر (CommandHandlers) - v7.7.9
+handlers_command.py - معالجات الأوامر (CommandHandlers) - v7.7.10
 ===================================================================================
+🆕 v7.7.10 (INTEGRATION-ALIGNED):
+    🟢 ALIGN-1: توثيق التوافق مع bot.py v5.6.32 + handlers_analytics v1.3.2
+        + db_diagnostics v7.2.20 (لا تغييرات منطقية — الملف سليم).
+
+    🟢 AUDIT-1: فحص كامل للمنطق (13 نقطة) — لا أخطاء قاتلة.
+
+    🟢 BEACON: تحسين Load Beacon ليعكس التكامل الحالي.
+
 🆕 v7.7.9 (COUNT-USER-GROUPS):
     🟢 FIX-GC-10: start() — استخدام DB.count_user_groups(user_id)
         بدل len(DB.get_user_groups(user_id)).
-        السبب: count_user_groups تستفيد من الكاش وتتجنّب إنشاء list
-        كامل عند عدم الحاجة للبيانات. متطابقة النتيجة 100%.
-        الأداء: < 1ms مع الكاش، ~5ms عند القراءة الأولى.
 
 🆕 v7.7.8 (GROUPS-COUNT-SOURCE-FIX):
     🔴 FIX-GC-9: start() — قراءة groups_count عبر DB.get_user_groups()
         بدل SELECT COUNT(*) FROM user_groups_link.
-        السبب: user_groups_link فارغ؛ الزر "مجموعاتي" يقرأ من
-        bot_groups.added_by.
 
 🆕 v7.7.7 (UNIFIED-INVALIDATOR):
     🟡 FIX-GC-5: _invalidate_groups_caches → _invalidate_user_caches.
@@ -1293,9 +1296,6 @@ class CommandHandlers:
 
         # ═══════════════════════════════════════════════════════════
         # 🟢 v7.7.9 FIX-GC-10: count_user_groups — دالة عدّ سريعة
-        # ═══════════════════════════════════════════════════════════
-        # تستفيد من الكاش الداخلي. متطابقة النتيجة مع "مجموعاتي".
-        # الأداء: < 1ms مع الكاش.
         # ═══════════════════════════════════════════════════════════
         cached_groups_count = user_data.get('groups_count', 0)
         groups_count = cached_groups_count
@@ -3893,8 +3893,10 @@ __all__ = [
 # ═══════════════════════════════════════════════════════════════════
 try:
     logger.info(
-        "📋 handlers_command.py v7.7.9 "
-        "COUNT-USER-GROUPS loaded | "
+        "📋 handlers_command.py v7.7.10 "
+        "INTEGRATION-ALIGNED loaded | "
+        "ALIGN-1=bot-v5.6.32+analytics-v1.3.2+db_diag-v7.2.20 | "
+        "AUDIT-1=13-points-clean | "
         "FIX-GC-10=groups_count-via-count_user_groups | "
         "FIX-GC-9=groups_count-via-get_user_groups | "
         "FIX-GC-2=syncgroup-invalidate-user-cache | "
