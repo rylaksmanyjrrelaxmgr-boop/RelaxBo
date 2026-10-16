@@ -1,31 +1,28 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-
 """
-🌿 Relax Manager – البوت الرئيسي (bot.py v5.6.31-WARMUP-DETECTORS)
+🌿 Relax Manager – البوت الرئيسي (bot.py v5.6.32-DATABASES-FIX)
 ================================================================================
 📌 نقطة الدخول الرسمية للتطبيق (entrypoint).
 
-🆕 v5.6.31 (WARMUP-DETECTORS):
-    🟢 WARMUP-1: استدعاء handlers_message.warmup_detectors_pool() بعد
-        نجاح _warmup_telegram_api — كـ create_task (غير حاجب).
-        الهدف: تهيئة مجمع detectors + تحميل الوحدات الثقيلة
-        (PIL/numpy/cv2/pytesseract) قبل وصول أول رسالة حقيقية.
-        الأثر المتوقّع: أول رسالة → ~250ms بدل ~8000ms (قياس prod:
-        SPAM-TIMEOUT كان يستهلك 8.2s في أول رسالة بعد الإقلاع).
+🆕 v5.6.32 (DATABASES-FIX):
+    🟢 FIX-DATABASES: كان bot.py يستورد 4 دوال من handlers_analytics
+        (show_analytics_menu, handle_analytics_callback, cmd_fullhealth,
+        cmd_latency) ويسجّلها يدوياً، لكنه لا يستدعي register_handlers().
+        النتيجة: /databases, /versions, /analytics_reset, /analytics
+        + زر databases_btn كانت معطّلة تماماً رغم وجودها في
+        handlers_analytics v1.3.1.
 
-    🟢 WARMUP-2: تتبّع task التسخين في _WARMUP_TASKS، وإلغاؤه في
-        finally عند الإغلاق اللطيف (لا يفشل الـshutdown إن لم ينته).
+        الإصلاح:
+        - [ORDER 5/6] يستدعي register_handlers(app) إن توفّرت.
+        - fallback يدوي محسّن: يُسجّل databases_btn ضمن الـpattern.
+        - في حال فشل register_handlers → التسجيل اليدوي يعمل كالمعتاد.
 
-    🟢 WARMUP-3: اكتشاف تلقائي لـ warmup_detectors_pool في
-        handlers_message — إن كان أقدم من v7.18.39، البوت يستمر
-        بدون خطأ (fallback آمن).
+    🟢 FIX-REGEX: أُضيف databases_btn إلى pattern التسجيل اليدوي —
+        كي لا يفقد الزر حتى لو توفّر fallback.
 
-🆕 v5.6.30 (DB-DIAG-MARK) — محفوظ:
-    🟢 MARK-1: mark_process_start() عند بدء main().
-    🟢 MARK-2: تسجيل حالة db_diagnostics.
-    🟢 MARK-3: اكتشاف تلقائي للـAPI.
-
+🆕 v5.6.31 (WARMUP-DETECTORS) — محفوظ.
+🆕 v5.6.30 (DB-DIAG-MARK) — محفوظ.
 🆕 v5.6.29 (PERF-TELEGRAM-POOL-FIX) — محفوظ.
 🆕 v5.6.28 (APP-START-FIX + ROBUST-SHUTDOWN) — محفوظ.
 🆕 v5.6.27 (SLEEP-PROBE) — محفوظ.
@@ -171,6 +168,11 @@ _show_analytics_menu = None
 _cmd_fullhealth = None
 _cmd_latency = None
 
+# 🆕 v5.6.32: register_handlers الكامل (v1.3.1+) — يُسجّل /databases,
+# /versions, /analytics_reset, /analytics + databases_btn + versions_refresh
+_register_analytics_handlers = None
+_ANALYTICS_REGISTER_AVAILABLE = False
+
 try:
     from handlers.handlers_analytics import (
         handle_analytics_callback as _handle_analytics_callback,
@@ -214,6 +216,29 @@ except ImportError as _e_an1:
             _ANALYTICS_HANDLERS_IMPORT_ERROR = (
                 f"{_e_an1} | {_e_an2} | {_e_an3}"
             )
+
+# 🆕 v5.6.32: register_handlers (منفصل عن الاستيراد أعلاه — v1.3.1+)
+try:
+    from handlers.handlers_analytics import (
+        register_handlers as _register_analytics_handlers_imported,
+    )
+    if callable(_register_analytics_handlers_imported):
+        _register_analytics_handlers = _register_analytics_handlers_imported
+        _ANALYTICS_REGISTER_AVAILABLE = True
+except ImportError:
+    try:
+        from handlers_analytics import (  # type: ignore
+            register_handlers as _register_analytics_handlers_imported,
+        )
+        if callable(_register_analytics_handlers_imported):
+            _register_analytics_handlers = _register_analytics_handlers_imported
+            _ANALYTICS_REGISTER_AVAILABLE = True
+    except ImportError:
+        _register_analytics_handlers = None
+        _ANALYTICS_REGISTER_AVAILABLE = False
+except Exception:
+    _register_analytics_handlers = None
+    _ANALYTICS_REGISTER_AVAILABLE = False
 
 # ═════════════════════════════════════════════════════════════════════
 # فحص محرك كشف السبام
@@ -397,12 +422,6 @@ from handlers.handlers_message import (
 # ═════════════════════════════════════════════════════════════════════
 # 🆕 v5.6.31 WARMUP-1/WARMUP-3: warmup_detectors_pool (optional)
 # ═════════════════════════════════════════════════════════════════════
-# الغرض: تسخين مجمع detectors قبل أول رسالة حقيقية.
-# القياس في prod: أول رسالة بعد الإقلاع = ~8s، الثانية = ~284ms.
-# warmup_detectors_pool() — إن وجدت في handlers_message v7.18.39+ —
-# تستدعي _get_shared_pool + تستورد الوحدات الثقيلة مرة واحدة.
-#
-# إن كان handlers_message أقدم من v7.18.39، نستمر بدون خطأ.
 _warmup_detectors_pool_fn = None
 _HAS_WARMUP_DETECTORS = False
 _WARMUP_DETECTORS_IMPORT_ERROR = None
@@ -1403,6 +1422,20 @@ else:
         _ANALYTICS_HANDLERS_IMPORT_ERROR or "unknown",
     )
 
+# 🆕 v5.6.32: تقرير توفّر register_handlers من handlers_analytics
+if _ANALYTICS_REGISTER_AVAILABLE and callable(_register_analytics_handlers):
+    logger.info(
+        "✅ handlers_analytics.register_handlers متاح — "
+        "سيُسجّل /databases + /versions + /analytics_reset + "
+        "/analytics + databases_btn + versions_refresh + "
+        "analytics_reset_cache"
+    )
+else:
+    logger.info(
+        "ℹ️ handlers_analytics.register_handlers غير متاح — "
+        "سيتم التسجيل اليدوي (fallback). يتطلب v1.3.1+"
+    )
+
 _log_spam_detector_status()
 _log_security_bridge_status()
 
@@ -1475,6 +1508,7 @@ ADMIN_COMMANDS = [
     ("cache_stats", "📊 إحصائيات الكاش الحية"),
     ("fullhealth", "🏥 التشخيص الشامل"),
     ("latency", "🔬 اختبار الكمون"),
+    ("databases", "🗂️ قواعد البيانات المُعدّة"),  # 🆕 v5.6.32
 ]
 
 GROUP_COMMANDS = [
@@ -3059,8 +3093,6 @@ async def main():
     # ═══════════════════════════════════════════════════════════════
     # 🆕 v5.6.30 MARK-1: إخطار db_diagnostics ببدء العملية الفعلي
     # ═══════════════════════════════════════════════════════════════
-    # يجب أن يكون هذا النداء الأول في main() — قبل أي انتظار/شبكة —
-    # لكي يُحسب وقت بدء نافذة السماح (STARTUP-GRACE) بدقة.
     if _MARK_PROCESS_START_FN is not None:
         try:
             _MARK_PROCESS_START_FN()
@@ -3088,7 +3120,7 @@ async def main():
     logger.info("👨‍💼 المالك: %s", CONFIG.PRIMARY_OWNER_ID)
 
     logger.info(
-        "📦 bot.py: v5.6.31 | "
+        "📦 bot.py: v5.6.32 | "
         "detectors=%s | layers=%d | helpers=%s | "
         "db_idle=%s | cache_stats=%s | analytics=%s | "
         "fullhealth=%s | latency=%s | maint_cmds=%s | "
@@ -3098,7 +3130,7 @@ async def main():
         "watcher_interval=%.0fs | shutdown_robust=on | "
         "httpx_pool=%s | "
         "db_diag=%s | db_diag_mark=%s | "
-        "warmup_detectors=%s",
+        "warmup_detectors=%s | analytics_register=%s",
         _SPAM_DETECTOR_VERSION or "N/A",
         _SPAM_DETECTOR_LAYERS_COUNT,
         (
@@ -3125,6 +3157,7 @@ async def main():
         _DB_DIAG_VERSION or "N/A",
         "on" if _MARK_PROCESS_START_FN is not None else "off",
         "yes" if _HAS_WARMUP_DETECTORS else "no",
+        "yes" if _ANALYTICS_REGISTER_AVAILABLE else "no",
     )
 
     try:
@@ -3251,8 +3284,6 @@ async def main():
     # ═══════════════════════════════════════════════════════════════════
     # 🆕 v5.6.31 WARMUP-1: تسخين مجمع detectors (غير حاجب)
     # ═══════════════════════════════════════════════════════════════════
-    # يُشغَّل كـtask خلفي بالتوازي مع تسجيل handlers — لا يحجب main().
-    # الأثر: أول رسالة حقيقية ستجد المجمع جاهزاً → ~250ms بدل ~8000ms.
     _spawn_warmup_detectors_pool()
 
     try:
@@ -3583,7 +3614,7 @@ async def main():
     app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, successful_payment))
 
     # ═══════════════════════════════════════════════════════════════
-    # ORDER-FIX-COMPAT: ترتيب التسجيل (v5.6.25 + v5.6.26)
+    # ORDER-FIX-COMPAT: ترتيب التسجيل (v5.6.25 + v5.6.26 + v5.6.32)
     # ═══════════════════════════════════════════════════════════════
 
     try:
@@ -3652,39 +3683,85 @@ async def main():
             "زر قناة السجل لن يعمل"
         )
 
-    if _ANALYTICS_HANDLERS_AVAILABLE and \
-       _show_analytics_menu is not None and \
-       _handle_analytics_callback is not None:
+    # ═══════════════════════════════════════════════════════════════
+    # 🆕 v5.6.32 [ORDER 5/6] FIX-DATABASES
+    # ═══════════════════════════════════════════════════════════════
+    # التسجيل عبر register_handlers() من handlers_analytics v1.3.1+ —
+    # يُسجّل كل الأزرار والأوامر بما فيها:
+    #   • /databases (زر databases_btn + أمر /databases)
+    #   • /versions, /analytics_reset, /analytics
+    #   • versions_refresh, analytics_reset_cache (أزرار داخلية)
+    # Fallback يدوي إن لم تتوفر register_handlers.
+    # ═══════════════════════════════════════════════════════════════
+
+    _analytics_registered = False
+
+    if _ANALYTICS_REGISTER_AVAILABLE and callable(_register_analytics_handlers):
         try:
-            app.add_handler(CallbackQueryHandler(
-                _show_analytics_menu,
-                pattern=r"^admin_analytics$",
-            ))
-            app.add_handler(CallbackQueryHandler(
-                _handle_analytics_callback,
-                pattern=(
-                    r"^(growth_30d_btn|top_channels_btn|publish_stats_btn|"
-                    r"channels_rate_btn|subscriptions_btn|pool_live_btn|"
-                    r"slow_queries_btn|export_excel_btn|"
-                    r"full_health_btn|latency_btn|"
-                    r"refresh_btn)$"
-                ),
-            ))
-            logger.info(
-                "✅ [ORDER 5/6] handlers_analytics: 12 معالج مسجّل "
-                "(admin_analytics + 11 زر تقرير)"
-            )
+            _ok = _register_analytics_handlers(app)
+            if _ok:
+                _analytics_registered = True
+                logger.info(
+                    "✅ [ORDER 5/6] handlers_analytics: register_handlers() "
+                    "نجح — يشمل /databases + /versions + /analytics_reset "
+                    "+ /analytics + databases_btn + versions_refresh + "
+                    "analytics_reset_cache"
+                )
+            else:
+                logger.warning(
+                    "⚠️ [ORDER 5/6] register_handlers() أعاد False — "
+                    "سيتم استخدام التسجيل اليدوي"
+                )
         except Exception as _e:
             logger.error(
-                "❌ [ORDER 5/6] فشل تسجيل handlers_analytics: %s",
+                "❌ [ORDER 5/6] register_handlers() فشل: %s — "
+                "سيتم استخدام التسجيل اليدوي",
                 _e, exc_info=True,
             )
     else:
-        logger.warning(
-            "⚠️ [ORDER 5/6] handlers_analytics غير متاح — "
-            "أزرار التحليلات لن تعمل: %s",
-            _ANALYTICS_HANDLERS_IMPORT_ERROR or "unknown",
+        logger.info(
+            "ℹ️ [ORDER 5/6] handlers_analytics.register_handlers غير متاح "
+            "(v1.3.1 مطلوب) — سيتم التسجيل اليدوي"
         )
+
+    # Fallback يدوي: يعمل فقط إذا فشل register_handlers
+    if not _analytics_registered:
+        if _ANALYTICS_HANDLERS_AVAILABLE and \
+           _show_analytics_menu is not None and \
+           _handle_analytics_callback is not None:
+            try:
+                app.add_handler(CallbackQueryHandler(
+                    _show_analytics_menu,
+                    pattern=r"^admin_analytics$",
+                ))
+                app.add_handler(CallbackQueryHandler(
+                    _handle_analytics_callback,
+                    pattern=(
+                        r"^(growth_30d_btn|top_channels_btn|publish_stats_btn|"
+                        r"channels_rate_btn|subscriptions_btn|pool_live_btn|"
+                        r"slow_queries_btn|export_excel_btn|"
+                        r"full_health_btn|latency_btn|"
+                        r"databases_btn|"
+                        r"refresh_btn)$"
+                    ),
+                ))
+                logger.info(
+                    "✅ [ORDER 5/6] handlers_analytics (fallback يدوي): "
+                    "11 زر مُسجّل — databases_btn ✅ (لكن /databases, "
+                    "/versions, /analytics_reset قد لا تعمل — يتطلب "
+                    "register_handlers من v1.3.1+)"
+                )
+            except Exception as _e:
+                logger.error(
+                    "❌ [ORDER 5/6] فشل التسجيل اليدوي: %s",
+                    _e, exc_info=True,
+                )
+        else:
+            logger.warning(
+                "⚠️ [ORDER 5/6] handlers_analytics غير متاح — "
+                "أزرار التحليلات لن تعمل: %s",
+                _ANALYTICS_HANDLERS_IMPORT_ERROR or "unknown",
+            )
 
     try:
         app.add_handler(CallbackQueryHandler(CallbackHandlers.handle))
@@ -3748,8 +3825,6 @@ async def main():
     # ═══════════════════════════════════════════════════════════════
     # 🆕 v5.6.31 WARMUP-2: انتظار قصير (≤2s) لانتهاء التسخين
     # ═══════════════════════════════════════════════════════════════
-    # انتظار قصير جداً — إن انتهى التسخين فوراً، نعرض رسالة نجاح.
-    # إن استمر، نتركه في الخلفية (لا نحجب startup).
     if _WARMUP_DETECTORS_TASK is not None and not _WARMUP_DETECTORS_TASK.done():
         _warmup_ok = await _await_warmup_detectors_pool(timeout=2.0)
         if _warmup_ok:
