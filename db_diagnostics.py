@@ -1,9 +1,24 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-db_diagnostics.py — واجهة تشخيص وصيانة قاعدة البيانات (v7.2.20 — COMMAND-FIX)
+db_diagnostics.py — واجهة تشخيص وصيانة قاعدة البيانات (v7.2.21 — POOL-DISPLAY-FIX)
 ================================================================================
-🆕 v7.2.20 — COMMAND-FIX:
+🆕 v7.2.21 — POOL-DISPLAY-FIX:
+
+    🔴 FIX-21: إصلاح عرض Pool في /databases و /db_diag:
+        كان يعرض `pool_used/total` = `15/15` (مضلّل — 100% usage وهمي).
+        السبب: `asyncpg.Pool._holders` يحتوي كل الاتصالات (idle + in-use)،
+        وليس فقط المُستخدَمة. استخدام `len(_holders)` كان يعطي عدداً
+        مضلّلاً.
+        الإصلاح:
+          - استخدام `pool.get_size() - pool.get_idle_size()` = in_use الفعلي.
+          - إضافة `pool_idle` منفصل لعرض الاتصالات الخاملة.
+          - تحديث `format_multi_db_report` ليعرض: `in_use/total (idle)`
+
+        مثال قبل: `🏊 Pool: 15/15` (مضلّل — يوحي بأن كل الاتصالات مشغولة)
+        مثال بعد: `🏊 Pool: 3/15 (idle=12)` (واضح — 3 قيد الاستخدام)
+
+🆕 v7.2.20 — COMMAND-FIX — محفوظ:
 
     🟢 FIX-20: تصحيح مرجع الأمر غير الموجود:
         - كان يُحيل إلى `/databases` (غير مُسجَّل في bot.py).
@@ -18,12 +33,6 @@ db_diagnostics.py — واجهة تشخيص وصيانة قاعدة البيان
         كانت GRACE-1/2 تعالج event_loop فقط. القياسات الأخرى
         (CPU=96%، load=7.11) تظهر مضخَّمة أثناء الإقلاع (19 مهمة +
         pool warmup) وتُعرض كانها bottleneck حقيقي.
-
-        التفاصيل:
-        - _probe_full_health: ينشر `_startup_window` إلى system dict.
-        - _identify_bottleneck: يتجاهل cpu/ram/filesystem خلال النافذة.
-        - format_full_health_report: بانر عام في الأعلى + وسم CPU
-          بـ «مضخَّم — إقلاع» بدل عرض الرقم بدون سياق.
 
 🆕 v7.2.18 — FIX-COMPLETE — محفوظ.
 🆕 v7.2.17 — FULL-FIX — محفوظ.
@@ -69,7 +78,7 @@ logger = logging.getLogger(__name__)
 # الإصدار + Startup grace
 # ═══════════════════════════════════════════════════════════════════════
 
-VERSION = "7.2.20"
+VERSION = "7.2.21"
 
 
 def _compute_process_start_monotonic() -> float:
@@ -529,6 +538,90 @@ def _guess_provider_from_host(host: str) -> str:
     return "unknown"
 
 
+def _read_pool_metrics(pool) -> Dict[str, int]:
+    """
+    🆕 FIX-21 (v7.2.21): قراءة مقاييس pool دقيقة.
+
+    المشكلة السابقة: `len(pool._holders)` يعطي كل الاتصالات
+    (idle + in-use)، وليس فقط المُستخدَمة → عرض `15/15` مضلّل.
+
+    الحل: استخدام الواجهات الرسمية:
+      - pool.get_size() → العدد الحالي للاتصالات (idle + in_use)
+      - pool.get_idle_size() → الاتصالات الخاملة
+      - in_use = get_size - get_idle_size
+
+    Returns dict مع: max_size, current_size, idle_size, in_use
+    كل القيم آمنة (0 عند الفشل).
+    """
+    metrics = {
+        "max_size": 0,
+        "current_size": 0,
+        "idle_size": 0,
+        "in_use": 0,
+    }
+    if pool is None:
+        return metrics
+
+    try:
+        # max_size
+        try:
+            if hasattr(pool, "get_max_size") and callable(pool.get_max_size):
+                metrics["max_size"] = int(pool.get_max_size() or 0)
+            else:
+                _m = getattr(pool, "_maxsize", None)
+                if _m is not None:
+                    metrics["max_size"] = int(_m)
+        except Exception:
+            pass
+
+        # current_size
+        try:
+            if hasattr(pool, "get_size") and callable(pool.get_size):
+                metrics["current_size"] = int(pool.get_size() or 0)
+            else:
+                _s = getattr(pool, "size", None)
+                if _s is not None:
+                    if callable(_s):
+                        metrics["current_size"] = int(_s() or 0)
+                    else:
+                        metrics["current_size"] = int(_s)
+        except Exception:
+            pass
+
+        # idle_size
+        try:
+            if hasattr(pool, "get_idle_size") and callable(pool.get_idle_size):
+                metrics["idle_size"] = int(pool.get_idle_size() or 0)
+            else:
+                _i = getattr(pool, "freesize", None)
+                if _i is not None:
+                    if callable(_i):
+                        metrics["idle_size"] = int(_i() or 0)
+                    else:
+                        metrics["idle_size"] = int(_i)
+        except Exception:
+            pass
+
+        # in_use = current - idle (لا يمكن أن يكون سالباً)
+        metrics["in_use"] = max(
+            0, metrics["current_size"] - metrics["idle_size"]
+        )
+
+        # sanity check: in_use ≤ max_size
+        if metrics["max_size"] > 0:
+            metrics["in_use"] = min(metrics["in_use"], metrics["max_size"])
+            metrics["current_size"] = min(
+                metrics["current_size"], metrics["max_size"]
+            )
+            metrics["idle_size"] = min(
+                metrics["idle_size"], metrics["max_size"]
+            )
+    except Exception:
+        pass
+
+    return metrics
+
+
 def _detect_active_db_source(db) -> Dict[str, Any]:
     out: Dict[str, Any] = {
         "active_url": "",
@@ -542,7 +635,9 @@ def _detect_active_db_source(db) -> Dict[str, Any]:
         "use_postgres": False,
         "use_mysql": False,
         "pool_size": 0,
-        "pool_used": 0,
+        "pool_used": 0,       # 🆕 FIX-21: in-use الفعلي
+        "pool_idle": 0,       # 🆕 FIX-21: idle صريح
+        "pool_current": 0,    # 🆕 FIX-21: current_size الفعلي
     }
     if db is None:
         return out
@@ -577,32 +672,24 @@ def _detect_active_db_source(db) -> Dict[str, Any]:
             out["components"].get("host", "")
         )
 
+    # 🆕 FIX-21 (v7.2.21): قراءة pool metrics بدقة
     pool = getattr(db, "_pool", None)
     if pool is not None:
         try:
-            pool_size = (
-                getattr(pool, "_maxsize", None)
-                or getattr(db, "DB_POOL_SIZE", 0)
-                or 0
-            )
-            out["pool_size"] = int(pool_size)
+            _metrics = _read_pool_metrics(pool)
 
-            holders = getattr(pool, "_holders", None)
-            if holders is not None and hasattr(holders, "__len__"):
-                out["pool_used"] = len(holders)
-            else:
-                get_size = getattr(pool, "get_size", None)
-                if callable(get_size):
-                    try:
-                        out["pool_used"] = int(get_size() or 0)
-                    except Exception:
-                        pass
-                else:
-                    size_attr = getattr(pool, "size", None)
-                    if callable(size_attr):
-                        out["pool_used"] = int(size_attr() or 0)
-                    elif size_attr is not None:
-                        out["pool_used"] = int(size_attr)
+            # ملء max_size من DB_POOL_SIZE عند غياب pool API
+            if _metrics["max_size"] <= 0:
+                try:
+                    _fallback_max = getattr(db, "DB_POOL_SIZE", 0) or 0
+                    _metrics["max_size"] = int(_fallback_max)
+                except Exception:
+                    pass
+
+            out["pool_size"] = _metrics["max_size"]
+            out["pool_used"] = _metrics["in_use"]
+            out["pool_idle"] = _metrics["idle_size"]
+            out["pool_current"] = _metrics["current_size"]
         except Exception:
             pass
 
@@ -741,7 +828,6 @@ def _get_multi_db_warnings(configured: List[Dict[str, Any]]) -> List[str]:
             f"— تأكد أن البوت يستخدم الصحيح"
         )
 
-    # FIX-15 (v7.2.18): استبعاد sqlite من تحذير «أنواع مختلفة».
     types = {c["db_type"] for c in configured
              if c["db_type"] and c["db_type"] != "sqlite"}
     if len(types) > 1:
@@ -756,6 +842,47 @@ def _get_multi_db_warnings(configured: List[Dict[str, Any]]) -> List[str]:
         )
 
     return warnings
+
+
+def _format_pool_line(active: Dict[str, Any]) -> str:
+    """
+    🆕 FIX-21 (v7.2.21): عرض pool بصيغة غير مضلّلة.
+
+    الصيغة: `in_use/max_size (idle=N, current=M)`
+    مثال:   `3/15 (idle=12, current=15)`
+    """
+    max_size = active.get("pool_size", 0)
+    in_use = active.get("pool_used", 0)
+    idle = active.get("pool_idle", 0)
+    current = active.get("pool_current", 0)
+
+    if max_size <= 0 and current <= 0:
+        return "🏊 Pool: — (غير متاح)"
+
+    # استخدام current_size إن كان max_size غير معروف
+    display_max = max_size if max_size > 0 else current
+
+    util_pct = (
+        round((current / display_max) * 100, 0)
+        if display_max > 0 else 0
+    )
+
+    # أيقونة حسب نسبة الاستخدام الحقيقي
+    if display_max > 0:
+        real_util = (in_use / display_max) * 100
+        if real_util < 50:
+            icon = "🟢"
+        elif real_util < 80:
+            icon = "🟡"
+        else:
+            icon = "🔴"
+    else:
+        icon = "⚪"
+
+    return (
+        f"🏊 Pool: {icon} {in_use}/{display_max} "
+        f"(idle={idle}, current={current}, util={util_pct:.0f}%)"
+    )
 
 
 def format_multi_db_report() -> str:
@@ -778,7 +905,8 @@ def format_multi_db_report() -> str:
         lines.append(f"   🔌 المصدر: <code>{_esc(active.get('active_source', '?'))}</code>")
         lines.append(f"   🌍 المنطقة: <code>{_esc(active.get('region', 'unknown'))}</code> "
                      f"<i>({active.get('region_confidence', '?')})</i>")
-        lines.append(f"   🏊 Pool: {active.get('pool_used', 0)}/{active.get('pool_size', 0)}")
+        # 🆕 FIX-21: عرض Pool بصيغة دقيقة
+        lines.append(f"   {_format_pool_line(active)}")
         masked = active.get("active_masked", "")
         if masked:
             lines.append(f"   🔗 <code>{_esc(masked)[:80]}</code>")
@@ -1789,8 +1917,6 @@ def format_latency_report(probe: Dict[str, Any]) -> str:
     lines.append("━━━━━━━━━━━━━━━━━━━━━━")
     lines.append(f"📊 <b>الحكم:</b> {verdict_label}")
     lines.append("")
-    # FIX-1 (v7.2.17): لا نُهرّب diagnosis/recommendation —
-    # فهي تحتوي على HTML مبني داخلياً بـ _esc() بالفعل.
     if diagnosis:
         lines.append("<b>التشخيص:</b>")
         lines.append(f"  {diagnosis}")
@@ -2090,9 +2216,6 @@ def _identify_bottleneck(data: Dict[str, Any]) -> Dict[str, Any]:
     🆕 v7.2.19 FIX-19: نتجاهل cpu/ram/filesystem/event_loop خلال
     نافذة الإقلاع — لأن 19 مهمة خلفية + pool warmup + webhook
     تُضخّم قياسات CPU/Load/FS بشكل مضلّل.
-
-    ملاحظة: network_db و database_internal يبقيان صالحَين دائماً
-    (measurements حقيقية للشبكة/DB، لا تتأثر بالإقلاع).
     """
     comps: List[Dict[str, Any]] = []
 
@@ -2111,7 +2234,6 @@ def _identify_bottleneck(data: Dict[str, Any]) -> Dict[str, Any]:
         and cross.get("inferred_from_rtt") is True
     )
 
-    # 🆕 v7.2.19 FIX-19: نافذة الإقلاع — تُطبَّق على cpu/ram/fs/event_loop
     loop_p = data.get("event_loop") or {}
     in_startup = bool(loop_p.get("_startup_window", False))
 
@@ -2121,7 +2243,6 @@ def _identify_bottleneck(data: Dict[str, Any]) -> Dict[str, Any]:
     if same_region_confirmed:
         db_tcp = 0.0
 
-    # network_db صالح دائماً — حتى أثناء الإقلاع (قياس حقيقي TCP)
     if db_tcp > 0:
         if db_tcp < _NET_DB_RTT_LOW_SAME_DC:
             sev = "low"
@@ -2135,7 +2256,6 @@ def _identify_bottleneck(data: Dict[str, Any]) -> Dict[str, Any]:
             sev = "critical"
         _add("network_db", "time", db_tcp, "ms", sev, db_tcp * 3.0)
 
-    # database_internal صالح دائماً — قياس DB داخلي لا يتأثر بالبدء
     warm = float(db_p.get("warm_median_ms") or 0)
     if warm > 0:
         internal_ms = max(0.0, warm - db_tcp) if db_tcp > 0 else warm
@@ -2150,7 +2270,6 @@ def _identify_bottleneck(data: Dict[str, Any]) -> Dict[str, Any]:
         _add("database_internal", "time", internal_ms, "ms", sev,
              internal_ms * 3.0)
 
-    # event_loop — GRACE-2 (v7.2.16): تجاهل خلال نافذة الإقلاع
     lag = float(loop_p.get("p90_ms") or loop_p.get("median_ms") or 0)
     if lag > 0 and not in_startup:
         if lag < 20:
@@ -2163,8 +2282,6 @@ def _identify_bottleneck(data: Dict[str, Any]) -> Dict[str, Any]:
             sev = "critical"
         _add("event_loop", "time", lag, "ms", sev, lag * 5.0)
 
-    # filesystem — 🆕 FIX-19: تجاهل خلال نافذة الإقلاع
-    # (I/O القرص مشبع بـ pool warmup + init writes)
     fs_p = data.get("filesystem") or {}
     fs_w = float(fs_p.get("write_1mb_ms") or 0)
     if fs_w > 0 and not in_startup:
@@ -2178,8 +2295,6 @@ def _identify_bottleneck(data: Dict[str, Any]) -> Dict[str, Any]:
             sev = "critical"
         _add("filesystem", "time", fs_w, "ms", sev, fs_w * 0.5)
 
-    # cpu — 🆕 FIX-19: تجاهل خلال نافذة الإقلاع
-    # (19 مهمة + pool warmup = CPU مرتفع مؤقتاً)
     sys_p = data.get("system") or {}
     cpu = float(sys_p.get("cpu_percent") or 0)
     if cpu > 0 and not in_startup:
@@ -2193,8 +2308,6 @@ def _identify_bottleneck(data: Dict[str, Any]) -> Dict[str, Any]:
             sev = "critical"
         _add("cpu", "percent", cpu, "%", sev, cpu * 1.0)
 
-    # ram — 🆕 FIX-19: تجاهل خلال نافذة الإقلاع
-    # (caches warming + modules loading)
     ram = float(sys_p.get("ram_percent") or 0)
     if ram > 0 and not in_startup:
         if ram < 85:
@@ -2207,7 +2320,6 @@ def _identify_bottleneck(data: Dict[str, Any]) -> Dict[str, Any]:
             sev = "critical"
         _add("ram", "percent", ram, "%", sev, ram * 0.8)
 
-    # network_telegram صالح دائماً — قياس حقيقي للشبكة
     net_tg = data.get("network_telegram") or {}
     tg_tcp = float(net_tg.get("tcp_ms") or 0)
     if tg_tcp > 0:
@@ -2295,8 +2407,6 @@ def _identify_bottleneck(data: Dict[str, Any]) -> Dict[str, Any]:
     }
 
     if top_name == "network_db" and cross.get("cross_region") is True:
-        # FIX-11 (v7.2.18): _esc() على bot_r/db_r — كانت نقطة
-        # HTML-injection بعد أن أزال FIX-1 التهريب الخارجي.
         bot_r_raw = cross.get("bot_region", "?")
         db_r_raw = cross.get("db_region", "?")
         bot_r = _esc(bot_r_raw)
@@ -2411,8 +2521,6 @@ async def _probe_full_health(*, force: bool = False) -> Dict[str, Any]:
     result["system"] = _safe(probes[3], {})
     result["database"] = db_latency_result
 
-    # 🆕 v7.2.19 FIX-19: ننشر _startup_window إلى system أيضاً —
-    # كي يستطيع formatter وسم CPU بـ «مضخَّم — إقلاع».
     loop_dict = result.get("event_loop")
     startup_window = bool(
         isinstance(loop_dict, dict)
@@ -2464,8 +2572,6 @@ async def _probe_full_health(*, force: bool = False) -> Dict[str, Any]:
     result["ok"] = True
     result["bottleneck"] = _identify_bottleneck(result)
 
-    # FIX-12 (v7.2.18): TTL قصير أثناء نافذة الإقلاع — كي لا تظل
-    # القياسات المضخّمة والبانر يظهران بعد الـ 60s.
     loop_win = bool((result.get("event_loop") or {}).get(
         "_startup_window", False))
     ttl = _FULL_HEALTH_TTL_STARTUP if loop_win else _FULL_HEALTH_TTL_NORMAL
@@ -2487,8 +2593,15 @@ def format_full_health_report(data: Dict[str, Any]) -> str:
         lines.append(active_line)
         lines.append("")
 
-    # 🆕 v7.2.19 FIX-19: بانر عام لنافذة الإقلاع في الأعلى — يُنبِّه
-    # أن CPU/RAM/FS/EventLoop غير موثوقة قبل 60s.
+    # 🆕 FIX-21: عرض Pool بصيغة دقيقة في تقرير الصحة
+    try:
+        _active = _detect_active_db_source(_get_db())
+        if _active.get("pool_size", 0) > 0 or _active.get("pool_current", 0) > 0:
+            lines.append(f"   {_format_pool_line(_active)}")
+            lines.append("")
+    except Exception:
+        pass
+
     loop_p = data.get("event_loop") or {}
     startup_window = bool(loop_p.get("_startup_window", False))
     if startup_window:
@@ -2809,8 +2922,6 @@ async def _get_db_metadata() -> Dict[str, Any]:
 # 2) Dead Tuples — FIX-14: Sentinel على الفشل
 # ═══════════════════════════════════════════════════════════════════════
 
-# FIX-14 (v7.2.18): حالة الفشل تُخزَّن كـ (None, None) — كي لا يفسّر
-# المُتصل ([], []) على أنها «لا توجد جداول قذرة».
 _HEALTH_FAILED_SENTINEL: Tuple[None, None] = (None, None)
 
 
@@ -2823,8 +2934,6 @@ async def _get_all_tables_health() -> Tuple[Optional[List[Dict]], Optional[List[
 
     db = _get_db()
     if db is None or not _is_postgres():
-        # SQLite/MySQL — لا يوجد dead tuples. نعيد ([], []) لأن
-        # هذا وضع طبيعي وليس فشلاً.
         if db is None:
             return None, None
         return [], []
@@ -2849,7 +2958,6 @@ async def _get_all_tables_health() -> Tuple[Optional[List[Dict]], Optional[List[
         """) or []
     except Exception as e:
         logger.warning(f"_get_all_tables_health: {e}")
-        # FIX-14: sentinel بدل ([], [])
         _cache_set("all_tables_health", _HEALTH_FAILED_SENTINEL,
                    ttl=_NEGATIVE_CACHE_TTL)
         return None, None
@@ -3055,10 +3163,6 @@ async def _get_indexes(tables: List[str]) -> Dict[str, List[Dict[str, Any]]]:
 # 6) Auto-Cleanup Status — FIX-6 + FIX-18
 # ═══════════════════════════════════════════════════════════════════════
 
-# FIX-6 (v7.2.17) + FIX-18 (v7.2.18): يحسب فهارس الأبناء في الجداول
-# المُقسَّمة (partitioned tables).
-# ملاحظة: يغطي مستوى تقسيم واحد (single-level) — وهو الأكثر شيوعاً.
-# الجداول المُقسَّمة هرمياً (nested partitions) تتطلب recursive CTE.
 _SQL_TABLE_TOTAL_SIZE = """
     SELECT c.relname AS table_name,
            (
@@ -3278,8 +3382,6 @@ def _build_cleanup_where(
     if dt == "MYSQL":
         base = f"{col} < (NOW() - INTERVAL {int(days)} DAY)"
     elif dt == "SQLITE":
-        # ملاحظة: يعمل فقط لو العمود يخزّن ISO TEXT. لو كان INTEGER epoch،
-        # الاستعلام يرجّع 0 صفوف بصمت. راجع typeof(col) عند الفشل.
         base = f"{col} < datetime('now', '-{int(days)} days')"
     else:  # POSTGRES / default
         base = f"{col} < NOW() - INTERVAL '{int(days)} days'"
@@ -3367,8 +3469,7 @@ async def preview_maintenance() -> Dict[str, Any]:
 
 async def run_maintenance() -> Dict[str, Any]:
     """
-    FIX-16 (v7.2.18): فرع MySQL قبل db.vacuum() — لو كان DB.vacuum()
-    PG-only لكن الـ object يعرّضه على MySQL أيضاً.
+    FIX-16 (v7.2.18): فرع MySQL قبل db.vacuum().
     """
     db = _get_db()
     start = time.monotonic()
@@ -3425,7 +3526,6 @@ async def run_maintenance() -> Dict[str, Any]:
             result['deletions'][tbl] = 0
             result['deletion_errors'][tbl] = str(e)[:100]
 
-    # FIX-4 + FIX-16
     if db_type == "SQLITE":
         try:
             await db.execute("VACUUM")
@@ -3443,7 +3543,6 @@ async def run_maintenance() -> Dict[str, Any]:
         tables = await _get_all_table_names()
         for t in tables:
             try:
-                # FIX-16: MySQL أولاً — لا نفترض أن db.vacuum() يعمل مع MySQL
                 if db_type == "MYSQL":
                     await db.execute(f"ANALYZE TABLE `{t}`")
                     await db.execute(f"OPTIMIZE TABLE `{t}`")
@@ -3660,7 +3759,6 @@ async def vacuum_analyze_tables() -> str:
     fail = 0
     for t in tables:
         try:
-            # FIX-16: MySQL أولاً
             if db_type == "MYSQL":
                 await db.execute(f"ANALYZE TABLE `{t}`")
                 await db.execute(f"OPTIMIZE TABLE `{t}`")
@@ -3708,7 +3806,6 @@ async def auto_vacuum_dirty_mvs(min_dead: int = 10) -> Dict[str, Any]:
     _invalidate_cache("all_tables_health")
     dirty, _ = await _get_all_tables_health()
 
-    # FIX-14: dirty=None يعني فشل الفحص
     if dirty is None:
         result['error'] = "فشل فحص dead tuples"
         result['duration_sec'] = round(time.monotonic() - start, 2)
@@ -3835,9 +3932,6 @@ async def _build_sections(*, include_probes: bool = True) -> List[str]:
 
     configured_dbs = _get_all_configured_databases()
     if len(configured_dbs) > 1:
-        # ✅ FIX-20 (v7.2.20): كان يشير إلى /databases (غير مُسجَّل في
-        # bot.py) — الآن يشير إلى /db_diag (مُسجَّل فعلياً ويعرض نفس
-        # المعلومات + القاعدة النشطة + قائمة كل المُعدّة).
         s0.append(
             f"⚠️ <b>تحذير:</b> يوجد <b>{len(configured_dbs)}</b> "
             f"قواعد بيانات مُعدّة — راجع /db_diag للتفاصيل."
@@ -4125,7 +4219,6 @@ async def diagnose_db_quick() -> str:
     critical = 0
     try:
         dirty, clean = await _get_all_tables_health()
-        # FIX-14: dirty=None يعني فشل الفحص
         if dirty is None:
             lines.append("🟠 فحص dead-tuples فشل مؤقتاً")
         else:
@@ -4201,8 +4294,6 @@ async def diagnose_db_quick() -> str:
 
     configured_dbs = _get_all_configured_databases()
     if len(configured_dbs) > 1:
-        # ✅ FIX-20 (v7.2.20): كان يشير إلى /databases (غير مُسجَّل) —
-        # الآن يشير إلى /db_diag (مُسجَّل فعلياً).
         lines.append(
             f"⚠️ <b>{len(configured_dbs)} قواعد بيانات مُعدّة</b> — "
             f"استخدم /db_diag للتفاصيل"
@@ -4363,12 +4454,14 @@ __all__ = [
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# LOAD BEACON — v7.2.20
+# LOAD BEACON — v7.2.21
 # ═══════════════════════════════════════════════════════════════════════
 
 try:
     logger.info(
         "🛡️ db_diagnostics.py v%s loaded | "
+        "POOL-DISPLAY-FIX ✅ | "
+        "FIX-21=pool-uses-get_size-minus-get_idle ✅ | "
         "COMMAND-FIX ✅ | "
         "FIX-20=/databases→/db_diag ✅ | "
         "FIX-19=startup-grace-for-cpu-ram-fs ✅ | "
