@@ -1,51 +1,32 @@
-
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-handlers_message.py - v7.18.43 (LOG-CHANNEL-POLISH)
+handlers_message.py - v7.18.45 (PG-SQL-AUDIT + COUNTER-FIX)
 (متوافق مع detectors v4.1.0 + banned_words_manager v1.2.0 + group_log v1.4.0)
 =============================================================================
-🆕 v7.18.43 (LOG-CHANNEL-POLISH — 4 إصلاحات جوهرية):
+🆕 v7.18.45 (PG-SQL-AUDIT + COUNTER-FIX — 10 إصلاحات):
 
-    🟢 FIX-HTML-ESCAPE: escape() على عنوان قناة السجل قبل إدراجه
-        في رسالة التأكيد (parse_mode='HTML').
-        المشكلة:
-          • عنوان قناة يحتوي `<` أو `&` أو `>` → يكسر الرسالة
-            أو يُعرض HTML خاماً للمطور.
-        الإصلاح:
-          • escape(str(title_for_display)) قبل .format().
+    🟢 FIX-PG-SUPPORT-INSERT: عناصر نائبة صحيحة ($1..$4) في
+        _handle_support_mode_text مع RETURNING id.
+    🟢 FIX-PG-ADMIN-CHECK: SQL متوافق مع نوع القاعدة في
+        _check_admin_in_chat (كان يفشل صامتاً على PG بدون ترجمة).
+    🟢 FIX-PG-AUTO-DEL: SQL متوافق مع PG في _handle_wait_auto_del_text.
+    🟢 FIX-VIOLATION-COUNTER: إعادة تصفير العدّاد عند غياب العقوبة
+        (penalty_type=None) لتفادي تضخّمه بلا فائدة.
+    🟢 FIX-MYSQL-UPSERT-MODERN: استخدام AS new syntax (MySQL 8.0.20+)
+        مع fallback آمن لـ VALUES() للنسخ الأقدم.
+    🟢 FIX-PRUNE-LOCK: إضافة asyncio.Lock حول _prune_perf_caches
+        وتحويلها لـ async.
+    🟢 FIX-LOGCH-NESTED-CODE: إزالة <code> المتداخل في رسالة تأكيد
+        قناة السجل.
+    🟢 FIX-DEV-IDS-INT: دعم OWNER_IDS/DEVELOPER_IDS كرقم مفرد.
+    🟢 FIX-DATETIME-DEPRECATED: استخدام datetime.now(timezone.utc)
+        بدل datetime.utcnow() (مُهمَل في Python 3.12+).
+    🟢 FIX-DETECTORS-IMPORT: توحيد استيراد detectors في حلقة واحدة.
+    🟢 FIX-RUN-SYNC-KWARGS: functools.partial موحّد قبل الفرعين.
+    🟢 FIX-VERIFY-RETRY-TAG: تصنيف دقيق لأخطاء الشبكة في retry.
 
-    🟢 FIX-FORBIDDEN: التقاط telegram.error.Forbidden صراحةً في
-        _verify_bot_in_log_channel.
-        المشكلة:
-          • Forbidden ليس BadRequest → يسقط في except Exception
-            → يُصنَّف "unknown_error" بدل "bot_not_member".
-        الإصلاح:
-          • `except (BadRequest, Forbidden) as e:` + إضافة
-            "bot was kicked" و "bot was blocked" للأنماط.
-
-    🟢 FIX-WWW-TME: دعم `https://www.t.me/...` في _parse_channel_ref.
-        المشكلة:
-          • urlparse يعيد netloc="www.t.me" → لا يطابق 't.me'.
-        الإصلاح:
-          • تطبيع netloc بإزالة "www." قبل المقارنة.
-          • قبول البدء النصي بـ `www.t.me/`.
-
-    🟢 FIX-DEV-IDS-STR: دعم CONFIG.DEVELOPER_IDS كنص مفصول بفواصل.
-        المشكلة:
-          • إذا كان DEVELOPER_IDS = "111,222,333" → التكرار يقرأ
-            حرفاً حرفاً، وكل حرف يفشل في int() بصمت.
-        الإصلاح:
-          • فحص isinstance(ids_attr, str) → split(',') + strip.
-
-✅ v7.18.42 (LOG-CHANNEL-MEMBERSHIP-VERIFY) — محفوظ:
-    • FIX-LOGCH-8: التحقق من عضوية/صلاحيات البوت قبل الحفظ.
-    • FIX-DEV-IDS: دعم CONFIG.DEVELOPER_IDS (قائمة).
-    • FIX-PENALTY-UX: رسالة واضحة عند فُقدان penalty_type.
-✅ v7.18.41 (LOG-CHANNEL-NUMERIC-ID-FIX) — محفوظ:
-    • FIX-LOGCH-6: تحويل @username/URL → chat_id رقمي.
-    • FIX-LOGCH-7: عرض العنوان + الرقم في التأكيد.
-✅ v7.18.40 وما قبله — محفوظ.
+✅ v7.18.44 وما قبله — محفوظ بالكامل.
 =============================================================================
 """
 
@@ -64,9 +45,10 @@ from functools import partial
 from typing import (
     Optional, Dict, Any, List, Tuple, Callable, Awaitable, DefaultDict,
 )
-from datetime import datetime
+from datetime import datetime, timezone
 from urllib.parse import urlparse
 from collections import defaultdict, deque, OrderedDict
+from importlib import import_module
 
 from telegram.error import BadRequest, Forbidden
 
@@ -88,7 +70,49 @@ logger = logging.getLogger(__name__)
 
 
 # ═════════════════════════════════════════════════════════════════════
-# 🆕 v7.18.39 FIX-TIMEOUT-1: مهلة كشف Spam
+# v7.18.44 FIX-DB-PG-UNIFIED: كشف نوع قاعدة البيانات موحّداً
+# ═════════════════════════════════════════════════════════════════════
+def _db_type() -> str:
+    """يعيد نوع قاعدة البيانات بحروف صغيرة (sqlite/postgres/mysql)."""
+    try:
+        t = getattr(DB, "DB_TYPE", None)
+        if t:
+            return str(t).strip().lower()
+    except Exception:
+        pass
+    try:
+        if bool(getattr(DB, "USE_POSTGRES", False)):
+            return "postgres"
+        if bool(getattr(DB, "USE_MYSQL", False)):
+            return "mysql"
+    except Exception:
+        pass
+    return "sqlite"
+
+
+def _db_is_pg() -> bool:
+    return _db_type() == "postgres"
+
+
+def _db_is_mysql() -> bool:
+    return _db_type() == "mysql"
+
+
+# 🆕 v7.18.45 FIX-PG-SUPPORT-INSERT: أدوات مساعدة للعناصر النائبة
+def _pg_ph(n: int) -> str:
+    """يعيد العنصر النائب رقم n ($1-based) لقواعد PG."""
+    return f"${n}"
+
+
+def _ph_list(count: int) -> str:
+    """يعيد قائمة عناصر نائبة مفصولة بفواصل حسب نوع القاعدة."""
+    if _db_is_pg():
+        return ", ".join(f"${i+1}" for i in range(count))
+    return ", ".join("?" for _ in range(count))
+
+
+# ═════════════════════════════════════════════════════════════════════
+# v7.18.39 FIX-TIMEOUT-1: مهلة كشف Spam
 # ═════════════════════════════════════════════════════════════════════
 _SPAM_ASYNC_TIMEOUT: float = 2.5
 
@@ -129,88 +153,94 @@ except ImportError:
 
 
 # ═════════════════════════════════════════════════════════════════════
-# ✅ FIX-1 v7.18.8: استيراد محرك الكشف (sync + async)
+# 🆕 v7.18.45 FIX-DETECTORS-IMPORT: استيراد موحّد بحلقة واحدة
 # ═════════════════════════════════════════════════════════════════════
 
-try:
-    from handlers.handlers_message_detectors import (
-        DEBUG_DIAG, DEBUG_SPAM,
-        SPAM_SCORE_THRESHOLD, POSTBOT_AUTO_BLOCK_CONFIDENCE,
-        SPAM_HARD_THRESHOLD, SPAM_CRITICAL_THRESHOLD,
-        ANTIEVASION_COMPACT_WORDS,
-        _MessageContext,
-        _strip_combining_marks, _deleet, _apply_homoglyphs_safe,
-        _normalize_text, _strip_emoji_for_domain,
-        _has_hidden_chars, _merge_split_urls,
-        _extract_entity_urls, _has_link_entity,
-        _extract_url_from_button, _button_is_external,
-        _extract_button_context, _extract_vcard_urls,
-        _extract_venue_url, _extract_poll_text,
-        _get_message_button_data, _get_message_button_texts,
-        _get_message_analysis_text,
-        _has_domain_pattern, _contains_link_enhanced,
-        _contains_email, _contains_at_channel, _contains_tg_scheme,
-        _has_button_link, _extract_button_link_urls,
-        _extract_spam_words, _count_unique_matches, _count_text_urls,
-        _compute_spam_score, _is_postbot_pattern,
-        _postbot_pattern_confidence,
-        analyze_message, get_spam_diagnostics,
-        is_spam, is_high_confidence_spam, is_critical_spam,
-        should_ignore_as_low_signal,
-    )
-except ImportError:
+_detectors_module = None
+for _path in (
+    "handlers.handlers_message_detectors",
+    "handlers_message_detectors",
+    ".handlers_message_detectors",
+):
     try:
-        from handlers_message_detectors import (
-            DEBUG_DIAG, DEBUG_SPAM,
-            SPAM_SCORE_THRESHOLD, POSTBOT_AUTO_BLOCK_CONFIDENCE,
-            SPAM_HARD_THRESHOLD, SPAM_CRITICAL_THRESHOLD,
-            ANTIEVASION_COMPACT_WORDS,
-            _MessageContext,
-            _strip_combining_marks, _deleet, _apply_homoglyphs_safe,
-            _normalize_text, _strip_emoji_for_domain,
-            _has_hidden_chars, _merge_split_urls,
-            _extract_entity_urls, _has_link_entity,
-            _extract_url_from_button, _button_is_external,
-            _extract_button_context, _extract_vcard_urls,
-            _extract_venue_url, _extract_poll_text,
-            _get_message_button_data, _get_message_button_texts,
-            _get_message_analysis_text,
-            _has_domain_pattern, _contains_link_enhanced,
-            _contains_email, _contains_at_channel, _contains_tg_scheme,
-            _has_button_link, _extract_button_link_urls,
-            _extract_spam_words, _count_unique_matches, _count_text_urls,
-            _compute_spam_score, _is_postbot_pattern,
-            _postbot_pattern_confidence,
-            analyze_message, get_spam_diagnostics,
-            is_spam, is_high_confidence_spam, is_critical_spam,
-            should_ignore_as_low_signal,
-        )
+        if _path.startswith("."):
+            _detectors_module = import_module(
+                _path, package=__package__ or None)
+        else:
+            _detectors_module = import_module(_path)
+        break
     except ImportError:
-        from .handlers_message_detectors import (
-            DEBUG_DIAG, DEBUG_SPAM,
-            SPAM_SCORE_THRESHOLD, POSTBOT_AUTO_BLOCK_CONFIDENCE,
-            SPAM_HARD_THRESHOLD, SPAM_CRITICAL_THRESHOLD,
-            ANTIEVASION_COMPACT_WORDS,
-            _MessageContext,
-            _strip_combining_marks, _deleet, _apply_homoglyphs_safe,
-            _normalize_text, _strip_emoji_for_domain,
-            _has_hidden_chars, _merge_split_urls,
-            _extract_entity_urls, _has_link_entity,
-            _extract_url_from_button, _button_is_external,
-            _extract_button_context, _extract_vcard_urls,
-            _extract_venue_url, _extract_poll_text,
-            _get_message_button_data, _get_message_button_texts,
-            _get_message_analysis_text,
-            _has_domain_pattern, _contains_link_enhanced,
-            _contains_email, _contains_at_channel, _contains_tg_scheme,
-            _has_button_link, _extract_button_link_urls,
-            _extract_spam_words, _count_unique_matches, _count_text_urls,
-            _compute_spam_score, _is_postbot_pattern,
-            _postbot_pattern_confidence,
-            analyze_message, get_spam_diagnostics,
-            is_spam, is_high_confidence_spam, is_critical_spam,
-            should_ignore_as_low_signal,
-        )
+        continue
+    except Exception as _e:
+        logger.debug("detectors import %s: %s", _path, _e)
+        continue
+
+if _detectors_module is None:
+    raise ImportError(
+        "handlers_message_detectors not found in any expected path")
+
+
+def _get_det_attr(name: str, default=None, required: bool = False):
+    val = getattr(_detectors_module, name, None)
+    if val is None:
+        if required:
+            raise ImportError(f"detectors missing required: {name}")
+        return default
+    return val
+
+
+DEBUG_DIAG = _get_det_attr("DEBUG_DIAG", False)
+DEBUG_SPAM = _get_det_attr("DEBUG_SPAM", False)
+SPAM_SCORE_THRESHOLD = _get_det_attr("SPAM_SCORE_THRESHOLD", 5)
+POSTBOT_AUTO_BLOCK_CONFIDENCE = _get_det_attr(
+    "POSTBOT_AUTO_BLOCK_CONFIDENCE", 70)
+SPAM_HARD_THRESHOLD = _get_det_attr("SPAM_HARD_THRESHOLD", 10)
+SPAM_CRITICAL_THRESHOLD = _get_det_attr("SPAM_CRITICAL_THRESHOLD", 15)
+ANTIEVASION_COMPACT_WORDS = _get_det_attr(
+    "ANTIEVASION_COMPACT_WORDS", False)
+_MessageContext = _get_det_attr("_MessageContext", None, required=True)
+_strip_combining_marks = _get_det_attr("_strip_combining_marks")
+_deleet = _get_det_attr("_deleet")
+_apply_homoglyphs_safe = _get_det_attr("_apply_homoglyphs_safe")
+_normalize_text = _get_det_attr("_normalize_text", required=True)
+_strip_emoji_for_domain = _get_det_attr("_strip_emoji_for_domain")
+_has_hidden_chars = _get_det_attr("_has_hidden_chars")
+_merge_split_urls = _get_det_attr("_merge_split_urls")
+_extract_entity_urls = _get_det_attr("_extract_entity_urls")
+_has_link_entity = _get_det_attr("_has_link_entity")
+_extract_url_from_button = _get_det_attr("_extract_url_from_button")
+_button_is_external = _get_det_attr("_button_is_external")
+_extract_button_context = _get_det_attr("_extract_button_context")
+_extract_vcard_urls = _get_det_attr("_extract_vcard_urls")
+_extract_venue_url = _get_det_attr("_extract_venue_url")
+_extract_poll_text = _get_det_attr("_extract_poll_text")
+_get_message_button_data = _get_det_attr("_get_message_button_data")
+_get_message_button_texts = _get_det_attr("_get_message_button_texts")
+_get_message_analysis_text = _get_det_attr("_get_message_analysis_text")
+_has_domain_pattern = _get_det_attr("_has_domain_pattern")
+_contains_link_enhanced = _get_det_attr("_contains_link_enhanced")
+_contains_email = _get_det_attr("_contains_email")
+_contains_at_channel = _get_det_attr("_contains_at_channel")
+_contains_tg_scheme = _get_det_attr("_contains_tg_scheme")
+_has_button_link = _get_det_attr("_has_button_link")
+_extract_button_link_urls = _get_det_attr("_extract_button_link_urls")
+_extract_spam_words = _get_det_attr("_extract_spam_words")
+_count_unique_matches = _get_det_attr("_count_unique_matches")
+_count_text_urls = _get_det_attr("_count_text_urls")
+_compute_spam_score = _get_det_attr("_compute_spam_score")
+_is_postbot_pattern = _get_det_attr("_is_postbot_pattern")
+_postbot_pattern_confidence = _get_det_attr("_postbot_pattern_confidence")
+analyze_message = _get_det_attr("analyze_message")
+get_spam_diagnostics = _get_det_attr("get_spam_diagnostics")
+is_spam = _get_det_attr("is_spam")
+is_high_confidence_spam = _get_det_attr("is_high_confidence_spam")
+is_critical_spam = _get_det_attr("is_critical_spam")
+should_ignore_as_low_signal = _get_det_attr("should_ignore_as_low_signal")
+
+logger.info(
+    "✅ detectors module loaded from %s",
+    _detectors_module.__name__ if hasattr(_detectors_module, "__name__")
+    else _detectors_module)
 
 
 _HAS_MULTILAYER = False
@@ -220,47 +250,35 @@ analyze_message_full_async = None
 SpamVerdict = None
 FINAL_THRESHOLD = 5
 LAYER_WEIGHTS: Dict[str, float] = {}
-_detectors_module = None
 
-for _path in (
-    "handlers.handlers_message_detectors",
-    "handlers_message_detectors",
-    ".handlers_message_detectors",
-):
-    try:
-        if _path.startswith("."):
-            from importlib import import_module
-            _mod = import_module(_path, package=__package__ or None)
-        else:
-            from importlib import import_module
-            _mod = import_module(_path)
+try:
+    analyze_message_full = getattr(
+        _detectors_module, "analyze_message_full", None)
+    analyze_message_full_async = getattr(
+        _detectors_module, "analyze_message_full_async", None)
+    SpamVerdict = getattr(_detectors_module, "SpamVerdict", None)
+    FINAL_THRESHOLD = getattr(_detectors_module, "FINAL_THRESHOLD", 5)
+    LAYER_WEIGHTS = getattr(_detectors_module, "LAYER_WEIGHTS", {}) or {}
 
-        analyze_message_full = getattr(_mod, "analyze_message_full", None)
-        analyze_message_full_async = getattr(
-            _mod, "analyze_message_full_async", None)
-        SpamVerdict = getattr(_mod, "SpamVerdict", None)
-        FINAL_THRESHOLD = getattr(_mod, "FINAL_THRESHOLD", 5)
-        LAYER_WEIGHTS = getattr(_mod, "LAYER_WEIGHTS", {}) or {}
+    TEXT_LAYER_ENABLED = getattr(
+        _detectors_module, "TEXT_LAYER_ENABLED", False)
+    OCR_LAYER_ENABLED = getattr(
+        _detectors_module, "OCR_LAYER_ENABLED", False)
+    AUDIO_LAYER_ENABLED = getattr(
+        _detectors_module, "AUDIO_LAYER_ENABLED", False)
+    URL_LAYER_ENABLED = getattr(
+        _detectors_module, "URL_LAYER_ENABLED", False)
+    METADATA_LAYER_ENABLED = getattr(
+        _detectors_module, "METADATA_LAYER_ENABLED", False)
+    OBFUSCATION_LAYER_ENABLED = getattr(
+        _detectors_module, "OBFUSCATION_LAYER_ENABLED", False)
+    BEHAVIORAL_LAYER_ENABLED = getattr(
+        _detectors_module, "BEHAVIORAL_LAYER_ENABLED", False)
 
-        TEXT_LAYER_ENABLED = getattr(_mod, "TEXT_LAYER_ENABLED", False)
-        OCR_LAYER_ENABLED = getattr(_mod, "OCR_LAYER_ENABLED", False)
-        AUDIO_LAYER_ENABLED = getattr(_mod, "AUDIO_LAYER_ENABLED", False)
-        URL_LAYER_ENABLED = getattr(_mod, "URL_LAYER_ENABLED", False)
-        METADATA_LAYER_ENABLED = getattr(_mod, "METADATA_LAYER_ENABLED", False)
-        OBFUSCATION_LAYER_ENABLED = getattr(_mod, "OBFUSCATION_LAYER_ENABLED", False)
-        BEHAVIORAL_LAYER_ENABLED = getattr(_mod, "BEHAVIORAL_LAYER_ENABLED", False)
-
-        _detectors_module = _mod
-        _HAS_MULTILAYER = analyze_message_full is not None
-        _HAS_ASYNC_DETECTORS = analyze_message_full_async is not None
-        break
-    except ImportError:
-        continue
-    except Exception as _e:
-        logger.debug("multilayer import %s: %s", _path, _e)
-        continue
-
-if not _HAS_MULTILAYER:
+    _HAS_MULTILAYER = analyze_message_full is not None
+    _HAS_ASYNC_DETECTORS = analyze_message_full_async is not None
+except Exception as _e:
+    logger.warning("multilayer extraction failed: %s", _e)
     TEXT_LAYER_ENABLED = False
     OCR_LAYER_ENABLED = False
     AUDIO_LAYER_ENABLED = False
@@ -275,20 +293,18 @@ _HAS_DET_SHUTDOWN_EXECUTOR = False
 _det_run_in_pool: Optional[Callable[..., Awaitable[Any]]] = None
 _det_shutdown_default_executor: Optional[Callable[..., Awaitable[Any]]] = None
 
-if _detectors_module is not None:
-    try:
-        _det_run_in_pool = getattr(
-            _detectors_module, "_run_in_pool", None)
-        _HAS_DET_RUN_IN_POOL = callable(_det_run_in_pool)
-    except Exception:
-        _HAS_DET_RUN_IN_POOL = False
+try:
+    _det_run_in_pool = getattr(_detectors_module, "_run_in_pool", None)
+    _HAS_DET_RUN_IN_POOL = callable(_det_run_in_pool)
+except Exception:
+    _HAS_DET_RUN_IN_POOL = False
 
-    try:
-        _det_shutdown_default_executor = getattr(
-            _detectors_module, "shutdown_default_executor", None)
-        _HAS_DET_SHUTDOWN_EXECUTOR = callable(_det_shutdown_default_executor)
-    except Exception:
-        _HAS_DET_SHUTDOWN_EXECUTOR = False
+try:
+    _det_shutdown_default_executor = getattr(
+        _detectors_module, "shutdown_default_executor", None)
+    _HAS_DET_SHUTDOWN_EXECUTOR = callable(_det_shutdown_default_executor)
+except Exception:
+    _HAS_DET_SHUTDOWN_EXECUTOR = False
 
 if not _HAS_DET_RUN_IN_POOL:
     logger.debug(
@@ -348,7 +364,7 @@ except ImportError:
 
 
 # ═════════════════════════════════════════════════════════════════════
-# 🆕 v7.18.39 FIX-WARMUP-1: تسخين مجمع detectors
+# v7.18.39 FIX-WARMUP-1 + v7.18.44 FIX-WARMUP-IMPORT
 # ═════════════════════════════════════════════════════════════════════
 
 async def warmup_detectors_pool() -> bool:
@@ -376,12 +392,13 @@ async def warmup_detectors_pool() -> bool:
             logger.debug("warmup: import %s: %s", _mod_name, e)
 
     try:
-        from handlers.handlers_message_detectors import (
-            _normalize_text as _warm_norm,
-        )
-        _ = _warm_norm("warmup")
-    except Exception:
-        pass
+        if _detectors_module is not None:
+            _warm_norm = getattr(
+                _detectors_module, "_normalize_text", None)
+            if callable(_warm_norm):
+                _ = _warm_norm("warmup")
+    except Exception as _e:
+        logger.debug("warmup: _normalize_text: %s", _e)
 
     logger.info(
         "🔥 warmup_detectors_pool: done | ok=%s | "
@@ -424,22 +441,16 @@ def _as_bool(value, default=False) -> bool:
 
 
 # ═════════════════════════════════════════════════════════════════════
-# 🆕 v7.18.42 FIX-DEV-IDS: دعم DEVELOPER_IDS + owner
-# 🆕 v7.18.43 FIX-DEV-IDS-STR: دعم نص مفصول بفواصل
+# v7.18.42 FIX-DEV-IDS + v7.18.43 FIX-DEV-IDS-STR
+# 🆕 v7.18.45 FIX-DEV-IDS-INT: دعم الرقم المفرد
 # ═════════════════════════════════════════════════════════════════════
 def _is_dev_user(user_id) -> bool:
     """فحص موحّد لصلاحيات المطور (developer/owner).
 
-    v7.18.42 FIX-DEV-IDS:
-      • يدعم CONFIG.DEVELOPER_IDS (قائمة IDs إضافية).
-      • يدعم CONFIG.DEV_IDS كاسم بديل.
-      • fallback لدوال is_developer/is_dev/is_owner على CONFIG.
-      • fallback أخير PRIMARY_OWNER_ID.
-
-    v7.18.43 FIX-DEV-IDS-STR:
-      • إذا كانت أي قائمة من القوائم أعلاه **نصّاً** مفصولاً
-        بفواصل (مثل "111,222,333") → تُقسَّم قبل التكرار.
-        بدون هذا، كان التكرار يقرأ حرفاً حرفاً ويفشل بصمت.
+    v7.18.45 FIX-DEV-IDS-INT: يدعم الآن:
+      • list/tuple/set من IDs
+      • str مفصول بفواصل ("111,222")
+      • int/float مفرد (111)
     """
     try:
         if not user_id:
@@ -449,14 +460,15 @@ def _is_dev_user(user_id) -> bool:
         except (TypeError, ValueError):
             return False
 
-        # 1) قوائم IDs إضافية
         for attr_name in ('DEVELOPER_IDS', 'DEV_IDS', 'OWNER_IDS'):
             try:
                 ids_attr = getattr(CONFIG, attr_name, None)
                 if ids_attr is None:
                     continue
-                # 🆕 v7.18.43 FIX-DEV-IDS-STR
-                if isinstance(ids_attr, str):
+                # 🆕 v7.18.45 FIX-DEV-IDS-INT: تطبيع القيمة إلى iterable
+                if isinstance(ids_attr, (int, float)):
+                    ids_attr = [int(ids_attr)]
+                elif isinstance(ids_attr, str):
                     ids_attr = [
                         x.strip()
                         for x in ids_attr.split(',')
@@ -474,7 +486,6 @@ def _is_dev_user(user_id) -> bool:
             except Exception:
                 continue
 
-        # 2) دوال فحص على CONFIG
         for attr in ('is_developer', 'is_dev', 'is_owner'):
             fn = getattr(CONFIG, attr, None)
             if callable(fn):
@@ -484,7 +495,6 @@ def _is_dev_user(user_id) -> bool:
                 except Exception:
                     continue
 
-        # 3) PRIMARY_OWNER_ID
         primary = int(getattr(CONFIG, 'PRIMARY_OWNER_ID', 0) or 0)
         return bool(primary and uid == primary)
     except Exception:
@@ -507,16 +517,21 @@ def _row_to_dict_local(row) -> Optional[Dict[str, Any]]:
         return None
 
 
+# ═════════════════════════════════════════════════════════════════════
+# 🆕 v7.18.45 FIX-RUN-SYNC-KWARGS: partial موحّد قبل الفرعين
+# ═════════════════════════════════════════════════════════════════════
 async def _run_sync_in_pool(
     fn: Callable[..., Any],
     *args: Any,
     timeout: float = 30.0,
     **kwargs: Any,
 ) -> Any:
+    if kwargs:
+        fn = functools.partial(fn, **kwargs)
+
     if _HAS_DET_RUN_IN_POOL and _det_run_in_pool is not None:
         try:
-            return await _det_run_in_pool(
-                fn, *args, timeout=timeout, **kwargs)
+            return await _det_run_in_pool(fn, *args, timeout=timeout)
         except asyncio.TimeoutError:
             logger.warning(
                 "_run_sync_in_pool: timeout after %.1fs — fn=%s",
@@ -525,9 +540,6 @@ async def _run_sync_in_pool(
         except Exception as _e:
             logger.debug(
                 "_run_in_pool failed (%s) — using asyncio.to_thread", _e)
-
-    if kwargs:
-        fn = functools.partial(fn, **kwargs)
 
     if timeout and timeout > 0:
         try:
@@ -762,7 +774,6 @@ def _invalidate_sec_settings_local(chat_id: Optional[int] = None) -> None:
 
 
 def _invalidate_ars_local_cache(chat_id: Optional[int] = None) -> None:
-    """مسح كاش ars المحلي."""
     try:
         if chat_id is None:
             _ars_local_cache.clear()
@@ -875,6 +886,10 @@ _ban_add_tracker: DefaultDict[int, deque] = defaultdict(
     lambda: deque(maxlen=_BAN_ADD_RATE_MAX + 5))
 _ban_add_lock = asyncio.Lock()
 _ban_add_last_cleanup = 0.0
+
+
+# 🆕 v7.18.45 FIX-PRUNE-LOCK: قفل لتنظيف الكاشات
+_prune_caches_lock = asyncio.Lock()
 
 
 async def _check_flood(
@@ -1025,6 +1040,16 @@ _columns_last_attempt_ts = 0.0
 _columns_last_error_log_ts = 0.0
 
 
+def _utc_now_iso() -> str:
+    """v7.18.45 FIX-DATETIME-DEPRECATED: بديل datetime.utcnow()."""
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _utc_now_str() -> str:
+    """v7.18.45 FIX-DATETIME-DEPRECATED: بديل datetime.utcnow().strftime()."""
+    return datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
+
+
 async def _notify_dev_about_idle_tx(
     bot, reason: str = "", *, force: bool = False,
 ) -> Optional[Dict[str, Any]]:
@@ -1155,8 +1180,8 @@ async def _lazy_init_columns(bot=None):
             return
         _columns_last_attempt_ts = now
 
-        db_type = getattr(DB, "DB_TYPE", "sqlite")
-        logger.info("🔧 v7.18.43: Auto-migration (DB_TYPE=%s)", db_type)
+        db_type = _db_type()
+        logger.info("🔧 v7.18.45: Auto-migration (DB_TYPE=%s)", db_type)
 
         cols = [
             ("delete_protected_any", "INTEGER DEFAULT 0",
@@ -1558,11 +1583,20 @@ _running_delete_tasks: set = set()
 
 
 async def _delete_after_delay(bot, chat_id, message_id, delay=10, context=None):
+    """v7.18.44 FIX-DELETE-TIMEOUT: timeout صريح لتفادي تسرّب المهامّ."""
     try:
         if delay > 0:
             await asyncio.sleep(delay)
-        await _safe_delete_message(
-            bot, chat_id, message_id, context=context, notify_owner=False)
+        try:
+            await asyncio.wait_for(
+                _safe_delete_message(
+                    bot, chat_id, message_id,
+                    context=context, notify_owner=False),
+                timeout=15.0)
+        except asyncio.TimeoutError:
+            logger.warning(
+                "⏱️ _delete_after_delay timeout | chat=%s msg=%s",
+                chat_id, message_id)
     except asyncio.CancelledError:
         raise
     except Exception:
@@ -1865,7 +1899,7 @@ def _build_delete_log_text(
     try:
         now_str = TimeUtils.mecca_now().strftime('%Y-%m-%d %H:%M:%S')
     except Exception:
-        now_str = datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
+        now_str = _utc_now_str()
     lines.append("")
     lines.append(f"🕐 {now_str}")
     return "\n".join(lines)
@@ -1909,7 +1943,7 @@ def _build_penalty_log_text(
     try:
         now_str = TimeUtils.mecca_now().strftime('%Y-%m-%d %H:%M:%S')
     except Exception:
-        now_str = datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
+        now_str = _utc_now_str()
     lines.append("")
     lines.append(f"🕐 {now_str}")
     return "\n".join(lines)
@@ -2575,7 +2609,7 @@ class GroupRateLimiterManager:
                 except Exception:
                     pass
                 try:
-                    _prune_perf_caches()
+                    await _prune_perf_caches()
                 except Exception:
                     pass
             except asyncio.CancelledError:
@@ -2584,62 +2618,66 @@ class GroupRateLimiterManager:
                 logger.error("❌ periodic_cleanup: %s", e)
 
 
-def _prune_perf_caches() -> int:
-    removed = 0
-    now = time.monotonic()
-    try:
-        stale = [
-            k for k, (_, ts) in _group_log_channel_cache.items()
-            if now - ts > _GROUP_LOG_CHANNEL_CACHE_TTL * 5
-        ]
-        for k in stale:
-            _group_log_channel_cache.pop(k, None)
-        removed += len(stale)
-    except Exception:
-        pass
-    try:
-        stale = [
-            k for k, (_, ts) in _sec_settings_local_cache.items()
-            if now - ts > _SEC_SETTINGS_LOCAL_TTL * 5
-        ]
-        for k in stale:
-            _sec_settings_local_cache.pop(k, None)
-        removed += len(stale)
-    except Exception:
-        pass
-    try:
-        stale = [
-            k for k, (_, ts) in _ars_local_cache.items()
-            if now - ts > _ARS_LOCAL_TTL * 5
-        ]
-        for k in stale:
-            _ars_local_cache.pop(k, None)
-        removed += len(stale)
-    except Exception:
-        pass
-    try:
-        stale = [
-            k for k, (_, ts) in _admin_check_cache.items()
-            if now - ts > _ADMIN_CHECK_CACHE_TTL * 5
-        ]
-        for k in stale:
-            _admin_check_cache.pop(k, None)
-        removed += len(stale)
-    except Exception:
-        pass
-    try:
-        stale = [
-            k for k, (_, ts) in _PENALTY_DURATION_OVERRIDE_CACHE.items()
-            if now - ts > _PENALTY_DURATION_OVERRIDE_TTL * 5
-        ]
-        for k in stale:
-            _PENALTY_DURATION_OVERRIDE_CACHE.pop(k, None)
-        removed += len(stale)
-    except Exception:
-        pass
-    if removed > 0:
-        logger.debug("🧹 _prune_perf_caches: حُذف %d إدخال", removed)
-    return removed
+# ═════════════════════════════════════════════════════════════════════
+# 🆕 v7.18.45 FIX-PRUNE-LOCK: تحويلها إلى async + قفل
+# ═════════════════════════════════════════════════════════════════════
+async def _prune_perf_caches() -> int:
+    async with _prune_caches_lock:
+        removed = 0
+        now = time.monotonic()
+        try:
+            stale = [
+                k for k, (_, ts) in _group_log_channel_cache.items()
+                if now - ts > _GROUP_LOG_CHANNEL_CACHE_TTL * 5
+            ]
+            for k in stale:
+                _group_log_channel_cache.pop(k, None)
+            removed += len(stale)
+        except Exception:
+            pass
+        try:
+            stale = [
+                k for k, (_, ts) in _sec_settings_local_cache.items()
+                if now - ts > _SEC_SETTINGS_LOCAL_TTL * 5
+            ]
+            for k in stale:
+                _sec_settings_local_cache.pop(k, None)
+            removed += len(stale)
+        except Exception:
+            pass
+        try:
+            stale = [
+                k for k, (_, ts) in _ars_local_cache.items()
+                if now - ts > _ARS_LOCAL_TTL * 5
+            ]
+            for k in stale:
+                _ars_local_cache.pop(k, None)
+            removed += len(stale)
+        except Exception:
+            pass
+        try:
+            stale = [
+                k for k, (_, ts) in _admin_check_cache.items()
+                if now - ts > _ADMIN_CHECK_CACHE_TTL * 5
+            ]
+            for k in stale:
+                _admin_check_cache.pop(k, None)
+            removed += len(stale)
+        except Exception:
+            pass
+        try:
+            stale = [
+                k for k, (_, ts) in _PENALTY_DURATION_OVERRIDE_CACHE.items()
+                if now - ts > _PENALTY_DURATION_OVERRIDE_TTL * 5
+            ]
+            for k in stale:
+                _PENALTY_DURATION_OVERRIDE_CACHE.pop(k, None)
+            removed += len(stale)
+        except Exception:
+            pass
+        if removed > 0:
+            logger.debug("🧹 _prune_perf_caches: حُذف %d إدخال", removed)
+        return removed
 
 
 async def _cleanup_delete_failure_counter():
@@ -2820,19 +2858,21 @@ async def _get_batched_message_settings(
         and (now - sec_entry[1]) < _SEC_SETTINGS_LOCAL_TTL
     )
 
+    ars_ready_local = False
     ars_cached = None
-    try:
-        ars_cached = await settings_cache.get_auto_reply_settings(
-            chat_id_int)
-    except Exception:
-        ars_cached = None
-    ars_ready_smart = isinstance(ars_cached, dict)
-
     ars_local_entry = _ars_local_cache.get(chat_id_int)
-    ars_ready_local = (
-        ars_local_entry is not None
-        and (now - ars_local_entry[1]) < _ARS_LOCAL_TTL
-    )
+    if ars_local_entry is not None:
+        if (now - ars_local_entry[1]) < _ARS_LOCAL_TTL:
+            ars_ready_local = True
+
+    ars_ready_smart = False
+    if sec_ready:
+        try:
+            ars_cached = await settings_cache.get_auto_reply_settings(
+                chat_id_int)
+        except Exception:
+            ars_cached = None
+        ars_ready_smart = isinstance(ars_cached, dict)
 
     def _pick_ars():
         if ars_ready_local:
@@ -2857,7 +2897,7 @@ async def _get_batched_message_settings(
                 "falling back to full BATCH path",
                 _pe)
 
-    if bool(getattr(DB, "USE_POSTGRES", False)):
+    if _db_is_pg():
         try:
             row = await DB.fetchone(
                 """
@@ -3167,8 +3207,7 @@ def _parse_contest_date(date_str):
 
 def _parse_channel_ref(raw: str) -> Tuple[bool, str]:
     """
-    v7.18.43 FIX-WWW-TME: يدعم الآن `https://www.t.me/...`
-    و البدء النصي بـ `www.t.me/`.
+    v7.18.43 FIX-WWW-TME + v7.18.44 FIX-WWW-CASE.
     """
     if not raw:
         return False, "empty"
@@ -3190,7 +3229,6 @@ def _parse_channel_ref(raw: str) -> Tuple[bool, str]:
         return False, "invalid_id"
     try:
         parsed = urlparse(s)
-        # 🆕 v7.18.43 FIX-WWW-TME: تطبيع netloc (إزالة www.)
         netloc = (parsed.netloc or "").lower()
         if netloc.startswith("www."):
             netloc = netloc[4:]
@@ -3203,9 +3241,12 @@ def _parse_channel_ref(raw: str) -> Tuple[bool, str]:
             return False, "empty_path"
     except Exception:
         pass
-    # 🆕 v7.18.43: قبول البدء النصي بـ www.t.me/
-    if s.startswith(('t.me/', 'telegram.me/', 'telegram.dog/',
-                     'www.t.me/')):
+    s_lower = s.lower()
+    if s_lower.startswith((
+        't.me/', 'www.t.me/',
+        'telegram.me/', 'www.telegram.me/',
+        'telegram.dog/', 'www.telegram.dog/',
+    )):
         return True, ""
     if re.match(r'^[a-zA-Z][a-zA-Z0-9_]{3,31}$', s):
         return True, ""
@@ -3233,13 +3274,21 @@ async def _check_admin_in_chat(context, chat_id, user_id) -> bool:
     except Exception:
         pass
     if not result:
+        # 🆕 v7.18.45 FIX-PG-ADMIN-CHECK: SQL متوافق مع النوع
         try:
-            row = await DB.fetchval(
-                "SELECT 1 FROM group_admins "
-                "WHERE chat_id = ? AND user_id = ? LIMIT 1",
-                (chat_id, user_id))
+            if _db_is_pg():
+                _admin_sql = (
+                    "SELECT 1 FROM group_admins "
+                    "WHERE chat_id = $1 AND user_id = $2 LIMIT 1")
+            else:
+                _admin_sql = (
+                    "SELECT 1 FROM group_admins "
+                    "WHERE chat_id = ? AND user_id = ? LIMIT 1")
+            row = await DB.fetchval(_admin_sql, (chat_id, user_id))
             result = row is not None
-        except Exception:
+        except Exception as _ae:
+            logger.debug(
+                "_check_admin_in_chat fetchval: %s", _ae)
             result = False
     if cache_key is not None:
         if len(_admin_check_cache) >= _ADMIN_CHECK_CACHE_MAX:
@@ -3260,13 +3309,11 @@ async def _check_admin_in_chat(context, chat_id, user_id) -> bool:
     return result
 
 
+# ═════════════════════════════════════════════════════════════════════
+# v7.18.43 FIX-FORBIDDEN + v7.18.44 FIX-LOGCH-RETRY
+# 🆕 v7.18.45 FIX-VERIFY-RETRY-TAG: تصنيف دقيق لأخطاء الشبكة
+# ═════════════════════════════════════════════════════════════════════
 async def _verify_bot_in_log_channel(context, channel_id):
-    """
-    v7.18.43 FIX-FORBIDDEN: يلتقط `Forbidden` صراحةً.
-
-    قبل الإصلاح: `Forbidden` كان يسقط في `except Exception`
-    ويُصنَّف "unknown_error" بدل "bot_not_member".
-    """
     if not channel_id:
         return False, "invalid_channel_id"
     try:
@@ -3275,36 +3322,68 @@ async def _verify_bot_in_log_channel(context, channel_id):
         return False, "bot_id_unavailable"
     if not bot_id:
         return False, "bot_id_missing"
-    try:
-        member = await asyncio.wait_for(
-            context.bot.get_chat_member(channel_id, bot_id),
-            timeout=10.0)
-    except asyncio.TimeoutError:
-        return False, "timeout"
-    except (BadRequest, Forbidden) as e:
-        # 🆕 v7.18.43 FIX-FORBIDDEN: توحيد المعالجة
-        err = str(e).lower()
-        if any(x in err for x in (
-            "chat not found", "bot is not a member",
-            "member not found", "user not found",
-            "bot was kicked", "bot was blocked",
-        )):
-            return False, "bot_not_member"
-        if "chat_admin_required" in err or "not enough rights" in err:
-            return False, "need_admin_rights"
-        return False, "bad_request"
-    except Exception as e:
-        logger.warning("_verify_bot_in_log_channel: %s", e)
-        return False, "unknown_error"
-    status = getattr(member, "status", None)
-    if status not in ("administrator", "creator"):
-        return False, "not_admin"
-    if getattr(member, "can_post_messages", None) is False:
-        return False, "no_post_permission"
-    return True, ""
+
+    last_reason = "unknown_error"
+    for attempt in (1, 2):
+        try:
+            member = await asyncio.wait_for(
+                context.bot.get_chat_member(channel_id, bot_id),
+                timeout=10.0)
+        except asyncio.TimeoutError:
+            last_reason = "timeout"
+            if attempt == 1:
+                logger.debug(
+                    "WAIT_LOG_CH verify: timeout — retrying (id=%s)",
+                    channel_id)
+                await asyncio.sleep(0.5)
+                continue
+            return False, "timeout"
+        except (BadRequest, Forbidden) as e:
+            err = str(e).lower()
+            if any(x in err for x in (
+                "chat not found", "bot is not a member",
+                "member not found", "user not found",
+                "bot was kicked", "bot was blocked",
+            )):
+                return False, "bot_not_member"
+            if "chat_admin_required" in err or "not enough rights" in err:
+                return False, "need_admin_rights"
+            return False, "bad_request"
+        except Exception as e:
+            err_str = str(e).lower()
+            transient = any(x in err_str for x in (
+                "timeout", "connection", "network",
+                "temporary", "server error", "502", "503", "504",
+            ))
+            if transient and attempt == 1:
+                last_reason = f"net_{type(e).__name__}"
+                logger.debug(
+                    "WAIT_LOG_CH verify: transient network (%s) — "
+                    "retrying (id=%s)", e, channel_id)
+                await asyncio.sleep(1.0)
+                continue
+            # attempt==2 أو خطأ غير شبكي
+            last_reason = (
+                f"net_{type(e).__name__}" if transient
+                else "unknown_error")
+            logger.warning(
+                "_verify_bot_in_log_channel (attempt=%d): %s | reason=%s",
+                attempt, e, last_reason)
+            return False, last_reason
+
+        status = getattr(member, "status", None)
+        if status not in ("administrator", "creator"):
+            return False, "not_admin"
+        if getattr(member, "can_post_messages", None) is False:
+            return False, "no_post_permission"
+        return True, ""
+
+    return False, last_reason
 
 
 def _verify_bot_in_log_channel_error_text(reason) -> str:
+    if reason and reason.startswith("net_"):
+        return "❌ تعذّر الوصول للقناة (خطأ شبكة)."
     mapping = {
         "invalid_channel_id": "❌ معرّف القناة غير صالح.",
         "timeout": "⏱️ انتهت مهلة الاتصال.",
@@ -3313,6 +3392,9 @@ def _verify_bot_in_log_channel_error_text(reason) -> str:
         "not_admin": "❌ البوت ليس مشرفاً.",
         "no_post_permission": "❌ البوت لا يملك صلاحية النشر.",
         "bad_request": "❌ تعذّر الوصول للقناة.",
+        "bot_id_unavailable": "❌ تعذّر قراءة معرّف البوت.",
+        "bot_id_missing": "❌ معرّف البوت فارغ.",
+        "unknown_error": "❌ تعذّر التحقق من قناة السجل.",
     }
     return mapping.get(reason, "❌ تعذّر التحقق من قناة السجل.")
 
@@ -3446,24 +3528,17 @@ def _accepts_state_arg(handler, handler_name: str) -> bool:
     return result
 
 
-# ═══════════════════════════════════════════════════════════════════
-# v7.18.40 FIX-LOGCH-2: _EXTERNAL_HANDLED_STATES — WAIT_LOG_CH مُعالَج محلياً
-# ═══════════════════════════════════════════════════════════════════
 _EXTERNAL_HANDLED_STATES = frozenset({
-    # ─── CommandHandlers.handle_text (قناة التحديثات) ───
     "WAIT_UPDATE_CH",
-    "WAIT_UPDATE_CHANNEL",   # v7.18.38 FIX-STATE-2
-    # ─── معالجات Documents مستقبلية ───
+    "WAIT_UPDATE_CHANNEL",
     "WAIT_IMPORT_FILE",
     "WAIT_BACKUP_FILE",
-    # ملاحظة: WAIT_LOG_CH يُعالَج محلياً عبر _PRIVATE_HANDLERS_MAP
 })
 
 
 class MessageHandlers:
 
     _PRIVATE_HANDLERS_MAP: Dict[Any, str] = {
-        # ─── معالجات محلية ───
         "WAIT_GROUP_BAN": "handle_add_banned_word",
         "WAIT_GLOBAL_BAN": "handle_add_global_banned_word",
         "WAIT_REM_GROUP_BAN": "handle_remove_banned_word",
@@ -3472,21 +3547,15 @@ class MessageHandlers:
         "WAIT_REPLY_RESPONSE": "handle_add_reply",
         "WAIT_REPLY_ADD": "handle_add_reply",
         "WAIT_REPLY_REMOVE": "handle_remove_reply",
-        # v7.18.21 FIX-ROUTE-2: حالات إدخال القناة النشطة
         "WAIT_CHANNEL": "_handle_wait_channel_text",
         "WAIT_ADD_CHANNEL": "_handle_wait_channel_text",
-        # v7.18.38 FIX-STATE-1: أُزيل WAIT_UPDATE_CHANNEL من هنا
-        # v7.18.28 FIX-ADDING-1: حالات إضافة المنشورات
         "ADDING_POSTS": "_handle_adding_posts_text",
         "WAIT_POST": "_handle_adding_posts_text",
-        # v7.18.29 FIX-SUPPORT-1: حالة الدعم الفني
         "SUPPORT_MODE": "_handle_support_mode_text",
-        # v7.18.32 FIX-FSM-1: حالات FSM ناقصة
         "WAIT_AUTO_KEY": "_handle_wait_auto_key_text",
         "WAIT_AUTO_DEL": "_handle_wait_auto_del_text",
         "WAIT_PENALTY_DURATION": "_handle_wait_penalty_duration_text",
         "WAIT_GITHUB_URL": "_handle_wait_github_url_text",
-        # 🆕 v7.18.40 FIX-LOGCH-1 + v7.18.41 FIX-LOGCH-6 + v7.18.42 FIX-LOGCH-8:
         "WAIT_LOG_CH": "_handle_wait_log_ch_text",
     }
 
@@ -3640,11 +3709,15 @@ class MessageHandlers:
             else:
                 _err_lower = (_api_error or "").lower()
                 _method_unsupported = (
-                    "method not found" in _err_lower
-                    or "unknown method" in _err_lower
-                    or "setchatslowmodedelay" in _err_lower
-                    and ("not found" in _err_lower
-                         or "404" in _err_lower)
+                    ("method not found" in _err_lower)
+                    or ("unknown method" in _err_lower)
+                    or (
+                        ("setchatslowmodedelay" in _err_lower)
+                        and (
+                            ("not found" in _err_lower)
+                            or ("404" in _err_lower)
+                        )
+                    )
                 )
                 if _method_unsupported:
                     if not _SLOW_MODE_UNSUPPORTED:
@@ -4292,6 +4365,9 @@ class MessageHandlers:
 
         return ptype, duration
 
+    # ═══════════════════════════════════════════════════════════════════
+    # 🆕 v7.18.45 FIX-VIOLATION-COUNTER: تصفير العدّاد عند غياب العقوبة
+    # ═══════════════════════════════════════════════════════════════════
     @staticmethod
     async def _delete_and_warn(
         update, context, chat_id, user_id,
@@ -4430,8 +4506,16 @@ class MessageHandlers:
         await MessageHandlers._send_user_warning(
             context, chat_id, user_name, violation_type, lang,
             violation_count)
+
+        # 🆕 v7.18.45 FIX-VIOLATION-COUNTER: تصفير العدّاد عند غياب العقوبة
         if not penalty_type:
+            try:
+                await DB.reset_violation_count(user_id, chat_id)
+            except Exception as _rvc:
+                logger.debug(
+                    "reset_violation_count (no penalty): %s", _rvc)
             return
+
         try:
             max_strikes = int(
                 settings.get('violation_strikes')
@@ -4440,6 +4524,8 @@ class MessageHandlers:
             max_strikes = 3
         max_strikes = max(1, max_strikes)
         if violation_count < max_strikes:
+            # لم نصل للحد — لا نُصفّر (تصميم strike-system)،
+            # لكن في حال كانت العقوبة غير مفعّلة أصلاً فقد عالجناها أعلاه.
             return
         success, msg = await apply_violation_penalty(
             update, context, chat_id, user_id,
@@ -4523,14 +4609,9 @@ class MessageHandlers:
             logger.error("❌ auto_reply: %s", e)
             return False
 
-    # ═══════════════════════════════════════════════════════════════════
-    # v7.18.21 FIX-ROUTE-2: معالج القناة النشطة
-    # ═══════════════════════════════════════════════════════════════════
     @staticmethod
     async def _handle_wait_channel_text(update, context, state=None):
-        """
-        v7.18.21 FIX-ROUTE-2: معالجة إدخال معرف القناة النشطة.
-        """
+        """v7.18.21 FIX-ROUTE-2: معالجة إدخال معرف القناة النشطة."""
         user_id = (
             update.effective_user.id if update.effective_user else None)
         if not user_id:
@@ -4560,7 +4641,6 @@ class MessageHandlers:
             return
 
         processed = False
-        from importlib import import_module
         for mod_name in (
             "handlers.handlers_command", "handlers_command",
             "handlers.command", "command",
@@ -4647,30 +4727,14 @@ class MessageHandlers:
                 pass
 
     # ═══════════════════════════════════════════════════════════════════
-    # 🆕 v7.18.41 FIX-LOGCH-6 + v7.18.42 FIX-LOGCH-8
-    # 🆕 v7.18.43 FIX-HTML-ESCAPE
+    # v7.18.43 FIX-HTML-ESCAPE + v7.18.44 FIX-MYSQL-UPSERT
+    # 🆕 v7.18.45 FIX-MYSQL-UPSERT-MODERN + FIX-LOGCH-NESTED-CODE
     #     معالج قناة السجل (WAIT_LOG_CH)
     # ═══════════════════════════════════════════════════════════════════
     @staticmethod
     async def _handle_wait_log_ch_text(update, context, state=None):
         """
-        v7.18.41 FIX-LOGCH-6: معالجة إدخال معرف قناة السجل العامة.
-        v7.18.42 FIX-LOGCH-8: التحقق من عضوية/صلاحيات البوت قبل الحفظ.
-        v7.18.43 FIX-HTML-ESCAPE: escape عنوان القناة في التأكيد.
-
-        🔴 التصحيح الحرج (v7.18.41):
-          • قبل: كان يُحفظ الرابط/username كنص → group_log._read_global_key
-            يفشل في int() → يظن أن القناة "لم تُحفظ".
-          • بعد: نحلّ @username والرابط إلى chat_id **رقمي** أولاً،
-            ثم نحفظ الرقم.
-
-        🔴 التصحيح الإضافي (v7.18.42):
-          • قبل: يُحفظ الرقم حتى لو البوت ليس عضواً/مشرفاً.
-          • بعد: نتحقق أولاً، وإذا فشل التحقق نُبلغ المطور ولا نحفظ.
-
-        🟢 التصحيح التجميلي (v7.18.43):
-          • escape عنوان القناة قبل إدراجه في رسالة التأكيد
-            (parse_mode='HTML').
+        v7.18.45: تنسيق موحّد بدون <code> متداخل + UPSERT حديث.
         """
         user_id = (
             update.effective_user.id if update.effective_user else None)
@@ -4682,7 +4746,6 @@ class MessageHandlers:
 
         lang = await _ensure_lang(update, context)
 
-        # ─── 1) تحقق من صلاحيات المطوّر ───
         if not _is_dev_user(user_id):
             logger.warning(
                 "🚫 WAIT_LOG_CH: مستخدم غير مطوّر حاول "
@@ -4706,7 +4769,6 @@ class MessageHandlers:
 
         raw = message.text.strip()
 
-        # ─── 2) تحقق من الصيغة ───
         valid, err_reason = _parse_channel_ref(raw)
         if not valid:
             msg = await _trans(
@@ -4727,14 +4789,12 @@ class MessageHandlers:
                 user_id, raw[:40], err_reason)
             return
 
-        # ─── 3) FIX-LOGCH-6: استخراج chat_id رقمي ───
         numeric_id: Optional[int] = None
         title_for_display: str = ""
         cleaned = raw.strip()
         if cleaned.startswith('@'):
             cleaned = cleaned[1:]
 
-        # الحالة أ: رقم مباشر
         if cleaned.lstrip('-').isdigit():
             try:
                 numeric_id = int(cleaned)
@@ -4742,7 +4802,6 @@ class MessageHandlers:
             except (ValueError, TypeError):
                 numeric_id = None
 
-        # الحالة ب: @username أو username أو رابط
         if numeric_id is None:
             username_to_resolve = None
             if cleaned.startswith(('https://', 'http://')):
@@ -4777,7 +4836,6 @@ class MessageHandlers:
                         "WAIT_LOG_CH: resolve @%s فشل: %s",
                         username_to_resolve, e)
 
-        # فشل resolve → أبلغ المستخدم
         if numeric_id is None:
             logger.error(
                 "❌ WAIT_LOG_CH: فشل استخراج chat_id رقمي | "
@@ -4798,9 +4856,6 @@ class MessageHandlers:
                 pass
             return
 
-        # ─── 3.5) 🆕 v7.18.42 FIX-LOGCH-8: التحقق من العضوية/الصلاحيات ───
-        # الفشل المُتحقَّق منه = نرفض الحفظ.
-        # الاستثناءات غير المتوقعة = نكمل (fail-open) لعدم منع المطور.
         try:
             verify_ok, verify_reason = await _verify_bot_in_log_channel(
                 context, numeric_id)
@@ -4833,7 +4888,6 @@ class MessageHandlers:
                 "غير متوقّع — نكمل (fail-open) | user=%s id=%s err=%s",
                 user_id, numeric_id, _ve)
 
-        # ─── 4-5) الحفظ على CANONICAL + حذف LEGACY ───
         saved_ok = False
         saved_error = None
         value_to_save = str(numeric_id)
@@ -4855,17 +4909,46 @@ class MessageHandlers:
                         "WAIT_LOG_CH: DB.set_setting(log_channel, %s) "
                         "فشل: %s — محاولة SQL مباشرة",
                         value_to_save, _e)
+
             if not saved_ok:
+                # 🆕 v7.18.45 FIX-MYSQL-UPSERT-MODERN
                 try:
-                    await DB.execute(
-                        "INSERT INTO settings (key, value) VALUES (?, ?) "
-                        "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
-                        ('log_channel', value_to_save))
+                    if _db_is_mysql():
+                        # MySQL 8.0.20+ modern syntax with fallback
+                        _ok_mysql = False
+                        try:
+                            await DB.execute(
+                                "INSERT INTO settings (key, value) "
+                                "VALUES (?, ?) AS new "
+                                "ON DUPLICATE KEY UPDATE "
+                                "value = new.value",
+                                ('log_channel', value_to_save))
+                            _ok_mysql = True
+                        except Exception as _mysql_new_err:
+                            logger.debug(
+                                "MySQL modern UPSERT failed: %s — "
+                                "trying legacy VALUES()",
+                                _mysql_new_err)
+                        if not _ok_mysql:
+                            await DB.execute(
+                                "INSERT INTO settings (key, value) "
+                                "VALUES (?, ?) "
+                                "ON DUPLICATE KEY UPDATE "
+                                "value = VALUES(value)",
+                                ('log_channel', value_to_save))
+                    else:
+                        await DB.execute(
+                            "INSERT INTO settings (key, value) "
+                            "VALUES (?, ?) "
+                            "ON CONFLICT (key) DO UPDATE "
+                            "SET value = EXCLUDED.value",
+                            ('log_channel', value_to_save))
                     saved_ok = True
                 except Exception as _e2:
                     saved_error = saved_error or str(_e2)[:120]
                     logger.error(
                         "WAIT_LOG_CH: SQL fallback فشل: %s", _e2)
+
             if saved_ok:
                 try:
                     await DB.execute(
@@ -4879,7 +4962,6 @@ class MessageHandlers:
             logger.error(
                 "WAIT_LOG_CH: حفظ فشل كلياً: %s", e, exc_info=True)
 
-        # ─── 6) إبطال caches ───
         if saved_ok:
             try:
                 _invalidate_group_log_cache(None)
@@ -4907,7 +4989,6 @@ class MessageHandlers:
                 logger.debug(
                     "WAIT_LOG_CH: invalidate menus: %s", _ie)
 
-        # ─── 7) clear state + context keys ───
         try:
             StateManager.clear(user_id)
         except Exception:
@@ -4922,7 +5003,6 @@ class MessageHandlers:
             except Exception:
                 pass
 
-        # ─── 8) أرسل تأكيد ───
         if saved_ok:
             try:
                 tmpl = await _trans(
@@ -4930,14 +5010,15 @@ class MessageHandlers:
                     "✅ تم تعيين قناة السجل:\n<code>{ch}</code>\n\n"
                     "📌 ستستقبل أحداث الحماية والتنبيهات هنا.")
                 try:
-                    display = f"{numeric_id}"
+                    # 🆕 v7.18.45 FIX-LOGCH-NESTED-CODE:
+                    # نُدخل النص الإضافي كنص عادي لتجنّب تداخل <code>.
                     if (title_for_display
                             and title_for_display != str(numeric_id)):
-                        # 🆕 v7.18.43 FIX-HTML-ESCAPE:
-                        # escape العنوان قبل الإدراج في HTML.
                         display = (
-                            f"{escape(str(title_for_display))} "
-                            f"(<code>{numeric_id}</code>)")
+                            f"{escape(str(title_for_display))} — "
+                            f"{numeric_id}")
+                    else:
+                        display = f"{numeric_id}"
                     msg = tmpl.format(ch=display)
                 except (KeyError, IndexError):
                     msg = tmpl
@@ -4967,9 +5048,6 @@ class MessageHandlers:
                 "id=%s err=%s",
                 user_id, raw[:60], numeric_id, saved_error or '—')
 
-    # ═══════════════════════════════════════════════════════════════════
-    # v7.18.28 FIX-ADDING-1: معالج إضافة المنشورات
-    # ═══════════════════════════════════════════════════════════════════
     @staticmethod
     async def _handle_adding_posts_text(update, context, state=None):
         """v7.18.28 FIX-ADDING-1: حفظ منشور في القناة النشطة."""
@@ -5109,7 +5187,7 @@ class MessageHandlers:
                 user_id, active_db_id)
 
     # ═══════════════════════════════════════════════════════════════════
-    # v7.18.29 FIX-SUPPORT-2: معالج الدعم الفني
+    # v7.18.29 FIX-SUPPORT-2 + v7.18.45 FIX-PG-SUPPORT-INSERT
     # ═══════════════════════════════════════════════════════════════════
     @staticmethod
     async def _handle_support_mode_text(update, context, state=None):
@@ -5228,16 +5306,18 @@ class MessageHandlers:
                 fetchval_fn = getattr(DB, "fetchval", None)
 
                 if callable(insert_fn):
-                    _is_pg = bool(getattr(DB, "USE_POSTGRES", False))
-                    _is_mysql = bool(getattr(DB, "USE_MYSQL", False))
+                    _is_pg = _db_is_pg()
+                    _is_mysql = _db_is_mysql()
 
-                    now_str = datetime.utcnow().isoformat()
+                    now_str = _utc_now_iso()
 
                     if _is_pg and callable(fetchone_fn):
+                        # 🆕 v7.18.45 FIX-PG-SUPPORT-INSERT:
+                        # استخدام $1..$4 مع RETURNING id
                         sql_pg = (
                             "INSERT INTO support_tickets "
                             "(user_id, message, media_type, created_at) "
-                            "VALUES (?, ?, ?, ?) RETURNING id")
+                            "VALUES ($1, $2, $3, $4) RETURNING id")
                         res = fetchone_fn(
                             sql_pg,
                             (user_id, text, media_type, now_str))
@@ -5316,8 +5396,7 @@ class MessageHandlers:
                     now_str_log = TimeUtils.mecca_now().strftime(
                         '%Y-%m-%d %H:%M:%S')
                 except Exception:
-                    now_str_log = datetime.utcnow().strftime(
-                        '%Y-%m-%d %H:%M:%S')
+                    now_str_log = _utc_now_str()
                 lines.append(f"🕐 {now_str_log}")
                 if ticket_error:
                     lines.append(
@@ -5363,10 +5442,6 @@ class MessageHandlers:
             "len=%d error=%s",
             user_id, ticket_id, media_type or "text",
             len(text), ticket_error or "—")
-
-    # ═══════════════════════════════════════════════════════════════════
-    # v7.18.32 FIX-FSM-1: معالجات FSM ناقصة
-    # ═══════════════════════════════════════════════════════════════════
 
     @staticmethod
     async def _handle_wait_auto_key_text(
@@ -5418,6 +5493,9 @@ class MessageHandlers:
             "WAIT_REPLY_RESPONSE",
             keyword[:40], user_id, chat_id)
 
+    # ═══════════════════════════════════════════════════════════════════
+    # 🆕 v7.18.45 FIX-PG-AUTO-DEL: SQL متوافق مع نوع القاعدة
+    # ═══════════════════════════════════════════════════════════════════
     @staticmethod
     async def _handle_wait_auto_del_text(
         update, context, state=None
@@ -5485,11 +5563,19 @@ class MessageHandlers:
                     fetchval = getattr(DB, "fetchval", None)
                     if callable(fetchval):
                         try:
+                            # 🆕 v7.18.45 FIX-PG-AUTO-DEL
+                            if _db_is_pg():
+                                _exists_sql = (
+                                    "SELECT 1 FROM auto_replies "
+                                    "WHERE chat_id = $1 AND keyword = $2 "
+                                    "LIMIT 1")
+                            else:
+                                _exists_sql = (
+                                    "SELECT 1 FROM auto_replies "
+                                    "WHERE chat_id = ? AND keyword = ? "
+                                    "LIMIT 1")
                             exists = fetchval(
-                                "SELECT 1 FROM auto_replies "
-                                "WHERE chat_id = ? AND keyword = ? "
-                                "LIMIT 1",
-                                (chat_id, keyword))
+                                _exists_sql, (chat_id, keyword))
                             if asyncio.iscoroutine(exists):
                                 exists = await exists
                         except Exception as _ee:
@@ -5497,11 +5583,19 @@ class MessageHandlers:
                                 "auto_del existence check: %s", _ee)
                             exists = None
 
+                    # 🆕 v7.18.45 FIX-PG-AUTO-DEL: DELETE متوافق
+                    if _db_is_pg():
+                        _del_sql = (
+                            "DELETE FROM auto_replies "
+                            "WHERE chat_id = $1 AND keyword = $2")
+                    else:
+                        _del_sql = (
+                            "DELETE FROM auto_replies "
+                            "WHERE chat_id = ? AND keyword = ?")
+
                     if exists:
                         rc = await DB.execute(
-                            "DELETE FROM auto_replies "
-                            "WHERE chat_id = ? AND keyword = ?",
-                            (chat_id, keyword))
+                            _del_sql, (chat_id, keyword))
                         removed = True if rc is None else bool(rc)
                         definitive = True
                     elif exists is not None:
@@ -5509,9 +5603,7 @@ class MessageHandlers:
                         definitive = True
                     else:
                         rc = await DB.execute(
-                            "DELETE FROM auto_replies "
-                            "WHERE chat_id = ? AND keyword = ?",
-                            (chat_id, keyword))
+                            _del_sql, (chat_id, keyword))
                         removed = True if rc is None else bool(rc)
                         definitive = True
                 except Exception as e:
@@ -5563,9 +5655,6 @@ class MessageHandlers:
             keyword[:40], user_id, chat_id, removed, definitive,
             removed_error or "—")
 
-    # ═══════════════════════════════════════════════════════════════════
-    # 🆕 v7.18.42 FIX-PENALTY-UX: رسالة واضحة عند فُقدان penalty_type
-    # ═══════════════════════════════════════════════════════════════════
     @staticmethod
     async def _handle_wait_penalty_duration_text(
         update, context, state=None
@@ -5589,7 +5678,6 @@ class MessageHandlers:
             pass
 
         if not penalty_type:
-            # v7.18.42 FIX-PENALTY-UX: لا تخرج بصمت
             try:
                 msg = await _trans(
                     'penalty_session_lost', lang,
@@ -5785,18 +5873,9 @@ class MessageHandlers:
             "attempted=%s",
             raw_url[:80], user_id, imported, count, attempted)
 
-    # ═══════════════════════════════════════════════════════════════════
-    # v7.18.21 FIX-ROUTE-2: handle_private مع 7 مسارات fallback
-    # ═══════════════════════════════════════════════════════════════════
     @staticmethod
     async def handle_private(update, context):
-        """
-        معالج الرسائل الخاصة.
-
-        v7.18.40: WAIT_LOG_CH يُعالَج محلياً (FIX-LOGCH-1/2)
-        عبر _PRIVATE_HANDLERS_MAP. WAIT_UPDATE_CH/CHANNEL لا يزالان
-        external (CommandHandlers.handle_text).
-        """
+        """v7.18.44 FIX-PRIVATE-DEDUP: تتبّع id(cls)."""
         try:
             if not update.effective_user:
                 return
@@ -5864,7 +5943,6 @@ class MessageHandlers:
                         await handler(update, context)
                     return
 
-            from importlib import import_module
             _fallback_paths = (
                 ("handlers.handlers_command", "CommandHandlers",
                  "handle_text"),
@@ -5878,6 +5956,7 @@ class MessageHandlers:
             )
             _tried: List[str] = []
             _succeeded = False
+            _seen_classes: set = set()
             for mod_name, cls_name, method_name in _fallback_paths:
                 try:
                     if mod_name.startswith("."):
@@ -5892,6 +5971,10 @@ class MessageHandlers:
                 if cls is None:
                     _tried.append(f"{mod_name}:no_{cls_name}")
                     continue
+                _cls_id = id(cls)
+                if _cls_id in _seen_classes:
+                    continue
+                _seen_classes.add(_cls_id)
                 method = getattr(cls, method_name, None)
                 if not callable(method):
                     _tried.append(f"{mod_name}:no_{method_name}")
@@ -7018,7 +7101,7 @@ async def handle_cache_stats_command(update, context):
     try:
         now_str = TimeUtils.mecca_now().strftime('%Y-%m-%d %H:%M:%S')
     except Exception:
-        now_str = datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
+        now_str = _utc_now_str()
     lines.append(f"🕐 {now_str}")
     text = "\n".join(lines)
     if len(text) > 4000:
@@ -7265,48 +7348,51 @@ __all__ = [
     "_invalidate_dev_log_cache",
     "_verify_bot_in_log_channel",
     "_verify_bot_in_log_channel_error_text",
+    "_db_type",
+    "_db_is_pg",
+    "_db_is_mysql",
+    # 🆕 v7.18.45
+    "_pg_ph",
+    "_ph_list",
+    "_utc_now_iso",
+    "_utc_now_str",
+    "_prune_caches_lock",
 ]
 
 
 # ═════════════════════════════════════════════════════════════════════
-# LOAD BEACON — v7.18.43
+# LOAD BEACON — v7.18.45
 # ═════════════════════════════════════════════════════════════════════
 
 try:
     logger.info(
-        "✅ handlers_message v7.18.43 loaded | "
+        "✅ handlers_message v7.18.45 loaded | "
         "BWM=%s | PRIVATE_HANDLERS=%d | "
         "external_handled=%d | "
-        "routing-fallback=7-paths | "
+        "routing-fallback=7-paths-deduped | "
         "SPAM-TIMEOUT=%.1fs | "
         "WARMUP=available | "
-        "SLOW-MODE-FIX=active | "
-        "WAIT_CHANNEL=direct-handler | "
-        "WAIT_LOG_CH=direct-handler (FIX-LOGCH-1/6/8) | "
-        "WAIT_UPDATE_CHANNEL=EXTERNAL (FIX-STATE-1/2) | "
-        "WAIT_UPDATE_CH=EXTERNAL (command) | "
-        "WAIT_IMPORT_FILE/WAIT_BACKUP_FILE=EXTERNAL (document-TODO) | "
-        "ADDING_POSTS=direct-handler | "
-        "SUPPORT_MODE=direct-handler | "
-        "AUTO_KEY/AUTO_DEL/PENALTY_DURATION/GITHUB_URL=direct-handler | "
-        "LOG-CHANNEL-KEY=log_channel (CANONICAL, numeric-only) | "
-        "BATCH-SETTINGS=PG-1RTT+empty-cache+partial_return | "
-        "ars_local_cache=5s-TTL | "
+        "DB-TYPE=%s | "
+        "WAIT_LOG_CH=direct-handler | "
         "detectors-compat=v4.1.0 | "
-        "fixes=(FIX-HTML-ESCAPE:log-ch-confirm, "
-        "FIX-FORBIDDEN:catch, "
-        "FIX-WWW-TME:parse, "
-        "FIX-DEV-IDS-STR:split, "
-        "FIX-LOGCH-8:membership-verify, "
-        "FIX-LOGCH-6:numeric-id-resolve, "
-        "FIX-DEV-IDS:DEVELOPER_IDS, "
-        "FIX-PENALTY-UX:session-lost-msg, "
-        "FIX-LOGCH-1..5, FIX-TIMEOUT-1, FIX-WARMUP-1, "
-        "FIX-SLOWMODE-1, FIX-STATE-1/2)",
+        "fixes=(FIX-PG-SUPPORT-INSERT, "
+        "FIX-PG-ADMIN-CHECK, "
+        "FIX-PG-AUTO-DEL, "
+        "FIX-VIOLATION-COUNTER, "
+        "FIX-MYSQL-UPSERT-MODERN, "
+        "FIX-PRUNE-LOCK, "
+        "FIX-LOGCH-NESTED-CODE, "
+        "FIX-DEV-IDS-INT, "
+        "FIX-DATETIME-DEPRECATED, "
+        "FIX-DETECTORS-IMPORT, "
+        "FIX-RUN-SYNC-KWARGS, "
+        "FIX-VERIFY-RETRY-TAG, "
+        "v7.18.44-all-fixes, v7.18.43-all-fixes)",
         "yes" if _HAS_BWM else "no",
         len(MessageHandlers._PRIVATE_HANDLERS_MAP),
         len(_EXTERNAL_HANDLED_STATES),
         _SPAM_ASYNC_TIMEOUT,
+        _db_type(),
     )
 except Exception:
     pass
