@@ -9,13 +9,11 @@ utils.py - الأدوات المساعدة للبوت (v7.10.23 — FIX-PUBLISH-
          • BackgroundTasks.auto_publish كان ينتظر asyncio.sleep(60)
            بين كل دورة polling (موضعان: عند "no channels" + بعد كل دورة).
          • النتيجة: عند إضافة منشور، التأخير حتى 60s (متوسط 30s).
-         • تجربة مستخدم سيئة: "لماذا يتأخر النشر؟"
 
        الإصلاح:
          • _publish_trigger = asyncio.Event() عالمي (lazy init).
          • trigger_auto_publish() — دالة عامة تُستدعى بعد إضافة منشور.
-         • auto_publish يستخدم asyncio.wait_for(trigger.wait(), timeout=15)
-           بدل asyncio.sleep(60) — يستيقظ فوراً عند الإشارة.
+         • auto_publish يستخدم wait_for(trigger, timeout=15) بدل sleep(60).
          • fallback: 15s بدل 60s (إذا فشلت الإشارة).
 
        الأثر المتوقّع:
@@ -23,11 +21,8 @@ utils.py - الأدوات المساعدة للبوت (v7.10.23 — FIX-PUBLISH-
          • إضافة منشور بدون trigger → نشر خلال ~7.5s (متوسط).
          • الحد الأقصى للتأخير: 15s بدل 60s.
 
-    🔴 FIX-PD-2: أي نشر فوري يحافظ على نفس الـsemaphore والـretry
-       (لا تضحية بالسلامة مقابل السرعة).
-
-    🟢 FIX-PD-3: trigger_auto_publish() آمنة للاستدعاء من أي سياق
-       (sync/async) — لا تحجب، لا ترمي.
+    🔴 FIX-PD-2: أي نشر فوري يحافظ على نفس الـsemaphore والـretry.
+    🟢 FIX-PD-3: trigger_auto_publish() آمنة للاستدعاء من أي سياق.
 
 🆕 v7.10.22 (FIX-SLOWQ) — محفوظ:
     🔴 FIX-SLOWQ-3: _read_pg_activity — GROUP BY + cache(120s).
@@ -90,27 +85,10 @@ from database import DB
 logger = logging.getLogger(__name__)
 
 # ═══════════════════════════════════════════════════════════════════════════
-# 🔴 FIX-1: _warmup_bg_tasks معرّف مبكراً
+# 🔴 v7.10.23 FIX-PD-1: Event-triggered auto_publish
 # ═══════════════════════════════════════════════════════════════════════════
 _warmup_bg_tasks: set = set()
 
-# ═══════════════════════════════════════════════════════════════════════════
-# 🔴 v7.10.23 FIX-PD-1: Event-triggered auto_publish
-# ═══════════════════════════════════════════════════════════════════════════
-# السبب الأصلي: auto_publish كان ينتظر asyncio.sleep(60) بين كل دورة
-# → عند إضافة منشور، التأخير حتى 60s (متوسط 30s).
-#
-# الإصلاح:
-#   1. `_publish_trigger` = asyncio.Event() عالمي (lazy init).
-#   2. `trigger_auto_publish()` — دالة عامة تُستدعى بعد إضافة منشور.
-#   3. auto_publish يستخدم wait_for(trigger, timeout=15) بدل sleep(60).
-#   4. النتيجة: نشر فوري (~1-3s) عند الإضافة، مع fallback كل 15s.
-#
-# الاستخدام في handlers_channels_posts.py:
-#   from utils import trigger_auto_publish
-#   await DB.add_post(...)
-#   trigger_auto_publish()  # ← النشر يبدأ فوراً
-# ═══════════════════════════════════════════════════════════════════════════
 _publish_trigger: Optional[asyncio.Event] = None
 _publish_trigger_lock = threading.Lock()
 _PUBLISH_SIGNAL_TIMEOUT_SECONDS = 15.0
@@ -177,12 +155,10 @@ _FALLBACK_PENALTY_TYPES: frozenset = frozenset({
     "ban", "mute", "kick", "warn", "restrict", "unban",
 })
 
-# 🔴 v7.10.19 FIX-BUG1c/FIX-BUG1d: أنواع الوسائط التي تدعم caption.
 _CAPTION_MEDIA_TYPES: frozenset = frozenset({
     'photo', 'video', 'document', 'audio', 'animation',
 })
 
-# 🆕 TIMEOUT-FIX-4: حدود timeouts ديناميكية
 _TIMEOUT_FAST = {
     "read_timeout": 30.0,
     "write_timeout": 30.0,
@@ -195,35 +171,29 @@ _TIMEOUT_SLOW = {
     "connect_timeout": 30.0,
     "pool_timeout": 15.0,
 }
-_TEXT_LONG_THRESHOLD = 2000  # حرف — بعد هذا نستخدم slow timeouts
+_TEXT_LONG_THRESHOLD = 2000
 
-# 🆕 FIX-SC2: monotonic + prune
 _security_settings_cache: Dict[int, Tuple[float, Dict[str, Any]]] = {}
 _SEC_SETTINGS_TTL = 300.0
 _SEC_SETTINGS_NEGATIVE_TTL = 30.0
 _SEC_SETTINGS_MAX_SIZE = 5000
 _SEC_SETTINGS_STALE_MULT = 10.0
 
-# 🆕 PERF-FIX-1: cache الفشل — مع حد أقصى 🆕 v7.10.14 FIX-I
 _sec_settings_neg_cache: Dict[int, float] = {}
 _SEC_SETTINGS_NEG_MAX_SIZE = 5000
 
-# 🆕 v7.10.18 FIX-BUG2: كاش صلاحيات البوت
 _bot_perms_cache: Dict[int, Tuple[float, Dict[str, Any]]] = {}
 _BOT_PERMS_TTL = 300.0
 _BOT_PERMS_MAX_SIZE = 2000
 
-# 🆕 v7.10.20 FIX-UB2: timeout للنسخ الاحتياطي
 _BACKUP_TIMEOUT_SECONDS = float(
     getattr(CONFIG, 'BACKUP_TIMEOUT_SECONDS', 300.0)
 )
 
-# 🆕 v7.10.22 FIX-SLOWQ-3: كاش قراءات pg_stat_activity
 _pg_activity_cache: Tuple[Optional[Dict[str, int]], float] = (None, 0.0)
 _PG_ACTIVITY_TTL = 120.0
 _PG_ACTIVITY_QUERY_TIMEOUT = 5.0
 
-# 🆕 FIX-D14: نطاقات عربية موسّعة
 _ARABIC_TATWEEL = '\u0640'
 _HIDDEN_CHARS = (
     '\u200b', '\u200c', '\u200d', '\u200e', '\u200f',
@@ -231,6 +201,7 @@ _HIDDEN_CHARS = (
     '\u2060', '\u2061', '\u2062', '\u2063', '\u2064', '\ufeff',
 )
 _HIDDEN_TRANSLATE_TABLE = {ord(c): None for c in _HIDDEN_CHARS}
+
 
 def _normalize_unicode(text: str) -> str:
     if not text:
@@ -244,7 +215,7 @@ def _normalize_unicode(text: str) -> str:
         text = text.replace(_ARABIC_TATWEEL, '')
     return text
 
-# 🔴 FIX-C v7.10.13: helper لتحويل Row إلى dict بأمان
+
 def _row_to_dict(row: Any) -> Optional[Dict[str, Any]]:
     """🆕 v7.10.13 FIX-C: يحوّل Row إلى dict بأمان."""
     if row is None:
@@ -259,6 +230,7 @@ def _row_to_dict(row: Any) -> Optional[Dict[str, Any]]:
         return {k: row[k] for k in row.keys()}
     except Exception:
         return None
+
 
 _AVAILABLE_LANGUAGES: Dict[str, str] = {
     "ar": "العربية 🇸🇦", "en": "English 🇬🇧", "fr": "Français 🇫🇷",
@@ -381,6 +353,7 @@ class SmartCache:
     async def size(self) -> int:
         async with self._lock:
             return len(self._cache)
+
 
 _auth_cache_smart = SmartCache(ttl=60, max_size=2000)
 _auth_neg_cache = SmartCache(ttl=15, max_size=1000)
@@ -547,6 +520,7 @@ class RateLimiter:
             else:
                 await asyncio.sleep(0.01)
 
+
 RATE_LIMITER = RateLimiter(max_concurrent=15, max_per_second=30)
 PUBLISH_RATE_LIMITER = RateLimiter(max_concurrent=5, max_per_second=10)
 
@@ -583,6 +557,7 @@ class MetricsCollector:
     def increment_messages(self):
         self.messages_processed += 1
 
+
 METRICS = MetricsCollector()
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -607,6 +582,7 @@ class AutoReplyCache:
 
     def clear(self):
         self._cache.clear()
+
 
 _auto_reply_cache = AutoReplyCache(maxsize=300, ttl=300)
 
@@ -867,6 +843,7 @@ class TranslationManager:
             "default_lang": cls._default_lang,
         }
 
+
 async def get_text(lang: str, key: str, **kwargs) -> str:
     return TranslationManager.get_text(lang, key, **kwargs)
 
@@ -947,6 +924,7 @@ class UserState(Enum):
     WAIT_REPLY_RESPONSE = auto()
     WAIT_REPLY_ADD = auto()
     WAIT_REPLY_REMOVE = auto()
+
 
 class StateManager:
     """🆕 v7.10.14 FIX-J: توثيق واضح لدالة is_expired."""
@@ -1811,6 +1789,7 @@ _global_words_loaded_at: float = 0.0
 _global_words_lock: asyncio.Lock = asyncio.Lock()
 _GLOBAL_WORDS_TTL = 1800
 
+
 def _normalize_word(word: Any) -> Optional[str]:
     if not isinstance(word, str):
         return None
@@ -1825,6 +1804,7 @@ def _normalize_word(word: Any) -> Optional[str]:
         word = word.replace(_ARABIC_TATWEEL, '')
     word = re.sub(r'\s+', ' ', word).strip()
     return word if word else None
+
 
 async def _get_or_create_banned_words_lock(chat_id: int) -> asyncio.Lock:
     async with _banned_words_locks_guard:
@@ -1842,6 +1822,7 @@ async def _get_or_create_banned_words_lock(chat_id: int) -> asyncio.Lock:
         lock = asyncio.Lock()
         _banned_words_locks[chat_id] = lock
         return lock
+
 
 async def _get_global_words_cached() -> List[str]:
     global _global_words_cache, _global_words_loaded_at
@@ -1865,6 +1846,7 @@ async def _get_global_words_cached() -> List[str]:
         except Exception as e:
             logger.error(f"❌ فشل جلب الكلمات العامة: {e}")
             return _global_words_cache or []
+
 
 async def get_banned_words_cached(chat_id: int) -> List[str]:
     if _ENABLE_BANNED_WORDS_CACHE:
@@ -1911,6 +1893,7 @@ async def get_banned_words_cached(chat_id: int) -> List[str]:
             logger.error(f"❌ فشل جلب الكلمات المحظورة: {e}")
             return []
 
+
 def _clear_db_banned_words_cache(chat_id: int = None) -> None:
     try:
         if hasattr(DB, '_banned_words_cache') and DB._banned_words_cache is not None:
@@ -1929,6 +1912,7 @@ def _clear_db_banned_words_cache(chat_id: int = None) -> None:
     except Exception as e:
         logger.debug(f"invalidate DB banned_words cache: {e}")
 
+
 def invalidate_banned_words_cache(chat_id: int = None) -> None:
     global _global_words_cache, _global_words_loaded_at
     if chat_id is None or chat_id == -1:
@@ -1940,6 +1924,7 @@ def invalidate_banned_words_cache(chat_id: int = None) -> None:
         _banned_words_cache.pop(chat_id, None)
         _banned_words_cache_time.pop(chat_id, None)
     _clear_db_banned_words_cache(chat_id)
+
 
 async def invalidate_banned_words_cache_async(chat_id: int = None) -> None:
     global _global_words_cache, _global_words_loaded_at
@@ -1953,6 +1938,7 @@ async def invalidate_banned_words_cache_async(chat_id: int = None) -> None:
         _banned_words_cache.pop(chat_id, None)
         _banned_words_cache_time.pop(chat_id, None)
     _clear_db_banned_words_cache(chat_id)
+
 
 async def get_min_publish_interval() -> int:
     val = await DB.get_setting(
@@ -2002,6 +1988,7 @@ async def _do_auth_check(bot, chat_id: int, user_id: int) -> bool:
         logger.debug(f"DB auth check failed: {e}")
     return False
 
+
 async def is_authorized_in_group(bot, chat_id: int, user_id: int) -> bool:
     try:
         primary_id = int(CONFIG.PRIMARY_OWNER_ID)
@@ -2024,6 +2011,7 @@ async def is_authorized_in_group(bot, chat_id: int, user_id: int) -> bool:
         await _auth_neg_cache.set(cache_key, False, ttl=15)
         await _auth_cache_smart.delete(cache_key)
     return authorized
+
 
 def invalidate_auth_cache(chat_id: int = None, user_id: int = None) -> None:
     """🔴 FIX-2 + v7.10.14 FIX-F: user_id-aware، لا clear() كامل."""
@@ -2060,6 +2048,7 @@ def invalidate_auth_cache(chat_id: int = None, user_id: int = None) -> None:
     except Exception as e:
         logger.debug("invalidate_auth_cache (sync): %s", e)
 
+
 async def invalidate_auth_cache_async(chat_id: int = None,
                                       user_id: int = None) -> None:
     """🔴 v7.10.14 FIX-F: دعم user_id وحده بدون مسح كامل الكاش."""
@@ -2078,11 +2067,9 @@ async def invalidate_auth_cache_async(chat_id: int = None,
             await _auth_cache_smart.clear()
             await _auth_neg_cache.clear()
 
-# 🆕 v7.10.18 FIX-BUG2: كاش check_bot_permissions
+
 async def check_bot_permissions(bot, chat_id: int) -> dict:
-    """
-    🆕 v7.10.18 FIX-BUG2: كاش TTL=300s لتقليل get_chat_member API calls.
-    """
+    """🆕 v7.10.18 FIX-BUG2: كاش TTL=300s لتقليل get_chat_member API calls."""
     now = time.monotonic()
     cached = _bot_perms_cache.get(chat_id)
     if cached is not None and now - cached[0] < _BOT_PERMS_TTL:
@@ -2116,6 +2103,7 @@ async def check_bot_permissions(bot, chat_id: int) -> dict:
     except Exception as e:
         return {'can_act': False, 'reason': str(e)[:50], 'can_pin': False}
 
+
 def invalidate_bot_perms_cache(chat_id: Optional[int] = None) -> None:
     """🆕 v7.10.18 FIX-BUG2: إبطال كاش صلاحيات البوت."""
     if chat_id is None:
@@ -2123,9 +2111,6 @@ def invalidate_bot_perms_cache(chat_id: Optional[int] = None) -> None:
     else:
         _bot_perms_cache.pop(chat_id, None)
 
-# ═══════════════════════════════════════════════════════════════════════════
-# 11.b) TIMEOUT-FIX-7/8: تشخيص latency
-# ═══════════════════════════════════════════════════════════════════════════
 
 async def _check_telegram_latency(bot, timeout: float = 10.0) -> float:
     """🆕 TIMEOUT-FIX-7 + 🔴 v7.10.14 FIX-G: PTB-safe fallback."""
@@ -2141,6 +2126,7 @@ async def _check_telegram_latency(bot, timeout: float = 10.0) -> float:
     except Exception as e:
         logger.debug("Telegram latency check failed: %s", e)
         return -1.0
+
 
 async def get_telegram_latency_text(bot) -> str:
     latency = await _check_telegram_latency(bot)
@@ -2179,6 +2165,7 @@ _CHAT_MIGRATION_TABLES: Tuple[Tuple[str, str, bool], ...] = (
     ("user_messages", "chat_id", False),
     ("violation_penalties", "chat_id", False),
 )
+
 
 async def _handle_chat_migrated(chat_id: int, new_chat_id: int) -> None:
     try:
@@ -2255,26 +2242,20 @@ async def _handle_chat_migrated(chat_id: int, new_chat_id: int) -> None:
     except Exception as e:
         logger.error("ChatMigrated handler: %s", e, exc_info=True)
 
+
 def _timeouts_for(text_len: int, is_media: bool = False) -> Dict[str, float]:
     if is_media or text_len > _TEXT_LONG_THRESHOLD:
         return dict(_TIMEOUT_SLOW)
     return dict(_TIMEOUT_FAST)
 
-# ═══════════════════════════════════════════════════════════════════════════
-# 🔴 v7.10.21 FIX-U1: _send_media — شرط warning مُصحَّح
-# ═══════════════════════════════════════════════════════════════════════════
 
 async def _send_media(bot, chat_id, media_type, media_file_id,
                       caption=None, reply_markup=None,
                       parse_mode: str = "HTML",
                       _full_text: Optional[str] = None,
                       **kwargs):
-    """
-    إرسال وسائط + نص.
-
-    🔴 v7.10.19 FIX-BUG1c: التمييز حسب _CAPTION_MEDIA_TYPES.
-    🟠 v7.10.20 FIX-UB3: log warning عند استدعاء قديم.
-    🔴 v7.10.21 FIX-U1 (CRITICAL): `_full_text is None` بدل `not _full_text`.
+    """إرسال وسائط + نص.
+    🔴 v7.10.21 FIX-U1: `_full_text is None` بدل `not _full_text`.
     """
     _reply_to = kwargs.get('reply_to_message_id')
     _full = _full_text if _full_text else (caption or "")
@@ -2345,57 +2326,50 @@ async def _send_media(bot, chat_id, media_type, media_file_id,
             reply_markup=reply_markup, parse_mode=parse_mode, **kwargs)
         await _send_followup_text()
         return sent
-
     elif media_type == 'video':
         sent = await bot.send_video(
             chat_id, media_file_id, caption=caption,
             reply_markup=reply_markup, parse_mode=parse_mode, **kwargs)
         await _send_followup_text()
         return sent
-
     elif media_type == 'document':
         sent = await bot.send_document(
             chat_id, media_file_id, caption=caption,
             reply_markup=reply_markup, parse_mode=parse_mode, **kwargs)
         await _send_followup_text()
         return sent
-
     elif media_type == 'audio':
         sent = await bot.send_audio(
             chat_id, media_file_id, caption=caption,
             reply_markup=reply_markup, parse_mode=parse_mode, **kwargs)
         await _send_followup_text()
         return sent
-
     elif media_type == 'voice':
         sent = await bot.send_voice(
             chat_id, media_file_id, reply_markup=reply_markup, **kwargs)
         await _send_followup_text()
         return sent
-
     elif media_type == 'animation':
         sent = await bot.send_animation(
             chat_id, media_file_id, caption=caption,
             reply_markup=reply_markup, parse_mode=parse_mode, **kwargs)
         await _send_followup_text()
         return sent
-
     elif media_type == 'sticker':
         sent = await bot.send_sticker(
             chat_id, media_file_id, reply_markup=reply_markup)
         await _send_followup_text()
         return sent
-
     elif media_type == 'video_note':
         sent = await bot.send_video_note(
             chat_id, media_file_id, reply_markup=reply_markup)
         await _send_followup_text()
         return sent
-
     else:
         return await bot.send_message(
             chat_id, caption or ".", reply_markup=reply_markup,
             parse_mode=parse_mode, **kwargs)
+
 
 async def safe_send(bot, chat_id: int, text: str, reply_markup=None,
                     parse_mode: str = "HTML",
@@ -2574,6 +2548,7 @@ async def safe_send(bot, chat_id: int, text: str, reply_markup=None,
             return None
     return None
 
+
 def get_ram_usage() -> dict:
     if psutil is None:
         return {'total': 0, 'used': 0, 'percent': 0}
@@ -2626,6 +2601,7 @@ async def ban_user_by_id(user_id: int) -> Tuple[bool, str]:
         logger.error("❌ ban_user_by_id(%s): %s", user_id, e, exc_info=True)
         return False, f"❌ فشل الحظر: {str(e)[:100]}"
 
+
 async def unban_user_by_id(user_id: int) -> Tuple[bool, str]:
     try:
         row = await DB.fetchone(
@@ -2654,6 +2630,7 @@ class PenaltyStrategy(ABC):
                     **kwargs) -> Tuple[bool, str]:
         pass
 
+
 class BanPenalty(PenaltyStrategy):
     async def apply(self, bot, chat_id, user_id, **kwargs):
         if user_id == bot.id:
@@ -2666,6 +2643,7 @@ class BanPenalty(PenaltyStrategy):
             return True, "✅ تم الحظر"
         except Exception as e:
             return False, str(e)[:100]
+
 
 class MutePenalty(PenaltyStrategy):
     async def apply(self, bot, chat_id, user_id, **kwargs):
@@ -2689,6 +2667,7 @@ class MutePenalty(PenaltyStrategy):
         except Exception as e:
             return False, str(e)[:100]
 
+
 class KickPenalty(PenaltyStrategy):
     async def apply(self, bot, chat_id, user_id, **kwargs):
         if user_id == bot.id:
@@ -2700,6 +2679,7 @@ class KickPenalty(PenaltyStrategy):
         except Exception as e:
             return False, str(e)[:100]
 
+
 class WarnPenalty(PenaltyStrategy):
     async def apply(self, bot, chat_id, user_id, **kwargs):
         if user_id == bot.id:
@@ -2709,6 +2689,7 @@ class WarnPenalty(PenaltyStrategy):
             return True, f"⚠️ تحذير {w}"
         except Exception as e:
             return False, str(e)[:100]
+
 
 class RestrictPenalty(PenaltyStrategy):
     async def apply(self, bot, chat_id, user_id, **kwargs):
@@ -2732,6 +2713,7 @@ class RestrictPenalty(PenaltyStrategy):
         except Exception as e:
             return False, str(e)[:100]
 
+
 class UnbanPenalty(PenaltyStrategy):
     async def apply(self, bot, chat_id, user_id, **kwargs):
         try:
@@ -2739,6 +2721,7 @@ class UnbanPenalty(PenaltyStrategy):
             return True, "✅ تم إلغاء الحظر"
         except Exception as e:
             return False, str(e)[:100]
+
 
 class PenaltyFactory:
     _strategies: Dict[str, PenaltyStrategy] = {
@@ -2750,6 +2733,7 @@ class PenaltyFactory:
     @classmethod
     def get_strategy(cls, penalty_type: str) -> Optional[PenaltyStrategy]:
         return cls._strategies.get(penalty_type)
+
 
 _PENALTY_I18N: Dict[str, Dict[str, str]] = {
     "ar": {
@@ -2804,6 +2788,7 @@ _PENALTY_I18N: Dict[str, Dict[str, str]] = {
     },
 }
 
+
 def _penalty_t(lang: str, key: str, **kwargs) -> str:
     try:
         pack = _PENALTY_I18N.get(lang) or _PENALTY_I18N.get("ar") or {}
@@ -2819,6 +2804,7 @@ def _penalty_t(lang: str, key: str, **kwargs) -> str:
     except Exception:
         return key
 
+
 def _format_duration(seconds, lang: str = "ar") -> str:
     try:
         seconds = int(seconds or 0)
@@ -2833,6 +2819,7 @@ def _format_duration(seconds, lang: str = "ar") -> str:
     if seconds < 86400:
         return _penalty_t(lang, "duration_hours", n=seconds // 3600)
     return _penalty_t(lang, "duration_days", n=seconds // 86400)
+
 
 async def apply_penalty(bot, chat_id, user_id, penalty_type,
                         duration=0, reason="", *, moderator=None,
@@ -2922,6 +2909,7 @@ _usage_failure_counts: Dict[Tuple[int, str], int] = {}
 _usage_lock = asyncio.Lock()
 _flush_in_progress = False
 
+
 async def _increment_usage_async(chat_id: int, keyword: str):
     async with _usage_lock:
         key = (chat_id, keyword.lower())
@@ -2929,6 +2917,7 @@ async def _increment_usage_async(chat_id: int, keyword: str):
         should_flush = len(_usage_updates) >= _USAGE_FLUSH_LIMIT
     if should_flush:
         await _flush_usage_updates()
+
 
 async def _flush_usage_updates():
     global _flush_in_progress
@@ -2983,6 +2972,7 @@ async def _flush_usage_updates():
         async with _usage_lock:
             _flush_in_progress = False
 
+
 async def export_auto_replies(chat_id: int, file_path: str = None) -> int:
     rows = await DB.fetchall(
         "SELECT keyword, reply FROM auto_replies "
@@ -2998,6 +2988,7 @@ async def export_auto_replies(chat_id: int, file_path: str = None) -> int:
             json.dump(data, f, ensure_ascii=False, indent=2)
     await asyncio.to_thread(_write)
     return len(data)
+
 
 async def import_auto_replies(chat_id: int,
                               file_path_or_data: Union[str, List[Dict]],
@@ -3039,6 +3030,7 @@ async def import_auto_replies(chat_id: int,
     except Exception as e:
         logger.error("❌ Import error: %s", e)
         return 0
+
 
 async def fetch_json_from_url(url: str) -> Optional[Union[list, dict]]:
     try:
@@ -3095,6 +3087,7 @@ def load_replies_from_file() -> dict:
         logger.error("❌ خطأ في تحميل replies.py: %s", e)
         return {}
 
+
 _REPLIES_FROM_FILE = load_replies_from_file()
 
 if _REPLIES_FROM_FILE:
@@ -3105,6 +3098,7 @@ else:
     logger.info("ℹ️ لا توجد ردود محملة من ملف replies.py")
 
 _COMPILED_REPLIES_LIST: List[Tuple[str, re.Pattern]] = []
+
 
 def _build_compiled_replies_pattern() -> None:
     global _COMPILED_REPLIES_LIST
@@ -3123,7 +3117,9 @@ def _build_compiled_replies_pattern() -> None:
         result.append((k, compiled))
     _COMPILED_REPLIES_LIST = result
 
+
 _build_compiled_replies_pattern()
+
 
 def get_reply_from_file(keyword: str) -> Optional[str]:
     if not _REPLIES_FROM_FILE or not keyword:
@@ -3149,6 +3145,7 @@ def get_reply_from_file(keyword: str) -> Optional[str]:
                 return random.choice(replies)
     return None
 
+
 def reload_replies_from_file() -> dict:
     global _REPLIES_FROM_FILE
     _REPLIES_FROM_FILE = load_replies_from_file()
@@ -3169,7 +3166,6 @@ class BackgroundTasks:
     _BASE_TTL = 600
     _GROUP_ADMINS_CACHE_MAX_SIZE = 5000
 
-    # 🟡 v7.10.18 FIX-BUG3: 60 → 300 لتقليل استعلامات pg_stat_activity
     POOL_MONITOR_INTERVAL = 300
     POOL_ALERT_THRESHOLD = 85.0
     POOL_ALERT_COOLDOWN = 600
@@ -3231,10 +3227,7 @@ class BackgroundTasks:
 
     @staticmethod
     async def _read_pg_activity() -> Optional[Dict[str, int]]:
-        """
-        قراءة إحصاءات pg_stat_activity — v7.10.22.
-        🔴 FIX-SLOWQ-3: GROUP BY + cache (120s) + timeout (5s).
-        """
+        """🔴 FIX-SLOWQ-3: GROUP BY + cache (120s) + timeout (5s)."""
         global _pg_activity_cache
         now = time.monotonic()
         cached_data, cached_at = _pg_activity_cache
@@ -3466,7 +3459,7 @@ class BackgroundTasks:
 
     @staticmethod
     async def _publish_post(bot, channel_id: int, post: dict) -> bool:
-        """نشر منشور واحد."""
+        """نشر منشور واحد مع fallback بدون caption."""
         _SEND_KWARGS = {
             "read_timeout": 60.0, "write_timeout": 60.0,
             "connect_timeout": 30.0, "pool_timeout": 15.0,
@@ -3679,24 +3672,11 @@ class BackgroundTasks:
                 ch.get('id', 'غير معروفة'), e)
             return False
 
-    # ═══════════════════════════════════════════════════════════════════
-    # 🔴 v7.10.23 FIX-PD-1: auto_publish — Event-Triggered + 15s fallback
-    # ═══════════════════════════════════════════════════════════════════
     @staticmethod
     async def auto_publish(bot) -> None:
         """
-        ناشر تلقائي — v7.10.23.
-
-        🔴 FIX-PD-1 (CRITICAL):
-            قبل: `await asyncio.sleep(60)` بين كل دورة → تأخير حتى 60s.
-            بعد: `asyncio.wait_for(_publish_trigger.wait(), timeout=15)`
-                 → استيقاظ فوري عند إشارة trigger_auto_publish()،
-                 أو 15s كحد أقصى (fallback).
-
-        الاستخدام:
-            await DB.add_post(...)
-            from utils import trigger_auto_publish
-            trigger_auto_publish()  # ← النشر يبدأ خلال ~1-3s
+        ناشر تلقائي — v7.10.23 FIX-PD-1.
+        يستخدم event-triggered wait (15s timeout) بدل sleep(60).
         """
         await asyncio.sleep(10)
         max_channels = getattr(CONFIG, 'MAX_CHANNELS_PER_CYCLE', 20)
@@ -3717,7 +3697,6 @@ class BackgroundTasks:
                     channels = await asyncio.wait_for(
                         DB.get_channels_to_publish(max_channels), timeout=10)
                     if not channels:
-                        # 🔴 FIX-PD-1: انتظار إشارة أو 15s
                         try:
                             await asyncio.wait_for(
                                 _get_publish_trigger().wait(),
@@ -3779,7 +3758,6 @@ class BackgroundTasks:
                                 active[cid].result()
                             del active[cid]
 
-                    # 🔴 FIX-PD-1: انتظار إشارة أو 15s (بدل sleep(60))
                     try:
                         await asyncio.wait_for(
                             _get_publish_trigger().wait(),
@@ -4097,7 +4075,6 @@ class BackgroundTasks:
                 _security_settings_cache.clear()
                 _sec_settings_neg_cache.clear()
                 _bot_perms_cache.clear()
-                # 🆕 v7.10.22 FIX-SLOWQ-3: تفريغ كاش pg_stat_activity
                 global _pg_activity_cache
                 _pg_activity_cache = (None, 0.0)
                 now_mono = time.monotonic()
@@ -4167,6 +4144,7 @@ def _spawn_warmup_task(coro, label: str = "warmup"):
     task.add_done_callback(_cleanup)
     return task
 
+
 async def _bg_warmup_db_words() -> None:
     try:
         if hasattr(DB, 'get_banned_words'):
@@ -4177,6 +4155,7 @@ async def _bg_warmup_db_words() -> None:
                 len(db_words or []))
     except Exception as e:
         logger.debug("bg_warmup db_words: %s", e)
+
 
 async def warmup_all() -> Dict[str, Any]:
     result = {
@@ -4228,6 +4207,7 @@ _NON_RETRYABLE_WEBHOOK_ERRORS = frozenset({
     "attributeerror", "indexerror",
 })
 
+
 async def setup_webhook(app, port: int):
     global _telegram_app
     _telegram_app = app
@@ -4251,6 +4231,7 @@ async def setup_webhook(app, port: int):
         logger.debug("تعذّر إرفاق site: %s", _e)
     logger.info("✅ Webhook on port %d", port)
     return runner
+
 
 async def webhook_handler(request):
     expected_secret = getattr(CONFIG, 'WEBHOOK_SECRET', None)
@@ -4451,6 +4432,7 @@ _detector_imports: Optional[Dict[str, Any]] = None
 _detector_import_lock = threading.Lock()
 _detector_import_async_lock: Optional[asyncio.Lock] = None
 
+
 def _do_import_detectors() -> Dict[str, Any]:
     _mod = None
     for _path in (
@@ -4496,6 +4478,7 @@ def _do_import_detectors() -> Dict[str, Any]:
         _mod = {}
     return _mod
 
+
 def _lazy_import_detectors() -> Dict[str, Any]:
     global _detector_imports
     if _detector_imports is not None:
@@ -4505,6 +4488,7 @@ def _lazy_import_detectors() -> Dict[str, Any]:
             return _detector_imports
         _detector_imports = _do_import_detectors()
         return _detector_imports
+
 
 async def _lazy_import_detectors_async() -> Dict[str, Any]:
     global _detector_imports, _detector_import_async_lock
@@ -4518,9 +4502,6 @@ async def _lazy_import_detectors_async() -> Dict[str, Any]:
         _detector_imports = await asyncio.to_thread(_do_import_detectors)
         return _detector_imports
 
-# ═══════════════════════════════════════════════════════════════════════════
-# 🟠 v7.10.20 FIX-UB4: get_security_settings مع SELECT 1 pre-check
-# ═══════════════════════════════════════════════════════════════════════════
 
 async def get_security_settings(chat_id: int) -> Dict[str, Any]:
     """جلب إعدادات الأمان (schema-aligned, typed loop, dual cache)."""
@@ -4634,6 +4615,7 @@ async def get_security_settings(chat_id: int) -> Dict[str, Any]:
         _sec_settings_neg_cache.pop(chat_id, None)
     return dict(settings)
 
+
 def invalidate_security_settings_cache(chat_id: Optional[int] = None) -> None:
     if chat_id is None:
         _security_settings_cache.clear()
@@ -4641,6 +4623,7 @@ def invalidate_security_settings_cache(chat_id: Optional[int] = None) -> None:
     else:
         _security_settings_cache.pop(chat_id, None)
         _sec_settings_neg_cache.pop(chat_id, None)
+
 
 def _try_detector_call(fn, text: str, **extra_kwargs) -> Any:
     if fn is None or not text:
@@ -4661,6 +4644,7 @@ def _try_detector_call(fn, text: str, **extra_kwargs) -> Any:
     except Exception as e:
         logger.debug("detector call: %s", e)
         return False
+
 
 async def should_delete_by_security(message: Any, ctx: Any = None):
     try:
@@ -4750,6 +4734,7 @@ async def should_delete_by_security(message: Any, ctx: Any = None):
     except Exception as e:
         logger.error("should_delete_by_security: %s", e, exc_info=True)
         return False, None
+
 
 async def check_all_security(message: Any, bot: Any = None,
                               ctx: Any = None) -> Dict[str, Any]:
@@ -4867,7 +4852,6 @@ __all__ = [
     '_BACKUP_TIMEOUT_SECONDS',
     '_pg_activity_cache', '_PG_ACTIVITY_TTL',
     '_PG_ACTIVITY_QUERY_TIMEOUT',
-    # 🆕 v7.10.23 FIX-PD-1
     'trigger_auto_publish', 'get_publish_trigger_status',
     '_get_publish_trigger', '_publish_trigger',
     '_PUBLISH_SIGNAL_TIMEOUT_SECONDS',
@@ -4885,7 +4869,6 @@ try:
         "  • trigger_auto_publish() exported | "
         "  • fallback=%.0fs | "
         "FIX-SLOWQ-3: _read_pg_activity — GROUP BY + cache(%.0fs) | "
-        "FIX-SLOWQ-5: bot.py delegates here | "
         "FIX-U1: _send_media warning uses `is None` | "
         "FIX-U2: _do_backup error log enriched | "
         "FIX-UB1: _do_backup cleanup via asyncio.to_thread | "
