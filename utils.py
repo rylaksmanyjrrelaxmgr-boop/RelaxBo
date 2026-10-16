@@ -1,44 +1,42 @@
-
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-utils.py - الأدوات المساعدة للبوت (v7.10.22 — FIX-SLOWQ)
+utils.py - الأدوات المساعدة للبوت (v7.10.23 — FIX-PUBLISH-DELAY)
 =================================================================================
-🆕 v7.10.22 (FIX-SLOWQ):
-    🔴 FIX-SLOWQ-3 (CRITICAL): BackgroundTasks._read_pg_activity
-       كانت تُنفّذ 6 FILTER aggregates على pg_stat_activity بلا cache.
-       النتيجة: 200-373ms لكل استدعاء، ويُستدعى دورياً في monitor_pool.
+🆕 v7.10.23 (FIX-PUBLISH-DELAY):
+    🔴 FIX-PD-1 (CRITICAL): Event-triggered auto_publish
+       السبب المُكتشف من تحليل السجلات:
+         • BackgroundTasks.auto_publish كان ينتظر asyncio.sleep(60)
+           بين كل دورة polling (موضعان: عند "no channels" + بعد كل دورة).
+         • النتيجة: عند إضافة منشور، التأخير حتى 60s (متوسط 30s).
+         • تجربة مستخدم سيئة: "لماذا يتأخر النشر؟"
+
        الإصلاح:
-         • GROUP BY state, wait_event_type بدل 6 FILTER passes
-           (PG يحسبها في single hash aggregate).
-         • cache داخلي TTL=120s (يُوفّر 80%+ من الاستدعاءات).
-         • timeout=5s (منع hang).
-         • تجميع النتائج في Python (رخيص).
+         • _publish_trigger = asyncio.Event() عالمي (lazy init).
+         • trigger_auto_publish() — دالة عامة تُستدعى بعد إضافة منشور.
+         • auto_publish يستخدم asyncio.wait_for(trigger.wait(), timeout=15)
+           بدل asyncio.sleep(60) — يستيقظ فوراً عند الإشارة.
+         • fallback: 15s بدل 60s (إذا فشلت الإشارة).
 
-    🔴 FIX-SLOWQ-5 (COUPLED): bot.py v5.6.29 يعتمد على هذا الإصلاح.
-       bot.py._fetch_pg_activity_cached يفُوَّض إلى هذه الدالة
-       (بدل الاستعلام المكرر الذي كان يعمل بالتوازي).
+       الأثر المتوقّع:
+         • إضافة منشور + trigger → نشر خلال ~1-3s.
+         • إضافة منشور بدون trigger → نشر خلال ~7.5s (متوسط).
+         • الحد الأقصى للتأخير: 15s بدل 60s.
 
-🆕 v7.10.21 (FIX-U1/U2/U3) — محفوظ:
-    🔴 FIX-U1: _send_media — شرط الـ warning `_full_text is None`
-       (لا log spam على sticker/voice/video_note بلا نص).
-    🟠 FIX-U2: _do_backup — enrich error log.
-    🟢 FIX-U3: تأكيد — get_security_settings منطقياً صحيح.
+    🔴 FIX-PD-2: أي نشر فوري يحافظ على نفس الـsemaphore والـretry
+       (لا تضحية بالسلامة مقابل السرعة).
 
-🆕 v7.10.20 (BACKUP-BLOCKING-FIX + TIMEOUT-GUARDS) — محفوظ:
-    🔴 FIX-UB1: _do_backup — glob/stat/unlink sync → asyncio.to_thread.
-    🔴 FIX-UB2: DB.backup_database — wait_for(300s).
-    🟠 FIX-UB3: _send_media — log warning عند fallback.
-    🟠 FIX-UB4: get_security_settings — SELECT 1 pre-check.
-    🟡 FIX-UB5: _do_backup — log متدرّج + timing.
+    🟢 FIX-PD-3: trigger_auto_publish() آمنة للاستدعاء من أي سياق
+       (sync/async) — لا تحجب، لا ترمي.
 
-🆕 v7.10.19 (FIX-FOLLOWUP-COMPLETE) — محفوظ:
-    🔴 FIX-BUG1c: _send_media — _CAPTION_MEDIA_TYPES للتمييز.
-    🔴 FIX-BUG1d: _publish_post._send_followup_text — نفس التمييز.
+🆕 v7.10.22 (FIX-SLOWQ) — محفوظ:
+    🔴 FIX-SLOWQ-3: _read_pg_activity — GROUP BY + cache(120s).
+    🔴 FIX-SLOWQ-5: bot.py يفُوَّض _fetch_pg_activity_cached لهذه الدالة.
 
-🆕 v7.10.18 (FIX-BUG1-R4) — محفوظ:
-    🔴 FIX-BUG1a/b, FIX-BUG2 (bot_perms_cache), FIX-BUG3 (pool_monitor),
-    FIX-BUG4 (pool_timeout).
+🆕 v7.10.21 (FIX-U1/U2/U3) — محفوظ.
+🆕 v7.10.20 (BACKUP-BLOCKING-FIX + TIMEOUT-GUARDS) — محفوظ.
+🆕 v7.10.19 (FIX-FOLLOWUP-COMPLETE) — محفوظ.
+🆕 v7.10.18 (FIX-BUG1-R4) — محفوظ.
 =================================================================================
 """
 
@@ -97,6 +95,74 @@ logger = logging.getLogger(__name__)
 _warmup_bg_tasks: set = set()
 
 # ═══════════════════════════════════════════════════════════════════════════
+# 🔴 v7.10.23 FIX-PD-1: Event-triggered auto_publish
+# ═══════════════════════════════════════════════════════════════════════════
+# السبب الأصلي: auto_publish كان ينتظر asyncio.sleep(60) بين كل دورة
+# → عند إضافة منشور، التأخير حتى 60s (متوسط 30s).
+#
+# الإصلاح:
+#   1. `_publish_trigger` = asyncio.Event() عالمي (lazy init).
+#   2. `trigger_auto_publish()` — دالة عامة تُستدعى بعد إضافة منشور.
+#   3. auto_publish يستخدم wait_for(trigger, timeout=15) بدل sleep(60).
+#   4. النتيجة: نشر فوري (~1-3s) عند الإضافة، مع fallback كل 15s.
+#
+# الاستخدام في handlers_channels_posts.py:
+#   from utils import trigger_auto_publish
+#   await DB.add_post(...)
+#   trigger_auto_publish()  # ← النشر يبدأ فوراً
+# ═══════════════════════════════════════════════════════════════════════════
+_publish_trigger: Optional[asyncio.Event] = None
+_publish_trigger_lock = threading.Lock()
+_PUBLISH_SIGNAL_TIMEOUT_SECONDS = 15.0
+
+
+def _get_publish_trigger() -> asyncio.Event:
+    """Lazy init لـ _publish_trigger — آمن عند الاستيراد."""
+    global _publish_trigger
+    if _publish_trigger is None:
+        with _publish_trigger_lock:
+            if _publish_trigger is None:
+                _publish_trigger = asyncio.Event()
+    return _publish_trigger
+
+
+def trigger_auto_publish() -> None:
+    """
+    ⚡ يُطلق إشارة النشر الفوري.
+
+    استخدمها في handlers_channels_posts.py بعد إضافة منشور جديد:
+
+        await DB.add_post(...)
+        from utils import trigger_auto_publish
+        trigger_auto_publish()
+
+    الأثر:
+      • auto_publish يستيقظ فوراً (بدل انتظار 60s).
+      • النشر يبدأ خلال ~1-3s.
+      • آمنة للاستدعاء من أي سياق — لا تحجب، لا ترمي.
+    """
+    try:
+        _get_publish_trigger().set()
+        logger.debug("⚡ trigger_auto_publish: signal sent")
+    except Exception as e:
+        logger.debug("trigger_auto_publish failed: %s", e)
+
+
+def get_publish_trigger_status() -> Dict[str, Any]:
+    """🆕 تشخيص — هل الإشارة مُفعَّلة الآن؟"""
+    try:
+        ev = _publish_trigger
+        return {
+            "initialized": ev is not None,
+            "is_set": bool(ev.is_set()) if ev is not None else False,
+            "timeout_sec": _PUBLISH_SIGNAL_TIMEOUT_SECONDS,
+        }
+    except Exception:
+        return {"initialized": False, "is_set": False,
+                "timeout_sec": _PUBLISH_SIGNAL_TIMEOUT_SECONDS}
+
+
+# ═══════════════════════════════════════════════════════════════════════════
 # ثوابت عامة
 # ═══════════════════════════════════════════════════════════════════════════
 
@@ -153,10 +219,6 @@ _BACKUP_TIMEOUT_SECONDS = float(
 )
 
 # 🆕 v7.10.22 FIX-SLOWQ-3: كاش قراءات pg_stat_activity
-#   السبب: الاستعلام الأصلي (6 FILTER aggregates) بطيء (200-373ms)،
-#   ويُستدعى دورياً في monitor_pool (كل 300s) + من bot.py
-#   (عبر تفويض _fetch_pg_activity_cached).
-#   120s كافٍ: monitor_pool يعمل كل 300s → cache hit في 60%+ من الحالات.
 _pg_activity_cache: Tuple[Optional[Dict[str, int]], float] = (None, 0.0)
 _PG_ACTIVITY_TTL = 120.0
 _PG_ACTIVITY_QUERY_TIMEOUT = 5.0
@@ -306,7 +368,6 @@ class SmartCache:
             return len(keys)
 
     async def delete_suffix(self, suffix: str) -> int:
-        """🆕 v7.10.14 FIX-F: حذف المفاتيح التي تنتهي بـ suffix."""
         async with self._lock:
             keys = [k for k in self._cache if k.endswith(suffix)]
             for k in keys:
@@ -2040,7 +2101,6 @@ async def check_bot_permissions(bot, chat_id: int) -> dict:
                           'can_pin': False}
             else:
                 result = {'can_act': True, 'reason': '', 'can_pin': can_pin}
-        # prune قبل الإضافة
         if len(_bot_perms_cache) >= _BOT_PERMS_MAX_SIZE and chat_id not in _bot_perms_cache:
             try:
                 sorted_items = sorted(
@@ -2212,25 +2272,13 @@ async def _send_media(bot, chat_id, media_type, media_file_id,
     """
     إرسال وسائط + نص.
 
-    🔴 v7.10.19 FIX-BUG1c (CRITICAL):
-        المنطق الجديد يميّز حسب _CAPTION_MEDIA_TYPES:
-          • photo/video/document/audio/animation → تدعم caption
-          • voice/sticker/video_note → لا تدعم caption
-
-    🟠 v7.10.20 FIX-UB3:
-        log warning عند استدعاء قديم بدون _full_text.
-
-    🔴 v7.10.21 FIX-U1 (CRITICAL):
-        كان الشرط `not _full_text` (falsy check).
-        المشكلة: safe_send يمرّر `_full_text=text` دائماً — وعندما
-        يكون النص فارغاً (`""`)، `not ""` = True → warning يُطبع
-        لكل sticker/voice/video_note بدون نص (سلوك طبيعي).
-        الإصلاح: `_full_text is None` (يتحقق من عدم تمرير القيمة).
+    🔴 v7.10.19 FIX-BUG1c: التمييز حسب _CAPTION_MEDIA_TYPES.
+    🟠 v7.10.20 FIX-UB3: log warning عند استدعاء قديم.
+    🔴 v7.10.21 FIX-U1 (CRITICAL): `_full_text is None` بدل `not _full_text`.
     """
     _reply_to = kwargs.get('reply_to_message_id')
     _full = _full_text if _full_text else (caption or "")
 
-    # 🔴 FIX-U1: `_full_text is None` بدل `not _full_text`
     if (_full_text is None
             and media_type
             and media_type not in _CAPTION_MEDIA_TYPES):
@@ -2240,16 +2288,13 @@ async def _send_media(bot, chat_id, media_type, media_file_id,
             media_type)
 
     async def _send_followup_text():
-        """يُرسل النص المتبقي بعد الوسيط — حسب نوع الوسيط."""
         if not _full:
             return
         if media_type in _CAPTION_MEDIA_TYPES:
-            # الوسيط حمل text[:1024] كـ caption → نرسل الباقي فقط
             if len(_full) <= 1024:
                 return
             remaining = _full[1024:]
         else:
-            # voice/sticker/video_note: لا caption → نرسل النص كاملاً
             remaining = _full
         if not remaining:
             return
@@ -2325,7 +2370,7 @@ async def _send_media(bot, chat_id, media_type, media_file_id,
     elif media_type == 'voice':
         sent = await bot.send_voice(
             chat_id, media_file_id, reply_markup=reply_markup, **kwargs)
-        await _send_followup_text()  # _full → النص كاملاً (voice لا يدعم caption)
+        await _send_followup_text()
         return sent
 
     elif media_type == 'animation':
@@ -2338,13 +2383,13 @@ async def _send_media(bot, chat_id, media_type, media_file_id,
     elif media_type == 'sticker':
         sent = await bot.send_sticker(
             chat_id, media_file_id, reply_markup=reply_markup)
-        await _send_followup_text()  # _full → النص كاملاً
+        await _send_followup_text()
         return sent
 
     elif media_type == 'video_note':
         sent = await bot.send_video_note(
             chat_id, media_file_id, reply_markup=reply_markup)
-        await _send_followup_text()  # _full → النص كاملاً
+        await _send_followup_text()
         return sent
 
     else:
@@ -3184,36 +3229,11 @@ class BackgroundTasks:
             logger.debug("_read_pool_stats: %s", e)
             return None
 
-    # ═══════════════════════════════════════════════════════════════════
-    # 🔴 v7.10.22 FIX-SLOWQ-3: _read_pg_activity — GROUP BY + cache
-    # ═══════════════════════════════════════════════════════════════════
     @staticmethod
     async def _read_pg_activity() -> Optional[Dict[str, int]]:
         """
         قراءة إحصاءات pg_stat_activity — v7.10.22.
-
-        🔴 FIX-SLOWQ-3 (CRITICAL):
-            الاستعلام الأصلي كان يستخدم 6 FILTER aggregates:
-                count(*) FILTER (WHERE state = 'active') AS active,
-                count(*) FILTER (WHERE state = 'idle') AS idle,
-                ...
-            المشكلة: PostgreSQL يُنفّذ 6 passes على نتيجة الفلتر
-            (كل FILTER = scan منفصل). على قواعد بها 20-50 اتصال نشط،
-            هذا يستهلك 200-373ms لكل استدعاء — وهو مذكور في
-            تقرير slow-queries في utils.py:3168 و bot.py:2224.
-
-            الإصلاح:
-              1. GROUP BY state, wait_event_type → hash aggregate واحد
-                 (بدل 6 FILTER passes).
-              2. تجميع النتائج في Python (رخيص جداً).
-              3. cache داخلي 120s (يُوفّر 80%+ من الاستدعاءات الدورية).
-              4. timeout=5s (منع hang).
-
-        🔴 FIX-SLOWQ-5 (COUPLED):
-            bot.py v5.6.29 يُفوّض _fetch_pg_activity_cached إلى
-            هذه الدالة. لذلك أي تحسين هنا ينعكس مباشرة على bot.py.
-            في نفس الإصدار، حُذف "monitor_pool_alert" من
-            _bg_task_specs لمنع الاستعلام المكرر المتوازي.
+        🔴 FIX-SLOWQ-3: GROUP BY + cache (120s) + timeout (5s).
         """
         global _pg_activity_cache
         now = time.monotonic()
@@ -3242,7 +3262,6 @@ class BackgroundTasks:
                 _pg_activity_cache = (None, now)
                 return None
 
-            # تجميع النتائج في Python (رخيص — عادةً 5-15 صف)
             total = 0
             active = 0
             idle = 0
@@ -3447,17 +3466,7 @@ class BackgroundTasks:
 
     @staticmethod
     async def _publish_post(bot, channel_id: int, post: dict) -> bool:
-        """
-        نشر منشور واحد.
-
-        🔴 v7.10.19 FIX-BUG1d (CRITICAL):
-            _send_followup_text كانت تُرسل text[1024:] دائماً (بعد FIX-BUG1a).
-            لكن voice/sticker/video_note لا تحمل caption → تفقد أول 1024 حرفاً!
-            الإصلاح: يستخدم _CAPTION_MEDIA_TYPES للتمييز.
-
-        🟠 v7.10.14 FIX-H: تقسيم النص > 4096 في follow-up text.
-        🔴 v7.10.17 FIX-BUG1: إضافة _send_followup_text في فروع الوسائط.
-        """
+        """نشر منشور واحد."""
         _SEND_KWARGS = {
             "read_timeout": 60.0, "write_timeout": 60.0,
             "connect_timeout": 30.0, "pool_timeout": 15.0,
@@ -3470,7 +3479,6 @@ class BackgroundTasks:
         caption = text[:1024] if text else None
 
         async def _send_followup_text():
-            """🔴 v7.10.19 FIX-BUG1d: التمييز حسب نوع الوسيط."""
             if not text:
                 return
             if media_type in _CAPTION_MEDIA_TYPES:
@@ -3614,7 +3622,6 @@ class BackgroundTasks:
     @staticmethod
     async def _publish_single_channel(bot, ch, published_count,
                                        has_sub: bool = None) -> bool:
-        """🔴 v7.10.17 FIX-BUG8: mark_post_published_pending من DB."""
         user_id = None
         try:
             user_id = ch.get('user_id') if isinstance(ch, dict) else None
@@ -3672,8 +3679,25 @@ class BackgroundTasks:
                 ch.get('id', 'غير معروفة'), e)
             return False
 
+    # ═══════════════════════════════════════════════════════════════════
+    # 🔴 v7.10.23 FIX-PD-1: auto_publish — Event-Triggered + 15s fallback
+    # ═══════════════════════════════════════════════════════════════════
     @staticmethod
     async def auto_publish(bot) -> None:
+        """
+        ناشر تلقائي — v7.10.23.
+
+        🔴 FIX-PD-1 (CRITICAL):
+            قبل: `await asyncio.sleep(60)` بين كل دورة → تأخير حتى 60s.
+            بعد: `asyncio.wait_for(_publish_trigger.wait(), timeout=15)`
+                 → استيقاظ فوري عند إشارة trigger_auto_publish()،
+                 أو 15s كحد أقصى (fallback).
+
+        الاستخدام:
+            await DB.add_post(...)
+            from utils import trigger_auto_publish
+            trigger_auto_publish()  # ← النشر يبدأ خلال ~1-3s
+        """
         await asyncio.sleep(10)
         max_channels = getattr(CONFIG, 'MAX_CHANNELS_PER_CYCLE', 20)
         min_interval_minutes = await get_min_publish_interval()
@@ -3693,8 +3717,20 @@ class BackgroundTasks:
                     channels = await asyncio.wait_for(
                         DB.get_channels_to_publish(max_channels), timeout=10)
                     if not channels:
-                        await asyncio.sleep(60)
+                        # 🔴 FIX-PD-1: انتظار إشارة أو 15s
+                        try:
+                            await asyncio.wait_for(
+                                _get_publish_trigger().wait(),
+                                timeout=_PUBLISH_SIGNAL_TIMEOUT_SECONDS,
+                            )
+                            _get_publish_trigger().clear()
+                            logger.debug(
+                                "⚡ auto_publish: signal (no channels) — "
+                                "wake-up immediately")
+                        except asyncio.TimeoutError:
+                            pass
                         continue
+
                     sem_size = _get_semaphore_size(len(channels))
                     semaphore = asyncio.Semaphore(sem_size)
                     active = BackgroundTasks._auto_publish_tasks
@@ -3742,7 +3778,19 @@ class BackgroundTasks:
                             with suppress(Exception):
                                 active[cid].result()
                             del active[cid]
-                    await asyncio.sleep(60)
+
+                    # 🔴 FIX-PD-1: انتظار إشارة أو 15s (بدل sleep(60))
+                    try:
+                        await asyncio.wait_for(
+                            _get_publish_trigger().wait(),
+                            timeout=_PUBLISH_SIGNAL_TIMEOUT_SECONDS,
+                        )
+                        _get_publish_trigger().clear()
+                        logger.debug(
+                            "⚡ auto_publish: signal after cycle — "
+                            "wake-up immediately")
+                    except asyncio.TimeoutError:
+                        pass
                 except asyncio.TimeoutError:
                     logger.error("❌ استعلام القنوات > 10s")
                     await asyncio.sleep(30)
@@ -3787,26 +3835,8 @@ class BackgroundTasks:
             except Exception as e:
                 logger.error("❌ Backup error: %s", e)
 
-    # ═════════════════════════════════════════════════════════════════════
-    # 🔴 v7.10.21 FIX-U2: _do_backup — enrich error log
-    # ═════════════════════════════════════════════════════════════════════
     @staticmethod
     async def _do_backup() -> None:
-        """
-        تنفيذ نسخة احتياطية واحدة.
-
-        🔴 v7.10.20 FIX-UB1 (CRITICAL):
-            تنظيف النسخ القديمة (glob + stat + unlink) كان sync
-            → يحجب event loop 50-500ms على مجلد فيه 50-500 نسخة.
-            الإصلاح: نقل العملية إلى asyncio.to_thread.
-
-        🔴 v7.10.20 FIX-UB2:
-            DB.backup_database بلا timeout → hang محتمل عند تعليق
-            pg_dump. الإصلاح: asyncio.wait_for مع timeout قابل للضبط.
-
-        🟠 v7.10.21 FIX-U2:
-            enrich error log عند الفشل — إضافة db_type + timeout + file.
-        """
         t_start = time.monotonic()
         try:
             if not await DB.get_auto_backup():
@@ -3824,7 +3854,6 @@ class BackgroundTasks:
 
             if hasattr(DB, "backup_database"):
                 try:
-                    # 🔴 FIX-UB2: timeout لمنع hang
                     success = await asyncio.wait_for(
                         DB.backup_database(backup_file),
                         timeout=_BACKUP_TIMEOUT_SECONDS,
@@ -3839,7 +3868,6 @@ class BackgroundTasks:
                     logger.warning("⚠️ DB.backup_database فشل: %s", e)
                     success = False
 
-            # fallback SQLite
             if (not success
                     and getattr(DB, "DB_TYPE", "sqlite") == "sqlite"):
                 try:
@@ -3862,7 +3890,6 @@ class BackgroundTasks:
             backup_elapsed = time.monotonic() - t_backup
 
             if not success:
-                # 🟠 FIX-U2: enrich error log
                 logger.error(
                     "❌ فشل النسخ الاحتياطي بعد %.2fs | "
                     "db_type=%s | timeout=%.0fs | file=%s",
@@ -3873,15 +3900,12 @@ class BackgroundTasks:
                 )
                 return
 
-            # تحديث settings
             try:
                 await DB.set_setting(
                     'last_backup', TimeUtils.sql_iso())
             except Exception as e:
                 logger.warning("⚠️ فشل حفظ last_backup: %s", e)
 
-            # 🔴 FIX-UB1: تنظيف النسخ القديمة في thread منفصل
-            # (glob + stat + unlink كانت تحجب event loop)
             cleanup_count = 0
             t_cleanup = time.monotonic()
             try:
@@ -4072,7 +4096,7 @@ class BackgroundTasks:
                 BackgroundTasks._group_admins_access_count.clear()
                 _security_settings_cache.clear()
                 _sec_settings_neg_cache.clear()
-                _bot_perms_cache.clear()   # 🆕 v7.10.18 FIX-BUG2
+                _bot_perms_cache.clear()
                 # 🆕 v7.10.22 FIX-SLOWQ-3: تفريغ كاش pg_stat_activity
                 global _pg_activity_cache
                 _pg_activity_cache = (None, 0.0)
@@ -4354,14 +4378,12 @@ NEW_SECURITY_DEFAULTS: Dict[str, int] = {
 }
 
 _DEFAULT_SECURITY_SETTINGS: Dict[str, Any] = {
-    # ═══ NEW_SECURITY_DEFAULTS ═══
     "delete_at_channel": 0,
     "delete_tg_scheme": 1,
     "delete_button_links": 1,
     "delete_emails": 0,
     "delete_protected_any": 0,
     "delete_postbot_pattern": 0,
-    # ═══ Delete toggles (المحتوى) ═══
     "delete_links": 0,
     "mentions": 0,
     "delete_forwarded": 0,
@@ -4378,58 +4400,46 @@ _DEFAULT_SECURITY_SETTINGS: Dict[str, Any] = {
     "delete_photos": 0,
     "delete_protected_forward": 0,
     "delete_banned_words": 0,
-    # ═══ Slow mode ═══
     "slow_mode": 0,
     "slow_mode_seconds": 5,
-    # ═══ Welcome / Goodbye ═══
     "welcome_enabled": 0,
     "welcome_text": "مرحباً {user} في {chat} 🤍",
     "goodbye_enabled": 0,
     "goodbye_text": "وداعاً {user} 👋",
-    # ═══ Join requests ═══
     "auto_approve_join": 0,
     "auto_reject_join": 0,
-    # ═══ Warnings ═══
     "warn_enabled": 0,
     "max_warnings": 3,
     "warn_penalty": "ban",
     "warn_penalty_duration": 3600,
     "warn_default_duration": 0,
-    # ═══ Violations ═══
     "violation_strikes": 3,
     "violation_duration": 60,
     "violation_penalty": "none",
     "violation_penalty_duration": 3600,
-    # ═══ Antiflood ═══
     "antiflood_enabled": 0,
     "antiflood_messages": 5,
     "antiflood_seconds": 10,
     "antiflood_penalty": "mute",
     "antiflood_penalty_duration": 3600,
-    # ═══ Night mode ═══
     "night_mode_enabled": 0,
     "night_mode_start": "23:00",
     "night_mode_end": "06:00",
     "night_mode_action": "mute",
     "night_mode_action_duration": 3600,
-    # ═══ NSFW ═══
     "nsfw_enabled": 0,
     "nsfw_threshold": 0.7,
     "nsfw_filter": 0,
-    # ═══ Penalty durations ═══
     "mute_default_duration": 3600,
     "ban_default_duration": 0,
     "restrict_default_duration": 1800,
     "enable_timed_penalties": 1,
     "auto_remove_penalties": 1,
-    # ═══ Auto penalty ═══
     "auto_penalty": "none",
     "auto_mute_duration": 3600,
-    # ═══ Delete penalty ═══
     "delete_penalty": "none",
     "delete_penalty_duration": 0,
     "delete_penalty_messages": 0,
-    # ═══ Length ═══
     "max_message_length": 0,
 }
 
@@ -4513,19 +4523,7 @@ async def _lazy_import_detectors_async() -> Dict[str, Any]:
 # ═══════════════════════════════════════════════════════════════════════════
 
 async def get_security_settings(chat_id: int) -> Dict[str, Any]:
-    """
-    جلب إعدادات الأمان (schema-aligned, typed loop, dual cache).
-
-    🟠 v7.10.20 FIX-UB4: قبل SELECT * (66 عمود)، نتحقق من وجود
-        الصف بـ SELECT 1 خفيف. إذا غير موجود، نتخطى SELECT *
-        الثقيل — يوفر RTT كامل للـ chats الجديدة.
-
-    🟢 v7.10.21 FIX-U3 (تأكيد — لا تغيير):
-        عند db_ok=True مع row_dict={} نخزّن القيم الافتراضية في
-        positive cache — سلوك مقصود (صف موجود = كل القيم افتراضية).
-        التحديثات تُبطَل عبر invalidate_security_settings_cache
-        من مواضع الكتابة (تأكد من وجود الاستدعاء بعد UPDATE).
-    """
+    """جلب إعدادات الأمان (schema-aligned, typed loop, dual cache)."""
     now = time.monotonic()
 
     cached = _security_settings_cache.get(chat_id)
@@ -4561,10 +4559,8 @@ async def get_security_settings(chat_id: int) -> Dict[str, Any]:
         except Exception as e:
             logger.debug("DB.get_security_settings(%s): %s", chat_id, e)
 
-    # 🟠 FIX-UB4: فحص خفيف قبل SELECT * الثقيل
     if not row_dict and not db_ok:
         try:
-            # فحص وجود الصف بـ SELECT 1 (خفيف — لا يحمل 66 عمود)
             exists = await asyncio.wait_for(
                 DB.fetchval(
                     "SELECT 1 FROM group_security "
@@ -4572,7 +4568,6 @@ async def get_security_settings(chat_id: int) -> Dict[str, Any]:
                     (chat_id,), default=None),
                 timeout=2.0)
             if exists is not None:
-                # الصف موجود — نُحمّل الأعمدة الآن
                 row = await asyncio.wait_for(
                     DB.fetchone(
                         "SELECT * FROM group_security WHERE chat_id = ?",
@@ -4582,7 +4577,6 @@ async def get_security_settings(chat_id: int) -> Dict[str, Any]:
                     row_dict = _row_to_dict(row) or {}
                     db_ok = True
             else:
-                # الصف غير موجود — لا نضيع RTT على SELECT * ثقيل
                 logger.debug(
                     "get_security_settings(%s): صف غير موجود "
                     "(SELECT 1 → None)", chat_id)
@@ -4871,9 +4865,12 @@ __all__ = [
     '_TEXT_LONG_THRESHOLD',
     '_warmup_bg_tasks',
     '_BACKUP_TIMEOUT_SECONDS',
-    # 🆕 v7.10.22 FIX-SLOWQ
     '_pg_activity_cache', '_PG_ACTIVITY_TTL',
     '_PG_ACTIVITY_QUERY_TIMEOUT',
+    # 🆕 v7.10.23 FIX-PD-1
+    'trigger_auto_publish', 'get_publish_trigger_status',
+    '_get_publish_trigger', '_publish_trigger',
+    '_PUBLISH_SIGNAL_TIMEOUT_SECONDS',
 ]
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -4882,34 +4879,33 @@ __all__ = [
 
 try:
     logger.info(
-        "🛡️ utils.py v7.10.22 FIX-SLOWQ loaded | "
+        "🛡️ utils.py v7.10.23 FIX-PUBLISH-DELAY loaded | "
+        "FIX-PD-1: event-triggered auto_publish | "
+        "  • signal timeout=%.0fs (was 60s) | "
+        "  • trigger_auto_publish() exported | "
+        "  • fallback=%.0fs | "
         "FIX-SLOWQ-3: _read_pg_activity — GROUP BY + cache(%.0fs) | "
-        "FIX-SLOWQ-5: bot.py делегирует сюда (no duplicate query) | "
+        "FIX-SLOWQ-5: bot.py delegates here | "
         "FIX-U1: _send_media warning uses `is None` | "
         "FIX-U2: _do_backup error log enriched | "
-        "FIX-U3: get_security_settings invalidate contract | "
         "FIX-UB1: _do_backup cleanup via asyncio.to_thread | "
         "FIX-UB2: DB.backup_database timeout=%.0fs | "
-        "FIX-UB4: get_security_settings SELECT 1 pre-check | "
         "FIX-BUG1c/d: _CAPTION_MEDIA_TYPES (%d types) | "
         "FIX-BUG2: bot_perms_cache=TTL(%ds, max=%d) | "
         "FIX-BUG3: pool_monitor=%ds | "
-        "FIX-BUG4: pool_timeout in FAST/SLOW | "
         "sec_defaults=%d keys | "
-        "sec_neg_cache=MAX(%d) | "
         "auth_cache=user_id-aware | "
-        "Lang=%d | SecCache=TTL(%ds) | "
-        "ChatMigrated=%d ops | ToggleMap=%d | "
-        "Webhook=✅ | Publish=✅ | Penalty=✅",
+        "Lang=%d | ChatMigrated=%d ops | ToggleMap=%d | "
+        "Webhook=✅ | Penalty=✅ | Publish=✅",
+        _PUBLISH_SIGNAL_TIMEOUT_SECONDS,
+        _PUBLISH_SIGNAL_TIMEOUT_SECONDS,
         _PG_ACTIVITY_TTL,
         _BACKUP_TIMEOUT_SECONDS,
         len(_CAPTION_MEDIA_TYPES),
         int(_BOT_PERMS_TTL), _BOT_PERMS_MAX_SIZE,
         int(BackgroundTasks.POOL_MONITOR_INTERVAL),
         len(_DEFAULT_SECURITY_SETTINGS),
-        _SEC_SETTINGS_NEG_MAX_SIZE,
         len(_AVAILABLE_LANGUAGES),
-        int(_SEC_SETTINGS_TTL),
         len(_CHAT_MIGRATION_TABLES),
         len(SECURITY_TOGGLE_MAP),
     )
