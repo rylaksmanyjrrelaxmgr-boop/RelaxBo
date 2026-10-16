@@ -1,26 +1,37 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-🌿 Relax Manager – البوت الرئيسي (bot.py v5.6.32-DATABASES-FIX)
+🌿 Relax Manager – البوت الرئيسي (bot.py v5.6.34-CLEANUP-HARDENING)
 ================================================================================
 📌 نقطة الدخول الرسمية للتطبيق (entrypoint).
 
-🆕 v5.6.32 (DATABASES-FIX):
-    🟢 FIX-DATABASES: كان bot.py يستورد 4 دوال من handlers_analytics
-        (show_analytics_menu, handle_analytics_callback, cmd_fullhealth,
-        cmd_latency) ويسجّلها يدوياً، لكنه لا يستدعي register_handlers().
-        النتيجة: /databases, /versions, /analytics_reset, /analytics
-        + زر databases_btn كانت معطّلة تماماً رغم وجودها في
-        handlers_analytics v1.3.1.
+🆕 v5.6.34 (CLEANUP-HARDENING):
+    🟢 FIX-APP-STOP (cleanup-order):
+        كان الإغلاق يستدعي app.shutdown() مباشرةً دون app.stop().
+        PTB v20+ يوصي صراحةً بـ stop() قبل shutdown() لإغلاق
+        جلسة Bot وHTTPXRequest pool بانتظام. غياب stop() كان يُنتج
+        أحياناً "Unclosed connector" على Render ويترك pool=32
+        بلا تنظيف صريح.
 
-        الإصلاح:
-        - [ORDER 5/6] يستدعي register_handlers(app) إن توفّرت.
-        - fallback يدوي محسّن: يُسجّل databases_btn ضمن الـpattern.
-        - في حال فشل register_handlers → التسجيل اليدوي يعمل كالمعتاد.
+        الإصلاح: استدعاء app.stop() (شرطياً — إن كان app.running)
+        قبل app.shutdown() داخل كتلة finally.
 
-    🟢 FIX-REGEX: أُضيف databases_btn إلى pattern التسجيل اليدوي —
-        كي لا يفقد الزر حتى لو توفّر fallback.
+    🟢 FIX-CHATTYPE-DEPRECATION:
+        filters.ChatType.GROUPS مُهمَل منذ PTB v20.7 وسيُزال.
+        استُبدل بـ (filters.ChatType.GROUP | filters.ChatType.SUPERGROUP)
+        في المواضع الثلاثة (message, edited_message, status_update).
 
+    🟢 FIX-SUCCESSFUL-PAYMENT-OVERLAP:
+        MessageHandler(filters.SUCCESSFUL_PAYMENT, ...) وMessageHandler
+        (… PRIVATE & ~COMMAND, handle_private) في نفس الـgroup=0.
+        لو وصلت رسالة Telegram تحتوي successful_payment + نص،
+        يُشغَّل الاثنان → احتمال معالجة مزدوجة لرسالة الإيصال.
+
+        الإصلاح: إضافة ~filters.SUCCESSFUL_PAYMENT إلى فلتر
+        handle_private.
+
+🆕 v5.6.33 (PAYMENT-ORDER-FIX + POST-INIT-WEBHOOK + DB-CLOSE + SIGNAL-EARLY) — محفوظ.
+🆕 v5.6.32 (DATABASES-FIX) — محفوظ.
 🆕 v5.6.31 (WARMUP-DETECTORS) — محفوظ.
 🆕 v5.6.30 (DB-DIAG-MARK) — محفوظ.
 🆕 v5.6.29 (PERF-TELEGRAM-POOL-FIX) — محفوظ.
@@ -754,6 +765,13 @@ _pm_slow_query_warned = False
 
 # 🆕 v5.6.31 WARMUP-2: تتبّع مهمة تسخين detectors
 _WARMUP_DETECTORS_TASK: Optional[asyncio.Task] = None
+
+# ═══════════════════════════════════════════════════════════════════
+# 🆕 v5.6.34 FIX-CHATTYPE-DEPRECATION:
+# filters.ChatType.GROUPS مُهمَل منذ PTB v20.7. نستخدم الصيغة
+# الحديثة (GROUP | SUPERGROUP) في كل الفلاتر.
+# ═══════════════════════════════════════════════════════════════════
+_GROUP_CHAT_FILTER = filters.ChatType.GROUP | filters.ChatType.SUPERGROUP
 
 # ═══════════════════════════════════════════════════════════════════
 # مساعد مقارنة المبالغ
@@ -1590,6 +1608,45 @@ async def _shutdown_detector_tasks(timeout: float = 3.0) -> None:
         logger.debug("_shutdown_detector_tasks (direct): %s", _e)
 
 # ═══════════════════════════════════════════════════════════════════
+# 🆕 v5.6.33 FIX-DB-CLOSE: إغلاق صريح لـ DB pool
+# ═══════════════════════════════════════════════════════════════════
+
+async def _shutdown_db_pool(timeout: float = 5.0) -> None:
+    """
+    🆕 v5.6.33 FIX-DB-CLOSE (BUG-3):
+    إغلاق صريح لـ DB pool لتحرير اتصالات PostgreSQL فوراً بدل
+    انتظار max_inactive_lifetime (300s).
+
+    يحاول بالترتيب:
+      1) DB.close_pool() — إن وُجدت (async أو sync)
+      2) DB.close()      — fallback
+    """
+    if not hasattr(DB, "close_pool") and not hasattr(DB, "close"):
+        logger.debug("ℹ️ DB: لا يوجد close_pool/close — تخطي")
+        return
+
+    _fn_name = "close_pool" if hasattr(DB, "close_pool") else "close"
+    _fn = getattr(DB, _fn_name, None)
+    if not callable(_fn):
+        logger.debug("ℹ️ DB.%s غير قابل للاستدعاء — تخطي", _fn_name)
+        return
+
+    try:
+        result = _fn()
+        if asyncio.iscoroutine(result):
+            await asyncio.wait_for(result, timeout=timeout)
+        logger.info("✅ DB.%s() — تم إغلاق pool نظيفاً", _fn_name)
+    except asyncio.TimeoutError:
+        logger.warning(
+            "⚠️ DB.%s() — انتهت المهلة (%.1fs) — استمرار الإغلاق",
+            _fn_name, timeout,
+        )
+    except asyncio.CancelledError:
+        raise
+    except Exception as _e:
+        logger.debug("DB.%s(): %s", _fn_name, _e)
+
+# ═══════════════════════════════════════════════════════════════════
 # Admin IDs collection
 # ═══════════════════════════════════════════════════════════════════
 
@@ -2172,6 +2229,13 @@ async def pre_checkout(update, context):
         logger.error("❌ Failed to answer pre-checkout success: %s", e)
 
 async def successful_payment(update, context):
+    """
+    🆕 v5.6.33 FIX-PAYMENT-ORDER (BUG-1):
+    بعد نجاح العملية الأساسية (activate_subscription_with_payment /
+    create_gift_code)، نُبلغ المستخدم فوراً. العمليات الثانوية
+    (payment_log, invalidate_cache, notify_dev_log) معزولة في
+    try/except مستقلة — أعطالها لا تُربك المستخدم.
+    """
     user_id = update.effective_user.id
     payment = update.message.successful_payment
     payload = payment.invoice_payload
@@ -2218,6 +2282,9 @@ async def successful_payment(update, context):
 
     plan_name = plan.get('name', 'الخطة')
 
+    # ═══════════════════════════════════════════════════════════════
+    # مسار 1: اشتراك
+    # ═══════════════════════════════════════════════════════════════
     if payment_type == 'subscription':
         try:
             success = await DB.activate_subscription_with_payment(
@@ -2226,107 +2293,160 @@ async def successful_payment(update, context):
                 payment_id=payment_id,
                 plan_id=plan['id']
             )
-            if success:
-                await DB.add_payment_log(
-                    user_id, 'xtr', 'subscription_paid',
-                    {'invoice': invoice['number'], 'plan_id': plan['id']}
-                )
-                await safe_send(
-                    context.bot, user_id,
-                    f"✅ تم تفعيل اشتراك {plan_name} بنجاح!"
-                )
-                logger.info("✅ Subscription activated: user=%s", user_id)
-                await invalidate_user_cache(user_id)
-
-                try:
-                    _uname = update.effective_user.username or ""
-                    _fname = update.effective_user.first_name or ""
-                    _username_display = (
-                        f"@{_uname}" if _uname else "❌ لا يوجد"
-                    )
-                    _plan_display = _html_escape(str(plan_name or '—'))
-                    _price_display = int(total_amount or 0)
-
-                    _spawn_notify_dev_log(
-                        context,
-                        f"💎 <b>اشتراك مدفوع جديد</b>\n"
-                        f"━━━━━━━━━━━━━━━━━━━━\n"
-                        f"👤 <b>الاسم:</b> "
-                        f"{_html_escape(str(_fname or '—'))}\n"
-                        f"🔗 <b>المعرف:</b> "
-                        f"{_html_escape(_username_display)}\n"
-                        f"🆔 <b>الرقم التعريفي:</b> "
-                        f"<code>{user_id}</code>\n"
-                        f"━━━━━━━━━━━━━━━━━━━━\n"
-                        f"💎 <b>الباقة:</b> {_plan_display}\n"
-                        f"💰 <b>المبلغ:</b> {_price_display} ⭐\n"
-                        f"📅 <b>الوقت:</b> {TimeUtils.mecca_iso()}",
-                    )
-                except Exception as _e:
-                    logger.debug("spawn notify dev log: %s", _e)
-            else:
-                await safe_send(
-                    context.bot, user_id, "❌ حدث خطأ في معالجة الدفع."
-                )
-                logger.error(
-                    "❌ Failed to activate subscription for user %s", user_id
-                )
         except Exception as e:
-            logger.exception("❌ Exception in subscription payment: %s", e)
-            await safe_send(context.bot, user_id, "❌ حدث خطأ غير متوقع.")
+            logger.exception(
+                "❌ Exception in subscription activation: %s", e
+            )
+            await safe_send(
+                context.bot, user_id, "❌ حدث خطأ غير متوقع."
+            )
+            return
 
+        if not success:
+            await safe_send(
+                context.bot, user_id, "❌ حدث خطأ في معالجة الدفع."
+            )
+            logger.error(
+                "❌ Failed to activate subscription for user %s", user_id
+            )
+            return
+
+        # ✅ نجح التفعيل — نُبلغ المستخدم فوراً (أولوية قصوى)
+        logger.info(
+            "✅ Subscription activated: user=%s invoice=%s plan=%s",
+            user_id, invoice['number'], plan['id'],
+        )
+        try:
+            await safe_send(
+                context.bot, user_id,
+                f"✅ تم تفعيل اشتراك {plan_name} بنجاح!"
+            )
+        except Exception as _e:
+            logger.warning(
+                "⚠️ safe_send (subscription success) فشل: %s", _e
+            )
+
+        # العمليات الثانوية — كل واحدة معزولة
+        try:
+            await DB.add_payment_log(
+                user_id, 'xtr', 'subscription_paid',
+                {'invoice': invoice['number'], 'plan_id': plan['id']}
+            )
+        except Exception as _e:
+            logger.error(
+                "⚠️ add_payment_log فشل (لكن الاشتراك مُفعَّل): %s", _e
+            )
+
+        try:
+            await invalidate_user_cache(user_id)
+        except Exception as _e:
+            logger.warning("invalidate_user_cache: %s", _e)
+
+        try:
+            _uname = update.effective_user.username or ""
+            _fname = update.effective_user.first_name or ""
+            _username_display = (
+                f"@{_uname}" if _uname else "❌ لا يوجد"
+            )
+            _plan_display = _html_escape(str(plan_name or '—'))
+            _price_display = int(total_amount or 0)
+
+            _spawn_notify_dev_log(
+                context,
+                f"💎 <b>اشتراك مدفوع جديد</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━\n"
+                f"👤 <b>الاسم:</b> "
+                f"{_html_escape(str(_fname or '—'))}\n"
+                f"🔗 <b>المعرف:</b> "
+                f"{_html_escape(_username_display)}\n"
+                f"🆔 <b>الرقم التعريفي:</b> "
+                f"<code>{user_id}</code>\n"
+                f"━━━━━━━━━━━━━━━━━━━━\n"
+                f"💎 <b>الباقة:</b> {_plan_display}\n"
+                f"💰 <b>المبلغ:</b> {_price_display} ⭐\n"
+                f"📅 <b>الوقت:</b> {TimeUtils.mecca_iso()}",
+            )
+        except Exception as _e:
+            logger.debug("spawn notify dev log: %s", _e)
+
+    # ═══════════════════════════════════════════════════════════════
+    # مسار 2: هدية
+    # ═══════════════════════════════════════════════════════════════
     elif payment_type == 'gift':
+        # 2.1 — توثيق الدفع
         try:
             paid = await DB.mark_invoice_paid(invoice['number'], payment_id)
-            if not paid:
-                logger.error(
-                    "❌ mark_invoice_paid فشل: %s", invoice['number']
-                )
-                await safe_send(
-                    context.bot, user_id,
-                    "❌ <b>فشل توثيق الدفع</b>\n\n"
-                    "لم يُصدر كود الهدية. يرجى التواصل مع الدعم.",
-                    parse_mode='HTML',
-                )
-                return
+        except Exception as e:
+            logger.exception("❌ mark_invoice_paid exception: %s", e)
+            await safe_send(
+                context.bot, user_id, "❌ حدث خطأ غير متوقع."
+            )
+            return
 
+        if not paid:
+            logger.error(
+                "❌ mark_invoice_paid فشل: %s", invoice['number']
+            )
+            await safe_send(
+                context.bot, user_id,
+                "❌ <b>فشل توثيق الدفع</b>\n\n"
+                "لم يُصدر كود الهدية. يرجى التواصل مع الدعم.",
+                parse_mode='HTML',
+            )
+            return
+
+        # 2.2 — توليد الكود
+        try:
             code = await DB.create_gift_code(
                 plan_id=plan['id'], creator_id=user_id
             )
-            if code:
-                duration = (
-                    plan.get('duration_days') or plan.get('days') or 0
-                )
-                await safe_send(
-                    context.bot, user_id,
-                    f"🎉 <b>تم شراء كود الهدية بنجاح!</b>\n\n"
-                    f"🎁 <b>الكود:</b>\n"
-                    f"<code>{code}</code>\n\n"
-                    f"📅 <b>المدة:</b> {duration} يوم\n\n"
-                    f"<i>شارك هذا الكود مع من تحب 💝</i>",
-                    parse_mode='HTML',
-                )
-                logger.info(
-                    "✅ Gift code created: user=%s (code=%s...)",
-                    user_id, code[:8],
-                )
-            else:
-                logger.error(
-                    "❌ create_gift_code فشل: user=%s invoice=%s",
-                    user_id, invoice['number'],
-                )
-                await safe_send(
-                    context.bot, user_id,
-                    "⚠️ <b>تم توثيق الدفع لكن فشل توليد الكود</b>\n\n"
-                    "يرجى التواصل مع الدعم لإصدار الكود يدوياً.\n"
-                    f"رقم الفاتورة: <code>{invoice['number']}</code>",
-                    parse_mode='HTML',
-                )
         except Exception as e:
-            logger.exception("❌ Exception in gift payment: %s", e)
+            logger.exception("❌ create_gift_code exception: %s", e)
             await safe_send(
                 context.bot, user_id,
-                "❌ حدث خطأ غير متوقع أثناء معالجة كود الهدية."
+                "⚠️ <b>تم توثيق الدفع لكن فشل توليد الكود</b>\n\n"
+                "يرجى التواصل مع الدعم لإصدار الكود يدوياً.\n"
+                f"رقم الفاتورة: <code>{invoice['number']}</code>",
+                parse_mode='HTML',
+            )
+            return
+
+        if not code:
+            logger.error(
+                "❌ create_gift_code أعاد None: user=%s invoice=%s",
+                user_id, invoice['number'],
+            )
+            await safe_send(
+                context.bot, user_id,
+                "⚠️ <b>تم توثيق الدفع لكن فشل توليد الكود</b>\n\n"
+                "يرجى التواصل مع الدعم لإصدار الكود يدوياً.\n"
+                f"رقم الفاتورة: <code>{invoice['number']}</code>",
+                parse_mode='HTML',
+            )
+            return
+
+        # ✅ نجح كل شيء — نُبلغ المستخدم فوراً
+        logger.info(
+            "✅ Gift code created: user=%s (code=%s...)",
+            user_id, code[:8],
+        )
+        duration = (
+            plan.get('duration_days') or plan.get('days') or 0
+        )
+        try:
+            await safe_send(
+                context.bot, user_id,
+                f"🎉 <b>تم شراء كود الهدية بنجاح!</b>\n\n"
+                f"🎁 <b>الكود:</b>\n"
+                f"<code>{code}</code>\n\n"
+                f"📅 <b>المدة:</b> {duration} يوم\n\n"
+                f"<i>شارك هذا الكود مع من تحب 💝</i>",
+                parse_mode='HTML',
+            )
+        except Exception as _e:
+            logger.warning(
+                "⚠️ safe_send (gift success) فشل: %s — "
+                "الكود مُسجَّل في DB", _e
             )
 
 # ═══════════════════════════════════════════════════════════════════
@@ -3091,6 +3211,37 @@ async def main():
     t_start = time.monotonic()
 
     # ═══════════════════════════════════════════════════════════════
+    # 🆕 v5.6.33 FIX-SIGNAL-EARLY: تسجيل الإشارات مبكراً
+    # (قبل app.start() وsetup_webhook — لإغلاق نظيف حتى لو وصل
+    #  SIGTERM خلال نافذة الإقلاع الحرجة)
+    # ═══════════════════════════════════════════════════════════════
+    _shutdown_event = asyncio.Event()
+
+    def _on_shutdown_signal(sig_name: str):
+        logger.info("🛑 تلقّيت %s — بدء الإغلاق اللطيف", sig_name)
+        _shutdown_event.set()
+
+    try:
+        _loop_for_signals = asyncio.get_running_loop()
+        _signals_to_install = [signal.SIGTERM, signal.SIGINT]
+        if hasattr(signal, "SIGHUP"):
+            _signals_to_install.append(signal.SIGHUP)
+
+        for _sig in _signals_to_install:
+            try:
+                _loop_for_signals.add_signal_handler(
+                    _sig,
+                    lambda s=_sig: _on_shutdown_signal(s.name),
+                )
+                logger.debug("✅ handler لـ %s مسجّل", _sig.name)
+            except (NotImplementedError, RuntimeError, ValueError) as _e:
+                logger.debug(
+                    "add_signal_handler(%s) غير مدعوم: %s", _sig.name, _e
+                )
+    except Exception as _e:
+        logger.debug("Signal setup (early): %s", _e)
+
+    # ═══════════════════════════════════════════════════════════════
     # 🆕 v5.6.30 MARK-1: إخطار db_diagnostics ببدء العملية الفعلي
     # ═══════════════════════════════════════════════════════════════
     if _MARK_PROCESS_START_FN is not None:
@@ -3120,7 +3271,7 @@ async def main():
     logger.info("👨‍💼 المالك: %s", CONFIG.PRIMARY_OWNER_ID)
 
     logger.info(
-        "📦 bot.py: v5.6.32 | "
+        "📦 bot.py: v5.6.34 | "
         "detectors=%s | layers=%d | helpers=%s | "
         "db_idle=%s | cache_stats=%s | analytics=%s | "
         "fullhealth=%s | latency=%s | maint_cmds=%s | "
@@ -3130,7 +3281,10 @@ async def main():
         "watcher_interval=%.0fs | shutdown_robust=on | "
         "httpx_pool=%s | "
         "db_diag=%s | db_diag_mark=%s | "
-        "warmup_detectors=%s | analytics_register=%s",
+        "warmup_detectors=%s | analytics_register=%s | "
+        "payment_order_fix=on | post_init_webhook=on | "
+        "db_close=on | signal_early=on | "
+        "app_stop=on | chattype_modern=on | pay_filter=on",
         _SPAM_DETECTOR_VERSION or "N/A",
         _SPAM_DETECTOR_LAYERS_COUNT,
         (
@@ -3385,8 +3539,10 @@ async def main():
             "⚠️ DIAG_INCOMING=1 لكن TypeHandler غير متاح في هذا الإصدار"
         )
 
+    # 🆕 v5.6.34 FIX-CHATTYPE-DEPRECATION:
+    # _GROUP_CHAT_FILTER = GROUP | SUPERGROUP (بدل GROUPS المُهمَل)
     _group_msg_filter = (
-        filters.ChatType.GROUPS
+        _GROUP_CHAT_FILTER
         & filters.UpdateType.MESSAGE
         & ~filters.COMMAND
     )
@@ -3407,7 +3563,7 @@ async def main():
         try:
             app.add_handler(
                 MessageHandler(
-                    filters.ChatType.GROUPS
+                    _GROUP_CHAT_FILTER
                     & filters.UpdateType.EDITED_MESSAGE,
                     MessageHandlers.handle_edited,
                 ),
@@ -3430,7 +3586,7 @@ async def main():
     try:
         app.add_handler(
             MessageHandler(
-                filters.StatusUpdate.ALL & filters.ChatType.GROUPS,
+                filters.StatusUpdate.ALL & _GROUP_CHAT_FILTER,
                 MessageHandlers.handle_service,
             ),
             group=-1,
@@ -3776,11 +3932,15 @@ async def main():
             _e, exc_info=True,
         )
 
+    # 🆕 v5.6.34 FIX-SUCCESSFUL-PAYMENT-OVERLAP:
+    # إضافة ~filters.SUCCESSFUL_PAYMENT لمنع تشغيل handle_private على
+    # رسالة الإيصال التي قد تحتوي نصاً + successful_payment.
     app.add_handler(MessageHandler(
         (filters.TEXT | filters.PHOTO | filters.VIDEO | filters.Document.ALL |
          filters.AUDIO | filters.VOICE | filters.ANIMATION | filters.Sticker.ALL |
          filters.VIDEO_NOTE) &
-        filters.ChatType.PRIVATE & ~filters.COMMAND,
+        filters.ChatType.PRIVATE & ~filters.COMMAND
+        & ~filters.SUCCESSFUL_PAYMENT,
         MessageHandlers.handle_private
     ))
 
@@ -3903,31 +4063,10 @@ async def main():
         _REMOVED_CHANNELS_GRACE_DAYS,
     )
 
-    _shutdown_event = asyncio.Event()
-
-    def _on_shutdown_signal(sig_name: str):
-        logger.info("🛑 تلقّيت %s — بدء الإغلاق اللطيف", sig_name)
-        _shutdown_event.set()
-
-    try:
-        _loop = asyncio.get_running_loop()
-        _signals_to_install = [signal.SIGTERM, signal.SIGINT]
-        if hasattr(signal, "SIGHUP"):
-            _signals_to_install.append(signal.SIGHUP)
-
-        for _sig in _signals_to_install:
-            try:
-                _loop.add_signal_handler(
-                    _sig,
-                    lambda s=_sig: _on_shutdown_signal(s.name),
-                )
-                logger.debug("✅ handler لـ %s مسجّل", _sig.name)
-            except (NotImplementedError, RuntimeError, ValueError) as _e:
-                logger.debug(
-                    "add_signal_handler(%s) غير مدعوم: %s", _sig.name, _e
-                )
-    except Exception as _e:
-        logger.debug("Signal setup: %s", _e)
+    # ═══════════════════════════════════════════════════════════════
+    # ✅ v5.6.33: _shutdown_event + signal handlers مُسجَّلة الآن في
+    # بداية main() — لا حاجة لتكرار هنا.
+    # ═══════════════════════════════════════════════════════════════
 
     app_shutdown_done = False
 
@@ -3948,6 +4087,11 @@ async def main():
             logger.info("✅ Webhook تم التعيين")
 
             runner = await setup_webhook(app, port)
+
+            # 🆕 v5.6.33 FIX-POST-INIT-WEBHOOK (BUG-2):
+            # تشغيل post_init hooks في وضع Webhook أيضاً (كانت تُستدعى
+            # فقط في polling mode — إصلاح لضمان تنفيذ التهيئة المتأخرة).
+            await _run_post_init_hooks(app)
 
             try:
                 async with aiohttp.ClientSession() as session:
@@ -3977,6 +4121,12 @@ async def main():
                         pass
                     except Exception as _e:
                         logger.debug("watcher_task: %s", _e)
+
+                # 🆕 v5.6.33: تشغيل post_stop قبل cleanup الـ runner
+                try:
+                    await _run_post_stop_hooks(app)
+                except Exception as _e:
+                    logger.debug("_run_post_stop_hooks (webhook): %s", _e)
 
                 try:
                     await runner.cleanup()
@@ -4118,7 +4268,22 @@ async def main():
             except Exception as _sp_u_e:
                 logger.debug("sleep_probe uninstall: %s", _sp_u_e)
 
+        # ═══════════════════════════════════════════════════════════
+        # 🆕 v5.6.34 FIX-APP-STOP: استدعاء app.stop() قبل app.shutdown()
+        # PTB v20+ يوصي بهذا الترتيب لإغلاق جلسة Bot وHTTPXRequest pool
+        # بانتظام. غياب stop() كان يُنتج أحياناً "Unclosed connector".
+        # ═══════════════════════════════════════════════════════════
         if not app_shutdown_done:
+            try:
+                if getattr(app, "running", False):
+                    try:
+                        await app.stop()
+                        logger.info("✅ app.stop() اكتمل")
+                    except Exception as _e:
+                        logger.debug("app.stop: %s", _e)
+            except Exception as _e:
+                logger.debug("app.stop check: %s", _e)
+
             try:
                 await app.shutdown()
                 app_shutdown_done = True
@@ -4127,6 +4292,15 @@ async def main():
                 raise
             except Exception as _e:
                 logger.debug("app.shutdown: %s", _e)
+
+        # 🆕 v5.6.33 FIX-DB-CLOSE (BUG-3): إغلاق صريح لـ DB pool
+        # (بعد app.shutdown لإتاحة الفرصة لأي عملية أخيرة تُغلق)
+        try:
+            await _shutdown_db_pool(timeout=5.0)
+        except asyncio.CancelledError:
+            raise
+        except Exception as _e:
+            logger.debug("_shutdown_db_pool: %s", _e)
 
     logger.info(
         "👋 انتهت دورة حياة البوت (%.2fs)",
@@ -4164,7 +4338,7 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         logger.info("\n👋 تم الإيقاف")
     except Exception as e:
-        logger.error("❌ خطأ: %s", e)
+        logger.error("❌ خطأ: %s", e, exc_info=True)
         traceback.print_exc()
     finally:
         if _loop is not None:
