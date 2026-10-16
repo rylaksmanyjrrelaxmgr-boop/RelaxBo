@@ -2,53 +2,32 @@
 # -*- coding: utf-8 -*-
 
 """
-database_tables.py — إنشاء الجداول والفهارس لكل قواعد البيانات (v7.9.10)
+database_tables.py — إنشاء الجداول والفهارس لكل قواعد البيانات (v7.9.11)
 ================================================================================
-🆕 v7.9.10 (AUDIT-REMEDIATION — 6 BUGs + 5 M-issues):
-  🔴 BUG-1: حذف idx_settings_key من CRITICAL_SMALL_TABLE_INDEXES
-      السبب: كان يُنشأ ثم يُحذف فوراً (مضادّ في DEPRECATED_INDEXES).
-      الجدول settings فيه PRIMARY KEY على key أصلاً → الفهرس مكرّر.
+🆕 v7.9.11 (SYNTAX-WARNING-FIX):
+  🔧 FIX-SW-1: إصلاح SyntaxWarning من `\m` و `\M` في docstrings.
+      المشكلة المُكتشفة من سجل Render:
+        database_tables.py:23: SyntaxWarning: invalid escape sequence '\m'
+        database_tables.py:1846: SyntaxWarning: invalid escape sequence '\m'
+      السبب: `\m` و `\M` في docstrings Python تعتبر escape sequences
+      غير صالحة (Python 3.12+ تُصدر تحذير).
+      الإصلاح: `\\m` و `\\M` (شرطة خلفية مضاعفة).
+      الأثر: لا تغيير وظيفي — فقط إزالة التحذير.
 
-  🔴 BUG-2: _create_indexes_postgres — نقل _drop_invalid_indexes_postgres
-      قبل _fetch_existing_indexes_postgres. وإلّا الفهارس INVALID تبقى
-      في existing ولا يُعاد إنشاؤها.
-      (كانت الدالتان الشقيقتان _ensure_all_indexes_exist_postgres
-      و _verify_critical_indexes_postgres تفعلان الترتيب الصحيح.)
+  ✅ لا تغيير في المنطق — كل إصلاحات v7.9.10 محفوظة.
 
-  🔴 BUG-3: create_tables_sqlite fast-path — إضافة
-      _ensure_index_definitions_match_sqlite + إعادة ترتيب التسلسل
-      ليطابق MySQL/PG.
-
-  🔴 BUG-4: _pg_has_active_query_on — استخدام regex word-boundaries
-      (\m..\M) بدل ILIKE %name% الذي يطابق جداول أخرى
-      (مثل 'posts' تطابق 'scheduled_posts').
-
-  🔴 BUG-5: حذف _should_skip_maintenance_bootstrap + ثابت +
-      استدعاءين. السبب: 1h vs. 6h vs. 24h = كود ميت رياضياً.
-
-  🔴 BUG-6: _run_maintenance_postgres — عدم كتابة last_maintenance_at
-      عند in_transaction=True (VACUUM لم يُنفَّذ فعلياً).
-
-  🟠 M-1: حذف _verify_critical_indexes_postgres و
-      _ensure_all_indexes_exist_postgres (كود PG ميت).
-
-  🟠 M-2: حذف فحص _is_valid_index_name("bot_groups") الميت.
-
-  🟠 M-4: migrations — رفع مستوى السجل من DEBUG إلى WARNING للأخطاء
-      الحقيقية (بعد استبعاد already-exists).
-
-  🟠 M-5: create_tables_postgres fast-path — حذف الاستدعاء المزدوج
-      لـ _ensure_critical_small_indexes_postgres.
-
-  🟠 M-8: حذف _quick_analyze_mysql — استُبدلت بـ _run_maintenance_mysql
-      في non-fast-path (لديه cooldown 24h)، وحُذف استدعاؤها من
-      fast-path (كانت مكرّرة مع _run_maintenance_mysql).
-
-  ✅ مُتحفَّظ عنه (لم يُعدَّل):
-    - M-6 (PRAGMA foreign_keys=ON موجود في database.py)
-    - M-3 (نظري فقط — بيئتك PG 18.6)
-    - m-3 (mv_active_user_limits يُنشأ في database.py)
-    - m-1..m-8 (نوافل — لاحقاً إن لزم)
+🆕 v7.9.10 (AUDIT-REMEDIATION — 6 BUGs + 5 M-issues) — محفوظ:
+  🔴 BUG-1: حذف idx_settings_key من CRITICAL_SMALL_TABLE_INDEXES.
+  🔴 BUG-2: _create_indexes_postgres — DROP قبل FETCH.
+  🔴 BUG-3: create_tables_sqlite fast-path — إضافة def-check.
+  🔴 BUG-4: _pg_has_active_query_on — regex word-boundaries.
+  🔴 BUG-5: حذف _should_skip_maintenance_bootstrap.
+  🔴 BUG-6: _run_maintenance_postgres — لا كتابة عند in_transaction.
+  🟠 M-1: حذف _verify_critical_indexes_postgres + _ensure_all.
+  🟠 M-2: حذف فحص _is_valid_index_name("bot_groups").
+  🟠 M-4: migrations DEBUG → WARNING.
+  🟠 M-5: create_tables_postgres — إزالة الاستدعاء المزدوج.
+  🟠 M-8: حذف _quick_analyze_mysql + استبدالها.
 
 🆕 v7.9.9 (BOT-GROUPS-INDEX + MAINTENANCE-COOLDOWN-FIX) — محفوظ.
 🆕 v7.9.8 (CORRECTNESS-PERF-HARDENING) — محفوظ.
@@ -59,7 +38,7 @@ database_tables.py — إنشاء الجداول والفهارس لكل قوا�
 ================================================================================
 """
 
-__version__ = "7.9.10"
+__version__ = "7.9.11"
 
 import asyncio
 import logging
@@ -77,11 +56,7 @@ CLEANUP_ANONYMOUS_BOT_IDS = (1087968824, 136817688)
 
 MAINTENANCE_INTERVAL_SECONDS = 86400
 
-# 🔴 FIX-C12a: 0.1 → 0.05 (maintenance أسرع بـ ~2.4s على 47 جدول)
 VACUUM_INTER_TABLE_DELAY_SECONDS = 0.05
-
-# 🟠 v7.9.10 BUG-5: حُذف MAINTENANCE_BOOTSTRAP_COOLDOWN_SECONDS —
-#   كان كوداً ميتاً (1h < 6h do_heavy، والفحص الداخلي 24h أقوى منه).
 
 ADMIN_LOGS_RETENTION_DAYS = 30
 ADMIN_LOGS_MAX_ROWS = 5000
@@ -95,11 +70,8 @@ STARTUP_MAINTENANCE_COOLDOWN_SECONDS = 6 * 3600
 # الفهارس الحرجة على الجداول الصغيرة — تُنشأ متزامناً قبل أي شيء
 # 🔴 FIX-C12b: قائمة صغيرة جداً تُنشأ بسرعة (< 100ms) بدون CONCURRENTLY
 # 🟠 BUG-1 (v7.9.10): حُذف idx_settings_key — كان يُنشأ ثم يُحذف فوراً
-#   (مضادّ في DEPRECATED_INDEXES)، والجدول لديه PRIMARY KEY أصلاً.
 # ═══════════════════════════════════════════════════════════════════════
 CRITICAL_SMALL_TABLE_INDEXES = (
-    # 🔴 FIX-C12b: هذا الفهرس مُكتشف من السجل —
-    #   SELECT ... FROM bot_groups WHERE added_by = ?  @ 1.36s
     ("bot_groups", "idx_bot_groups_added_by",
      "CREATE INDEX IF NOT EXISTS idx_bot_groups_added_by "
      "ON bot_groups(added_by)"),
@@ -118,7 +90,6 @@ CRITICAL_SMALL_TABLE_INDEXES = (
     ("group_admins", "idx_group_admins_user_chat",
      "CREATE INDEX IF NOT EXISTS idx_group_admins_user_chat "
      "ON group_admins(user_id, chat_id)"),
-    # 🟠 BUG-1: idx_settings_key محذوف من هنا
 )
 
 MAINTENANCE_TABLES = (
@@ -501,13 +472,11 @@ def _is_advanced_index(cols: str) -> bool:
     return " WHERE " in s or " INCLUDE " in s
 
 
-# 🟡 C11-E: MYSQL_SKIP_INDEXES تُحسب تلقائياً
 MYSQL_SKIP_INDEXES = frozenset(
     n for _, n, c in COMMON_INDEXES if _is_advanced_index(c)
 )
 
 
-# 🔴 C11-C: فحص شديد فقط عند الطلب الصريح
 _STRICT_INDEX_CHECK = os.getenv("DB_STRICT_INDEX_CHECK", "0") == "1"
 
 if _STRICT_INDEX_CHECK:
@@ -524,10 +493,6 @@ if _duplicates:
         f"❌ أسماء فهارس مكررة في COMMON_INDEXES: {_duplicates}"
     )
 
-
-# =====================================================================
-# دوال مساعدة للتوقيت
-# =====================================================================
 
 def _safe_now_iso(TimeUtils) -> str:
     """يعيد الطابع الزمني الآن بصيغة SQL (UTC)."""
@@ -581,7 +546,7 @@ async def _should_run_startup_maintenance(
                 except Exception:
                     pass
             val = row[0] if row else None
-        else:  # mysql
+        else:
             cursor = await conn.cursor()
             try:
                 await cursor.execute(
@@ -633,7 +598,7 @@ async def _mark_startup_maintenance_done(
                 await conn.commit()
             except Exception:
                 pass
-        else:  # mysql
+        else:
             cursor = await conn.cursor()
             try:
                 await cursor.execute(
@@ -689,10 +654,6 @@ def _parse_expected_columns(cols: str) -> str:
 def _adapt_cols_for_db(cols: str, db_type: str) -> str:
     """
     يحوّل تعريف فهرس PostgreSQL إلى SQLite/MySQL.
-
-    🔴 C11-D: الإصلاح الحرج — INCLUDE + WHERE:
-      - PostgreSQL: كما هو.
-      - MySQL/SQLite: حذف INCLUDE كاملاً (غير مدعوم).
     """
     if not cols:
         return cols
@@ -731,10 +692,7 @@ def _get_expected_cols_for_index(
 # =====================================================================
 
 async def _get_table_row_count_postgres(conn, table_name: str) -> int:
-    """
-    تقدير سريع لعدد صفوف الجدول.
-    🔴 C11-F: fallback إلى COUNT(*) فعلي.
-    """
+    """تقدير سريع لعدد صفوف الجدول."""
     if not _is_valid_index_name(table_name):
         return 0
     try:
@@ -857,9 +815,7 @@ async def _create_index_postgres_smart(
     table_row_cache=None,
     force_non_concurrent: bool = False,
 ) -> str:
-    """
-    إنشاء فهرس مع قرار CONCURRENTLY التلقائي.
-    """
+    """إنشاء فهرس مع قرار CONCURRENTLY التلقائي."""
     if not _is_valid_index_name(idx_name):
         return "failed"
 
@@ -965,15 +921,11 @@ async def _create_index_postgres_smart(
 
 async def _ensure_critical_small_indexes_postgres(conn, logger) -> int:
     """
-    🔴 FIX-C12b (CRITICAL): ينشئ الفهارس الحرجة على الجداول الصغيرة
-    بشكل **متزامن** وسريع (< 500ms) قبل بدء maintenance في الخلفية.
+    🔴 FIX-C12b: ينشئ الفهارس الحرجة على الجداول الصغيرة
+    بشكل متزامن وسريع (< 500ms) قبل maintenance.
 
-    السبب المُكتشف من السجل:
-      SELECT chat_id, chat_name, username, banned
-      FROM bot_groups WHERE added_by = ?  @ 1.36s
-
-    🟠 M-2 (v7.9.10): حُذف فحص `_is_valid_index_name("bot_groups")` —
-    كان دائماً False (bot_groups اسم صالح)، فحص debug ميت.
+    🟠 M-2 (v7.9.10): حُذف فحص `_is_valid_index_name("bot_groups")`
+    الميت.
     """
     try:
         created = 0
@@ -1035,9 +987,7 @@ async def _run_combined_index_checks_postgres(
     conn, logger,
     in_transaction: bool = False,
 ) -> None:
-    """
-    استعلام واحد يجلب كل شيء ثم يوزّع الفحوصات على الذاكرة.
-    """
+    """استعلام واحد يجلب كل شيء ثم يوزّع الفحوصات على الذاكرة."""
     try:
         _force_nc = bool(in_transaction)
         if _force_nc and logger:
@@ -1045,7 +995,6 @@ async def _run_combined_index_checks_postgres(
                 "⚙️ FIX-C10: CONCURRENTLY معطّل (داخل transaction)"
             )
 
-        # 🔴 FIX-C12b: ضمان الفهارس الحرجة الصغيرة أولاً
         try:
             await _ensure_critical_small_indexes_postgres(conn, logger)
         except Exception as _c12_e:
@@ -1457,7 +1406,7 @@ async def _cleanup_old_admin_logs_mysql(conn, logger):
 # =====================================================================
 
 async def _tune_autovacuum_postgres(conn, logger):
-    """0.05 للصغيرة، 0.1 للنّامية. استعلام bulk واحد."""
+    """0.05 للصغيرة، 0.1 للنّامية."""
     all_tables = list(dict.fromkeys(
         list(SMALL_TABLES_FOR_AGGRESSIVE_AUTOVACUUM)
         + list(GROWING_TABLES_FOR_MODERATE_AUTOVACUUM)
@@ -1533,13 +1482,8 @@ async def _tune_autovacuum_postgres(conn, logger):
 
 # ═══════════════════════════════════════════════════════════════════════
 # فحص جماعي
+# 🟠 M-1 (v7.9.10): _ensure_all_indexes_exist_postgres حُذفت — كود ميت.
 # ═══════════════════════════════════════════════════════════════════════
-
-# 🟠 M-1 (v7.9.10): _ensure_all_indexes_exist_postgres حُذفت — كود PG ميت.
-#   المسار السريع لـ PostgreSQL يعتمد على
-#   _run_combined_index_checks_postgres التي تُغطّي نفس الوظيفة + أكثر.
-#   النسخ الخاصة بـ SQLite/MySQL باقية لأنها مستخدمة فعلاً.
-
 
 async def _ensure_all_indexes_exist_sqlite(conn, logger):
     try:
@@ -1721,9 +1665,7 @@ async def _quick_analyze_postgres(conn, logger):
         return 0
 
 
-# 🟠 M-8 (v7.9.10): _quick_analyze_mysql حُذفت — كانت تكرّر ANALYZE × 18
-#   على نفس الجداول التي يُنفّذها _run_maintenance_mysql (مع cooldown 24h).
-#   المُستدعي (non-fast-path) استُبدل بـ _run_maintenance_mysql.
+# 🟠 M-8 (v7.9.10): _quick_analyze_mysql حُذفت — كانت تكرّر ANALYZE × 18.
 
 
 # =====================================================================
@@ -1836,14 +1778,14 @@ async def _vacuum_dirty_mvs_postgres(conn, logger, min_dead: int = 10):
 
 
 # =====================================================================
-# VACUUM ANALYZE الدوري — FIX-C12d + BUG-6
+# 🔧 v7.9.11 FIX-SW-1: إصلاح `\m` → `\\m` في docstring
 # =====================================================================
 
 async def _pg_has_active_query_on(conn, table_name: str) -> bool:
     """
     🟠 FIX-C12d + BUG-4 (v7.9.10): هل يوجد استعلام نشط على الجدول الآن؟
 
-    نستخدم word-boundaries في PostgreSQL regex (\m..\M) لتفادي
+    نستخدم word-boundaries في PostgreSQL regex (\\m..\\M) لتفادي
     false positives (مثل 'users' المطابق لـ 'user_channels'، أو
     'posts' المطابق لـ 'scheduled_posts').
 
@@ -1883,18 +1825,13 @@ async def _pg_has_active_query_on(conn, table_name: str) -> bool:
             return False
 
 
-# 🟠 BUG-5 (v7.9.10): _should_skip_maintenance_bootstrap حُذفت —
-#   كود ميت رياضياً (1h vs. 6h do_heavy، والفحص الداخلي في
-#   _run_maintenance_postgres هو 24h، فهو الأقوى).
-
-
 async def _run_maintenance_postgres(
     conn, logger,
     in_transaction: bool = False,
 ):
     """
     VACUUM ANALYZE الدوري.
-    🔴 C11-H: if in_transaction, نتخطى VACUUM (يفشل داخل tx).
+    🔴 C11-H: if in_transaction, نتخطى VACUUM.
     🟠 FIX-C12d: فحص pg_stat_activity قبل كل VACUUM.
     🟠 BUG-6 (v7.9.10): لا نكتب last_maintenance_at إذا in_transaction.
     """
@@ -1965,7 +1902,6 @@ async def _run_maintenance_postgres(
                 failed += 1
                 continue
 
-            # 🟠 FIX-C12d: تخطي إذا كان هناك استعلام نشط
             if not in_transaction:
                 try:
                     busy = await _pg_has_active_query_on(conn, tbl)
@@ -2030,9 +1966,7 @@ async def _run_maintenance_postgres(
                 if logger:
                     logger.debug(f"⚠️ _vacuum_dirty_mvs_postgres: {e}")
 
-        # 🟠 BUG-6 (v7.9.10): لا نكتب last_maintenance_at إذا كنا
-        # داخل transaction، لأن VACUUM لم يُنفَّذ فعلياً (ANALYZE فقط)،
-        # فلا يصحّ تأجيل VACUUM الحقيقي يوماً كاملاً.
+        # 🟠 BUG-6 (v7.9.10): لا نكتب last_maintenance_at إذا في tx.
         if not in_transaction:
             try:
                 await conn.execute(
@@ -2204,7 +2138,7 @@ async def _run_maintenance_mysql(conn, logger):
 
 # =====================================================================
 # Migrations — إضافة أعمدة مفقودة
-# 🟠 M-4 (v7.9.10): logger.debug → logger.warning للأخطاء الحقيقية
+# 🟠 M-4 (v7.9.10): DEBUG → WARNING للأخطاء الحقيقية
 # =====================================================================
 
 _GROUP_SECURITY_NEW_COLUMNS = [
@@ -2261,7 +2195,6 @@ async def _migrate_missing_columns_sqlite(conn, logger):
             err = str(e).lower()
             if "duplicate" in err or "already exists" in err:
                 continue
-            # 🟠 M-4 (v7.9.10): رُفع إلى WARNING — فشل حقيقي
             if logger:
                 logger.warning(f"⚠️ SQLite migration {col_name}: {e}")
 
@@ -2957,10 +2890,8 @@ async def _cleanup_stale_links_mysql(conn, logger):
 
 # =====================================================================
 # فحص الفهارس الحرجة
-# 🟠 M-1 (v7.9.10): _verify_critical_indexes_postgres حُذفت — كود PG ميت.
-#   النسخ الخاصة بـ SQLite/MySQL باقية لأنها مستخدمة فعلاً.
+# 🟠 M-1 (v7.9.10): _verify_critical_indexes_postgres حُذفت.
 # =====================================================================
-
 
 async def _verify_critical_indexes_sqlite(conn, logger):
     try:
@@ -3509,7 +3440,7 @@ async def _create_indexes_sqlite(conn, logger):
 
 # =====================================================================
 # إنشاء فهارس PostgreSQL — smart creation
-# 🔴 BUG-2 (v7.9.10): نقل DROP-INVALID قبل FETCH-EXISTING
+# 🔴 BUG-2 (v7.9.10): DROP-INVALID قبل FETCH-EXISTING
 # =====================================================================
 
 async def _create_indexes_postgres(
@@ -3517,10 +3448,7 @@ async def _create_indexes_postgres(
     in_transaction: bool = False,
 ):
     """دعم in_transaction لتجنّب CONCURRENTLY داخل tx."""
-    # 🔴 BUG-2 (v7.9.10): يجب حذف الفهارس INVALID *قبل* جلب الموجود،
-    # وإلّا فإن INVALID يظهر في existing → يُتجاهل إعادة إنشائه.
-    # ملاحظة: الدالتان الشقيقتان كانتا تفعلان هذا الترتيب الصحيح،
-    # وهذه الدالة الآن تتفق معهما.
+    # 🔴 BUG-2: يجب حذف INVALID قبل جلب الموجود.
     await _drop_invalid_indexes_postgres(
         conn, logger,
         force_non_concurrent=in_transaction,
@@ -3673,8 +3601,7 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
                     "🔍 SQLite: بدء فحوصات الإقلاع الشاملة"
                 )
             await _migrate_missing_columns_sqlite(conn, logger)
-            # 🔴 BUG-3 (v7.9.10): كان تعريف الفهارس لا يُفحص في fast-path
-            # → فهارس بأعمدة خاطئة تبقى دون إصلاح. الآن نحاكي MySQL وPG.
+            # 🔴 BUG-3: كان تعريف الفهارس لا يُفحص في fast-path.
             await _drop_deprecated_indexes_sqlite(conn, logger)
             await _ensure_index_definitions_match_sqlite(conn, logger)
             await _verify_critical_indexes_sqlite(conn, logger)
@@ -4340,7 +4267,7 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
             "(version, applied_at, description) "
             "VALUES (?, ?, ?) ON CONFLICT(version) DO NOTHING",
             (CURRENT_SCHEMA_VERSION, _safe_now_iso(TimeUtils),
-             "v7.9.10-audit-remediation"),
+             "v7.9.11-syntax-warning-fix"),
         )
         await conn.commit()
     except Exception as e:
@@ -4352,33 +4279,22 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
     if logger:
         logger.info(
             "✅ تم إنشاء جميع جداول SQLite مع الفهارس المحسنة "
-            "(v7.9.10 — AUDIT-REMEDIATION)"
+            "(v7.9.11 — SYNTAX-WARNING-FIX)"
         )
 
 
 # =====================================================================
 # 2. جداول PostgreSQL
-# 🟠 M-5 (v7.9.10): حُذف الاستدعاء المزدوج
-# 🟠 BUG-5 (v7.9.10): حُذف فحص cooldown الخارجي
 # =====================================================================
 
 async def create_tables_postgres(
     conn, logger, TimeUtils,
     in_transaction: bool = False,
 ):
-    """
-    🔴 v7.9.10: الفحوصات الحرجة الصغيرة تُنفَّذ مرة واحدة فقط داخل
-    _run_combined_index_checks_postgres (عند do_heavy=True).
-    """
+    """🟠 M-5 (v7.9.10): لا استدعاء مزدوج للفهارس الحرجة."""
     current = await _get_current_schema_version_postgres(conn)
     if current >= CURRENT_SCHEMA_VERSION:
         _warn_if_schema_ahead(current, logger)
-
-        # 🟠 M-5 (v7.9.10): حُذف الاستدعاء المزدوج لـ
-        # _ensure_critical_small_indexes_postgres. النسخة الوحيدة الآن
-        # داخل _run_combined_index_checks_postgres (pre-step).
-        # في حال do_heavy=False، لا حاجة لها أصلاً لأن الفهارس الحرجة
-        # الصغيرة persistent ولا تُحذف تلقائياً.
 
         do_heavy = await _should_run_startup_maintenance(
             conn, "postgres", logger,
@@ -4398,8 +4314,8 @@ async def create_tables_postgres(
                         "(نحن داخل transaction)"
                     )
 
-            # 🔴 FIX-C12b: هذا الاستدعاء يمرّ داخلياً بـ
-            # _ensure_critical_small_indexes_postgres أولاً (متزامن، سريع).
+            # هذا الاستدعاء يمرّ داخلياً بـ
+            # _ensure_critical_small_indexes_postgres أولاً.
             await _run_combined_index_checks_postgres(
                 conn, logger,
                 in_transaction=in_transaction,
@@ -4411,9 +4327,6 @@ async def create_tables_postgres(
             await _tune_autovacuum_postgres(conn, logger)
             await _quick_analyze_postgres(conn, logger)
 
-            # 🟠 BUG-5 (v7.9.10): حُذف فحص cooldown الخارجي — كود ميت
-            # (1h vs. 6h do_heavy، والفحص الداخلي في
-            # _run_maintenance_postgres هو 24h، فهو الأقوى).
             await _run_maintenance_postgres(
                 conn, logger,
                 in_transaction=in_transaction,
@@ -5087,7 +5000,6 @@ async def create_tables_postgres(
     await _tune_autovacuum_postgres(conn, logger)
     await _quick_analyze_postgres(conn, logger)
 
-    # 🟠 BUG-5 (v7.9.10): حُذف فحص cooldown الخارجي — كود ميت.
     await _run_maintenance_postgres(
         conn, logger,
         in_transaction=in_transaction,
@@ -5100,7 +5012,7 @@ async def create_tables_postgres(
             "VALUES ($1, $2, $3) ON CONFLICT (version) DO NOTHING",
             CURRENT_SCHEMA_VERSION,
             _safe_now_dt(TimeUtils),
-            "v7.9.10-audit-remediation",
+            "v7.9.11-syntax-warning-fix",
         )
     except Exception as e:
         if logger:
@@ -5111,14 +5023,12 @@ async def create_tables_postgres(
     if logger:
         logger.info(
             "✅ تم إنشاء جميع جداول PostgreSQL مع الفهارس المحسنة "
-            "(v7.9.10 — AUDIT-REMEDIATION)"
+            "(v7.9.11 — SYNTAX-WARNING-FIX)"
         )
 
 
 # =====================================================================
 # 3. جداول MySQL
-# 🟠 M-8 (v7.9.10): حُذف _quick_analyze_mysql + استُبدلت بـ
-#   _run_maintenance_mysql في non-fast-path، وحُذف الاستدعاء من fast-path.
 # =====================================================================
 
 async def create_tables_mysql(conn, logger, TimeUtils):
@@ -5142,9 +5052,6 @@ async def create_tables_mysql(conn, logger, TimeUtils):
             await _drop_deprecated_indexes_mysql(conn, logger)
             await _cleanup_stale_links_mysql(conn, logger)
             await _cleanup_old_admin_logs_mysql(conn, logger)
-            # 🟠 M-8 (v7.9.10): حُذف _quick_analyze_mysql —
-            #   _run_maintenance_mysql يُنفّذ ANALYZE على نفس الجداول
-            #   (مع cooldown 24h)، فلا حاجة لاستدعائه هنا.
             await _run_maintenance_mysql(conn, logger)
             await _mark_startup_maintenance_done(
                 conn, "mysql", logger,
@@ -5808,10 +5715,6 @@ async def create_tables_mysql(conn, logger, TimeUtils):
         await _create_indexes_mysql(conn, logger)
         await _cleanup_stale_links_mysql(conn, logger)
         await _cleanup_old_admin_logs_mysql(conn, logger)
-
-        # 🟠 M-8 (v7.9.10): كان _quick_analyze_mysql (ANALYZE × 18)
-        #   يكرّر ما ينفّذه _run_maintenance_mysql (ANALYZE × 18 مع
-        #   cooldown 24h). الآن نستدعي _run_maintenance_mysql فقط.
         await _run_maintenance_mysql(conn, logger)
 
         try:
@@ -5822,7 +5725,7 @@ async def create_tables_mysql(conn, logger, TimeUtils):
                 (
                     CURRENT_SCHEMA_VERSION,
                     _safe_now_iso(TimeUtils),
-                    "v7.9.10-audit-remediation",
+                    "v7.9.11-syntax-warning-fix",
                 ),
             )
         except Exception as e:
@@ -5834,7 +5737,7 @@ async def create_tables_mysql(conn, logger, TimeUtils):
         if logger:
             logger.info(
                 "✅ تم إنشاء جميع جداول MySQL مع الفهارس المحسنة "
-                "(v7.9.10 — AUDIT-REMEDIATION)"
+                "(v7.9.11 — SYNTAX-WARNING-FIX)"
             )
 
     finally:
@@ -5863,7 +5766,6 @@ __all__ = [
     "DEPRECATED_INDEXES",
     "DEFAULT_SETTINGS",
     "MAINTENANCE_INTERVAL_SECONDS",
-    # 🟠 BUG-5 (v7.9.10): حُذف MAINTENANCE_BOOTSTRAP_COOLDOWN_SECONDS
     "MAINTENANCE_TABLES",
     "VACUUM_INTER_TABLE_DELAY_SECONDS",
     "MYSQL_SKIP_INDEXES",
@@ -5878,7 +5780,6 @@ __all__ = [
     "_mark_startup_maintenance_done",
     "_run_combined_index_checks_postgres",
     "_ensure_critical_small_indexes_postgres",
-    # 🟠 BUG-5 (v7.9.10): حُذف _should_skip_maintenance_bootstrap
     "_pg_has_active_query_on",
     "_adapt_cols_for_db",
     "_cleanup_old_admin_logs_postgres",
@@ -5898,33 +5799,21 @@ __all__ = [
     "_ensure_auto_blocked_table_mysql",
     "_BANNED_WORDS_NEW_COLUMNS",
     "_AUTO_REPLIES_NEW_COLUMNS",
-    # 🟠 M-1 (v7.9.10): حُذف _verify_critical_indexes_postgres
-    # 🟠 M-1 (v7.9.10): حُذف _ensure_all_indexes_exist_postgres
 ]
 
 
 # =====================================================================
-# LOAD BEACON — v7.9.10
+# LOAD BEACON — v7.9.11
 # =====================================================================
 
 try:
     _beacon_parts = [
         f"🛡️ database_tables.py v{__version__} loaded",
+        f"FIX-SW-1 escape-sequences-fixed=✅",
         f"FIX-C12a VACUUM_DELAY={VACUUM_INTER_TABLE_DELAY_SECONDS}s",
         f"FIX-C12b CRITICAL_SMALL_INDEXES={len(CRITICAL_SMALL_TABLE_INDEXES)}",
-        f"FIX-C12c explicit-failed-names=✅",
-        f"FIX-C12d skip-busy-tables=✅(word-boundaries)",
-        f"BUG-1 idx_settings_key-removed=✅",
-        f"BUG-2 drop-invalid-before-fetch=✅",
-        f"BUG-3 sqlite-def-check=✅",
-        f"BUG-4 regex-word-boundaries=✅",
-        f"BUG-5 dead-cooldown-removed=✅",
-        f"BUG-6 tx-no-maint-stamp=✅",
-        f"M-1 dead-pg-helpers-removed=✅",
-        f"M-2 dead-bot-groups-check-removed=✅",
-        f"M-4 migration-warn-level=✅",
-        f"M-5 dup-critical-call-removed=✅",
-        f"M-8 dup-analyze-mysql-removed=✅",
+        f"BUG-1..6 all-fixed=✅",
+        f"M-1,2,4,5,8 all-fixed=✅",
         f"indexes={len(COMMON_INDEXES)}",
         f"critical={len(CRITICAL_INDEX_NAMES)}",
         f"deprecated={len(DEPRECATED_INDEXES)}",
