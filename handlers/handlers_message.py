@@ -1,31 +1,47 @@
+
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-handlers_message.py - v7.18.42 (LOG-CHANNEL-MEMBERSHIP-VERIFY)
+handlers_message.py - v7.18.43 (LOG-CHANNEL-POLISH)
 (متوافق مع detectors v4.1.0 + banned_words_manager v1.2.0 + group_log v1.4.0)
 =============================================================================
-🆕 v7.18.42 (LOG-CHANNEL-MEMBERSHIP-VERIFY + POLISH):
+🆕 v7.18.43 (LOG-CHANNEL-POLISH — 4 إصلاحات جوهرية):
 
-    🔴 FIX-LOGCH-8 (CRITICAL): التحقق من عضوية/صلاحيات البوت
-        في قناة السجل **قبل** الحفظ.
+    🟢 FIX-HTML-ESCAPE: escape() على عنوان قناة السجل قبل إدراجه
+        في رسالة التأكيد (parse_mode='HTML').
         المشكلة:
-          • المطور يعيّن قناة (عبر @username أو رابط أو ID).
-          • get_chat ينجح (البوت "يعرف" القناة) → يُحفظ الرقم.
-          • لكن البوت ليس عضواً/مشرفاً → الإرسال يفشل بصمت.
-          • الواجهة تعرض "محفوظ" بينما لا تصل أي سجلات.
+          • عنوان قناة يحتوي `<` أو `&` أو `>` → يكسر الرسالة
+            أو يُعرض HTML خاماً للمطور.
         الإصلاح:
-          • استدعاء _verify_bot_in_log_channel() قبل الحفظ.
-          • إن فشل التحقق → أبلغ المطور ولا تحفظ.
-          • عند استثناء غير متوقع → نُكمل (fail-open) ولا نمنع
-            المطور من الحفظ.
+          • escape(str(title_for_display)) قبل .format().
 
-    🟢 FIX-DEV-IDS: _is_dev_user يدعم CONFIG.DEVELOPER_IDS
-        (قائمة IDs إضافية للفريق، بصرف النظر عن PRIMARY_OWNER_ID).
+    🟢 FIX-FORBIDDEN: التقاط telegram.error.Forbidden صراحةً في
+        _verify_bot_in_log_channel.
+        المشكلة:
+          • Forbidden ليس BadRequest → يسقط في except Exception
+            → يُصنَّف "unknown_error" بدل "bot_not_member".
+        الإصلاح:
+          • `except (BadRequest, Forbidden) as e:` + إضافة
+            "bot was kicked" و "bot was blocked" للأنماط.
 
-    🟢 FIX-PENALTY-UX: عند فُقدان penalty_type في
-        WAIT_PENALTY_DURATION → أرسل رسالة واضحة للمستخدم
-        بدل الخروج الصامت.
+    🟢 FIX-WWW-TME: دعم `https://www.t.me/...` في _parse_channel_ref.
+        المشكلة:
+          • urlparse يعيد netloc="www.t.me" → لا يطابق 't.me'.
+        الإصلاح:
+          • تطبيع netloc بإزالة "www." قبل المقارنة.
+          • قبول البدء النصي بـ `www.t.me/`.
 
+    🟢 FIX-DEV-IDS-STR: دعم CONFIG.DEVELOPER_IDS كنص مفصول بفواصل.
+        المشكلة:
+          • إذا كان DEVELOPER_IDS = "111,222,333" → التكرار يقرأ
+            حرفاً حرفاً، وكل حرف يفشل في int() بصمت.
+        الإصلاح:
+          • فحص isinstance(ids_attr, str) → split(',') + strip.
+
+✅ v7.18.42 (LOG-CHANNEL-MEMBERSHIP-VERIFY) — محفوظ:
+    • FIX-LOGCH-8: التحقق من عضوية/صلاحيات البوت قبل الحفظ.
+    • FIX-DEV-IDS: دعم CONFIG.DEVELOPER_IDS (قائمة).
+    • FIX-PENALTY-UX: رسالة واضحة عند فُقدان penalty_type.
 ✅ v7.18.41 (LOG-CHANNEL-NUMERIC-ID-FIX) — محفوظ:
     • FIX-LOGCH-6: تحويل @username/URL → chat_id رقمي.
     • FIX-LOGCH-7: عرض العنوان + الرقم في التأكيد.
@@ -52,7 +68,7 @@ from datetime import datetime
 from urllib.parse import urlparse
 from collections import defaultdict, deque, OrderedDict
 
-from telegram.error import BadRequest
+from telegram.error import BadRequest, Forbidden
 
 from config import CONFIG
 from database import DB, TimeUtils, internal_cache
@@ -409,6 +425,7 @@ def _as_bool(value, default=False) -> bool:
 
 # ═════════════════════════════════════════════════════════════════════
 # 🆕 v7.18.42 FIX-DEV-IDS: دعم DEVELOPER_IDS + owner
+# 🆕 v7.18.43 FIX-DEV-IDS-STR: دعم نص مفصول بفواصل
 # ═════════════════════════════════════════════════════════════════════
 def _is_dev_user(user_id) -> bool:
     """فحص موحّد لصلاحيات المطور (developer/owner).
@@ -418,6 +435,11 @@ def _is_dev_user(user_id) -> bool:
       • يدعم CONFIG.DEV_IDS كاسم بديل.
       • fallback لدوال is_developer/is_dev/is_owner على CONFIG.
       • fallback أخير PRIMARY_OWNER_ID.
+
+    v7.18.43 FIX-DEV-IDS-STR:
+      • إذا كانت أي قائمة من القوائم أعلاه **نصّاً** مفصولاً
+        بفواصل (مثل "111,222,333") → تُقسَّم قبل التكرار.
+        بدون هذا، كان التكرار يقرأ حرفاً حرفاً ويفشل بصمت.
     """
     try:
         if not user_id:
@@ -433,6 +455,13 @@ def _is_dev_user(user_id) -> bool:
                 ids_attr = getattr(CONFIG, attr_name, None)
                 if ids_attr is None:
                     continue
+                # 🆕 v7.18.43 FIX-DEV-IDS-STR
+                if isinstance(ids_attr, str):
+                    ids_attr = [
+                        x.strip()
+                        for x in ids_attr.split(',')
+                        if x.strip()
+                    ]
                 try:
                     for dev_id in ids_attr:
                         try:
@@ -1127,7 +1156,7 @@ async def _lazy_init_columns(bot=None):
         _columns_last_attempt_ts = now
 
         db_type = getattr(DB, "DB_TYPE", "sqlite")
-        logger.info("🔧 v7.18.42: Auto-migration (DB_TYPE=%s)", db_type)
+        logger.info("🔧 v7.18.43: Auto-migration (DB_TYPE=%s)", db_type)
 
         cols = [
             ("delete_protected_any", "INTEGER DEFAULT 0",
@@ -3137,6 +3166,10 @@ def _parse_contest_date(date_str):
 
 
 def _parse_channel_ref(raw: str) -> Tuple[bool, str]:
+    """
+    v7.18.43 FIX-WWW-TME: يدعم الآن `https://www.t.me/...`
+    و البدء النصي بـ `www.t.me/`.
+    """
     if not raw:
         return False, "empty"
     s = raw.strip()
@@ -3157,8 +3190,12 @@ def _parse_channel_ref(raw: str) -> Tuple[bool, str]:
         return False, "invalid_id"
     try:
         parsed = urlparse(s)
+        # 🆕 v7.18.43 FIX-WWW-TME: تطبيع netloc (إزالة www.)
+        netloc = (parsed.netloc or "").lower()
+        if netloc.startswith("www."):
+            netloc = netloc[4:]
         if (parsed.scheme in ('http', 'https')
-                and parsed.netloc in (
+                and netloc in (
                     't.me', 'telegram.me', 'telegram.dog')):
             path = parsed.path.lstrip('/')
             if path:
@@ -3166,7 +3203,9 @@ def _parse_channel_ref(raw: str) -> Tuple[bool, str]:
             return False, "empty_path"
     except Exception:
         pass
-    if s.startswith(('t.me/', 'telegram.me/')):
+    # 🆕 v7.18.43: قبول البدء النصي بـ www.t.me/
+    if s.startswith(('t.me/', 'telegram.me/', 'telegram.dog/',
+                     'www.t.me/')):
         return True, ""
     if re.match(r'^[a-zA-Z][a-zA-Z0-9_]{3,31}$', s):
         return True, ""
@@ -3222,6 +3261,12 @@ async def _check_admin_in_chat(context, chat_id, user_id) -> bool:
 
 
 async def _verify_bot_in_log_channel(context, channel_id):
+    """
+    v7.18.43 FIX-FORBIDDEN: يلتقط `Forbidden` صراحةً.
+
+    قبل الإصلاح: `Forbidden` كان يسقط في `except Exception`
+    ويُصنَّف "unknown_error" بدل "bot_not_member".
+    """
     if not channel_id:
         return False, "invalid_channel_id"
     try:
@@ -3236,11 +3281,13 @@ async def _verify_bot_in_log_channel(context, channel_id):
             timeout=10.0)
     except asyncio.TimeoutError:
         return False, "timeout"
-    except BadRequest as e:
+    except (BadRequest, Forbidden) as e:
+        # 🆕 v7.18.43 FIX-FORBIDDEN: توحيد المعالجة
         err = str(e).lower()
         if any(x in err for x in (
             "chat not found", "bot is not a member",
             "member not found", "user not found",
+            "bot was kicked", "bot was blocked",
         )):
             return False, "bot_not_member"
         if "chat_admin_required" in err or "not enough rights" in err:
@@ -4601,6 +4648,7 @@ class MessageHandlers:
 
     # ═══════════════════════════════════════════════════════════════════
     # 🆕 v7.18.41 FIX-LOGCH-6 + v7.18.42 FIX-LOGCH-8
+    # 🆕 v7.18.43 FIX-HTML-ESCAPE
     #     معالج قناة السجل (WAIT_LOG_CH)
     # ═══════════════════════════════════════════════════════════════════
     @staticmethod
@@ -4608,6 +4656,7 @@ class MessageHandlers:
         """
         v7.18.41 FIX-LOGCH-6: معالجة إدخال معرف قناة السجل العامة.
         v7.18.42 FIX-LOGCH-8: التحقق من عضوية/صلاحيات البوت قبل الحفظ.
+        v7.18.43 FIX-HTML-ESCAPE: escape عنوان القناة في التأكيد.
 
         🔴 التصحيح الحرج (v7.18.41):
           • قبل: كان يُحفظ الرابط/username كنص → group_log._read_global_key
@@ -4618,6 +4667,10 @@ class MessageHandlers:
         🔴 التصحيح الإضافي (v7.18.42):
           • قبل: يُحفظ الرقم حتى لو البوت ليس عضواً/مشرفاً.
           • بعد: نتحقق أولاً، وإذا فشل التحقق نُبلغ المطور ولا نحفظ.
+
+        🟢 التصحيح التجميلي (v7.18.43):
+          • escape عنوان القناة قبل إدراجه في رسالة التأكيد
+            (parse_mode='HTML').
         """
         user_id = (
             update.effective_user.id if update.effective_user else None)
@@ -4878,8 +4931,13 @@ class MessageHandlers:
                     "📌 ستستقبل أحداث الحماية والتنبيهات هنا.")
                 try:
                     display = f"{numeric_id}"
-                    if title_for_display and title_for_display != str(numeric_id):
-                        display = f"{title_for_display} (<code>{numeric_id}</code>)"
+                    if (title_for_display
+                            and title_for_display != str(numeric_id)):
+                        # 🆕 v7.18.43 FIX-HTML-ESCAPE:
+                        # escape العنوان قبل الإدراج في HTML.
+                        display = (
+                            f"{escape(str(title_for_display))} "
+                            f"(<code>{numeric_id}</code>)")
                     msg = tmpl.format(ch=display)
                 except (KeyError, IndexError):
                     msg = tmpl
@@ -7211,12 +7269,12 @@ __all__ = [
 
 
 # ═════════════════════════════════════════════════════════════════════
-# LOAD BEACON — v7.18.42
+# LOAD BEACON — v7.18.43
 # ═════════════════════════════════════════════════════════════════════
 
 try:
     logger.info(
-        "✅ handlers_message v7.18.42 loaded | "
+        "✅ handlers_message v7.18.43 loaded | "
         "BWM=%s | PRIVATE_HANDLERS=%d | "
         "external_handled=%d | "
         "routing-fallback=7-paths | "
@@ -7235,7 +7293,11 @@ try:
         "BATCH-SETTINGS=PG-1RTT+empty-cache+partial_return | "
         "ars_local_cache=5s-TTL | "
         "detectors-compat=v4.1.0 | "
-        "fixes=(FIX-LOGCH-8:membership-verify, "
+        "fixes=(FIX-HTML-ESCAPE:log-ch-confirm, "
+        "FIX-FORBIDDEN:catch, "
+        "FIX-WWW-TME:parse, "
+        "FIX-DEV-IDS-STR:split, "
+        "FIX-LOGCH-8:membership-verify, "
         "FIX-LOGCH-6:numeric-id-resolve, "
         "FIX-DEV-IDS:DEVELOPER_IDS, "
         "FIX-PENALTY-UX:session-lost-msg, "
