@@ -1,9 +1,18 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-db_diagnostics.py — واجهة تشخيص وصيانة قاعدة البيانات (v7.2.19 — GRACE-EXTENDED)
+db_diagnostics.py — واجهة تشخيص وصيانة قاعدة البيانات (v7.2.20 — COMMAND-FIX)
 ================================================================================
-🆕 v7.2.19 — GRACE-EXTENDED:
+🆕 v7.2.20 — COMMAND-FIX:
+
+    🟢 FIX-20: تصحيح مرجع الأمر غير الموجود:
+        - كان يُحيل إلى `/databases` (غير مُسجَّل في bot.py).
+        - أصبح يُحيل إلى `/db_diag` (مُسجَّل فعلياً + يعرض
+          نفس المعلومات + القاعدة النشطة).
+        - الموضعان: `_build_sections()` (S0 banner) و
+          `diagnose_db_quick()`.
+
+🆕 v7.2.19 — GRACE-EXTENDED — محفوظ:
 
     🟢 FIX-19: نافذة السماح موسَّعة لتشمل CPU / RAM / Filesystem —
         كانت GRACE-1/2 تعالج event_loop فقط. القياسات الأخرى
@@ -60,7 +69,7 @@ logger = logging.getLogger(__name__)
 # الإصدار + Startup grace
 # ═══════════════════════════════════════════════════════════════════════
 
-VERSION = "7.2.19"
+VERSION = "7.2.20"
 
 
 def _compute_process_start_monotonic() -> float:
@@ -3826,9 +3835,12 @@ async def _build_sections(*, include_probes: bool = True) -> List[str]:
 
     configured_dbs = _get_all_configured_databases()
     if len(configured_dbs) > 1:
+        # ✅ FIX-20 (v7.2.20): كان يشير إلى /databases (غير مُسجَّل في
+        # bot.py) — الآن يشير إلى /db_diag (مُسجَّل فعلياً ويعرض نفس
+        # المعلومات + القاعدة النشطة + قائمة كل المُعدّة).
         s0.append(
             f"⚠️ <b>تحذير:</b> يوجد <b>{len(configured_dbs)}</b> "
-            f"قواعد بيانات مُعدّة — راجع /databases للتفاصيل."
+            f"قواعد بيانات مُعدّة — راجع /db_diag للتفاصيل."
         )
         s0.append("")
     if s0:
@@ -4189,9 +4201,11 @@ async def diagnose_db_quick() -> str:
 
     configured_dbs = _get_all_configured_databases()
     if len(configured_dbs) > 1:
+        # ✅ FIX-20 (v7.2.20): كان يشير إلى /databases (غير مُسجَّل) —
+        # الآن يشير إلى /db_diag (مُسجَّل فعلياً).
         lines.append(
             f"⚠️ <b>{len(configured_dbs)} قواعد بيانات مُعدّة</b> — "
-            f"استخدم /databases للتفاصيل"
+            f"استخدم /db_diag للتفاصيل"
         )
 
     return "\n".join(lines)
@@ -4349,13 +4363,14 @@ __all__ = [
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# LOAD BEACON — v7.2.19
+# LOAD BEACON — v7.2.20
 # ═══════════════════════════════════════════════════════════════════════
 
 try:
     logger.info(
         "🛡️ db_diagnostics.py v%s loaded | "
-        "GRACE-EXTENDED ✅ | "
+        "COMMAND-FIX ✅ | "
+        "FIX-20=/databases→/db_diag ✅ | "
         "FIX-19=startup-grace-for-cpu-ram-fs ✅ | "
         "FIX-11..FIX-18 ✅ | FULL-FIX ✅ | STARTUP-GRACE ✅ | "
         "PERF-OPTIMIZED ✅ | MULTI-DB-DISCOVERY ✅ | "
