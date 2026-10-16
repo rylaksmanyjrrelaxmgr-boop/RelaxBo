@@ -1,26 +1,36 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-handlers_message.py - v7.18.46 (POST-AUDIT-CORRECTIONS)
+handlers_message.py - v7.18.47 (LOG-CHANNEL-KEY-UNIFICATION)
 (متوافق مع detectors v4.1.0 + banned_words_manager v1.2.0 + group_log v1.4.0)
 =============================================================================
-🆕 v7.18.46 (POST-AUDIT-CORRECTIONS — 5 إصلاحات):
+🆕 v7.18.47 (LOG-CHANNEL-KEY-UNIFICATION):
 
-    🟢 FIX-LOGCH-SCHEMELESS-URL: دعم `t.me/username` و
-        `telegram.dog/username` و `telegram.me/username`
-        بدون scheme في _handle_wait_log_ch_text
-        (كانت مقبولة في _parse_channel_ref لكنها تفشل في المعالجة).
-    🟢 FIX-DEAD-CODE-REMOVE: إزالة if لا يفعل شيئاً في _handle_group_impl
-        (كان `if _analysis_mode == "text-only": _analysis_mode = "text-only"`).
-    🟢 FIX-PH-HELPERS-USE: استخدام `_pg_ph` و `_ph_list` فعلياً في
-        مسارات PG لتفادي hardcoded placeholders.
-    🟢 FIX-RUN-SYNC-SAFE-FALLBACK: fallback في _run_sync_in_pool
-        يقتصر على أخطاء الجدولة (RuntimeError/OSError) فقط لتفادي
-        التنفيذ المزدوج عند فشل التنفيذ الفعلي.
-    🟢 FIX-REPLY-FSM-CLEANUP: تنظيف منطق handle_add_reply بحيث
-        `state_name == "WAIT_REPLY_TRIGGER"` لا يتأثر بوجود ` | `
-        في نص المستخدم.
+    🔴 FIX-LOGCH-KEY (CRITICAL): توحيد مفتاح قناة السجل.
+        المشكلة المُبلَّغ عنها:
+          • المطور يعيّن قناة سجل من اللوحة
+          • تظهر "✅ تم تعيين قناة السجل: ..." بنجاح
+          • لكن اللوحة تُظهر "غير مُعيَّن" عند العودة!
+          • DB: settings.log_channel = "-1004497316748" ✅
+            بينما: settings.log_channel_id غير موجود ❌
+        السبب الجذري:
+          _handle_wait_log_ch_text كان يكتب على 'log_channel'
+          بينما database_settings.py يقرأ/يكتب على 'log_channel_id'
+          (get_log_channel, set_log_channel, remove_log_channel,
+           _SETTING_VALIDATORS, auto-heal — كلها log_channel_id).
+        الإصلاح:
+          • استخدام DB.set_log_channel(numeric_id) أساساً — الدالة
+            المخصصة المُحصَّنة (FIX-Y1) التي تستخدم المفتاح الصحيح.
+          • fallback: DB.set_setting('log_channel_id', ...) عند
+            عدم توفر set_log_channel.
+          • SQL fallback على 'log_channel_id' أيضاً.
+          • تنظيف المفتاح الخاطئ 'log_channel' (لا يُستخدم بعد الآن).
 
+    🟢 FIX-LOGCH-KEY-CLEANUP: حذف المفاتيح القديمة تلقائياً:
+        • 'global_log_channel' (legacy قديم)
+        • 'log_channel' (المفتاح الخاطئ من v7.18.46)
+
+✅ v7.18.46 (POST-AUDIT-CORRECTIONS) — محفوظ بالكامل.
 ✅ v7.18.45 وما قبله — محفوظ بالكامل.
 =============================================================================
 """
@@ -93,7 +103,6 @@ def _db_is_mysql() -> bool:
     return _db_type() == "mysql"
 
 
-# 🆕 v7.18.45 FIX-PG-SUPPORT-INSERT: أدوات مساعدة للعناصر النائبة
 def _pg_ph(n: int) -> str:
     """يعيد العنصر النائب رقم n ($1-based) لقواعد PG."""
     return f"${n}"
@@ -440,13 +449,7 @@ def _as_bool(value, default=False) -> bool:
 # v7.18.45 FIX-DEV-IDS-INT: دعم الرقم المفرد
 # ═════════════════════════════════════════════════════════════════════
 def _is_dev_user(user_id) -> bool:
-    """فحص موحّد لصلاحيات المطور (developer/owner).
-
-    v7.18.45 FIX-DEV-IDS-INT: يدعم الآن:
-      • list/tuple/set من IDs
-      • str مفصول بفواصل ("111,222")
-      • int/float مفرد (111)
-    """
+    """فحص موحّد لصلاحيات المطور (developer/owner)."""
     try:
         if not user_id:
             return False
@@ -460,7 +463,6 @@ def _is_dev_user(user_id) -> bool:
                 ids_attr = getattr(CONFIG, attr_name, None)
                 if ids_attr is None:
                     continue
-                # v7.18.45 FIX-DEV-IDS-INT: تطبيع القيمة إلى iterable
                 if isinstance(ids_attr, (int, float)):
                     ids_attr = [int(ids_attr)]
                 elif isinstance(ids_attr, str):
@@ -513,8 +515,7 @@ def _row_to_dict_local(row) -> Optional[Dict[str, Any]]:
 
 
 # ═════════════════════════════════════════════════════════════════════
-# v7.18.45 FIX-RUN-SYNC-KWARGS: partial موحّد قبل الفرعين
-# 🆕 v7.18.46 FIX-RUN-SYNC-SAFE-FALLBACK: fallback آمن
+# v7.18.45 FIX-RUN-SYNC-KWARGS + v7.18.46 FIX-RUN-SYNC-SAFE-FALLBACK
 # ═════════════════════════════════════════════════════════════════════
 async def _run_sync_in_pool(
     fn: Callable[..., Any],
@@ -534,16 +535,11 @@ async def _run_sync_in_pool(
                 timeout, getattr(fn, "__name__", repr(fn)))
             raise
         except (RuntimeError, OSError) as _e:
-            # v7.18.46 FIX-RUN-SYNC-SAFE-FALLBACK:
-            # أخطاء الجدولة فقط (مجمع مُغلق، لا يمكن إنشاء future،
-            # أخطاء OS/قنوات) — نسمح بالـ fallback.
             logger.debug(
                 "_run_in_pool scheduling failed (%s: %s) — "
                 "falling back to asyncio.to_thread",
                 type(_e).__name__, _e)
         except Exception as _e:
-            # v7.18.46: أي خطأ آخر = غالباً فشل تنفيذ فعلي —
-            # لا نعيد المحاولة لتفادي التنفيذ المزدوج.
             logger.debug(
                 "_run_in_pool raised during execution (%s: %s) — "
                 "re-raising to avoid double execution",
@@ -897,7 +893,6 @@ _ban_add_lock = asyncio.Lock()
 _ban_add_last_cleanup = 0.0
 
 
-# v7.18.45 FIX-PRUNE-LOCK: قفل لتنظيف الكاشات
 _prune_caches_lock = asyncio.Lock()
 
 
@@ -1050,12 +1045,10 @@ _columns_last_error_log_ts = 0.0
 
 
 def _utc_now_iso() -> str:
-    """v7.18.45 FIX-DATETIME-DEPRECATED: بديل datetime.utcnow()."""
     return datetime.now(timezone.utc).isoformat()
 
 
 def _utc_now_str() -> str:
-    """v7.18.45 FIX-DATETIME-DEPRECATED: بديل datetime.utcnow().strftime()."""
     return datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
 
 
@@ -1190,7 +1183,7 @@ async def _lazy_init_columns(bot=None):
         _columns_last_attempt_ts = now
 
         db_type = _db_type()
-        logger.info("🔧 v7.18.45: Auto-migration (DB_TYPE=%s)", db_type)
+        logger.info("🔧 v7.18.47: Auto-migration (DB_TYPE=%s)", db_type)
 
         cols = [
             ("delete_protected_any", "INTEGER DEFAULT 0",
@@ -1592,7 +1585,6 @@ _running_delete_tasks: set = set()
 
 
 async def _delete_after_delay(bot, chat_id, message_id, delay=10, context=None):
-    """v7.18.44 FIX-DELETE-TIMEOUT: timeout صريح لتفادي تسرّب المهامّ."""
     try:
         if delay > 0:
             await asyncio.sleep(delay)
@@ -2627,7 +2619,6 @@ class GroupRateLimiterManager:
                 logger.error("❌ periodic_cleanup: %s", e)
 
 
-# v7.18.45 FIX-PRUNE-LOCK: تحويلها إلى async + قفل
 async def _prune_perf_caches() -> int:
     async with _prune_caches_lock:
         removed = 0
@@ -2906,7 +2897,6 @@ async def _get_batched_message_settings(
 
     if _db_is_pg():
         try:
-            # v7.18.46 FIX-PH-HELPERS-USE: نستخدم $1 مباشرة (placeholder واحد)
             row = await DB.fetchone(
                 """
                 SELECT
@@ -3214,9 +3204,7 @@ def _parse_contest_date(date_str):
 
 
 def _parse_channel_ref(raw: str) -> Tuple[bool, str]:
-    """
-    v7.18.43 FIX-WWW-TME + v7.18.44 FIX-WWW-CASE.
-    """
+    """v7.18.43 FIX-WWW-TME + v7.18.44 FIX-WWW-CASE."""
     if not raw:
         return False, "empty"
     s = raw.strip()
@@ -3261,8 +3249,6 @@ def _parse_channel_ref(raw: str) -> Tuple[bool, str]:
     return False, "unknown_format"
 
 
-# 🆕 v7.18.46 FIX-LOGCH-SCHEMELESS-URL: مساعد مشترك
-# يستخرج username من أنماط t.me بدون scheme
 _SCHEMELESS_TG_HOSTS_RE = re.compile(
     r'^(?:www\.)?(?:t\.me|telegram\.me|telegram\.dog)/',
     re.IGNORECASE,
@@ -3270,25 +3256,13 @@ _SCHEMELESS_TG_HOSTS_RE = re.compile(
 
 
 def _extract_username_from_schemeless_url(raw: str) -> Optional[str]:
-    """
-    v7.18.46: يستخرج username من روابط Telegram بدون scheme.
-
-    يقبل:
-      • t.me/username
-      • www.t.me/username
-      • telegram.me/username
-      • telegram.dog/username
-      • أي منها مع / أو ? لاحقاً
-
-    يعيد None إذا لم يكن النمط مطابقاً أو كان الرابط للدعوة (+xxx).
-    """
+    """v7.18.46: يستخرج username من روابط Telegram بدون scheme."""
     if not raw:
         return None
     s = raw.strip()
     if not _SCHEMELESS_TG_HOSTS_RE.match(s):
         return None
     path = _SCHEMELESS_TG_HOSTS_RE.sub('', s, count=1)
-    # قطع أي مسار لاحق أو query
     path = re.split(r'[/?#]', path, maxsplit=1)[0]
     if not path:
         return None
@@ -3320,8 +3294,6 @@ async def _check_admin_in_chat(context, chat_id, user_id) -> bool:
     except Exception:
         pass
     if not result:
-        # v7.18.45 FIX-PG-ADMIN-CHECK: SQL متوافق مع النوع
-        # v7.18.46 FIX-PH-HELPERS-USE: استخدام _pg_ph
         try:
             if _db_is_pg():
                 _admin_sql = (
@@ -3357,10 +3329,6 @@ async def _check_admin_in_chat(context, chat_id, user_id) -> bool:
     return result
 
 
-# ═════════════════════════════════════════════════════════════════════
-# v7.18.43 FIX-FORBIDDEN + v7.18.44 FIX-LOGCH-RETRY
-# v7.18.45 FIX-VERIFY-RETRY-TAG: تصنيف دقيق لأخطاء الشبكة في retry
-# ═════════════════════════════════════════════════════════════════════
 async def _verify_bot_in_log_channel(context, channel_id):
     if not channel_id:
         return False, "invalid_channel_id"
@@ -3410,7 +3378,6 @@ async def _verify_bot_in_log_channel(context, channel_id):
                     "retrying (id=%s)", e, channel_id)
                 await asyncio.sleep(1.0)
                 continue
-            # attempt==2 أو خطأ غير شبكي
             last_reason = (
                 f"net_{type(e).__name__}" if transient
                 else "unknown_error")
@@ -3971,8 +3938,6 @@ class MessageHandlers:
                     logger.debug("multilayer sync-pool error: %s", e)
                     _verdict = None
             if _verdict is None:
-                # v7.18.46 FIX-DEAD-CODE-REMOVE:
-                # أُزيل الفرع الذي كان يعيد تعيين _analysis_mode لنفسه.
                 try:
                     _spam_score, _spam_reasons = _compute_spam_score(ctx)
                 except Exception as e:
@@ -4413,7 +4378,6 @@ class MessageHandlers:
 
         return ptype, duration
 
-    # v7.18.45 FIX-VIOLATION-COUNTER: تصفير العدّاد عند غياب العقوبة
     @staticmethod
     async def _delete_and_warn(
         update, context, chat_id, user_id,
@@ -4553,7 +4517,6 @@ class MessageHandlers:
             context, chat_id, user_name, violation_type, lang,
             violation_count)
 
-        # v7.18.45 FIX-VIOLATION-COUNTER: تصفير العدّاد عند غياب العقوبة
         if not penalty_type:
             try:
                 await DB.reset_violation_count(user_id, chat_id)
@@ -4570,8 +4533,6 @@ class MessageHandlers:
             max_strikes = 3
         max_strikes = max(1, max_strikes)
         if violation_count < max_strikes:
-            # لم نصل للحد — لا نُصفّر (تصميم strike-system)،
-            # لكن في حال كانت العقوبة غير مفعّلة أصلاً فقد عالجناها أعلاه.
             return
         success, msg = await apply_violation_penalty(
             update, context, chat_id, user_id,
@@ -4775,13 +4736,31 @@ class MessageHandlers:
     # ═══════════════════════════════════════════════════════════════════
     # v7.18.43 FIX-HTML-ESCAPE + v7.18.44 FIX-MYSQL-UPSERT
     # v7.18.45 FIX-MYSQL-UPSERT-MODERN + FIX-LOGCH-NESTED-CODE
-    # 🆕 v7.18.46 FIX-LOGCH-SCHEMELESS-URL
-    #     معالج قناة السجل (WAIT_LOG_CH)
+    # v7.18.46 FIX-LOGCH-SCHEMELESS-URL
+    # 🆕 v7.18.47 FIX-LOGCH-KEY: توحيد المفتاح على log_channel_id
     # ═══════════════════════════════════════════════════════════════════
     @staticmethod
     async def _handle_wait_log_ch_text(update, context, state=None):
         """
-        v7.18.46: دعم `t.me/username` بدون scheme + UPSERT حديث.
+        v7.18.47 FIX-LOGCH-KEY: معالجة إدخال معرف قناة السجل.
+
+        🔴 التصحيح الحاسم (v7.18.47):
+          المشكلة: _handle_wait_log_ch_text كان يكتب على 'log_channel'
+          بينما database_settings.py (get_log_channel, set_log_channel,
+          remove_log_channel, _SETTING_VALIDATORS, auto-heal) كلها
+          تستخدم 'log_channel_id'.
+          النتيجة: "✅ تم تعيين قناة السجل" يظهر بنجاح، لكن اللوحة
+          تُظهر "غير مُعيَّن" — الكتابة نجحت على مفتاح، والقراءة
+          تبحث في مفتاح آخر.
+
+          الحل:
+            1) استخدام DB.set_log_channel(numeric_id) أساساً — الدالة
+               المخصصة المُحصَّنة (FIX-Y1) التي تستخدم المفتاح الصحيح.
+            2) fallback: DB.set_setting('log_channel_id', ...) عند
+               عدم توفر set_log_channel.
+            3) SQL fallback على 'log_channel_id'.
+            4) تنظيف المفاتيح القديمة 'global_log_channel' و
+               'log_channel' (المفتاح الخاطئ).
         """
         user_id = (
             update.effective_user.id if update.effective_user else None)
@@ -4853,7 +4832,6 @@ class MessageHandlers:
         if numeric_id is None:
             username_to_resolve = None
             if cleaned.startswith(('https://', 'http://')):
-                # صيغة URL كاملة
                 try:
                     parsed = urlparse(cleaned)
                     path = (parsed.path or '').lstrip('/')
@@ -4864,10 +4842,6 @@ class MessageHandlers:
             elif re.match(r'^[a-zA-Z][a-zA-Z0-9_]{3,31}$', cleaned):
                 username_to_resolve = cleaned
             else:
-                # 🆕 v7.18.46 FIX-LOGCH-SCHEMELESS-URL:
-                # دعم t.me/username و telegram.dog/username
-                # بدون scheme (كانت مقبولة في _parse_channel_ref
-                # لكنها تفشل هنا سابقاً).
                 username_to_resolve = _extract_username_from_schemeless_url(
                     raw)
 
@@ -4944,88 +4918,129 @@ class MessageHandlers:
                 "غير متوقّع — نكمل (fail-open) | user=%s id=%s err=%s",
                 user_id, numeric_id, _ve)
 
+        # ═══════════════════════════════════════════════════════════════
+        # 🆕 v7.18.47 FIX-LOGCH-KEY: الحفظ بالمفتاح الصحيح
+        # ═══════════════════════════════════════════════════════════════
         saved_ok = False
         saved_error = None
         value_to_save = str(numeric_id)
 
+        # ─── 1) المسار الأساسي: DB.set_log_channel (المفتاح الصحيح) ───
         try:
-            setter = getattr(DB, 'set_setting', None)
+            setter = getattr(DB, 'set_log_channel', None)
             if callable(setter):
                 try:
-                    result = setter('log_channel', value_to_save)
+                    result = setter(numeric_id)
                     if asyncio.iscoroutine(result):
                         result = await result
                     if result is False:
-                        saved_error = "set_setting أعاد False"
+                        saved_error = "set_log_channel أعاد False"
                     else:
                         saved_ok = True
-                except Exception as _e:
-                    saved_error = str(_e)[:120]
+                        logger.info(
+                            "✅ WAIT_LOG_CH: DB.set_log_channel(%s) نجح",
+                            numeric_id)
+                except Exception as _e1:
+                    saved_error = str(_e1)[:120]
                     logger.warning(
-                        "WAIT_LOG_CH: DB.set_setting(log_channel, %s) "
-                        "فشل: %s — محاولة SQL مباشرة",
-                        value_to_save, _e)
+                        "WAIT_LOG_CH: DB.set_log_channel(%s) فشل: %s — "
+                        "محاولة set_setting",
+                        numeric_id, _e1)
+        except Exception as _e1a:
+            saved_error = str(_e1a)[:120]
+            logger.warning(
+                "WAIT_LOG_CH: الوصول لـ DB.set_log_channel فشل: %s",
+                _e1a)
 
-            if not saved_ok:
-                # v7.18.45 FIX-MYSQL-UPSERT-MODERN
-                # v7.18.46 FIX-PH-HELPERS-USE: استخدام _ph_list
-                try:
-                    if _db_is_mysql():
-                        # MySQL 8.0.20+ modern syntax with fallback
-                        _ok_mysql = False
-                        try:
-                            await DB.execute(
-                                "INSERT INTO settings (key, value) "
-                                "VALUES (?, ?) AS new "
-                                "ON DUPLICATE KEY UPDATE "
-                                "value = new.value",
-                                ('log_channel', value_to_save))
-                            _ok_mysql = True
-                        except Exception as _mysql_new_err:
-                            logger.debug(
-                                "MySQL modern UPSERT failed: %s — "
-                                "trying legacy VALUES()",
-                                _mysql_new_err)
-                        if not _ok_mysql:
-                            await DB.execute(
-                                "INSERT INTO settings (key, value) "
-                                "VALUES (?, ?) "
-                                "ON DUPLICATE KEY UPDATE "
-                                "value = VALUES(value)",
-                                ('log_channel', value_to_save))
-                    elif _db_is_pg():
-                        _ph = _ph_list(2)
+        # ─── 2) fallback: DB.set_setting بالمفتاح الصحيح ───
+        if not saved_ok:
+            try:
+                setter = getattr(DB, 'set_setting', None)
+                if callable(setter):
+                    try:
+                        result = setter('log_channel_id', value_to_save)
+                        if asyncio.iscoroutine(result):
+                            result = await result
+                        if result is False:
+                            saved_error = "set_setting أعاد False"
+                        else:
+                            saved_ok = True
+                            logger.info(
+                                "✅ WAIT_LOG_CH: set_setting("
+                                "'log_channel_id', %s) نجح",
+                                value_to_save)
+                    except Exception as _e2:
+                        saved_error = saved_error or str(_e2)[:120]
+                        logger.warning(
+                            "WAIT_LOG_CH: set_setting('log_channel_id', "
+                            "%s) فشل: %s", value_to_save, _e2)
+            except Exception as _e2a:
+                saved_error = saved_error or str(_e2a)[:120]
+                logger.warning(
+                    "WAIT_LOG_CH: الوصول لـ set_setting فشل: %s", _e2a)
+
+        # ─── 3) SQL fallback على 'log_channel_id' ───
+        if not saved_ok:
+            try:
+                if _db_is_mysql():
+                    _ok_mysql = False
+                    try:
                         await DB.execute(
-                            f"INSERT INTO settings (key, value) "
-                            f"VALUES ({_ph}) "
-                            f"ON CONFLICT (key) DO UPDATE "
-                            f"SET value = EXCLUDED.value",
-                            ('log_channel', value_to_save))
-                    else:
+                            "INSERT INTO settings (key, value) "
+                            "VALUES (?, ?) AS new "
+                            "ON DUPLICATE KEY UPDATE "
+                            "value = new.value",
+                            ('log_channel_id', value_to_save))
+                        _ok_mysql = True
+                    except Exception as _mysql_new_err:
+                        logger.debug(
+                            "MySQL modern UPSERT failed: %s — "
+                            "trying legacy VALUES()",
+                            _mysql_new_err)
+                    if not _ok_mysql:
                         await DB.execute(
                             "INSERT INTO settings (key, value) "
                             "VALUES (?, ?) "
-                            "ON CONFLICT (key) DO UPDATE "
-                            "SET value = EXCLUDED.value",
-                            ('log_channel', value_to_save))
-                    saved_ok = True
-                except Exception as _e2:
-                    saved_error = saved_error or str(_e2)[:120]
-                    logger.error(
-                        "WAIT_LOG_CH: SQL fallback فشل: %s", _e2)
+                            "ON DUPLICATE KEY UPDATE "
+                            "value = VALUES(value)",
+                            ('log_channel_id', value_to_save))
+                elif _db_is_pg():
+                    _ph = _ph_list(2)
+                    await DB.execute(
+                        f"INSERT INTO settings (key, value) "
+                        f"VALUES ({_ph}) "
+                        f"ON CONFLICT (key) DO UPDATE "
+                        f"SET value = EXCLUDED.value",
+                        ('log_channel_id', value_to_save))
+                else:
+                    await DB.execute(
+                        "INSERT INTO settings (key, value) "
+                        "VALUES (?, ?) "
+                        "ON CONFLICT (key) DO UPDATE "
+                        "SET value = EXCLUDED.value",
+                        ('log_channel_id', value_to_save))
+                saved_ok = True
+                logger.info(
+                    "✅ WAIT_LOG_CH: SQL fallback على 'log_channel_id' نجح")
+            except Exception as _e3:
+                saved_error = saved_error or str(_e3)[:120]
+                logger.error(
+                    "WAIT_LOG_CH: SQL fallback فشل: %s", _e3)
 
-            if saved_ok:
+        # ─── 4) تنظيف المفاتيح القديمة ───
+        if saved_ok:
+            for _legacy_key in ('global_log_channel', 'log_channel'):
                 try:
                     await DB.execute(
                         "DELETE FROM settings WHERE key = ?",
-                        ('global_log_channel',))
-                except Exception as _e3:
+                        (_legacy_key,))
                     logger.debug(
-                        "WAIT_LOG_CH: حذف legacy فشل: %s", _e3)
-        except Exception as e:
-            saved_error = saved_error or str(e)[:120]
-            logger.error(
-                "WAIT_LOG_CH: حفظ فشل كلياً: %s", e, exc_info=True)
+                        "🧹 WAIT_LOG_CH: حذف المفتاح القديم '%s'",
+                        _legacy_key)
+                except Exception as _e4:
+                    logger.debug(
+                        "WAIT_LOG_CH: حذف '%s' فشل: %s",
+                        _legacy_key, _e4)
 
         if saved_ok:
             try:
@@ -5053,6 +5068,15 @@ class MessageHandlers:
             except Exception as _ie:
                 logger.debug(
                     "WAIT_LOG_CH: invalidate menus: %s", _ie)
+            try:
+                if hasattr(settings_cache, 'invalidate_bot_settings'):
+                    r = settings_cache.invalidate_bot_settings(
+                        'log_channel_id')
+                    if asyncio.iscoroutine(r):
+                        await r
+            except Exception as _se:
+                logger.debug(
+                    "WAIT_LOG_CH: invalidate settings cache: %s", _se)
 
         try:
             StateManager.clear(user_id)
@@ -5075,8 +5099,6 @@ class MessageHandlers:
                     "✅ تم تعيين قناة السجل:\n<code>{ch}</code>\n\n"
                     "📌 ستستقبل أحداث الحماية والتنبيهات هنا.")
                 try:
-                    # v7.18.45 FIX-LOGCH-NESTED-CODE:
-                    # نُدخل النص الإضافي كنص عادي لتجنّب تداخل <code>.
                     if (title_for_display
                             and title_for_display != str(numeric_id)):
                         display = (
@@ -5094,7 +5116,7 @@ class MessageHandlers:
                     "WAIT_LOG_CH: send ack فشل: %s", _se)
             logger.info(
                 "✅ WAIT_LOG_CH: قناة السجل عُيّنت | "
-                "user=%s raw=%r → id=%s",
+                "user=%s raw=%r → id=%s (key=log_channel_id)",
                 user_id, raw[:60], numeric_id)
         else:
             try:
@@ -5251,10 +5273,6 @@ class MessageHandlers:
                 "⚠️ ADDING_POSTS: فشل (None) — user=%s ch=%s",
                 user_id, active_db_id)
 
-    # ═══════════════════════════════════════════════════════════════════
-    # v7.18.29 FIX-SUPPORT-2 + v7.18.45 FIX-PG-SUPPORT-INSERT
-    # 🆕 v7.18.46 FIX-PH-HELPERS-USE
-    # ═══════════════════════════════════════════════════════════════════
     @staticmethod
     async def _handle_support_mode_text(update, context, state=None):
         user_id = (
@@ -5378,8 +5396,6 @@ class MessageHandlers:
                     now_str = _utc_now_iso()
 
                     if _is_pg and callable(fetchone_fn):
-                        # v7.18.45 FIX-PG-SUPPORT-INSERT:
-                        # v7.18.46 FIX-PH-HELPERS-USE
                         sql_pg = (
                             "INSERT INTO support_tickets "
                             "(user_id, message, media_type, created_at) "
@@ -5559,9 +5575,6 @@ class MessageHandlers:
             "WAIT_REPLY_RESPONSE",
             keyword[:40], user_id, chat_id)
 
-    # ═══════════════════════════════════════════════════════════════════
-    # v7.18.45 FIX-PG-AUTO-DEL: SQL متوافق مع نوع القاعدة
-    # ═══════════════════════════════════════════════════════════════════
     @staticmethod
     async def _handle_wait_auto_del_text(
         update, context, state=None
@@ -5629,8 +5642,6 @@ class MessageHandlers:
                     fetchval = getattr(DB, "fetchval", None)
                     if callable(fetchval):
                         try:
-                            # v7.18.45 FIX-PG-AUTO-DEL
-                            # v7.18.46 FIX-PH-HELPERS-USE
                             if _db_is_pg():
                                 _exists_sql = (
                                     "SELECT 1 FROM auto_replies "
@@ -5651,8 +5662,6 @@ class MessageHandlers:
                                 "auto_del existence check: %s", _ee)
                             exists = None
 
-                    # v7.18.45 FIX-PG-AUTO-DEL: DELETE متوافق
-                    # v7.18.46 FIX-PH-HELPERS-USE
                     if _db_is_pg():
                         _del_sql = (
                             "DELETE FROM auto_replies "
@@ -6649,7 +6658,6 @@ class MessageHandlers:
             await MessageHandlers._finalize_ban_add(
                 context, user_id, success)
 
-    # 🆕 v7.18.46 FIX-REPLY-FSM-CLEANUP: تنظيف منطق FSM
     @staticmethod
     async def handle_add_reply(update, context, state=None):
         user_id = (
@@ -6677,10 +6685,6 @@ class MessageHandlers:
         if not raw:
             return
 
-        # v7.18.46 FIX-REPLY-FSM-CLEANUP:
-        # ترتيب الفروع بحسب الحالة أولاً، ثم fallback للصيغة
-        # `trigger | response` عندما لا تكون الحالة محدّدة أو
-        # عندما تكون WAIT_REPLY_ADD.
         if state_name == "WAIT_REPLY_TRIGGER":
             trigger = raw
             context.user_data['reply_trigger_pending'] = trigger
@@ -7430,25 +7434,23 @@ __all__ = [
     "_db_type",
     "_db_is_pg",
     "_db_is_mysql",
-    # v7.18.45
     "_pg_ph",
     "_ph_list",
     "_utc_now_iso",
     "_utc_now_str",
     "_prune_caches_lock",
-    # 🆕 v7.18.46
     "_extract_username_from_schemeless_url",
     "_SCHEMELESS_TG_HOSTS_RE",
 ]
 
 
 # ═════════════════════════════════════════════════════════════════════
-# LOAD BEACON — v7.18.46
+# LOAD BEACON — v7.18.47
 # ═════════════════════════════════════════════════════════════════════
 
 try:
     logger.info(
-        "✅ handlers_message v7.18.46 loaded | "
+        "✅ handlers_message v7.18.47 loaded | "
         "BWM=%s | PRIVATE_HANDLERS=%d | "
         "external_handled=%d | "
         "routing-fallback=7-paths-deduped | "
@@ -7456,13 +7458,16 @@ try:
         "WARMUP=available | "
         "DB-TYPE=%s | "
         "WAIT_LOG_CH=direct-handler | "
+        "LOG-CHANNEL-KEY=log_channel_id (CANONICAL, unified) | "
         "detectors-compat=v4.1.0 | "
-        "fixes=(FIX-LOGCH-SCHEMELESS-URL, "
+        "fixes=(FIX-LOGCH-KEY:unified-key, "
+        "FIX-LOGCH-SCHEMELESS-URL, "
         "FIX-DEAD-CODE-REMOVE, "
         "FIX-PH-HELPERS-USE, "
         "FIX-RUN-SYNC-SAFE-FALLBACK, "
         "FIX-REPLY-FSM-CLEANUP, "
-        "v7.18.45-all-fixes, v7.18.44-all-fixes, v7.18.43-all-fixes)",
+        "v7.18.46-all, v7.18.45-all, v7.18.44-all, "
+        "v7.18.43-all)",
         "yes" if _HAS_BWM else "no",
         len(MessageHandlers._PRIVATE_HANDLERS_MAP),
         len(_EXTERNAL_HANDLED_STATES),
