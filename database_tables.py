@@ -2,19 +2,23 @@
 # -*- coding: utf-8 -*-
 
 """
-database_tables.py — إنشاء الجداول والفهارس لكل قواعد البيانات (v7.9.11)
+database_tables.py — إنشاء الجداول والفهارس لكل قواعد البيانات (v7.9.12)
 ================================================================================
-🆕 v7.9.11 (SYNTAX-WARNING-FIX):
+🆕 v7.9.12 (DELETE-SPAM-SCORE-COLUMN):
+  🟢 FIX-DSS-1: إضافة عمود `delete_spam_score` إلى CREATE TABLE group_security
+      في 3 أماكن (SQLite / PostgreSQL / MySQL).
+      السبب: database_migrations.py v1.1.0 يُعرِّف العمود عبر
+      _MIGRATIONS_TYPES → يُضاف عبر ALTER TABLE في التنصيبات الموجودة،
+      لكن كان مفقوداً من CREATE TABLE في التنصيبات الجديدة.
+      الأثر: تنصيبات جديدة تُنشئ العمود مباشرة (بدون ALTER إضافي).
+      لا تغيير وظيفي على التنصيبات الحالية (migration يبقى يعمل).
+
+  ✅ لا تغيير في المنطق — كل إصلاحات v7.9.11 محفوظة.
+
+🆕 v7.9.11 (SYNTAX-WARNING-FIX) — محفوظ:
   🔧 FIX-SW-1: إصلاح SyntaxWarning من `\m` و `\M` في docstrings.
-      المشكلة المُكتشفة من سجل Render:
-        database_tables.py:23: SyntaxWarning: invalid escape sequence '\m'
-        database_tables.py:1846: SyntaxWarning: invalid escape sequence '\m'
-      السبب: `\m` و `\M` في docstrings Python تعتبر escape sequences
-      غير صالحة (Python 3.12+ تُصدر تحذير).
       الإصلاح: `\\m` و `\\M` (شرطة خلفية مضاعفة).
       الأثر: لا تغيير وظيفي — فقط إزالة التحذير.
-
-  ✅ لا تغيير في المنطق — كل إصلاحات v7.9.10 محفوظة.
 
 🆕 v7.9.10 (AUDIT-REMEDIATION — 6 BUGs + 5 M-issues) — محفوظ:
   🔴 BUG-1: حذف idx_settings_key من CRITICAL_SMALL_TABLE_INDEXES.
@@ -38,7 +42,7 @@ database_tables.py — إنشاء الجداول والفهارس لكل قوا�
 ================================================================================
 """
 
-__version__ = "7.9.11"
+__version__ = "7.9.12"
 
 import asyncio
 import logging
@@ -3794,6 +3798,9 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
         )
     """)
 
+    # ═══════════════════════════════════════════════════════════════════
+    # 🟢 v7.9.12 FIX-DSS-1: delete_spam_score مُضاف (كان مفقوداً)
+    # ═══════════════════════════════════════════════════════════════════
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS group_security (
             chat_id INTEGER PRIMARY KEY,
@@ -3859,7 +3866,8 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
             delete_emails INTEGER DEFAULT 0,
             delete_protected_any INTEGER DEFAULT 0,
             delete_postbot_pattern INTEGER DEFAULT 0,
-            delete_protected_forward INTEGER DEFAULT 0
+            delete_protected_forward INTEGER DEFAULT 0,
+            delete_spam_score INTEGER DEFAULT 1
         )
     """)
 
@@ -4116,8 +4124,7 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
             features TEXT CHECK(features IS NULL OR json_valid(features)),
             is_active INTEGER DEFAULT 1,
             is_gift INTEGER DEFAULT 0,
-            created_at TEXT
-        )
+            created_at TEXT        )
     """)
 
     await conn.execute("""
@@ -4267,7 +4274,7 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
             "(version, applied_at, description) "
             "VALUES (?, ?, ?) ON CONFLICT(version) DO NOTHING",
             (CURRENT_SCHEMA_VERSION, _safe_now_iso(TimeUtils),
-             "v7.9.11-syntax-warning-fix"),
+             "v7.9.12-delete-spam-score-column"),
         )
         await conn.commit()
     except Exception as e:
@@ -4279,7 +4286,7 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
     if logger:
         logger.info(
             "✅ تم إنشاء جميع جداول SQLite مع الفهارس المحسنة "
-            "(v7.9.11 — SYNTAX-WARNING-FIX)"
+            "(v7.9.12 — DELETE-SPAM-SCORE-COLUMN)"
         )
 
 
@@ -4518,6 +4525,9 @@ async def create_tables_postgres(
         )
     """)
 
+    # ═══════════════════════════════════════════════════════════════════
+    # 🟢 v7.9.12 FIX-DSS-1: delete_spam_score مُضاف (كان مفقوداً)
+    # ═══════════════════════════════════════════════════════════════════
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS group_security (
             chat_id BIGINT PRIMARY KEY,
@@ -4583,7 +4593,8 @@ async def create_tables_postgres(
             delete_emails INTEGER DEFAULT 0,
             delete_protected_any INTEGER DEFAULT 0,
             delete_postbot_pattern INTEGER DEFAULT 0,
-            delete_protected_forward INTEGER DEFAULT 0
+            delete_protected_forward INTEGER DEFAULT 0,
+            delete_spam_score INTEGER DEFAULT 1
         )
     """)
 
@@ -5012,7 +5023,7 @@ async def create_tables_postgres(
             "VALUES ($1, $2, $3) ON CONFLICT (version) DO NOTHING",
             CURRENT_SCHEMA_VERSION,
             _safe_now_dt(TimeUtils),
-            "v7.9.11-syntax-warning-fix",
+            "v7.9.12-delete-spam-score-column",
         )
     except Exception as e:
         if logger:
@@ -5023,7 +5034,7 @@ async def create_tables_postgres(
     if logger:
         logger.info(
             "✅ تم إنشاء جميع جداول PostgreSQL مع الفهارس المحسنة "
-            "(v7.9.11 — SYNTAX-WARNING-FIX)"
+            "(v7.9.12 — DELETE-SPAM-SCORE-COLUMN)"
         )
 
 
@@ -5247,6 +5258,9 @@ async def create_tables_mysql(conn, logger, TimeUtils):
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
         """)
 
+        # ═══════════════════════════════════════════════════════════════
+        # 🟢 v7.9.12 FIX-DSS-1: delete_spam_score مُضاف (كان مفقوداً)
+        # ═══════════════════════════════════════════════════════════════
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS group_security (
                 chat_id BIGINT PRIMARY KEY,
@@ -5314,7 +5328,8 @@ async def create_tables_mysql(conn, logger, TimeUtils):
                 delete_emails TINYINT(1) DEFAULT 0,
                 delete_protected_any TINYINT(1) DEFAULT 0,
                 delete_postbot_pattern TINYINT(1) DEFAULT 0,
-                delete_protected_forward TINYINT(1) DEFAULT 0
+                delete_protected_forward TINYINT(1) DEFAULT 0,
+                delete_spam_score TINYINT(1) DEFAULT 1
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
         """)
 
@@ -5725,7 +5740,7 @@ async def create_tables_mysql(conn, logger, TimeUtils):
                 (
                     CURRENT_SCHEMA_VERSION,
                     _safe_now_iso(TimeUtils),
-                    "v7.9.11-syntax-warning-fix",
+                    "v7.9.12-delete-spam-score-column",
                 ),
             )
         except Exception as e:
@@ -5737,7 +5752,7 @@ async def create_tables_mysql(conn, logger, TimeUtils):
         if logger:
             logger.info(
                 "✅ تم إنشاء جميع جداول MySQL مع الفهارس المحسنة "
-                "(v7.9.11 — SYNTAX-WARNING-FIX)"
+                "(v7.9.12 — DELETE-SPAM-SCORE-COLUMN)"
             )
 
     finally:
@@ -5803,12 +5818,13 @@ __all__ = [
 
 
 # =====================================================================
-# LOAD BEACON — v7.9.11
+# LOAD BEACON — v7.9.12
 # =====================================================================
 
 try:
     _beacon_parts = [
         f"🛡️ database_tables.py v{__version__} loaded",
+        f"FIX-DSS-1 delete_spam_score-added=✅",
         f"FIX-SW-1 escape-sequences-fixed=✅",
         f"FIX-C12a VACUUM_DELAY={VACUUM_INTER_TABLE_DELAY_SECONDS}s",
         f"FIX-C12b CRITICAL_SMALL_INDEXES={len(CRITICAL_SMALL_TABLE_INDEXES)}",
