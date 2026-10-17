@@ -1,35 +1,52 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-🌿 Relax Manager – البوت الرئيسي (bot.py v5.6.37-METRICS-WORKAROUND)
+🌿 Relax Manager – البوت الرئيسي (bot.py v5.6.38-METRICS-INTEGRATION)
 ================================================================================
 📌 نقطة الدخول الرسمية للتطبيق (entrypoint).
 
-🆕 v5.6.37 (METRICS-WORKAROUND):
-    🟢 NEW-CMD-POSTS-STATS:
-        المشكلة المكتشفة: auto_publish في utils.py ينشر بنجاح
-        (سجل: "✅ قناة 18 نشرت" @ 14:00:27) لكن admin_metrics_live
-        يُظهر "منشورات ناجحة: 0". السبب: auto_publish لا يستدعي
-        أي increment على العدّاد المستخدم في handlers_analytics.
+🆕 v5.6.38 (FIX-POSTS-STATS-SQL):
+    🔴 FIX-SQL-PUBLISHED:
+        `/posts_stats` كان يستخدم `published = TRUE` (boolean)
+        لكن العمود في DB هو INTEGER (0/1) → UndefinedFunctionError.
+        الآن: يجرّب `published_at NOT NULL` أولاً (مؤكد أنه يعمل)،
+        ثم `published = 1` (integer)، ثم `published = TRUE`
+        (boolean - احتياطياً لـ schemas أخرى).
 
-        هذا الإصلاح في bot.py (utils.py يحتاج تعديلاً منفصلاً):
+    🔴 FIX-SQL-PER-CHANNEL:
+        per-channel query كان يستخدم `published = TRUE` (فشل).
+        الآن يستخدم `published_at IS NOT NULL` مباشرة.
 
-        • /posts_stats — أمر جديد يقرأ من DB مباشرة (مصدر الحقيقة)
-          يجرب أنماط استعلام متعددة (published, published_at, sent_at,
-          status, count-all) ليعمل مع أي schema محتملة.
-          يُظهر إحصائيات لكل قناة + الإجمالي.
+    🟢 IMPROVE-UPTIME-DISPLAY:
+        عرض uptime بالدقائق والثواني بدلاً من الثواني فقط.
 
-        • _BOT_METRICS + record_bot_metric() — عدّاد في bot.py يمكن
-          لـ utils.py استدعاؤه إذا أُضيف سطر واحد:
-              from bot import record_bot_metric
-              record_bot_metric("posts_success")
-          بعد كل نشر ناجح. لم يُدمَج في handlers_analytics بعد لأن
-          ذلك يتطلب تعديل handlers_analytics.py أيضاً.
+    🟢 IMPROVE-CONSISTENCY-CHECK:
+        مقارنة ذكية بين bot.py _BOT_METRICS و DB 24h —
+        تنبيه إن كان bot.py > DB (غير طبيعي).
 
-        💡 الخطوة التالية الموصى بها: أرسل دالة auto_publish من
-           utils.py لتعديلها بدقة.
+    🟢 IMPROVE-FIRST-BOOT-HINT:
+        رسالة توضيحية عند uptime < 10min + posts_success=0:
+        "البوت حديث — لم ينشر بعد".
 
-🆕 v5.6.36 (HARDENING) — محفوظ.
+🆕 v5.6.37 (METRICS-INTEGRATION) — محفوظ:
+    🟢 NEW-BOT-METRICS: _BOT_METRICS + record_bot_metric()
+    🟢 NEW-PING-METRICS: cmd_ping يسجل pings في _BOT_METRICS
+    🟢 NEW-CMD-POSTS-STATS: /posts_stats مع 5 أنماط استعلام
+    🟢 NEW-ADMIN-BUTTON: ("posts_stats", ...) في ADMIN_COMMANDS
+    🟢 NEW-REGISTER-HANDLER: تسجيل /posts_stats في main()
+
+🆕 v5.6.36 (HARDENING) — محفوظ:
+    🔴 FIX-PING-ADMIN-GUARD
+    🔴 FIX-KEEPALIVE-LOG-FLOOD
+    🔴 FIX-STOP-POLLING-ORDER
+    🟠 FIX-DOUBLE-PAYMENT-UX
+    🟠 FIX-GIFT-NOTIFY-DEV
+    🟠 FIX-CMD-PING-MODERN
+    🟠 FIX-RESOLVE-PORT-NONE
+    🟠 FIX-RESOLVE-HOSTNAME-INVALID
+    🟡 FIX-VERIFY-CALLABLE
+    🟢 FIX-BOT-DATA-ADMIN-IDS
+
 🆕 v5.6.35 (PING-LATENCY) — محفوظ.
 🆕 v5.6.34 (CLEANUP-HARDENING) — محفوظ.
 🆕 v5.6.33 (PAYMENT-ORDER-FIX + POST-INIT-WEBHOOK + DB-CLOSE + SIGNAL-EARLY) — محفوظ.
@@ -69,7 +86,7 @@ from telegram import (
     BotCommandScopeDefault,
 )
 
-# 🆕 v5.6.36: ReplyParameters (PTB >=20.8) — optional fallback
+# v5.6.36: ReplyParameters (PTB >=20.8) — optional fallback
 try:
     from telegram import ReplyParameters
     _HAS_REPLY_PARAMETERS = True
@@ -794,27 +811,8 @@ def _amounts_match(expected: Any, actual: Any) -> bool:
 
 _NOTIFY_TASKS: Set[asyncio.Task] = set()
 
-def _spawn_notify_dev_log(context, text: str) -> None:
-    try:
-        task = asyncio.create_task(_notify_dev_log(context, text))
-        _NOTIFY_TASKS.add(task)
-
-        def _cleanup(t: asyncio.Task) -> None:
-            _NOTIFY_TASKS.discard(t)
-            try:
-                if not t.cancelled() and t.exception():
-                    logger.debug(
-                        "notify_dev_log task failed: %s", t.exception()
-                    )
-            except Exception:
-                pass
-
-        task.add_done_callback(_cleanup)
-    except Exception as _e:
-        logger.debug("_spawn_notify_dev_log: %s", _e)
-
 # ═══════════════════════════════════════════════════════════════════
-# 🆕 v5.6.37: BOT METRICS — عدّاد في bot.py يمكن لـ utils.py استدعاؤه
+# 🆕 v5.6.37: BOT METRICS — عدّاد في bot.py يستدعيه utils.py
 # ═══════════════════════════════════════════════════════════════════
 
 _BOT_METRICS: Dict[str, Any] = {
@@ -835,6 +833,10 @@ def record_bot_metric(key: str, value: Any = 1) -> None:
     الاستخدام من utils.py بعد كل نشر ناجح:
         from bot import record_bot_metric
         record_bot_metric("posts_success")
+
+    الاستخدام من handlers_callback لتحسين ping:
+        from bot import _BOT_METRICS
+        _BOT_METRICS["pings_total"] += 1
     """
     try:
         cur = _BOT_METRICS.get(key)
@@ -844,6 +846,26 @@ def record_bot_metric(key: str, value: Any = 1) -> None:
             _BOT_METRICS[key] = value
     except Exception as _e:
         logger.debug("record_bot_metric(%r): %s", key, _e)
+
+
+def _spawn_notify_dev_log(context, text: str) -> None:
+    try:
+        task = asyncio.create_task(_notify_dev_log(context, text))
+        _NOTIFY_TASKS.add(task)
+
+        def _cleanup(t: asyncio.Task) -> None:
+            _NOTIFY_TASKS.discard(t)
+            try:
+                if not t.cancelled() and t.exception():
+                    logger.debug(
+                        "notify_dev_log task failed: %s", t.exception()
+                    )
+            except Exception:
+                pass
+
+        task.add_done_callback(_cleanup)
+    except Exception as _e:
+        logger.debug("_spawn_notify_dev_log: %s", _e)
 
 # ═══════════════════════════════════════════════════════════════════
 # WARMUP-1: spawn warmup detectors pool (non-blocking)
@@ -1549,7 +1571,6 @@ GROUP_COMMANDS = [
     ("unban", "🔓 إلغاء حظر"),
     ("pin", "📌 تثبيت رسالة"),
 ]
-
 # ═══════════════════════════════════════════════════════════════════
 # إغلاق مهام + pool + default executor
 # ═══════════════════════════════════════════════════════════════════
@@ -3257,7 +3278,24 @@ async def _diag_incoming(update, context):
 # ═══════════════════════════════════════════════════════════════════
 
 async def cmd_ping(update, context):
-    """🏓 قياس كمون حقيقي من داخل البوت."""
+    """
+    🏓 قياس كمون حقيقي من داخل البوت.
+
+    يقيس:
+      • Send API RTT — الوقت الفعلي لـ reply_text (يمثل الرد الحقيقي)
+      • Message age  — زمن الوصول التقريبي (دقة 1s من Telegram)
+      • Edit API RTT — الوقت الفعلي لـ edit_text (يُسجَّل فقط)
+
+    v5.6.36:
+      • فحص أدمن داخلي عبر context.bot_data["admin_ids"]
+      • ReplyParameters بدل reply_to_message_id (PTB >=20.8)
+      • fallback آمن عند فشل reply_text
+      • تسمية "زمن الوصول" بدل "عمر الرسالة"
+
+    v5.6.37:
+      • تسجيل pings_total / ping_sum_ms / ping_min_ms / ping_max_ms
+        في _BOT_METRICS (للوحة المقاييس الحية).
+    """
     user = update.effective_user
     if user is None:
         return
@@ -3298,7 +3336,7 @@ async def cmd_ping(update, context):
         t1 = time.monotonic()
         send_rtt_ms = int((t1 - t0) * 1000)
 
-        # 🆕 v5.6.37: تسجيل متريك
+        # v5.6.37: تسجيل ping metrics
         try:
             _BOT_METRICS["pings_total"] = (
                 int(_BOT_METRICS.get("pings_total") or 0) + 1
@@ -3372,15 +3410,21 @@ async def cmd_ping(update, context):
             pass
 
 # ═══════════════════════════════════════════════════════════════════
-# 🆕 v5.6.37: /posts_stats — إحصائيات النشر من DB مباشرة
+# 🆕 v5.6.38: /posts_stats — إحصائيات النشر من DB مباشرة
+#           (SQL fix: published_at أولاً، ثم published=1)
 # ═══════════════════════════════════════════════════════════════════
 
 async def cmd_posts_stats(update, context):
     """
-    📊 إحصائيات النشر من DB مباشرة (بديل فوري عن العدّاد المعطّل).
+    📊 إحصائيات النشر من DB مباشرة.
 
-    يجرب أنماط استعلام متعددة (published, published_at, sent_at,
-    status, count-all) ليعمل مع أي schema محتملة.
+    v5.6.38 FIX-SQL:
+      • published_at NOT NULL أولاً (مؤكد من السجل أنه يعمل).
+      • published = 1 (integer) بدلاً من TRUE (boolean).
+      • per-channel يستخدم published_at مباشرة.
+      • عرض uptime بالدقائق والثواني.
+      • فحص تناسق بين bot.py و DB.
+      • رسالة توضيحية عند uptime < 10min + posts_success=0.
     """
     user = update.effective_user
     if user is None:
@@ -3409,17 +3453,24 @@ async def cmd_posts_stats(update, context):
         except Exception as _e:
             return None, f"{type(_e).__name__}: {str(_e)[:60]}"
 
+    # 🆕 v5.6.38: الترتيب يعكس ما يعمل فعلاً في DB
     queries = [
-        (
-            "published=TRUE (24h)",
-            "SELECT COUNT(*) AS n FROM posts "
-            "WHERE published = TRUE "
-            "AND created_at > NOW() - INTERVAL '24 hours'",
-        ),
         (
             "published_at NOT NULL (24h)",
             "SELECT COUNT(*) AS n FROM posts "
             "WHERE published_at IS NOT NULL "
+            "AND created_at > NOW() - INTERVAL '24 hours'",
+        ),
+        (
+            "published=1 (24h)",
+            "SELECT COUNT(*) AS n FROM posts "
+            "WHERE published = 1 "
+            "AND created_at > NOW() - INTERVAL '24 hours'",
+        ),
+        (
+            "published=TRUE (24h)",
+            "SELECT COUNT(*) AS n FROM posts "
+            "WHERE published = TRUE "
             "AND created_at > NOW() - INTERVAL '24 hours'",
         ),
         (
@@ -3443,6 +3494,7 @@ async def cmd_posts_stats(update, context):
     lines = ["📊 <b>إحصائيات النشر — من DB مباشرة</b>", ""]
 
     working_scheme: Optional[str] = None
+    working_count = 0
 
     for label, sql in queries:
         count, err = await _try_count(sql)
@@ -3450,55 +3502,61 @@ async def cmd_posts_stats(update, context):
             lines.append(f"✅ <code>{label}</code>: <b>{count}</b>")
             if count > 0 and working_scheme is None:
                 working_scheme = label
+                working_count = count
         else:
             lines.append(
                 f"⚠️ <code>{label}</code>: <i>{err or 'unknown'}</i>"
             )
 
-    # إحصائيات لكل قناة (باستخدام أفضل نمط متاح)
+    # 🆕 per-channel: يستخدم published_at مباشرة (مؤكد)
     lines.append("")
-    if working_scheme and "published" in working_scheme.lower():
-        try:
-            rows = await DB.fetchall(
-                "SELECT channel_id, COUNT(*) AS n FROM posts "
-                "WHERE published = TRUE "
-                "AND created_at > NOW() - INTERVAL '24 hours' "
-                "GROUP BY channel_id "
-                "ORDER BY n DESC LIMIT 10"
-            )
-            if rows:
-                lines.append("📡 <b>لكل قناة (24h):</b>")
-                for r in rows:
-                    if isinstance(r, dict):
-                        cid = r.get('channel_id')
-                        n = r.get('n', 0)
-                    else:
-                        try:
-                            cid, n = r[0], r[1]
-                        except Exception:
-                            continue
-                    lines.append(
-                        f"  • قناة <code>{cid}</code>: <b>{n}</b>"
-                    )
-        except Exception as _e:
-            lines.append(f"⚠️ per-channel: {type(_e).__name__}")
+    try:
+        rows = await DB.fetchall(
+            "SELECT channel_id, COUNT(*) AS n FROM posts "
+            "WHERE published_at IS NOT NULL "
+            "AND created_at > NOW() - INTERVAL '24 hours' "
+            "GROUP BY channel_id "
+            "ORDER BY n DESC LIMIT 10"
+        )
+        if rows:
+            lines.append("📡 <b>لكل قناة (24h) — عبر published_at:</b>")
+            for r in rows:
+                if isinstance(r, dict):
+                    cid = r.get('channel_id')
+                    n = r.get('n', 0)
+                else:
+                    try:
+                        cid, n = r[0], r[1]
+                    except Exception:
+                        continue
+                lines.append(
+                    f"  • قناة <code>{cid}</code>: <b>{n}</b>"
+                )
+        else:
+            lines.append("📭 <i>لا منشورات مُصنَّفة بقناة في آخر 24h</i>")
+    except Exception as _e:
+        lines.append(
+            f"⚠️ per-channel: <code>{type(_e).__name__}</code>"
+        )
 
-    # bot internal counters (in-memory, since process start)
+    # bot internal counters
     uptime_s = int(time.monotonic() - _BOT_METRICS.get(
         "started_at", time.monotonic()
     ))
     lines.append("")
     lines.append("🔢 <b>bot.py metrics (since restart):</b>")
     lines.append(
-        f"  • ⏱️ uptime: <code>{uptime_s}s</code>"
+        f"  • ⏱️ uptime: <code>{uptime_s}s</code> "
+        f"(~{uptime_s // 60}د {uptime_s % 60}ث)"
+    )
+    _ps = _BOT_METRICS.get('posts_success', 0)
+    _pf = _BOT_METRICS.get('posts_failed', 0)
+    lines.append(
+        f"  • ✅ posts_success: <code>{_ps}</code> "
+        f"{'🟢' if _ps > 0 else '⏳ (لم ينشر بعد)'}"
     )
     lines.append(
-        f"  • ✅ posts_success: "
-        f"<code>{_BOT_METRICS.get('posts_success', 0)}</code>"
-    )
-    lines.append(
-        f"  • ❌ posts_failed: "
-        f"<code>{_BOT_METRICS.get('posts_failed', 0)}</code>"
+        f"  • ❌ posts_failed: <code>{_pf}</code>"
     )
 
     pings_total = _BOT_METRICS.get('pings_total', 0)
@@ -3511,13 +3569,37 @@ async def cmd_posts_stats(update, context):
         f"max={_BOT_METRICS.get('ping_max_ms') or '—'})"
     )
 
+    # تشخيص ذكي
     lines.append("")
-    lines.append(
-        "<i>💡 posts_success يُملأ فقط عند استدعاء "
-        "<code>record_bot_metric(\"posts_success\")</code> من "
-        "utils.py::auto_publish (يحتاج تعديل). الأرقام من DB "
-        "هي المصدر الموثوق.</i>"
-    )
+    if uptime_s < 600 and _ps == 0:
+        lines.append(
+            "ℹ️ <i>البوت حديث الإقلاع — لم ينشر بعد. "
+            "انتظر الدورة التالية للقناة ثم أعد الفحص.</i>"
+        )
+    elif uptime_s > 600 and _ps == 0:
+        lines.append(
+            "⚠️ <i>مضى أكثر من 10 دقائق بلا posts_success. "
+            "تحقق من utils.py v7.10.24 (record_bot_metric).</i>"
+        )
+    elif _ps > 0:
+        lines.append(
+            f"✅ <i>record_bot_metric يعمل — "
+            f"{_ps} منشور/منشورات منذ الإقلاع.</i>"
+        )
+
+    # مقارنة DB vs bot.py
+    if working_count > 0 and _ps > 0:
+        lines.append("")
+        if _ps > working_count:
+            lines.append(
+                f"⚠️ <i>bot.py ({_ps}) > DB 24h ({working_count}) — "
+                f"غير طبيعي!</i>"
+            )
+        else:
+            lines.append(
+                f"✅ <i>bot.py ({_ps}) ≤ DB 24h ({working_count}) — "
+                f"متسق</i>"
+            )
 
     text = "\n".join(lines)
     try:
@@ -3592,7 +3674,7 @@ async def main():
     logger.info("👨‍💼 المالك: %s", CONFIG.PRIMARY_OWNER_ID)
 
     logger.info(
-        "📦 bot.py: v5.6.37 | "
+        "📦 bot.py: v5.6.38 | "
         "detectors=%s | layers=%d | helpers=%s | "
         "db_idle=%s | cache_stats=%s | analytics=%s | "
         "fullhealth=%s | latency=%s | maint_cmds=%s | "
@@ -3611,7 +3693,8 @@ async def main():
         "gift_notify=on | reply_params_modern=%s | "
         "resolve_port_none_fix=on | resolve_hostname_invalid=on | "
         "verify_callable=on | bot_data_admin_ids=on | "
-        "posts_stats_cmd=on | record_bot_metric=on",
+        "posts_stats_cmd=on | record_bot_metric=on | "
+        "posts_stats_sql_fix=on",
         _SPAM_DETECTOR_VERSION or "N/A",
         _SPAM_DETECTOR_LAYERS_COUNT,
         (
@@ -3992,7 +4075,7 @@ async def main():
             "✅ /ping مُسجَّل (internal-only guard — admin_ids فارغة)"
         )
 
-    # 🆕 v5.6.37: /posts_stats — admin-only
+    # v5.6.37: /posts_stats — admin-only
     if _admin_ids:
         try:
             app.add_handler(CommandHandler(
