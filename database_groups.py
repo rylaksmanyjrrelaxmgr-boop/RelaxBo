@@ -1,9 +1,18 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-database_groups.py - دوال المجموعات (v7.4.17)
+database_groups.py - دوال المجموعات (v7.4.18)
 ================================================================================
-🆕 v7.4.17 — CACHE-INVALIDATION-COMPLETE:
+🆕 v7.4.18 — BOT-ADMINS-READ-API:
+  🟢 FIX-ADMIN-1: إضافة get_admin_list() / get_all_admins() / get_admins().
+      السبب: bot.py v5.6.39 دالة _collect_admin_ids تبحث عن إحدى هذه
+      الأسماء الثلاثة لجلب الأدمن من جدول bot_admins. لم تكن موجودة
+      في أي Mixin → bot.py كان يتخطاها بـ hasattr، فلا يقرأ الأدمن
+      المضافين عبر /add_admin.
+      الأثر: الأدمن المضافون عبر /add_admin الآن يرون الأوامر الإدارية
+      في Telegram (كانوا لا يرونها). لا تغيير على المالك والمطورين.
+
+🆕 v7.4.17 — CACHE-INVALIDATION-COMPLETE (محفوظ):
   🔴 FIX-CACHE-1: add/remove_group_admin → إبطال groups_cache.
   🔴 FIX-CACHE-2: add/remove_anonymous_admin → إبطال groups_cache.
   🔴 FIX-CACHE-3: sync_group_admins / sync_anonymous_admins →
@@ -136,6 +145,45 @@ class GroupsMixin:
             )
 
         return invalidated
+
+    # ═════════════════════════════════════════════════════════════════
+    # 🆕 v7.4.18 FIX-ADMIN-1: قراءة أدمن البوت من DB
+    # ═════════════════════════════════════════════════════════════════
+
+    async def get_admin_list(self) -> List[Dict]:
+        """
+        🆕 v7.4.18: قائمة أدمن البوت من جدول bot_admins.
+
+        يستدعيها bot.py._collect_admin_ids() لجلب كل الأدمن المضافين
+        عبر /add_admin. بدونها، الأدمن المضافون عبر الأمر لا يرون
+        الأوامر الإدارية في Telegram.
+
+        Returns:
+            List[Dict]: [{'user_id': int, 'added_by': int, 'added_at': ...}, ...]
+            (قائمة فارغة عند أي فشل — لا يرمي استثناء)
+        """
+        try:
+            rows = await self.fetchall(
+                "SELECT user_id, added_by, added_at FROM bot_admins "
+                "ORDER BY added_at ASC"
+            )
+            return rows or []
+        except Exception as e:
+            logger.debug(f"get_admin_list: {e}")
+            return []
+
+    async def get_all_admins(self) -> List[Dict]:
+        """
+        🆕 v7.4.18: مرادف لـ get_admin_list (اسم بديل يستخدمه
+        bot.py كـ fallback).
+        """
+        return await self.get_admin_list()
+
+    async def get_admins(self) -> List[Dict]:
+        """
+        🆕 v7.4.18: مرادف لـ get_admin_list (اسم بديل آخر).
+        """
+        return await self.get_admin_list()
 
     # ═════════════════════════════════════════════════════════════════
     # 2) تسجيل المجموعات وإدارتها
@@ -2308,3 +2356,27 @@ class GroupsMixin:
 
 
 __all__ = ["GroupsMixin"]
+
+
+# =====================================================================
+# LOAD BEACON — v7.4.18
+# =====================================================================
+
+try:
+    logger.info(
+        "🛡️ database_groups.py v7.4.18 BOT-ADMINS-READ-API loaded | "
+        "🆕 FIX-ADMIN-1: get_admin_list / get_all_admins / get_admins "
+        "(bot.py يقرأ bot_admins → الأدمن المضافون عبر /add_admin "
+        "يرون الأوامر) | "
+        "FIX-CACHE-1..6 (v7.4.17) محفوظة | "
+        "FIX-AC2 + FIX-C4 (v7.4.16) محفوظة | "
+        "P1..P5 (v7.4.15) محفوظة | "
+        "O1..O2 (v7.4.14) محفوظة | "
+        "F1..F3 (v7.4.13) محفوظة | "
+        "F1..F2 (v7.4.12) محفوظة | "
+        "M1..M4 + m1..m3 (v7.4.11) محفوظة | "
+        "NEW FALLBACKS (v7.4.11) محفوظة | "
+        "add_banned_word fallback=10000"
+    )
+except Exception:
+    pass
