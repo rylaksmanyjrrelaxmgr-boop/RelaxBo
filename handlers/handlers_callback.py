@@ -1,31 +1,29 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-handlers_callback.py - معالج الأزرار (v9.7.30-FREE-PLAN-BYPASS)
+handlers_callback.py - معالج الأزرار (v9.7.31-BOT-METRICS-AWARE)
 =====================================================================
-🆕 v9.7.30-FREE-PLAN-BYPASS:
-    🔴 FIX-FREE-1 (CRITICAL): إضافة طبقة حماية احتياطية للخطة المجانية.
-        المشكلة: المستخدم على الخطة المجانية (price=0) يضغط "نشر"
-        فتظهر له رسالة "انتهى اشتراكك" ظلماً.
-        السبب: DB.has_active_subscription(user_id) يرجع False
-        عندما لا يوجد اشتراك نشط (الحالة الفعلية للمستخدم المجاني).
-        الإصلاح:
-          1) إضافة helper موحّد CallbackHandlers._user_can_publish
-             يتحقق من: المالك → اشتراك نشط → خطة مجانية → None.
-          2) استخدام الـ helper في 3 مواضع:
-             • _handle_post_add
-             • _handle_post_publish (🔴 السبب الأساسي)
-             • _handle_publish_all
+🆕 v9.7.31-BOT-METRICS-AWARE:
+    🟢 NEW-1: _show_metrics_dashboard يقرأ من 3 مصادر:
+        • DB (24h/1h) — مصدر الحقيقة المطلق
+        • _BOT_METRICS من bot.py v5.6.37+ (posts + ping)
+        • _metrics المحلية (CB — للمقارنة)
+        النتيجة: رؤية كاملة لا تُخفي النشاط حتى لو أُعيد النشر.
 
-🆕 v9.7.29-BACKUP-BLOCKING-FIX — محفوظ كاملاً:
-    🔴 FIX-CB-1: _do_backup — glob/stat/unlink → asyncio.to_thread
-    🔴 FIX-CB-2: _do_backup — DB.backup_database مع timeout
-    🟠 FIX-CB-3: _show_restore_backups — glob+stat → to_thread
-    🟡 FIX-CB-4: except Exception فقط
-    🔴 FIX-CB-5: تصحيح SyntaxError في _show_restore_backups
+    🟢 NEW-2: _read_bot_metrics() — lazy import لـ bot module
+        (يتجنب circular import). يُرجع dict آمن عند الفشل.
 
-🆕 v9.7.28-CONTEST-JOIN-FIX — محفوظ:
-    🔴 FIX-CJ-1: زر "المشاركة" في المسابقات
+    🟢 NEW-3: _read_posts_count_from_db() — multi-variant query
+        يدعم postgres/mysql/sqlite، يُرجع None عند فشل كل الأنماط
+        (بدلاً من الكذب بـ 0).
+
+🆕 v9.7.30-FREE-PLAN-BYPASS — محفوظ:
+    🔴 FIX-FREE-1 (CRITICAL): helper _user_can_publish في 3 مواضع.
+
+🆕 v9.7.29-BACKUP-BLOCKING-FIX — محفوظ:
+    🔴 FIX-CB-1..5.
+
+🆕 v9.7.28-CONTEST-JOIN-FIX — محفوظ.
 =====================================================================
 """
 import asyncio, importlib, logging, json, time, shutil, os, re
@@ -154,7 +152,6 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
-# 🟠 FIX-CB-2: timeout للنسخ الاحتياطي (يُقرأ من CONFIG أو default=300)
 _BACKUP_TIMEOUT_SECONDS = float(
     getattr(CONFIG, 'BACKUP_TIMEOUT_SECONDS', 300.0))
 
@@ -191,7 +188,6 @@ except ImportError:
         _coerce_float, _safe_str, _md_to_html, _log_channel_cache_key,
         _is_valid_url, _mask_id, _make_user_cache_keys)
 
-# 🟢 FIX-6
 try:
     _CONTEXT_KEYS_TO_CLEAR = list(_CONTEXT_KEYS_TO_CLEAR)
     for _extra_key in ('sched_ch', 'panel_chat', 'pending_action'):
@@ -200,9 +196,6 @@ try:
 except Exception:
     pass
 
-# ═══════════════════════════════════════════════════════════════════
-# SecurityCallbacks
-# ═══════════════════════════════════════════════════════════════════
 try:
     from .callback_security import (
         SecurityCallbacks,
@@ -220,9 +213,6 @@ except ImportError:
         _prune_sec_auth_cache, _set_sec_chat, _resolve_sec_chat_id,
     )
 
-# ═══════════════════════════════════════════════════════════════════
-# Analytics aliases
-# ═══════════════════════════════════════════════════════════════════
 _ANALYTICS_BUTTONS_DIRECT_MAP: Dict[str, str] = {
     "growth_30d_btn": "user_growth", "top_channels_btn": "top_channels",
     "publish_stats_btn": "publish_stats",
@@ -264,10 +254,6 @@ _membership_table_created = False
 _MAX_TASKS_PER_USER = 5
 _user_active_tasks: Dict[int, Set[asyncio.Task]] = {}
 
-
-# ═══════════════════════════════════════════════════════════════════
-# Helpers موحّدة
-# ═══════════════════════════════════════════════════════════════════
 
 def _is_banned(row_dict) -> bool:
     if not row_dict:
@@ -526,10 +512,6 @@ def _build_updates_channel_health_warning(report, lang='ar') -> str:
     return "\n".join(lines)
 
 
-# ═══════════════════════════════════════════════════════════════════
-# Message-handlers cache invalidation bridge
-# ═══════════════════════════════════════════════════════════════════
-
 _message_handlers_module = None
 _message_handlers_import_attempted = False
 
@@ -579,10 +561,6 @@ async def _invalidate_message_caches(chat_id=None, user_id=None, reason=""):
         logger.debug("🧹 PERF-CB: invalidation | chat=%s user=%s | %s",
                      chat_id, user_id, reason)
 
-
-# ═══════════════════════════════════════════════════════════════════
-# Membership handlers
-# ═══════════════════════════════════════════════════════════════════
 
 async def _membership_ensure_table() -> None:
     global _membership_table_created
@@ -829,10 +807,6 @@ def register_membership_handlers(application):
         logger.error(f"❌ فشل تسجيل ChatMemberHandler: {e}", exc_info=True)
 
 
-# ═══════════════════════════════════════════════════════════════════
-# Metrics
-# ═══════════════════════════════════════════════════════════════════
-
 _metrics = {
     'started_at': time.monotonic(), 'callbacks_total': 0,
     'callbacks_failed': 0, 'callbacks_rate_limited': 0,
@@ -897,9 +871,79 @@ def _metrics_reset():
     except Exception: pass
 
 
-# ═══════════════════════════════════════════════════════════════════
-# CircuitBreaker
-# ═══════════════════════════════════════════════════════════════════
+# 🆕 v9.7.31: قراءة _BOT_METRICS من bot.py + DB fallback
+
+def _read_bot_metrics() -> Dict:
+    """🆕 v9.7.31: قراءة _BOT_METRICS من bot.py v5.6.37+."""
+    try:
+        import bot as _bot_mod
+        m = getattr(_bot_mod, "_BOT_METRICS", None)
+        if isinstance(m, dict):
+            return dict(m)
+    except Exception as e:
+        logger.debug(f"_read_bot_metrics: {e}")
+    return {}
+
+
+async def _read_posts_count_from_db(hours: int = 24) -> Optional[int]:
+    """🆕 v9.7.31: قراءة عدد المنشورات من DB (مصدر الحقيقة)."""
+    db_type = str(getattr(DB, "DB_TYPE", "sqlite")).lower()
+    h = int(max(1, hours))
+    if db_type == "postgres":
+        variants = [
+            f"SELECT COUNT(*) AS n FROM posts "
+            f"WHERE published = TRUE "
+            f"AND created_at > NOW() - INTERVAL '{h} hours'",
+            f"SELECT COUNT(*) AS n FROM posts "
+            f"WHERE published = 1 "
+            f"AND created_at > NOW() - INTERVAL '{h} hours'",
+            f"SELECT COUNT(*) AS n FROM posts "
+            f"WHERE published_at IS NOT NULL "
+            f"AND published_at > NOW() - INTERVAL '{h} hours'",
+            f"SELECT COUNT(*) AS n FROM posts "
+            f"WHERE sent_at IS NOT NULL "
+            f"AND sent_at > NOW() - INTERVAL '{h} hours'",
+        ]
+    elif db_type == "mysql":
+        variants = [
+            f"SELECT COUNT(*) AS n FROM posts "
+            f"WHERE published = 1 "
+            f"AND created_at > NOW() - INTERVAL {h} HOUR",
+            f"SELECT COUNT(*) AS n FROM posts "
+            f"WHERE published_at IS NOT NULL "
+            f"AND published_at > NOW() - INTERVAL {h} HOUR",
+        ]
+    else:
+        variants = [
+            f"SELECT COUNT(*) AS n FROM posts "
+            f"WHERE published = 1 "
+            f"AND created_at > datetime('now', '-{h} hours')",
+            f"SELECT COUNT(*) AS n FROM posts "
+            f"WHERE published_at IS NOT NULL "
+            f"AND published_at > datetime('now', '-{h} hours')",
+        ]
+    for sql in variants:
+        try:
+            row = await DB.fetchone(sql)
+            if row is None:
+                return 0
+            if isinstance(row, dict):
+                n = (row.get('n') or row.get('count')
+                     or row.get('COUNT(*)') or 0)
+            else:
+                try: n = row[0]
+                except (TypeError, IndexError): n = 0
+            try:
+                return int(n or 0)
+            except (TypeError, ValueError):
+                continue
+        except Exception as _e:
+            logger.debug(
+                f"_read_posts_count_from_db variant failed "
+                f"({db_type}): {_e}")
+            continue
+    return None
+
 
 class CircuitBreaker:
     __slots__ = ('failures', 'threshold', 'recovery', 'opened_at',
@@ -981,10 +1025,6 @@ def _prune_publish_circuits():
                 _publish_circuits.pop(ch_id, None)
     except Exception: pass
 
-
-# ═══════════════════════════════════════════════════════════════════
-# Helpers صغيرة
-# ═══════════════════════════════════════════════════════════════════
 
 def _match_cb(data, *candidates):
     if not data: return False
@@ -1194,10 +1234,6 @@ async def _safe_answer(query, text=None, show_alert=False):
         return False
 
 
-# ═══════════════════════════════════════════════════════════════════
-# safe_edit
-# ═══════════════════════════════════════════════════════════════════
-
 async def safe_edit(query, text, reply_markup=None, parse_mode="HTML",
                     bot=None, clear_markup=False):
     if not query or not query.message:
@@ -1341,30 +1377,14 @@ def _format_channel_rate_line(ch):
     return line
 
 
-# ═══════════════════════════════════════════════════════════════════
-# CallbackHandlers
-# ═══════════════════════════════════════════════════════════════════
-
 class CallbackHandlers:
 
     RATE_LIMIT_PER_MINUTE = 30
     PUBLISH_DELAY_SECONDS = 0.2
     PUBLISH_BATCH_SIZE = 10
 
-    # ═══════════════════════════════════════════════════════════════
-    # 🔴🆕 FIX-FREE-1: helper موحّد للتحقق من صلاحية النشر
-    # ═══════════════════════════════════════════════════════════════
     @staticmethod
     async def _user_can_publish(user_id: int) -> bool:
-        """
-        🆕 FIX-FREE-1: فحص موحّد لصلاحية النشر.
-
-        الترتيب:
-          1) المالك الأساسي → True دائماً
-          2) اشتراك نشط عبر DB.has_active_subscription → True
-          3) 🆕 اشتراك في خطة مجانية (price=0) → True دائماً
-          4) خلاف ذلك → False
-        """
         if _is_primary_owner(user_id):
             return True
         try:
@@ -2649,9 +2669,6 @@ class CallbackHandlers:
             reply_markup=InlineKeyboardMarkup(kb),
             parse_mode='HTML', bot=context.bot)
 
-    # ═══════════════════════════════════════════════════════════════
-    # 🔴🆕 FIX-FREE-1: _handle_post_add مع helper موحّد
-    # ═══════════════════════════════════════════════════════════════
     @staticmethod
     async def _handle_post_add(update, context, query, user_id):
         lang = 'ar'
@@ -2682,9 +2699,6 @@ class CallbackHandlers:
                 await _trans('error_occurred', lang, "❌"),
                 bot=context.bot)
 
-    # ═══════════════════════════════════════════════════════════════
-    # 🔴🆕 FIX-FREE-1: _handle_post_publish مع helper موحّد
-    # ═══════════════════════════════════════════════════════════════
     @staticmethod
     async def _handle_post_publish(update, context, query, user_id):
         lang = 'ar'
@@ -2839,9 +2853,6 @@ class CallbackHandlers:
                 bot=context.bot)
         except Exception: pass
 
-    # ═══════════════════════════════════════════════════════════════
-    # 🔴🆕 FIX-FREE-1: _handle_publish_all مع helper موحّد
-    # ═══════════════════════════════════════════════════════════════
     @staticmethod
     async def _handle_publish_all(update, context, query, user_id):
         lang = 'ar'
@@ -3485,6 +3496,7 @@ class CallbackHandlers:
                     bot=context.bot)
             except Exception: pass
 
+    # 🆕 v9.7.31: لوحة المقاييس الحية — 3 طبقات (DB + bot.py + CB)
     @staticmethod
     async def _show_metrics_dashboard(query, context, user_id, lang):
         try:
@@ -3495,6 +3507,31 @@ class CallbackHandlers:
             top_lines = "\n".join(
                 f"   • <code>{_html.escape(k)}</code>: {v}"
                 for k, v in top_sorted) or "   —"
+
+            # 🆕 قراءة _BOT_METRICS من bot.py
+            bm = _read_bot_metrics()
+            bot_available = bool(bm)
+            bot_posts_success = int(bm.get("posts_success") or 0)
+            bot_posts_failed = int(bm.get("posts_failed") or 0)
+            bot_pings_total = int(bm.get("pings_total") or 0)
+            bot_pings_sum = int(bm.get("ping_sum_ms") or 0)
+            bot_pings_avg = (
+                (bot_pings_sum // bot_pings_total)
+                if bot_pings_total else 0
+            )
+            bot_ping_min = bm.get("ping_min_ms")
+            bot_ping_max = bm.get("ping_max_ms")
+
+            # 🆕 قراءة DB (مصدر موثوق)
+            db_posts_24h = await _read_posts_count_from_db(hours=24)
+            db_posts_1h = await _read_posts_count_from_db(hours=1)
+            db_24h_str = (
+                "—" if db_posts_24h is None else str(db_posts_24h))
+            db_1h_str = (
+                "—" if db_posts_1h is None else str(db_posts_1h))
+
+            bot_avail_str = "✅" if bot_available else "❌"
+
             text = (
                 "📊 <b>لوحة المقاييس الحية</b>\n"
                 "━━━━━━━━━━━━━━━━━━━━━━\n"
@@ -3511,25 +3548,51 @@ class CallbackHandlers:
                 f"   🟡 100ms-1s: {lat.get('100ms-1s', 0)}\n"
                 f"   🔴 &gt;1s: {lat.get('>1s', 0)}\n\n"
                 f"🔝 <b>Top callbacks:</b>\n{top_lines}\n\n"
-                f"✅ منشورات ناجحة: "
-                f"<b>{snap.get('publishes_success', 0)}</b>\n"
-                f"❌ منشورات فاشلة: "
-                f"<b>{snap.get('publishes_failed', 0)}</b>\n"
-                f"⛔ Forbidden: "
+                "📤 <b>النشر:</b>\n"
+                f"   🗄️ <b>DB (آخر 24h):</b> <b>{db_24h_str}</b>\n"
+                f"   🗄️ <b>DB (آخر 1h):</b> <b>{db_1h_str}</b>\n"
+                f"   ⚡ bot.py {bot_avail_str} — success: "
+                f"<b>{bot_posts_success}</b> | failed: "
+                f"<b>{bot_posts_failed}</b>\n"
+                f"   📋 CB metrics (since restart): "
+                f"success=<b>{snap.get('publishes_success', 0)}</b> | "
+                f"failed=<b>{snap.get('publishes_failed', 0)}</b>\n"
+                f"   ⛔ Forbidden: "
                 f"<b>{snap.get('publishes_forbidden', 0)}</b>\n"
-                f"⚠️ Rate-limited: "
+                f"   ⚠️ Rate-limited: "
                 f"<b>{snap.get('publishes_rate_limited', 0)}</b>\n\n"
+                "🏓 <b>Ping (bot.py):</b>\n"
+                f"   📊 count: <b>{bot_pings_total}</b>\n"
+            )
+
+            if bot_pings_total > 0:
+                text += (
+                    f"   ⚡ avg: <b>{bot_pings_avg}ms</b>\n"
+                    f"   🟢 min: <b>{bot_ping_min}ms</b>\n"
+                    f"   🔴 max: <b>{bot_ping_max}ms</b>\n\n"
+                )
+            else:
+                text += (
+                    "   <i>لم يُسجَّل ping بعد — استخدم /ping</i>\n\n"
+                )
+
+            text += (
                 f"⚡ دوائر فتحت: "
                 f"<b>{snap.get('circuit_opened', 0)}</b>\n"
                 f"🚫 دوائر حجبت: "
                 f"<b>{snap.get('circuit_blocked', 0)}</b>\n"
                 f"🔌 دوائر حالية: <b>{len(_publish_circuits)}</b>\n"
-                f"📦 مهام نشطة: <b>{len(ACTIVE_TASKS)}</b>\n"
+                f"📦 مهام نشطة: <b>{len(ACTIVE_TASKS)}</b>\n\n"
+                "━━━━━━━━━━━━━━━━━━━━━━\n"
+                "💡 <i>أرقام DB هي المصدر الموثوق. "
+                "bot.py in-memory تُصفَّر عند النشر. "
+                "استخدم /posts_stats لعرض DB مفصّل لكل قناة.</i>"
             )
+
             kb = InlineKeyboardMarkup([
                 [InlineKeyboardButton("🔄 تحديث",
                     callback_data="admin_metrics_live")],
-                [InlineKeyboardButton("🗑️ تصفير",
+                [InlineKeyboardButton("🗑️ تصفير العدّادات",
                     callback_data="admin_metrics_reset")],
                 [InlineKeyboardButton(
                     KeyboardFactory.get_text("back", lang),
@@ -3537,7 +3600,8 @@ class CallbackHandlers:
             await safe_edit(query, text, reply_markup=kb,
                 parse_mode='HTML', bot=context.bot)
         except Exception as e:
-            logger.error(f"_show_metrics_dashboard: {e}", exc_info=True)
+            logger.error(
+                f"_show_metrics_dashboard: {e}", exc_info=True)
             try:
                 await safe_edit(query,
                     await _trans('error_occurred', lang, "❌"),
@@ -3613,17 +3677,8 @@ class CallbackHandlers:
                     bot=context.bot)
             except Exception: pass
 
-    # ═════════════════════════════════════════════════════════════════
-    # 🔴 v9.7.29 FIX-CB-1 + FIX-CB-2: _do_backup مُصحَّحة
-    # ═════════════════════════════════════════════════════════════════
     @staticmethod
     async def _do_backup(context, user_id, lang):
-        """
-        نسخة احتياطية عبر الزر.
-
-        🔴 FIX-CB-1: glob/stat/unlink → asyncio.to_thread.
-        🔴 FIX-CB-2: DB.backup_database مع wait_for(timeout).
-        """
         try:
             PATHS.BACKUPS.mkdir(parents=True, exist_ok=True)
             backup_file = (PATHS.BACKUPS /
@@ -3632,7 +3687,6 @@ class CallbackHandlers:
             success = False
             if hasattr(DB, "backup_database"):
                 try:
-                    # 🔴 FIX-CB-2: timeout لمنع hang
                     result = await asyncio.wait_for(
                         DB.backup_database(backup_file),
                         timeout=_BACKUP_TIMEOUT_SECONDS)
@@ -3664,7 +3718,6 @@ class CallbackHandlers:
                     await DB.set_setting(
                         'last_backup', TimeUtils.sql_iso())
                 except Exception: pass
-                # 🔴 FIX-CB-1: glob/stat/unlink في thread منفصل
                 try:
                     def _cleanup_old_backups() -> int:
                         backups = sorted(
@@ -3725,22 +3778,12 @@ class CallbackHandlers:
                     f"❌ {str(e)[:100]}")
             except Exception: pass
 
-    # ═════════════════════════════════════════════════════════════════
-    # 🟠 v9.7.29 FIX-CB-3 + 🔴 FIX-CB-5: _show_restore_backups
-    # ═════════════════════════════════════════════════════════════════
     @staticmethod
     async def _show_restore_backups(update, context, query, user_id, lang):
-        """
-        عرض قائمة النسخ الاحتياطية.
-
-        🟠 FIX-CB-3: glob+stat كانت sync في async → to_thread.
-        🔴 FIX-CB-5: إصلاح SyntaxError (أقواس زائدة حول callback_data).
-        """
         try:
             PATHS.BACKUPS.mkdir(parents=True, exist_ok=True)
 
             def _collect_backups():
-                """🟠 FIX-CB-3: كل عمليات I/O في thread منفصل."""
                 try:
                     items = sorted(
                         PATHS.BACKUPS.glob("backup_*.db"),
@@ -3792,7 +3835,6 @@ class CallbackHandlers:
                 text += (f"📁 <code>{_html.escape(info['name'])}</code>\n"
                          f"   📅 {info['mtime']} • "
                          f"💾 {info['size_kb']:.1f} KB\n\n")
-                # 🔴 FIX-CB-5: إزالة الأقواس الزائدة حول callback_data
                 kb.append([InlineKeyboardButton(
                     f"♻️ استرجاع {info['name'][:30]}",
                     callback_data=f"admin_restore_file:{info['name']}")])
@@ -4167,9 +4209,6 @@ class CallbackHandlers:
                     bot=context.bot)
             except Exception: pass
 
-    # ═══════════════════════════════════════════════════════════════
-    # 🔴 v9.7.28 FIX-CJ-1 (محفوظ): _handle_contests
-    # ═══════════════════════════════════════════════════════════════
     @staticmethod
     async def _handle_contests(update, context, query, user_id, lang):
         data = (query.data or "")
@@ -4227,7 +4266,6 @@ class CallbackHandlers:
                         bot=context.bot)
                 return
 
-            # 🔴 FIX-CJ-1: قبول "contest_join" أو "contest_join:<id>"
             if data == "contest_join" or data.startswith("contest_join:"):
                 contest_id = 0
                 if ':' in data:
@@ -4256,7 +4294,6 @@ class CallbackHandlers:
                             logger.debug(
                                 f"check_contest_joined: {_ce}")
                     if not already and hasattr(DB, 'join_contest'):
-                        # 🔴 الترتيب الصحيح: (contest_id, user_id)
                         ok = await DB.join_contest(contest_id, user_id)
                 except Exception as e:
                     logger.warning(f"join_contest: {e}")
@@ -5098,7 +5135,6 @@ class CallbackHandlers:
                 await safe_edit(query, text, reply_markup=kb,
                     bot=context.bot); return
             if data == CB.ADMIN_EXPORT_REPLIES:
-                # 🟡 FIX-CB-4: except (AttributeError, Exception) → except Exception
                 try:
                     file_path = await DB.export_auto_replies_to_file()
                 except Exception:
@@ -5261,10 +5297,6 @@ class CallbackHandlers:
             except Exception: pass
 
 
-# ═══════════════════════════════════════════════════════════════════
-# LOAD BEACON
-# ═══════════════════════════════════════════════════════════════════
-
 try:
     _missing_check = []
     for _name in ('_handle_auto_reply', '_handle_schedule',
@@ -5280,12 +5312,15 @@ try:
             _missing_check.append(_name)
     if _missing_check:
         logger.critical(
-            f"🚨 v9.7.30: دوال مفقودة: {_missing_check}")
+            f"🚨 v9.7.31: دوال مفقودة: {_missing_check}")
     else:
         logger.info(
-            "🛡️ handlers_callback.py v9.7.30-FREE-PLAN-BYPASS | "
-            "🆕 FIX-FREE-1: _user_can_publish helper + "
-            "bypass للخطة المجانية في 3 مواضع | "
+            "🛡️ handlers_callback.py v9.7.31-BOT-METRICS-AWARE | "
+            "🆕 NEW-1: _show_metrics_dashboard يقرأ "
+            "_BOT_METRICS + DB (24h/1h) | "
+            "🆕 NEW-2: _read_bot_metrics (lazy bot import) | "
+            "🆕 NEW-3: _read_posts_count_from_db (multi-variant) | "
+            "KEPT v9.7.30: FREE-PLAN-BYPASS + _user_can_publish | "
             "KEPT v9.7.29: backup timeouts + FIX-CB-1..5 | "
             "KEPT v9.7.28: contest_join fix | "
             "max_tasks_per_user=%d",
