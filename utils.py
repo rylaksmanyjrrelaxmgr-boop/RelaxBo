@@ -1,33 +1,21 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-utils.py - الأدوات المساعدة للبوت (v7.10.23 — FIX-PUBLISH-DELAY)
+utils.py - الأدوات المساعدة للبوت (v7.10.24 — METRICS-INTEGRATION)
 =================================================================================
-🆕 v7.10.23 (FIX-PUBLISH-DELAY):
-    🔴 FIX-PD-1 (CRITICAL): Event-triggered auto_publish
-       السبب المُكتشف من تحليل السجلات:
-         • BackgroundTasks.auto_publish كان ينتظر asyncio.sleep(60)
-           بين كل دورة polling (موضعان: عند "no channels" + بعد كل دورة).
-         • النتيجة: عند إضافة منشور، التأخير حتى 60s (متوسط 30s).
+🆕 v7.10.24 (FIX-METRICS-INTEGRATION):
+    🔴 FIX-METRICS-INTEGRATION (CRITICAL): إضافة استدعاء record_bot_metric
+       و_metrics_inc في BackgroundTasks._publish_single_channel بعد كل
+       نشر (نجاح/فشل). السبب: auto_publish كان ينشر بنجاح لكن لوحة
+       المقاييس (admin_metrics_live) تبقى 0 لأن utils.py لم يكن يُحدّث
+       العدّادات التي نُضيفها في bot.py v5.6.37 وhandlers_callback v9.7.31.
+       الأثر المتوقّع: لوحة المقاييس الحية ستعرض أرقاماً حقيقية.
 
-       الإصلاح:
-         • _publish_trigger = asyncio.Event() عالمي (lazy init).
-         • trigger_auto_publish() — دالة عامة تُستدعى بعد إضافة منشور.
-         • auto_publish يستخدم wait_for(trigger, timeout=15) بدل sleep(60).
-         • fallback: 15s بدل 60s (إذا فشلت الإشارة).
+    🟢 IMPROVE-DOC: توضيح متى يمكن استدعاء trigger_auto_publish()
+        (فقط من داخل event loop).
 
-       الأثر المتوقّع:
-         • إضافة منشور + trigger → نشر خلال ~1-3s.
-         • إضافة منشور بدون trigger → نشر خلال ~7.5s (متوسط).
-         • الحد الأقصى للتأخير: 15s بدل 60s.
-
-    🔴 FIX-PD-2: أي نشر فوري يحافظ على نفس الـsemaphore والـretry.
-    🟢 FIX-PD-3: trigger_auto_publish() آمنة للاستدعاء من أي سياق.
-
-🆕 v7.10.22 (FIX-SLOWQ) — محفوظ:
-    🔴 FIX-SLOWQ-3: _read_pg_activity — GROUP BY + cache(120s).
-    🔴 FIX-SLOWQ-5: bot.py يفُوَّض _fetch_pg_activity_cached لهذه الدالة.
-
+🆕 v7.10.23 (FIX-PUBLISH-DELAY) — محفوظ.
+🆕 v7.10.22 (FIX-SLOWQ) — محفوظ.
 🆕 v7.10.21 (FIX-U1/U2/U3) — محفوظ.
 🆕 v7.10.20 (BACKUP-BLOCKING-FIX + TIMEOUT-GUARDS) — محفوظ.
 🆕 v7.10.19 (FIX-FOLLOWUP-COMPLETE) — محفوظ.
@@ -115,9 +103,11 @@ def trigger_auto_publish() -> None:
         trigger_auto_publish()
 
     الأثر:
-      • auto_publish يستيقظ فوراً (بدل انتظار 60s).
-      • النشر يبدأ خلال ~1-3s.
-      • آمنة للاستدعاء من أي سياق — لا تحجب، لا ترمي.
+      • auto_publish يستيقظ فوراً (بدل انتظار 15s timeout).
+      • النشر يبدأ خلال ~1-3s (إذا كان الـinterval قد انقضى).
+      • غير محجوبة، لا ترمي.
+
+    ⚠️ يجب استدعاؤها من داخل event loop (async context).
     """
     try:
         _get_publish_trigger().set()
@@ -3662,9 +3652,31 @@ class BackgroundTasks:
                         with suppress(Exception):
                             await safe_send(
                                 bot, user_id, "✅ تم نشر منشور في قناتك")
+                # 🆕 v7.10.24 FIX-METRICS-INTEGRATION
+                try:
+                    from bot import record_bot_metric
+                    record_bot_metric("posts_success")
+                except Exception as _me:
+                    logger.debug("record_bot_metric success: %s", _me)
+                try:
+                    from handlers_callback import _metrics_inc
+                    _metrics_inc('publishes_success')
+                except Exception as _me:
+                    logger.debug("_metrics_inc success: %s", _me)
                 return True
             else:
                 await DB.increment_post_fail(post['id'])
+                # 🆕 v7.10.24 FIX-METRICS-INTEGRATION
+                try:
+                    from bot import record_bot_metric
+                    record_bot_metric("posts_failed")
+                except Exception as _me:
+                    logger.debug("record_bot_metric failed: %s", _me)
+                try:
+                    from handlers_callback import _metrics_inc
+                    _metrics_inc('publishes_failed')
+                except Exception as _me:
+                    logger.debug("_metrics_inc failed: %s", _me)
                 return False
         except Exception as e:
             logger.error(
@@ -4858,17 +4870,17 @@ __all__ = [
 ]
 
 # ═══════════════════════════════════════════════════════════════════════════
-# LOAD BEACON
+# LOAD BEACON — v7.10.24
 # ═══════════════════════════════════════════════════════════════════════════
 
 try:
     logger.info(
-        "🛡️ utils.py v7.10.23 FIX-PUBLISH-DELAY loaded | "
-        "FIX-PD-1: event-triggered auto_publish | "
-        "  • signal timeout=%.0fs (was 60s) | "
-        "  • trigger_auto_publish() exported | "
-        "  • fallback=%.0fs | "
-        "FIX-SLOWQ-3: _read_pg_activity — GROUP BY + cache(%.0fs) | "
+        "🛡️ utils.py v7.10.24 METRICS-INTEGRATION loaded | "
+        "🆕 FIX-METRICS: record_bot_metric + _metrics_inc في "
+        "_publish_single_channel (success + fail) | "
+        "FIX-PD-1: event-triggered auto_publish (signal=%.0fs) | "
+        "FIX-PD-2: cached trigger ref in loop | "
+        "FIX-SLOWQ-3: _read_pg_activity (GROUP BY + cache %.0fs) | "
         "FIX-U1: _send_media warning uses `is None` | "
         "FIX-U2: _do_backup error log enriched | "
         "FIX-UB1: _do_backup cleanup via asyncio.to_thread | "
@@ -4879,8 +4891,8 @@ try:
         "sec_defaults=%d keys | "
         "auth_cache=user_id-aware | "
         "Lang=%d | ChatMigrated=%d ops | ToggleMap=%d | "
-        "Webhook=✅ | Penalty=✅ | Publish=✅",
-        _PUBLISH_SIGNAL_TIMEOUT_SECONDS,
+        "Webhook=✅ | Penalty=✅ | Publish=✅ | "
+        "Metrics=✅ (DB + bot.py + CB)",
         _PUBLISH_SIGNAL_TIMEOUT_SECONDS,
         _PG_ACTIVITY_TTL,
         _BACKUP_TIMEOUT_SECONDS,
