@@ -1,61 +1,35 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-🌿 Relax Manager – البوت الرئيسي (bot.py v5.6.36-HARDENING)
+🌿 Relax Manager – البوت الرئيسي (bot.py v5.6.37-METRICS-WORKAROUND)
 ================================================================================
 📌 نقطة الدخول الرسمية للتطبيق (entrypoint).
 
-🆕 v5.6.36 (HARDENING):
-    🔴 FIX-PING-ADMIN-GUARD:
-        /ping كان مسجّلاً بلا فلتر → أي مستخدم يمكنه استدعاؤه
-        وإهدار حصة API. الآن:
-          • filters.User(_admin_ids) على التسجيل (حماية مزدوجة).
-          • فحص داخلي احتياطي عبر context.bot_data["admin_ids"]
-            (لو _admin_ids فارغة أو التسجيل اليدوي).
+🆕 v5.6.37 (METRICS-WORKAROUND):
+    🟢 NEW-CMD-POSTS-STATS:
+        المشكلة المكتشفة: auto_publish في utils.py ينشر بنجاح
+        (سجل: "✅ قناة 18 نشرت" @ 14:00:27) لكن admin_metrics_live
+        يُظهر "منشورات ناجحة: 0". السبب: auto_publish لا يستدعي
+        أي increment على العدّاد المستخدم في handlers_analytics.
 
-    🔴 FIX-KEEPALIVE-LOG-FLOOD:
-        عند غياب RENDER_EXTERNAL_URL/KEEP_ALIVE_URL، keep_alive
-        كان يعود → run_task_with_retry يعيده كل 5s → 51,840
-        سطر/يوم بلا فائدة. الآن: `await asyncio.Event().wait()`
-        عند الفرع "no URL" → يحجب أبدياً (لن يُعاد).
+        هذا الإصلاح في bot.py (utils.py يحتاج تعديلاً منفصلاً):
 
-    🔴 FIX-STOP-POLLING-ORDER:
-        _stop_polling_mode: updater.stop() كان بعد finally — لو
-        رفع post_stop استثناءً، updater يبقى يعمل. الآن:
-        updater.stop() داخل finally.
+        • /posts_stats — أمر جديد يقرأ من DB مباشرة (مصدر الحقيقة)
+          يجرب أنماط استعلام متعددة (published, published_at, sent_at,
+          status, count-all) ليعمل مع أي schema محتملة.
+          يُظهر إحصائيات لكل قناة + الإجمالي.
 
-    🟠 FIX-DOUBLE-PAYMENT-UX:
-        successful_payment: دفع مزدوج (retry من Telegram أو نقر
-        مزدوج) كان يرد "❌ حدث خطأ" رغم أن الفاتورة مدفوعة فعلاً.
-        الآن: كشف حالة "already paid" والرد برسالة مطمئنة.
+        • _BOT_METRICS + record_bot_metric() — عدّاد في bot.py يمكن
+          لـ utils.py استدعاؤه إذا أُضيف سطر واحد:
+              from bot import record_bot_metric
+              record_bot_metric("posts_success")
+          بعد كل نشر ناجح. لم يُدمَج في handlers_analytics بعد لأن
+          ذلك يتطلب تعديل handlers_analytics.py أيضاً.
 
-    🟠 FIX-GIFT-NOTIFY-DEV:
-        فرع gift لم يكن يُشعر المطور — المالك لا يعرف بالهدايا
-        المُشتراة. الآن: _spawn_notify_dev_log بعد نجاح الكود.
+        💡 الخطوة التالية الموصى بها: أرسل دالة auto_publish من
+           utils.py لتعديلها بدقة.
 
-    🟠 FIX-CMD-PING-MODERN:
-        • reply_parameters (PTB >=20.8) بدل reply_to_message_id.
-        • عرض edit_rtt_ms في السجل (كان يُقاس ويُهمل).
-        • تسمية "زمن الوصول" بدل "عمر الرسالة" (أدق).
-        • fallback آمن عند فشل reply_text (context.bot.send_message).
-
-    🟠 FIX-RESOLVE-PORT-NONE:
-        int(CONFIG.WEB_PORT) لو كانت None → TypeError قبل try.
-        الآن: int(... or 10000) داخل try.
-
-    🟠 FIX-RESOLVE-HOSTNAME-INVALID:
-        RENDER_EXTERNAL_URL بقيمة غير URL (مثل "/path") كانت
-        تُعاد كما هي → webhook URL غير صالح. الآن: تجاهل + تحذير.
-
-    🟡 FIX-VERIFY-CALLABLE:
-        _verify_command_handlers: hasattr ≠ callable. الآن يستخدم
-        callable() — يكشف CommandHandlers.start = None قبل
-        CommandHandler("start", None) الذي يرفع TypeError لاحقاً.
-
-    🟢 FIX-BOT-DATA-ADMIN-IDS:
-        بعد _collect_admin_ids، نُخزّنها في app.bot_data["admin_ids"]
-        لاستخدامها من cmd_ping وبقية الفحوصات.
-
+🆕 v5.6.36 (HARDENING) — محفوظ.
 🆕 v5.6.35 (PING-LATENCY) — محفوظ.
 🆕 v5.6.34 (CLEANUP-HARDENING) — محفوظ.
 🆕 v5.6.33 (PAYMENT-ORDER-FIX + POST-INIT-WEBHOOK + DB-CLOSE + SIGNAL-EARLY) — محفوظ.
@@ -840,6 +814,38 @@ def _spawn_notify_dev_log(context, text: str) -> None:
         logger.debug("_spawn_notify_dev_log: %s", _e)
 
 # ═══════════════════════════════════════════════════════════════════
+# 🆕 v5.6.37: BOT METRICS — عدّاد في bot.py يمكن لـ utils.py استدعاؤه
+# ═══════════════════════════════════════════════════════════════════
+
+_BOT_METRICS: Dict[str, Any] = {
+    "posts_success": 0,
+    "posts_failed": 0,
+    "commands_total": 0,
+    "pings_total": 0,
+    "ping_min_ms": None,
+    "ping_max_ms": None,
+    "ping_sum_ms": 0,
+    "started_at": time.monotonic(),
+}
+
+def record_bot_metric(key: str, value: Any = 1) -> None:
+    """
+    🆕 v5.6.37: تسجيل متريك في bot.py.
+
+    الاستخدام من utils.py بعد كل نشر ناجح:
+        from bot import record_bot_metric
+        record_bot_metric("posts_success")
+    """
+    try:
+        cur = _BOT_METRICS.get(key)
+        if isinstance(cur, int) and isinstance(value, int):
+            _BOT_METRICS[key] = cur + value
+        else:
+            _BOT_METRICS[key] = value
+    except Exception as _e:
+        logger.debug("record_bot_metric(%r): %s", key, _e)
+
+# ═══════════════════════════════════════════════════════════════════
 # WARMUP-1: spawn warmup detectors pool (non-blocking)
 # ═══════════════════════════════════════════════════════════════════
 
@@ -1526,6 +1532,7 @@ ADMIN_COMMANDS = [
     ("latency", "🔬 اختبار الكمون"),
     ("databases", "🗂️ قواعد البيانات المُعدّة"),
     ("ping", "🏓 قياس كمون الاتصال"),
+    ("posts_stats", "📊 إحصائيات النشر (DB)"),  # 🆕 v5.6.37
 ]
 
 GROUP_COMMANDS = [
@@ -1810,7 +1817,6 @@ def _verify_command_handlers() -> bool:
         "add_hidden_admin", "remove_hidden_admin", "list_hidden_admins",
     ]
 
-    # 🆕 v5.6.36 FIX-VERIFY-CALLABLE: hasattr ≠ callable
     missing = [
         name for name in required
         if not callable(getattr(CommandHandlers, name, None))
@@ -2223,11 +2229,7 @@ async def pre_checkout(update, context):
         logger.error("❌ Failed to answer pre-checkout success: %s", e)
 
 async def successful_payment(update, context):
-    """
-    FIX-PAYMENT-ORDER: العمليات الثانوية معزولة.
-    FIX-DOUBLE-PAYMENT-UX: كشف already paid برسالة مطمئنة.
-    FIX-GIFT-NOTIFY-DEV: إشعار المطور لشراء الهدايا.
-    """
+    """FIX-PAYMENT-ORDER + FIX-DOUBLE-PAYMENT-UX + FIX-GIFT-NOTIFY-DEV."""
     user_id = update.effective_user.id
     payment = update.message.successful_payment
     payload = payment.invoice_payload
@@ -2238,8 +2240,6 @@ async def successful_payment(update, context):
     invoice, plan, data = await _validate_invoice_for_payment(user_id, payload)
 
     if invoice is None or plan is None:
-        # 🆕 v5.6.36 FIX-DOUBLE-PAYMENT-UX:
-        # التمييز بين "already paid" (retry من Telegram) وبين خطأ فعلي
         try:
             _pd = json.loads(payload)
             _inv_num = _pd.get('invoice')
@@ -2456,7 +2456,6 @@ async def successful_payment(update, context):
                 "الكود مُسجَّل في DB", _e
             )
 
-        # 🆕 v5.6.36 FIX-GIFT-NOTIFY-DEV: إشعار المطور
         try:
             _uname = update.effective_user.username or ""
             _fname = update.effective_user.first_name or ""
@@ -2513,7 +2512,6 @@ async def keep_alive():
             "💡 الحل الموصى به: استخدم Cron-job.org (خارجي) "
             "على https://<your-app>.onrender.com/health كل 5 دقائق."
         )
-        # 🆕 v5.6.36 FIX-KEEPALIVE-LOG-FLOOD: حجب أبدي بدل return
         await asyncio.Event().wait()
         return
 
@@ -2846,8 +2844,6 @@ def _resolve_hostname() -> Optional[str]:
             except Exception:
                 pass
         else:
-            # 🆕 v5.6.36 FIX-RESOLVE-HOSTNAME-INVALID:
-            # القيمة غير URL — تجاهل بدل إعادتها كما هي
             logger.warning(
                 "⚠️ RENDER_EXTERNAL_URL غير URL صالح: %r — تجاهل", ru
             )
@@ -2880,7 +2876,6 @@ def _resolve_hostname() -> Optional[str]:
     return None
 
 def _resolve_port() -> int:
-    # 🆕 v5.6.36 FIX-RESOLVE-PORT-NONE: حماية من WEB_PORT=None
     try:
         default_port = int(getattr(CONFIG, "WEB_PORT", None) or 10000)
     except (TypeError, ValueError):
@@ -3189,11 +3184,6 @@ async def _start_polling_mode(app: Application) -> None:
     await _run_post_init_hooks(app)
 
 async def _stop_polling_mode(app: Application) -> None:
-    """
-    🆕 v5.6.36 FIX-STOP-POLLING-ORDER:
-        updater.stop() الآن داخل finally — لو رفع post_stop استثناءً،
-        الـ updater لا يبقى يعمل.
-    """
     if not _polling_state["running"]:
         if app.updater is not None:
             try:
@@ -3207,7 +3197,6 @@ async def _stop_polling_mode(app: Application) -> None:
         await _run_post_stop_hooks(app)
     finally:
         _polling_state["running"] = False
-        # 🆕 v5.6.36: updater.stop() داخل finally
         if app.updater is not None:
             try:
                 await app.updater.stop()
@@ -3264,25 +3253,11 @@ async def _diag_incoming(update, context):
         logger.debug("_diag_incoming error: %s", _e)
 
 # ═══════════════════════════════════════════════════════════════════
-# 🆕 v5.6.36 FIX-PING-ADMIN-GUARD: /ping — قياس كمون حقيقي
+# /ping — قياس كمون حقيقي
 # ═══════════════════════════════════════════════════════════════════
 
 async def cmd_ping(update, context):
-    """
-    🏓 قياس كمون حقيقي من داخل البوت.
-
-    يقيس:
-      • Send API RTT — الوقت الفعلي لـ reply_text (يمثل الرد الحقيقي)
-      • Message age  — زمن الوصول التقريبي (دقة 1s من Telegram)
-      • Edit API RTT — الوقت الفعلي لـ edit_text (يُسجَّل فقط)
-
-    🆕 v5.6.36:
-      • فحص أدمن داخلي عبر context.bot_data["admin_ids"]
-      • ReplyParameters بدل reply_to_message_id (PTB >=20.8)
-      • fallback آمن عند فشل reply_text
-      • تسمية "زمن الوصول" بدل "عمر الرسالة"
-    """
-    # 🆕 v5.6.36: فحص أدمن داخلي (احتياطي — لو التسجيل بلا filter)
+    """🏓 قياس كمون حقيقي من داخل البوت."""
     user = update.effective_user
     if user is None:
         return
@@ -3295,7 +3270,6 @@ async def cmd_ping(update, context):
         if msg is None:
             return
 
-        # ── قياس 1: زمن الوصول التقريبي ──
         msg_date = getattr(msg, "date", None)
         age_ms = None
         if msg_date is not None:
@@ -3305,8 +3279,6 @@ async def cmd_ping(update, context):
                 (datetime.now(timezone.utc) - msg_date).total_seconds() * 1000
             )
 
-        # ── قياس 2: إرسال الرد (API RTT) ──
-        # 🆕 v5.6.36: ReplyParameters (PTB >=20.8) بدل deprecated
         t0 = time.monotonic()
         try:
             if _HAS_REPLY_PARAMETERS and ReplyParameters is not None:
@@ -3317,18 +3289,32 @@ async def cmd_ping(update, context):
                     ),
                 )
             else:
-                # fallback للـ PTB الأقدم
                 sent = await msg.reply_text(
                     "🏓 قياس...",
                     reply_to_message_id=msg.message_id,
                 )
         except TypeError:
-            # fallback أخير — بلا رد
             sent = await msg.reply_text("🏓 قياس...")
         t1 = time.monotonic()
         send_rtt_ms = int((t1 - t0) * 1000)
 
-        # ── بناء النتيجة ──
+        # 🆕 v5.6.37: تسجيل متريك
+        try:
+            _BOT_METRICS["pings_total"] = (
+                int(_BOT_METRICS.get("pings_total") or 0) + 1
+            )
+            _BOT_METRICS["ping_sum_ms"] = (
+                int(_BOT_METRICS.get("ping_sum_ms") or 0) + send_rtt_ms
+            )
+            _cur_min = _BOT_METRICS.get("ping_min_ms")
+            if _cur_min is None or send_rtt_ms < _cur_min:
+                _BOT_METRICS["ping_min_ms"] = send_rtt_ms
+            _cur_max = _BOT_METRICS.get("ping_max_ms")
+            if _cur_max is None or send_rtt_ms > _cur_max:
+                _BOT_METRICS["ping_max_ms"] = send_rtt_ms
+        except Exception as _e:
+            logger.debug("ping metrics: %s", _e)
+
         lines = [
             "🏓 <b>Pong</b>",
             "",
@@ -3356,7 +3342,6 @@ async def cmd_ping(update, context):
             "لتجربة المستخدم الكاملة أضف ~150-300ms لكل اتجاه.</i>"
         )
 
-        # ── قياس 3: تعديل الرسالة (يُسجَّل فقط) ──
         t2 = time.monotonic()
         edit_rtt_ms = -1
         try:
@@ -3378,11 +3363,171 @@ async def cmd_ping(update, context):
         )
     except Exception as e:
         logger.error("❌ /ping error: %s", e, exc_info=True)
-        # 🆕 v5.6.36: fallback آمن
         try:
             await context.bot.send_message(
                 chat_id=update.effective_chat.id,
                 text=f"❌ فشل القياس: {type(e).__name__}",
+            )
+        except Exception:
+            pass
+
+# ═══════════════════════════════════════════════════════════════════
+# 🆕 v5.6.37: /posts_stats — إحصائيات النشر من DB مباشرة
+# ═══════════════════════════════════════════════════════════════════
+
+async def cmd_posts_stats(update, context):
+    """
+    📊 إحصائيات النشر من DB مباشرة (بديل فوري عن العدّاد المعطّل).
+
+    يجرب أنماط استعلام متعددة (published, published_at, sent_at,
+    status, count-all) ليعمل مع أي schema محتملة.
+    """
+    user = update.effective_user
+    if user is None:
+        return
+    allowed = context.bot_data.get("admin_ids")
+    if allowed is not None and user.id not in allowed:
+        return
+
+    msg = update.effective_message
+    if msg is None:
+        return
+
+    async def _try_count(sql: str) -> Tuple[Optional[int], Optional[str]]:
+        try:
+            row = await DB.fetchone(sql)
+            if row is None:
+                return 0, None
+            if isinstance(row, dict):
+                n = row.get('n') or 0
+            else:
+                try:
+                    n = row[0]
+                except (TypeError, IndexError):
+                    n = 0
+            return int(n or 0), None
+        except Exception as _e:
+            return None, f"{type(_e).__name__}: {str(_e)[:60]}"
+
+    queries = [
+        (
+            "published=TRUE (24h)",
+            "SELECT COUNT(*) AS n FROM posts "
+            "WHERE published = TRUE "
+            "AND created_at > NOW() - INTERVAL '24 hours'",
+        ),
+        (
+            "published_at NOT NULL (24h)",
+            "SELECT COUNT(*) AS n FROM posts "
+            "WHERE published_at IS NOT NULL "
+            "AND created_at > NOW() - INTERVAL '24 hours'",
+        ),
+        (
+            "sent_at NOT NULL (24h)",
+            "SELECT COUNT(*) AS n FROM posts "
+            "WHERE sent_at IS NOT NULL "
+            "AND created_at > NOW() - INTERVAL '24 hours'",
+        ),
+        (
+            "status='published' (24h)",
+            "SELECT COUNT(*) AS n FROM posts "
+            "WHERE status = 'published' "
+            "AND created_at > NOW() - INTERVAL '24 hours'",
+        ),
+        (
+            "total posts (all-time)",
+            "SELECT COUNT(*) AS n FROM posts",
+        ),
+    ]
+
+    lines = ["📊 <b>إحصائيات النشر — من DB مباشرة</b>", ""]
+
+    working_scheme: Optional[str] = None
+
+    for label, sql in queries:
+        count, err = await _try_count(sql)
+        if err is None and count is not None:
+            lines.append(f"✅ <code>{label}</code>: <b>{count}</b>")
+            if count > 0 and working_scheme is None:
+                working_scheme = label
+        else:
+            lines.append(
+                f"⚠️ <code>{label}</code>: <i>{err or 'unknown'}</i>"
+            )
+
+    # إحصائيات لكل قناة (باستخدام أفضل نمط متاح)
+    lines.append("")
+    if working_scheme and "published" in working_scheme.lower():
+        try:
+            rows = await DB.fetchall(
+                "SELECT channel_id, COUNT(*) AS n FROM posts "
+                "WHERE published = TRUE "
+                "AND created_at > NOW() - INTERVAL '24 hours' "
+                "GROUP BY channel_id "
+                "ORDER BY n DESC LIMIT 10"
+            )
+            if rows:
+                lines.append("📡 <b>لكل قناة (24h):</b>")
+                for r in rows:
+                    if isinstance(r, dict):
+                        cid = r.get('channel_id')
+                        n = r.get('n', 0)
+                    else:
+                        try:
+                            cid, n = r[0], r[1]
+                        except Exception:
+                            continue
+                    lines.append(
+                        f"  • قناة <code>{cid}</code>: <b>{n}</b>"
+                    )
+        except Exception as _e:
+            lines.append(f"⚠️ per-channel: {type(_e).__name__}")
+
+    # bot internal counters (in-memory, since process start)
+    uptime_s = int(time.monotonic() - _BOT_METRICS.get(
+        "started_at", time.monotonic()
+    ))
+    lines.append("")
+    lines.append("🔢 <b>bot.py metrics (since restart):</b>")
+    lines.append(
+        f"  • ⏱️ uptime: <code>{uptime_s}s</code>"
+    )
+    lines.append(
+        f"  • ✅ posts_success: "
+        f"<code>{_BOT_METRICS.get('posts_success', 0)}</code>"
+    )
+    lines.append(
+        f"  • ❌ posts_failed: "
+        f"<code>{_BOT_METRICS.get('posts_failed', 0)}</code>"
+    )
+
+    pings_total = _BOT_METRICS.get('pings_total', 0)
+    pings_sum = _BOT_METRICS.get('ping_sum_ms', 0)
+    pings_avg = (pings_sum // pings_total) if pings_total else 0
+    lines.append(
+        f"  • 🏓 pings: <code>{pings_total}</code> "
+        f"(avg={pings_avg}ms, "
+        f"min={_BOT_METRICS.get('ping_min_ms') or '—'}, "
+        f"max={_BOT_METRICS.get('ping_max_ms') or '—'})"
+    )
+
+    lines.append("")
+    lines.append(
+        "<i>💡 posts_success يُملأ فقط عند استدعاء "
+        "<code>record_bot_metric(\"posts_success\")</code> من "
+        "utils.py::auto_publish (يحتاج تعديل). الأرقام من DB "
+        "هي المصدر الموثوق.</i>"
+    )
+
+    text = "\n".join(lines)
+    try:
+        await msg.reply_text(text, parse_mode='HTML')
+    except Exception:
+        try:
+            await context.bot.send_message(
+                chat_id=update.effective_chat.id,
+                text=text,
+                parse_mode='HTML',
             )
         except Exception:
             pass
@@ -3394,9 +3539,6 @@ async def cmd_ping(update, context):
 async def main():
     t_start = time.monotonic()
 
-    # ═══════════════════════════════════════════════════════════════
-    # FIX-SIGNAL-EARLY: تسجيل الإشارات مبكراً
-    # ═══════════════════════════════════════════════════════════════
     _shutdown_event = asyncio.Event()
 
     def _on_shutdown_signal(sig_name: str):
@@ -3423,9 +3565,6 @@ async def main():
     except Exception as _e:
         logger.debug("Signal setup (early): %s", _e)
 
-    # ═══════════════════════════════════════════════════════════════
-    # MARK-1: إخطار db_diagnostics ببدء العملية
-    # ═══════════════════════════════════════════════════════════════
     if _MARK_PROCESS_START_FN is not None:
         try:
             _MARK_PROCESS_START_FN()
@@ -3453,7 +3592,7 @@ async def main():
     logger.info("👨‍💼 المالك: %s", CONFIG.PRIMARY_OWNER_ID)
 
     logger.info(
-        "📦 bot.py: v5.6.36 | "
+        "📦 bot.py: v5.6.37 | "
         "detectors=%s | layers=%d | helpers=%s | "
         "db_idle=%s | cache_stats=%s | analytics=%s | "
         "fullhealth=%s | latency=%s | maint_cmds=%s | "
@@ -3471,7 +3610,8 @@ async def main():
         "stop_polling_order=on | double_payment_ux=on | "
         "gift_notify=on | reply_params_modern=%s | "
         "resolve_port_none_fix=on | resolve_hostname_invalid=on | "
-        "verify_callable=on | bot_data_admin_ids=on",
+        "verify_callable=on | bot_data_admin_ids=on | "
+        "posts_stats_cmd=on | record_bot_metric=on",
         _SPAM_DETECTOR_VERSION or "N/A",
         _SPAM_DETECTOR_LAYERS_COUNT,
         (
@@ -3577,9 +3717,6 @@ async def main():
     port = _resolve_port()
     hostname = _resolve_hostname()
 
-    # ═══════════════════════════════════════════════════════════════════
-    # Application مع HTTPXRequest
-    # ═══════════════════════════════════════════════════════════════════
     t_app = time.monotonic()
 
     _http_request_pool = _build_http_request_pool()
@@ -3688,7 +3825,6 @@ async def main():
 
     logger.info("👥 عدد الأدمن المُكتشفين: %d", len(_admin_ids))
 
-    # 🆕 v5.6.36 FIX-BOT-DATA-ADMIN-IDS: تخزين للاستخدام في cmd_ping
     app.bot_data["admin_ids"] = set(_admin_ids)
 
     for _admin_id in _admin_ids:
@@ -3834,8 +3970,7 @@ async def main():
     app.add_handler(CommandHandler("db_diag", CommandHandlers.db_diag))
     app.add_handler(CommandHandler("db_vacuum", CommandHandlers.db_vacuum))
 
-    # 🆕 v5.6.36 FIX-PING-ADMIN-GUARD:
-    # حماية مزدوجة — filters.User على التسجيل + فحص داخلي في cmd_ping
+    # /ping — admin-only
     if _admin_ids:
         try:
             app.add_handler(CommandHandler(
@@ -3852,11 +3987,31 @@ async def main():
             )
             app.add_handler(CommandHandler("ping", cmd_ping))
     else:
-        # لو _admin_ids فارغة، الفلتر سيعطّل الزر تماماً
-        # نستخدم cmd_ping's internal check (bot_data["admin_ids"])
         app.add_handler(CommandHandler("ping", cmd_ping))
         logger.info(
             "✅ /ping مُسجَّل (internal-only guard — admin_ids فارغة)"
+        )
+
+    # 🆕 v5.6.37: /posts_stats — admin-only
+    if _admin_ids:
+        try:
+            app.add_handler(CommandHandler(
+                "posts_stats", cmd_posts_stats,
+                filters=filters.User(_admin_ids),
+            ))
+            logger.info(
+                "✅ /posts_stats مُسجَّل (admin-only, n=%d)",
+                len(_admin_ids),
+            )
+        except Exception as _e:
+            logger.warning(
+                "⚠️ فشل تسجيل /posts_stats مع filter — fallback: %s", _e
+            )
+            app.add_handler(CommandHandler("posts_stats", cmd_posts_stats))
+    else:
+        app.add_handler(CommandHandler("posts_stats", cmd_posts_stats))
+        logger.info(
+            "✅ /posts_stats مُسجَّل (internal-only guard)"
         )
 
     try:
@@ -3979,10 +4134,6 @@ async def main():
 
     app.add_handler(PreCheckoutQueryHandler(pre_checkout))
     app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, successful_payment))
-
-    # ═══════════════════════════════════════════════════════════════
-    # ORDER-FIX-COMPAT: ترتيب التسجيل
-    # ═══════════════════════════════════════════════════════════════
 
     try:
         register_channels_list_handlers(app)
@@ -4131,7 +4282,6 @@ async def main():
             _e, exc_info=True,
         )
 
-    # FIX-SUCCESSFUL-PAYMENT-OVERLAP
     app.add_handler(MessageHandler(
         (filters.TEXT | filters.PHOTO | filters.VIDEO | filters.Document.ALL |
          filters.AUDIO | filters.VOICE | filters.ANIMATION | filters.Sticker.ALL |
@@ -4277,7 +4427,6 @@ async def main():
 
             runner = await setup_webhook(app, port)
 
-            # FIX-POST-INIT-WEBHOOK
             await _run_post_init_hooks(app)
 
             try:
@@ -4453,7 +4602,6 @@ async def main():
             except Exception as _sp_u_e:
                 logger.debug("sleep_probe uninstall: %s", _sp_u_e)
 
-        # FIX-APP-STOP
         if not app_shutdown_done:
             try:
                 if getattr(app, "running", False):
@@ -4474,7 +4622,6 @@ async def main():
             except Exception as _e:
                 logger.debug("app.shutdown: %s", _e)
 
-        # FIX-DB-CLOSE
         try:
             await _shutdown_db_pool(timeout=5.0)
         except asyncio.CancelledError:
