@@ -1,11 +1,31 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-🌿 Relax Manager – البوت الرئيسي (bot.py v5.6.40-PER-CHANNEL-GIL-FIX)
+🌿 Relax Manager – البوت الرئيسي (bot.py v5.6.41-RECORD-METRIC-MODULE-FIX)
 ================================================================================
 📌 نقطة الدخول الرسمية للتطبيق (entrypoint).
 
-🆕 v5.6.40 (PER-CHANNEL-FIX + GIL-CONTENTION-FIX):
+🆕 v5.6.41 (RECORD-METRIC-MODULE-FIX):
+    🔴 FIX-RECORD-METRIC-MODULE (CRITICAL):
+        عند `python bot.py`: __name__ == "__main__" → _BOT_METRICS في __main__.
+        utils.py: `from bot import record_bot_metric` (lazy، عند أول نشر) →
+        Python يُنشئ module 'bot' منفصلاً → له _BOT_METRICS منفصل →
+        record_bot_metric يُحدّث نسخة، cmd_posts_stats يقرأ أخرى →
+        posts_success يبقى 0 دائماً.
+        الإصلاح: sys.modules.setdefault('bot', sys.modules['__main__'])
+        بعد logger مباشرة — يجعل `from bot import ...` و __main__ يشيران
+        لنفس الوحدة. الآن record_bot_metric يُحدّث نفس dict الذي يقرأه
+        /posts_stats.
+        الأثر: posts_success في /posts_stats يطابق عدد النشر الحقيقي.
+
+    🟢 FIX-STATS-DIAGNOSTIC:
+        إضافة إلى /posts_stats:
+          • `published last 15m` — يميّز "0 = لا نشر بعد" من "0 = bug".
+          • `module binding` — يكشف إن كان __main__ == bot أو منفصلين
+            (مع عناوين id() للمقارنة).
+        الأثر: تشخيص فوري لأي bug metrics مستقبلي.
+
+🆕 v5.6.40 (PER-CHANNEL-FIX + GIL-CONTENTION-FIX) — محفوظ:
     🟢 FIX-PER-CHANNEL-DISCOVERY:
         `/posts_stats` per-channel كان يفشل بـ "لم يُعثر على عمود قناة"
         لأن `channel_db_id` (العمود الفعلي في جدول posts — مؤكد من
@@ -705,6 +725,39 @@ for _noisy in (
 
 logger = logging.getLogger(__name__)
 
+# ═══════════════════════════════════════════════════════════════════
+# 🔴 v5.6.41 FIX-RECORD-METRIC-MODULE (CRITICAL)
+# ═══════════════════════════════════════════════════════════════════
+# السبب:
+#   عند `python bot.py`: __name__ == "__main__" → _BOT_METRICS في __main__
+#   utils.py: `from bot import record_bot_metric` (lazy، عند أول نشر) →
+#   Python يُنشئ module 'bot' منفصلاً → له _BOT_METRICS منفصل →
+#   record_bot_metric يُحدّث نسخة، cmd_posts_stats يقرأ نسخة أخرى →
+#   posts_success يبقى 0 دائماً.
+#
+# الإصلاح:
+#   اجعل sys.modules['bot'] = sys.modules['__main__'] قبل أول استدعاء
+#   لـ `from bot import ...` (وهو lazy في utils.py، يحدث عند أول نشر).
+#   الآن: كل من `from bot import ...` و __main__ يشيران لنفس الوحدة.
+#
+# الأثر:
+#   ✅ record_bot_metric("posts_success") يُحدّث نفس dict الذي يقرأه
+#      /posts_stats → posts_success يطابق النشر الحقيقي.
+#   ✅ _metrics_inc في handlers_callback يعمل (نفس الحالة).
+#   ✅ لا يحتاج restart — فقط إعادة تشغيل بعد الحفظ.
+# ═══════════════════════════════════════════════════════════════════
+import sys as _sys_for_bot_alias
+if __name__ == "__main__":
+    _sys_for_bot_alias.modules.setdefault(
+        'bot', _sys_for_bot_alias.modules['__main__']
+    )
+    logger.debug(
+        "🔗 FIX-RECORD-METRIC-MODULE: sys.modules['bot'] = __main__ "
+        "(was %s)",
+        "new" if _sys_for_bot_alias.modules.get('bot')
+        is _sys_for_bot_alias.modules.get('__main__') else "already-bound"
+    )
+
 # ═══════════════════════════════════════════════════════════════════════
 # SLEEP-PROBE
 # ═══════════════════════════════════════════════════════════════════════
@@ -977,7 +1030,7 @@ async def _gil_lag_monitor() -> None:
     الإصلاح الفعلي: إزالة install_default_executor في __main__.
     """
     logger.info(
-        "🔍 v5.6.40 GIL-MONITOR: بدء المراقبة "
+        "🔍 v5.6.41 GIL-MONITOR: بدء المراقبة "
         "(lag warn >%.0fms, p90 window=%d samples, "
         "alert every %.0fs)",
         _GIL_LAG_WARN_MS, _GIL_LAG_SAMPLES_MAX,
@@ -1010,7 +1063,7 @@ async def _gil_lag_monitor() -> None:
                 p99 = sorted_lags[-1] if n else 0.0
                 avg = sum(lags) / n if n else 0.0
                 logger.warning(
-                    "🔴 v5.6.40 GIL-MONITOR: lag=%.0fms | "
+                    "🔴 v5.6.41 GIL-MONITOR: lag=%.0fms | "
                     "samples=%d | p50=%.0fms p90=%.0fms "
                     "p99=%.0fms avg=%.0fms | "
                     "action: قِس DETECTOR_POOL_WORKERS وأزل "
@@ -1018,7 +1071,7 @@ async def _gil_lag_monitor() -> None:
                     lag_ms, n, p50, p90, p99, avg,
                 )
         except asyncio.CancelledError:
-            logger.info("🛑 v5.6.40 GIL-MONITOR: تم الإيقاف")
+            logger.info("🛑 v5.6.41 GIL-MONITOR: تم الإيقاف")
             raise
         except Exception as _e:
             logger.debug("GIL-MONITOR error: %s", _e)
@@ -1037,7 +1090,7 @@ def _spawn_gil_lag_monitor() -> Optional[asyncio.Task]:
         return _GIL_LAG_MONITOR_TASK
     except Exception as _e:
         logger.warning(
-            "⚠️ v5.6.40: فشل بدء GIL-MONITOR: %s", _e,
+            "⚠️ v5.6.41: فشل بدء GIL-MONITOR: %s", _e,
         )
         return None
 
@@ -3512,27 +3565,24 @@ async def cmd_ping(update, context):
             pass
 
 # ═══════════════════════════════════════════════════════════════════
-# 🆕 v5.6.40: /posts_stats — إحصائيات النشر من DB مباشرة
-#           (per-channel discovery + channel_db_id)
+# 🆕 v5.6.41: /posts_stats — إحصائيات النشر من DB مباشرة
+#           (per-channel discovery + channel_db_id +
+#            15m diagnostic + module binding diagnostic)
 # ═══════════════════════════════════════════════════════════════════
 
 async def cmd_posts_stats(update, context):
     """
     📊 إحصائيات النشر من DB مباشرة.
 
-    v5.6.40 FIX-PER-CHANNEL-DISCOVERY:
-      • اكتشاف أعمدة posts table من information_schema أولاً.
-      • اكتشاف عمود القناة تلقائياً — `channel_db_id` أولاً
-        (مؤكد من database_tables.py v7.9.12 كـ FK).
-      • per-channel يستخدم العمود المُكتشَف (لا hard-coded channel_id).
-      • عرض الأعمدة الموجودة/المفقودة في أعلى الرد.
+    v5.6.41 FIX-STATS-DIAGNOSTIC:
+      • `published last 15m` — يميّز "0 = لا نشر بعد" من "0 = bug".
+      • `module binding` — يكشف إن كان __main__ == bot أو منفصلين
+        (مع عناوين id() للمقارنة).
 
-    v5.6.39 FIX-PER-CHANNEL-DISCOVERY (محفوظ):
-      • كان يفشل بسبب عدم وجود channel_db_id في المرشحين.
+    v5.6.40 FIX-PER-CHANNEL-DISCOVERY (محفوظ):
+      • `channel_db_id` أول مرشح (FK → user_channels.id).
 
-    v5.6.38 FIX-SQL-PUBLISHED (محفوظ):
-      • published_at NOT NULL أولاً.
-      • published = 1 (integer) بدلاً من TRUE (boolean).
+    v5.6.39/38 (محفوظ): per-channel discovery + SQL published fixes.
     """
     user = update.effective_user
     if user is None:
@@ -3748,6 +3798,50 @@ async def cmd_posts_stats(update, context):
             f"⚠️ <code>total posts</code>: <i>{err_total}</i>"
         )
 
+    # 🆕 v5.6.41 FIX-STATS-DIAGNOSTIC: نشر آخر 15 دقيقة (كشف bug metrics)
+    cnt_15m, err_15m = await _try_count(
+        "SELECT COUNT(*) AS n FROM posts "
+        "WHERE published_at IS NOT NULL "
+        "AND published_at > NOW() - INTERVAL '15 minutes'"
+    )
+    if err_15m is None:
+        lines.append(
+            f"✅ <code>published last 15m</code>: <b>{cnt_15m}</b>"
+        )
+    else:
+        lines.append(
+            f"⚠️ <code>published last 15m</code>: <i>{err_15m}</i>"
+        )
+
+    # 🆕 v5.6.41 FIX-STATS-DIAGNOSTIC: فحص وحدة القياس
+    try:
+        _sys = __import__("sys")
+        _main_mod = _sys.modules.get("__main__")
+        _bot_mod = _sys.modules.get("bot")
+        _same_module = (_main_mod is _bot_mod)
+        _main_id = id(_main_mod) if _main_mod else 0
+        _bot_id = id(_bot_mod) if _bot_mod else 0
+        if _same_module:
+            lines.append(
+                "✅ <code>module binding</code>: <b>unified</b> "
+                f"<i>(__main__ == bot)</i>"
+            )
+        elif _bot_mod is None:
+            lines.append(
+                "⚠️ <code>module binding</code>: "
+                "<b>bot غير محمّل بعد</b> "
+                "<i>(record_bot_metric لم يُستدعَ)</i>"
+            )
+        else:
+            lines.append(
+                f"🔴 <code>module binding</code>: <b>SEPARATE!</b> "
+                f"<i>(__main__={_main_id:#x}, bot={_bot_id:#x})</i>"
+            )
+    except Exception as _mbe:
+        lines.append(
+            f"⚠️ <code>module binding</code>: <i>{type(_mbe).__name__}</i>"
+        )
+
     # per-channel: يستخدم العمود المُكتشَف
     lines.append("")
     if channel_col:
@@ -3832,7 +3926,8 @@ async def cmd_posts_stats(update, context):
     elif uptime_s > 600 and _ps == 0:
         lines.append(
             "⚠️ <i>مضى أكثر من 10 دقائق بلا posts_success. "
-            "تحقق من utils.py v7.10.24 (record_bot_metric).</i>"
+            "تحقق من utils.py v7.10.26 (record_bot_metric) "
+            "و module binding أعلاه.</i>"
         )
     elif _ps > 0:
         lines.append(
@@ -3927,7 +4022,7 @@ async def main():
     logger.info("👨‍💼 المالك: %s", CONFIG.PRIMARY_OWNER_ID)
 
     logger.info(
-        "📦 bot.py: v5.6.40 | "
+        "📦 bot.py: v5.6.41 | "
         "detectors=%s | layers=%d | helpers=%s | "
         "db_idle=%s | cache_stats=%s | analytics=%s | "
         "fullhealth=%s | latency=%s | maint_cmds=%s | "
@@ -3947,6 +4042,8 @@ async def main():
         "resolve_port_none_fix=on | resolve_hostname_invalid=on | "
         "verify_callable=on | bot_data_admin_ids=on | "
         "posts_stats_cmd=on | record_bot_metric=on | "
+        "record_metric_module_fix=on | "
+        "posts_stats_15m_diag=on | module_binding_diag=on | "
         "posts_stats_sql_fix=on | per_channel_discovery=on | "
         "channel_db_id_priority=on | "
         "gil_contention_fix=on | gil_lag_monitor=on",
@@ -5012,7 +5109,7 @@ if __name__ == "__main__":
         #    منفصل تماماً عن التطبيق. صفر تنافس على GIL بين المسارين.
         if _DETECTORS_HAS_INSTALL_HELPER:
             logger.info(
-                "ℹ️ v5.6.40 FIX-GIL-CONTENTION: "
+                "ℹ️ v5.6.41 FIX-GIL-CONTENTION: "
                 "تم تجاوز install_default_executor — "
                 "detectors pool (16 workers) منفصل عن default executor "
                 "التطبيق (12 workers تلقائياً). "
