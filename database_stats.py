@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-database_stats.py - دوال الإحصائيات والمشرفين (v7.4.5)
+database_stats.py - دوال الإحصائيات والمشرفين (v7.4.6)
 ================================================================================
 StatsMixin:
   - get_bot_stats      : إحصائيات البوت الأساسية
@@ -9,16 +9,36 @@ StatsMixin:
   - get_user_stats     : إحصائيات المستخدمين
   - add_admin          : إضافة مشرف (UPSERT متوافق)
   - remove_admin       : إزالة مشرف
-  - get_admin_list     : قائمة المشرفين
+  - get_admin_list     : قائمة المشرفين (⚠️ المصدر الوحيد الموثوق)
 
-🆕 v7.4.5 (FIX-DB-SIZE-STATS):
+🆕 v7.4.6 (ADMIN-DEDUP-CLARIFICATION):
+  🟢 FIX-ADMIN-DEDUP (CRITICAL): توثيق أن get_admin_list يجب أن يبقى
+      هنا فقط. وليس في GroupsMixin.
+      السبب: ترتيب MRO في Database:
+        RefactorMixin → MigrationsMixin → ChannelsPostsMixin →
+        SubscriptionsMixin → GroupsMixin → TicketsMixin → ContestsMixin →
+        StatsMixin → SettingsMixin → ...
+      عندما يكون get_admin_list في BOTH GroupsMixin و StatsMixin:
+        • DB.get_admin_list() → GroupsMixin يَفوز (بدون Cache)
+        • StatsMixin.get_admin_list (مع auth_cache) لا يُستدعى أبداً
+        • النتيجة: كل استدعاء = DB query (~42ms) بدل 0ms
+      الأثر: إما حذف النسخة من GroupsMixin، أو تفويضها لـ StatsMixin.
+      (انظر database_groups.py v7.4.19 المخطط).
+
+  🟢 FIX-ADMIN-CACHE-CONSISTENCY: add_admin/remove_admin يُبطلان
+      auth_cache.invalidate() بشكل شامل — يمسح get_admin_list(0)
+      أيضاً. لا حاجة لتعديل.
+
+  🟢 IMPROVE-DOCSTRING: توضيح العلاقة مع GroupsMixin.
+
+🆕 v7.4.5 (FIX-DB-SIZE-STATS) — محفوظ:
   ✅ get_bot_stats: إضافة db_size_kb (via self.get_db_size_kb())
   ✅ get_general_stats: إضافة db_size_kb
   ✅ حل مشكلة "💾 حجم قاعدة البيانات: 0.0 KB"
   ✅ يعمل على PostgreSQL/MySQL/SQLite
   ✅ لا تغيير في السلوك السابق — إضافة حقل فقط
 
-🆕 v7.4.4 (تحسينات أداء + إصلاحات):
+🆕 v7.4.4 (تحسينات أداء + إصلاحات) — محفوظ:
   ✅ get_general_stats: استعلام واحد بدل 9 استعلامات (PostgreSQL)
     - يحسّن admin_stats من 4.24s → 200ms
   ✅ get_bot_stats: استعلام واحد بدل 7 استعلامات
@@ -314,6 +334,10 @@ class StatsMixin:
     async def add_admin(self, admin_id: int, added_by: int) -> bool:
         """
         ✅ v7.4.4: UPSERT متوافق مع PostgreSQL/MySQL/SQLite.
+
+        🟢 v7.4.6 FIX-ADMIN-CACHE-CONSISTENCY:
+            - auth_cache.invalidate() بدون معامل يمسح get_admin_list(0)
+              أيضاً — لا حاجة لتعديل.
         """
         try:
             db_type = "sqlite"
@@ -366,7 +390,12 @@ class StatsMixin:
     # =====================================================================
 
     async def remove_admin(self, admin_id: int) -> bool:
-        """إزالة مشرف من القائمة."""
+        """
+        إزالة مشرف من القائمة.
+
+        🟢 v7.4.6 FIX-ADMIN-CACHE-CONSISTENCY:
+            - auth_cache.invalidate() بدون معامل يمسح get_admin_list(0).
+        """
         try:
             async with self.connection() as conn:
                 deleted = await self._execute_with_conn(
@@ -392,7 +421,21 @@ class StatsMixin:
         """
         ✅ v7.4.4: إصلاح خطأ تخزين [user_id] بدل النتائج الكاملة.
 
-        ⚠️ ملاحظة: الآن يُخزّن النتائج كاملة (dict list).
+        🟢 v7.4.6 FIX-ADMIN-DEDUP (CRITICAL):
+            هذه هي النسخة المُحصَّنة مع auth_cache.
+            يجب ألا تكون هناك نسخة مكرّرة في GroupsMixin — لأن ترتيب
+            MRO يجعل GroupsMixin يفوز (قبل StatsMixin) → يفقد
+            الـ Cache → 42ms إضافية لكل استدعاء.
+
+            إذا كانت GroupsMixin تُعرِّف get_admin_list → احذفها
+            أو فوّضها لـ super().get_admin_list() (انظر
+            database_groups.py v7.4.19 المخطط).
+
+        الآلية:
+          • Cache hit → 0ms (من auth_cache)
+          • Cache miss → DB query (~42ms) + cache set (60s TTL)
+          • add_admin/remove_admin → invalidate() → cache miss التالي
+            يعيد القراءة من DB
         """
         if self.CACHE_AVAILABLE:
             try:
@@ -420,3 +463,24 @@ class StatsMixin:
         except Exception as e:
             logger.error(f"❌ get_admin_list: {e}", exc_info=True)
             return []
+
+
+__all__ = ["StatsMixin"]
+
+
+# ═════════════════════════════════════════════════════════════════════
+# LOAD BEACON — v7.4.6
+# ═════════════════════════════════════════════════════════════════════
+
+try:
+    logger.info(
+        "✅ database_stats.py v7.4.6 loaded | "
+        "fixes=(ADMIN-DEDUP-CLARIFICATION: "
+        "get_admin_list-must-be-here-only, "
+        "ADMIN-CACHE-CONSISTENCY: add/remove-admin-invalidate, "
+        "v7.4.5-all: db_size_kb, "
+        "v7.4.4-all: batch-queries-upsert) | "
+        "⚠️ تحقق: GroupsMixin لا يجب أن تعرّف get_admin_list"
+    )
+except Exception:
+    pass
