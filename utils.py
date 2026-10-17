@@ -1,9 +1,17 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-utils.py - الأدوات المساعدة للبوت (v7.10.25 — REMINDERS-INDEPENDENCE)
+utils.py - الأدوات المساعدة للبوت (v7.10.26 — METRIC-VISIBILITY)
 =================================================================================
-🆕 v7.10.25 (REMINDERS-INDEPENDENCE):
+🆕 v7.10.26 (FIX-METRIC-VISIBILITY):
+    🟡 FIX-METRIC-VISIBILITY: استبدال logger.debug بـ logger.warning في
+       bloc_ {record_bot_metric("posts_success"), record_bot_metric("posts_failed")}
+       داخل BackgroundTasks._publish_single_channel. السبب: إذا فشل
+       الاستيراد (ImportError) أو الاستدعاء (Exception) كان الفشل صامتاً
+       تماماً (level=INFO عادةً) فلا يعرف المشغّل أن metrics=0.
+       الأثر: أي فشل في ربط record_bot_metric سيظهر تحذيراً في السجل.
+
+🆕 v7.10.25 (REMINDERS-INDEPENDENCE) — محفوظ:
     🔴 FIX-REMINDERS-INDEPENDENCE (CRITICAL): في BackgroundTasks.reminders
        كانت الاستدعاءات الثلاثة (subscription + daily + weekly) داخل
        try/except واحد. إذا فشلت الأولى → الباقي لا يُنفَّذ.
@@ -3661,11 +3669,20 @@ class BackgroundTasks:
                             await safe_send(
                                 bot, user_id, "✅ تم نشر منشور في قناتك")
                 # 🆕 v7.10.24 FIX-METRICS-INTEGRATION
+                # 🆕 v7.10.26 FIX-METRIC-VISIBILITY: warning بدل debug
                 try:
                     from bot import record_bot_metric
                     record_bot_metric("posts_success")
+                except ImportError as _ie:
+                    logger.warning(
+                        "⚠️ record_bot_metric غير متاح — "
+                        "metrics ستكون 0 | err=%s", _ie
+                    )
                 except Exception as _me:
-                    logger.debug("record_bot_metric success: %s", _me)
+                    logger.warning(
+                        "⚠️ record_bot_metric فشل | err=%s: %s",
+                        type(_me).__name__, _me
+                    )
                 try:
                     from handlers_callback import _metrics_inc
                     _metrics_inc('publishes_success')
@@ -3675,11 +3692,19 @@ class BackgroundTasks:
             else:
                 await DB.increment_post_fail(post['id'])
                 # 🆕 v7.10.24 FIX-METRICS-INTEGRATION
+                # 🆕 v7.10.26 FIX-METRIC-VISIBILITY: warning بدل debug
                 try:
                     from bot import record_bot_metric
                     record_bot_metric("posts_failed")
+                except ImportError as _ie:
+                    logger.warning(
+                        "⚠️ record_bot_metric غير متاح (fail) | err=%s", _ie
+                    )
                 except Exception as _me:
-                    logger.debug("record_bot_metric failed: %s", _me)
+                    logger.warning(
+                        "⚠️ record_bot_metric فشل (fail) | err=%s: %s",
+                        type(_me).__name__, _me
+                    )
                 try:
                     from handlers_callback import _metrics_inc
                     _metrics_inc('publishes_failed')
@@ -4912,13 +4937,15 @@ __all__ = [
 ]
 
 # ═══════════════════════════════════════════════════════════════════════════
-# LOAD BEACON — v7.10.25
+# LOAD BEACON — v7.10.26
 # ═══════════════════════════════════════════════════════════════════════════
 
 try:
     logger.info(
-        "🛡️ utils.py v7.10.25 REMINDERS-INDEPENDENCE loaded | "
-        "🆕 FIX-REMINDERS-INDEPENDENCE: 3×try/except مستقل | "
+        "🛡️ utils.py v7.10.26 METRIC-VISIBILITY loaded | "
+        "🆕 FIX-METRIC-VISIBILITY: warning بدل debug في "
+        "record_bot_metric (success + fail) | "
+        "FIX-REMINDERS-INDEPENDENCE: 3×try/except مستقل | "
         "FIX-METRICS: record_bot_metric + _metrics_inc في "
         "_publish_single_channel (success + fail) | "
         "FIX-PD-1: event-triggered auto_publish (signal=%.0fs) | "
