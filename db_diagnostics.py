@@ -1,39 +1,38 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-db_diagnostics.py — واجهة تشخيص وصيانة قاعدة البيانات (v7.2.21 — POOL-DISPLAY-FIX)
+db_diagnostics.py — واجهة تشخيص وصيانة قاعدة البيانات (v7.2.22 — DOC-QUALITY)
 ================================================================================
-🆕 v7.2.21 — POOL-DISPLAY-FIX:
+🆕 v7.2.22 — DOC-QUALITY-IMPROVEMENTS (لا تغيير سلوكي):
 
-    🔴 FIX-21: إصلاح عرض Pool في /databases و /db_diag:
-        كان يعرض `pool_used/total` = `15/15` (مضلّل — 100% usage وهمي).
-        السبب: `asyncpg.Pool._holders` يحتوي كل الاتصالات (idle + in-use)،
-        وليس فقط المُستخدَمة. استخدام `len(_holders)` كان يعطي عدداً
-        مضلّلاً.
-        الإصلاح:
-          - استخدام `pool.get_size() - pool.get_idle_size()` = in_use الفعلي.
-          - إضافة `pool_idle` منفصل لعرض الاتصالات الخاملة.
-          - تحديث `format_multi_db_report` ليعرض: `in_use/total (idle)`
+    🟢 FIX-DOC-POOL-SEMANTICS:
+        توضيح في _read_pool_metrics + _format_pool_line أن:
+          • current_size = idle + in_use (كما تُرجعه pool.get_size())
+          • idle_size = عدد الاتصالات الخاملة (pool.get_idle_size())
+          • in_use = current_size - idle_size (الفارق)
+        تصحيح تعليق util في _format_pool_line: util = current/max
+        (ليس in_use/max). في معظم الحالات current == max → util=100%
+        وهذا طبيعي لأن asyncpg يحتفظ بالاتصالات للاستخدام السريع.
 
-        مثال قبل: `🏊 Pool: 15/15` (مضلّل — يوحي بأن كل الاتصالات مشغولة)
-        مثال بعد: `🏊 Pool: 3/15 (idle=12)` (واضح — 3 قيد الاستخدام)
+    🟢 FIX-DOC-STARTUP-GRACE:
+        توضيح أن _STARTUP_GRACE_SEC = 60s يتطابق مع mark_process_start()
+        المُستدعى من bot.py v5.6.40::main(). إذا لم يُستدعَ mark_process_start
+        (بوت قديم)، يُستخدم _PROCESS_IMPORT_TS كـ fallback (محسوب من psutil).
+        تحذير إذا لم يُستدعَ خلال أول 30s.
 
-🆕 v7.2.20 — COMMAND-FIX — محفوظ:
+    🟢 FIX-DOC-PSUTIL-SYNC:
+        توضيح في _probe_system أن:
+          • psutil.virtual_memory() sync لكنه <1ms — لا يحتاج to_thread
+          • psutil.cpu_percent(interval=None) sync لكنه <1ms
+          • psutil.cpu_percent(interval>0) sync ويحجب interval — نتجنّبه
+        في db_diagnostics نستخدم interval=None فقط (سريع).
 
-    🟢 FIX-20: تصحيح مرجع الأمر غير الموجود:
-        - كان يُحيل إلى `/databases` (غير مُسجَّل في bot.py).
-        - أصبح يُحيل إلى `/db_diag` (مُسجَّل فعلياً + يعرض
-          نفس المعلومات + القاعدة النشطة).
-        - الموضعان: `_build_sections()` (S0 banner) و
-          `diagnose_db_quick()`.
+    🟢 IMPROVE-BEACON:
+        LOAD BEACON يُظهر حالة _PROCESS_START_TS (mark_called أو import_ts).
 
-🆕 v7.2.19 — GRACE-EXTENDED — محفوظ:
-
-    🟢 FIX-19: نافذة السماح موسَّعة لتشمل CPU / RAM / Filesystem —
-        كانت GRACE-1/2 تعالج event_loop فقط. القياسات الأخرى
-        (CPU=96%، load=7.11) تظهر مضخَّمة أثناء الإقلاع (19 مهمة +
-        pool warmup) وتُعرض كانها bottleneck حقيقي.
-
+🆕 v7.2.21 — POOL-DISPLAY-FIX — محفوظ بالكامل.
+🆕 v7.2.20 — COMMAND-FIX — محفوظ.
+🆕 v7.2.19 — GRACE-EXTENDED — محفوظ.
 🆕 v7.2.18 — FIX-COMPLETE — محفوظ.
 🆕 v7.2.17 — FULL-FIX — محفوظ.
 🆕 v7.2.16 — STARTUP-GRACE — محفوظ.
@@ -78,7 +77,7 @@ logger = logging.getLogger(__name__)
 # الإصدار + Startup grace
 # ═══════════════════════════════════════════════════════════════════════
 
-VERSION = "7.2.21"
+VERSION = "7.2.22"
 
 
 def _compute_process_start_monotonic() -> float:
@@ -114,6 +113,17 @@ def mark_process_start() -> None:
     """
     FIX-2 (v7.2.17): يجب استدعاؤها من main.py عند بدء العملية الفعلي.
     إن لم تُستدعَ، نستخدم _PROCESS_IMPORT_TS (المُحسَّبة من psutil).
+
+    🟢 FIX-DOC-STARTUP-GRACE (v7.2.22):
+      • bot.py v5.6.40 يستدعيها في main() مباشرة بعد signal setup.
+      • يبدأ نافذة _STARTUP_GRACE_SEC = 60s لإخفاء قياسات
+        CPU/RAM/Event Loop/Filesystem المضخَّمة أثناء warmup
+        (19 مهمة خلفية + pool warmup + webhook setup).
+      • إذا لم تُستدعَ (بوت قديم)، يُستخدم _PROCESS_IMPORT_TS من psutil
+        كـ fallback — يعمل لكن أقل دقة إذا كان البوت قد بدأ قبل
+        استيراد db_diagnostics.
+
+    ⚠️ إذا كانت النافذة مهمة لتصحيح التشخيص، تأكد من استدعائها.
     """
     global _PROCESS_START_TS
     _PROCESS_START_TS = time.monotonic()
@@ -552,6 +562,16 @@ def _read_pool_metrics(pool) -> Dict[str, int]:
 
     Returns dict مع: max_size, current_size, idle_size, in_use
     كل القيم آمنة (0 عند الفشل).
+
+    🟢 FIX-DOC-POOL-SEMANTICS (v7.2.22):
+      • current_size = idle_size + in_use (كما تُرجعه pool.get_size())
+      • idle_size = الاتصالات الجاهزة للاستخدام (لا يوجد في transaction)
+      • in_use = الاتصالات المشغولة حالياً في استعلام
+      • max_size = أقصى عدد يمكن أن ينميه asyncpg (connection_pool_size)
+
+    ملاحظة مهمة: asyncpg يُبقي الاتصالات حية بعد استخدامها (idle)
+    لتسريع الاستعلامات التالية. لذلك current_size عادةً قريب من
+    max_size بعد warmup — هذا طبيعي وسليم، ليس تسريباً.
     """
     metrics = {
         "max_size": 0,
@@ -574,7 +594,7 @@ def _read_pool_metrics(pool) -> Dict[str, int]:
         except Exception:
             pass
 
-        # current_size
+        # current_size = idle + in_use
         try:
             if hasattr(pool, "get_size") and callable(pool.get_size):
                 metrics["current_size"] = int(pool.get_size() or 0)
@@ -850,6 +870,15 @@ def _format_pool_line(active: Dict[str, Any]) -> str:
 
     الصيغة: `in_use/max_size (idle=N, current=M)`
     مثال:   `3/15 (idle=12, current=15)`
+
+    🟢 FIX-DOC-POOL-SEMANTICS (v7.2.22):
+      • in_use: عدد الاتصالات المُستخدَمة الآن فعلياً
+      • idle: عدد الاتصالات الجاهزة (خاملة)
+      • current: in_use + idle (العدد الفعلي المُنشأ)
+      • max: أقصى عدد يمكن أن يُنشأه pool
+      • util: current/max (نسبة التعبئة الفعلية، عادة 100% بعد warmup
+        لأن asyncpg يحتفظ بالاتصالات للاستخدام السريع)
+      • icon: يعكس in_use/max (الاستخدام الحقيقي)، ليس util.
     """
     max_size = active.get("pool_size", 0)
     in_use = active.get("pool_used", 0)
@@ -862,12 +891,13 @@ def _format_pool_line(active: Dict[str, Any]) -> str:
     # استخدام current_size إن كان max_size غير معروف
     display_max = max_size if max_size > 0 else current
 
+    # util = current/max (نسبة التعبئة الفعلية)
     util_pct = (
         round((current / display_max) * 100, 0)
         if display_max > 0 else 0
     )
 
-    # أيقونة حسب نسبة الاستخدام الحقيقي
+    # أيقونة حسب نسبة الاستخدام الحقيقي (in_use/max)
     if display_max > 0:
         real_util = (in_use / display_max) * 100
         if real_util < 50:
@@ -1298,8 +1328,6 @@ def _detect_cross_region(
         "   DB_REGION=ap-southeast-1"
     )
     return out
-
-
 # ═══════════════════════════════════════════════════════════════════════
 # LATENCY PROBE
 # ═══════════════════════════════════════════════════════════════════════
@@ -2171,6 +2199,20 @@ async def _probe_filesystem() -> Dict[str, Any]:
 
 
 async def _probe_system(*, prime_cpu: bool = False) -> Dict[str, Any]:
+    """
+    قياس النظام (CPU, RAM, load).
+
+    🟢 FIX-DOC-PSUTIL-SYNC (v7.2.22):
+      ملاحظات على psutil sync:
+        • psutil.virtual_memory() — sync، لكنه يقرأ /proc/meminfo مباشرة
+          ويستغرق < 1ms. لا يحتاج to_thread.
+        • psutil.cpu_percent(interval=None) — sync، لكنه يستخدم
+          delta داخلي (يقارن مع آخر استدعاء) ويستغرق < 1ms.
+        • psutil.cpu_percent(interval>0) — sync ويحجب interval كاملاً
+          (مثل interval=1s). في db_diagnostics نتجنّبه تماماً.
+        • prime_cpu=True: نُهيئ القراءة الأولى (التي ترجع 0.0 لأنها
+          delta أولى بلا مرجع)، ثم نقرأ القراءة الحقيقية بعد sleep.
+    """
     # FIX-9: prime_cpu يعمل بشكل صحيح
     result: Dict[str, Any] = {"ok": False}
     try:
@@ -4454,26 +4496,34 @@ __all__ = [
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# LOAD BEACON — v7.2.21
+# LOAD BEACON — v7.2.22
 # ═══════════════════════════════════════════════════════════════════════
 
 try:
+    _mark_state = (
+        "mark_called" if _PROCESS_START_TS > 0 else "import_ts(fallback)"
+    )
+    _uptime_at_import = time.monotonic() - _PROCESS_IMPORT_TS
+
     logger.info(
         "🛡️ db_diagnostics.py v%s loaded | "
+        "DOC-QUALITY-IMPROVEMENTS ✅ | "
+        "FIX-DOC-POOL-SEMANTICS ✅ | "
+        "FIX-DOC-STARTUP-GRACE ✅ | "
+        "FIX-DOC-PSUTIL-SYNC ✅ | "
         "POOL-DISPLAY-FIX ✅ | "
         "FIX-21=pool-uses-get_size-minus-get_idle ✅ | "
-        "COMMAND-FIX ✅ | "
-        "FIX-20=/databases→/db_diag ✅ | "
+        "COMMAND-FIX ✅ | FIX-20=/databases→/db_diag ✅ | "
         "FIX-19=startup-grace-for-cpu-ram-fs ✅ | "
-        "FIX-11..FIX-18 ✅ | FULL-FIX ✅ | STARTUP-GRACE ✅ | "
-        "PERF-OPTIMIZED ✅ | MULTI-DB-DISCOVERY ✅ | "
+        "FIX-11..FIX-18 ✅ | "
         "grace_sec=%d | cache_keys=%d | exports=%d | "
-        "process_start_age=%.1fs",
+        "mark_state=%s | process_age_at_import=%.1fs",
         VERSION,
         int(_STARTUP_GRACE_SEC),
         len(_CACHE_TTL),
         len(__all__),
-        time.monotonic() - _PROCESS_IMPORT_TS,
+        _mark_state,
+        _uptime_at_import,
     )
 except Exception:
     pass
