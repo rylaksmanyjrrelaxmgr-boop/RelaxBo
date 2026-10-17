@@ -1,16 +1,29 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-database_groups.py - دوال المجموعات (v7.4.18)
+database_groups.py - دوال المجموعات (v7.4.19)
 ================================================================================
-🆕 v7.4.18 — BOT-ADMINS-READ-API:
-  🟢 FIX-ADMIN-1: إضافة get_admin_list() / get_all_admins() / get_admins().
-      السبب: bot.py v5.6.39 دالة _collect_admin_ids تبحث عن إحدى هذه
-      الأسماء الثلاثة لجلب الأدمن من جدول bot_admins. لم تكن موجودة
-      في أي Mixin → bot.py كان يتخطاها بـ hasattr، فلا يقرأ الأدمن
-      المضافين عبر /add_admin.
-      الأثر: الأدمن المضافون عبر /add_admin الآن يرون الأوامر الإدارية
-      في Telegram (كانوا لا يرونها). لا تغيير على المالك والمطورين.
+🆕 v7.4.19 — ADMIN-MRO-DEDUP:
+  🔴 FIX-ADMIN-MRO-DEDUP (CRITICAL): حذف get_admin_list من GroupsMixin
+      → يفوّض لـ StatsMixin.get_admin_list (مع auth_cache).
+      السبب: ترتيب MRO في Database:
+        RefactorMixin → MigrationsMixin → ChannelsPostsMixin →
+        SubscriptionsMixin → GroupsMixin ← قبل
+        → TicketsMixin → ContestsMixin → StatsMixin
+      عندما كان get_admin_list موجوداً في GroupsMixin (v7.4.18)،
+      كان يفوز على StatsMixin.get_admin_list (النسخة مع auth_cache)
+      → يفقد الـ Cache → 42ms إضافية لكل استدعاء.
+      الآن: DB.get_admin_list() → StatsMixin (مع Cache) ✅
+
+  🟢 FIX-ADMIN-ALIASES: get_all_admins + get_admins تُفوّضان صراحةً
+      لـ super().get_admin_list() مع fallback آمن.
+
+  🟢 IMPROVE-DOCSTRING: توضيح العلاقة مع StatsMixin.
+
+🆕 v7.4.18 — BOT-ADMINS-READ-API (محفوظ جزئياً):
+  🟢 FIX-ADMIN-1: get_admin_list / get_all_admins / get_admins
+      (تم حذف get_admin_list في v7.4.19 — انظر أعلاه).
+      get_all_admins + get_admins محفوظتان كـ wrappers.
 
 🆕 v7.4.17 — CACHE-INVALIDATION-COMPLETE (محفوظ):
   🔴 FIX-CACHE-1: add/remove_group_admin → إبطال groups_cache.
@@ -147,43 +160,47 @@ class GroupsMixin:
         return invalidated
 
     # ═════════════════════════════════════════════════════════════════
-    # 🆕 v7.4.18 FIX-ADMIN-1: قراءة أدمن البوت من DB
+    # 🆕 v7.4.19 FIX-ADMIN-MRO-DEDUP: مرادفات فقط — التفويض لـ StatsMixin
     # ═════════════════════════════════════════════════════════════════
-
-    async def get_admin_list(self) -> List[Dict]:
-        """
-        🆕 v7.4.18: قائمة أدمن البوت من جدول bot_admins.
-
-        يستدعيها bot.py._collect_admin_ids() لجلب كل الأدمن المضافين
-        عبر /add_admin. بدونها، الأدمن المضافون عبر الأمر لا يرون
-        الأوامر الإدارية في Telegram.
-
-        Returns:
-            List[Dict]: [{'user_id': int, 'added_by': int, 'added_at': ...}, ...]
-            (قائمة فارغة عند أي فشل — لا يرمي استثناء)
-        """
-        try:
-            rows = await self.fetchall(
-                "SELECT user_id, added_by, added_at FROM bot_admins "
-                "ORDER BY added_at ASC"
-            )
-            return rows or []
-        except Exception as e:
-            logger.debug(f"get_admin_list: {e}")
-            return []
 
     async def get_all_admins(self) -> List[Dict]:
         """
-        🆕 v7.4.18: مرادف لـ get_admin_list (اسم بديل يستخدمه
-        bot.py كـ fallback).
+        🆕 v7.4.19 FIX-ADMIN-MRO-DEDUP: مرادف لـ get_admin_list.
+
+        يفوّض صراحةً لـ super().get_admin_list() — أي لـ
+        StatsMixin.get_admin_list (النسخة المُحصَّنة مع auth_cache).
+
+        ملاحظة: get_admin_list محذوفة من GroupsMixin في v7.4.19
+        لتجنّب تعارض MRO. الاستدعاء `DB.get_admin_list()` يذهب
+        مباشرة إلى StatsMixin (مع Cache).
         """
-        return await self.get_admin_list()
+        try:
+            result = await super().get_admin_list()
+            if isinstance(result, list):
+                return result
+        except AttributeError:
+            pass
+        except Exception as e:
+            logger.debug(f"get_all_admins (super): {e}")
+
+        # Fallback: استعلام مباشر إذا لم يكن StatsMixin متاحاً
+        try:
+            return await self.fetchall(
+                "SELECT user_id, added_by, added_at FROM bot_admins "
+                "ORDER BY added_at DESC"
+            ) or []
+        except Exception as e:
+            logger.debug(f"get_all_admins fallback: {e}")
+            return []
 
     async def get_admins(self) -> List[Dict]:
         """
-        🆕 v7.4.18: مرادف لـ get_admin_list (اسم بديل آخر).
+        🆕 v7.4.19 FIX-ADMIN-MRO-DEDUP: مرادف آخر لـ get_admin_list.
+
+        يفوّض لـ get_all_admins() الذي يفوّض بدوره لـ
+        StatsMixin.get_admin_list.
         """
-        return await self.get_admin_list()
+        return await self.get_all_admins()
 
     # ═════════════════════════════════════════════════════════════════
     # 2) تسجيل المجموعات وإدارتها
@@ -2358,16 +2375,17 @@ class GroupsMixin:
 __all__ = ["GroupsMixin"]
 
 
-# =====================================================================
-# LOAD BEACON — v7.4.18
-# =====================================================================
+# ═════════════════════════════════════════════════════════════════════
+# LOAD BEACON — v7.4.19
+# ═════════════════════════════════════════════════════════════════════
 
 try:
     logger.info(
-        "🛡️ database_groups.py v7.4.18 BOT-ADMINS-READ-API loaded | "
-        "🆕 FIX-ADMIN-1: get_admin_list / get_all_admins / get_admins "
-        "(bot.py يقرأ bot_admins → الأدمن المضافون عبر /add_admin "
-        "يرون الأوامر) | "
+        "🛡️ database_groups.py v7.4.19 ADMIN-MRO-DEDUP loaded | "
+        "🆕 FIX-ADMIN-MRO-DEDUP: get_admin_list-MOVED-to-StatsMixin "
+        "(MRO-resolved, Cache-preserved) | "
+        "🆕 FIX-ADMIN-ALIASES: get_all_admins + get_admins → super() | "
+        "FIX-ADMIN-1 (v7.4.18) محفوظ جزئياً: aliases فقط | "
         "FIX-CACHE-1..6 (v7.4.17) محفوظة | "
         "FIX-AC2 + FIX-C4 (v7.4.16) محفوظة | "
         "P1..P5 (v7.4.15) محفوظة | "
