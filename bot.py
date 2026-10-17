@@ -1,11 +1,28 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-🌿 Relax Manager – البوت الرئيسي (bot.py v5.6.38-METRICS-INTEGRATION)
+🌿 Relax Manager – البوت الرئيسي (bot.py v5.6.39-PER-CHANNEL-FIX)
 ================================================================================
 📌 نقطة الدخول الرسمية للتطبيق (entrypoint).
 
-🆕 v5.6.38 (FIX-POSTS-STATS-SQL):
+🆕 v5.6.39 (FIX-POSTS-STATS-PER-CHANNEL):
+    🔴 FIX-PER-CHANNEL-DISCOVERY:
+        per-channel كان يفشل بـ UndefinedColumnError (channel_id مفقود).
+        الآن: يكتشف عمود القناة تلقائياً من information_schema،
+        ويجرّب: channel_id, channel, chat_id, source_id, source,
+        target_channel, channel_username, chat — ثم يستخدم الأول.
+
+    🟢 IMPROVE-SCHEMA-INTROSPECTION:
+        عرض أعمدة posts table الفعلية (موجودة/مفقودة) في أعلى الرد.
+
+    🟢 IMPROVE-EXPECTED-FAILS:
+        published=TRUE يُعرض كـ "غير مدعوم (integer)" بدل ⚠️
+        sent_at/status: لا تُستعلم أصلاً إن لم توجد (لا ضوضاء).
+
+    🟢 IMPROVE-CHANNEL-DISPLAY:
+        عرض channel_col المكتشَف في التقرير للمطور.
+
+🆕 v5.6.38 (FIX-POSTS-STATS-SQL) — محفوظ:
     🔴 FIX-SQL-PUBLISHED:
         `/posts_stats` كان يستخدم `published = TRUE` (boolean)
         لكن العمود في DB هو INTEGER (0/1) → UndefinedFunctionError.
@@ -1554,7 +1571,7 @@ ADMIN_COMMANDS = [
     ("latency", "🔬 اختبار الكمون"),
     ("databases", "🗂️ قواعد البيانات المُعدّة"),
     ("ping", "🏓 قياس كمون الاتصال"),
-    ("posts_stats", "📊 إحصائيات النشر (DB)"),  # 🆕 v5.6.37
+    ("posts_stats", "📊 إحصائيات النشر (DB)"),
 ]
 
 GROUP_COMMANDS = [
@@ -3281,11 +3298,6 @@ async def cmd_ping(update, context):
     """
     🏓 قياس كمون حقيقي من داخل البوت.
 
-    يقيس:
-      • Send API RTT — الوقت الفعلي لـ reply_text (يمثل الرد الحقيقي)
-      • Message age  — زمن الوصول التقريبي (دقة 1s من Telegram)
-      • Edit API RTT — الوقت الفعلي لـ edit_text (يُسجَّل فقط)
-
     v5.6.36:
       • فحص أدمن داخلي عبر context.bot_data["admin_ids"]
       • ReplyParameters بدل reply_to_message_id (PTB >=20.8)
@@ -3336,7 +3348,6 @@ async def cmd_ping(update, context):
         t1 = time.monotonic()
         send_rtt_ms = int((t1 - t0) * 1000)
 
-        # v5.6.37: تسجيل ping metrics
         try:
             _BOT_METRICS["pings_total"] = (
                 int(_BOT_METRICS.get("pings_total") or 0) + 1
@@ -3410,21 +3421,25 @@ async def cmd_ping(update, context):
             pass
 
 # ═══════════════════════════════════════════════════════════════════
-# 🆕 v5.6.38: /posts_stats — إحصائيات النشر من DB مباشرة
-#           (SQL fix: published_at أولاً، ثم published=1)
+# 🆕 v5.6.39: /posts_stats — إحصائيات النشر من DB مباشرة
+#           (schema discovery + per-channel auto-detect)
 # ═══════════════════════════════════════════════════════════════════
 
 async def cmd_posts_stats(update, context):
     """
     📊 إحصائيات النشر من DB مباشرة.
 
-    v5.6.38 FIX-SQL:
-      • published_at NOT NULL أولاً (مؤكد من السجل أنه يعمل).
+    v5.6.39 FIX-PER-CHANNEL-DISCOVERY:
+      • يكتشف أعمدة posts table من information_schema أولاً.
+      • يكتشف عمود القناة تلقائياً من 8 أسماء محتملة.
+      • per-channel يستخدم العمود المُكتشَف (لا hard-coded channel_id).
+      • published=TRUE يُعرض كـ "غير مدعوم (integer)" بدل ⚠️.
+      • sent_at/status لا تُستعلم إن لم تكن موجودة (لا ضوضاء).
+      • عرض الأعمدة الموجودة/المفقودة في أعلى الرد.
+
+    v5.6.38 FIX-SQL-PUBLISHED (محفوظ):
+      • published_at NOT NULL أولاً.
       • published = 1 (integer) بدلاً من TRUE (boolean).
-      • per-channel يستخدم published_at مباشرة.
-      • عرض uptime بالدقائق والثواني.
-      • فحص تناسق بين bot.py و DB.
-      • رسالة توضيحية عند uptime < 10min + posts_success=0.
     """
     user = update.effective_user
     if user is None:
@@ -3453,90 +3468,225 @@ async def cmd_posts_stats(update, context):
         except Exception as _e:
             return None, f"{type(_e).__name__}: {str(_e)[:60]}"
 
-    # 🆕 v5.6.38: الترتيب يعكس ما يعمل فعلاً في DB
-    queries = [
-        (
-            "published_at NOT NULL (24h)",
-            "SELECT COUNT(*) AS n FROM posts "
-            "WHERE published_at IS NOT NULL "
-            "AND created_at > NOW() - INTERVAL '24 hours'",
-        ),
-        (
-            "published=1 (24h)",
-            "SELECT COUNT(*) AS n FROM posts "
-            "WHERE published = 1 "
-            "AND created_at > NOW() - INTERVAL '24 hours'",
-        ),
-        (
-            "published=TRUE (24h)",
-            "SELECT COUNT(*) AS n FROM posts "
-            "WHERE published = TRUE "
-            "AND created_at > NOW() - INTERVAL '24 hours'",
-        ),
-        (
-            "sent_at NOT NULL (24h)",
-            "SELECT COUNT(*) AS n FROM posts "
-            "WHERE sent_at IS NOT NULL "
-            "AND created_at > NOW() - INTERVAL '24 hours'",
-        ),
-        (
-            "status='published' (24h)",
-            "SELECT COUNT(*) AS n FROM posts "
-            "WHERE status = 'published' "
-            "AND created_at > NOW() - INTERVAL '24 hours'",
-        ),
-        (
-            "total posts (all-time)",
-            "SELECT COUNT(*) AS n FROM posts",
-        ),
-    ]
+    # 🆕 v5.6.39: اكتشاف أعمدة posts table
+    async def _get_posts_columns() -> Set[str]:
+        try:
+            rows = await DB.fetchall(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_name = 'posts'"
+            )
+            cols: Set[str] = set()
+            for r in rows:
+                c = None
+                if isinstance(r, dict):
+                    c = r.get('column_name')
+                else:
+                    try:
+                        c = r[0]
+                    except Exception:
+                        c = None
+                if c:
+                    cols.add(str(c).lower())
+            return cols
+        except Exception as _e:
+            logger.debug("_get_posts_columns: %s", _e)
+            return set()
+
+    posts_cols = await _get_posts_columns()
+
+    # 🆕 v5.6.39: اكتشاف عمود القناة
+    async def _discover_channel_col() -> Optional[str]:
+        candidates = (
+            "channel_id", "channel", "chat_id", "source_id",
+            "source", "target_channel", "channel_username", "chat",
+        )
+        # 1) من information_schema (سريع)
+        for c in candidates:
+            if c in posts_cols:
+                return c
+        # 2) تجربة استعلام فعلي (fallback)
+        for c in candidates:
+            try:
+                await DB.fetchone(f"SELECT {c} FROM posts LIMIT 1")
+                return c
+            except Exception:
+                continue
+        return None
+
+    channel_col = await _discover_channel_col()
 
     lines = ["📊 <b>إحصائيات النشر — من DB مباشرة</b>", ""]
 
-    working_scheme: Optional[str] = None
-    working_count = 0
+    # 🆕 v5.6.39: عرض معلومات schema مختصرة
+    if posts_cols:
+        _important = [
+            "published", "published_at", "created_at",
+            "sent_at", "status", "channel_id", "channel",
+        ]
+        _present = [c for c in _important if c in posts_cols]
+        _absent = [c for c in _important if c not in posts_cols]
+        if _present:
+            lines.append(
+                f"🔑 <b>أعمدة موجودة:</b> "
+                f"<code>{', '.join(_present)}</code>"
+            )
+        if _absent:
+            lines.append(
+                f"🚫 <b>أعمدة مفقودة:</b> "
+                f"<code>{', '.join(_absent)}</code>"
+            )
+        if channel_col:
+            lines.append(
+                f"📡 <b>عمود القناة:</b> <code>{channel_col}</code>"
+            )
+        lines.append("")
 
-    for label, sql in queries:
-        count, err = await _try_count(sql)
-        if err is None and count is not None:
-            lines.append(f"✅ <code>{label}</code>: <b>{count}</b>")
-            if count > 0 and working_scheme is None:
-                working_scheme = label
-                working_count = count
+    # 1) published_at NOT NULL (الأكثر موثوقية)
+    cnt_pub_at, err_pub_at = await _try_count(
+        "SELECT COUNT(*) AS n FROM posts "
+        "WHERE published_at IS NOT NULL "
+        "AND created_at > NOW() - INTERVAL '24 hours'"
+    )
+    if err_pub_at is None:
+        lines.append(
+            f"✅ <code>published_at NOT NULL (24h)</code>: "
+            f"<b>{cnt_pub_at}</b>"
+        )
+    else:
+        lines.append(
+            f"⚠️ <code>published_at NOT NULL (24h)</code>: "
+            f"<i>{err_pub_at}</i>"
+        )
+
+    # 2) published = 1 (integer)
+    cnt_p1, err_p1 = await _try_count(
+        "SELECT COUNT(*) AS n FROM posts "
+        "WHERE published = 1 "
+        "AND created_at > NOW() - INTERVAL '24 hours'"
+    )
+    if err_p1 is None:
+        lines.append(
+            f"✅ <code>published=1 (24h)</code>: <b>{cnt_p1}</b>"
+        )
+    else:
+        lines.append(
+            f"⚠️ <code>published=1 (24h)</code>: <i>{err_p1}</i>"
+        )
+
+    # 3) published = TRUE (boolean) — متوقع الفشل (integer vs boolean)
+    cnt_pt, err_pt = await _try_count(
+        "SELECT COUNT(*) AS n FROM posts "
+        "WHERE published = TRUE "
+        "AND created_at > NOW() - INTERVAL '24 hours'"
+    )
+    if err_pt is None:
+        lines.append(
+            f"✅ <code>published=TRUE (24h)</code>: <b>{cnt_pt}</b>"
+        )
+    elif cnt_p1 is not None:
+        # متوقع في schemas بـ integer — عرض توضيحي لا تحذيري
+        lines.append(
+            "ℹ️ <code>published=TRUE</code>: "
+            "<i>غير مدعوم (integer column) — استخدم =1</i>"
+        )
+    else:
+        lines.append(
+            f"⚠️ <code>published=TRUE</code>: <i>{err_pt}</i>"
+        )
+
+    # 4) sent_at (اختياري — فقط إن وُجد)
+    if "sent_at" in posts_cols:
+        cnt_sa, err_sa = await _try_count(
+            "SELECT COUNT(*) AS n FROM posts "
+            "WHERE sent_at IS NOT NULL "
+            "AND created_at > NOW() - INTERVAL '24 hours'"
+        )
+        if err_sa is None:
+            lines.append(
+                f"✅ <code>sent_at NOT NULL (24h)</code>: "
+                f"<b>{cnt_sa}</b>"
+            )
         else:
             lines.append(
-                f"⚠️ <code>{label}</code>: <i>{err or 'unknown'}</i>"
+                f"⚠️ <code>sent_at NOT NULL</code>: <i>{err_sa}</i>"
             )
+    elif posts_cols:
+        lines.append("🚫 <code>sent_at</code>: <i>عمود غير موجود</i>")
 
-    # 🆕 per-channel: يستخدم published_at مباشرة (مؤكد)
-    lines.append("")
-    try:
-        rows = await DB.fetchall(
-            "SELECT channel_id, COUNT(*) AS n FROM posts "
-            "WHERE published_at IS NOT NULL "
-            "AND created_at > NOW() - INTERVAL '24 hours' "
-            "GROUP BY channel_id "
-            "ORDER BY n DESC LIMIT 10"
+    # 5) status (اختياري — فقط إن وُجد)
+    if "status" in posts_cols:
+        cnt_st, err_st = await _try_count(
+            "SELECT COUNT(*) AS n FROM posts "
+            "WHERE status = 'published' "
+            "AND created_at > NOW() - INTERVAL '24 hours'"
         )
-        if rows:
-            lines.append("📡 <b>لكل قناة (24h) — عبر published_at:</b>")
-            for r in rows:
-                if isinstance(r, dict):
-                    cid = r.get('channel_id')
-                    n = r.get('n', 0)
-                else:
-                    try:
-                        cid, n = r[0], r[1]
-                    except Exception:
-                        continue
-                lines.append(
-                    f"  • قناة <code>{cid}</code>: <b>{n}</b>"
-                )
+        if err_st is None:
+            lines.append(
+                f"✅ <code>status='published' (24h)</code>: "
+                f"<b>{cnt_st}</b>"
+            )
         else:
-            lines.append("📭 <i>لا منشورات مُصنَّفة بقناة في آخر 24h</i>")
-    except Exception as _e:
+            lines.append(
+                f"⚠️ <code>status='published'</code>: <i>{err_st}</i>"
+            )
+    elif posts_cols:
+        lines.append("🚫 <code>status</code>: <i>عمود غير موجود</i>")
+
+    # 6) total (all-time)
+    cnt_total, err_total = await _try_count(
+        "SELECT COUNT(*) AS n FROM posts"
+    )
+    if err_total is None:
         lines.append(
-            f"⚠️ per-channel: <code>{type(_e).__name__}</code>"
+            f"✅ <code>total posts (all-time)</code>: <b>{cnt_total}</b>"
+        )
+    else:
+        lines.append(
+            f"⚠️ <code>total posts</code>: <i>{err_total}</i>"
+        )
+
+    # 🆕 per-channel: يستخدم العمود المُكتشَف
+    lines.append("")
+    if channel_col:
+        try:
+            rows = await DB.fetchall(
+                f"SELECT {channel_col} AS ch, COUNT(*) AS n FROM posts "
+                f"WHERE published_at IS NOT NULL "
+                f"AND created_at > NOW() - INTERVAL '24 hours' "
+                f"GROUP BY {channel_col} "
+                f"ORDER BY n DESC LIMIT 10"
+            )
+            if rows:
+                lines.append(
+                    f"📡 <b>لكل قناة (24h) — عبر "
+                    f"<code>{channel_col}</code>:</b>"
+                )
+                for r in rows:
+                    if isinstance(r, dict):
+                        cid = r.get('ch')
+                        n = r.get('n', 0)
+                    else:
+                        try:
+                            cid, n = r[0], r[1]
+                        except Exception:
+                            continue
+                    lines.append(
+                        f"  • <code>{cid}</code>: <b>{n}</b>"
+                    )
+            else:
+                lines.append(
+                    "📭 <i>لا منشورات مُصنَّفة بقناة في آخر 24h</i>"
+                )
+        except Exception as _e:
+            lines.append(
+                f"⚠️ per-channel: "
+                f"<code>{type(_e).__name__}: {str(_e)[:80]}</code>"
+            )
+    else:
+        lines.append(
+            "⚠️ <b>per-channel:</b> <i>لم يُعثر على عمود قناة "
+            "(تم فحص: channel_id, channel, chat_id, source_id, "
+            "source, target_channel, channel_username, chat)</i>"
         )
 
     # bot internal counters
@@ -3588,16 +3738,16 @@ async def cmd_posts_stats(update, context):
         )
 
     # مقارنة DB vs bot.py
-    if working_count > 0 and _ps > 0:
+    if cnt_p1 is not None and cnt_p1 > 0 and _ps > 0:
         lines.append("")
-        if _ps > working_count:
+        if _ps > cnt_p1:
             lines.append(
-                f"⚠️ <i>bot.py ({_ps}) > DB 24h ({working_count}) — "
+                f"⚠️ <i>bot.py ({_ps}) > DB 24h ({cnt_p1}) — "
                 f"غير طبيعي!</i>"
             )
         else:
             lines.append(
-                f"✅ <i>bot.py ({_ps}) ≤ DB 24h ({working_count}) — "
+                f"✅ <i>bot.py ({_ps}) ≤ DB 24h ({cnt_p1}) — "
                 f"متسق</i>"
             )
 
@@ -3674,7 +3824,7 @@ async def main():
     logger.info("👨‍💼 المالك: %s", CONFIG.PRIMARY_OWNER_ID)
 
     logger.info(
-        "📦 bot.py: v5.6.38 | "
+        "📦 bot.py: v5.6.39 | "
         "detectors=%s | layers=%d | helpers=%s | "
         "db_idle=%s | cache_stats=%s | analytics=%s | "
         "fullhealth=%s | latency=%s | maint_cmds=%s | "
@@ -3694,7 +3844,8 @@ async def main():
         "resolve_port_none_fix=on | resolve_hostname_invalid=on | "
         "verify_callable=on | bot_data_admin_ids=on | "
         "posts_stats_cmd=on | record_bot_metric=on | "
-        "posts_stats_sql_fix=on",
+        "posts_stats_sql_fix=on | per_channel_discovery=on | "
+        "posts_schema_introspection=on",
         _SPAM_DETECTOR_VERSION or "N/A",
         _SPAM_DETECTOR_LAYERS_COUNT,
         (
@@ -4075,7 +4226,7 @@ async def main():
             "✅ /ping مُسجَّل (internal-only guard — admin_ids فارغة)"
         )
 
-    # v5.6.37: /posts_stats — admin-only
+    # v5.6.39: /posts_stats — admin-only
     if _admin_ids:
         try:
             app.add_handler(CommandHandler(
