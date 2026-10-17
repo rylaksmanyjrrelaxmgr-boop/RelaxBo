@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 """
-database_reminders.py - دوال التذكيرات (Mixin) — v1.3
+database_reminders.py - دوال التذكيرات (Mixin) — v1.4
 ================================================================================
 Mixin يُضاف إلى فئة Database في database.py
 
@@ -22,15 +22,28 @@ Mixin يُضاف إلى فئة Database في database.py
   - self._fetchval_with_conn, self._fetchone_with_conn, self._fetchall_with_conn
   - self._execute_with_conn, self._executemany_with_conn
 
-🆕 v1.3 (FIX-U26-doc + 2 optional quality):
-  🟢 FIX-U26-doc: docstring migrate_reminders_columns — يُشير صراحةً
-                  للاستدعاء من bot.py (تم فعلياً في الملف 4).
-  🟡 FIX-PG-SCHEMA: migrate_reminders_columns — إضافة فلتر
-                    table_schema = current_schema() لمنع false-positive.
-  🟡 FIX-AWAITABLE: _invalidate_user_reminder_cache — حماية isawaitable
-                    ضد sync invalidate_user_cache (توافق مع إصدارات).
+🆕 v1.4 (DOC-QUALITY-IMPROVEMENTS — لا تغيير سلوكي):
+  🟢 FIX-DOC-TZ-CONVERSION: توضيح أن _now_utc_reminders يُعيد
+      datetime (بدون tz)، وأن _adapt_params في database.py يتولى
+      التحويل إلى strftime للـ MySQL/SQLite تلقائياً. لا حاجة لتحويل
+      يدوي هنا.
+  🟢 FIX-DOC-MIGRATION-TX: توضيح أن migrate_reminders_columns يجب
+      أن يُستدعى **خارج** أي transaction. السبب: ALTER TABLE في
+      PostgreSQL قد يفشل داخل transaction في بعض الإصدارات، وحتى
+      لو نجح، فإنه يفرض قفلاً على الجدول.
+  🟢 FIX-DOC-DAILY-WEEKLY: توضيح صريح في docstrings أن
+      send_daily_reminders + send_weekly_reminders **تحتاج استدعاءً
+      من utils.py**. حالياً **لا يوجد مستدعٍ** — الميزة موجودة في
+      DB لكنها غير مُفعَّلة. لوحة الإعدادات تُظهر الخيارات لكن
+      لا يُرسل شيء. راجع BackgroundTasks.reminders في utils.py.
+  🟢 IMPROVE-NO-MISLEAD: تعليق داخلي صريح لمنع الالتباس.
 
-🆕 v1.2 (تحسينات جودة — لا تغيير سلوك):
+🆕 v1.3 (FIX-U26-doc + 2 optional quality) — محفوظ:
+  🟢 FIX-U26-doc: docstring migrate_reminders_columns
+  🟡 FIX-PG-SCHEMA: فلتر table_schema = current_schema()
+  🟡 FIX-AWAITABLE: حماية isawaitable ضد sync invalidate
+
+🆕 v1.2 (تحسينات جودة — لا تغيير سلوك) — محفوظ:
   ✅ _invalidate_user_reminder_cache يستخدم cache.invalidate_user_cache
   ✅ __all__ للتصدير الصريح
   ✅ migrate_reminders_columns: يفحص الأعمدة القديمة أيضاً
@@ -38,7 +51,7 @@ Mixin يُضاف إلى فئة Database في database.py
   ✅ docstrings أوضح
   ✅ _now_utc_reminders: حماية إضافية من None
 
-🆕 v1.1 — إصلاحات جوهرية:
+🆕 v1.1 — إصلاحات جوهرية — محفوظ:
   ✅ استخدام datetime مباشرة (بدل sql_iso مع +00:00)
   ✅ INTERVAL يستخدم reminder_days_before الفعلي
   ✅ last_daily_sent / last_weekly_sent / last_subscription_sent منفصلة
@@ -120,6 +133,12 @@ class RemindersMixin:
       - self.internal_cache   : InternalQueryCache
       - دوال fetchone/fetchall/fetchval/execute
       - دوال connection/transaction
+
+    ⚠️ حالة الميزات (v1.4):
+      • ✅ subscription_reminder    — يعمل (يُستدعى من utils.py)
+      • ❌ daily_stats_reminder     — **غير مفعّل** (لا مستدعٍ في utils.py)
+      • ❌ weekly_report            — **غير مفعّل** (لا مستدعٍ في utils.py)
+      التفاصيل في docstring send_daily_reminders/send_weekly_reminders.
     """
 
     # =================================================================
@@ -136,6 +155,18 @@ class RemindersMixin:
         """
         ✅ v1.2: datetime نظيف (بدون tz) — للاستخدام في الاستعلامات.
         آمن ضد فشل TimeUtils.
+
+        🟢 FIX-DOC-TZ-CONVERSION (v1.4):
+          يُعيد datetime **بدون tzinfo**. التحويل إلى صيغة SQL
+          (strftime) يتولاه تلقائياً `_adapt_params` في database.py
+          عند تمرير المعاملات إلى `_execute_with_conn`:
+            • PostgreSQL : datetime يُمرَّر كما هو
+            • MySQL      : datetime → strftime('%Y-%m-%d %H:%M:%S')
+            • SQLite     : datetime → strftime('%Y-%m-%d %H:%M:%S')
+          لا حاجة لتحويل يدوي هنا.
+
+        Returns:
+            datetime (naive UTC)
         """
         try:
             now = self.TimeUtils.utc_now()
@@ -376,6 +407,10 @@ class RemindersMixin:
         """
         ✅ v1.1: جلب المستخدمين الذين يريدون تذكيراً يومياً.
         يستخدم last_daily_sent (بدل last_reminder_sent المشترك).
+
+        ⚠️ v1.4: هذه الدالة **جاهزة** لكن لا يوجد مستدعٍ في utils.py
+        حتى v7.10.24. تُستدعى فقط من send_daily_reminders — وهي بدورها
+        غير مستدعاة. لتفعيل الميزة، راجع utils.py BackgroundTasks.reminders.
         """
         try:
             limit = max(1, min(limit, 1000))
@@ -441,6 +476,10 @@ class RemindersMixin:
         """
         ✅ v1.1: جلب المستخدمين الذين يريدون تقريراً أسبوعياً.
         يستخدم last_weekly_sent (بدل last_reminder_sent المشترك).
+
+        ⚠️ v1.4: هذه الدالة **جاهزة** لكن لا يوجد مستدعٍ في utils.py
+        حتى v7.10.24. تُستدعى فقط من send_weekly_reminders — وهي بدورها
+        غير مستدعاة. لتفعيل الميزة، راجع utils.py BackgroundTasks.reminders.
         """
         try:
             limit = max(1, min(limit, 1000))
@@ -633,6 +672,9 @@ class RemindersMixin:
 
         Args:
             reminder_type: "daily" | "weekly" | "subscription"
+
+        🟢 FIX-DOC-TZ-CONVERSION (v1.4): now_dt هنا datetime (naive UTC)،
+        و _adapt_params في database.py يحوّله إلى strftime للـ MySQL/SQLite.
         """
         try:
             column_map = {
@@ -717,6 +759,9 @@ class RemindersMixin:
         - لا N+1 queries (reminder_days_before ضمن النتائج).
         - يُحدّث last_subscription_sent فقط عند النجاح.
         - يُرجع dict مع sent/skipped/failed.
+
+        ⚠️ v1.4: هذه الدالة **مستدعاة بالفعل** من
+        utils.py::BackgroundTasks.reminders (كل ساعة).
 
         Args:
             reminder_func: async def f(user_id, days_left, lang) -> bool
@@ -834,7 +879,26 @@ class RemindersMixin:
         reminder_func: Callable[[int, str], Awaitable[bool]],
     ) -> Dict[str, int]:
         """
-        ✅ v1.1: إرسال تذكيرات يومية.
+        ⚠️ v1.4 FIX-DOC-DAILY-WEEKLY: هذه الدالة **غير مُفعَّلة**.
+
+        لا يوجد مستدعٍ لها في utils.py حتى v7.10.24. الميزة موجودة
+        في DB (get_users_for_daily_reminder + mark_reminder_sent)،
+        لكن BackgroundTasks.reminders في utils.py **لا يستدعيها**.
+
+        الأثر:
+          • المستخدم يفعّل daily_stats_reminder=1 من اللوحة
+          • يحفظ بنجاح في DB ✅
+          • لكن **لا يُرسل شيء** ❌ (لأن send_daily_reminders لا تُستدعى)
+
+        لتفعيل الميزة، أضف في utils.py::BackgroundTasks.reminders:
+
+            if hasattr(DB, "send_daily_reminders"):
+                async def _daily_impl(uid, lang):
+                    text = await get_text(lang, 'daily_stats_message', ...)
+                    result = await safe_send(bot, uid, text)
+                    return result is not None
+                daily_stats = await DB.send_daily_reminders(_daily_impl)
+
         Args:
             reminder_func: async def f(user_id, lang) -> bool
         """
@@ -850,7 +914,26 @@ class RemindersMixin:
         reminder_func: Callable[[int, str], Awaitable[bool]],
     ) -> Dict[str, int]:
         """
-        ✅ v1.1: إرسال تقارير أسبوعية.
+        ⚠️ v1.4 FIX-DOC-DAILY-WEEKLY: هذه الدالة **غير مُفعَّلة**.
+
+        لا يوجد مستدعٍ لها في utils.py حتى v7.10.24. الميزة موجودة
+        في DB (get_users_for_weekly_reminder + mark_reminder_sent)،
+        لكن BackgroundTasks.reminders في utils.py **لا يستدعيها**.
+
+        الأثر:
+          • المستخدم يفعّل weekly_report=1 من اللوحة
+          • يحفظ بنجاح في DB ✅
+          • لكن **لا يُرسل شيء** ❌ (لأن send_weekly_reminders لا تُستدعى)
+
+        لتفعيل الميزة، أضف في utils.py::BackgroundTasks.reminders:
+
+            if hasattr(DB, "send_weekly_reminders"):
+                async def _weekly_impl(uid, lang):
+                    text = await get_text(lang, 'weekly_report_message', ...)
+                    result = await safe_send(bot, uid, text)
+                    return result is not None
+                weekly_stats = await DB.send_weekly_reminders(_weekly_impl)
+
         Args:
             reminder_func: async def f(user_id, lang) -> bool
         """
@@ -934,6 +1017,16 @@ class RemindersMixin:
         last_subscription_sent. بدون استدعائها،
         get_users_for_daily_reminder يفشل بـ "no such column" →
         التذكيرات معطّلة.
+
+        🟢 FIX-DOC-MIGRATION-TX (v1.4):
+          ⚠️ يجب أن تُستدعى **خارج أي transaction صريحة**.
+          السبب:
+            • PostgreSQL: ALTER TABLE داخل transaction صريحة يفرض
+              قفلاً (ACCESS EXCLUSIVE) على الجدول لفترة أطول،
+              وقد يفشل في بعض الإصدارات إذا كان الجدول كبيراً.
+            • `bot.py::main()` يستدعيها مباشرة بعد pre_initialize()
+              (خارج transaction) — وهذا صحيح.
+            • لا تستدعها من داخل `async with self.transaction():`.
 
         ⚠️ إذا حذفت الاستدعاء من bot.py، ستفشل التذكيرات على
         الترقيات. راجع bot.py (FIX-U26).
@@ -1049,3 +1142,24 @@ __all__ = [
     "DEFAULT_BULK_BATCH",
     "ALLOWED_UPDATE_COLUMNS",
 ]
+
+
+# ═════════════════════════════════════════════════════════════════════
+# LOAD BEACON — v1.4
+# ═════════════════════════════════════════════════════════════════════
+
+try:
+    logger.info(
+        "🛡️ database_reminders.py v1.4 loaded | "
+        "RemindersMixin ✅ | "
+        "fixes=(FIX-DOC-TZ-CONVERSION: now_dt-ready-for-adapt_params, "
+        "FIX-DOC-MIGRATION-TX: call-outside-transaction, "
+        "FIX-DOC-DAILY-WEEKLY: send_daily/weekly-NOT-called, "
+        "IMPROVE-NO-MISLEAD: explicit-warnings) | "
+        "v1.3-all محفوظ | v1.2-all محفوظ | v1.1-all محفوظ | "
+        "⚠️ status: subscription_reminder=✅-active, "
+        "daily_stats_reminder=❌-inactive, "
+        "weekly_report=❌-inactive"
+    )
+except Exception:
+    pass
