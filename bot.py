@@ -1,35 +1,63 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-🌿 Relax Manager – البوت الرئيسي (bot.py v5.6.34-CLEANUP-HARDENING)
+🌿 Relax Manager – البوت الرئيسي (bot.py v5.6.36-HARDENING)
 ================================================================================
 📌 نقطة الدخول الرسمية للتطبيق (entrypoint).
 
-🆕 v5.6.34 (CLEANUP-HARDENING):
-    🟢 FIX-APP-STOP (cleanup-order):
-        كان الإغلاق يستدعي app.shutdown() مباشرةً دون app.stop().
-        PTB v20+ يوصي صراحةً بـ stop() قبل shutdown() لإغلاق
-        جلسة Bot وHTTPXRequest pool بانتظام. غياب stop() كان يُنتج
-        أحياناً "Unclosed connector" على Render ويترك pool=32
-        بلا تنظيف صريح.
+🆕 v5.6.36 (HARDENING):
+    🔴 FIX-PING-ADMIN-GUARD:
+        /ping كان مسجّلاً بلا فلتر → أي مستخدم يمكنه استدعاؤه
+        وإهدار حصة API. الآن:
+          • filters.User(_admin_ids) على التسجيل (حماية مزدوجة).
+          • فحص داخلي احتياطي عبر context.bot_data["admin_ids"]
+            (لو _admin_ids فارغة أو التسجيل اليدوي).
 
-        الإصلاح: استدعاء app.stop() (شرطياً — إن كان app.running)
-        قبل app.shutdown() داخل كتلة finally.
+    🔴 FIX-KEEPALIVE-LOG-FLOOD:
+        عند غياب RENDER_EXTERNAL_URL/KEEP_ALIVE_URL، keep_alive
+        كان يعود → run_task_with_retry يعيده كل 5s → 51,840
+        سطر/يوم بلا فائدة. الآن: `await asyncio.Event().wait()`
+        عند الفرع "no URL" → يحجب أبدياً (لن يُعاد).
 
-    🟢 FIX-CHATTYPE-DEPRECATION:
-        filters.ChatType.GROUPS مُهمَل منذ PTB v20.7 وسيُزال.
-        استُبدل بـ (filters.ChatType.GROUP | filters.ChatType.SUPERGROUP)
-        في المواضع الثلاثة (message, edited_message, status_update).
+    🔴 FIX-STOP-POLLING-ORDER:
+        _stop_polling_mode: updater.stop() كان بعد finally — لو
+        رفع post_stop استثناءً، updater يبقى يعمل. الآن:
+        updater.stop() داخل finally.
 
-    🟢 FIX-SUCCESSFUL-PAYMENT-OVERLAP:
-        MessageHandler(filters.SUCCESSFUL_PAYMENT, ...) وMessageHandler
-        (… PRIVATE & ~COMMAND, handle_private) في نفس الـgroup=0.
-        لو وصلت رسالة Telegram تحتوي successful_payment + نص،
-        يُشغَّل الاثنان → احتمال معالجة مزدوجة لرسالة الإيصال.
+    🟠 FIX-DOUBLE-PAYMENT-UX:
+        successful_payment: دفع مزدوج (retry من Telegram أو نقر
+        مزدوج) كان يرد "❌ حدث خطأ" رغم أن الفاتورة مدفوعة فعلاً.
+        الآن: كشف حالة "already paid" والرد برسالة مطمئنة.
 
-        الإصلاح: إضافة ~filters.SUCCESSFUL_PAYMENT إلى فلتر
-        handle_private.
+    🟠 FIX-GIFT-NOTIFY-DEV:
+        فرع gift لم يكن يُشعر المطور — المالك لا يعرف بالهدايا
+        المُشتراة. الآن: _spawn_notify_dev_log بعد نجاح الكود.
 
+    🟠 FIX-CMD-PING-MODERN:
+        • reply_parameters (PTB >=20.8) بدل reply_to_message_id.
+        • عرض edit_rtt_ms في السجل (كان يُقاس ويُهمل).
+        • تسمية "زمن الوصول" بدل "عمر الرسالة" (أدق).
+        • fallback آمن عند فشل reply_text (context.bot.send_message).
+
+    🟠 FIX-RESOLVE-PORT-NONE:
+        int(CONFIG.WEB_PORT) لو كانت None → TypeError قبل try.
+        الآن: int(... or 10000) داخل try.
+
+    🟠 FIX-RESOLVE-HOSTNAME-INVALID:
+        RENDER_EXTERNAL_URL بقيمة غير URL (مثل "/path") كانت
+        تُعاد كما هي → webhook URL غير صالح. الآن: تجاهل + تحذير.
+
+    🟡 FIX-VERIFY-CALLABLE:
+        _verify_command_handlers: hasattr ≠ callable. الآن يستخدم
+        callable() — يكشف CommandHandlers.start = None قبل
+        CommandHandler("start", None) الذي يرفع TypeError لاحقاً.
+
+    🟢 FIX-BOT-DATA-ADMIN-IDS:
+        بعد _collect_admin_ids، نُخزّنها في app.bot_data["admin_ids"]
+        لاستخدامها من cmd_ping وبقية الفحوصات.
+
+🆕 v5.6.35 (PING-LATENCY) — محفوظ.
+🆕 v5.6.34 (CLEANUP-HARDENING) — محفوظ.
 🆕 v5.6.33 (PAYMENT-ORDER-FIX + POST-INIT-WEBHOOK + DB-CLOSE + SIGNAL-EARLY) — محفوظ.
 🆕 v5.6.32 (DATABASES-FIX) — محفوظ.
 🆕 v5.6.31 (WARMUP-DETECTORS) — محفوظ.
@@ -54,7 +82,7 @@ import json
 import signal
 import time
 import aiohttp
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from html import escape as _html_escape
 from urllib.parse import urlparse
 from typing import Set, Any, Dict, Optional, List, Tuple
@@ -66,6 +94,15 @@ from telegram import (
     BotCommandScopeChat,
     BotCommandScopeDefault,
 )
+
+# 🆕 v5.6.36: ReplyParameters (PTB >=20.8) — optional fallback
+try:
+    from telegram import ReplyParameters
+    _HAS_REPLY_PARAMETERS = True
+except ImportError:
+    ReplyParameters = None
+    _HAS_REPLY_PARAMETERS = False
+
 from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler,
     MessageHandler, ChatJoinRequestHandler, filters,
@@ -103,7 +140,6 @@ try:
         _db_diag_mod, "mark_process_start", None,
     )
     if not callable(_MARK_PROCESS_START_FN):
-        # db_diagnostics أقدم من v7.2.17 — لا mark_process_start
         _MARK_PROCESS_START_FN = None
 except ImportError as _e_dbdiag:
     _DB_DIAG_IMPORT_ERROR = str(_e_dbdiag)
@@ -179,8 +215,6 @@ _show_analytics_menu = None
 _cmd_fullhealth = None
 _cmd_latency = None
 
-# 🆕 v5.6.32: register_handlers الكامل (v1.3.1+) — يُسجّل /databases,
-# /versions, /analytics_reset, /analytics + databases_btn + versions_refresh
 _register_analytics_handlers = None
 _ANALYTICS_REGISTER_AVAILABLE = False
 
@@ -228,7 +262,6 @@ except ImportError as _e_an1:
                 f"{_e_an1} | {_e_an2} | {_e_an3}"
             )
 
-# 🆕 v5.6.32: register_handlers (منفصل عن الاستيراد أعلاه — v1.3.1+)
 try:
     from handlers.handlers_analytics import (
         register_handlers as _register_analytics_handlers_imported,
@@ -431,7 +464,7 @@ from handlers.handlers_message import (
 )
 
 # ═════════════════════════════════════════════════════════════════════
-# 🆕 v5.6.31 WARMUP-1/WARMUP-3: warmup_detectors_pool (optional)
+# warmup_detectors_pool (optional)
 # ═════════════════════════════════════════════════════════════════════
 _warmup_detectors_pool_fn = None
 _HAS_WARMUP_DETECTORS = False
@@ -660,7 +693,7 @@ for _noisy in (
 logger = logging.getLogger(__name__)
 
 # ═══════════════════════════════════════════════════════════════════════
-# 🆕 v5.6.27 SLEEP-PROBE — تفعيل كاشف تأخيرات event loop
+# SLEEP-PROBE
 # ═══════════════════════════════════════════════════════════════════════
 _sleep_probe_available = False
 try:
@@ -689,11 +722,10 @@ except Exception as _sp_import_e:
     logger.warning("⚠️ sleep_probe import: %s", _sp_import_e)
 
 # ═══════════════════════════════════════════════════════════════════════
-# 🆕 v5.6.30 MARK-2: تقرير حالة db_diagnostics
+# تقرير حالة db_diagnostics
 # ═══════════════════════════════════════════════════════════════════════
 
 def _log_db_diagnostics_status() -> None:
-    """🆕 v5.6.30: تسجيل حالة تكامل db_diagnostics في Startup."""
     if not _DB_DIAG_AVAILABLE:
         logger.info(
             "ℹ️ db_diagnostics: غير متاح — %s "
@@ -763,13 +795,10 @@ _pm_last_query_ts = 0.0
 _pm_last_query_result: Optional[Dict[str, Any]] = None
 _pm_slow_query_warned = False
 
-# 🆕 v5.6.31 WARMUP-2: تتبّع مهمة تسخين detectors
 _WARMUP_DETECTORS_TASK: Optional[asyncio.Task] = None
 
 # ═══════════════════════════════════════════════════════════════════
-# 🆕 v5.6.34 FIX-CHATTYPE-DEPRECATION:
-# filters.ChatType.GROUPS مُهمَل منذ PTB v20.7. نستخدم الصيغة
-# الحديثة (GROUP | SUPERGROUP) في كل الفلاتر.
+# FIX-CHATTYPE-DEPRECATION
 # ═══════════════════════════════════════════════════════════════════
 _GROUP_CHAT_FILTER = filters.ChatType.GROUP | filters.ChatType.SUPERGROUP
 
@@ -811,18 +840,10 @@ def _spawn_notify_dev_log(context, text: str) -> None:
         logger.debug("_spawn_notify_dev_log: %s", _e)
 
 # ═══════════════════════════════════════════════════════════════════
-# 🆕 v5.6.31 WARMUP-1: spawn warmup detectors pool (non-blocking)
+# WARMUP-1: spawn warmup detectors pool (non-blocking)
 # ═══════════════════════════════════════════════════════════════════
 
 def _spawn_warmup_detectors_pool() -> Optional[asyncio.Task]:
-    """
-    🆕 v5.6.31 WARMUP-1: يُشغّل warmup_detectors_pool() كـtask خلفي.
-
-    الهدف: تهيئة مجمع detectors + استيراد الوحدات الثقيلة (PIL/numpy/
-    cv2/pytesseract) — بدل أول رسالة حقيقية (~8s).
-
-    لا يحجب main() — يُنفّذ بالتوازي مع تسجيل handlers.
-    """
     global _WARMUP_DETECTORS_TASK
 
     if not _HAS_WARMUP_DETECTORS or _warmup_detectors_pool_fn is None:
@@ -855,12 +876,6 @@ def _spawn_warmup_detectors_pool() -> Optional[asyncio.Task]:
 async def _await_warmup_detectors_pool(
     timeout: float = 15.0,
 ) -> bool:
-    """
-    🆕 v5.6.31 WARMUP-2: ينتظر انتهاء مهمة التسخين (أو timeout).
-
-    Returns:
-        True إن انتهت بنجاح، False إن فشلت/انتهت المهلة/غير متاحة.
-    """
     global _WARMUP_DETECTORS_TASK
 
     if _WARMUP_DETECTORS_TASK is None:
@@ -891,22 +906,10 @@ async def _await_warmup_detectors_pool(
         return False
 
 # ═══════════════════════════════════════════════════════════════════
-# 🔴 v5.6.29 FIX-BOT-6: HTTPXRequest factory
+# HTTPXRequest factory
 # ═══════════════════════════════════════════════════════════════════
 
 def _build_http_request_pool():
-    """
-    🔴 FIX-BOT-6 (v5.6.29): إنشاء HTTPXRequest مخصّص.
-
-    الهدف:
-      • PTB v20 افتراضياً pool=1 → كل send_message ينتظر السابق.
-      • Telegram على Render البعيد: TCP 305ms + TLS 409ms = 714ms.
-      • مع pool=32 + keepalive 120s، إعادة استخدام الاتصالات →
-        send_message من 554ms → 150-250ms.
-
-    Returns:
-        HTTPXRequest instance أو None إذا لم تكن المكتبة متاحة.
-    """
     if not _HAS_HTTPX_REQUEST or HTTPXRequest is None:
         logger.warning(
             "⚠️ HTTPXRequest غير متاح — البوت سيستخدم الإعداد الافتراضي "
@@ -915,7 +918,6 @@ def _build_http_request_pool():
         return None
 
     try:
-        # 🟡 FIX-BOT-7: pool كبير + keepalive طويل
         request = HTTPXRequest(
             connection_pool_size=32,
             connect_timeout=15.0,
@@ -930,7 +932,6 @@ def _build_http_request_pool():
         )
         return request
     except TypeError:
-        # fallback: بعض إصدارات PTB أقدم
         try:
             request = HTTPXRequest(connection_pool_size=32)
             logger.info(
@@ -1402,7 +1403,6 @@ else:
         _CACHE_STATS_IMPORT_ERROR or "n/a",
     )
 
-# 🆕 v5.6.31 WARMUP-3: تقرير حالة warmup detectors
 if _HAS_WARMUP_DETECTORS:
     logger.info(
         "🔥 warmup_detectors_pool: ✅ متاح — سيُشغَّل بعد "
@@ -1440,7 +1440,6 @@ else:
         _ANALYTICS_HANDLERS_IMPORT_ERROR or "unknown",
     )
 
-# 🆕 v5.6.32: تقرير توفّر register_handlers من handlers_analytics
 if _ANALYTICS_REGISTER_AVAILABLE and callable(_register_analytics_handlers):
     logger.info(
         "✅ handlers_analytics.register_handlers متاح — "
@@ -1457,7 +1456,6 @@ else:
 _log_spam_detector_status()
 _log_security_bridge_status()
 
-# 🆕 v5.6.30 MARK-2: تقرير db_diagnostics
 _log_db_diagnostics_status()
 
 _log_perf_tuning_status()
@@ -1526,7 +1524,8 @@ ADMIN_COMMANDS = [
     ("cache_stats", "📊 إحصائيات الكاش الحية"),
     ("fullhealth", "🏥 التشخيص الشامل"),
     ("latency", "🔬 اختبار الكمون"),
-    ("databases", "🗂️ قواعد البيانات المُعدّة"),  # 🆕 v5.6.32
+    ("databases", "🗂️ قواعد البيانات المُعدّة"),
+    ("ping", "🏓 قياس كمون الاتصال"),
 ]
 
 GROUP_COMMANDS = [
@@ -1608,19 +1607,10 @@ async def _shutdown_detector_tasks(timeout: float = 3.0) -> None:
         logger.debug("_shutdown_detector_tasks (direct): %s", _e)
 
 # ═══════════════════════════════════════════════════════════════════
-# 🆕 v5.6.33 FIX-DB-CLOSE: إغلاق صريح لـ DB pool
+# FIX-DB-CLOSE: إغلاق صريح لـ DB pool
 # ═══════════════════════════════════════════════════════════════════
 
 async def _shutdown_db_pool(timeout: float = 5.0) -> None:
-    """
-    🆕 v5.6.33 FIX-DB-CLOSE (BUG-3):
-    إغلاق صريح لـ DB pool لتحرير اتصالات PostgreSQL فوراً بدل
-    انتظار max_inactive_lifetime (300s).
-
-    يحاول بالترتيب:
-      1) DB.close_pool() — إن وُجدت (async أو sync)
-      2) DB.close()      — fallback
-    """
     if not hasattr(DB, "close_pool") and not hasattr(DB, "close"):
         logger.debug("ℹ️ DB: لا يوجد close_pool/close — تخطي")
         return
@@ -1820,11 +1810,15 @@ def _verify_command_handlers() -> bool:
         "add_hidden_admin", "remove_hidden_admin", "list_hidden_admins",
     ]
 
-    missing = [name for name in required if not hasattr(CommandHandlers, name)]
+    # 🆕 v5.6.36 FIX-VERIFY-CALLABLE: hasattr ≠ callable
+    missing = [
+        name for name in required
+        if not callable(getattr(CommandHandlers, name, None))
+    ]
 
     if missing:
         logger.error(
-            "❌ دوال مفقودة في CommandHandlers (%d): %s",
+            "❌ دوال مفقودة أو غير callable في CommandHandlers (%d): %s",
             len(missing), missing,
         )
         _command_handlers_verified = False
@@ -2230,11 +2224,9 @@ async def pre_checkout(update, context):
 
 async def successful_payment(update, context):
     """
-    🆕 v5.6.33 FIX-PAYMENT-ORDER (BUG-1):
-    بعد نجاح العملية الأساسية (activate_subscription_with_payment /
-    create_gift_code)، نُبلغ المستخدم فوراً. العمليات الثانوية
-    (payment_log, invalidate_cache, notify_dev_log) معزولة في
-    try/except مستقلة — أعطالها لا تُربك المستخدم.
+    FIX-PAYMENT-ORDER: العمليات الثانوية معزولة.
+    FIX-DOUBLE-PAYMENT-UX: كشف already paid برسالة مطمئنة.
+    FIX-GIFT-NOTIFY-DEV: إشعار المطور لشراء الهدايا.
     """
     user_id = update.effective_user.id
     payment = update.message.successful_payment
@@ -2246,6 +2238,32 @@ async def successful_payment(update, context):
     invoice, plan, data = await _validate_invoice_for_payment(user_id, payload)
 
     if invoice is None or plan is None:
+        # 🆕 v5.6.36 FIX-DOUBLE-PAYMENT-UX:
+        # التمييز بين "already paid" (retry من Telegram) وبين خطأ فعلي
+        try:
+            _pd = json.loads(payload)
+            _inv_num = _pd.get('invoice')
+            if _inv_num:
+                _existing = await DB.get_invoice(_inv_num)
+                if (
+                    _existing
+                    and _existing.get('user_id') == user_id
+                    and _existing.get('status') == 'paid'
+                ):
+                    logger.info(
+                        "ℹ️ payment retry — invoice %s already paid "
+                        "for user %s",
+                        _inv_num, user_id,
+                    )
+                    await safe_send(
+                        context.bot, user_id,
+                        "✅ تم استلام إشعار الدفع.\n"
+                        "الفاتورة مُعالجة مسبقاً — لا حاجة لأي إجراء.",
+                    )
+                    return
+        except Exception as _e:
+            logger.debug("already-paid check: %s", _e)
+
         logger.error(
             "❌ Payment processing failed: invalid invoice for user %s",
             user_id,
@@ -2282,9 +2300,6 @@ async def successful_payment(update, context):
 
     plan_name = plan.get('name', 'الخطة')
 
-    # ═══════════════════════════════════════════════════════════════
-    # مسار 1: اشتراك
-    # ═══════════════════════════════════════════════════════════════
     if payment_type == 'subscription':
         try:
             success = await DB.activate_subscription_with_payment(
@@ -2311,7 +2326,6 @@ async def successful_payment(update, context):
             )
             return
 
-        # ✅ نجح التفعيل — نُبلغ المستخدم فوراً (أولوية قصوى)
         logger.info(
             "✅ Subscription activated: user=%s invoice=%s plan=%s",
             user_id, invoice['number'], plan['id'],
@@ -2326,7 +2340,6 @@ async def successful_payment(update, context):
                 "⚠️ safe_send (subscription success) فشل: %s", _e
             )
 
-        # العمليات الثانوية — كل واحدة معزولة
         try:
             await DB.add_payment_log(
                 user_id, 'xtr', 'subscription_paid',
@@ -2369,11 +2382,7 @@ async def successful_payment(update, context):
         except Exception as _e:
             logger.debug("spawn notify dev log: %s", _e)
 
-    # ═══════════════════════════════════════════════════════════════
-    # مسار 2: هدية
-    # ═══════════════════════════════════════════════════════════════
     elif payment_type == 'gift':
-        # 2.1 — توثيق الدفع
         try:
             paid = await DB.mark_invoice_paid(invoice['number'], payment_id)
         except Exception as e:
@@ -2395,7 +2404,6 @@ async def successful_payment(update, context):
             )
             return
 
-        # 2.2 — توليد الكود
         try:
             code = await DB.create_gift_code(
                 plan_id=plan['id'], creator_id=user_id
@@ -2425,7 +2433,6 @@ async def successful_payment(update, context):
             )
             return
 
-        # ✅ نجح كل شيء — نُبلغ المستخدم فوراً
         logger.info(
             "✅ Gift code created: user=%s (code=%s...)",
             user_id, code[:8],
@@ -2449,6 +2456,35 @@ async def successful_payment(update, context):
                 "الكود مُسجَّل في DB", _e
             )
 
+        # 🆕 v5.6.36 FIX-GIFT-NOTIFY-DEV: إشعار المطور
+        try:
+            _uname = update.effective_user.username or ""
+            _fname = update.effective_user.first_name or ""
+            _username_display = (
+                f"@{_uname}" if _uname else "❌ لا يوجد"
+            )
+            _plan_display = _html_escape(str(plan_name or '—'))
+            _price_display = int(total_amount or 0)
+
+            _spawn_notify_dev_log(
+                context,
+                f"🎁 <b>هدية مُشتراة</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━\n"
+                f"👤 <b>الاسم:</b> "
+                f"{_html_escape(str(_fname or '—'))}\n"
+                f"🔗 <b>المعرف:</b> "
+                f"{_html_escape(_username_display)}\n"
+                f"🆔 <b>الرقم التعريفي:</b> "
+                f"<code>{user_id}</code>\n"
+                f"━━━━━━━━━━━━━━━━━━━━\n"
+                f"💎 <b>الباقة:</b> {_plan_display}\n"
+                f"💰 <b>المبلغ:</b> {_price_display} ⭐\n"
+                f"🔑 <b>الكود:</b> <code>{code}</code>\n"
+                f"📅 <b>الوقت:</b> {TimeUtils.mecca_iso()}",
+            )
+        except Exception as _e:
+            logger.debug("gift notify dev log: %s", _e)
+
 # ═══════════════════════════════════════════════════════════════════
 # Health check + keep-alive
 # ═══════════════════════════════════════════════════════════════════
@@ -2471,12 +2507,14 @@ async def keep_alive():
     if not url:
         logger.info(
             "ℹ️ keep_alive: RENDER_EXTERNAL_URL/KEEP_ALIVE_URL غير موجود "
-            "— المهمة تتوقف الآن (لا حاجة لمهمة خلفية)."
+            "— المهمة ستُحجب أبدياً (لن تُعاد)."
         )
         logger.info(
             "💡 الحل الموصى به: استخدم Cron-job.org (خارجي) "
             "على https://<your-app>.onrender.com/health كل 5 دقائق."
         )
+        # 🆕 v5.6.36 FIX-KEEPALIVE-LOG-FLOOD: حجب أبدي بدل return
+        await asyncio.Event().wait()
         return
 
     url = url.rstrip('/')
@@ -2802,10 +2840,17 @@ def _resolve_hostname() -> Optional[str]:
         ru = ru.strip()
         if ru.startswith("http"):
             try:
-                return urlparse(ru).netloc
+                n = urlparse(ru).netloc
+                if n:
+                    return n
             except Exception:
                 pass
-        return ru.rstrip('/')
+        else:
+            # 🆕 v5.6.36 FIX-RESOLVE-HOSTNAME-INVALID:
+            # القيمة غير URL — تجاهل بدل إعادتها كما هي
+            logger.warning(
+                "⚠️ RENDER_EXTERNAL_URL غير URL صالح: %r — تجاهل", ru
+            )
 
     rw = os.getenv("RAILWAY_PUBLIC_DOMAIN")
     if rw:
@@ -2822,15 +2867,25 @@ def _resolve_hostname() -> Optional[str]:
         wh = wh.strip()
         if wh.startswith("http"):
             try:
-                return urlparse(wh).netloc
+                n = urlparse(wh).netloc
+                if n:
+                    return n
             except Exception:
                 pass
-        return wh.rstrip('/')
+        else:
+            logger.warning(
+                "⚠️ WEBHOOK_URL غير URL صالح: %r — تجاهل", wh
+            )
 
     return None
 
 def _resolve_port() -> int:
-    default_port = int(getattr(CONFIG, "WEB_PORT", 10000))
+    # 🆕 v5.6.36 FIX-RESOLVE-PORT-NONE: حماية من WEB_PORT=None
+    try:
+        default_port = int(getattr(CONFIG, "WEB_PORT", None) or 10000)
+    except (TypeError, ValueError):
+        default_port = 10000
+
     raw = os.getenv("PORT")
 
     if raw is None or str(raw).strip() == "":
@@ -3134,6 +3189,11 @@ async def _start_polling_mode(app: Application) -> None:
     await _run_post_init_hooks(app)
 
 async def _stop_polling_mode(app: Application) -> None:
+    """
+    🆕 v5.6.36 FIX-STOP-POLLING-ORDER:
+        updater.stop() الآن داخل finally — لو رفع post_stop استثناءً،
+        الـ updater لا يبقى يعمل.
+    """
     if not _polling_state["running"]:
         if app.updater is not None:
             try:
@@ -3147,12 +3207,12 @@ async def _stop_polling_mode(app: Application) -> None:
         await _run_post_stop_hooks(app)
     finally:
         _polling_state["running"] = False
-
-    if app.updater is not None:
-        try:
-            await app.updater.stop()
-        except Exception as _e:
-            logger.debug("updater.stop: %s", _e)
+        # 🆕 v5.6.36: updater.stop() داخل finally
+        if app.updater is not None:
+            try:
+                await app.updater.stop()
+            except Exception as _e:
+                logger.debug("updater.stop: %s", _e)
 
 # ═══════════════════════════════════════════════════════════════════
 # Diagnostic handler
@@ -3204,6 +3264,130 @@ async def _diag_incoming(update, context):
         logger.debug("_diag_incoming error: %s", _e)
 
 # ═══════════════════════════════════════════════════════════════════
+# 🆕 v5.6.36 FIX-PING-ADMIN-GUARD: /ping — قياس كمون حقيقي
+# ═══════════════════════════════════════════════════════════════════
+
+async def cmd_ping(update, context):
+    """
+    🏓 قياس كمون حقيقي من داخل البوت.
+
+    يقيس:
+      • Send API RTT — الوقت الفعلي لـ reply_text (يمثل الرد الحقيقي)
+      • Message age  — زمن الوصول التقريبي (دقة 1s من Telegram)
+      • Edit API RTT — الوقت الفعلي لـ edit_text (يُسجَّل فقط)
+
+    🆕 v5.6.36:
+      • فحص أدمن داخلي عبر context.bot_data["admin_ids"]
+      • ReplyParameters بدل reply_to_message_id (PTB >=20.8)
+      • fallback آمن عند فشل reply_text
+      • تسمية "زمن الوصول" بدل "عمر الرسالة"
+    """
+    # 🆕 v5.6.36: فحص أدمن داخلي (احتياطي — لو التسجيل بلا filter)
+    user = update.effective_user
+    if user is None:
+        return
+    allowed = context.bot_data.get("admin_ids")
+    if allowed is not None and user.id not in allowed:
+        return
+
+    try:
+        msg = update.effective_message
+        if msg is None:
+            return
+
+        # ── قياس 1: زمن الوصول التقريبي ──
+        msg_date = getattr(msg, "date", None)
+        age_ms = None
+        if msg_date is not None:
+            if msg_date.tzinfo is None:
+                msg_date = msg_date.replace(tzinfo=timezone.utc)
+            age_ms = int(
+                (datetime.now(timezone.utc) - msg_date).total_seconds() * 1000
+            )
+
+        # ── قياس 2: إرسال الرد (API RTT) ──
+        # 🆕 v5.6.36: ReplyParameters (PTB >=20.8) بدل deprecated
+        t0 = time.monotonic()
+        try:
+            if _HAS_REPLY_PARAMETERS and ReplyParameters is not None:
+                sent = await msg.reply_text(
+                    "🏓 قياس...",
+                    reply_parameters=ReplyParameters(
+                        message_id=msg.message_id
+                    ),
+                )
+            else:
+                # fallback للـ PTB الأقدم
+                sent = await msg.reply_text(
+                    "🏓 قياس...",
+                    reply_to_message_id=msg.message_id,
+                )
+        except TypeError:
+            # fallback أخير — بلا رد
+            sent = await msg.reply_text("🏓 قياس...")
+        t1 = time.monotonic()
+        send_rtt_ms = int((t1 - t0) * 1000)
+
+        # ── بناء النتيجة ──
+        lines = [
+            "🏓 <b>Pong</b>",
+            "",
+            f"⚡ <b>Send API RTT:</b> <code>{send_rtt_ms}ms</code>",
+        ]
+        if age_ms is not None:
+            lines.append(
+                f"📥 <b>زمن الوصول:</b> <code>~{age_ms}ms</code> "
+                f"<i>(تقريبي، دقة 1s)</i>"
+            )
+
+        if send_rtt_ms < 300:
+            verdict = "🟢 ممتاز"
+        elif send_rtt_ms < 500:
+            verdict = "🟢 جيد جداً"
+        elif send_rtt_ms < 800:
+            verdict = "🟡 جيد"
+        elif send_rtt_ms < 1500:
+            verdict = "🟠 مقبول"
+        else:
+            verdict = "🔴 يحتاج تحسين"
+        lines.append(f"\n<b>{verdict}</b>")
+        lines.append(
+            "\n<i>💡 هذا القياس للبوت فقط. "
+            "لتجربة المستخدم الكاملة أضف ~150-300ms لكل اتجاه.</i>"
+        )
+
+        # ── قياس 3: تعديل الرسالة (يُسجَّل فقط) ──
+        t2 = time.monotonic()
+        edit_rtt_ms = -1
+        try:
+            await sent.edit_text(
+                "\n".join(lines),
+                parse_mode='HTML',
+            )
+            t3 = time.monotonic()
+            edit_rtt_ms = int((t3 - t2) * 1000)
+        except Exception as _ee:
+            logger.debug("ping edit_text: %s", _ee)
+
+        logger.info(
+            "🏓 /ping | user=%s | send=%dms | edit=%dms | age=%sms",
+            user.id,
+            send_rtt_ms,
+            edit_rtt_ms,
+            age_ms if age_ms is not None else -1,
+        )
+    except Exception as e:
+        logger.error("❌ /ping error: %s", e, exc_info=True)
+        # 🆕 v5.6.36: fallback آمن
+        try:
+            await context.bot.send_message(
+                chat_id=update.effective_chat.id,
+                text=f"❌ فشل القياس: {type(e).__name__}",
+            )
+        except Exception:
+            pass
+
+# ═══════════════════════════════════════════════════════════════════
 # Main
 # ═══════════════════════════════════════════════════════════════════
 
@@ -3211,9 +3395,7 @@ async def main():
     t_start = time.monotonic()
 
     # ═══════════════════════════════════════════════════════════════
-    # 🆕 v5.6.33 FIX-SIGNAL-EARLY: تسجيل الإشارات مبكراً
-    # (قبل app.start() وsetup_webhook — لإغلاق نظيف حتى لو وصل
-    #  SIGTERM خلال نافذة الإقلاع الحرجة)
+    # FIX-SIGNAL-EARLY: تسجيل الإشارات مبكراً
     # ═══════════════════════════════════════════════════════════════
     _shutdown_event = asyncio.Event()
 
@@ -3242,7 +3424,7 @@ async def main():
         logger.debug("Signal setup (early): %s", _e)
 
     # ═══════════════════════════════════════════════════════════════
-    # 🆕 v5.6.30 MARK-1: إخطار db_diagnostics ببدء العملية الفعلي
+    # MARK-1: إخطار db_diagnostics ببدء العملية
     # ═══════════════════════════════════════════════════════════════
     if _MARK_PROCESS_START_FN is not None:
         try:
@@ -3271,7 +3453,7 @@ async def main():
     logger.info("👨‍💼 المالك: %s", CONFIG.PRIMARY_OWNER_ID)
 
     logger.info(
-        "📦 bot.py: v5.6.34 | "
+        "📦 bot.py: v5.6.36 | "
         "detectors=%s | layers=%d | helpers=%s | "
         "db_idle=%s | cache_stats=%s | analytics=%s | "
         "fullhealth=%s | latency=%s | maint_cmds=%s | "
@@ -3284,7 +3466,12 @@ async def main():
         "warmup_detectors=%s | analytics_register=%s | "
         "payment_order_fix=on | post_init_webhook=on | "
         "db_close=on | signal_early=on | "
-        "app_stop=on | chattype_modern=on | pay_filter=on",
+        "app_stop=on | chattype_modern=on | pay_filter=on | "
+        "ping_cmd=on | ping_admin_guard=on | keepalive_flood_fix=on | "
+        "stop_polling_order=on | double_payment_ux=on | "
+        "gift_notify=on | reply_params_modern=%s | "
+        "resolve_port_none_fix=on | resolve_hostname_invalid=on | "
+        "verify_callable=on | bot_data_admin_ids=on",
         _SPAM_DETECTOR_VERSION or "N/A",
         _SPAM_DETECTOR_LAYERS_COUNT,
         (
@@ -3312,6 +3499,7 @@ async def main():
         "on" if _MARK_PROCESS_START_FN is not None else "off",
         "yes" if _HAS_WARMUP_DETECTORS else "no",
         "yes" if _ANALYTICS_REGISTER_AVAILABLE else "no",
+        "yes" if _HAS_REPLY_PARAMETERS else "no",
     )
 
     try:
@@ -3390,7 +3578,7 @@ async def main():
     hostname = _resolve_hostname()
 
     # ═══════════════════════════════════════════════════════════════════
-    # 🔴 v5.6.29 FIX-BOT-6 + FIX-BOT-7: Application مع HTTPXRequest
+    # Application مع HTTPXRequest
     # ═══════════════════════════════════════════════════════════════════
     t_app = time.monotonic()
 
@@ -3435,9 +3623,6 @@ async def main():
             "(قد يكون أول /start أبطأ قليلاً)."
         )
 
-    # ═══════════════════════════════════════════════════════════════════
-    # 🆕 v5.6.31 WARMUP-1: تسخين مجمع detectors (غير حاجب)
-    # ═══════════════════════════════════════════════════════════════════
     _spawn_warmup_detectors_pool()
 
     try:
@@ -3503,6 +3688,9 @@ async def main():
 
     logger.info("👥 عدد الأدمن المُكتشفين: %d", len(_admin_ids))
 
+    # 🆕 v5.6.36 FIX-BOT-DATA-ADMIN-IDS: تخزين للاستخدام في cmd_ping
+    app.bot_data["admin_ids"] = set(_admin_ids)
+
     for _admin_id in _admin_ids:
         try:
             await app.bot.set_my_commands(
@@ -3539,8 +3727,6 @@ async def main():
             "⚠️ DIAG_INCOMING=1 لكن TypeHandler غير متاح في هذا الإصدار"
         )
 
-    # 🆕 v5.6.34 FIX-CHATTYPE-DEPRECATION:
-    # _GROUP_CHAT_FILTER = GROUP | SUPERGROUP (بدل GROUPS المُهمَل)
     _group_msg_filter = (
         _GROUP_CHAT_FILTER
         & filters.UpdateType.MESSAGE
@@ -3647,6 +3833,31 @@ async def main():
     app.add_handler(CommandHandler("posts", CommandHandlers.posts))
     app.add_handler(CommandHandler("db_diag", CommandHandlers.db_diag))
     app.add_handler(CommandHandler("db_vacuum", CommandHandlers.db_vacuum))
+
+    # 🆕 v5.6.36 FIX-PING-ADMIN-GUARD:
+    # حماية مزدوجة — filters.User على التسجيل + فحص داخلي في cmd_ping
+    if _admin_ids:
+        try:
+            app.add_handler(CommandHandler(
+                "ping", cmd_ping,
+                filters=filters.User(_admin_ids),
+            ))
+            logger.info(
+                "✅ /ping مُسجَّل (admin-only via filters.User, n=%d)",
+                len(_admin_ids),
+            )
+        except Exception as _e:
+            logger.warning(
+                "⚠️ فشل تسجيل /ping مع filter — fallback: %s", _e
+            )
+            app.add_handler(CommandHandler("ping", cmd_ping))
+    else:
+        # لو _admin_ids فارغة، الفلتر سيعطّل الزر تماماً
+        # نستخدم cmd_ping's internal check (bot_data["admin_ids"])
+        app.add_handler(CommandHandler("ping", cmd_ping))
+        logger.info(
+            "✅ /ping مُسجَّل (internal-only guard — admin_ids فارغة)"
+        )
 
     try:
         app.add_handler(CommandHandler(
@@ -3770,7 +3981,7 @@ async def main():
     app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, successful_payment))
 
     # ═══════════════════════════════════════════════════════════════
-    # ORDER-FIX-COMPAT: ترتيب التسجيل (v5.6.25 + v5.6.26 + v5.6.32)
+    # ORDER-FIX-COMPAT: ترتيب التسجيل
     # ═══════════════════════════════════════════════════════════════
 
     try:
@@ -3839,17 +4050,6 @@ async def main():
             "زر قناة السجل لن يعمل"
         )
 
-    # ═══════════════════════════════════════════════════════════════
-    # 🆕 v5.6.32 [ORDER 5/6] FIX-DATABASES
-    # ═══════════════════════════════════════════════════════════════
-    # التسجيل عبر register_handlers() من handlers_analytics v1.3.1+ —
-    # يُسجّل كل الأزرار والأوامر بما فيها:
-    #   • /databases (زر databases_btn + أمر /databases)
-    #   • /versions, /analytics_reset, /analytics
-    #   • versions_refresh, analytics_reset_cache (أزرار داخلية)
-    # Fallback يدوي إن لم تتوفر register_handlers.
-    # ═══════════════════════════════════════════════════════════════
-
     _analytics_registered = False
 
     if _ANALYTICS_REGISTER_AVAILABLE and callable(_register_analytics_handlers):
@@ -3880,7 +4080,6 @@ async def main():
             "(v1.3.1 مطلوب) — سيتم التسجيل اليدوي"
         )
 
-    # Fallback يدوي: يعمل فقط إذا فشل register_handlers
     if not _analytics_registered:
         if _ANALYTICS_HANDLERS_AVAILABLE and \
            _show_analytics_menu is not None and \
@@ -3932,9 +4131,7 @@ async def main():
             _e, exc_info=True,
         )
 
-    # 🆕 v5.6.34 FIX-SUCCESSFUL-PAYMENT-OVERLAP:
-    # إضافة ~filters.SUCCESSFUL_PAYMENT لمنع تشغيل handle_private على
-    # رسالة الإيصال التي قد تحتوي نصاً + successful_payment.
+    # FIX-SUCCESSFUL-PAYMENT-OVERLAP
     app.add_handler(MessageHandler(
         (filters.TEXT | filters.PHOTO | filters.VIDEO | filters.Document.ALL |
          filters.AUDIO | filters.VOICE | filters.ANIMATION | filters.Sticker.ALL |
@@ -3982,9 +4179,6 @@ async def main():
             _MEMBERSHIP_IMPORT_ERROR or "unknown",
         )
 
-    # ═══════════════════════════════════════════════════════════════
-    # 🆕 v5.6.31 WARMUP-2: انتظار قصير (≤2s) لانتهاء التسخين
-    # ═══════════════════════════════════════════════════════════════
     if _WARMUP_DETECTORS_TASK is not None and not _WARMUP_DETECTORS_TASK.done():
         _warmup_ok = await _await_warmup_detectors_pool(timeout=2.0)
         if _warmup_ok:
@@ -4063,11 +4257,6 @@ async def main():
         _REMOVED_CHANNELS_GRACE_DAYS,
     )
 
-    # ═══════════════════════════════════════════════════════════════
-    # ✅ v5.6.33: _shutdown_event + signal handlers مُسجَّلة الآن في
-    # بداية main() — لا حاجة لتكرار هنا.
-    # ═══════════════════════════════════════════════════════════════
-
     app_shutdown_done = False
 
     try:
@@ -4088,9 +4277,7 @@ async def main():
 
             runner = await setup_webhook(app, port)
 
-            # 🆕 v5.6.33 FIX-POST-INIT-WEBHOOK (BUG-2):
-            # تشغيل post_init hooks في وضع Webhook أيضاً (كانت تُستدعى
-            # فقط في polling mode — إصلاح لضمان تنفيذ التهيئة المتأخرة).
+            # FIX-POST-INIT-WEBHOOK
             await _run_post_init_hooks(app)
 
             try:
@@ -4122,7 +4309,6 @@ async def main():
                     except Exception as _e:
                         logger.debug("watcher_task: %s", _e)
 
-                # 🆕 v5.6.33: تشغيل post_stop قبل cleanup الـ runner
                 try:
                     await _run_post_stop_hooks(app)
                 except Exception as _e:
@@ -4203,7 +4389,6 @@ async def main():
             except asyncio.CancelledError:
                 raise
 
-        # 🆕 v5.6.31 WARMUP-2: إلغاء مهمة تسخين detectors إن لم تنتهِ
         if _WARMUP_DETECTORS_TASK is not None and \
                 not _WARMUP_DETECTORS_TASK.done():
             try:
@@ -4268,11 +4453,7 @@ async def main():
             except Exception as _sp_u_e:
                 logger.debug("sleep_probe uninstall: %s", _sp_u_e)
 
-        # ═══════════════════════════════════════════════════════════
-        # 🆕 v5.6.34 FIX-APP-STOP: استدعاء app.stop() قبل app.shutdown()
-        # PTB v20+ يوصي بهذا الترتيب لإغلاق جلسة Bot وHTTPXRequest pool
-        # بانتظام. غياب stop() كان يُنتج أحياناً "Unclosed connector".
-        # ═══════════════════════════════════════════════════════════
+        # FIX-APP-STOP
         if not app_shutdown_done:
             try:
                 if getattr(app, "running", False):
@@ -4293,8 +4474,7 @@ async def main():
             except Exception as _e:
                 logger.debug("app.shutdown: %s", _e)
 
-        # 🆕 v5.6.33 FIX-DB-CLOSE (BUG-3): إغلاق صريح لـ DB pool
-        # (بعد app.shutdown لإتاحة الفرصة لأي عملية أخيرة تُغلق)
+        # FIX-DB-CLOSE
         try:
             await _shutdown_db_pool(timeout=5.0)
         except asyncio.CancelledError:
