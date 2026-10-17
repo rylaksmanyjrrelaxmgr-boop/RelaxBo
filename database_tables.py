@@ -2,23 +2,39 @@
 # -*- coding: utf-8 -*-
 
 """
-database_tables.py — إنشاء الجداول والفهارس لكل قواعد البيانات (v7.9.12)
+database_tables.py — إنشاء الجداول والفهارس لكل قواعد البيانات (v7.9.13)
 ================================================================================
-🆕 v7.9.12 (DELETE-SPAM-SCORE-COLUMN):
-  🟢 FIX-DSS-1: إضافة عمود `delete_spam_score` إلى CREATE TABLE group_security
-      في 3 أماكن (SQLite / PostgreSQL / MySQL).
-      السبب: database_migrations.py v1.1.0 يُعرِّف العمود عبر
-      _MIGRATIONS_TYPES → يُضاف عبر ALTER TABLE في التنصيبات الموجودة،
-      لكن كان مفقوداً من CREATE TABLE في التنصيبات الجديدة.
-      الأثر: تنصيبات جديدة تُنشئ العمود مباشرة (بدون ALTER إضافي).
-      لا تغيير وظيفي على التنصيبات الحالية (migration يبقى يعمل).
+🆕 v7.9.13 (CONSISTENCY-ALIGNMENT):
+  🟢 FIX-DSS-CREATE: (من v7.9.12) delete_spam_score مُضاف في
+      CREATE TABLE group_security لـ 3 قواعد بيانات.
 
-  ✅ لا تغيير في المنطق — كل إصلاحات v7.9.11 محفوظة.
+  🟢 FIX-TEXT-HASH-DEFAULT: text_hash في CREATE TABLE posts أصبح
+      TEXT DEFAULT '' (كان TEXT بدون default).
+      السبب: database_migrations.py v1.1.0 يُعرِّف العمود كـ
+      'TEXT DEFAULT '''. بدون توحيد، الصفوف الجديدة على تنصيب
+      قديم قد تحصل على NULL بدل ''، مما يسبب اختلافات في البحث
+      (WHERE text_hash = '' لا يطابق NULL).
+      الأثر: تطابق كامل بين CREATE TABLE والـ migrations.
+
+  🟢 FIX-WELCOME-DEFAULTS: welcome_text/goodbye_text في
+      CREATE TABLE group_security أصبحت '' (بدلاً من النص
+      العربي الطويل).
+      السبب: توحيد مع database_migrations.py v1.1.0 الذي
+      يعرّفها كـ 'TEXT DEFAULT '''. النصوص العربية الافتراضية
+      موجودة في utils._DEFAULT_SECURITY_SETTINGS على مستوى
+      التطبيق، وليست في DB. CREATE TABLE الآن يعكس الحقيقة:
+      الحقل يُملأ عند التفعيل، لا عند الإنشاء.
+      الأثر: لا تغيير وظيفي — utils._format_security_text
+      يستخدم القيم الافتراضية من dict، لا من DB.
+
+  🟢 IMPROVE-VERSION-NOTE: تحديث schema_version description
+      في 3 دوال CREATE.
+
+🆕 v7.9.12 (DELETE-SPAM-SCORE-COLUMN) — محفوظ:
+  🟢 FIX-DSS-1: delete_spam_score في CREATE TABLE group_security.
 
 🆕 v7.9.11 (SYNTAX-WARNING-FIX) — محفوظ:
   🔧 FIX-SW-1: إصلاح SyntaxWarning من `\m` و `\M` في docstrings.
-      الإصلاح: `\\m` و `\\M` (شرطة خلفية مضاعفة).
-      الأثر: لا تغيير وظيفي — فقط إزالة التحذير.
 
 🆕 v7.9.10 (AUDIT-REMEDIATION — 6 BUGs + 5 M-issues) — محفوظ:
   🔴 BUG-1: حذف idx_settings_key من CRITICAL_SMALL_TABLE_INDEXES.
@@ -42,7 +58,7 @@ database_tables.py — إنشاء الجداول والفهارس لكل قوا�
 ================================================================================
 """
 
-__version__ = "7.9.12"
+__version__ = "7.9.13"
 
 import asyncio
 import logging
@@ -3674,12 +3690,13 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
         )
     """)
 
+    # 🟢 FIX-TEXT-HASH-DEFAULT: TEXT DEFAULT '' (كان TEXT بدون default)
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS posts (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             channel_db_id INTEGER,
             text TEXT,
-            text_hash TEXT,
+            text_hash TEXT DEFAULT '',
             media_type TEXT,
             media_file_id TEXT,
             published INTEGER DEFAULT 0,
@@ -3798,9 +3815,8 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
         )
     """)
 
-    # ═══════════════════════════════════════════════════════════════════
-    # 🟢 v7.9.12 FIX-DSS-1: delete_spam_score مُضاف (كان مفقوداً)
-    # ═══════════════════════════════════════════════════════════════════
+    # 🟢 FIX-WELCOME-DEFAULTS: welcome_text/goodbye_text = '' (كان نصاً عربياً)
+    # 🟢 FIX-DSS-CREATE: delete_spam_score INTEGER DEFAULT 1
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS group_security (
             chat_id INTEGER PRIMARY KEY,
@@ -3809,9 +3825,9 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
             slow_mode INTEGER DEFAULT 0,
             slow_mode_seconds INTEGER DEFAULT 5,
             welcome_enabled INTEGER DEFAULT 0,
-            welcome_text TEXT DEFAULT 'مرحباً {user} في {chat} 🤍',
+            welcome_text TEXT DEFAULT '',
             goodbye_enabled INTEGER DEFAULT 0,
-            goodbye_text TEXT DEFAULT 'وداعاً {user} 👋',
+            goodbye_text TEXT DEFAULT '',
             delete_banned_words INTEGER DEFAULT 0,
             auto_penalty TEXT DEFAULT 'none',
             auto_mute_duration INTEGER DEFAULT 3600,
@@ -4124,7 +4140,8 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
             features TEXT CHECK(features IS NULL OR json_valid(features)),
             is_active INTEGER DEFAULT 1,
             is_gift INTEGER DEFAULT 0,
-            created_at TEXT        )
+            created_at TEXT
+        )
     """)
 
     await conn.execute("""
@@ -4274,7 +4291,7 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
             "(version, applied_at, description) "
             "VALUES (?, ?, ?) ON CONFLICT(version) DO NOTHING",
             (CURRENT_SCHEMA_VERSION, _safe_now_iso(TimeUtils),
-             "v7.9.12-delete-spam-score-column"),
+             "v7.9.13-consistency-alignment"),
         )
         await conn.commit()
     except Exception as e:
@@ -4286,7 +4303,7 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
     if logger:
         logger.info(
             "✅ تم إنشاء جميع جداول SQLite مع الفهارس المحسنة "
-            "(v7.9.12 — DELETE-SPAM-SCORE-COLUMN)"
+            "(v7.9.13 — CONSISTENCY-ALIGNMENT)"
         )
 
 
@@ -4401,12 +4418,13 @@ async def create_tables_postgres(
         )
     """)
 
+    # 🟢 FIX-TEXT-HASH-DEFAULT: TEXT DEFAULT '' (كان TEXT بدون default)
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS posts (
             id SERIAL PRIMARY KEY,
             channel_db_id INTEGER,
             text TEXT,
-            text_hash TEXT,
+            text_hash TEXT DEFAULT '',
             media_type TEXT,
             media_file_id TEXT,
             published INTEGER DEFAULT 0,
@@ -4525,9 +4543,8 @@ async def create_tables_postgres(
         )
     """)
 
-    # ═══════════════════════════════════════════════════════════════════
-    # 🟢 v7.9.12 FIX-DSS-1: delete_spam_score مُضاف (كان مفقوداً)
-    # ═══════════════════════════════════════════════════════════════════
+    # 🟢 FIX-WELCOME-DEFAULTS: welcome_text/goodbye_text = '' (كان نصاً عربياً)
+    # 🟢 FIX-DSS-CREATE: delete_spam_score INTEGER DEFAULT 1
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS group_security (
             chat_id BIGINT PRIMARY KEY,
@@ -4536,9 +4553,9 @@ async def create_tables_postgres(
             slow_mode INTEGER DEFAULT 0,
             slow_mode_seconds INTEGER DEFAULT 5,
             welcome_enabled INTEGER DEFAULT 0,
-            welcome_text TEXT DEFAULT 'مرحباً {user} في {chat} 🤍',
+            welcome_text TEXT DEFAULT '',
             goodbye_enabled INTEGER DEFAULT 0,
-            goodbye_text TEXT DEFAULT 'وداعاً {user} 👋',
+            goodbye_text TEXT DEFAULT '',
             delete_banned_words INTEGER DEFAULT 0,
             auto_penalty TEXT DEFAULT 'none',
             auto_mute_duration INTEGER DEFAULT 3600,
@@ -5023,7 +5040,7 @@ async def create_tables_postgres(
             "VALUES ($1, $2, $3) ON CONFLICT (version) DO NOTHING",
             CURRENT_SCHEMA_VERSION,
             _safe_now_dt(TimeUtils),
-            "v7.9.12-delete-spam-score-column",
+            "v7.9.13-consistency-alignment",
         )
     except Exception as e:
         if logger:
@@ -5034,7 +5051,7 @@ async def create_tables_postgres(
     if logger:
         logger.info(
             "✅ تم إنشاء جميع جداول PostgreSQL مع الفهارس المحسنة "
-            "(v7.9.12 — DELETE-SPAM-SCORE-COLUMN)"
+            "(v7.9.13 — CONSISTENCY-ALIGNMENT)"
         )
 
 
@@ -5125,6 +5142,7 @@ async def create_tables_mysql(conn, logger, TimeUtils):
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
         """)
 
+        # 🟢 FIX-TEXT-HASH-DEFAULT: text_hash CHAR(64) DEFAULT ''
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS posts (
                 id INT PRIMARY KEY AUTO_INCREMENT,
@@ -5258,9 +5276,8 @@ async def create_tables_mysql(conn, logger, TimeUtils):
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
         """)
 
-        # ═══════════════════════════════════════════════════════════════
-        # 🟢 v7.9.12 FIX-DSS-1: delete_spam_score مُضاف (كان مفقوداً)
-        # ═══════════════════════════════════════════════════════════════
+        # 🟢 FIX-WELCOME-DEFAULTS: welcome_text/goodbye_text = '' (كان نصاً عربياً)
+        # 🟢 FIX-DSS-CREATE: delete_spam_score TINYINT(1) DEFAULT 1
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS group_security (
                 chat_id BIGINT PRIMARY KEY,
@@ -5269,11 +5286,9 @@ async def create_tables_mysql(conn, logger, TimeUtils):
                 slow_mode TINYINT(1) DEFAULT 0,
                 slow_mode_seconds INT DEFAULT 5,
                 welcome_enabled TINYINT(1) DEFAULT 0,
-                welcome_text VARCHAR(2000)
-                    DEFAULT 'مرحباً {user} في {chat} 🤍',
+                welcome_text VARCHAR(2000) DEFAULT '',
                 goodbye_enabled TINYINT(1) DEFAULT 0,
-                goodbye_text VARCHAR(2000)
-                    DEFAULT 'وداعاً {user} 👋',
+                goodbye_text VARCHAR(2000) DEFAULT '',
                 delete_banned_words TINYINT(1) DEFAULT 0,
                 auto_penalty VARCHAR(50) DEFAULT 'none',
                 auto_mute_duration INT DEFAULT 3600,
@@ -5740,7 +5755,7 @@ async def create_tables_mysql(conn, logger, TimeUtils):
                 (
                     CURRENT_SCHEMA_VERSION,
                     _safe_now_iso(TimeUtils),
-                    "v7.9.12-delete-spam-score-column",
+                    "v7.9.13-consistency-alignment",
                 ),
             )
         except Exception as e:
@@ -5752,7 +5767,7 @@ async def create_tables_mysql(conn, logger, TimeUtils):
         if logger:
             logger.info(
                 "✅ تم إنشاء جميع جداول MySQL مع الفهارس المحسنة "
-                "(v7.9.12 — DELETE-SPAM-SCORE-COLUMN)"
+                "(v7.9.13 — CONSISTENCY-ALIGNMENT)"
             )
 
     finally:
@@ -5818,13 +5833,15 @@ __all__ = [
 
 
 # =====================================================================
-# LOAD BEACON — v7.9.12
+# LOAD BEACON — v7.9.13
 # =====================================================================
 
 try:
     _beacon_parts = [
         f"🛡️ database_tables.py v{__version__} loaded",
-        f"FIX-DSS-1 delete_spam_score-added=✅",
+        f"FIX-DSS-CREATE delete_spam_score-added=✅",
+        f"FIX-TEXT-HASH-DEFAULT text_hash-DEFAULT-''=✅",
+        f"FIX-WELCOME-DEFAULTS welcome/goodbye-DEFAULT-''=✅",
         f"FIX-SW-1 escape-sequences-fixed=✅",
         f"FIX-C12a VACUUM_DELAY={VACUUM_INTER_TABLE_DELAY_SECONDS}s",
         f"FIX-C12b CRITICAL_SMALL_INDEXES={len(CRITICAL_SMALL_TABLE_INDEXES)}",
