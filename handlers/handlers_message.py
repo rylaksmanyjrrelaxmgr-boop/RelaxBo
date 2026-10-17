@@ -1,34 +1,47 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-handlers_message.py - v7.18.47 (LOG-CHANNEL-KEY-UNIFICATION)
+handlers_message.py - v7.18.48 (PERF-FIX-MEDIA-ONLY-MULTILAYER)
 (متوافق مع detectors v4.1.0 + banned_words_manager v1.2.0 + group_log v1.4.0)
 =============================================================================
-🆕 v7.18.47 (LOG-CHANNEL-KEY-UNIFICATION):
+🆕 v7.18.48 (PERF-FIX-MEDIA-ONLY-MULTILAYER):
+
+    🔴 FIX-LAG-1 (CRITICAL): analyze_message_full_async فقط للرسائل
+        التي تحتوي وسائط (photo/video/voice/audio/document/animation/
+        video_note/sticker). النصوص البسيطة تستخدم _compute_spam_score
+        مباشرة.
+        السبب: analyze_message_full_async يشغّل 15 طبقة (OCR, audio,
+        video, URL × whois, NSFW, stego, ...) لكل رسالة مجموعة —
+        حتى لو كانت نصاً بسيطاً. الطبقات الثقيلة تحتجز GIL لفترات
+        طويلة → event loop يتجمّد → lag p90=372ms.
+        الأثر: 90% من الرسائل (نصية) تتخطى 15 طبقة → lag p90 يتوقع
+        ينخفض إلى < 50ms.
+
+    🔴 FIX-LAG-2: _SPAM_ASYNC_TIMEOUT من 2.5s → 1.0s.
+        السبب: max wait للرسائل الوسائط كان 2.5s، مما يجعل أسوأ حالة
+        lag أعلى. 1.0s كافٍ للطبقات السريعة، ويقلل max lag.
+
+    🟢 FIX-LAG-3: _lazy_init_columns أصبح fire-and-forget عند أول
+        رسالة. migration DB يعمل في background task، والرسالة تكمل
+        فوراً بدون انتظار.
+        السبب: أول رسالة بعد الإقلاع كانت تنتظر ALTER TABLE × 9
+        + cache clear + autoblock init = 500ms-2s.
+        الأثر: lag أول رسالة ينخفض من 2s إلى < 50ms.
+
+    🟢 FIX-LAG-4: _analysis_mode = "text-only-fast" عند استخدام
+        _compute_spam_score مباشرة. يساعد في تشخيص السجل.
+
+    ✅ كل شيء آخر محفوظ من v7.18.47 (LOG-CHANNEL-KEY-UNIFICATION).
+
+🆕 v7.18.47 (LOG-CHANNEL-KEY-UNIFICATION) — محفوظ:
 
     🔴 FIX-LOGCH-KEY (CRITICAL): توحيد مفتاح قناة السجل.
-        المشكلة المُبلَّغ عنها:
-          • المطور يعيّن قناة سجل من اللوحة
-          • تظهر "✅ تم تعيين قناة السجل: ..." بنجاح
-          • لكن اللوحة تُظهر "غير مُعيَّن" عند العودة!
-          • DB: settings.log_channel = "-1004497316748" ✅
-            بينما: settings.log_channel_id غير موجود ❌
-        السبب الجذري:
-          _handle_wait_log_ch_text كان يكتب على 'log_channel'
-          بينما database_settings.py يقرأ/يكتب على 'log_channel_id'
-          (get_log_channel, set_log_channel, remove_log_channel,
-           _SETTING_VALIDATORS, auto-heal — كلها log_channel_id).
-        الإصلاح:
-          • استخدام DB.set_log_channel(numeric_id) أساساً — الدالة
-            المخصصة المُحصَّنة (FIX-Y1) التي تستخدم المفتاح الصحيح.
-          • fallback: DB.set_setting('log_channel_id', ...) عند
-            عدم توفر set_log_channel.
-          • SQL fallback على 'log_channel_id' أيضاً.
-          • تنظيف المفتاح الخاطئ 'log_channel' (لا يُستخدم بعد الآن).
+        • استخدام DB.set_log_channel(numeric_id) أساساً
+        • fallback: DB.set_setting('log_channel_id', ...)
+        • SQL fallback على 'log_channel_id'
+        • تنظيف المفاتيح القديمة 'global_log_channel' و 'log_channel'
 
-    🟢 FIX-LOGCH-KEY-CLEANUP: حذف المفاتيح القديمة تلقائياً:
-        • 'global_log_channel' (legacy قديم)
-        • 'log_channel' (المفتاح الخاطئ من v7.18.46)
+    🟢 FIX-LOGCH-KEY-CLEANUP: حذف المفاتيح القديمة تلقائياً.
 
 ✅ v7.18.46 (POST-AUDIT-CORRECTIONS) — محفوظ بالكامل.
 ✅ v7.18.45 وما قبله — محفوظ بالكامل.
@@ -116,9 +129,12 @@ def _ph_list(count: int) -> str:
 
 
 # ═════════════════════════════════════════════════════════════════════
-# v7.18.39 FIX-TIMEOUT-1: مهلة كشف Spam
+# 🆕 v7.18.48 FIX-LAG-2: مهلة كشف Spam (2.5s → 1.0s)
 # ═════════════════════════════════════════════════════════════════════
-_SPAM_ASYNC_TIMEOUT: float = 2.5
+# السبب: max wait للرسائل الوسائط كان 2.5s، مما يجعل أسوأ حالة
+# lag أعلى. 1.0s كافٍ للطبقات السريعة، ويقلل max lag.
+# النصوص البسيطة لا تستخدم هذا timeout أصلاً (FIX-LAG-1).
+_SPAM_ASYNC_TIMEOUT: float = 1.0
 
 
 # ═════════════════════════════════════════════════════════════════════
@@ -1042,6 +1058,8 @@ _columns_initialized = False
 _columns_init_lock = asyncio.Lock()
 _columns_last_attempt_ts = 0.0
 _columns_last_error_log_ts = 0.0
+# 🆕 v7.18.48 FIX-LAG-3: flag لمنع تشغيل migration أكثر من مرة
+_columns_bg_task: Optional[asyncio.Task] = None
 
 
 def _utc_now_iso() -> str:
@@ -1163,164 +1181,207 @@ async def _notify_dev_about_idle_tx(
         return None
 
 
+# ═════════════════════════════════════════════════════════════════════
+# 🆕 v7.18.48 FIX-LAG-3: _lazy_init_columns غير محجوب
+# ═════════════════════════════════════════════════════════════════════
+
+async def _do_lazy_init_columns_migration(bot=None) -> None:
+    """
+    🆕 v7.18.48 FIX-LAG-3: التنفيذ الفعلي لـ migration في background.
+    """
+    global _columns_initialized, _columns_last_error_log_ts
+
+    db_type = _db_type()
+    logger.info("🔧 v7.18.48 FIX-LAG-3: Auto-migration (DB_TYPE=%s)", db_type)
+
+    cols = [
+        ("delete_protected_any", "INTEGER DEFAULT 0",
+         "TINYINT(1) DEFAULT 0"),
+        ("delete_postbot_pattern", "INTEGER DEFAULT 0",
+         "TINYINT(1) DEFAULT 0"),
+        ("delete_spam_score", "INTEGER DEFAULT 1",
+         "TINYINT(1) DEFAULT 1"),
+        ("delete_at_channel", "INTEGER DEFAULT 0",
+         "TINYINT(1) DEFAULT 0"),
+        ("delete_tg_scheme", "INTEGER DEFAULT 1",
+         "TINYINT(1) DEFAULT 1"),
+        ("delete_button_links", "INTEGER DEFAULT 1",
+         "TINYINT(1) DEFAULT 1"),
+        ("delete_emails", "INTEGER DEFAULT 0",
+         "TINYINT(1) DEFAULT 0"),
+        ("delete_polls", "INTEGER DEFAULT 0",
+         "TINYINT(1) DEFAULT 0"),
+        ("delete_protected_forward", "INTEGER DEFAULT 0",
+         "TINYINT(1) DEFAULT 0"),
+    ]
+
+    migration_ok = True
+    unexpected_failures: List[str] = []
+
+    if db_type == "postgres":
+        try:
+            additions = ", ".join(
+                f"ADD COLUMN IF NOT EXISTS {col} {sqlite_def}"
+                for col, sqlite_def, _ in cols)
+            await DB.execute(
+                f"ALTER TABLE group_security {additions}")
+            logger.info(
+                "✅ PERF-9: عمود %d أُضيفوا في ALTER واحد (PG)",
+                len(cols))
+        except Exception as bulk_e:
+            logger.warning(
+                "⚠️ PG bulk ALTER فشل — fallback فردي: %s", bulk_e)
+            for col_name, sqlite_def, _ in cols:
+                try:
+                    await DB.execute(
+                        f"ALTER TABLE group_security "
+                        f"ADD COLUMN IF NOT EXISTS "
+                        f"{col_name} {sqlite_def}")
+                except Exception as col_e:
+                    m = str(col_e).lower()
+                    if ("already exists" not in m
+                            and "duplicate" not in m):
+                        migration_ok = False
+                        unexpected_failures.append(
+                            f"{col_name}: {col_e}")
+    else:
+        for col_name, sqlite_def, mysql_def in cols:
+            try:
+                if db_type == "mysql":
+                    try:
+                        await DB.execute(
+                            "ALTER TABLE group_security "
+                            f"ADD COLUMN {col_name} {mysql_def}")
+                    except Exception as e:
+                        m = str(e).lower()
+                        if ("duplicate" not in m
+                                and "already exists" not in m):
+                            migration_ok = False
+                            unexpected_failures.append(
+                                f"{col_name}: {e}")
+                else:
+                    try:
+                        await DB.execute(
+                            "ALTER TABLE group_security "
+                            f"ADD COLUMN {col_name} {sqlite_def}")
+                    except Exception as e:
+                        m = str(e).lower()
+                        if "database is locked" in m or \
+                           "database table is locked" in m:
+                            logger.warning(
+                                "⚠️ SQLite lock أثناء ALTER %s "
+                                "— سيُعاد في الدورة التالية",
+                                col_name)
+                            migration_ok = False
+                            unexpected_failures.append(
+                                f"{col_name}: locked")
+                        elif ("duplicate" not in m
+                                and "already exists" not in m):
+                            migration_ok = False
+                            unexpected_failures.append(
+                                f"{col_name}: {e}")
+            except Exception as e:
+                migration_ok = False
+                unexpected_failures.append(f"{col_name}: {e}")
+
+    if _HAS_AUTO_BLOCK:
+        try:
+            await _ensure_autoblock_table()
+        except Exception as e:
+            logger.debug("auto_block table init: %s", e)
+
+    try:
+        await internal_cache.clear()
+        logger.info("✅ internal_cache cleared")
+    except Exception:
+        pass
+
+    _invalidate_group_log_cache()
+    _invalidate_sec_settings_local()
+    _invalidate_ars_local_cache()
+    _invalidate_admin_check_cache()
+    _invalidate_penalty_duration_override_cache()
+
+    if migration_ok:
+        _columns_initialized = True
+        logger.info(
+            "✅ v7.18.48 FIX-LAG-3: migration اكتمل بنجاح (background)")
+    elif unexpected_failures:
+        now = time.monotonic()
+        if now - _columns_last_error_log_ts >= _COLUMNS_LOG_THROTTLE_SEC:
+            _columns_last_error_log_ts = now
+            logger.error(
+                "❌ migration_ok=False — فشل %d عمود: %s",
+                len(unexpected_failures),
+                "; ".join(unexpected_failures[:5]))
+            logger.error(
+                "⚠️ المخطط غير متزامن — قد تفشل عمليات القراءة/الكتابة "
+                "على group_security. راجع سجلات DB.")
+        else:
+            logger.debug(
+                "migration failed (%d cols) — log throttled",
+                len(unexpected_failures))
+        if bot is not None:
+            try:
+                _spawn_tracked_task(
+                    _notify_dev_about_idle_tx(
+                        bot,
+                        reason=(
+                            f"migration_failed:"
+                            f"{len(unexpected_failures)}_cols")),
+                    label="idle-tx-notify-migration")
+            except Exception as _e_it:
+                logger.debug(
+                    "idle-tx spawn after migration fail: %s", _e_it)
+
+
 async def _lazy_init_columns(bot=None):
+    """
+    🆕 v7.18.48 FIX-LAG-3: fire-and-forget.
+
+    السبب: أول رسالة بعد الإقلاع كانت تنتظر ALTER TABLE × 9
+    + cache clear + autoblock init = 500ms-2s.
+    الأثر: lag أول رسالة ينخفض من 2s إلى < 50ms.
+
+    الآلية:
+      • إن كانت _columns_initialized → ارجع فوراً (مسار سريع).
+      • إن لم تُشغَّل migration بعد → ابدأها في background task.
+      • الرسالة الحالية تكمل بدون migration (fire-and-forget).
+      • migration التالي سيعمل في الخلفية ولن يعطّل الرسائل اللاحقة.
+    """
     global _columns_initialized, _columns_last_attempt_ts
-    global _columns_last_error_log_ts
+    global _columns_bg_task
 
     if _columns_initialized:
         return
 
-    async with _columns_init_lock:
-        if _columns_initialized:
-            return
+    # cooldown: لا تُعِد المحاولة أكثر من مرة كل _COLUMNS_RETRY_COOLDOWN_SEC
+    now = time.monotonic()
+    if (
+        _columns_last_attempt_ts > 0
+        and now - _columns_last_attempt_ts < _COLUMNS_RETRY_COOLDOWN_SEC
+    ):
+        return
 
-        now = time.monotonic()
-        if (
-            _columns_last_attempt_ts > 0
-            and now - _columns_last_attempt_ts < _COLUMNS_RETRY_COOLDOWN_SEC
-        ):
-            return
-        _columns_last_attempt_ts = now
+    # إن كانت مهمة سابقة لا تزال تعمل → لا تكرر
+    if _columns_bg_task is not None and not _columns_bg_task.done():
+        return
 
-        db_type = _db_type()
-        logger.info("🔧 v7.18.47: Auto-migration (DB_TYPE=%s)", db_type)
+    _columns_last_attempt_ts = now
 
-        cols = [
-            ("delete_protected_any", "INTEGER DEFAULT 0",
-             "TINYINT(1) DEFAULT 0"),
-            ("delete_postbot_pattern", "INTEGER DEFAULT 0",
-             "TINYINT(1) DEFAULT 0"),
-            ("delete_spam_score", "INTEGER DEFAULT 1",
-             "TINYINT(1) DEFAULT 1"),
-            ("delete_at_channel", "INTEGER DEFAULT 0",
-             "TINYINT(1) DEFAULT 0"),
-            ("delete_tg_scheme", "INTEGER DEFAULT 1",
-             "TINYINT(1) DEFAULT 1"),
-            ("delete_button_links", "INTEGER DEFAULT 1",
-             "TINYINT(1) DEFAULT 1"),
-            ("delete_emails", "INTEGER DEFAULT 0",
-             "TINYINT(1) DEFAULT 0"),
-            ("delete_polls", "INTEGER DEFAULT 0",
-             "TINYINT(1) DEFAULT 0"),
-            ("delete_protected_forward", "INTEGER DEFAULT 0",
-             "TINYINT(1) DEFAULT 0"),
-        ]
-
-        migration_ok = True
-        unexpected_failures: List[str] = []
-
-        if db_type == "postgres":
-            try:
-                additions = ", ".join(
-                    f"ADD COLUMN IF NOT EXISTS {col} {sqlite_def}"
-                    for col, sqlite_def, _ in cols)
-                await DB.execute(
-                    f"ALTER TABLE group_security {additions}")
-                logger.info(
-                    "✅ PERF-9: عمود %d أُضيفوا في ALTER واحد (PG)",
-                    len(cols))
-            except Exception as bulk_e:
-                logger.warning(
-                    "⚠️ PG bulk ALTER فشل — fallback فردي: %s", bulk_e)
-                for col_name, sqlite_def, _ in cols:
-                    try:
-                        await DB.execute(
-                            f"ALTER TABLE group_security "
-                            f"ADD COLUMN IF NOT EXISTS "
-                            f"{col_name} {sqlite_def}")
-                    except Exception as col_e:
-                        m = str(col_e).lower()
-                        if ("already exists" not in m
-                                and "duplicate" not in m):
-                            migration_ok = False
-                            unexpected_failures.append(
-                                f"{col_name}: {col_e}")
-        else:
-            for col_name, sqlite_def, mysql_def in cols:
-                try:
-                    if db_type == "mysql":
-                        try:
-                            await DB.execute(
-                                "ALTER TABLE group_security "
-                                f"ADD COLUMN {col_name} {mysql_def}")
-                        except Exception as e:
-                            m = str(e).lower()
-                            if ("duplicate" not in m
-                                    and "already exists" not in m):
-                                migration_ok = False
-                                unexpected_failures.append(
-                                    f"{col_name}: {e}")
-                    else:
-                        try:
-                            await DB.execute(
-                                "ALTER TABLE group_security "
-                                f"ADD COLUMN {col_name} {sqlite_def}")
-                        except Exception as e:
-                            m = str(e).lower()
-                            if "database is locked" in m or \
-                               "database table is locked" in m:
-                                logger.warning(
-                                    "⚠️ SQLite lock أثناء ALTER %s "
-                                    "— سيُعاد في الدورة التالية",
-                                    col_name)
-                                migration_ok = False
-                                unexpected_failures.append(
-                                    f"{col_name}: locked")
-                            elif ("duplicate" not in m
-                                    and "already exists" not in m):
-                                migration_ok = False
-                                unexpected_failures.append(
-                                    f"{col_name}: {e}")
-                except Exception as e:
-                    migration_ok = False
-                    unexpected_failures.append(f"{col_name}: {e}")
-
-        if _HAS_AUTO_BLOCK:
-            try:
-                await _ensure_autoblock_table()
-            except Exception as e:
-                logger.debug("auto_block table init: %s", e)
-
-        try:
-            await internal_cache.clear()
-            logger.info("✅ internal_cache cleared")
-        except Exception:
-            pass
-
-        _invalidate_group_log_cache()
-        _invalidate_sec_settings_local()
-        _invalidate_ars_local_cache()
-        _invalidate_admin_check_cache()
-        _invalidate_penalty_duration_override_cache()
-
-        if migration_ok:
-            _columns_initialized = True
-        elif unexpected_failures:
-            if now - _columns_last_error_log_ts >= _COLUMNS_LOG_THROTTLE_SEC:
-                _columns_last_error_log_ts = now
-                logger.error(
-                    "❌ migration_ok=False — فشل %d عمود: %s",
-                    len(unexpected_failures),
-                    "; ".join(unexpected_failures[:5]))
-                logger.error(
-                    "⚠️ المخطط غير متزامن — قد تفشل عمليات القراءة/الكتابة "
-                    "على group_security. راجع سجلات DB.")
-            else:
-                logger.debug(
-                    "migration failed (%d cols) — log throttled",
-                    len(unexpected_failures))
-            if bot is not None:
-                try:
-                    _spawn_tracked_task(
-                        _notify_dev_about_idle_tx(
-                            bot,
-                            reason=(
-                                f"migration_failed:"
-                                f"{len(unexpected_failures)}_cols")),
-                        label="idle-tx-notify-migration")
-                except Exception as _e_it:
-                    logger.debug(
-                        "idle-tx spawn after migration fail: %s", _e_it)
+    # 🆕 FIX-LAG-3: تشغيل migration في background — لا انتظار
+    try:
+        _columns_bg_task = _spawn_tracked_task(
+            _do_lazy_init_columns_migration(bot),
+            label="bg-lazy-init-columns",
+        )
+        logger.debug(
+            "🔧 v7.18.48 FIX-LAG-3: migration في background — "
+            "الرسالة الحالية تمر بسرعة (bot=%s)",
+            "yes" if bot is not None else "no")
+    except Exception as e:
+        logger.warning(
+            "فشل spawn bg-lazy-init: %s — migration لن يعمل", e)
 
 
 _dev_log_cache = None
@@ -3549,8 +3610,6 @@ _EXTERNAL_HANDLED_STATES = frozenset({
     "WAIT_IMPORT_FILE",
     "WAIT_BACKUP_FILE",
 })
-
-
 class MessageHandlers:
 
     _PRIVATE_HANDLERS_MAP: Dict[Any, str] = {
@@ -3871,77 +3930,109 @@ class MessageHandlers:
         _analysis_mode = "text-only"
 
         if _spam_enabled:
-            if _MULTILAYER_ENABLED and _HAS_ASYNC_DETECTORS:
-                try:
-                    _verdict = await asyncio.wait_for(
-                        analyze_message_full_async(
-                            message, bot=context.bot),
-                        timeout=_SPAM_ASYNC_TIMEOUT)
-                    if _verdict is not None:
-                        _spam_score = int(
-                            getattr(_verdict, "total_score", 0) or 0)
-                        _spam_layer_scores = dict(
-                            getattr(
-                                _verdict, "layer_scores", {}) or {})
-                        try:
-                            for _layer, _reasons in (
+            # 🆕 v7.18.48 FIX-LAG-1: هل الرسالة تحتوي وسائط؟
+            # السبب: analyze_message_full_async يشغّل 15 طبقة
+            # (OCR, audio, video, URL × whois, NSFW, stego, ...)
+            # لكل رسالة — حتى النصية البسيطة. الطبقات الثقيلة
+            # تحتجز GIL → event loop يتجمّد → lag p90=372ms.
+            # الأثر: 90% من الرسائل (نصية) تتخطى 15 طبقة → lag
+            # p90 يتوقع ينخفض إلى < 50ms.
+            _has_media = any([
+                getattr(message, 'photo', None),
+                getattr(message, 'video', None),
+                getattr(message, 'voice', None),
+                getattr(message, 'audio', None),
+                getattr(message, 'document', None),
+                getattr(message, 'animation', None),
+                getattr(message, 'video_note', None),
+                getattr(message, 'sticker', None),
+            ])
+
+            if _has_media:
+                # ─── رسالة تحتوي وسائط → استخدم multi-layer ───
+                if _MULTILAYER_ENABLED and _HAS_ASYNC_DETECTORS:
+                    try:
+                        _verdict = await asyncio.wait_for(
+                            analyze_message_full_async(
+                                message, bot=context.bot),
+                            timeout=_SPAM_ASYNC_TIMEOUT)
+                        if _verdict is not None:
+                            _spam_score = int(
+                                getattr(_verdict, "total_score", 0) or 0)
+                            _spam_layer_scores = dict(
                                 getattr(
-                                    _verdict, "layer_reasons", {}) or {}
-                            ).items():
-                                for _r in (_reasons or []):
-                                    _spam_reasons.append(
-                                        f"{_layer}:{_r}")
-                        except Exception:
-                            pass
-                        _analysis_mode = "multilayer-async"
-                except asyncio.TimeoutError:
-                    logger.warning(
-                        "⚠️ SPAM-TIMEOUT | chat=%s user=%s | "
-                        "%.1fs exceeded — fallback text-only",
-                        chat_id, user_id, _SPAM_ASYNC_TIMEOUT)
-                    _verdict = None
-                    _analysis_mode = "text-only-timeout"
-                except Exception as e:
-                    logger.debug("multilayer async error: %s", e)
-                    _verdict = None
-            elif _MULTILAYER_ENABLED and analyze_message_full is not None:
-                try:
-                    _verdict = await _run_sync_in_pool(
-                        analyze_message_full, message, context.bot,
-                        timeout=_SPAM_ASYNC_TIMEOUT)
-                    if _verdict is not None:
-                        _spam_score = int(
-                            getattr(_verdict, "total_score", 0) or 0)
-                        _spam_layer_scores = dict(
-                            getattr(
-                                _verdict, "layer_scores", {}) or {})
-                        try:
-                            for _layer, _reasons in (
+                                    _verdict, "layer_scores", {}) or {})
+                            try:
+                                for _layer, _reasons in (
+                                    getattr(
+                                        _verdict, "layer_reasons", {}) or {}
+                                ).items():
+                                    for _r in (_reasons or []):
+                                        _spam_reasons.append(
+                                            f"{_layer}:{_r}")
+                            except Exception:
+                                pass
+                            _analysis_mode = "multilayer-async"
+                    except asyncio.TimeoutError:
+                        logger.warning(
+                            "⚠️ SPAM-TIMEOUT | chat=%s user=%s | "
+                            "%.1fs exceeded — fallback text-only",
+                            chat_id, user_id, _SPAM_ASYNC_TIMEOUT)
+                        _verdict = None
+                        _analysis_mode = "text-only-timeout"
+                    except Exception as e:
+                        logger.debug("multilayer async error: %s", e)
+                        _verdict = None
+                elif _MULTILAYER_ENABLED and analyze_message_full is not None:
+                    try:
+                        _verdict = await _run_sync_in_pool(
+                            analyze_message_full, message, context.bot,
+                            timeout=_SPAM_ASYNC_TIMEOUT)
+                        if _verdict is not None:
+                            _spam_score = int(
+                                getattr(_verdict, "total_score", 0) or 0)
+                            _spam_layer_scores = dict(
                                 getattr(
-                                    _verdict, "layer_reasons", {}) or {}
-                            ).items():
-                                for _r in (_reasons or []):
-                                    _spam_reasons.append(
-                                        f"{_layer}:{_r}")
-                        except Exception:
-                            pass
-                        _analysis_mode = (
-                            "multilayer-sync-pool-DEGRADED")
-                except asyncio.TimeoutError:
-                    logger.warning(
-                        "⚠️ multilayer sync pool: TIMEOUT (%.1fs) | "
-                        "chat=%s user=%s — fallback to text-only",
-                        _SPAM_ASYNC_TIMEOUT, chat_id, user_id)
-                    _verdict = None
-                    _analysis_mode = "text-only-timeout"
-                except Exception as e:
-                    logger.debug("multilayer sync-pool error: %s", e)
-                    _verdict = None
-            if _verdict is None:
+                                    _verdict, "layer_scores", {}) or {})
+                            try:
+                                for _layer, _reasons in (
+                                    getattr(
+                                        _verdict, "layer_reasons", {}) or {}
+                                ).items():
+                                    for _r in (_reasons or []):
+                                        _spam_reasons.append(
+                                            f"{_layer}:{_r}")
+                            except Exception:
+                                pass
+                            _analysis_mode = (
+                                "multilayer-sync-pool-DEGRADED")
+                    except asyncio.TimeoutError:
+                        logger.warning(
+                            "⚠️ multilayer sync pool: TIMEOUT (%.1fs) | "
+                            "chat=%s user=%s — fallback to text-only",
+                            _SPAM_ASYNC_TIMEOUT, chat_id, user_id)
+                        _verdict = None
+                        _analysis_mode = "text-only-timeout"
+                    except Exception as e:
+                        logger.debug("multilayer sync-pool error: %s", e)
+                        _verdict = None
+
+                # fallback إلى text-only إذا فشل multi-layer
+                if _verdict is None:
+                    try:
+                        _spam_score, _spam_reasons = _compute_spam_score(ctx)
+                    except Exception as e:
+                        logger.debug("spam_score (media fallback): %s", e)
+            else:
+                # 🆕 FIX-LAG-1: رسالة نصية فقط → استخدم text-layer
+                # السريع مباشرة (بدون 15 طبقة).
                 try:
                     _spam_score, _spam_reasons = _compute_spam_score(ctx)
+                    _analysis_mode = "text-only-fast"
                 except Exception as e:
-                    logger.debug("spam_score: %s", e)
+                    logger.debug("spam_score (text-only-fast): %s", e)
+                    _spam_score = 0
+                    _spam_reasons = []
 
         _is_spam = (
             _spam_enabled and _spam_score >= SPAM_SCORE_THRESHOLD)
@@ -4737,7 +4828,7 @@ class MessageHandlers:
     # v7.18.43 FIX-HTML-ESCAPE + v7.18.44 FIX-MYSQL-UPSERT
     # v7.18.45 FIX-MYSQL-UPSERT-MODERN + FIX-LOGCH-NESTED-CODE
     # v7.18.46 FIX-LOGCH-SCHEMELESS-URL
-    # 🆕 v7.18.47 FIX-LOGCH-KEY: توحيد المفتاح على log_channel_id
+    # v7.18.47 FIX-LOGCH-KEY: توحيد المفتاح على log_channel_id
     # ═══════════════════════════════════════════════════════════════════
     @staticmethod
     async def _handle_wait_log_ch_text(update, context, state=None):
@@ -7441,16 +7532,19 @@ __all__ = [
     "_prune_caches_lock",
     "_extract_username_from_schemeless_url",
     "_SCHEMELESS_TG_HOSTS_RE",
+    # 🆕 v7.18.48 additions
+    "_columns_bg_task",
+    "_do_lazy_init_columns_migration",
 ]
 
 
 # ═════════════════════════════════════════════════════════════════════
-# LOAD BEACON — v7.18.47
+# LOAD BEACON — v7.18.48
 # ═════════════════════════════════════════════════════════════════════
 
 try:
     logger.info(
-        "✅ handlers_message v7.18.47 loaded | "
+        "✅ handlers_message v7.18.48 loaded | "
         "BWM=%s | PRIVATE_HANDLERS=%d | "
         "external_handled=%d | "
         "routing-fallback=7-paths-deduped | "
@@ -7460,14 +7554,13 @@ try:
         "WAIT_LOG_CH=direct-handler | "
         "LOG-CHANNEL-KEY=log_channel_id (CANONICAL, unified) | "
         "detectors-compat=v4.1.0 | "
-        "fixes=(FIX-LOGCH-KEY:unified-key, "
-        "FIX-LOGCH-SCHEMELESS-URL, "
-        "FIX-DEAD-CODE-REMOVE, "
-        "FIX-PH-HELPERS-USE, "
-        "FIX-RUN-SYNC-SAFE-FALLBACK, "
-        "FIX-REPLY-FSM-CLEANUP, "
-        "v7.18.46-all, v7.18.45-all, v7.18.44-all, "
-        "v7.18.43-all)",
+        "fixes=(PERF-FIX-MEDIA-ONLY-MULTILAYER: "
+        "FIX-LAG-1:text-only-fast-skip-15-layers, "
+        "FIX-LAG-2:timeout 2.5s->1.0s, "
+        "FIX-LAG-3:fire-and-forget-migration, "
+        "FIX-LAG-4:analysis-mode-metric, "
+        "v7.18.47-all, v7.18.46-all, v7.18.45-all, "
+        "v7.18.44-all, v7.18.43-all)",
         "yes" if _HAS_BWM else "no",
         len(MessageHandlers._PRIVATE_HANDLERS_MAP),
         len(_EXTERNAL_HANDLED_STATES),
