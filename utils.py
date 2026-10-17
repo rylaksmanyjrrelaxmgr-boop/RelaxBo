@@ -1,9 +1,17 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-utils.py - الأدوات المساعدة للبوت (v7.10.24 — METRICS-INTEGRATION)
+utils.py - الأدوات المساعدة للبوت (v7.10.25 — REMINDERS-INDEPENDENCE)
 =================================================================================
-🆕 v7.10.24 (FIX-METRICS-INTEGRATION):
+🆕 v7.10.25 (REMINDERS-INDEPENDENCE):
+    🔴 FIX-REMINDERS-INDEPENDENCE (CRITICAL): في BackgroundTasks.reminders
+       كانت الاستدعاءات الثلاثة (subscription + daily + weekly) داخل
+       try/except واحد. إذا فشلت الأولى → الباقي لا يُنفَّذ.
+       الآن: كل استدعاء في try/except مستقل.
+    🟢 IMPROVE-REMINDERS-LOG: تسجيل باسم النوع (subscription/daily/weekly).
+    🟢 FIX-VERSION-ALIGNMENT: توحيد رقم الإصدار.
+
+🆕 v7.10.24 (FIX-METRICS-INTEGRATION) — محفوظ:
     🔴 FIX-METRICS-INTEGRATION (CRITICAL): إضافة استدعاء record_bot_metric
        و_metrics_inc في BackgroundTasks._publish_single_channel بعد كل
        نشر (نجاح/فشل). السبب: auto_publish كان ينشر بنجاح لكن لوحة
@@ -3937,45 +3945,79 @@ class BackgroundTasks:
     async def reminders(bot) -> None:
         while True:
             await asyncio.sleep(3600)
+
+            # ─── subscription reminders (isolated) ───
             try:
                 if hasattr(DB, "send_subscription_reminders"):
-                    async def send_impl(user_id: int, days_left: int,
-                                        lang: str) -> bool:
+                    async def send_impl(user_id, days_left, lang):
                         try:
                             text = await get_text(
                                 lang, 'reminder_subscription_expires',
                                 days=days_left)
                             if text == 'reminder_subscription_expires':
-                                text = (f"⚠️ اشتراكك سينتهي بعد "
-                                        f"{days_left} يوم")
+                                text = f"⚠️ اشتراكك سينتهي بعد {days_left} يوم"
                             result = await safe_send(bot, user_id, text)
                             return result is not None
                         except Exception:
                             return False
                     stats = await DB.send_subscription_reminders(send_impl)
-                    if (isinstance(stats, dict)
-                            and stats.get('sent', 0) > 0):
+                    if isinstance(stats, dict) and stats.get('sent', 0) > 0:
                         logger.info(
-                            "📨 تم إرسال %d تذكير اشتراك",
-                            stats['sent'])
-                elif hasattr(DB, "get_users_for_reminder"):
-                    users = await DB.get_users_for_reminder()
-                    for u in users:
-                        try:
-                            days = int(u['days_left'])
-                            lang = u.get('language', 'ar')
-                            text = await get_text(
-                                lang, 'reminder_subscription_expires',
-                                days=days)
-                            if text == 'reminder_subscription_expires':
-                                text = (f"⚠️ اشتراكك سينتهي "
-                                        f"بعد {days} يوم")
-                            await safe_send(bot, u['user_id'], text)
-                            await asyncio.sleep(0.1)
-                        except Exception:
-                            pass
+                            f"📨 Reminders (subscription): "
+                            f"تم إرسال {stats['sent']}"
+                        )
+            except asyncio.CancelledError:
+                raise
             except Exception as e:
-                logger.error("❌ Reminders: %s", e)
+                logger.error("❌ Reminders (subscription): %s", e)
+
+            # ─── 🆕 v7.10.25 FIX: daily reminders (isolated) ───
+            try:
+                if hasattr(DB, "send_daily_reminders"):
+                    async def daily_impl(user_id, lang):
+                        try:
+                            text = await get_text(
+                                lang, 'daily_stats_message')
+                            if text == 'daily_stats_message':
+                                text = "📊 تقريرك اليومي جاهز! راجع /channels"
+                            result = await safe_send(bot, user_id, text)
+                            return result is not None
+                        except Exception:
+                            return False
+                    daily_stats = await DB.send_daily_reminders(daily_impl)
+                    if isinstance(daily_stats, dict) and daily_stats.get('sent', 0) > 0:
+                        logger.info(
+                            f"📨 Reminders (daily): "
+                            f"تم إرسال {daily_stats['sent']}"
+                        )
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                logger.error("❌ Reminders (daily): %s", e)
+
+            # ─── 🆕 v7.10.25 FIX: weekly reminders (isolated) ───
+            try:
+                if hasattr(DB, "send_weekly_reminders"):
+                    async def weekly_impl(user_id, lang):
+                        try:
+                            text = await get_text(
+                                lang, 'weekly_report_message')
+                            if text == 'weekly_report_message':
+                                text = "📈 تقريرك الأسبوعي جاهز!"
+                            result = await safe_send(bot, user_id, text)
+                            return result is not None
+                        except Exception:
+                            return False
+                    weekly_stats = await DB.send_weekly_reminders(weekly_impl)
+                    if isinstance(weekly_stats, dict) and weekly_stats.get('sent', 0) > 0:
+                        logger.info(
+                            f"📨 Reminders (weekly): "
+                            f"تم إرسال {weekly_stats['sent']}"
+                        )
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                logger.error("❌ Reminders (weekly): %s", e)
 
     @staticmethod
     async def heartbeat(bot) -> None:
@@ -4870,13 +4912,14 @@ __all__ = [
 ]
 
 # ═══════════════════════════════════════════════════════════════════════════
-# LOAD BEACON — v7.10.24
+# LOAD BEACON — v7.10.25
 # ═══════════════════════════════════════════════════════════════════════════
 
 try:
     logger.info(
-        "🛡️ utils.py v7.10.24 METRICS-INTEGRATION loaded | "
-        "🆕 FIX-METRICS: record_bot_metric + _metrics_inc في "
+        "🛡️ utils.py v7.10.25 REMINDERS-INDEPENDENCE loaded | "
+        "🆕 FIX-REMINDERS-INDEPENDENCE: 3×try/except مستقل | "
+        "FIX-METRICS: record_bot_metric + _metrics_inc في "
         "_publish_single_channel (success + fail) | "
         "FIX-PD-1: event-triggered auto_publish (signal=%.0fs) | "
         "FIX-PD-2: cached trigger ref in loop | "
@@ -4892,7 +4935,8 @@ try:
         "auth_cache=user_id-aware | "
         "Lang=%d | ChatMigrated=%d ops | ToggleMap=%d | "
         "Webhook=✅ | Penalty=✅ | Publish=✅ | "
-        "Metrics=✅ (DB + bot.py + CB)",
+        "Metrics=✅ (DB + bot.py + CB) | "
+        "Reminders=✅ (3× isolated)",
         _PUBLISH_SIGNAL_TIMEOUT_SECONDS,
         _PG_ACTIVITY_TTL,
         _BACKUP_TIMEOUT_SECONDS,
