@@ -1,60 +1,89 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-🌿 Relax Manager – البوت الرئيسي (bot.py v5.6.42-STATS-RATE-DIAGNOSTIC)
+🌿 Relax Manager – البوت الرئيسي (bot.py v5.6.44-CODE-REVIEW-FIXES-V2)
 ================================================================================
 📌 نقطة الدخول الرسمية للتطبيق (entrypoint).
 
-🆕 v5.6.42 (STATS-RATE-DIAGNOSTIC):
-    🟢 FIX-STATS-RATE-COMPARISON:
-        التحذير السابق `bot.py (N) > DB 24h (M)` كان مضللاً:
-        يقارن "عدد أحداث النشر منذ الإقلاع" بـ "عدد المنشورات الفريدة
-        في آخر 24h" — قياسان مختلفان (events vs entities).
-        مع recycle مفعّل، `posts_success` يمكن أن يكون 68× عدد
-        المنشورات الفريدة دون أي bug.
-        الآن: مقارنة **معدل النشر** مقابل المتوقع من min_publish_interval:
-          rate_per_hour = posts_success / uptime_hours
-          expected     = 60 / min_publish_interval
-        إذا تجاوز rate المتوقع بـ 1.5× → تحذير حقيقي مع 3 احتمالات
-        (فاصل قصير، posts يتيمة، auto_publish مكرر).
-        الأثر: تشخيص دقيق للمشاكل الحقيقية بدل إنذار كاذب.
+🆕 v5.6.44 (CODE-REVIEW-FIXES-V2):
+    🔴 FIX-ADMIN-GUARD-FAIL-CLOSED (CRITICAL — أمني):
+        `_resolve_admin_guard` كان fail-OPEN: عندما `bot_data["admin_ids"]`
+        = set() فارغة (حالة نادرة لكن ممكنة) والـ fallback أيضاً فارغ
+        (PRIMARY_OWNER_ID=0 + DEVELOPER_IDS=[])، كان `if allowed and ...`
+        = `if set() and ...` = False → لا حجب → أي غريب ينفّذ /ping
+        و /posts_stats. الآن: `if not allowed: refuse` — fail-closed.
+        + تسجيل CRITICAL عند البدء إذا _admin_ids فارغة.
+        + _verify_db_config يحذّر عند PRIMARY_OWNER_ID=0.
 
-    🟢 FIX-STATS-15M-RATE:
-        `published last 15m` يقارن الآن بـ expected_15m (من interval).
-        إذا تجاوز 1.5× → تحذير "نشر سريع جداً" مع الإجراء المطلوب.
+    🔴 FIX-WATCH-RUNNER-PROBE (عالٍ):
+        فرع "addresses only" في _watch_runner كان يفحص فقط أن
+        AppRunner.addresses غير فارغة — لا HTTP health probe. هذا يعطي
+        إحساساً زائفاً بالمراقبة: خادم معلّق (يقبل TCP، لا يستجيب HTTP)
+        لن يُكتشف. الآن: الفرع ينفّذ HTTP /health probe كامل مثل الفرع
+        الرئيسي (نفس _WATCHER_MAX_PROBE_FAILURES).
 
-    🟢 IMPROVE-IMPORT:
-        إضافة `get_min_publish_interval` إلى `from utils import ...`
-        (كانت موجودة لكن غير مستوردة في bot.py).
+    🟡 FIX-GIFT-REFUND-NOTIFY:
+        `successful_payment` — مسار gift عند فشل create_gift_code
+        (استثناء أو None) كان يرسل للمستخدم فقط. الآن: notify_dev_log
+        أيضاً (مثل مسار subscription) — refund/إصدار يدوي.
 
-🆕 v5.6.41 (RECORD-METRIC-MODULE-FIX) — محفوظ:
-    🔴 FIX-RECORD-METRIC-MODULE (CRITICAL): sys.modules.setdefault
-       ('bot', __main__) بعد logger مباشرة. يمنع إنشاء module 'bot'
-       منفصل عند `from bot import record_bot_metric` من utils.py.
-       الأثر: posts_success في /posts_stats يطابق النشر الحقيقي.
-    🟢 FIX-STATS-DIAGNOSTIC: `published last 15m` + `module binding`
-       في /posts_stats.
+    🟡 FIX-VERIFY-ASYNC:
+        `_verify_command_handlers` — `callable()` يمرّر دوال sync
+        عادية. الآن: `inspect.iscoroutinefunction()` — يكشف دوال
+        متزامنة تُنفَّذ blocking للـ event loop.
 
+    🟡 FIX-COLLECT-ADMINS-CLARITY:
+        `_collect_admin_ids` — `any_method_succeeded` كان مضللاً
+        (get_admin_list ترجع [] → "succeeded=True" رغم عدم وجود بيانات).
+        الآن: فصل `any_method_ran` (بلا استثناء) عن `any_method_succeeded`
+        (رجعت بيانات فعلية). التحذير يظهر في كل الحالات الفاشلة.
+
+    🟡 FIX-STATS-PUBLISHED-TRUE:
+        `published = TRUE` في cmd_posts_stats كان يعرض السطر على
+        SQLite/MySQL (حيث TRUE=1) — مضلل ("يبدو boolean"). الآن:
+        يُعرض فقط على Postgres، حيث السلوك informative فعلاً.
+
+    🟢 FIX-LOGGER-NAME:
+        `logger = logging.getLogger(__name__)` → عند `python bot.py`
+        الاسم "__main__" بينما بقية الموديولات "bot". الآن:
+        `logging.getLogger("bot" if __name__ == "__main__" else __name__)`
+        — سجلات موحّدة أثناء التشخيص.
+
+    🟢 FIX-METRICS-STARTED-AT:
+        `_BOT_METRICS["started_at"]` كان وقت الاستيراد (قبل initialize_db
+        + warmup + app.start — قد تكون 10-30s). الآن: يُعاد تعيينه
+        **بعد** app.start() — uptime في /posts_stats دقيق.
+
+    🟢 FIX-KEEP-ALIVE-HANG-V2:
+        `asyncio.sleep(float('inf'))` → `asyncio.Event().wait()` — نية
+        أوضح للقارئ ("انتظار أبدي" ≠ "نم لأبد")، ونفس السلوك
+        (قابل لـ cancel).
+
+    🟢 FIX-CLEANUP-REMOVED-ROWCOUNT:
+        `cleanup_removed_channels_periodically` — `isinstance(result, int)`
+        لا يلتقط rowcount من cursors. الآن: `getattr(result, 'rowcount', 0)`
+        كـ fallback.
+
+    🟢 FIX-WARMUP-TASK-CLEANUP:
+        `_spawn_warmup_detectors_pool` — بعد استهلاك task منتهٍ بخطأ،
+        المهمة تبقى في _WARMUP_DETECTORS_TASK (لا تسريب لكن مرجع ميت).
+        الآن: تُمسح بعد الاستهلاك.
+
+    🟢 IMPROVE-POSTS-TABLE-EMPTY:
+        `cmd_posts_stats` — إذا `posts_cols` فارغة (جدول غير موجود
+        أو فارغ)، تظهر رسالة واضحة بدل قائمة "كل الأعمدة مفقودة".
+
+🆕 v5.6.43 (CODE-REVIEW-FIXES) — محفوظ:
+    🔴 FIX-RECORD-METRIC-MODULE-EARLY (نُقل قبل imports).
+    🟡 FIX-PERIODIC-CLEANUP-CHECK / FIX-STATS-SQLITE /
+       FIX-KEEP-ALIVE-HANG / FIX-SUCCESSFUL-PAYMENT-FILTER /
+       FIX-VALIDATE-INVOICE-PLAN-ID.
+    🟢 IMPROVE-SYS-IMPORT / IMPROVE-REFUND-TODO / IMPROVE-GIL-SKIP-COMMENT.
+
+🆕 v5.6.42 (STATS-RATE-DIAGNOSTIC) — محفوظ.
+🆕 v5.6.41 (RECORD-METRIC-MODULE-FIX) — محفوظ.
 🆕 v5.6.40 (PER-CHANNEL-FIX + GIL-CONTENTION-FIX) — محفوظ.
-🆕 v5.6.39 (FIX-POSTS-STATS-PER-CHANNEL) — محفوظ.
-🆕 v5.6.38 (FIX-POSTS-STATS-SQL) — محفوظ.
-🆕 v5.6.37 (METRICS-INTEGRATION) — محفوظ.
-🆕 v5.6.36 (HARDENING) — محفوظ.
-🆕 v5.6.35 (PING-LATENCY) — محفوظ.
-🆕 v5.6.34 (CLEANUP-HARDENING) — محفوظ.
-🆕 v5.6.33 (PAYMENT-ORDER-FIX + POST-INIT-WEBHOOK + DB-CLOSE + SIGNAL-EARLY) — محفوظ.
-🆕 v5.6.32 (DATABASES-FIX) — محفوظ.
-🆕 v5.6.31 (WARMUP-DETECTORS) — محفوظ.
-🆕 v5.6.30 (DB-DIAG-MARK) — محفوظ.
-🆕 v5.6.29 (PERF-TELEGRAM-POOL-FIX) — محفوظ.
-🆕 v5.6.28 (APP-START-FIX + ROBUST-SHUTDOWN) — محفوظ.
-🆕 v5.6.27 (SLEEP-PROBE) — محفوظ.
-🆕 v5.6.26 (DUP-FIX) — محفوظ.
-🆕 v5.6.25 (NAV-FIX-COMPAT) — محفوظ.
-🆕 v5.6.24 (ORDER-FIX) — محفوظ.
-🆕 v5.6.23 (PERF-SESSIONS) — محفوظ.
-🆕 v5.6.22 (FULLHEALTH-COMMANDS) — محفوظ.
-🆕 v5.6.21 (FIX-BUNDLE) — محفوظ.
+🆕 v5.6.39/38/37/36/35/34/33/32/31/30/29/28/27/26/25/24/23/22/21 — محفوظ.
 ================================================================================
 """
 
@@ -64,6 +93,7 @@ import logging
 import traceback
 import json
 import signal
+import sys
 import time
 import aiohttp
 from datetime import datetime, timedelta, timezone
@@ -71,6 +101,51 @@ from html import escape as _html_escape
 from urllib.parse import urlparse
 from typing import Set, Any, Dict, Optional, List, Tuple
 from aiohttp import web
+
+# ═══════════════════════════════════════════════════════════════════
+# 🔴 v5.6.43 FIX-RECORD-METRIC-MODULE-EARLY (CRITICAL)
+# ═══════════════════════════════════════════════════════════════════
+# السبب:
+#   عند `python bot.py`: __name__ == "__main__" → _BOT_METRICS في __main__.
+#   utils.py: `from bot import record_bot_metric` يُنشئ module 'bot' منفصلاً
+#   إن لم يكن موجوداً → نسخة ثانية من _BOT_METRICS → posts_success يبقى 0.
+#
+# الإصلاح:
+#   نقل sys.modules.setdefault إلى هنا — **قبل** any project import
+#   (telegram، config، database، handlers، utils). الآن 'bot' مضمون
+#   أن يكون __main__ قبل أي `from bot import ...`.
+#
+# الأثر:
+#   ✅ record_bot_metric("posts_success") يُحدّث نفس dict الذي يقرأه
+#      /posts_stats → posts_success يطابق النشر الحقيقي.
+#   ✅ إذا كان 'bot' موجوداً مسبقاً (استيراد صريح سبق)، نُسجّل خطأ
+#      واضحاً في stderr — لا صمت.
+# ═══════════════════════════════════════════════════════════════════
+if __name__ == "__main__":
+    _existing_bot = sys.modules.get('bot')
+    _main_mod = sys.modules.get('__main__')
+    if _main_mod is None:
+        print(
+            "🔴 FIX-RECORD-METRIC-MODULE: __main__ not in sys.modules — "
+            "cannot establish 'bot' alias. posts_success may stay 0.",
+            file=sys.stderr,
+        )
+    elif _existing_bot is None:
+        sys.modules['bot'] = _main_mod
+        print(
+            "🔗 FIX-RECORD-METRIC-MODULE: sys.modules['bot'] = __main__ "
+            "(early alias established)",
+            file=sys.stderr,
+        )
+    elif _existing_bot is not _main_mod:
+        print(
+            "🔴 FIX-RECORD-METRIC-MODULE FAILED: "
+            "sys.modules['bot'] already exists as a SEPARATE module "
+            "(an eager 'from bot import ...' happened before this line). "
+            "posts_success will stay 0. "
+            "Investigate which module imports 'bot' at import-time.",
+            file=sys.stderr,
+        )
 
 from telegram import (
     BotCommandScopeAllPrivateChats,
@@ -676,40 +751,10 @@ for _noisy in (
 ):
     logging.getLogger(_noisy).setLevel(logging.WARNING)
 
-logger = logging.getLogger(__name__)
-
-# ═══════════════════════════════════════════════════════════════════
-# 🔴 v5.6.41 FIX-RECORD-METRIC-MODULE (CRITICAL)
-# ═══════════════════════════════════════════════════════════════════
-# السبب:
-#   عند `python bot.py`: __name__ == "__main__" → _BOT_METRICS في __main__
-#   utils.py: `from bot import record_bot_metric` (lazy، عند أول نشر) →
-#   Python يُنشئ module 'bot' منفصلاً → له _BOT_METRICS منفصل →
-#   record_bot_metric يُحدّث نسخة، cmd_posts_stats يقرأ نسخة أخرى →
-#   posts_success يبقى 0 دائماً.
-#
-# الإصلاح:
-#   اجعل sys.modules['bot'] = sys.modules['__main__'] قبل أول استدعاء
-#   لـ `from bot import ...` (وهو lazy في utils.py، يحدث عند أول نشر).
-#   الآن: كل من `from bot import ...` و __main__ يشيران لنفس الوحدة.
-#
-# الأثر:
-#   ✅ record_bot_metric("posts_success") يُحدّث نفس dict الذي يقرأه
-#      /posts_stats → posts_success يطابق النشر الحقيقي.
-#   ✅ _metrics_inc في handlers_callback يعمل (نفس الحالة).
-#   ✅ لا يحتاج restart — فقط إعادة تشغيل بعد الحفظ.
-# ═══════════════════════════════════════════════════════════════════
-import sys as _sys_for_bot_alias
-if __name__ == "__main__":
-    _sys_for_bot_alias.modules.setdefault(
-        'bot', _sys_for_bot_alias.modules['__main__']
-    )
-    logger.debug(
-        "🔗 FIX-RECORD-METRIC-MODULE: sys.modules['bot'] = __main__ "
-        "(was %s)",
-        "new" if _sys_for_bot_alias.modules.get('bot')
-        is _sys_for_bot_alias.modules.get('__main__') else "already-bound"
-    )
+# 🆕 v5.6.44 FIX-LOGGER-NAME: توحيد اسم الـ logger في الوضعين
+logger = logging.getLogger(
+    "bot" if __name__ == "__main__" else __name__
+)
 
 # ═══════════════════════════════════════════════════════════════════════
 # SLEEP-PROBE
@@ -919,6 +964,14 @@ def _spawn_warmup_detectors_pool() -> Optional[asyncio.Task]:
     if _WARMUP_DETECTORS_TASK is not None and not _WARMUP_DETECTORS_TASK.done():
         return _WARMUP_DETECTORS_TASK
 
+    # 🆕 v5.6.44 FIX-WARMUP-TASK-CLEANUP: امسح مرجع task منتهٍ بخطأ
+    if _WARMUP_DETECTORS_TASK is not None and _WARMUP_DETECTORS_TASK.done():
+        try:
+            _ = _WARMUP_DETECTORS_TASK.result()
+        except Exception:
+            pass
+        _WARMUP_DETECTORS_TASK = None
+
     try:
         _WARMUP_DETECTORS_TASK = asyncio.create_task(
             _warmup_detectors_pool_fn(),
@@ -983,7 +1036,7 @@ async def _gil_lag_monitor() -> None:
     الإصلاح الفعلي: إزالة install_default_executor في __main__.
     """
     logger.info(
-        "🔍 v5.6.42 GIL-MONITOR: بدء المراقبة "
+        "🔍 v5.6.44 GIL-MONITOR: بدء المراقبة "
         "(lag warn >%.0fms, p90 window=%d samples, "
         "alert every %.0fs)",
         _GIL_LAG_WARN_MS, _GIL_LAG_SAMPLES_MAX,
@@ -1016,7 +1069,7 @@ async def _gil_lag_monitor() -> None:
                 p99 = sorted_lags[-1] if n else 0.0
                 avg = sum(lags) / n if n else 0.0
                 logger.warning(
-                    "🔴 v5.6.42 GIL-MONITOR: lag=%.0fms | "
+                    "🔴 v5.6.44 GIL-MONITOR: lag=%.0fms | "
                     "samples=%d | p50=%.0fms p90=%.0fms "
                     "p99=%.0fms avg=%.0fms | "
                     "action: قِس DETECTOR_POOL_WORKERS وأزل "
@@ -1024,7 +1077,7 @@ async def _gil_lag_monitor() -> None:
                     lag_ms, n, p50, p90, p99, avg,
                 )
         except asyncio.CancelledError:
-            logger.info("🛑 v5.6.42 GIL-MONITOR: تم الإيقاف")
+            logger.info("🛑 v5.6.44 GIL-MONITOR: تم الإيقاف")
             raise
         except Exception as _e:
             logger.debug("GIL-MONITOR error: %s", _e)
@@ -1043,7 +1096,7 @@ def _spawn_gil_lag_monitor() -> Optional[asyncio.Task]:
         return _GIL_LAG_MONITOR_TASK
     except Exception as _e:
         logger.warning(
-            "⚠️ v5.6.42: فشل بدء GIL-MONITOR: %s", _e,
+            "⚠️ v5.6.44: فشل بدء GIL-MONITOR: %s", _e,
         )
         return None
 
@@ -1602,6 +1655,29 @@ _log_db_diagnostics_status()
 
 _log_perf_tuning_status()
 
+# 🆕 v5.6.43 FIX-PERIODIC-CLEANUP-CHECK: تحقق تشخيصي
+try:
+    import inspect as _inspect_pc
+    _pc_fn = getattr(GroupRateLimiterManager, "periodic_cleanup_task", None)
+    if _pc_fn is None:
+        logger.warning(
+            "⚠️ GroupRateLimiterManager.periodic_cleanup_task غير موجود — "
+            "المهمة الدورية للتنظيف لن تعمل"
+        )
+    elif _inspect_pc.isfunction(_pc_fn):
+        try:
+            _pc_sig = _inspect_pc.signature(_pc_fn)
+            if len(_pc_sig.parameters) >= 1 and 'self' in _pc_sig.parameters:
+                logger.warning(
+                    "⚠️ GroupRateLimiterManager.periodic_cleanup_task "
+                    "يحتاج 'self' (ليس @staticmethod) — المهمة ستفشل عند "
+                    "الاستدعاء. أضف @staticmethod إلى handlers_message.py."
+                )
+        except (ValueError, TypeError):
+            pass
+except Exception as _e:
+    logger.debug("periodic_cleanup_check: %s", _e)
+
 # ═══════════════════════════════════════════════════════════════════
 # Allowed updates
 # ═══════════════════════════════════════════════════════════════════
@@ -1805,6 +1881,8 @@ async def _collect_admin_ids() -> List[int]:
 
     admin_list_getters = ("get_admin_list", "get_all_admins", "get_admins")
 
+    # 🆕 v5.6.44 FIX-COLLECT-ADMINS-CLARITY: فصل ran عن succeeded
+    any_method_ran = False
     any_method_succeeded = False
     last_error = None
 
@@ -1817,7 +1895,7 @@ async def _collect_admin_ids() -> List[int]:
             if asyncio.iscoroutine(result):
                 result = await result
 
-            any_method_succeeded = True
+            any_method_ran = True
 
             if not result:
                 logger.debug(
@@ -1846,6 +1924,7 @@ async def _collect_admin_ids() -> List[int]:
                 "✅ _collect_admin_ids: قرأ %d أدمن من DB.%s()",
                 added_from_db, method_name,
             )
+            any_method_succeeded = True
             break
         except Exception as _e:
             last_error = _e
@@ -1854,11 +1933,12 @@ async def _collect_admin_ids() -> List[int]:
             )
             continue
 
-    if not any_method_succeeded and last_error is not None:
+    if not any_method_succeeded:
         logger.warning(
-            "⚠️ _collect_admin_ids: فشلت كل الطرق — آخر خطأ: %s. "
-            "الأوامر الإدارية ستظهر للمالك والمطورين فقط.",
-            last_error,
+            "⚠️ _collect_admin_ids: لا توجد قائمة أدمن من DB — "
+            "ran=%s last_error=%s. الأوامر الإدارية ستظهر للمالك "
+            "والمطورين فقط.",
+            any_method_ran, last_error,
         )
 
     return sorted(admin_ids)
@@ -1952,10 +2032,20 @@ def _verify_command_handlers() -> bool:
         "add_hidden_admin", "remove_hidden_admin", "list_hidden_admins",
     ]
 
-    missing = [
-        name for name in required
-        if not callable(getattr(CommandHandlers, name, None))
-    ]
+    # 🆕 v5.6.44 FIX-VERIFY-ASYNC: كشف الدوال sync (خطأ نسخ/لصق)
+    import inspect as _inspect_vc
+    missing: List[str] = []
+    sync_handlers: List[str] = []
+    for name in required:
+        _attr = getattr(CommandHandlers, name, None)
+        if not callable(_attr):
+            missing.append(name)
+            continue
+        try:
+            if not _inspect_vc.iscoroutinefunction(_attr):
+                sync_handlers.append(name)
+        except Exception:
+            pass
 
     if missing:
         logger.error(
@@ -1965,7 +2055,16 @@ def _verify_command_handlers() -> bool:
         _command_handlers_verified = False
         return False
 
-    logger.info("✅ كل %d دالة CommandHandlers موجودة", len(required))
+    if sync_handlers:
+        logger.error(
+            "❌ دوال CommandHandlers ليست async (%d): %s — "
+            "ستُعطّل event loop عند التنفيذ!",
+            len(sync_handlers), sync_handlers,
+        )
+        _command_handlers_verified = False
+        return False
+
+    logger.info("✅ كل %d دالة CommandHandlers موجودة و async", len(required))
 
     if not hasattr(MessageHandlers, "handle_edited"):
         logger.warning(
@@ -1982,6 +2081,18 @@ def _verify_db_config() -> bool:
     try:
         db_type = getattr(DB, "DB_TYPE", "unknown")
         db_url = getattr(CONFIG, "DATABASE_URL", "") or ""
+
+        # 🆕 v5.6.44: تحذير PRIMARY_OWNER_ID=0
+        try:
+            _pid = int(getattr(CONFIG, "PRIMARY_OWNER_ID", 0) or 0)
+            if _pid == 0:
+                logger.warning(
+                    "⚠️ PRIMARY_OWNER_ID=0 — لن تظهر الأوامر الإدارية "
+                    "لأي مستخدم، و /ping /posts_stats سترفض كل الطلبات "
+                    "(fail-closed). اضبط PRIMARY_OWNER_ID في البيئة."
+                )
+        except (TypeError, ValueError):
+            pass
 
         if not db_url:
             if db_type != "sqlite":
@@ -2220,8 +2331,14 @@ async def cleanup_removed_channels_periodically() -> None:
                     )
                     result = await DB.execute(sql, (GRACE_DAYS,))
 
+                # 🆕 v5.6.44 FIX-CLEANUP-REMOVED-ROWCOUNT
                 if isinstance(result, int):
                     deleted = result
+                else:
+                    try:
+                        deleted = int(getattr(result, 'rowcount', 0) or 0)
+                    except (TypeError, ValueError):
+                        deleted = 0
 
             if deleted:
                 logger.info(
@@ -2284,7 +2401,18 @@ async def _validate_invoice_for_payment(user_id: int, payload: str):
         logger.warning("❌ Unknown payment type: %s", payment_type)
         return None, None, None
 
-    plan_id = data.get('plan_id') or data.get('gift_plan_id')
+    # 🆕 v5.6.43 FIX-VALIDATE-INVOICE-PLAN-ID: فصل صريح حسب payment_type
+    if payment_type == 'subscription':
+        plan_id = data.get('plan_id')
+    else:  # gift
+        plan_id = data.get('gift_plan_id')
+
+    if not plan_id:
+        logger.warning(
+            "❌ Missing plan_id for type=%s (payload keys=%s)",
+            payment_type, list(data.keys()),
+        )
+        return None, None, None
 
     try:
         if payment_type == 'subscription':
@@ -2453,11 +2581,34 @@ async def successful_payment(update, context):
             return
 
         if not success:
-            await safe_send(
-                context.bot, user_id, "❌ حدث خطأ في معالجة الدفع."
-            )
+            # 🆕 v5.6.43 TODO-REFUND: الدفع تم لكن DB فشل — يحتاج
+            #    مراجعة يدوية (refund/retry). نُشعر المطور فوراً.
             logger.error(
-                "❌ Failed to activate subscription for user %s", user_id
+                "🔴 SUBSCRIPTION_DB_FAILED: user=%s invoice=%s plan=%s — "
+                "payment received but DB activation failed. Manual refund "
+                "or retry may be needed. payment_id=%s",
+                user_id, invoice['number'], plan['id'], payment_id,
+            )
+            try:
+                _spawn_notify_dev_log(
+                    context,
+                    f"🔴 <b>فشل تفعيل اشتراك بعد الدفع</b>\n"
+                    f"━━━━━━━━━━━━━━━━━━━━\n"
+                    f"👤 <b>المستخدم:</b> <code>{user_id}</code>\n"
+                    f"🧾 <b>الفاتورة:</b> "
+                    f"<code>{invoice['number']}</code>\n"
+                    f"💎 <b>الخطة:</b> <code>{plan['id']}</code>\n"
+                    f"💳 <b>payment_id:</b> <code>{payment_id}</code>\n"
+                    f"⚠️ <b>الإجراء المطلوب:</b> refund أو retry يدوي.",
+                )
+            except Exception as _e:
+                logger.debug("notify DB-fail: %s", _e)
+            await safe_send(
+                context.bot, user_id,
+                "⚠️ <b>تم استلام الدفع لكن حدث خطأ في التفعيل</b>\n\n"
+                "تم إشعار الدعم تلقائياً. يرجى التواصل مع الدعم مع رقم "
+                f"الفاتورة: <code>{invoice.get('number') or '?'}</code>",
+                parse_mode='HTML',
             )
             return
 
@@ -2545,10 +2696,25 @@ async def successful_payment(update, context):
             )
         except Exception as e:
             logger.exception("❌ create_gift_code exception: %s", e)
+            # 🆕 v5.6.44 FIX-GIFT-REFUND-NOTIFY
+            try:
+                _spawn_notify_dev_log(
+                    context,
+                    f"🔴 <b>فشل توليد كود هدية بعد الدفع</b>\n"
+                    f"━━━━━━━━━━━━━━━━━━━━\n"
+                    f"👤 <b>المستخدم:</b> <code>{user_id}</code>\n"
+                    f"🧾 <b>الفاتورة:</b> "
+                    f"<code>{invoice['number']}</code>\n"
+                    f"💎 <b>الخطة:</b> <code>{plan['id']}</code>\n"
+                    f"💳 <b>payment_id:</b> <code>{payment_id}</code>\n"
+                    f"⚠️ <b>الإجراء المطلوب:</b> refund أو إصدار يدوي.",
+                )
+            except Exception as _e:
+                logger.debug("notify gift-exception: %s", _e)
             await safe_send(
                 context.bot, user_id,
                 "⚠️ <b>تم توثيق الدفع لكن فشل توليد الكود</b>\n\n"
-                "يرجى التواصل مع الدعم لإصدار الكود يدوياً.\n"
+                "تم إشعار الدعم تلقائياً. يرجى التواصل مع الدعم.\n"
                 f"رقم الفاتورة: <code>{invoice['number']}</code>",
                 parse_mode='HTML',
             )
@@ -2559,10 +2725,24 @@ async def successful_payment(update, context):
                 "❌ create_gift_code أعاد None: user=%s invoice=%s",
                 user_id, invoice['number'],
             )
+            # 🆕 v5.6.44 FIX-GIFT-REFUND-NOTIFY
+            try:
+                _spawn_notify_dev_log(
+                    context,
+                    f"🔴 <b>create_gift_code أعاد None بعد الدفع</b>\n"
+                    f"━━━━━━━━━━━━━━━━━━━━\n"
+                    f"👤 <b>المستخدم:</b> <code>{user_id}</code>\n"
+                    f"🧾 <b>الفاتورة:</b> "
+                    f"<code>{invoice['number']}</code>\n"
+                    f"💳 <b>payment_id:</b> <code>{payment_id}</code>\n"
+                    f"⚠️ <b>الإجراء المطلوب:</b> refund أو إصدار يدوي.",
+                )
+            except Exception as _e:
+                logger.debug("notify gift-none: %s", _e)
             await safe_send(
                 context.bot, user_id,
                 "⚠️ <b>تم توثيق الدفع لكن فشل توليد الكود</b>\n\n"
-                "يرجى التواصل مع الدعم لإصدار الكود يدوياً.\n"
+                "تم إشعار الدعم تلقائياً. يرجى التواصل مع الدعم.\n"
                 f"رقم الفاتورة: <code>{invoice['number']}</code>",
                 parse_mode='HTML',
             )
@@ -2647,6 +2827,7 @@ async def keep_alive():
             "💡 الحل الموصى به: استخدم Cron-job.org (خارجي) "
             "على https://<your-app>.onrender.com/health كل 5 دقائق."
         )
+        # 🆕 v5.6.44 FIX-KEEP-ALIVE-HANG-V2: Event().wait() أوضح نية
         await asyncio.Event().wait()
         return
 
@@ -3038,7 +3219,7 @@ def _resolve_port() -> int:
     return port
 
 # ═══════════════════════════════════════════════════════════════════
-# Webhook runner watcher
+# Webhook runner watcher — 🆕 v5.6.44 FIX-WATCH-RUNNER-PROBE
 # ═══════════════════════════════════════════════════════════════════
 
 async def _watch_runner(
@@ -3046,26 +3227,62 @@ async def _watch_runner(
     shutdown_event: asyncio.Event,
     port: int,
 ) -> None:
+    """
+    🆕 v5.6.44 FIX-WATCH-RUNNER-PROBE:
+      كل مسارات الاكتشاف الآن تنتهي بنفس HTTP /health probe.
+      لا يوجد فرع "addresses only" بدون فحص — كان يعطي إحساساً زائفاً.
+      المسارات:
+        1. AppRunner.sites (aiohttp ≥3.8) — set
+        2. AppRunner.addresses — list
+        3. runner.site / _site / _server — قديم
+      Grace 3s أولاً (لا إنذار كاذب إذا الخادم لم يربط بعد).
+    """
     try:
-        site = None
-        if hasattr(runner, "site"):
-            site = runner.site
-        elif hasattr(runner, "_site"):
-            site = runner._site
-        elif hasattr(runner, "runner") and hasattr(runner.runner, "site"):
-            site = runner.runner.site
-        elif hasattr(runner, "_server"):
-            site = runner
+        # Grace: انتظر 3s قبل أول فحص (بعض الإصدارات تربط متأخراً)
+        try:
+            await asyncio.sleep(3.0)
+        except asyncio.CancelledError:
+            raise
 
+        # جمع معلومات عن site (للتشخيص فقط)
+        site = None
+        _addresses_available = False
+        try:
+            sites = getattr(runner, "sites", None)
+            if sites:
+                site = next(iter(sites))
+        except Exception:
+            pass
+        try:
+            addrs = getattr(runner, "addresses", None)
+            if addrs is not None:
+                _addresses_available = True
+        except Exception:
+            pass
         if site is None:
+            if hasattr(runner, "site"):
+                site = runner.site
+            elif hasattr(runner, "_site"):
+                site = runner._site
+            elif hasattr(runner, "runner") and hasattr(runner.runner, "site"):
+                site = runner.runner.site
+            elif hasattr(runner, "_server"):
+                site = runner
+
+        if site is None and not _addresses_available:
             logger.warning(
                 "⚠️ _watch_runner: لم أتمكّن من الوصول إلى TCP site "
-                "— مراقبة انهيار Webhook معطّلة."
+                "ولا addresses — مراقبة انهيار Webhook معطّلة."
             )
             return
 
-        logger.debug("✅ _watch_runner: بدء المراقبة")
+        logger.debug(
+            "✅ _watch_runner: بدء المراقبة "
+            "(site=%s, addresses_available=%s)",
+            site is not None, _addresses_available,
+        )
 
+        # 🆕 v5.6.44: كل المسارات تستخدم HTTP probe فعلي
         probe_failures = 0
         health_url = f"http://127.0.0.1:{port}/health"
 
@@ -3085,19 +3302,35 @@ async def _watch_runner(
         ) as session:
             while not shutdown_event.is_set():
                 try:
-                    server = getattr(site, "_server", None)
-                    if server is None:
-                        await asyncio.sleep(2.0)
-                        continue
+                    # فحص 1: site._server.sockets (إن كان site متاحاً)
+                    _server_sockets_ok = True
+                    if site is not None:
+                        server = getattr(site, "_server", None)
+                        if server is not None:
+                            if (server.sockets is None
+                                    or len(server.sockets) == 0):
+                                logger.error(
+                                    "❌ _watch_runner: خادم Webhook أُغلق "
+                                    "(sockets empty) — إيقاف البوت بلطف"
+                                )
+                                shutdown_event.set()
+                                return
 
-                    if server.sockets is None or len(server.sockets) == 0:
-                        logger.error(
-                            "❌ _watch_runner: خادم Webhook أُغلق بشكل "
-                            "غير متوقع — إيقاف البوت بلطف"
-                        )
-                        shutdown_event.set()
-                        return
+                    # فحص 2: addresses (إن كانت متاحة، وكشف سريع)
+                    if _addresses_available:
+                        try:
+                            addrs = getattr(runner, "addresses", None)
+                            if addrs is not None and len(addrs) == 0:
+                                logger.error(
+                                    "❌ _watch_runner: AppRunner.addresses "
+                                    "أصبحت فارغة — إيقاف البوت بلطف"
+                                )
+                                shutdown_event.set()
+                                return
+                        except Exception:
+                            pass
 
+                    # فحص 3 (الأهم): HTTP health probe فعلي
                     try:
                         async with session.get(health_url) as resp:
                             await resp.read()
@@ -3299,7 +3532,12 @@ async def _start_polling_mode(app: Application) -> None:
     if _polling_state["running"]:
         raise RuntimeError("Application is already running!")
 
-    if not getattr(app, "running", False):
+    # 🆕 v5.6.43: getattr fallback لدعم PTB أقدم
+    _app_running = (
+        getattr(app, "running", False)
+        or getattr(app, "_running", False)
+    )
+    if not _app_running:
         raise RuntimeError(
             "app.running=False — يجب استدعاء app.start() قبل "
             "_start_polling_mode()"
@@ -3388,6 +3626,38 @@ async def _diag_incoming(update, context):
         logger.debug("_diag_incoming error: %s", _e)
 
 # ═══════════════════════════════════════════════════════════════════
+# Admin guard helper — 🆕 v5.6.44 FIX-ADMIN-GUARD-FAIL-CLOSED
+# ═══════════════════════════════════════════════════════════════════
+
+def _resolve_admin_guard(context) -> Set[int]:
+    """
+    🆕 v5.6.44: يرجع مجموعة الأدمن المصرح لهم.
+
+    fail-closed:
+      - إذا bot_data["admin_ids"] موجودة وغير فارغة → استخدمها.
+      - وإلا، fallback إلى PRIMARY_OWNER_ID + DEVELOPER_IDS من CONFIG.
+      - إذا الكل فارغ → يرجع set() فارغة، والـ caller يجب أن يرفض.
+    """
+    allowed = context.bot_data.get("admin_ids")
+    if allowed:
+        return allowed
+    try:
+        fallback: Set[int] = set()
+        _pid = int(getattr(CONFIG, "PRIMARY_OWNER_ID", 0) or 0)
+        if _pid:
+            fallback.add(_pid)
+        for _d in (getattr(CONFIG, "DEVELOPER_IDS", []) or []):
+            try:
+                _di = int(_d)
+                if _di:
+                    fallback.add(_di)
+            except (TypeError, ValueError):
+                continue
+        return fallback
+    except Exception:
+        return set()
+
+# ═══════════════════════════════════════════════════════════════════
 # /ping — قياس كمون حقيقي
 # ═══════════════════════════════════════════════════════════════════
 
@@ -3404,12 +3674,24 @@ async def cmd_ping(update, context):
     v5.6.37:
       • تسجيل pings_total / ping_sum_ms / ping_min_ms / ping_max_ms
         في _BOT_METRICS (للوحة المقاييس الحية).
+
+    v5.6.44:
+      • FIX-ADMIN-GUARD-FAIL-CLOSED: إذا `not allowed` → refuse
+        (fail-closed بدل fail-open).
     """
     user = update.effective_user
     if user is None:
         return
-    allowed = context.bot_data.get("admin_ids")
-    if allowed is not None and user.id not in allowed:
+    allowed = _resolve_admin_guard(context)
+    if not allowed:
+        logger.warning(
+            "/ping refused (fail-closed): no admin list available "
+            "(bot_data['admin_ids'] empty AND PRIMARY_OWNER_ID + "
+            "DEVELOPER_IDS empty). user=%s",
+            user.id,
+        )
+        return
+    if user.id not in allowed:
         return
 
     try:
@@ -3518,41 +3800,62 @@ async def cmd_ping(update, context):
             pass
 
 # ═══════════════════════════════════════════════════════════════════
-# 🆕 v5.6.42: /posts_stats — إحصائيات النشر من DB مباشرة
-#           (per-channel discovery + channel_db_id +
-#            15m diagnostic + module binding diagnostic +
-#            rate comparison vs min_interval)
+# 🆕 v5.6.44: /posts_stats — إحصائيات النشر من DB مباشرة
+#    (per-channel discovery + channel_db_id +
+#     15m diagnostic + module binding diagnostic +
+#     rate comparison vs min_interval + SQLite support +
+#     published=TRUE only for postgres + empty table hint)
 # ═══════════════════════════════════════════════════════════════════
 
 async def cmd_posts_stats(update, context):
     """
     📊 إحصائيات النشر من DB مباشرة.
 
-    v5.6.42 FIX-STATS-RATE-COMPARISON:
-      • استبدال التحذير المضلّل `bot.py > DB 24h` بمقارنة
-        **معدل النشر** مقابل المتوقع من min_publish_interval.
-      • `published last 15m` يقارن بـ expected_15m → تحذير
-        "نشر سريع جداً" عند تجاوز 1.5×.
+    v5.6.44 FIX-ADMIN-GUARD-FAIL-CLOSED + FIX-STATS-PUBLISHED-TRUE +
+            IMPROVE-POSTS-TABLE-EMPTY:
+      • fail-closed على allowed check.
+      • `published=TRUE` يُعرض فقط على Postgres.
+      • رسالة واضحة إذا جدول posts غير موجود/فارغ.
 
-    v5.6.41 FIX-STATS-DIAGNOSTIC:
-      • `published last 15m` — يميّز "0 = لا نشر" عن "0 = bug".
-      • `module binding` — يكشف __main__ == bot أو منفصلين.
-
-    v5.6.40 FIX-PER-CHANNEL-DISCOVERY (محفوظ):
-      • `channel_db_id` أول مرشح (FK → user_channels.id).
-
-    v5.6.39/38 (محفوظ): per-channel discovery + SQL published fixes.
+    v5.6.43 FIX-STATS-SQLITE: بناء SQL حسب DB_TYPE.
+    v5.6.42 FIX-STATS-RATE-COMPARISON.
+    v5.6.41 FIX-STATS-DIAGNOSTIC.
+    v5.6.40 FIX-PER-CHANNEL-DISCOVERY.
     """
     user = update.effective_user
     if user is None:
         return
-    allowed = context.bot_data.get("admin_ids")
-    if allowed is not None and user.id not in allowed:
+    allowed = _resolve_admin_guard(context)
+    if not allowed:
+        logger.warning(
+            "/posts_stats refused (fail-closed): no admin list available. "
+            "user=%s", user.id,
+        )
+        return
+    if user.id not in allowed:
         return
 
     msg = update.effective_message
     if msg is None:
         return
+
+    _db_type = getattr(DB, "DB_TYPE", "sqlite").lower()
+
+    if _db_type == "postgres":
+        _interval_24h = "NOW() - INTERVAL '24 hours'"
+        _interval_15m = "NOW() - INTERVAL '15 minutes'"
+        _info_schema_query = (
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_name = 'posts'"
+        )
+    elif _db_type == "mysql":
+        _interval_24h = "NOW() - INTERVAL 24 HOUR"
+        _interval_15m = "NOW() - INTERVAL 15 MINUTE"
+        _info_schema_query = "SHOW COLUMNS FROM posts"
+    else:  # sqlite
+        _interval_24h = "datetime('now', '-24 hours')"
+        _interval_15m = "datetime('now', '-15 minutes')"
+        _info_schema_query = "PRAGMA table_info(posts)"
 
     async def _try_count(sql: str) -> Tuple[Optional[int], Optional[str]]:
         try:
@@ -3570,21 +3873,31 @@ async def cmd_posts_stats(update, context):
         except Exception as _e:
             return None, f"{type(_e).__name__}: {str(_e)[:60]}"
 
-    # اكتشاف أعمدة posts table
     async def _get_posts_columns() -> Set[str]:
         try:
-            rows = await DB.fetchall(
-                "SELECT column_name FROM information_schema.columns "
-                "WHERE table_name = 'posts'"
-            )
+            rows = await DB.fetchall(_info_schema_query)
             cols: Set[str] = set()
             for r in rows:
                 c = None
-                if isinstance(r, dict):
-                    c = r.get('column_name')
-                else:
+                rd = r if isinstance(r, dict) else None
+                if rd is None:
                     try:
-                        c = r[0]
+                        rd = dict(r)
+                    except Exception:
+                        rd = None
+                if rd is not None:
+                    c = (
+                        rd.get('column_name')
+                        or rd.get('name')
+                        or rd.get('Field')
+                        or rd.get('COLUMN_NAME')
+                    )
+                if c is None:
+                    try:
+                        if _db_type == "sqlite":
+                            c = r[1]
+                        else:
+                            c = r[0]
                     except Exception:
                         c = None
                 if c:
@@ -3596,13 +3909,9 @@ async def cmd_posts_stats(update, context):
 
     posts_cols = await _get_posts_columns()
 
-    # 🟢 v5.6.40 FIX-PER-CHANNEL-DISCOVERY: channel_db_id أولاً
     async def _discover_channel_col() -> Optional[str]:
-        # 🟢 channel_db_id مؤكد من database_tables.py v7.9.12 كـ FK
-        #    إلى user_channels.id. ضعه أولاً قبل channel_id (وهو
-        #    معرف Telegram وليس الحقل المرجعي في posts).
         candidates = (
-            "channel_db_id",   # ← مؤكد (FK → user_channels.id)
+            "channel_db_id",
             "channel_id",
             "channel",
             "chat_id",
@@ -3612,11 +3921,9 @@ async def cmd_posts_stats(update, context):
             "channel_username",
             "chat",
         )
-        # 1) من information_schema (سريع)
         for c in candidates:
             if c in posts_cols:
                 return c
-        # 2) تجربة استعلام فعلي (fallback)
         for c in candidates:
             try:
                 await DB.fetchone(f"SELECT {c} FROM posts LIMIT 1")
@@ -3629,36 +3936,58 @@ async def cmd_posts_stats(update, context):
 
     lines = ["📊 <b>إحصائيات النشر — من DB مباشرة</b>", ""]
 
-    # عرض معلومات schema مختصرة
-    if posts_cols:
-        _important = [
-            "published", "published_at", "created_at",
-            "sent_at", "status", "channel_db_id",
-            "channel_id", "channel",
-        ]
-        _present = [c for c in _important if c in posts_cols]
-        _absent = [c for c in _important if c not in posts_cols]
-        if _present:
-            lines.append(
-                f"🔑 <b>أعمدة موجودة:</b> "
-                f"<code>{', '.join(_present)}</code>"
-            )
-        if _absent:
-            lines.append(
-                f"🚫 <b>أعمدة مفقودة:</b> "
-                f"<code>{', '.join(_absent)}</code>"
-            )
-        if channel_col:
-            lines.append(
-                f"📡 <b>عمود القناة:</b> <code>{channel_col}</code>"
-            )
-        lines.append("")
+    # 🆕 v5.6.44 IMPROVE-POSTS-TABLE-EMPTY
+    if not posts_cols:
+        lines.append(
+            "⚠️ <b>جدول <code>posts</code> غير موجود أو فارغ</b> "
+            f"<i>(DB_TYPE={_db_type})</i>"
+        )
+        lines.append(
+            "  <i>تأكد من تنفيذ migrations، أو أن الجدول في schema آخر "
+            "(public افتراضياً).</i>"
+        )
+        text = "\n".join(lines)
+        try:
+            await msg.reply_text(text, parse_mode='HTML')
+        except Exception:
+            try:
+                await context.bot.send_message(
+                    chat_id=update.effective_chat.id,
+                    text=text,
+                    parse_mode='HTML',
+                )
+            except Exception:
+                pass
+        return
 
-    # 1) published_at NOT NULL (الأكثر موثوقية)
+    _important = [
+        "published", "published_at", "created_at",
+        "sent_at", "status", "channel_db_id",
+        "channel_id", "channel",
+    ]
+    _present = [c for c in _important if c in posts_cols]
+    _absent = [c for c in _important if c not in posts_cols]
+    if _present:
+        lines.append(
+            f"🔑 <b>أعمدة موجودة:</b> "
+            f"<code>{', '.join(_present)}</code>"
+        )
+    if _absent:
+        lines.append(
+            f"🚫 <b>أعمدة مفقودة:</b> "
+            f"<code>{', '.join(_absent)}</code>"
+        )
+    if channel_col:
+        lines.append(
+            f"📡 <b>عمود القناة:</b> <code>{channel_col}</code>"
+        )
+    lines.append("")
+
+    # 1) published_at NOT NULL
     cnt_pub_at, err_pub_at = await _try_count(
-        "SELECT COUNT(*) AS n FROM posts "
-        "WHERE published_at IS NOT NULL "
-        "AND created_at > NOW() - INTERVAL '24 hours'"
+        f"SELECT COUNT(*) AS n FROM posts "
+        f"WHERE published_at IS NOT NULL "
+        f"AND created_at > {_interval_24h}"
     )
     if err_pub_at is None:
         lines.append(
@@ -3671,11 +4000,11 @@ async def cmd_posts_stats(update, context):
             f"<i>{err_pub_at}</i>"
         )
 
-    # 2) published = 1 (integer)
+    # 2) published = 1
     cnt_p1, err_p1 = await _try_count(
-        "SELECT COUNT(*) AS n FROM posts "
-        "WHERE published = 1 "
-        "AND created_at > NOW() - INTERVAL '24 hours'"
+        f"SELECT COUNT(*) AS n FROM posts "
+        f"WHERE published = 1 "
+        f"AND created_at > {_interval_24h}"
     )
     if err_p1 is None:
         lines.append(
@@ -3686,32 +4015,33 @@ async def cmd_posts_stats(update, context):
             f"⚠️ <code>published=1 (24h)</code>: <i>{err_p1}</i>"
         )
 
-    # 3) published = TRUE (boolean) — متوقع الفشل (integer vs boolean)
-    cnt_pt, err_pt = await _try_count(
-        "SELECT COUNT(*) AS n FROM posts "
-        "WHERE published = TRUE "
-        "AND created_at > NOW() - INTERVAL '24 hours'"
-    )
-    if err_pt is None:
-        lines.append(
-            f"✅ <code>published=TRUE (24h)</code>: <b>{cnt_pt}</b>"
+    # 🆕 v5.6.44 FIX-STATS-PUBLISHED-TRUE: فقط على Postgres
+    if _db_type == "postgres":
+        cnt_pt, err_pt = await _try_count(
+            f"SELECT COUNT(*) AS n FROM posts "
+            f"WHERE published = TRUE "
+            f"AND created_at > {_interval_24h}"
         )
-    elif cnt_p1 is not None:
-        lines.append(
-            "ℹ️ <code>published=TRUE</code>: "
-            "<i>غير مدعوم (integer column) — استخدم =1</i>"
-        )
-    else:
-        lines.append(
-            f"⚠️ <code>published=TRUE</code>: <i>{err_pt}</i>"
-        )
+        if err_pt is None:
+            lines.append(
+                f"✅ <code>published=TRUE (24h)</code>: <b>{cnt_pt}</b>"
+            )
+        elif cnt_p1 is not None:
+            lines.append(
+                "ℹ️ <code>published=TRUE</code>: "
+                "<i>غير مدعوم (integer column) — استخدم =1</i>"
+            )
+        else:
+            lines.append(
+                f"⚠️ <code>published=TRUE</code>: <i>{err_pt}</i>"
+            )
 
-    # 4) sent_at (اختياري — فقط إن وُجد)
+    # 4) sent_at (اختياري)
     if "sent_at" in posts_cols:
         cnt_sa, err_sa = await _try_count(
-            "SELECT COUNT(*) AS n FROM posts "
-            "WHERE sent_at IS NOT NULL "
-            "AND created_at > NOW() - INTERVAL '24 hours'"
+            f"SELECT COUNT(*) AS n FROM posts "
+            f"WHERE sent_at IS NOT NULL "
+            f"AND created_at > {_interval_24h}"
         )
         if err_sa is None:
             lines.append(
@@ -3722,15 +4052,13 @@ async def cmd_posts_stats(update, context):
             lines.append(
                 f"⚠️ <code>sent_at NOT NULL</code>: <i>{err_sa}</i>"
             )
-    elif posts_cols:
-        lines.append("🚫 <code>sent_at</code>: <i>عمود غير موجود</i>")
 
-    # 5) status (اختياري — فقط إن وُجد)
+    # 5) status
     if "status" in posts_cols:
         cnt_st, err_st = await _try_count(
-            "SELECT COUNT(*) AS n FROM posts "
-            "WHERE status = 'published' "
-            "AND created_at > NOW() - INTERVAL '24 hours'"
+            f"SELECT COUNT(*) AS n FROM posts "
+            f"WHERE status = 'published' "
+            f"AND created_at > {_interval_24h}"
         )
         if err_st is None:
             lines.append(
@@ -3741,8 +4069,6 @@ async def cmd_posts_stats(update, context):
             lines.append(
                 f"⚠️ <code>status='published'</code>: <i>{err_st}</i>"
             )
-    elif posts_cols:
-        lines.append("🚫 <code>status</code>: <i>عمود غير موجود</i>")
 
     # 6) total (all-time)
     cnt_total, err_total = await _try_count(
@@ -3757,11 +4083,11 @@ async def cmd_posts_stats(update, context):
             f"⚠️ <code>total posts</code>: <i>{err_total}</i>"
         )
 
-    # 🆕 v5.6.41 FIX-STATS-DIAGNOSTIC: نشر آخر 15 دقيقة (كشف bug metrics)
+    # 🆕 v5.6.41: نشر آخر 15 دقيقة
     cnt_15m, err_15m = await _try_count(
-        "SELECT COUNT(*) AS n FROM posts "
-        "WHERE published_at IS NOT NULL "
-        "AND published_at > NOW() - INTERVAL '15 minutes'"
+        f"SELECT COUNT(*) AS n FROM posts "
+        f"WHERE published_at IS NOT NULL "
+        f"AND published_at > {_interval_15m}"
     )
     if err_15m is None:
         lines.append(
@@ -3772,11 +4098,10 @@ async def cmd_posts_stats(update, context):
             f"⚠️ <code>published last 15m</code>: <i>{err_15m}</i>"
         )
 
-    # 🆕 v5.6.41 FIX-STATS-DIAGNOSTIC: فحص وحدة القياس
+    # 🆕 v5.6.41: module binding
     try:
-        _sys = __import__("sys")
-        _main_mod = _sys.modules.get("__main__")
-        _bot_mod = _sys.modules.get("bot")
+        _main_mod = sys.modules.get("__main__")
+        _bot_mod = sys.modules.get("bot")
         _same_module = (_main_mod is _bot_mod)
         _main_id = id(_main_mod) if _main_mod else 0
         _bot_id = id(_bot_mod) if _bot_mod else 0
@@ -3801,14 +4126,14 @@ async def cmd_posts_stats(update, context):
             f"⚠️ <code>module binding</code>: <i>{type(_mbe).__name__}</i>"
         )
 
-    # per-channel: يستخدم العمود المُكتشَف
+    # per-channel
     lines.append("")
     if channel_col:
         try:
             rows = await DB.fetchall(
                 f"SELECT {channel_col} AS ch, COUNT(*) AS n FROM posts "
                 f"WHERE published_at IS NOT NULL "
-                f"AND created_at > NOW() - INTERVAL '24 hours' "
+                f"AND created_at > {_interval_24h} "
                 f"GROUP BY {channel_col} "
                 f"ORDER BY n DESC LIMIT 10"
             )
@@ -3894,16 +4219,18 @@ async def cmd_posts_stats(update, context):
             f"{_ps} منشور/منشورات منذ الإقلاع.</i>"
         )
 
-    # 🆕 v5.6.42 FIX-STATS-RATE-COMPARISON: مقارنة معدل النشر
-    #    (events vs events، لا events vs unique posts)
+    # 🆕 v5.6.42 FIX-STATS-RATE-COMPARISON
     lines.append("")
     if uptime_s > 0 and _ps > 0:
         try:
             _min_interval = await get_min_publish_interval()
+            _min_interval = int(_min_interval) if _min_interval else 5
         except Exception:
             _min_interval = 5
+        if _min_interval < 1:
+            _min_interval = 1
         rate_per_hour = (_ps / uptime_s) * 3600.0
-        expected_per_hour = 60.0 / max(1, _min_interval)
+        expected_per_hour = 60.0 / _min_interval
         lines.append(
             f"📈 <b>معدل النشر:</b> "
             f"<code>{rate_per_hour:.0f}/ساعة</code> "
@@ -3936,9 +4263,14 @@ async def cmd_posts_stats(update, context):
     if cnt_15m is not None and cnt_15m > 0 and uptime_s > 0:
         try:
             _min_interval_15m = await get_min_publish_interval()
+            _min_interval_15m = (
+                int(_min_interval_15m) if _min_interval_15m else 5
+            )
         except Exception:
             _min_interval_15m = 5
-        expected_15m = 15.0 / max(1, _min_interval_15m)
+        if _min_interval_15m < 1:
+            _min_interval_15m = 1
+        expected_15m = 15.0 / _min_interval_15m
         if cnt_15m > expected_15m * 1.5:
             lines.append("")
             lines.append(
@@ -4024,7 +4356,7 @@ async def main():
     logger.info("👨‍💼 المالك: %s", CONFIG.PRIMARY_OWNER_ID)
 
     logger.info(
-        "📦 bot.py: v5.6.42 | "
+        "📦 bot.py: v5.6.44 | "
         "detectors=%s | layers=%d | helpers=%s | "
         "db_idle=%s | cache_stats=%s | analytics=%s | "
         "fullhealth=%s | latency=%s | maint_cmds=%s | "
@@ -4038,15 +4370,25 @@ async def main():
         "payment_order_fix=on | post_init_webhook=on | "
         "db_close=on | signal_early=on | "
         "app_stop=on | chattype_modern=on | pay_filter=on | "
-        "ping_cmd=on | ping_admin_guard=on | keepalive_flood_fix=on | "
+        "ping_cmd=on | ping_admin_guard=fail-closed | "
+        "keepalive_flood_fix=on | "
         "stop_polling_order=on | double_payment_ux=on | "
         "gift_notify=on | reply_params_modern=%s | "
         "resolve_port_none_fix=on | resolve_hostname_invalid=on | "
-        "verify_callable=on | bot_data_admin_ids=on | "
+        "verify_callable=on | verify_async=on | "
+        "bot_data_admin_ids=on | "
         "posts_stats_cmd=on | record_bot_metric=on | "
-        "record_metric_module_fix=on | "
+        "record_metric_module_fix=on | record_metric_module_early=on | "
         "posts_stats_15m_diag=on | module_binding_diag=on | "
         "stats_rate_comparison=on | stats_15m_rate=on | "
+        "admin_guard_empty_set_fix=on | admin_guard_fail_closed=on | "
+        "watch_runner_multipath=on | watch_runner_probe=on | "
+        "stats_sqlite=on | stats_published_true_pg_only=on | "
+        "successful_payment_private_filter=on | "
+        "gift_refund_notify=on | collect_admins_clarity=on | "
+        "logger_name_unified=on | metrics_started_at_after_start=on | "
+        "keepalive_hang_v2=on | cleanup_removed_rowcount=on | "
+        "warmup_task_cleanup=on | posts_table_empty_hint=on | "
         "posts_stats_sql_fix=on | per_channel_discovery=on | "
         "channel_db_id_priority=on | "
         "gil_contention_fix=on | gil_lag_monitor=on",
@@ -4191,6 +4533,16 @@ async def main():
         else:
             raise
 
+    # 🆕 v5.6.44 FIX-METRICS-STARTED-AT: قياس uptime من هنا
+    try:
+        _BOT_METRICS["started_at"] = time.monotonic()
+        logger.debug(
+            "📊 _BOT_METRICS['started_at'] reset after app.start() "
+            "— uptime will be accurate"
+        )
+    except Exception as _e:
+        logger.debug("reset started_at: %s", _e)
+
     _tg_warm_ok = await _warmup_telegram_api(app)
     if not _tg_warm_ok:
         logger.info(
@@ -4265,6 +4617,15 @@ async def main():
     _admin_full_list = PUBLIC_COMMANDS + ADMIN_COMMANDS
 
     logger.info("👥 عدد الأدمن المُكتشفين: %d", len(_admin_ids))
+
+    # 🆕 v5.6.44 FIX-ADMIN-GUARD-FAIL-CLOSED: CRITICAL إذا _admin_ids فارغة
+    if not _admin_ids:
+        logger.critical(
+            "🔴 _collect_admin_ids() أعادت قائمة فارغة! "
+            "لا يوجد PRIMARY_OWNER_ID ولا DEVELOPER_IDS ولا DB admins. "
+            "أي مستخدم سيُرفض من /ping و /posts_stats (fail-closed). "
+            "اضبط PRIMARY_OWNER_ID أو DEVELOPER_IDS في البيئة."
+        )
 
     app.bot_data["admin_ids"] = set(_admin_ids)
 
@@ -4430,7 +4791,7 @@ async def main():
     else:
         app.add_handler(CommandHandler("ping", cmd_ping))
         logger.info(
-            "✅ /ping مُسجَّل (internal-only guard — admin_ids فارغة)"
+            "✅ /ping مُسجَّل (internal fail-closed guard — admin_ids فارغة)"
         )
 
     # /posts_stats — admin-only
@@ -4452,7 +4813,7 @@ async def main():
     else:
         app.add_handler(CommandHandler("posts_stats", cmd_posts_stats))
         logger.info(
-            "✅ /posts_stats مُسجَّل (internal-only guard)"
+            "✅ /posts_stats مُسجَّل (internal fail-closed guard)"
         )
 
     try:
@@ -4574,7 +4935,11 @@ async def main():
         )
 
     app.add_handler(PreCheckoutQueryHandler(pre_checkout))
-    app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, successful_payment))
+    # 🆕 v5.6.43 FIX-SUCCESSFUL-PAYMENT-FILTER: إضافة ChatType.PRIVATE
+    app.add_handler(MessageHandler(
+        filters.SUCCESSFUL_PAYMENT & filters.ChatType.PRIVATE,
+        successful_payment,
+    ))
 
     try:
         register_channels_list_handlers(app)
@@ -5111,9 +5476,10 @@ if __name__ == "__main__":
         #    detectors يحتفظون بـ pool الخاص (16 worker) داخلياً —
         #    منفصل تماماً عن التطبيق. صفر تنافس على GIL بين المسارين.
         if _DETECTORS_HAS_INSTALL_HELPER:
+            # INTENTIONALLY SKIPPED — see v5.6.40 FIX-GIL-CONTENTION.
             logger.info(
-                "ℹ️ v5.6.42 FIX-GIL-CONTENTION: "
-                "تم تجاوز install_default_executor — "
+                "ℹ️ v5.6.44 FIX-GIL-CONTENTION: "
+                "تم تجاوز install_default_executor عمداً — "
                 "detectors pool (16 workers) منفصل عن default executor "
                 "التطبيق (12 workers تلقائياً). "
                 "هذا يقلل lag p90 من ~372ms إلى <100ms متوقع."
@@ -5121,7 +5487,7 @@ if __name__ == "__main__":
         else:
             logger.debug(
                 "install_default_executor غير متاح "
-                "(detectors أقدم من v4.0.8)"
+                "(detectors أقدم من v4.0.8) — لا يوجد ما نتجاوزه"
             )
 
         _loop.run_until_complete(main())
