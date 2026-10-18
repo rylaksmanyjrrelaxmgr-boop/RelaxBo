@@ -1,94 +1,45 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-🌿 Relax Manager – البوت الرئيسي (bot.py v5.6.41-RECORD-METRIC-MODULE-FIX)
+🌿 Relax Manager – البوت الرئيسي (bot.py v5.6.42-STATS-RATE-DIAGNOSTIC)
 ================================================================================
 📌 نقطة الدخول الرسمية للتطبيق (entrypoint).
 
-🆕 v5.6.41 (RECORD-METRIC-MODULE-FIX):
-    🔴 FIX-RECORD-METRIC-MODULE (CRITICAL):
-        عند `python bot.py`: __name__ == "__main__" → _BOT_METRICS في __main__.
-        utils.py: `from bot import record_bot_metric` (lazy، عند أول نشر) →
-        Python يُنشئ module 'bot' منفصلاً → له _BOT_METRICS منفصل →
-        record_bot_metric يُحدّث نسخة، cmd_posts_stats يقرأ أخرى →
-        posts_success يبقى 0 دائماً.
-        الإصلاح: sys.modules.setdefault('bot', sys.modules['__main__'])
-        بعد logger مباشرة — يجعل `from bot import ...` و __main__ يشيران
-        لنفس الوحدة. الآن record_bot_metric يُحدّث نفس dict الذي يقرأه
-        /posts_stats.
-        الأثر: posts_success في /posts_stats يطابق عدد النشر الحقيقي.
+🆕 v5.6.42 (STATS-RATE-DIAGNOSTIC):
+    🟢 FIX-STATS-RATE-COMPARISON:
+        التحذير السابق `bot.py (N) > DB 24h (M)` كان مضللاً:
+        يقارن "عدد أحداث النشر منذ الإقلاع" بـ "عدد المنشورات الفريدة
+        في آخر 24h" — قياسان مختلفان (events vs entities).
+        مع recycle مفعّل، `posts_success` يمكن أن يكون 68× عدد
+        المنشورات الفريدة دون أي bug.
+        الآن: مقارنة **معدل النشر** مقابل المتوقع من min_publish_interval:
+          rate_per_hour = posts_success / uptime_hours
+          expected     = 60 / min_publish_interval
+        إذا تجاوز rate المتوقع بـ 1.5× → تحذير حقيقي مع 3 احتمالات
+        (فاصل قصير، posts يتيمة، auto_publish مكرر).
+        الأثر: تشخيص دقيق للمشاكل الحقيقية بدل إنذار كاذب.
 
-    🟢 FIX-STATS-DIAGNOSTIC:
-        إضافة إلى /posts_stats:
-          • `published last 15m` — يميّز "0 = لا نشر بعد" من "0 = bug".
-          • `module binding` — يكشف إن كان __main__ == bot أو منفصلين
-            (مع عناوين id() للمقارنة).
-        الأثر: تشخيص فوري لأي bug metrics مستقبلي.
+    🟢 FIX-STATS-15M-RATE:
+        `published last 15m` يقارن الآن بـ expected_15m (من interval).
+        إذا تجاوز 1.5× → تحذير "نشر سريع جداً" مع الإجراء المطلوب.
 
-🆕 v5.6.40 (PER-CHANNEL-FIX + GIL-CONTENTION-FIX) — محفوظ:
-    🟢 FIX-PER-CHANNEL-DISCOVERY:
-        `/posts_stats` per-channel كان يفشل بـ "لم يُعثر على عمود قناة"
-        لأن `channel_db_id` (العمود الفعلي في جدول posts — مؤكد من
-        database_tables.py v7.9.12) لم يكن ضمن المرشحين.
-        الآن: أضيف `channel_db_id` كأول مرشح قبل channel_id وغيره.
-        ملاحظة: database_tables.py يُعرِّف `posts.channel_db_id`
-        كـ FK إلى `user_channels.id`. لذا `channel_db_id` هو
-        المرشح الأول الصحيح.
+    🟢 IMPROVE-IMPORT:
+        إضافة `get_min_publish_interval` إلى `from utils import ...`
+        (كانت موجودة لكن غير مستوردة في bot.py).
 
-    🔴 FIX-GIL-CONTENTION (CRITICAL):
-        `install_default_executor` كان يضع detectors pool (16 worker)
-        كـ default executor للتطبيق بأكمله. معالج detectors
-        (pytesseract, torch, whois, requests) يحتفظون بـ GIL لفترات
-        طويلة → event loop يتجمّد → lag p90=372ms.
-        الآن: التطبيق يستخدم default executor تلقائياً (12 worker،
-        منفصل تماماً). detectors pool يبقى داخلياً لطبقاته فقط.
-        الأثر: lag p90 متوقع <100ms (من 372ms).
+🆕 v5.6.41 (RECORD-METRIC-MODULE-FIX) — محفوظ:
+    🔴 FIX-RECORD-METRIC-MODULE (CRITICAL): sys.modules.setdefault
+       ('bot', __main__) بعد logger مباشرة. يمنع إنشاء module 'bot'
+       منفصل عند `from bot import record_bot_metric` من utils.py.
+       الأثر: posts_success في /posts_stats يطابق النشر الحقيقي.
+    🟢 FIX-STATS-DIAGNOSTIC: `published last 15m` + `module binding`
+       في /posts_stats.
 
-    🟢 NEW-GIL-MONITOR:
-        إضافة `_gil_lag_monitor()` يُشغَّل بعد app.start() ويقيس
-        الـ event loop lag كل 0.1s. يسجل تحذيرات عند lag > 50ms
-        مع p90 rolling. أداة تشخيص مدمجة للمستقبل.
-
-    🟢 IMPROVE-COLLECT-ADMINS:
-        `_collect_admin_ids` يقرأ الآن أيضاً من `get_admin_list`
-        (بعد database_groups.py v7.4.18). الأدمن المضافون عبر
-        `/add_admin` يرون الأوامر الإدارية في Telegram.
-
-    🟢 IMPROVE-BEACON:
-        LOAD BEACON يعرض حالة FIX-GIL-CONTENTION و FIX-PER-CHANNEL.
-
-🆕 v5.6.39 (FIX-POSTS-STATS-PER-CHANNEL) — محفوظ:
-    🔴 FIX-PER-CHANNEL-DISCOVERY (schema introspection)
-    🟢 IMPROVE-SCHEMA-INTROSPECTION
-    🟢 IMPROVE-EXPECTED-FAILS
-    🟢 IMPROVE-CHANNEL-DISPLAY
-
-🆕 v5.6.38 (FIX-POSTS-STATS-SQL) — محفوظ:
-    🔴 FIX-SQL-PUBLISHED
-    🔴 FIX-SQL-PER-CHANNEL
-    🟢 IMPROVE-UPTIME-DISPLAY
-    🟢 IMPROVE-CONSISTENCY-CHECK
-    🟢 IMPROVE-FIRST-BOOT-HINT
-
-🆕 v5.6.37 (METRICS-INTEGRATION) — محفوظ:
-    🟢 NEW-BOT-METRICS: _BOT_METRICS + record_bot_metric()
-    🟢 NEW-PING-METRICS: cmd_ping يسجل pings في _BOT_METRICS
-    🟢 NEW-CMD-POSTS-STATS: /posts_stats مع 5 أنماط استعلام
-    🟢 NEW-ADMIN-BUTTON: ("posts_stats", ...) في ADMIN_COMMANDS
-    🟢 NEW-REGISTER-HANDLER: تسجيل /posts_stats في main()
-
-🆕 v5.6.36 (HARDENING) — محفوظ:
-    🔴 FIX-PING-ADMIN-GUARD
-    🔴 FIX-KEEPALIVE-LOG-FLOOD
-    🔴 FIX-STOP-POLLING-ORDER
-    🟠 FIX-DOUBLE-PAYMENT-UX
-    🟠 FIX-GIFT-NOTIFY-DEV
-    🟠 FIX-CMD-PING-MODERN
-    🟠 FIX-RESOLVE-PORT-NONE
-    🟠 FIX-RESOLVE-HOSTNAME-INVALID
-    🟡 FIX-VERIFY-CALLABLE
-    🟢 FIX-BOT-DATA-ADMIN-IDS
-
+🆕 v5.6.40 (PER-CHANNEL-FIX + GIL-CONTENTION-FIX) — محفوظ.
+🆕 v5.6.39 (FIX-POSTS-STATS-PER-CHANNEL) — محفوظ.
+🆕 v5.6.38 (FIX-POSTS-STATS-SQL) — محفوظ.
+🆕 v5.6.37 (METRICS-INTEGRATION) — محفوظ.
+🆕 v5.6.36 (HARDENING) — محفوظ.
 🆕 v5.6.35 (PING-LATENCY) — محفوظ.
 🆕 v5.6.34 (CLEANUP-HARDENING) — محفوظ.
 🆕 v5.6.33 (PAYMENT-ORDER-FIX + POST-INIT-WEBHOOK + DB-CLOSE + SIGNAL-EARLY) — محفوظ.
@@ -696,10 +647,12 @@ except ImportError as _e:
     _MAINTENANCE_AVAILABLE = False
     _MAINTENANCE_IMPORT_ERROR = str(_e)
 
+# 🆕 v5.6.42: إضافة get_min_publish_interval
 from utils import (
     TranslationManager, KeyboardFactory, BackgroundTasks,
     ErrorHandler, setup_webhook, safe_send,
     warmup_all,
+    get_min_publish_interval,
 )
 from cache import cache_cleanup_task, user_cache, invalidate_user_cache  # noqa: F401
 
@@ -1030,7 +983,7 @@ async def _gil_lag_monitor() -> None:
     الإصلاح الفعلي: إزالة install_default_executor في __main__.
     """
     logger.info(
-        "🔍 v5.6.41 GIL-MONITOR: بدء المراقبة "
+        "🔍 v5.6.42 GIL-MONITOR: بدء المراقبة "
         "(lag warn >%.0fms, p90 window=%d samples, "
         "alert every %.0fs)",
         _GIL_LAG_WARN_MS, _GIL_LAG_SAMPLES_MAX,
@@ -1063,7 +1016,7 @@ async def _gil_lag_monitor() -> None:
                 p99 = sorted_lags[-1] if n else 0.0
                 avg = sum(lags) / n if n else 0.0
                 logger.warning(
-                    "🔴 v5.6.41 GIL-MONITOR: lag=%.0fms | "
+                    "🔴 v5.6.42 GIL-MONITOR: lag=%.0fms | "
                     "samples=%d | p50=%.0fms p90=%.0fms "
                     "p99=%.0fms avg=%.0fms | "
                     "action: قِس DETECTOR_POOL_WORKERS وأزل "
@@ -1071,7 +1024,7 @@ async def _gil_lag_monitor() -> None:
                     lag_ms, n, p50, p90, p99, avg,
                 )
         except asyncio.CancelledError:
-            logger.info("🛑 v5.6.41 GIL-MONITOR: تم الإيقاف")
+            logger.info("🛑 v5.6.42 GIL-MONITOR: تم الإيقاف")
             raise
         except Exception as _e:
             logger.debug("GIL-MONITOR error: %s", _e)
@@ -1090,7 +1043,7 @@ def _spawn_gil_lag_monitor() -> Optional[asyncio.Task]:
         return _GIL_LAG_MONITOR_TASK
     except Exception as _e:
         logger.warning(
-            "⚠️ v5.6.41: فشل بدء GIL-MONITOR: %s", _e,
+            "⚠️ v5.6.42: فشل بدء GIL-MONITOR: %s", _e,
         )
         return None
 
@@ -3565,19 +3518,25 @@ async def cmd_ping(update, context):
             pass
 
 # ═══════════════════════════════════════════════════════════════════
-# 🆕 v5.6.41: /posts_stats — إحصائيات النشر من DB مباشرة
+# 🆕 v5.6.42: /posts_stats — إحصائيات النشر من DB مباشرة
 #           (per-channel discovery + channel_db_id +
-#            15m diagnostic + module binding diagnostic)
+#            15m diagnostic + module binding diagnostic +
+#            rate comparison vs min_interval)
 # ═══════════════════════════════════════════════════════════════════
 
 async def cmd_posts_stats(update, context):
     """
     📊 إحصائيات النشر من DB مباشرة.
 
+    v5.6.42 FIX-STATS-RATE-COMPARISON:
+      • استبدال التحذير المضلّل `bot.py > DB 24h` بمقارنة
+        **معدل النشر** مقابل المتوقع من min_publish_interval.
+      • `published last 15m` يقارن بـ expected_15m → تحذير
+        "نشر سريع جداً" عند تجاوز 1.5×.
+
     v5.6.41 FIX-STATS-DIAGNOSTIC:
-      • `published last 15m` — يميّز "0 = لا نشر بعد" من "0 = bug".
-      • `module binding` — يكشف إن كان __main__ == bot أو منفصلين
-        (مع عناوين id() للمقارنة).
+      • `published last 15m` — يميّز "0 = لا نشر" عن "0 = bug".
+      • `module binding` — يكشف __main__ == bot أو منفصلين.
 
     v5.6.40 FIX-PER-CHANNEL-DISCOVERY (محفوظ):
       • `channel_db_id` أول مرشح (FK → user_channels.id).
@@ -3935,18 +3894,61 @@ async def cmd_posts_stats(update, context):
             f"{_ps} منشور/منشورات منذ الإقلاع.</i>"
         )
 
-    # مقارنة DB vs bot.py
-    if cnt_p1 is not None and cnt_p1 > 0 and _ps > 0:
-        lines.append("")
-        if _ps > cnt_p1:
+    # 🆕 v5.6.42 FIX-STATS-RATE-COMPARISON: مقارنة معدل النشر
+    #    (events vs events، لا events vs unique posts)
+    lines.append("")
+    if uptime_s > 0 and _ps > 0:
+        try:
+            _min_interval = await get_min_publish_interval()
+        except Exception:
+            _min_interval = 5
+        rate_per_hour = (_ps / uptime_s) * 3600.0
+        expected_per_hour = 60.0 / max(1, _min_interval)
+        lines.append(
+            f"📈 <b>معدل النشر:</b> "
+            f"<code>{rate_per_hour:.0f}/ساعة</code> "
+            f"<i>(متوقع بـ interval={_min_interval}د: "
+            f"~{expected_per_hour:.0f}/ساعة)</i>"
+        )
+        if rate_per_hour > expected_per_hour * 1.5:
             lines.append(
-                f"⚠️ <i>bot.py ({_ps}) > DB 24h ({cnt_p1}) — "
-                f"غير طبيعي!</i>"
+                "🔴 <b>معدل النشر أعلى من المتوقع 1.5×!</b> "
+                "<i>تحقق من:</i>"
+            )
+            lines.append("  <i>1. min_publish_interval قصير جداً؟</i>")
+            lines.append(
+                "  <i>2. posts يتيمة (channel_db_id=NULL) تُنشر؟</i>"
+            )
+            lines.append(
+                "  <i>3. مهام auto_publish متعددة في نفس الوقت؟</i>"
+            )
+        elif rate_per_hour < expected_per_hour * 0.5:
+            lines.append(
+                "⚠️ <b>معدل النشر أقل من المتوقع 0.5×</b> "
+                "<i>(قنوات خاملة أو مشاكل اشتراكات)</i>"
             )
         else:
             lines.append(
-                f"✅ <i>bot.py ({_ps}) ≤ DB 24h ({cnt_p1}) — "
-                f"متسق</i>"
+                "✅ <i>معدل النشر ضمن النطاق الطبيعي</i>"
+            )
+
+    # 🆕 v5.6.42: نشر سريع في آخر 15 دقيقة
+    if cnt_15m is not None and cnt_15m > 0 and uptime_s > 0:
+        try:
+            _min_interval_15m = await get_min_publish_interval()
+        except Exception:
+            _min_interval_15m = 5
+        expected_15m = 15.0 / max(1, _min_interval_15m)
+        if cnt_15m > expected_15m * 1.5:
+            lines.append("")
+            lines.append(
+                f"🔴 <b>نشر سريع جداً:</b> <code>{cnt_15m}</code> "
+                f"في 15 دقيقة <i>(متوقع ~{expected_15m:.0f} "
+                f"بـ interval={_min_interval_15m}د)</i>"
+            )
+            lines.append(
+                "  <i>راجع min_publish_interval "
+                "أو مهام auto_publish المكررة</i>"
             )
 
     text = "\n".join(lines)
@@ -4022,7 +4024,7 @@ async def main():
     logger.info("👨‍💼 المالك: %s", CONFIG.PRIMARY_OWNER_ID)
 
     logger.info(
-        "📦 bot.py: v5.6.41 | "
+        "📦 bot.py: v5.6.42 | "
         "detectors=%s | layers=%d | helpers=%s | "
         "db_idle=%s | cache_stats=%s | analytics=%s | "
         "fullhealth=%s | latency=%s | maint_cmds=%s | "
@@ -4044,6 +4046,7 @@ async def main():
         "posts_stats_cmd=on | record_bot_metric=on | "
         "record_metric_module_fix=on | "
         "posts_stats_15m_diag=on | module_binding_diag=on | "
+        "stats_rate_comparison=on | stats_15m_rate=on | "
         "posts_stats_sql_fix=on | per_channel_discovery=on | "
         "channel_db_id_priority=on | "
         "gil_contention_fix=on | gil_lag_monitor=on",
@@ -5109,7 +5112,7 @@ if __name__ == "__main__":
         #    منفصل تماماً عن التطبيق. صفر تنافس على GIL بين المسارين.
         if _DETECTORS_HAS_INSTALL_HELPER:
             logger.info(
-                "ℹ️ v5.6.41 FIX-GIL-CONTENTION: "
+                "ℹ️ v5.6.42 FIX-GIL-CONTENTION: "
                 "تم تجاوز install_default_executor — "
                 "detectors pool (16 workers) منفصل عن default executor "
                 "التطبيق (12 workers تلقائياً). "
