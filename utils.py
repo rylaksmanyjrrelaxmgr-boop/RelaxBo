@@ -1,8 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-utils.py - الأدوات المساعدة للبوت (v7.10.26 — METRIC-VISIBILITY)
+utils.py - الأدوات المساعدة للبوت (v7.10.27 — MANAGED-BOTS-READY)
 =================================================================================
+🆕 v7.10.27 (MANAGED-BOTS-READY):
+    🟢 MANAGED-BOTS: توثيق عقد التكامل مع "مدير البوتات العامة"
+       (Section 25). صفر تعديل وظيفي.
+
 🆕 v7.10.26 (FIX-METRIC-VISIBILITY):
     🟡 FIX-METRIC-VISIBILITY: استبدال logger.debug بـ logger.warning في
        bloc_ {record_bot_metric("posts_success"), record_bot_metric("posts_failed")}
@@ -4936,13 +4940,88 @@ __all__ = [
     '_PUBLISH_SIGNAL_TIMEOUT_SECONDS',
 ]
 
+
 # ═══════════════════════════════════════════════════════════════════════════
-# LOAD BEACON — v7.10.26
+# 25. Managed Bots Extension Points (v5.7.0) — Documentation Only
+# ═══════════════════════════════════════════════════════════════════════════
+#
+# 🎯 الغرض: توثيق عقد التكامل بين utils.py وميزة "مدير البوتات العامة".
+#
+# 📐 المبدأ المعماري:
+#   utils.py = طبقة أدوات (Library Layer) — لا يعرف من يستخدمه.
+#   managed_bots_*.py = طبقة تطبيق (Application Layer) — يستهلك utils.
+#   الاتجاه أحادي: Application → Library (لا اعتماد عكسي).
+#
+# ✅ ما يستخدمه مدير البوتات من هذا الملف (Public API):
+#
+#   safe_send(bot, chat_id, text, reply_markup=None, parse_mode="HTML")
+#       ↑ الإرسال الآمن — يعمل مع أي `bot` (Relax أو مُدار).
+#       الاستخدام: managed_bots_runner.py → notify_manager(...)
+#
+#   TimeUtils.utc_iso() / .mecca_iso() / .utc_now()
+#       ↑ طوابع زمنية موحّدة للـ JSON state.
+#
+#   RATE_LIMITER.acquire() / .report_429()
+#       ↑ معدّل الإرسال المشترك — يقي كل البوتات من flood.
+#
+#   TranslationManager.get_text(lang, key, **kwargs)  [اختياري]
+#       ↑ ترجمة رسائل مدير البوتات (لو أردت i18n).
+#
+# ❌ ما يجب أن لا يُضاف إلى هذا الملف (يفسد العزل):
+#
+#   ✗ MANAGED_BOTS: Dict[int, dict] = {}
+#       → مكانه: managed_bots_storage.py (state ميزة، ليس أداة)
+#
+#   ✗ async def start_managed_bot(bid, token) -> bool
+#       → مكانه: managed_bots_runner.py (منطق تشغيل)
+#
+#   ✗ MB_PANEL = "mb_panel"  في CB
+#       → مكانه: handlers_managed_bots.py (namespace مستقل)
+#
+#   ✗ توسيع KeyboardFactory._NO_CHAT_ID_BUTTONS بـ "mb_*"
+#       → لا يحتاج: لوحة المدير تبني InlineKeyboardMarkup مباشرة.
+#
+#   ✗ إضافة "managed_bots_menu" إلى KeyboardFactory._get_default_menus()
+#       → لا يحتاج: القائمة مستقلة في handlers_managed_bots.py.
+#
+# 🧪 تحقّق من العزل (بعد التطبيق):
+#
+#   $ mv handlers/handlers_managed_bots.py /tmp/
+#   $ mv managed_bots_runner.py managed_bots_storage.py /tmp/
+#   $ python bot.py
+#   ✅ يجب أن يعمل Relax Manager 100% بلا أخطاء استيراد
+#      (زر "🎛️ مدير البوتات" يظهر لكن لا يستجيب — مقبول)
+#
+#   الأثر المتوقّع: صفر. هذه هي علامة التناسق المعماري.
+#
+# 📊 خريطة التكامل:
+#
+#   ┌─────────────────────────────────────────────────────────────┐
+#   │  Relax Manager (main app)                                   │
+#   │  ├── bot.py                 (start_all / stop_all hooks)    │
+#   │  ├── handlers_command.py    (زر mb_panel ← سطر واحد)         │
+#   │  └── utils.py               (← هذا الملف: صفر تعديل وظيفي)   │
+#   ├─────────────────────────────────────────────────────────────┤
+#   │  Managed Bots Layer (مُعزولة — يمكن حذفها بالكامل)          │
+#   │  ├── managed_bots_storage.py    (JSON I/O ذري)              │
+#   │  ├── managed_bots_runner.py     (start/stop/retry)          │
+#   │  ├── handlers/handlers_managed_bots.py    (لوحة mb_*)        │
+#   │  └── handlers/handlers_managed_public.py  (4 رسائل/بوت)      │
+#   └─────────────────────────────────────────────────────────────┘
+#
+#   الاعتماد: ↓ فقط (Application → Library). لا عكس.
+#
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# LOAD BEACON — v7.10.27
 # ═══════════════════════════════════════════════════════════════════════════
 
 try:
     logger.info(
-        "🛡️ utils.py v7.10.26 METRIC-VISIBILITY loaded | "
+        "🛡️ utils.py v7.10.27 MANAGED-BOTS-READY loaded | "
+        "🆕 MANAGED-BOTS: صفر تعديل وظيفي — عقد تكامل موثّق (قسم 25) | "
         "🆕 FIX-METRIC-VISIBILITY: warning بدل debug في "
         "record_bot_metric (success + fail) | "
         "FIX-REMINDERS-INDEPENDENCE: 3×try/except مستقل | "
@@ -4963,7 +5042,8 @@ try:
         "Lang=%d | ChatMigrated=%d ops | ToggleMap=%d | "
         "Webhook=✅ | Penalty=✅ | Publish=✅ | "
         "Metrics=✅ (DB + bot.py + CB) | "
-        "Reminders=✅ (3× isolated)",
+        "Reminders=✅ (3× isolated) | "
+        "ManagedBots=Documented (Section 25)",
         _PUBLISH_SIGNAL_TIMEOUT_SECONDS,
         _PG_ACTIVITY_TTL,
         _BACKUP_TIMEOUT_SECONDS,
