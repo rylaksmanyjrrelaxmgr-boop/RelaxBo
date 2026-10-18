@@ -1,9 +1,19 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-🌿 Relax Manager – البوت الرئيسي (bot.py v5.6.44-CODE-REVIEW-FIXES-V2)
+🌿 Relax Manager – البوت الرئيسي (bot.py v5.7.0-MANAGED-BOTS)
 ================================================================================
 📌 نقطة الدخول الرسمية للتطبيق (entrypoint).
+
+🆕 v5.7.0 (MANAGED-BOTS-INTEGRATION):
+    3 hooks جراحية — دون أي تعديل على منطق v5.6.44:
+    1. start_all_managed_bots() بعد _spawn_warmup_detectors_pool()
+       → كل بوت محفوظ يُشغَّل عند الإقلاع.
+    2. register_managed_bots_handlers(app) قبل CallbackHandlers.handle
+       → mb_panel يستجيب (لو سُجِّل catch-all أولاً، سيمسك mb_*).
+    3. stop_all_managed_bots() قبل _shutdown_db_pool()
+       → حفظ managed_bots_state.json قبل إغلاق الموارد.
+    كل استدعاء داخل try/except معزول — الميزة اختيارية بالكامل.
 
 🆕 v5.6.44 (CODE-REVIEW-FIXES-V2):
     🔴 FIX-ADMIN-GUARD-FAIL-CLOSED (CRITICAL — أمني):
@@ -4356,7 +4366,7 @@ async def main():
     logger.info("👨‍💼 المالك: %s", CONFIG.PRIMARY_OWNER_ID)
 
     logger.info(
-        "📦 bot.py: v5.6.44 | "
+        "📦 bot.py: v5.7.0 | "
         "detectors=%s | layers=%d | helpers=%s | "
         "db_idle=%s | cache_stats=%s | analytics=%s | "
         "fullhealth=%s | latency=%s | maint_cmds=%s | "
@@ -4391,7 +4401,9 @@ async def main():
         "warmup_task_cleanup=on | posts_table_empty_hint=on | "
         "posts_stats_sql_fix=on | per_channel_discovery=on | "
         "channel_db_id_priority=on | "
-        "gil_contention_fix=on | gil_lag_monitor=on",
+        "gil_contention_fix=on | gil_lag_monitor=on | "
+        "managed_bots_startup=on | managed_bots_handlers=on | "
+        "managed_bots_shutdown=on",
         _SPAM_DETECTOR_VERSION or "N/A",
         _SPAM_DETECTOR_LAYERS_COUNT,
         (
@@ -4551,6 +4563,23 @@ async def main():
         )
 
     _spawn_warmup_detectors_pool()
+
+    # ═══════════════════════════════════════════════════════════════
+    # ═══ v5.7.0: Managed Bots — بدء البوتات المُدارة ═══
+    # ═══════════════════════════════════════════════════════════════
+    _managed_apps: Dict[str, Any] = {}
+    try:
+        from managed_bots_runner import start_all_managed_bots
+        _managed_apps = await start_all_managed_bots()
+        logger.info(
+            "✅ managed_bots: %d/%d بوت عام يعمل",
+            sum(1 for ok in _managed_apps.values() if ok),
+            len(_managed_apps),
+        )
+    except Exception as _mb_e:
+        logger.error(
+            "❌ managed_bots startup: %s", _mb_e, exc_info=True
+        )
 
     # 🆕 v5.6.40 NEW-GIL-MONITOR: بدء مراقب lag
     _spawn_gil_lag_monitor()
@@ -5075,6 +5104,24 @@ async def main():
                 _ANALYTICS_HANDLERS_IMPORT_ERROR or "unknown",
             )
 
+    # ═══════════════════════════════════════════════════════════════
+    # ═══ v5.7.0: Managed Bots handlers — قبل catch-all ═══
+    # ═══════════════════════════════════════════════════════════════
+    try:
+        from handlers.handlers_managed_bots import (
+            register_managed_bots_handlers,
+        )
+        register_managed_bots_handlers(app)
+        logger.info(
+            "✅ [ORDER 5.5/6] managed_bots: "
+            "لوحة الإدارة مُسجَّلة (pattern=r'^mb_')"
+        )
+    except Exception as _mb_e:
+        logger.error(
+            "❌ [ORDER 5.5/6] managed_bots handlers: %s",
+            _mb_e, exc_info=True,
+        )
+
     try:
         app.add_handler(CallbackQueryHandler(CallbackHandlers.handle))
         logger.info(
@@ -5440,6 +5487,20 @@ async def main():
                 raise
             except Exception as _e:
                 logger.debug("app.shutdown: %s", _e)
+
+        # ═══════════════════════════════════════════════════════════════
+        # ═══ v5.7.0: Managed Bots shutdown ═══
+        # ═══════════════════════════════════════════════════════════════
+        try:
+            from managed_bots_runner import stop_all_managed_bots
+            await stop_all_managed_bots(timeout=15.0)
+            logger.info(
+                "✅ managed_bots: أُوقفت كل البوتات العامة"
+            )
+        except Exception as _mb_e:
+            logger.warning(
+                "⚠️ managed_bots shutdown: %s", _mb_e
+            )
 
         try:
             await _shutdown_db_pool(timeout=5.0)
