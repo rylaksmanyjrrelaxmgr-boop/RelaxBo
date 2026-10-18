@@ -107,6 +107,8 @@
     "admin_payment_logs": "📊 سجلات الدفع",
     "admin_grant_free": "🎁 منح مجاني",
 
+    "mb_panel": "🎛️ مدير البوتات",
+
     "admin_metrics_live": "📊 Live Metrics",
     "admin_metrics_reset": "♻️ إعادة تعيين",
 
@@ -446,6 +448,7 @@
       "rows": [
         ["admin_analytics"],
         ["admin_metrics_live"],
+        ["mb_panel"],
         ["admin_users", "admin_banned"],
         ["admin_unban_all"],
         ["admin_ban_user", "admin_unban_user"],
