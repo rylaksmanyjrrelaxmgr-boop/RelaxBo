@@ -1,13 +1,18 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-handlers/handlers_managed_bots.py — لوحة إدارة البوتات المُدارة (v5.7.0)
+handlers/handlers_managed_bots.py — لوحة إدارة البوتات المُدارة (v5.7.1)
 =================================================================================
 📌 المسؤولية:
     • register_managed_bots_handlers(app) — تسجيل pattern="^mb_"
     • لوحة إدارة كاملة: عرض/إضافة/تعديل/تشغيل/إيقاف/حذف
     • استقبال النص المعلّق (توكن/رسالة) عبر MessageHandler
     • استخدام ApplicationHandlerStop لتفادي تداخل MessageHandlers
+
+🆕 v5.7.1 (FIX-ASYNCIO-IMPORT):
+    🔴 إصلاح `NameError: name 'asyncio' is not defined`
+       كان مفقوداً في `_process_addbot` (asyncio.wait_for + asyncio.TimeoutError).
+       أُضيف `import asyncio` في أعلى الملف.
 
 🎯 العقد:
     bot.py → register_managed_bots_handlers(app)  (قبل catch-all)
@@ -25,6 +30,7 @@ handlers/handlers_managed_bots.py — لوحة إدارة البوتات الم�
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from datetime import datetime, timezone
@@ -177,7 +183,10 @@ def _kb_back() -> InlineKeyboardMarkup:
 # 3. بناء اللوحة
 # ═══════════════════════════════════════════════════════════════════════════
 
-def _build_panel(bots: Dict[int, Dict[str, Any]], state: Dict[int, Any]) -> tuple:
+def _build_panel(
+    bots: Dict[int, Dict[str, Any]],
+    state: Dict[int, Any],
+) -> tuple:
     if not bots:
         text = (
             "🎛️ <b>مدير البوتات العامة</b>\n"
@@ -632,7 +641,9 @@ async def _process_addbot(update, context, raw: str) -> None:
         pass
 
 
-async def _process_set(update, context, pending: Dict[str, Any], raw: str) -> None:
+async def _process_set(
+    update, context, pending: Dict[str, Any], raw: str
+) -> None:
     bid = int(pending.get("bid", 0))
     field = pending.get("field", "")
     if field not in _FIELD_LABEL:
@@ -741,9 +752,9 @@ __all__ = ["register_managed_bots_handlers"]
 
 try:
     logger.debug(
-        "🛡️ handlers_managed_bots v5.7.0 loaded | "
+        "🛡️ handlers_managed_bots v5.7.1 loaded | "
         "callbacks=7 | text_handler=group(-1) | "
-        "max_panel=%d",
+        "max_panel=%d | asyncio=imported",
         _MAX_BOTS_IN_PANEL,
     )
 except Exception:
