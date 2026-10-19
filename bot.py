@@ -1,9 +1,16 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-🌿 Relax Manager – البوت الرئيسي (bot.py v5.7.0-MANAGED-BOTS)
+🌿 Relax Manager – البوت الرئيسي (bot.py v5.7.1-STATS-CHANNELS-FIX)
 ================================================================================
 📌 نقطة الدخول الرسمية للتطبيق (entrypoint).
+
+🆕 v5.7.1 (STATS-CHANNELS-FIX):
+    🟢 حساب معدل النشر المتوقع بناءً على عدد القنوات النشطة الفعلي
+       (من جدول user_channels) بدلاً من افتراض قناة واحدة.
+    🟢 الأثر: يختفي التحذير الكاذب "معدل النشر أعلى من المتوقع 1.5×"
+       عندما يكون لديك عدة قنوات. تظهر رسالة "معدل النشر ضمن النطاق
+       الطبيعي" 🟢.
 
 🆕 v5.7.0 (MANAGED-BOTS-INTEGRATION):
     3 hooks جراحية — دون أي تعديل على منطق v5.6.44:
@@ -15,85 +22,24 @@
        → حفظ managed_bots_state.json قبل إغلاق الموارد.
     كل استدعاء داخل try/except معزول — الميزة اختيارية بالكامل.
 
-🆕 v5.6.44 (CODE-REVIEW-FIXES-V2):
-    🔴 FIX-ADMIN-GUARD-FAIL-CLOSED (CRITICAL — أمني):
-        `_resolve_admin_guard` كان fail-OPEN: عندما `bot_data["admin_ids"]`
-        = set() فارغة (حالة نادرة لكن ممكنة) والـ fallback أيضاً فارغ
-        (PRIMARY_OWNER_ID=0 + DEVELOPER_IDS=[])، كان `if allowed and ...`
-        = `if set() and ...` = False → لا حجب → أي غريب ينفّذ /ping
-        و /posts_stats. الآن: `if not allowed: refuse` — fail-closed.
-        + تسجيل CRITICAL عند البدء إذا _admin_ids فارغة.
-        + _verify_db_config يحذّر عند PRIMARY_OWNER_ID=0.
+🆕 v5.6.44 (CODE-REVIEW-FIXES-V2) — محفوظ:
+    🔴 FIX-ADMIN-GUARD-FAIL-CLOSED (CRITICAL — أمني).
+    🔴 FIX-WATCH-RUNNER-PROBE (عالٍ).
+    🟡 FIX-GIFT-REFUND-NOTIFY.
+    🟡 FIX-VERIFY-ASYNC.
+    🟡 FIX-COLLECT-ADMINS-CLARITY.
+    🟡 FIX-STATS-PUBLISHED-TRUE.
+    🟢 FIX-LOGGER-NAME.
+    🟢 FIX-METRICS-STARTED-AT.
+    🟢 FIX-KEEP-ALIVE-HANG-V2.
+    🟢 FIX-CLEANUP-REMOVED-ROWCOUNT.
+    🟢 FIX-WARMUP-TASK-CLEANUP.
+    🟢 IMPROVE-POSTS-TABLE-EMPTY.
 
-    🔴 FIX-WATCH-RUNNER-PROBE (عالٍ):
-        فرع "addresses only" في _watch_runner كان يفحص فقط أن
-        AppRunner.addresses غير فارغة — لا HTTP health probe. هذا يعطي
-        إحساساً زائفاً بالمراقبة: خادم معلّق (يقبل TCP، لا يستجيب HTTP)
-        لن يُكتشف. الآن: الفرع ينفّذ HTTP /health probe كامل مثل الفرع
-        الرئيسي (نفس _WATCHER_MAX_PROBE_FAILURES).
-
-    🟡 FIX-GIFT-REFUND-NOTIFY:
-        `successful_payment` — مسار gift عند فشل create_gift_code
-        (استثناء أو None) كان يرسل للمستخدم فقط. الآن: notify_dev_log
-        أيضاً (مثل مسار subscription) — refund/إصدار يدوي.
-
-    🟡 FIX-VERIFY-ASYNC:
-        `_verify_command_handlers` — `callable()` يمرّر دوال sync
-        عادية. الآن: `inspect.iscoroutinefunction()` — يكشف دوال
-        متزامنة تُنفَّذ blocking للـ event loop.
-
-    🟡 FIX-COLLECT-ADMINS-CLARITY:
-        `_collect_admin_ids` — `any_method_succeeded` كان مضللاً
-        (get_admin_list ترجع [] → "succeeded=True" رغم عدم وجود بيانات).
-        الآن: فصل `any_method_ran` (بلا استثناء) عن `any_method_succeeded`
-        (رجعت بيانات فعلية). التحذير يظهر في كل الحالات الفاشلة.
-
-    🟡 FIX-STATS-PUBLISHED-TRUE:
-        `published = TRUE` في cmd_posts_stats كان يعرض السطر على
-        SQLite/MySQL (حيث TRUE=1) — مضلل ("يبدو boolean"). الآن:
-        يُعرض فقط على Postgres، حيث السلوك informative فعلاً.
-
-    🟢 FIX-LOGGER-NAME:
-        `logger = logging.getLogger(__name__)` → عند `python bot.py`
-        الاسم "__main__" بينما بقية الموديولات "bot". الآن:
-        `logging.getLogger("bot" if __name__ == "__main__" else __name__)`
-        — سجلات موحّدة أثناء التشخيص.
-
-    🟢 FIX-METRICS-STARTED-AT:
-        `_BOT_METRICS["started_at"]` كان وقت الاستيراد (قبل initialize_db
-        + warmup + app.start — قد تكون 10-30s). الآن: يُعاد تعيينه
-        **بعد** app.start() — uptime في /posts_stats دقيق.
-
-    🟢 FIX-KEEP-ALIVE-HANG-V2:
-        `asyncio.sleep(float('inf'))` → `asyncio.Event().wait()` — نية
-        أوضح للقارئ ("انتظار أبدي" ≠ "نم لأبد")، ونفس السلوك
-        (قابل لـ cancel).
-
-    🟢 FIX-CLEANUP-REMOVED-ROWCOUNT:
-        `cleanup_removed_channels_periodically` — `isinstance(result, int)`
-        لا يلتقط rowcount من cursors. الآن: `getattr(result, 'rowcount', 0)`
-        كـ fallback.
-
-    🟢 FIX-WARMUP-TASK-CLEANUP:
-        `_spawn_warmup_detectors_pool` — بعد استهلاك task منتهٍ بخطأ،
-        المهمة تبقى في _WARMUP_DETECTORS_TASK (لا تسريب لكن مرجع ميت).
-        الآن: تُمسح بعد الاستهلاك.
-
-    🟢 IMPROVE-POSTS-TABLE-EMPTY:
-        `cmd_posts_stats` — إذا `posts_cols` فارغة (جدول غير موجود
-        أو فارغ)، تظهر رسالة واضحة بدل قائمة "كل الأعمدة مفقودة".
-
-🆕 v5.6.43 (CODE-REVIEW-FIXES) — محفوظ:
-    🔴 FIX-RECORD-METRIC-MODULE-EARLY (نُقل قبل imports).
-    🟡 FIX-PERIODIC-CLEANUP-CHECK / FIX-STATS-SQLITE /
-       FIX-KEEP-ALIVE-HANG / FIX-SUCCESSFUL-PAYMENT-FILTER /
-       FIX-VALIDATE-INVOICE-PLAN-ID.
-    🟢 IMPROVE-SYS-IMPORT / IMPROVE-REFUND-TODO / IMPROVE-GIL-SKIP-COMMENT.
-
+🆕 v5.6.43 (CODE-REVIEW-FIXES) — محفوظ.
 🆕 v5.6.42 (STATS-RATE-DIAGNOSTIC) — محفوظ.
 🆕 v5.6.41 (RECORD-METRIC-MODULE-FIX) — محفوظ.
 🆕 v5.6.40 (PER-CHANNEL-FIX + GIL-CONTENTION-FIX) — محفوظ.
-🆕 v5.6.39/38/37/36/35/34/33/32/31/30/29/28/27/26/25/24/23/22/21 — محفوظ.
 ================================================================================
 """
 
@@ -114,22 +60,6 @@ from aiohttp import web
 
 # ═══════════════════════════════════════════════════════════════════
 # 🔴 v5.6.43 FIX-RECORD-METRIC-MODULE-EARLY (CRITICAL)
-# ═══════════════════════════════════════════════════════════════════
-# السبب:
-#   عند `python bot.py`: __name__ == "__main__" → _BOT_METRICS في __main__.
-#   utils.py: `from bot import record_bot_metric` يُنشئ module 'bot' منفصلاً
-#   إن لم يكن موجوداً → نسخة ثانية من _BOT_METRICS → posts_success يبقى 0.
-#
-# الإصلاح:
-#   نقل sys.modules.setdefault إلى هنا — **قبل** any project import
-#   (telegram، config، database، handlers، utils). الآن 'bot' مضمون
-#   أن يكون __main__ قبل أي `from bot import ...`.
-#
-# الأثر:
-#   ✅ record_bot_metric("posts_success") يُحدّث نفس dict الذي يقرأه
-#      /posts_stats → posts_success يطابق النشر الحقيقي.
-#   ✅ إذا كان 'bot' موجوداً مسبقاً (استيراد صريح سبق)، نُسجّل خطأ
-#      واضحاً في stderr — لا صمت.
 # ═══════════════════════════════════════════════════════════════════
 if __name__ == "__main__":
     _existing_bot = sys.modules.get('bot')
@@ -4229,7 +4159,7 @@ async def cmd_posts_stats(update, context):
             f"{_ps} منشور/منشورات منذ الإقلاع.</i>"
         )
 
-    # 🆕 v5.6.42 FIX-STATS-RATE-COMPARISON
+    # 🆕 v5.7.1 FIX-CHANNELS-RATE
     lines.append("")
     if uptime_s > 0 and _ps > 0:
         try:
@@ -4239,12 +4169,25 @@ async def cmd_posts_stats(update, context):
             _min_interval = 5
         if _min_interval < 1:
             _min_interval = 1
+            
+        # جلب عدد القنوات النشطة من user_channels
+        _active_channels = 1
+        try:
+            _ch_row = await DB.fetchone("SELECT COUNT(*) AS n FROM user_channels WHERE removed_at IS NULL")
+            if _ch_row:
+                _ch_n = _ch_row.get('n') if isinstance(_ch_row, dict) else _ch_row[0]
+                if _ch_n and int(_ch_n) > 0:
+                    _active_channels = int(_ch_n)
+        except Exception as _e:
+            logger.debug("get_active_channels for stats: %s", _e)
+
         rate_per_hour = (_ps / uptime_s) * 3600.0
-        expected_per_hour = 60.0 / _min_interval
+        expected_per_hour = (60.0 / _min_interval) * _active_channels
+        
         lines.append(
             f"📈 <b>معدل النشر:</b> "
             f"<code>{rate_per_hour:.0f}/ساعة</code> "
-            f"<i>(متوقع بـ interval={_min_interval}د: "
+            f"<i>(متوقع لـ {_active_channels} قناة نشطة بـ interval={_min_interval}د: "
             f"~{expected_per_hour:.0f}/ساعة)</i>"
         )
         if rate_per_hour > expected_per_hour * 1.5:
@@ -4269,7 +4212,7 @@ async def cmd_posts_stats(update, context):
                 "✅ <i>معدل النشر ضمن النطاق الطبيعي</i>"
             )
 
-    # 🆕 v5.6.42: نشر سريع في آخر 15 دقيقة
+    # 🆕 v5.7.1 FIX-CHANNELS-RATE
     if cnt_15m is not None and cnt_15m > 0 and uptime_s > 0:
         try:
             _min_interval_15m = await get_min_publish_interval()
@@ -4280,13 +4223,16 @@ async def cmd_posts_stats(update, context):
             _min_interval_15m = 5
         if _min_interval_15m < 1:
             _min_interval_15m = 1
-        expected_15m = 15.0 / _min_interval_15m
+            
+        # استخدمنا _active_channels المحسوب مسبقاً
+        expected_15m = (15.0 / _min_interval_15m) * _active_channels
+        
         if cnt_15m > expected_15m * 1.5:
             lines.append("")
             lines.append(
                 f"🔴 <b>نشر سريع جداً:</b> <code>{cnt_15m}</code> "
                 f"في 15 دقيقة <i>(متوقع ~{expected_15m:.0f} "
-                f"بـ interval={_min_interval_15m}د)</i>"
+                f"لـ {_active_channels} قناة بـ interval={_min_interval_15m}د)</i>"
             )
             lines.append(
                 "  <i>راجع min_publish_interval "
@@ -4366,7 +4312,7 @@ async def main():
     logger.info("👨‍💼 المالك: %s", CONFIG.PRIMARY_OWNER_ID)
 
     logger.info(
-        "📦 bot.py: v5.7.0 | "
+        "📦 bot.py: v5.7.1 | "
         "detectors=%s | layers=%d | helpers=%s | "
         "db_idle=%s | cache_stats=%s | analytics=%s | "
         "fullhealth=%s | latency=%s | maint_cmds=%s | "
@@ -4403,7 +4349,7 @@ async def main():
         "channel_db_id_priority=on | "
         "gil_contention_fix=on | gil_lag_monitor=on | "
         "managed_bots_startup=on | managed_bots_handlers=on | "
-        "managed_bots_shutdown=on",
+        "managed_bots_shutdown=on | stats_channels_rate_fix=on",
         _SPAM_DETECTOR_VERSION or "N/A",
         _SPAM_DETECTOR_LAYERS_COUNT,
         (
