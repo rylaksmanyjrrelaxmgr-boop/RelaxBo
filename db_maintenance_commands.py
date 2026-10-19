@@ -1,48 +1,28 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-db_maintenance_commands.py - أوامر صيانة قاعدة البيانات (v1.1.2)
+db_maintenance_commands.py - أوامر صيانة قاعدة البيانات (v1.1.3)
 ================================================================================
-🆕 v1.1.2 — IDEMPOTENT-REG + HTML-SAFE + DB-AWARE:
+🆕 v1.1.3 — REPORT-VISIBILITY-FIX (بدون تغيير سلوكي):
 
-    🔴 FIX-AM2: idempotency لـ register_maintenance_commands
-        (flag _commands_registered يمنع التسجيل المزدوج).
+    🔴 FIX-AM16: إصلاح مفتاح MV — كان v.get('is_matview') بينما
+        auto_vacuum_dirty_mvs يُرجع 'is_mv' → وسم [MV] لم يظهر أبدًا.
 
-    🔴 FIX-AM3: scheduled_auto_vacuum يقف فوراً إذا DB_TYPE != postgres
-        (SQLite/MySQL لا تستفيد من auto_vacuum_dirty_mvs → توفير دورات).
+    🔴 FIX-AM17: توسيع تقرير auto_now ليشمل:
+        • 'dead_before → dead_after' لكل جدول تم تنظيفه.
+        • قسم "💀 ما تبقّى في القاعدة" من result['remaining'].
+        • قسم "⏭️ تُرك" من result['skipped'] (جداول dead<min_dead).
+        • رسالة توضيحية عند cleaned=0 و before>0.
+        • يعمل مع db_diagnostics قديم (الحقول الجديدة اختيارية).
 
-    🔴 FIX-AM4: HTML escape على أسماء الجداول ورسائل الأخطاء في
-        auto_now + إشعار log_ch (كانت رسائل PostgreSQL تحتوي على < >).
+    🟠 FIX-AM18: عرض "dead قبل/بعد" بعلامة '?' عند غياب القيمة
+        بدلاً من إظهار 0 مضلّل.
 
-    🟠 FIX-AM5: _VERSION_OK — رفض تشغيل auto-vacuum عند إصدار
-        db_diagnostics أقدم من الحد الأدنى.
+    🟡 FIX-AM19: نفس إصلاح m v_tag في إشعار scheduled_auto_vacuum.
 
-    🟠 FIX-AM6: فحص DB._closing/_closed في حلقة auto-vacuum
-        (يمنع deadlock أثناء إغلاق التطبيق).
-
-    🟠 FIX-AM7: _AUTO_VACUUM_MIN_DEAD قابل للضبط من env.
-
-    🟠 FIX-AM8: _parse_version يقبل pre-release suffixes
-        (7.2.6-rc1 → (7, 2, 6)).
-
-    🟠 FIX-AM9: تتبّع تغيّر حالة auto-vacuum + log عند التبديل.
-
-    🟠 FIX-AM10: stop_*_task — فحص loop.is_closed() + try/except شامل.
-
-    🟠 FIX-AM11: db_weekly_command ينظّف pending قديم أولاً.
-
-    🟡 FIX-AM12: log target_chat أسبوعياً (debugging).
-
-    🟡 FIX-AM13: _AUTO_VACUUM_NOTIFY_MIN_CLEANED = 3 (ثابت موثّق).
-
-    🟡 FIX-AM14: get_tasks_status() helper للتشخيص.
-
-    🟡 FIX-AM15: __version__ موثّق.
-
-🆕 v1.1.1 — FIX-AM1 (توثيقي): تذكير بضرورة استدعاء stop_auto_vacuum_task
-    + stop_weekly_diagnostic_task عند إغلاق التطبيق.
-
-🆕 v1.1.0 — التنظيف التلقائي الكامل (AUTO-1..5).
+🆕 v1.1.2 — IDEMPOTENT-REG + HTML-SAFE + DB-AWARE — محفوظ بالكامل.
+🆕 v1.1.1 — FIX-AM1 — محفوظ.
+🆕 v1.1.0 — التنظيف التلقائي الكامل — محفوظ.
 
 📋 الأوامر:
   /db_diag_quick   — تقرير صحي مختصر
@@ -50,8 +30,8 @@ db_maintenance_commands.py - أوامر صيانة قاعدة البيانات (
   /db_weekly       — التقرير الأسبوعي + التنظيف التلقائي
 
 ⚠️ الاعتماديات:
-    • db_diagnostics >= v6.9.4
-      (يوفّر: auto_vacuum_dirty_mvs + سياسة تنظيف آمنة)
+    • db_diagnostics >= v7.2.23 (للحصول على skipped/remaining/dead_after/is_mv)
+    • النسخ الأقدم تعمل لكن بدون التفاصيل الكاملة.
     • config.CONFIG.PRIMARY_OWNER_ID أو CONFIG.is_developer
 
 ⚠️ الصلاحيات:
@@ -61,18 +41,17 @@ db_maintenance_commands.py - أوامر صيانة قاعدة البيانات (
     عند إغلاق التطبيق، يجب على bot.py استدعاء:
       1) stop_weekly_diagnostic_task(timeout=3.0)
       2) stop_auto_vacuum_task(timeout=3.0)
-    بدون ذلك → Task was destroyed but it is pending + deadlock محتمل.
 ================================================================================
 """
 
-__version__ = "1.1.2"
+__version__ = "1.1.3"
 
 import os
 import asyncio
 import logging
 import time
 import html as _html_mod
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 
 from telegram import Update
 from telegram.ext import CommandHandler, ContextTypes
@@ -536,6 +515,117 @@ async def db_maintenance_command(
 # /db_weekly
 # ═══════════════════════════════════════════════════════════════════
 
+def _build_auto_now_report(result: Dict[str, Any]) -> str:
+    """
+    🆕 FIX-AM17: بناء تقرير auto_now مع التفاصيل الكاملة.
+
+    يتعامل مع كلا الحالتين:
+      • db_diagnostics v7.2.23+ → skipped/remaining/dead_after موجودة
+      • db_diagnostics أقدم → الحقول غائبة (نتخطاها بأمان)
+    """
+    cleaned  = int(result.get('cleaned', 0) or 0)
+    before   = int(result.get('total_dead_before', 0) or 0)
+    # 🆕 FIX-AM18: عند عدم وجود total_dead_after → استخدم '?'
+    after_raw = result.get('total_dead_after', None)
+    after_display = (
+        str(int(after_raw)) if isinstance(after_raw, (int, float))
+        else "?"
+    )
+    duration = float(result.get('duration_sec', 0) or 0)
+
+    text = (
+        "🧹 <b>التنظيف الفوري</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"📊 <b>النتيجة:</b>\n"
+        f"  💀 dead قبل: <b>{before}</b>\n"
+        f"  💀 dead بعد: <b>{after_display}</b>\n"
+        f"  ✅ نُظِّف: <b>{cleaned}</b>\n"
+        f"  ⏱️ المدة: <b>{duration:.2f}s</b>\n"
+    )
+
+    # ═══ ✅ ما تم تنظيفه ═══
+    vacuumed = result.get('vacuumed', []) or []
+    if vacuumed:
+        text += "\n<b>✅ ما تم تنظيفه:</b>\n"
+        for v in vacuumed[:15]:
+            name = _esc(v.get('name', '?'))
+            # 🆕 FIX-AM16: المفتاح الصحيح هو is_mv (كان is_matview خطأً)
+            mv_tag = " <code>[MV]</code>" if v.get('is_mv') else ""
+            db_  = v.get('dead_before', 0)
+            da_  = v.get('dead_after', '?')
+            # 🆕 FIX-AM18: عرض '?' إذا غاب dead_after
+            da_str = str(da_) if da_ != '?' else "?"
+            text += (
+                f"  ✅ <code>{name}</code>{mv_tag} "
+                f"— dead {db_} → {da_str}\n"
+            )
+        if len(vacuumed) > 15:
+            text += f"  … و{len(vacuumed) - 15} آخر\n"
+
+    # ═══ 💀 ما تبقّى في القاعدة ═══
+    remaining = result.get('remaining', []) or []
+    skipped   = result.get('skipped', []) or []
+
+    seen_names = {r.get('name') for r in remaining if r.get('name')}
+    all_rem: List[Dict[str, Any]] = []
+
+    for r in remaining:
+        all_rem.append({
+            'name': r.get('name', '?'),
+            'dead': int(r.get('dead', 0) or 0),
+            'ratio_pct': float(r.get('ratio_pct', 0) or 0),
+            'is_mv': bool(r.get('is_mv', False)),
+            'note': '',
+        })
+
+    for s in skipped:
+        name = s.get('name')
+        if not name or name in seen_names:
+            continue
+        all_rem.append({
+            'name': name,
+            'dead': int(s.get('dead', 0) or 0),
+            'ratio_pct': 0.0,
+            'is_mv': bool(s.get('is_mv', False)),
+            'note': f" (dead<{_AUTO_VACUUM_MIN_DEAD}، تُرك)",
+        })
+
+    if all_rem:
+        all_rem.sort(key=lambda x: -x['dead'])
+        text += "\n<b>💀 ما تبقّى في القاعدة:</b>\n"
+        for r in all_rem[:15]:
+            name = _esc(r['name'])
+            mv_tag = " <code>[MV]</code>" if r.get('is_mv') else ""
+            pct = r.get('ratio_pct', 0)
+            pct_str = f" ({pct:.2f}%)" if pct and pct > 0 else ""
+            text += (
+                f"  • <code>{name}</code>{mv_tag} — "
+                f"dead={r['dead']}{pct_str}{r.get('note', '')}\n"
+            )
+        if len(all_rem) > 15:
+            text += f"  … و{len(all_rem) - 15} آخر\n"
+
+    # ═══ ❌ فشل ═══
+    failed = result.get('failed', []) or []
+    if failed:
+        text += f"\n❌ <b>فشل ({len(failed)}):</b>\n"
+        for f in failed[:5]:
+            name = _esc(f.get('name', '?'))
+            err  = _esc(str(f.get('error', '?'))[:60])
+            text += f"  ❌ <code>{name}</code> — <i>{err}</i>\n"
+
+    # ═══ حالة خاصة ═══
+    if cleaned == 0 and before == 0:
+        text += "\n✨ <i>القاعدة نظيفة — لا شيء للتنظيف.</i>"
+    elif cleaned == 0 and before > 0:
+        text += (
+            f"\n💡 <i>لم يُنظَّف شيء لأن كل الجداول تحت "
+            f"الحد ({_AUTO_VACUUM_MIN_DEAD} dead tuples).</i>"
+        )
+
+    return text
+
+
 async def db_weekly_command(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ):
@@ -690,52 +780,8 @@ async def db_weekly_command(
                 )
                 return
 
-            # بناء التقرير
-            cleaned = result.get('cleaned', 0)
-            before = result.get('total_dead_before', 0)
-            after = result.get('total_dead_after', 0)
-            duration = result.get('duration_sec', 0)
-
-            text = (
-                "🧹 <b>التنظيف الفوري</b>\n"
-                "━━━━━━━━━━━━━━━━━━━━━━\n\n"
-                f"📊 <b>النتيجة:</b>\n"
-                f"  💀 dead قبل: <b>{before}</b>\n"
-                f"  💀 dead بعد: <b>{after}</b>\n"
-                f"  ✅ نُظِّف: <b>{cleaned}</b>\n"
-                f"  ⏱️ المدة: <b>{duration:.2f}s</b>\n"
-            )
-
-            vacuumed = result.get('vacuumed', [])
-            if vacuumed:
-                text += "\n<b>التفاصيل:</b>\n"
-                for v in vacuumed[:10]:
-                    # 🆕 FIX-AM4: escape أسماء الجداول
-                    name = _esc(v.get('name', '?'))
-                    mv_tag = " <code>[MV]</code>" if v.get('is_matview') else ""
-                    text += (
-                        f"  ✅ <code>{name}</code>{mv_tag} "
-                        f"(dead={v.get('dead_before', 0)})\n"
-                    )
-                if len(vacuumed) > 10:
-                    text += f"  … و{len(vacuumed) - 10} آخر\n"
-
-            failed = result.get('failed', [])
-            if failed:
-                text += f"\n❌ <b>فشل:</b> {len(failed)}\n"
-                for f in failed[:5]:
-                    # 🆕 FIX-AM4: escape name و error
-                    name = _esc(f.get('name', '?'))
-                    err = _esc(f.get('error', '?')[:60])
-                    text += (
-                        f"  ❌ <code>{name}</code> — "
-                        f"<i>{err}</i>\n"
-                    )
-
-            if cleaned == 0 and before == 0:
-                text += (
-                    "\n✨ <i>القاعدة نظيفة — لا شيء للتنظيف.</i>"
-                )
+            # 🆕 FIX-AM17: بناء التقرير عبر الدالة المساعدة
+            text = _build_auto_now_report(result)
 
             await update.message.reply_text(
                 text, parse_mode='HTML'
@@ -944,12 +990,12 @@ async def scheduled_auto_vacuum(bot):
                             if (log_ch and cleaned
                                     >= _AUTO_VACUUM_NOTIFY_MIN_CLEANED):
                                 vacuumed = result.get('vacuumed', [])
-                                # 🆕 FIX-AM4: escape أسماء الجداول
+                                # 🆕 FIX-AM19: is_mv بدلاً من is_matview
                                 details = "\n".join(
                                     f"  • <code>{_esc(v.get('name', '?'))}"
                                     f"</code>"
                                     + (" <code>[MV]</code>"
-                                       if v.get('is_matview') else "")
+                                       if v.get('is_mv') else "")
                                     for v in vacuumed[:5]
                                 )
                                 await safe_send(
@@ -1293,6 +1339,8 @@ __all__ = [
     "stop_auto_vacuum_task",
     # 🆕 v1.1.2: تشخيص
     "get_tasks_status",
+    # 🆕 v1.1.3: باني التقرير (للاستخدام الداخلي/الاختبار)
+    "_build_auto_now_report",
     # التسجيل (الرئيسي + aliases)
     "register_maintenance_commands",
     "register",
@@ -1330,6 +1378,10 @@ try:
         "FIX-AM12 weekly-target-log ✅",
         "FIX-AM13 notify-threshold-const ✅",
         "FIX-AM14 tasks-status-helper ✅",
+        "FIX-AM16 is_mv-key-fix ✅",
+        "FIX-AM17 report-visibility ✅",
+        "FIX-AM18 dead-after-display ✅",
+        "FIX-AM19 notify-is_mv ✅",
     ]
     logger.info(" | ".join(_beacon_parts))
 except Exception:
