@@ -1,18 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-managed_bots_storage.py — طبقة I/O ذرية للبوتات المُدارة (v5.7.3 - DB-MIGRATION)
+managed_bots_storage.py — طبقة I/O ذرية للبوتات المُدارة (v5.7.6 - REENTRANT-LOCK)
 =================================================================================
-📌 المسؤولية:
-    • حفظ التوكنات والرسائل في جداول قاعدة البيانات (managed_bots).
-    • حفظ تقدم المستخدمين في جدول (managed_bot_users).
-    • إزالة الاعتماد على ملفات JSON لضمان عدم فقدان البيانات
-      عند إعادة النشر على منصات مثل Render.
-
-🎯 التغيير الأساسي عن v5.7.0:
-    • كل الدوال الأربع الرئيسية أصبحت async (لأن DB غير متزامن).
-    • لا ملفات JSON. لا .bak. لا chmod 0600.
-    • الجداول تُنشأ تلقائياً عند أول استدعاء (_ensure_tables).
+🆕 v5.7.6 (FIX-DEADLOCK):
+    🔴 إصلاح Deadlock في save_managed_bots / save_managed_state.
+    السبب: asyncio.Lock ليس reentrant. استدعاء save_* من داخل
+           async with get_lock(): كان يسبب انتظاراً أبدياً.
+    الحل: ReentrantLock — يسمح للـ Task الحالي بإعادة الحصول على القفل.
 =================================================================================
 """
 
@@ -28,15 +23,62 @@ from database import DB
 
 logger = logging.getLogger(__name__)
 
-_io_lock: Optional[asyncio.Lock] = None
+
+# ═══════════════════════════════════════════════════════════════════════════
+# 🆕 v5.7.6: ReentrantLock — يسمح للـ Task الحالي بإعادة الحصول على القفل
+# ═══════════════════════════════════════════════════════════════════════════
+
+class ReentrantLock:
+    """
+    قفل يدعم الحصول المتكرر من نفس asyncio.Task.
+
+    💡 لماذا نحتاجه؟
+       - save_managed_bots يحاول الحصول على القفل.
+       - بعض المستدعين (handlers) يحصلون عليه أولاً.
+       - asyncio.Lock العادي يسبب deadlock عند إعادة الحصول.
+    """
+    def __init__(self):
+        self._lock = asyncio.Lock()
+        self._owner: Optional[asyncio.Task] = None
+        self._depth: int = 0
+
+    async def acquire(self):
+        current = asyncio.current_task()
+        if self._owner is current:
+            self._depth += 1
+            return
+        await self._lock.acquire()
+        self._owner = current
+        self._depth = 1
+
+    def release(self):
+        current = asyncio.current_task()
+        if self._owner is not current:
+            raise RuntimeError(
+                "ReentrantLock released by non-owner task"
+            )
+        self._depth -= 1
+        if self._depth == 0:
+            self._owner = None
+            self._lock.release()
+
+    async def __aenter__(self):
+        await self.acquire()
+        return self
+
+    async def __aexit__(self, *args):
+        self.release()
+
+
+_io_lock: Optional[ReentrantLock] = None
 _tables_created = False
 
 
-def get_lock() -> asyncio.Lock:
+def get_lock() -> ReentrantLock:
     """Lazy init — آمن عند الاستيراد قبل وجود event loop."""
     global _io_lock
     if _io_lock is None:
-        _io_lock = asyncio.Lock()
+        _io_lock = ReentrantLock()
     return _io_lock
 
 
@@ -49,7 +91,6 @@ _FALLBACK_MESSAGES: Dict[str, str] = {
 
 
 def get_default_messages() -> Dict[str, str]:
-    """أولويات: 1) CONFIG 2) القيمة الافتراضية"""
     return {
         k: str(getattr(CONFIG, f"MANAGED_{k.upper()}_MESSAGE", None)
                or _FALLBACK_MESSAGES[k])
@@ -58,10 +99,6 @@ def get_default_messages() -> Dict[str, str]:
 
 
 async def _ensure_tables():
-    """
-    إنشاء الجداول تلقائياً عند أول استخدام.
-    آمنة للاستدعاء المتكرر (IF NOT EXISTS).
-    """
     global _tables_created
     if _tables_created:
         return
@@ -99,7 +136,6 @@ async def _ensure_tables():
 
 
 async def load_managed_bots() -> Dict[int, Dict[str, Any]]:
-    """يقرأ جميع البوتات من قاعدة البيانات."""
     await _ensure_tables()
     result: Dict[int, Dict[str, Any]] = {}
     try:
@@ -124,10 +160,6 @@ async def load_managed_bots() -> Dict[int, Dict[str, Any]]:
 
 
 async def save_managed_bots(bots: Dict[int, Dict[str, Any]]) -> bool:
-    """
-    يحفظ القاموس كاملاً (DELETE + INSERT لضمان التطابق التام).
-    عدد البوتات عادة صغير (< 50)، لذلك DELETE+INSERT آمن وسريع.
-    """
     await _ensure_tables()
     try:
         async with get_lock():
@@ -143,7 +175,8 @@ async def save_managed_bots(bots: Dict[int, Dict[str, Any]]) -> bool:
                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
                     (
                         int(bid), info["token"], info.get("name", ""),
-                        msgs["start"], msgs["reply"], msgs["third"], msgs["fourth"],
+                        msgs["start"], msgs["reply"],
+                        msgs["third"], msgs["fourth"],
                         info.get("added_at", "")
                     )
                 )
@@ -154,7 +187,6 @@ async def save_managed_bots(bots: Dict[int, Dict[str, Any]]) -> bool:
 
 
 async def load_managed_state() -> Dict[int, Dict[int, Dict[str, bool]]]:
-    """يقرأ حالة جميع المستخدمين من قاعدة البيانات."""
     await _ensure_tables()
     result: Dict[int, Dict[int, Dict[str, bool]]] = {}
     try:
@@ -179,16 +211,9 @@ async def load_managed_state() -> Dict[int, Dict[int, Dict[str, bool]]]:
 async def save_managed_state(
     state: Dict[int, Dict[int, Dict[str, bool]]],
 ) -> bool:
-    """
-    يحفظ حالة المستخدمين.
-    استراتيجية:
-      - حذف البوتات التي أُزيلت من state.
-      - UPSERT لكل مستخدم (ON CONFLICT DO UPDATE).
-    """
     await _ensure_tables()
     try:
         async with get_lock():
-            # حذف البوتات التي لم تعد موجودة
             db_bots = await DB.fetchall(
                 "SELECT DISTINCT bot_id FROM managed_bot_users"
             )
@@ -203,7 +228,6 @@ async def save_managed_state(
                         (bid,)
                     )
 
-            # UPSERT لكل مستخدم
             now = datetime.now(timezone.utc)
             for bid, users in state.items():
                 for uid, st in users.items():
@@ -220,8 +244,10 @@ async def save_managed_state(
                            updated_at = EXCLUDED.updated_at""",
                         (
                             int(bid), int(uid),
-                            st.get("start", False), st.get("reply", False),
-                            st.get("third", False), st.get("fourth", False),
+                            st.get("start", False),
+                            st.get("reply", False),
+                            st.get("third", False),
+                            st.get("fourth", False),
                             now
                         )
                     )
@@ -232,7 +258,6 @@ async def save_managed_state(
 
 
 def next_managed_bot_id(existing: Dict[int, Any]) -> int:
-    """أول رقم موجب غير مستخدم."""
     used: Set[int] = set()
     for k in existing.keys():
         try:
@@ -246,7 +271,6 @@ def next_managed_bot_id(existing: Dict[int, Any]) -> int:
 
 
 def ensure_default_state() -> Dict[str, bool]:
-    """حالة مستخدم جديد."""
     return {"start": False, "reply": False, "third": False, "fourth": False}
 
 
@@ -254,7 +278,6 @@ def get_stats(
     bots: Dict[int, Dict[str, Any]],
     state: Dict[int, Dict[int, Dict[str, bool]]],
 ) -> Dict[str, int]:
-    """إحصاء سريع للعرض في اللوحة."""
     total_users = 0
     completed = 0
     for users in state.values():
@@ -270,7 +293,6 @@ def get_stats(
 
 
 def health_check() -> Dict[str, Any]:
-    """للتوافق فقط. التخزين الآن في قاعدة البيانات."""
     return {"db_migration": True, "status": "ok"}
 
 
@@ -285,18 +307,15 @@ __all__ = [
     "ensure_default_state",
     "get_stats",
     "health_check",
+    "ReentrantLock",
 ]
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-# LOAD BEACON
-# ═══════════════════════════════════════════════════════════════════════════
-
 try:
     logger.debug(
-        "🛡️ managed_bots_storage v5.7.3 (DB-MIGRATION) loaded | "
+        "🛡️ managed_bots_storage v5.7.6 (REENTRANT-LOCK) loaded | "
         "tables=managed_bots,managed_bot_users | "
-        "lazy_create=True | lock=lazy"
+        "lock=reentrant"
     )
 except Exception:
     pass
