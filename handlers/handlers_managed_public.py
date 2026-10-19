@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-handlers/handlers_managed_public.py — معالجات البوتات المُدارة (v5.7.0)
+handlers/handlers_managed_public.py — معالجات البوتات المُدارة (v5.7.3 - DB-MIGRATION)
 =================================================================================
 📌 المسؤولية:
     • بناء (on_start, on_text) لكل بوت مُدار (bid).
     • منطق الرسائل الأربع المتتالية (start → reply → third → fourth).
-    • إدارة حالة المستخدم في الذاكرة + حفظها في managed_bots_state.json.
+    • إدارة حالة المستخدم في الذاكرة + حفظها في قاعدة البيانات.
     • منع الأدمن/المطور من استهلاك دورة الرسائل (للاختبار).
     • قفل per-user (lock striping بـ 64) لتجنب race على double-tap.
 
@@ -17,7 +17,7 @@ handlers/handlers_managed_public.py — معالجات البوتات المُد
 
     يعتمد على:
         • utils.safe_send — إرسال آمن مع retry
-        • managed_bots_storage.load/save_managed_state + get_lock
+        • managed_bots_storage.load/save_managed_state (async) + get_lock
         • config.CONFIG.PRIMARY_OWNER_ID / DEVELOPER_IDS (skip)
 
 🚫 لا يحتوي:
@@ -97,11 +97,15 @@ def _lock_for_user(app: Application, user_id: int) -> asyncio.Lock:
     return _stripes(app)[int(user_id) % _NUM_LOCK_STRIPES]
 
 
-def _get_state(app: Application, bid: int) -> Dict[int, Dict[str, bool]]:
+# 🆕 v5.7.3: def → async def (لأن load_managed_state أصبح async)
+async def _get_state(
+    app: Application, bid: int,
+) -> Dict[int, Dict[str, bool]]:
     """يحمل حالة هذا البوت مرة واحدة إلى bot_data."""
     state = app.bot_data.get("_managed_state")
     if state is None:
-        full = load_managed_state()
+        # 🆕 v5.7.3: await
+        full = await load_managed_state()
         state = full.get(bid, {})
         app.bot_data["_managed_state"] = state
     return state
@@ -123,9 +127,11 @@ async def _persist(
     """حفظ حالة هذا البوت (read-modify-write مع قفل مشترك)."""
     try:
         async with get_lock():
-            full = load_managed_state()
+            # 🆕 v5.7.3: await
+            full = await load_managed_state()
             full[bid] = state
-            save_managed_state(full)
+            # 🆕 v5.7.3: await
+            await save_managed_state(full)
     except Exception as e:
         logger.warning("managed_bot #%s: persist state: %s", bid, e)
 
@@ -169,7 +175,8 @@ def make_managed_handlers(bid: int) -> Tuple[Callable, Callable]:
             lock = _lock_for_user(app, user.id)
 
             async with lock:
-                state = _get_state(app, bid)
+                # 🆕 v5.7.3: await (لأن _get_state أصبح async)
+                state = await _get_state(app, bid)
                 user_state = state.get(user.id, {})
                 _ensure_fields(user_state)
 
@@ -213,7 +220,8 @@ def make_managed_handlers(bid: int) -> Tuple[Callable, Callable]:
             lock = _lock_for_user(app, user.id)
 
             async with lock:
-                state = _get_state(app, bid)
+                # 🆕 v5.7.3: await (لأن _get_state أصبح async)
+                state = await _get_state(app, bid)
                 user_state = state.get(user.id, {})
                 _ensure_fields(user_state)
 
@@ -289,9 +297,9 @@ __all__ = [
 
 try:
     logger.debug(
-        "🛡️ handlers_managed_public v5.7.0 loaded | "
+        "🛡️ handlers_managed_public v5.7.3 (DB-MIGRATION) loaded | "
         "flow=start→reply→third→fourth | "
-        "locks=striped(%d) | persist=atomic",
+        "locks=striped(%d) | persist=async",
         _NUM_LOCK_STRIPES,
     )
 except Exception:
