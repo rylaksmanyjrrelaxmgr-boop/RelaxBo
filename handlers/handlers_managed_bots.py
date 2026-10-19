@@ -1,18 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-handlers/handlers_managed_bots.py — لوحة إدارة البوتات المُدارة (v5.7.1)
+handlers/handlers_managed_bots.py — لوحة إدارة البوتات المُدارة (v5.7.3 - DB-MIGRATION)
 =================================================================================
 📌 المسؤولية:
     • register_managed_bots_handlers(app) — تسجيل pattern="^mb_"
     • لوحة إدارة كاملة: عرض/إضافة/تعديل/تشغيل/إيقاف/حذف
     • استقبال النص المعلّق (توكن/رسالة) عبر MessageHandler
     • استخدام ApplicationHandlerStop لتفادي تداخل MessageHandlers
-
-🆕 v5.7.1 (FIX-ASYNCIO-IMPORT):
-    🔴 إصلاح `NameError: name 'asyncio' is not defined`
-       كان مفقوداً في `_process_addbot` (asyncio.wait_for + asyncio.TimeoutError).
-       أُضيف `import asyncio` في أعلى الملف.
 
 🎯 العقد:
     bot.py → register_managed_bots_handlers(app)  (قبل catch-all)
@@ -62,6 +57,7 @@ from managed_bots_storage import (
     load_managed_state,
     next_managed_bot_id,
     save_managed_bots,
+    save_managed_state,  # 🆕 v5.7.3: نُقل من الاستيراد الداخلي
 )
 
 logger = logging.getLogger(__name__)
@@ -91,7 +87,6 @@ _MSG_MAX_LEN = 4000
 
 _TOKEN_RE = re.compile(r"^\d{6,12}:[A-Za-z0-9_\-]{30,}$")
 
-# الحد الأقصى لعدد البوتات في اللوحة (بدون pagination)
 _MAX_BOTS_IN_PANEL = 12
 
 
@@ -137,7 +132,6 @@ async def _safe_edit(
     reply_markup: Optional[InlineKeyboardMarkup] = None,
     parse_mode: str = "HTML",
 ) -> None:
-    """تعديل آمن مع fallback عند غياب الرسالة الأصلية."""
     msg = getattr(query, "message", None)
     if msg is None:
         try:
@@ -288,8 +282,9 @@ async def _cb_panel(update, context) -> None:
     if not _is_admin(query.from_user.id):
         return
     context.user_data.pop("managed_pending", None)
-    bots = load_managed_bots()
-    state = load_managed_state()
+    # 🆕 v5.7.3: await
+    bots = await load_managed_bots()
+    state = await load_managed_state()
     text, kb = _build_panel(bots, state)
     await _safe_edit(query, text, kb)
 
@@ -322,12 +317,14 @@ async def _cb_bot(update, context) -> None:
     if not m:
         return
     bid = int(m.group(1))
-    bots = load_managed_bots()
+    # 🆕 v5.7.3: await
+    bots = await load_managed_bots()
     info = bots.get(bid)
     if info is None:
         await _safe_edit(query, "⚠️ البوت غير موجود.", _kb_back())
         return
-    state = load_managed_state()
+    # 🆕 v5.7.3: await
+    state = await load_managed_state()
     text, kb = _build_bot_detail(bid, info, state.get(bid, {}))
     await _safe_edit(query, text, kb)
 
@@ -344,7 +341,8 @@ async def _cb_set(update, context) -> None:
     field = m.group(2)
     if field not in _FIELD_LABEL:
         return
-    bots = load_managed_bots()
+    # 🆕 v5.7.3: await
+    bots = await load_managed_bots()
     if bid not in bots:
         await _safe_edit(query, "⚠️ البوت غير موجود.", _kb_back())
         return
@@ -374,7 +372,8 @@ async def _cb_toggle(update, context) -> None:
     if not m:
         return
     bid = int(m.group(1))
-    bots = load_managed_bots()
+    # 🆕 v5.7.3: await
+    bots = await load_managed_bots()
     info = bots.get(bid)
     if info is None:
         await _safe_edit(query, "⚠️ البوت غير موجود.", _kb_back())
@@ -399,7 +398,8 @@ async def _cb_toggle(update, context) -> None:
             )
             return
 
-    state = load_managed_state()
+    # 🆕 v5.7.3: await
+    state = await load_managed_state()
     text, kb = _build_bot_detail(bid, info, state.get(bid, {}))
     await _safe_edit(query, text, kb)
 
@@ -413,12 +413,15 @@ async def _cb_del_confirm(update, context) -> None:
     if not m:
         return
     bid = int(m.group(1))
-    bots = load_managed_bots()
+    # 🆕 v5.7.3: await
+    bots = await load_managed_bots()
     info = bots.get(bid)
     if info is None:
         await _safe_edit(query, "⚠️ البوت غير موجود.", _kb_back())
         return
-    n_users = len(load_managed_state().get(bid, {}))
+    # 🆕 v5.7.3: await
+    _state = await load_managed_state()
+    n_users = len(_state.get(bid, {}))
     kb = InlineKeyboardMarkup([
         [InlineKeyboardButton(
             f"✅ نعم، احذف #{bid}", callback_data=f"mb_dodel:{bid}"
@@ -457,22 +460,24 @@ async def _cb_del_do(update, context) -> None:
 
     try:
         async with get_lock():
-            bots = load_managed_bots()
+            # 🆕 v5.7.3: await
+            bots = await load_managed_bots()
             if bid in bots:
                 del bots[bid]
-                save_managed_bots(bots)
-            state = load_managed_state()
+                await save_managed_bots(bots)
+            # 🆕 v5.7.3: await + استخدام save_managed_state المستورد
+            state = await load_managed_state()
             if bid in state:
                 del state[bid]
-                from managed_bots_storage import save_managed_state
-                save_managed_state(state)
+                await save_managed_state(state)
     except Exception as _e:
         logger.error("del_bot storage: %s", _e, exc_info=True)
         await _safe_edit(query, "❌ فشل الحذف.", _kb_back())
         return
 
-    bots = load_managed_bots()
-    state = load_managed_state()
+    # 🆕 v5.7.3: await
+    bots = await load_managed_bots()
+    state = await load_managed_state()
     text, kb = _build_panel(bots, state)
     await _safe_edit(query, f"🗑️ تم حذف بوت #{bid}.\n\n" + text, kb)
 
@@ -492,7 +497,7 @@ async def _handle_pending_text(update, context) -> None:
 
     pending = context.user_data.get("managed_pending")
     if not pending:
-        return  # ندع MessageHandlers.handle_private تتصرف
+        return
 
     kind = pending.get("kind")
     raw = (update.message.text or "").strip()
@@ -505,12 +510,10 @@ async def _handle_pending_text(update, context) -> None:
         context.user_data.pop("managed_pending", None)
         return
 
-    # منع باقي المعالجات
     raise ApplicationHandlerStop
 
 
 async def _process_addbot(update, context, raw: str) -> None:
-    # تحقق أولي
     if not raw or len(raw) < _TOKEN_MIN_LEN or len(raw) > _TOKEN_MAX_LEN:
         await update.message.reply_text(
             "❌ التوكن غير صالح (الطول غير متوقع).\n"
@@ -525,7 +528,6 @@ async def _process_addbot(update, context, raw: str) -> None:
         )
         return
 
-    # تحقق من تعارض مع Relax
     relax_token = (getattr(CONFIG, "TOKEN", "") or "").strip()
     if relax_token and raw == relax_token:
         await update.message.reply_text(
@@ -533,8 +535,8 @@ async def _process_addbot(update, context, raw: str) -> None:
         )
         return
 
-    # تحقق من التكرار
-    existing = load_managed_bots()
+    # 🆕 v5.7.3: await
+    existing = await load_managed_bots()
     for bid, info in existing.items():
         if info.get("token") == raw:
             await update.message.reply_text(
@@ -542,12 +544,10 @@ async def _process_addbot(update, context, raw: str) -> None:
             )
             return
 
-    # عرض حالة
     status_msg = await update.message.reply_text(
         "⏳ جاري التحقق من التوكن..."
     )
 
-    # تحقق من Telegram
     tmp_bot: Optional[Bot] = None
     try:
         tmp_bot = Bot(token=raw)
@@ -578,10 +578,10 @@ async def _process_addbot(update, context, raw: str) -> None:
             except Exception:
                 pass
 
-    # حفظ
     try:
         async with get_lock():
-            bots = load_managed_bots()
+            # 🆕 v5.7.3: await
+            bots = await load_managed_bots()
             new_bid = next_managed_bot_id(bots)
             bots[new_bid] = {
                 "token":    raw,
@@ -589,19 +589,18 @@ async def _process_addbot(update, context, raw: str) -> None:
                 "messages": get_default_messages(),
                 "added_at": _now_iso(),
             }
-            save_managed_bots(bots)
+            # 🆕 v5.7.3: await
+            await save_managed_bots(bots)
     except Exception as _e:
         logger.error("addbot save: %s", _e, exc_info=True)
         await status_msg.edit_text("❌ فشل الحفظ.")
         return
 
-    # حذف رسالة التوكن الأصلية
     try:
         await update.message.delete()
     except Exception:
         pass
 
-    # تشغيل تلقائي
     context.user_data.pop("managed_pending", None)
     try:
         ok = await start_one(new_bid, raw)
@@ -612,7 +611,6 @@ async def _process_addbot(update, context, raw: str) -> None:
         logger.error("addbot start: %s", _e, exc_info=True)
         status_text = "🔴 فشل التشغيل"
 
-    # رد إداري (ليس رداً على رسالة محذوفة)
     chat_id = update.effective_chat.id
     try:
         await context.bot.send_message(
@@ -626,9 +624,9 @@ async def _process_addbot(update, context, raw: str) -> None:
     except Exception as _e:
         logger.debug("addbot confirm: %s", _e)
 
-    # لوحة محدّثة
-    bots = load_managed_bots()
-    state = load_managed_state()
+    # 🆕 v5.7.3: await
+    bots = await load_managed_bots()
+    state = await load_managed_state()
     text, kb = _build_panel(bots, state)
     try:
         await context.bot.send_message(
@@ -662,20 +660,22 @@ async def _process_set(
 
     try:
         async with get_lock():
-            bots = load_managed_bots()
+            # 🆕 v5.7.3: await
+            bots = await load_managed_bots()
             if bid not in bots:
                 context.user_data.pop("managed_pending", None)
                 await update.message.reply_text("⚠️ البوت غير موجود.")
                 return
             bots[bid]["messages"][field] = new_text
-            save_managed_bots(bots)
+            # 🆕 v5.7.3: await
+            await save_managed_bots(bots)
     except Exception as _e:
         logger.error("set message storage: %s", _e, exc_info=True)
         await update.message.reply_text("❌ فشل الحفظ.")
         return
 
-    # إعادة تحميل الرسائل في البوت العامل
-    reload_messages(bid)
+    # 🆕 v5.7.3: await (reload_messages أصبحت async)
+    await reload_messages(bid)
 
     context.user_data.pop("managed_pending", None)
     await update.message.reply_text(
@@ -683,9 +683,9 @@ async def _process_set(
         parse_mode="HTML",
     )
 
-    # إعادة عرض اللوحة
-    bots = load_managed_bots()
-    state = load_managed_state()
+    # 🆕 v5.7.3: await
+    bots = await load_managed_bots()
+    state = await load_managed_state()
     info = bots.get(bid)
     if info is not None:
         text, kb = _build_bot_detail(bid, info, state.get(bid, {}))
@@ -702,12 +702,6 @@ async def _process_set(
 # ═══════════════════════════════════════════════════════════════════════════
 
 def register_managed_bots_handlers(app: Application) -> None:
-    """
-    يُسجّل كل معالجات mb_* + معالج النص المعلّق.
-    يجب أن يُستدعى قبل app.add_handler(CallbackQueryHandler(CallbackHandlers.handle)).
-    """
-
-    # 1) callbacks
     handlers = [
         (r"^mb_panel$", _cb_panel),
         (r"^mb_add$", _cb_add),
@@ -724,7 +718,6 @@ def register_managed_bots_handlers(app: Application) -> None:
             group=0,
         )
 
-    # 2) معالج النص المعلّق (private فقط، group=-1 ليسبق handle_private)
     app.add_handler(
         MessageHandler(
             filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE,
@@ -752,9 +745,9 @@ __all__ = ["register_managed_bots_handlers"]
 
 try:
     logger.debug(
-        "🛡️ handlers_managed_bots v5.7.1 loaded | "
+        "🛡️ handlers_managed_bots v5.7.3 (DB-MIGRATION) loaded | "
         "callbacks=7 | text_handler=group(-1) | "
-        "max_panel=%d | asyncio=imported",
+        "max_panel=%d | asyncio=imported | reload_messages=async",
         _MAX_BOTS_IN_PANEL,
     )
 except Exception:
