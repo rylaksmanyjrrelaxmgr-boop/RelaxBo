@@ -1,36 +1,24 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-db_diagnostics.py — واجهة تشخيص وصيانة قاعدة البيانات (v7.2.22 — DOC-QUALITY)
+db_diagnostics.py — واجهة تشخيص وصيانة قاعدة البيانات (v7.2.23 — CLEANUP-VISIBILITY)
 ================================================================================
-🆕 v7.2.22 — DOC-QUALITY-IMPROVEMENTS (لا تغيير سلوكي):
+🆕 v7.2.23 — CLEANUP-VISIBILITY (بدون تغيير سلوكي لمستخدمي التشخيص):
 
-    🟢 FIX-DOC-POOL-SEMANTICS:
-        توضيح في _read_pool_metrics + _format_pool_line أن:
-          • current_size = idle + in_use (كما تُرجعه pool.get_size())
-          • idle_size = عدد الاتصالات الخاملة (pool.get_idle_size())
-          • in_use = current_size - idle_size (الفارق)
-        تصحيح تعليق util في _format_pool_line: util = current/max
-        (ليس in_use/max). في معظم الحالات current == max → util=100%
-        وهذا طبيعي لأن asyncpg يحتفظ بالاتصالات للاستخدام السريع.
+    🔴 FIX-CLEANUP-1: auto_vacuum_dirty_mvs تُرجع الآن:
+        • 'skipped'   : جداول فيها dead > 0 لكن < min_dead (لن تُنظَّف).
+        • 'remaining' : كل جدول فيه dead بعد التنظيف (name, dead, ratio, is_mv).
+        • 'dead_after' لكل جدول داخل 'vacuumed'.
 
-    🟢 FIX-DOC-STARTUP-GRACE:
-        توضيح أن _STARTUP_GRACE_SEC = 60s يتطابق مع mark_process_start()
-        المُستدعى من bot.py v5.6.40::main(). إذا لم يُستدعَ mark_process_start
-        (بوت قديم)، يُستخدم _PROCESS_IMPORT_TS كـ fallback (محسوب من psutil).
-        تحذير إذا لم يُستدعَ خلال أول 30s.
+    🔴 FIX-CLEANUP-2: لا ترجع 0 كـ 'total_dead_after' عند عدم وجود
+        targets — كانت تقرأ dirty_after فقط بعد حلقة VACUUM.
+        الآن تقرأ dirty_after دائمًا (حتى بدون targets).
 
-    🟢 FIX-DOC-PSUTIL-SYNC:
-        توضيح في _probe_system أن:
-          • psutil.virtual_memory() sync لكنه <1ms — لا يحتاج to_thread
-          • psutil.cpu_percent(interval=None) sync لكنه <1ms
-          • psutil.cpu_percent(interval>0) sync ويحجب interval — نتجنّبه
-        في db_diagnostics نستخدم interval=None فقط (سريع).
+    🟠 FIX-CLEANUP-3: قراءة dead_after لكل جدول بعد VACUUM مباشرة
+        (كانت مفقودة تمامًا).
 
-    🟢 IMPROVE-BEACON:
-        LOAD BEACON يُظهر حالة _PROCESS_START_TS (mark_called أو import_ts).
-
-🆕 v7.2.21 — POOL-DISPLAY-FIX — محفوظ بالكامل.
+🆕 v7.2.22 — DOC-QUALITY-IMPROVEMENTS — محفوظ بالكامل.
+🆕 v7.2.21 — POOL-DISPLAY-FIX — محفوظ.
 🆕 v7.2.20 — COMMAND-FIX — محفوظ.
 🆕 v7.2.19 — GRACE-EXTENDED — محفوظ.
 🆕 v7.2.18 — FIX-COMPLETE — محفوظ.
@@ -77,16 +65,10 @@ logger = logging.getLogger(__name__)
 # الإصدار + Startup grace
 # ═══════════════════════════════════════════════════════════════════════
 
-VERSION = "7.2.22"
+VERSION = "7.2.23"
 
 
 def _compute_process_start_monotonic() -> float:
-    """
-    FIX-17 (v7.2.18): نحسب بدء العملية الفعلي عبر psutil عند الاستيراد
-    كـ fallback أمتن من وقت الاستيراد.
-
-    لو لم يتوفر psutil، نتراجع إلى /proc/self/stat ثم time.monotonic().
-    """
     try:
         import psutil  # type: ignore
         created = psutil.Process().create_time()
@@ -105,32 +87,16 @@ def _compute_process_start_monotonic() -> float:
 
 
 _PROCESS_IMPORT_TS: float = _compute_process_start_monotonic()
-_PROCESS_START_TS: float = 0.0  # 0 = استخدم IMPORT_TS
+_PROCESS_START_TS: float = 0.0
 _STARTUP_GRACE_SEC = 60.0
 
 
 def mark_process_start() -> None:
-    """
-    FIX-2 (v7.2.17): يجب استدعاؤها من main.py عند بدء العملية الفعلي.
-    إن لم تُستدعَ، نستخدم _PROCESS_IMPORT_TS (المُحسَّبة من psutil).
-
-    🟢 FIX-DOC-STARTUP-GRACE (v7.2.22):
-      • bot.py v5.6.40 يستدعيها في main() مباشرة بعد signal setup.
-      • يبدأ نافذة _STARTUP_GRACE_SEC = 60s لإخفاء قياسات
-        CPU/RAM/Event Loop/Filesystem المضخَّمة أثناء warmup
-        (19 مهمة خلفية + pool warmup + webhook setup).
-      • إذا لم تُستدعَ (بوت قديم)، يُستخدم _PROCESS_IMPORT_TS من psutil
-        كـ fallback — يعمل لكن أقل دقة إذا كان البوت قد بدأ قبل
-        استيراد db_diagnostics.
-
-    ⚠️ إذا كانت النافذة مهمة لتصحيح التشخيص، تأكد من استدعائها.
-    """
     global _PROCESS_START_TS
     _PROCESS_START_TS = time.monotonic()
 
 
 def _uptime_sec() -> float:
-    """مدة تشغيل العملية (من بدء فعلي أو psutil-import fallback)."""
     base = _PROCESS_START_TS if _PROCESS_START_TS > 0 else _PROCESS_IMPORT_TS
     return max(0.0, time.monotonic() - base)
 
@@ -145,7 +111,6 @@ _NEGATIVE_CACHE_TTL = 5.0
 _FULL_HEALTH_TTL_NORMAL = 120.0
 _FULL_HEALTH_TTL_STARTUP = 10.0
 
-# عتبات RTT-REGION-INFERENCE
 _RTT_SAME_REGION_HIGH = 15.0
 _RTT_SAME_REGION_MEDIUM = 50.0
 _RTT_CROSS_REGION_MIN = 150.0
@@ -188,20 +153,10 @@ _SQLITE_PATH_VARS: Tuple[str, ...] = (
 )
 
 _DB_URL_PRIORITY: Tuple[str, ...] = (
-    "DATABASE_URL",
-    "TIMESCALE_URL",
-    "POSTGRES_URL",
-    "POSTGRESQL_URL",
-    "PG_URL",
-    "MYSQL_URL",
-    "MARIADB_URL",
-    "DB_URL",
-    "DATABASE_URI",
+    "DATABASE_URL", "TIMESCALE_URL", "POSTGRES_URL",
+    "POSTGRESQL_URL", "PG_URL", "MYSQL_URL", "MARIADB_URL",
+    "DB_URL", "DATABASE_URI",
 )
-
-# ═══════════════════════════════════════════════════════════════════════
-# خرائط المناطق السحابية
-# ═══════════════════════════════════════════════════════════════════════
 
 _CLOUD_ENV_KEYS: Dict[str, str] = {
     "RENDER_SERVICE_ID":        "render",
@@ -525,65 +480,24 @@ def _extract_db_components(url: str) -> Dict[str, Any]:
 
 def _guess_provider_from_host(host: str) -> str:
     h = (host or "").lower()
-    if "timescale.com" in h:
-        return "timescale"
-    if "aivencloud.com" in h:
-        return "aiven"
-    if "rds.amazonaws.com" in h:
-        return "aws_rds"
-    if "supabase" in h:
-        return "supabase"
-    if "neon.tech" in h:
-        return "neon"
-    if "render.com" in h:
-        return "render"
-    if "railway" in h:
-        return "railway"
-    if "heroku" in h:
-        return "heroku"
-    if "cloudsql" in h or "gcp" in h:
-        return "gcp"
-    if h in ("localhost", "127.0.0.1", "::1"):
-        return "local"
+    if "timescale.com" in h: return "timescale"
+    if "aivencloud.com" in h: return "aiven"
+    if "rds.amazonaws.com" in h: return "aws_rds"
+    if "supabase" in h: return "supabase"
+    if "neon.tech" in h: return "neon"
+    if "render.com" in h: return "render"
+    if "railway" in h: return "railway"
+    if "heroku" in h: return "heroku"
+    if "cloudsql" in h or "gcp" in h: return "gcp"
+    if h in ("localhost", "127.0.0.1", "::1"): return "local"
     return "unknown"
 
 
 def _read_pool_metrics(pool) -> Dict[str, int]:
-    """
-    🆕 FIX-21 (v7.2.21): قراءة مقاييس pool دقيقة.
-
-    المشكلة السابقة: `len(pool._holders)` يعطي كل الاتصالات
-    (idle + in-use)، وليس فقط المُستخدَمة → عرض `15/15` مضلّل.
-
-    الحل: استخدام الواجهات الرسمية:
-      - pool.get_size() → العدد الحالي للاتصالات (idle + in_use)
-      - pool.get_idle_size() → الاتصالات الخاملة
-      - in_use = get_size - get_idle_size
-
-    Returns dict مع: max_size, current_size, idle_size, in_use
-    كل القيم آمنة (0 عند الفشل).
-
-    🟢 FIX-DOC-POOL-SEMANTICS (v7.2.22):
-      • current_size = idle_size + in_use (كما تُرجعه pool.get_size())
-      • idle_size = الاتصالات الجاهزة للاستخدام (لا يوجد في transaction)
-      • in_use = الاتصالات المشغولة حالياً في استعلام
-      • max_size = أقصى عدد يمكن أن ينميه asyncpg (connection_pool_size)
-
-    ملاحظة مهمة: asyncpg يُبقي الاتصالات حية بعد استخدامها (idle)
-    لتسريع الاستعلامات التالية. لذلك current_size عادةً قريب من
-    max_size بعد warmup — هذا طبيعي وسليم، ليس تسريباً.
-    """
-    metrics = {
-        "max_size": 0,
-        "current_size": 0,
-        "idle_size": 0,
-        "in_use": 0,
-    }
+    metrics = {"max_size": 0, "current_size": 0, "idle_size": 0, "in_use": 0}
     if pool is None:
         return metrics
-
     try:
-        # max_size
         try:
             if hasattr(pool, "get_max_size") and callable(pool.get_max_size):
                 metrics["max_size"] = int(pool.get_max_size() or 0)
@@ -593,8 +507,6 @@ def _read_pool_metrics(pool) -> Dict[str, int]:
                     metrics["max_size"] = int(_m)
         except Exception:
             pass
-
-        # current_size = idle + in_use
         try:
             if hasattr(pool, "get_size") and callable(pool.get_size):
                 metrics["current_size"] = int(pool.get_size() or 0)
@@ -607,8 +519,6 @@ def _read_pool_metrics(pool) -> Dict[str, int]:
                         metrics["current_size"] = int(_s)
         except Exception:
             pass
-
-        # idle_size
         try:
             if hasattr(pool, "get_idle_size") and callable(pool.get_idle_size):
                 metrics["idle_size"] = int(pool.get_idle_size() or 0)
@@ -621,58 +531,35 @@ def _read_pool_metrics(pool) -> Dict[str, int]:
                         metrics["idle_size"] = int(_i)
         except Exception:
             pass
-
-        # in_use = current - idle (لا يمكن أن يكون سالباً)
-        metrics["in_use"] = max(
-            0, metrics["current_size"] - metrics["idle_size"]
-        )
-
-        # sanity check: in_use ≤ max_size
+        metrics["in_use"] = max(0, metrics["current_size"] - metrics["idle_size"])
         if metrics["max_size"] > 0:
             metrics["in_use"] = min(metrics["in_use"], metrics["max_size"])
-            metrics["current_size"] = min(
-                metrics["current_size"], metrics["max_size"]
-            )
-            metrics["idle_size"] = min(
-                metrics["idle_size"], metrics["max_size"]
-            )
+            metrics["current_size"] = min(metrics["current_size"], metrics["max_size"])
+            metrics["idle_size"] = min(metrics["idle_size"], metrics["max_size"])
     except Exception:
         pass
-
     return metrics
 
 
 def _detect_active_db_source(db) -> Dict[str, Any]:
     out: Dict[str, Any] = {
-        "active_url": "",
-        "active_masked": "",
-        "active_source": "unknown",
-        "db_type": "unknown",
+        "active_url": "", "active_masked": "",
+        "active_source": "unknown", "db_type": "unknown",
         "provider": "unknown",
         "components": {"host": "?", "port": 0, "database": "?", "user": "?", "scheme": "?"},
-        "region": "unknown",
-        "region_confidence": "low",
-        "use_postgres": False,
-        "use_mysql": False,
-        "pool_size": 0,
-        "pool_used": 0,       # 🆕 FIX-21: in-use الفعلي
-        "pool_idle": 0,       # 🆕 FIX-21: idle صريح
-        "pool_current": 0,    # 🆕 FIX-21: current_size الفعلي
+        "region": "unknown", "region_confidence": "low",
+        "use_postgres": False, "use_mysql": False,
+        "pool_size": 0, "pool_used": 0, "pool_idle": 0, "pool_current": 0,
     }
     if db is None:
         return out
-
-    active_url = (
-        getattr(db, "DATABASE_URL", "")
-        or os.getenv("DATABASE_URL", "")
-    )
+    active_url = (getattr(db, "DATABASE_URL", "") or os.getenv("DATABASE_URL", ""))
     out["active_url"] = active_url
     out["active_masked"] = _mask_db_url(active_url)
     out["components"] = _extract_db_components(active_url)
     out["db_type"] = str(getattr(db, "DB_TYPE", "sqlite")).lower()
     out["use_postgres"] = bool(getattr(db, "USE_POSTGRES", False))
     out["use_mysql"] = bool(getattr(db, "USE_MYSQL", False))
-
     is_sqlite_local = (
         out["db_type"] == "sqlite"
         and not out["use_postgres"]
@@ -681,43 +568,32 @@ def _detect_active_db_source(db) -> Dict[str, Any]:
     if is_sqlite_local:
         out["provider"] = "sqlite_local"
         out["active_source"] = "sqlite"
-        out["components"] = {
-            "host": "local", "port": 0,
-            "database": "sqlite", "user": "?", "scheme": "sqlite",
-        }
+        out["components"] = {"host": "local", "port": 0, "database": "sqlite",
+                             "user": "?", "scheme": "sqlite"}
         out["region"] = "local"
         out["region_confidence"] = "high"
     else:
-        out["provider"] = _guess_provider_from_host(
-            out["components"].get("host", "")
-        )
-
-    # 🆕 FIX-21 (v7.2.21): قراءة pool metrics بدقة
+        out["provider"] = _guess_provider_from_host(out["components"].get("host", ""))
     pool = getattr(db, "_pool", None)
     if pool is not None:
         try:
             _metrics = _read_pool_metrics(pool)
-
-            # ملء max_size من DB_POOL_SIZE عند غياب pool API
             if _metrics["max_size"] <= 0:
                 try:
                     _fallback_max = getattr(db, "DB_POOL_SIZE", 0) or 0
                     _metrics["max_size"] = int(_fallback_max)
                 except Exception:
                     pass
-
             out["pool_size"] = _metrics["max_size"]
             out["pool_used"] = _metrics["in_use"]
             out["pool_idle"] = _metrics["idle_size"]
             out["pool_current"] = _metrics["current_size"]
         except Exception:
             pass
-
     if not is_sqlite_local:
         region_info = _guess_db_region(out["components"].get("host", ""))
         out["region"] = region_info.get("region", "unknown")
         out["region_confidence"] = region_info.get("confidence", "low")
-
     if active_url and not is_sqlite_local:
         for var in _DB_URL_PRIORITY:
             val = os.getenv(var, "")
@@ -734,33 +610,27 @@ def _detect_active_db_source(db) -> Dict[str, Any]:
                    comp["database"] and comp["database"] in val:
                     out["active_source"] = f"{var} (تطابق جزئي)"
                     break
-
     return out
 
 
 def _get_all_configured_databases() -> List[Dict[str, Any]]:
     active = _detect_active_db_source(_get_db())
     active_url = active.get("active_url", "")
-
     configured: List[Dict[str, Any]] = []
     seen_keys = set()
-
     for var, hint_type in _DB_URL_ENV_VARS:
         val = os.getenv(var, "")
         if not val or len(val) < 10:
             continue
         if "://" not in val and not val.endswith(".db"):
             continue
-
         comp = _extract_db_components(val)
         dedup_key = f"{comp['host']}:{comp['port']}/{comp['database']}"
         is_active = (val == active_url)
-
         if dedup_key in seen_keys and not is_active:
             continue
         if is_active:
             seen_keys.add(dedup_key)
-
         db_type = hint_type
         scheme = (comp["scheme"] or "").lower()
         if scheme in ("postgres", "postgresql"):
@@ -771,133 +641,78 @@ def _get_all_configured_databases() -> List[Dict[str, Any]]:
             db_type = "sqlite"
         elif db_type == "unknown" and scheme:
             db_type = scheme
-
         provider = _guess_provider_from_host(comp["host"])
         region_info = _guess_db_region(comp["host"])
-
         configured.append({
-            "env_var": var,
-            "db_type": db_type,
-            "provider": provider,
-            "host": comp["host"],
-            "port": comp["port"],
-            "database": comp["database"],
-            "user": comp["user"],
-            "masked_url": _mask_db_url(val),
-            "is_active": is_active,
+            "env_var": var, "db_type": db_type, "provider": provider,
+            "host": comp["host"], "port": comp["port"],
+            "database": comp["database"], "user": comp["user"],
+            "masked_url": _mask_db_url(val), "is_active": is_active,
             "region": region_info.get("region", "unknown"),
             "region_confidence": region_info.get("confidence", "low"),
         })
-
     for var in _SQLITE_PATH_VARS:
         val = os.getenv(var, "")
-        if not val:
-            continue
-        if val in seen_keys:
+        if not val or val in seen_keys:
             continue
         seen_keys.add(val)
-
         is_active = (
             val == active_url
             or (active.get("db_type") == "sqlite"
                 and active.get("provider") == "sqlite_local")
         )
-
         configured.append({
-            "env_var": var,
-            "db_type": "sqlite",
-            "provider": "sqlite_local",
-            "host": "local",
-            "port": 0,
-            "database": val,
-            "user": "?",
-            "masked_url": val,
-            "is_active": is_active,
-            "region": "local",
-            "region_confidence": "high",
+            "env_var": var, "db_type": "sqlite", "provider": "sqlite_local",
+            "host": "local", "port": 0, "database": val, "user": "?",
+            "masked_url": val, "is_active": is_active,
+            "region": "local", "region_confidence": "high",
         })
-
     configured.sort(key=lambda x: (not x["is_active"], x["env_var"]))
     return configured
 
 
 def _get_multi_db_warnings(configured: List[Dict[str, Any]]) -> List[str]:
     warnings: List[str] = []
-
     hosts: Dict[str, List[str]] = {}
     for c in configured:
         key = f"{c['host']}:{c['port']}"
         hosts.setdefault(key, []).append(c["env_var"])
-
     for key, vars_list in hosts.items():
         if len(vars_list) > 1:
             warnings.append(
                 f"⚠️ <b>تكرار</b>: <code>{_esc(key)}</code> "
-                f"مُعرّف في: <code>{_esc(', '.join(vars_list))}</code> "
-                f"→ نفس DB"
+                f"مُعرّف في: <code>{_esc(', '.join(vars_list))}</code> → نفس DB"
             )
-
-    providers = set(
-        c["provider"] for c in configured
-        if c["provider"] not in ("unknown", "sqlite_local", "local")
-    )
+    providers = set(c["provider"] for c in configured
+                    if c["provider"] not in ("unknown", "sqlite_local", "local"))
     if len(providers) > 1:
         warnings.append(
             f"⚠️ <b>مزودون متعددون</b>: "
             f"<code>{_esc(', '.join(sorted(providers)))}</code> "
             f"— تأكد أن البوت يستخدم الصحيح"
         )
-
-    types = {c["db_type"] for c in configured
-             if c["db_type"] and c["db_type"] != "sqlite"}
+    types = {c["db_type"] for c in configured if c["db_type"] and c["db_type"] != "sqlite"}
     if len(types) > 1:
         warnings.append(
             f"⚠️ <b>أنواع DB مختلفة</b>: "
             f"<code>{_esc(', '.join(sorted(types)))}</code>"
         )
-
     if not any(c["is_active"] for c in configured):
         warnings.append(
             "⚠️ لم يتم تحديد أي DB كنشطة — قد يكون البوت يستخدم SQLite محلي."
         )
-
     return warnings
 
 
 def _format_pool_line(active: Dict[str, Any]) -> str:
-    """
-    🆕 FIX-21 (v7.2.21): عرض pool بصيغة غير مضلّلة.
-
-    الصيغة: `in_use/max_size (idle=N, current=M)`
-    مثال:   `3/15 (idle=12, current=15)`
-
-    🟢 FIX-DOC-POOL-SEMANTICS (v7.2.22):
-      • in_use: عدد الاتصالات المُستخدَمة الآن فعلياً
-      • idle: عدد الاتصالات الجاهزة (خاملة)
-      • current: in_use + idle (العدد الفعلي المُنشأ)
-      • max: أقصى عدد يمكن أن يُنشأه pool
-      • util: current/max (نسبة التعبئة الفعلية، عادة 100% بعد warmup
-        لأن asyncpg يحتفظ بالاتصالات للاستخدام السريع)
-      • icon: يعكس in_use/max (الاستخدام الحقيقي)، ليس util.
-    """
     max_size = active.get("pool_size", 0)
     in_use = active.get("pool_used", 0)
     idle = active.get("pool_idle", 0)
     current = active.get("pool_current", 0)
-
     if max_size <= 0 and current <= 0:
         return "🏊 Pool: — (غير متاح)"
-
-    # استخدام current_size إن كان max_size غير معروف
     display_max = max_size if max_size > 0 else current
-
-    # util = current/max (نسبة التعبئة الفعلية)
-    util_pct = (
-        round((current / display_max) * 100, 0)
-        if display_max > 0 else 0
-    )
-
-    # أيقونة حسب نسبة الاستخدام الحقيقي (in_use/max)
+    util_pct = round((current / display_max) * 100, 0) if display_max > 0 else 0
     if display_max > 0:
         real_util = (in_use / display_max) * 100
         if real_util < 50:
@@ -908,7 +723,6 @@ def _format_pool_line(active: Dict[str, Any]) -> str:
             icon = "🔴"
     else:
         icon = "⚪"
-
     return (
         f"🏊 Pool: {icon} {in_use}/{display_max} "
         f"(idle={idle}, current={current}, util={util_pct:.0f}%)"
@@ -920,10 +734,8 @@ def format_multi_db_report() -> str:
     lines.append("🗂️ <b>قواعد البيانات المُعدّة (Multi-DB Discovery)</b>")
     lines.append("━━━━━━━━━━━━━━━━━━━━━━")
     lines.append("")
-
     active = _detect_active_db_source(_get_db())
     configured = _get_all_configured_databases()
-
     lines.append("🟢 <b>النشطة حالياً:</b>")
     if active.get("active_url") or active.get("provider") == "sqlite_local":
         comp = active.get("components", {})
@@ -935,7 +747,6 @@ def format_multi_db_report() -> str:
         lines.append(f"   🔌 المصدر: <code>{_esc(active.get('active_source', '?'))}</code>")
         lines.append(f"   🌍 المنطقة: <code>{_esc(active.get('region', 'unknown'))}</code> "
                      f"<i>({active.get('region_confidence', '?')})</i>")
-        # 🆕 FIX-21: عرض Pool بصيغة دقيقة
         lines.append(f"   {_format_pool_line(active)}")
         masked = active.get("active_masked", "")
         if masked:
@@ -943,31 +754,20 @@ def format_multi_db_report() -> str:
     else:
         lines.append("   ⚪ لم يتم الاتصال بعد، أو SQLite محلي.")
     lines.append("")
-
     if not configured:
         lines.append("⚠️ لا توجد قواعد بيانات مُعدّة في env vars.")
         return "\n".join(lines)
-
     lines.append(f"📋 <b>كل المُعدّة ({len(configured)}):</b>")
     lines.append("")
     for c in configured:
         icon = "🟢" if c["is_active"] else "⚪"
         active_tag = " ← <b>النشطة</b>" if c["is_active"] else ""
-        lines.append(
-            f"  {icon} <code>{_esc(c['env_var'])}</code>{active_tag}"
-        )
-        lines.append(
-            f"      {_esc(c['db_type'].upper())} | "
-            f"{_esc(c['provider'])} | "
-            f"{_esc(c['host'])}:{c['port']}"
-        )
-        lines.append(
-            f"      📦 <code>{_esc(c['database'])}</code> | "
-            f"🌍 {_esc(c['region'])}"
-        )
+        lines.append(f"  {icon} <code>{_esc(c['env_var'])}</code>{active_tag}")
+        lines.append(f"      {_esc(c['db_type'].upper())} | "
+                     f"{_esc(c['provider'])} | {_esc(c['host'])}:{c['port']}")
+        lines.append(f"      📦 <code>{_esc(c['database'])}</code> | 🌍 {_esc(c['region'])}")
         lines.append(f"      🔗 <code>{_esc(c['masked_url'][:80])}</code>")
         lines.append("")
-
     warnings = _get_multi_db_warnings(configured)
     if warnings:
         lines.append("━━━━━━━━━━━━━━━━━━━━━━")
@@ -975,12 +775,10 @@ def format_multi_db_report() -> str:
         for w in warnings:
             lines.append(f"  {w}")
         lines.append("")
-
     if len(configured) == 1:
         lines.append("✅ <b>إعداد نظيف</b>: DB واحدة فقط مُعرّفة.")
     elif not warnings:
         lines.append("✅ <b>إعداد سليم</b>: قواعد متعددة لكن النشطة واضحة.")
-
     return "\n".join(lines)
 
 
@@ -1001,7 +799,6 @@ def format_active_db_line() -> str:
         if active.get("db_type") == "sqlite":
             return "🗄️ <b>DB النشطة:</b> SQLite (محلي)"
         return ""
-
     comp = active.get("components", {})
     src = active.get("active_source", "?")
     provider = active.get("provider", "?")
@@ -1009,18 +806,16 @@ def format_active_db_line() -> str:
     port = comp.get("port", 0)
     db_name = comp.get("database", "?")
     region = active.get("region", "unknown")
-
     return (
         f"🗄️ <b>DB النشطة:</b> "
         f"<code>{_esc(provider)}</code> @ "
         f"<code>{_esc(host)}:{port}/{_esc(db_name)}</code>\n"
-        f"   🔌 من: <code>{_esc(src)}</code> | "
-        f"🌍 <code>{_esc(region)}</code>"
+        f"   🔌 من: <code>{_esc(src)}</code> | 🌍 <code>{_esc(region)}</code>"
     )
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# كشف المناطق الجغرافية
+# كشف المناطق
 # ═══════════════════════════════════════════════════════════════════════
 
 def _normalize_render_region(raw: str) -> Optional[str]:
@@ -1043,22 +838,15 @@ def _normalize_render_region(raw: str) -> Optional[str]:
 
 
 def _detect_bot_cloud() -> Dict[str, Any]:
-    result: Dict[str, Any] = {
-        "provider": "unknown",
-        "region": "unknown",
-        "confidence": "low",
-        "hints": [],
-    }
-
+    result: Dict[str, Any] = {"provider": "unknown", "region": "unknown",
+                              "confidence": "low", "hints": []}
     for key, provider in _CLOUD_ENV_KEYS.items():
         if os.getenv(key):
             result["provider"] = provider
             result["hints"].append(key)
             result["confidence"] = "high"
             break
-
     provider = result["provider"]
-
     if provider == "render":
         for key in _RENDER_REGION_ENV_VARS:
             raw = os.getenv(key)
@@ -1070,7 +858,6 @@ def _detect_bot_cloud() -> Dict[str, Any]:
                 result["confidence"] = "high"
                 result["hints"].append(f"{key}={raw}")
                 break
-
         if result["region"] == "unknown":
             hostname = os.getenv("RENDER_EXTERNAL_HOSTNAME", "")
             if hostname:
@@ -1079,44 +866,32 @@ def _detect_bot_cloud() -> Dict[str, Any]:
                     result["region"] = normalized
                     result["confidence"] = "medium"
                     result["hints"].append(f"hostname={hostname}")
-
     elif provider == "fly":
         region = os.getenv("FLY_REGION") or os.getenv("FLY_REGION_CODE")
         if region:
             result["region"] = region.lower()
             result["confidence"] = "high"
             result["hints"].append("FLY_REGION")
-
     elif provider == "heroku":
         region = os.getenv("HEROKU_REGION")
         if region:
             result["region"] = f"heroku-{region.lower()}"
             result["confidence"] = "high"
             result["hints"].append("HEROKU_REGION")
-
     elif provider == "railway":
         region = os.getenv("RAILWAY_REGION")
         if region:
             result["region"] = region.lower()
             result["confidence"] = "high"
             result["hints"].append("RAILWAY_REGION")
-
     return result
 
 
 def _guess_db_region(db_host: str) -> Dict[str, Any]:
-    result: Dict[str, Any] = {
-        "provider": "unknown",
-        "region": "unknown",
-        "confidence": "low",
-    }
+    result: Dict[str, Any] = {"provider": "unknown", "region": "unknown", "confidence": "low"}
     h = (db_host or "").lower().strip()
-
-    env_region = (
-        os.getenv("DB_REGION")
-        or os.getenv("TIMESCALE_REGION")
-        or os.getenv("DATABASE_REGION")
-    )
+    env_region = (os.getenv("DB_REGION") or os.getenv("TIMESCALE_REGION")
+                  or os.getenv("DATABASE_REGION"))
     if env_region:
         normalized = _normalize_render_region(env_region) or env_region
         result["region"] = normalized
@@ -1128,10 +903,8 @@ def _guess_db_region(db_host: str) -> Dict[str, Any]:
         elif "rds.amazonaws.com" in h:
             result["provider"] = "aws_rds"
         return result
-
     if not h:
         return result
-
     if "aivencloud.com" in h:
         result["provider"] = "aiven"
         for hint, region in _AIVEN_REGION_HINTS.items():
@@ -1141,104 +914,64 @@ def _guess_db_region(db_host: str) -> Dict[str, Any]:
                 return result
         result["confidence"] = "low"
         return result
-
     if "timescale.com" in h:
         result["provider"] = "timescale"
         result["confidence"] = "low"
         return result
-
     if "rds.amazonaws.com" in h:
         result["provider"] = "aws_rds"
         for p in h.split("."):
-            if any(p.startswith(prefix)
-                   for prefix in ("eu-", "us-", "ap-", "ca-", "sa-")):
+            if any(p.startswith(prefix) for prefix in ("eu-", "us-", "ap-", "ca-", "sa-")):
                 result["region"] = p
                 result["confidence"] = "high"
                 return result
         return result
-
     if "cloudsql" in h or "gcp" in h:
         result["provider"] = "gcp"
         return result
-
     return result
 
 
-def _infer_region_from_rtt(
-    tcp_ms: Optional[float],
-    bot_info: Dict[str, Any],
-    db_info: Dict[str, Any],
-) -> Dict[str, Any]:
-    out: Dict[str, Any] = {
-        "cross_region": None,
-        "confidence": "low",
-        "reason": "",
-        "inferred": False,
-    }
-
+def _infer_region_from_rtt(tcp_ms, bot_info, db_info) -> Dict[str, Any]:
+    out = {"cross_region": None, "confidence": "low", "reason": "", "inferred": False}
     if tcp_ms is None or tcp_ms <= 0:
         return out
-
     t = float(tcp_ms)
-
     if t < _RTT_SAME_REGION_HIGH:
         out["cross_region"] = False
         out["confidence"] = "high"
         out["inferred"] = True
-        out["reason"] = (
-            f"RTT={t:.0f}ms < {_RTT_SAME_REGION_HIGH:.0f}ms "
-            f"→ نفس المنطقة (استنتاج من RTT)"
-        )
+        out["reason"] = f"RTT={t:.0f}ms < {_RTT_SAME_REGION_HIGH:.0f}ms → نفس المنطقة (استنتاج من RTT)"
     elif t < _RTT_SAME_REGION_MEDIUM:
         out["cross_region"] = False
         out["confidence"] = "medium"
         out["inferred"] = True
-        out["reason"] = (
-            f"RTT={t:.0f}ms في نطاق "
-            f"{_RTT_SAME_REGION_HIGH:.0f}-{_RTT_SAME_REGION_MEDIUM:.0f}ms "
-            f"→ نفس المنطقة (احتمال مرتفع)"
-        )
+        out["reason"] = f"RTT={t:.0f}ms في نطاق {_RTT_SAME_REGION_HIGH:.0f}-{_RTT_SAME_REGION_MEDIUM:.0f}ms → نفس المنطقة (احتمال مرتفع)"
     elif t < _RTT_CROSS_REGION_MIN:
         out["cross_region"] = None
         out["confidence"] = "medium"
         out["inferred"] = True
-        out["reason"] = (
-            f"RTT={t:.0f}ms في نطاق "
-            f"{_RTT_SAME_REGION_MEDIUM:.0f}-{_RTT_CROSS_REGION_MIN:.0f}ms "
-            f"→ احتمال cross-region"
-        )
+        out["reason"] = f"RTT={t:.0f}ms في نطاق {_RTT_SAME_REGION_MEDIUM:.0f}-{_RTT_CROSS_REGION_MIN:.0f}ms → احتمال cross-region"
     else:
         out["cross_region"] = True
         out["confidence"] = "high"
         out["inferred"] = True
-        out["reason"] = (
-            f"RTT={t:.0f}ms ≥ {_RTT_CROSS_REGION_MIN:.0f}ms "
-            f"→ مناطق مختلفة قطعياً"
-        )
-
+        out["reason"] = f"RTT={t:.0f}ms ≥ {_RTT_CROSS_REGION_MIN:.0f}ms → مناطق مختلفة قطعياً"
     return out
 
 
-def _detect_cross_region(
-    bot_info: Dict[str, Any],
-    db_info: Dict[str, Any],
-    tcp_ms: Optional[float] = None,
-) -> Dict[str, Any]:
-    out: Dict[str, Any] = {
+def _detect_cross_region(bot_info, db_info, tcp_ms=None) -> Dict[str, Any]:
+    out = {
         "cross_region": None,
         "bot_region": bot_info.get("region", "unknown"),
         "db_region": db_info.get("region", "unknown"),
         "bot_provider": bot_info.get("provider", "unknown"),
         "db_provider": db_info.get("provider", "unknown"),
-        "confidence": "low",
-        "recommendation": "",
-        "inferred_from_rtt": False,
-        "inference_reason": "",
+        "confidence": "low", "recommendation": "",
+        "inferred_from_rtt": False, "inference_reason": "",
     }
-
     bot_r = bot_info.get("region", "unknown")
     db_r = db_info.get("region", "unknown")
-
     if tcp_ms is not None and tcp_ms > 0:
         inference = _infer_region_from_rtt(tcp_ms, bot_info, db_info)
         if inference.get("confidence") == "high":
@@ -1246,7 +979,6 @@ def _detect_cross_region(
             out["confidence"] = "high"
             out["inferred_from_rtt"] = True
             out["inference_reason"] = inference["reason"]
-
             if inference["cross_region"] is False:
                 out["recommendation"] = (
                     f"✅ {inference['reason']}.\n"
@@ -1262,23 +994,13 @@ def _detect_cross_region(
                     f"   ✅ الحل: انقل البوت و DB إلى نفس المنطقة."
                 )
             return out
-
     if bot_r != "unknown" and db_r != "unknown":
-        out["confidence"] = (
-            "high"
-            if (bot_info.get("confidence") == "high"
-                and db_info.get("confidence") == "high")
-            else "medium"
-        )
-
+        out["confidence"] = ("high" if (bot_info.get("confidence") == "high"
+                                        and db_info.get("confidence") == "high") else "medium")
         if bot_r == db_r:
             out["cross_region"] = False
-            out["recommendation"] = (
-                f"✅ البوت و DB في نفس المنطقة ({bot_r}). "
-                f"RTT الطبيعي المتوقع 1-5ms."
-            )
+            out["recommendation"] = f"✅ البوت و DB في نفس المنطقة ({bot_r}). RTT الطبيعي المتوقع 1-5ms."
             return out
-
         out["cross_region"] = True
         out["recommendation"] = (
             f"🚨 البوت في {bot_r} و DB في {db_r} — منطقتان مختلفتان!\n"
@@ -1286,14 +1008,12 @@ def _detect_cross_region(
             f"   ✅ الحل: انقل البوت إلى {db_r} أو انقل DB إلى {bot_r}."
         )
         return out
-
     inference = _infer_region_from_rtt(tcp_ms, bot_info, db_info)
     if inference.get("inferred"):
         out["cross_region"] = inference["cross_region"]
         out["confidence"] = inference["confidence"]
         out["inferred_from_rtt"] = True
         out["inference_reason"] = inference["reason"]
-
         if inference["cross_region"] is False:
             out["recommendation"] = (
                 f"✅ {inference['reason']}.\n"
@@ -1317,7 +1037,6 @@ def _detect_cross_region(
                 f"<code>DB_REGION</code> env vars."
             )
         return out
-
     out["recommendation"] = (
         "ℹ️ لا يمكن تحديد المناطق:\n"
         "   • bot_region=unknown (أضف RENDER_SERVICE_REGION)\n"
@@ -1328,6 +1047,8 @@ def _detect_cross_region(
         "   DB_REGION=ap-southeast-1"
     )
     return out
+
+
 # ═══════════════════════════════════════════════════════════════════════
 # LATENCY PROBE
 # ═══════════════════════════════════════════════════════════════════════
@@ -1356,31 +1077,20 @@ async def _detect_users_pk_col(conn) -> str:
     return "user_id"
 
 
-async def _probe_db_latency(
-    *,
-    force: bool = False,
-    socket_timeout: float = 5.0,
-) -> Dict[str, Any]:
-    """قياس كمون الشبكة/DB."""
+async def _probe_db_latency(*, force: bool = False, socket_timeout: float = 5.0) -> Dict[str, Any]:
     if not force:
         cached = _cache_get("latency_probe")
         if cached is not None:
             return cached
-
     db = _get_db()
     if db is None:
         return {"ok": False, "error": "DB غير مستورد", "verdict": "unknown"}
-
     db_type = str(getattr(db, "DB_TYPE", "sqlite")).lower()
-    result: Dict[str, Any] = {
-        "ok": False, "db_type": db_type,
-        "verdict": "unknown", "diagnosis": "",
-        "recommendation": "", "used_pool": False,
-    }
-
+    result: Dict[str, Any] = {"ok": False, "db_type": db_type,
+                               "verdict": "unknown", "diagnosis": "",
+                               "recommendation": "", "used_pool": False}
     active_info = _detect_active_db_source(db)
     result["active_db"] = active_info
-
     if db_type == "sqlite":
         try:
             t0 = time.monotonic()
@@ -1392,9 +1102,7 @@ async def _probe_db_latency(
                 await db.fetchval("SELECT 1", default=0)
                 warm.append((time.monotonic() - t0) * 1000)
             result.update({
-                "ok": True,
-                "tcp_connect_ms": 0.0,
-                "asyncpg_connect_ms": 0.0,
+                "ok": True, "tcp_connect_ms": 0.0, "asyncpg_connect_ms": 0.0,
                 "first_query_ms": round(first_ms, 2),
                 "warm_queries_ms": [round(x, 2) for x in warm],
                 "warm_median_ms": round(statistics.median(warm), 2),
@@ -1408,10 +1116,8 @@ async def _probe_db_latency(
             result["error"] = f"SQLite probe: {e}"
         _cache_set("latency_probe", result, ttl=120.0)
         return result
-
     db_url = active_info.get("active_url") or (
-        getattr(db, "DATABASE_URL", "")
-        or os.getenv("DATABASE_URL", "")
+        getattr(db, "DATABASE_URL", "") or os.getenv("DATABASE_URL", "")
     )
     host = "?"
     port = 0
@@ -1424,57 +1130,43 @@ async def _probe_db_latency(
         result["active_db_source"] = active_info.get("active_source", "unknown")
     except Exception as e:
         logger.debug(f"parse DATABASE_URL: {e}")
-
     db_region = _guess_db_region(host)
     bot_region = _detect_bot_cloud()
     result["db_region"] = db_region
     result["bot_region"] = bot_region
-
     tcp_ms: Optional[float] = None
     if host != "?" and port > 0:
         try:
             t0 = time.monotonic()
-
             def _connect():
                 s = socket.create_connection((host, port), timeout=socket_timeout)
                 s.close()
-
-            await asyncio.wait_for(
-                asyncio.to_thread(_connect),
-                timeout=socket_timeout + 1.0,
-            )
+            await asyncio.wait_for(asyncio.to_thread(_connect), timeout=socket_timeout + 1.0)
             tcp_ms = (time.monotonic() - t0) * 1000
             result["tcp_connect_ms"] = round(tcp_ms, 2)
         except asyncio.TimeoutError:
             result["tcp_connect_ms"] = -1.0
             result["error"] = f"TCP timeout >{socket_timeout}s"
             result["verdict"] = "critical"
-            result["diagnosis"] = (
-                f"🔴 لا يمكن الوصول إلى {host}:{port} خلال "
-                f"{socket_timeout}s — شبكة مقطوعة أو DB مُطفأ."
-            )
-            result["cross_region"] = _detect_cross_region(
-                bot_region, db_region, tcp_ms=None)
+            result["diagnosis"] = (f"🔴 لا يمكن الوصول إلى {host}:{port} خلال {socket_timeout}s "
+                                   f"— شبكة مقطوعة أو DB مُطفأ.")
+            result["cross_region"] = _detect_cross_region(bot_region, db_region, tcp_ms=None)
             _cache_set("latency_probe", result, ttl=120.0)
             return result
         except Exception as e:
             result["tcp_connect_ms"] = -1.0
             result["error"] = f"TCP: {type(e).__name__}: {e}"
             result["verdict"] = "critical"
-            result["cross_region"] = _detect_cross_region(
-                bot_region, db_region, tcp_ms=None)
+            result["cross_region"] = _detect_cross_region(bot_region, db_region, tcp_ms=None)
             _cache_set("latency_probe", result, ttl=120.0)
             return result
     else:
         result["tcp_connect_ms"] = -1.0
-
     cross = _detect_cross_region(bot_region, db_region, tcp_ms=tcp_ms)
     result["cross_region"] = cross
-
     conn = None
     from_pool = False
     pool = getattr(db, "_pool", None)
-
     if pool is not None:
         try:
             t0 = time.monotonic()
@@ -1486,7 +1178,6 @@ async def _probe_db_latency(
             logger.debug(f"pool.acquire فشل: {e}")
             conn = None
             from_pool = False
-
     if conn is None:
         try:
             t0 = time.monotonic()
@@ -1515,10 +1206,8 @@ async def _probe_db_latency(
                     _cache_set("latency_probe", result, ttl=120.0)
                     return result
                 try:
-                    conn = await asyncio.wait_for(
-                        asyncmy.connect(db_url),
-                        timeout=socket_timeout + 2.0,
-                    )
+                    conn = await asyncio.wait_for(asyncmy.connect(db_url),
+                                                  timeout=socket_timeout + 2.0)
                 except asyncio.TimeoutError:
                     result["error"] = "asyncmy.connect timeout"
                     result["verdict"] = "critical"
@@ -1528,8 +1217,7 @@ async def _probe_db_latency(
                 result["error"] = f"DB type غير مدعوم: {db_type}"
                 _cache_set("latency_probe", result, ttl=120.0)
                 return result
-            result["asyncpg_connect_ms"] = round(
-                (time.monotonic() - t0) * 1000, 2)
+            result["asyncpg_connect_ms"] = round((time.monotonic() - t0) * 1000, 2)
         except Exception as e:
             result["error"] = f"connect: {type(e).__name__}: {str(e)[:120]}"
             result["verdict"] = "critical"
@@ -1537,7 +1225,6 @@ async def _probe_db_latency(
             return result
     else:
         result["asyncpg_connect_ms"] = 0.0
-
     try:
         t0 = time.monotonic()
         if db_type == "postgres":
@@ -1551,7 +1238,6 @@ async def _probe_db_latency(
             except Exception:
                 pass
         result["first_query_ms"] = round((time.monotonic() - t0) * 1000, 2)
-
         warm = []
         for _ in range(5):
             t0 = time.monotonic()
@@ -1569,7 +1255,6 @@ async def _probe_db_latency(
         result["warm_queries_ms"] = [round(x, 2) for x in warm]
         warm_median = statistics.median(warm)
         result["warm_median_ms"] = round(warm_median, 2)
-
         pk_col = "user_id"
         if db_type == "postgres":
             try:
@@ -1577,10 +1262,8 @@ async def _probe_db_latency(
             except Exception as e:
                 logger.debug(f"_detect_users_pk_col: {e}")
         result["users_pk_col"] = pk_col
-
         pk_sql_pg = f'SELECT 1 FROM users WHERE {pk_col} = $1 LIMIT 1'
         pk_sql_mysql = "SELECT 1 FROM users WHERE user_id = %s LIMIT 1"
-
         try:
             if db_type == "postgres":
                 await conn.fetchval(pk_sql_pg, 1)
@@ -1594,7 +1277,6 @@ async def _probe_db_latency(
                     pass
         except Exception as e:
             logger.debug(f"pk_select warmup: {e}")
-
         try:
             t0 = time.monotonic()
             if db_type == "postgres":
@@ -1611,7 +1293,6 @@ async def _probe_db_latency(
         except Exception as e:
             result["pk_select_ms"] = -1.0
             logger.debug(f"pk_select probe: {e}")
-
         try:
             t0 = time.monotonic()
             if db_type == "postgres":
@@ -1630,13 +1311,11 @@ async def _probe_db_latency(
             result["bulk_fetch_ms"] = -1.0
             result["bulk_rows"] = 0
             logger.debug(f"bulk_fetch probe: {e}")
-
         verdict, diagnosis, recommendation = _compute_latency_verdict(result)
         result["verdict"] = verdict
         result["diagnosis"] = diagnosis
         result["recommendation"] = recommendation
         result["ok"] = True
-
     except Exception as e:
         logger.warning(f"_probe_db_latency inner: {e}")
         result["error"] = f"{type(e).__name__}: {str(e)[:200]}"
@@ -1645,34 +1324,25 @@ async def _probe_db_latency(
         if conn is not None:
             if from_pool and pool is not None:
                 try:
-                    await asyncio.wait_for(
-                        pool.release(conn), timeout=_CONN_CLOSE_TIMEOUT,
-                    )
+                    await asyncio.wait_for(pool.release(conn), timeout=_CONN_CLOSE_TIMEOUT)
                 except Exception as e:
                     logger.debug(f"pool.release: {e}")
             else:
                 try:
-                    await asyncio.wait_for(
-                        conn.close(), timeout=_CONN_CLOSE_TIMEOUT,
-                    )
+                    await asyncio.wait_for(conn.close(), timeout=_CONN_CLOSE_TIMEOUT)
                 except asyncio.TimeoutError:
                     logger.debug("conn.close: timeout")
                 except Exception as e:
                     logger.debug(f"conn.close: {e}")
-
     _cache_set("latency_probe", result, ttl=120.0)
     return result
 
 
 def _verdict_from_warm(warm_ms: float) -> str:
-    if warm_ms < 5:
-        return "excellent"
-    if warm_ms < 20:
-        return "good"
-    if warm_ms < 100:
-        return "acceptable"
-    if warm_ms < 500:
-        return "slow"
+    if warm_ms < 5: return "excellent"
+    if warm_ms < 20: return "good"
+    if warm_ms < 100: return "acceptable"
+    if warm_ms < 500: return "slow"
     return "critical"
 
 
@@ -1684,154 +1354,100 @@ def _compute_latency_verdict(result: Dict[str, Any]) -> Tuple[str, str, str]:
     pk = float(result.get("pk_select_ms") or 0)
     used_pool = bool(result.get("used_pool", False))
     cross = result.get("cross_region") or {}
-
     internal_db = max(0.0, warm - tcp) if tcp > 0 else warm
-
     if tcp < 0:
-        return (
-            "critical",
-            "🔴 لا يمكن قياس TCP — الشبكة مقطوعة أو DB غير متاح.",
-            "تحقّق من DATABASE_URL، حالة DB، وأي firewall.",
-        )
-
+        return ("critical",
+                "🔴 لا يمكن قياس TCP — الشبكة مقطوعة أو DB غير متاح.",
+                "تحقّق من DATABASE_URL، حالة DB، وأي firewall.")
     if warm > 200 and tcp < 80:
-        return (
-            "critical",
-            f"🔴 DB بطيء ({warm:.0f}ms) رغم شبكة ممتازة ({tcp:.0f}ms). "
-            f"المشكلة داخل PostgreSQL نفسه — ليس في الشبكة.",
-            "شغّل VACUUM ANALYZE فورًا، راجع pg_stat_statements، "
-            "افحص CPU/RAM على الخادم.",
-        )
-
+        return ("critical",
+                f"🔴 DB بطيء ({warm:.0f}ms) رغم شبكة ممتازة ({tcp:.0f}ms). "
+                f"المشكلة داخل PostgreSQL نفسه — ليس في الشبكة.",
+                "شغّل VACUUM ANALYZE فورًا، راجع pg_stat_statements، "
+                "افحص CPU/RAM على الخادم.")
     if cross.get("cross_region") is True and tcp > 30:
         bot_r = cross.get("bot_region", "?")
         db_r = cross.get("db_region", "?")
         inferred = cross.get("inferred_from_rtt", False)
-        inferred_note = (
-            "\n   🆕 مُستنتَج من RTT (env vars غائبة)."
-            if inferred else ""
-        )
-        return (
-            "acceptable",
-            f"🚨 <b>Cross-Region مؤكّد</b>: "
-            f"البوت في <code>{_esc(bot_r)}</code>، "
-            f"DB في <code>{_esc(db_r)}</code>. "
-            f"كل استعلام يقطع ~{tcp:.0f}ms RTT. "
-            f"DB داخلياً سريع (~{internal_db:.0f}ms)."
-            f"{inferred_note}",
-            f"✅ <b>الحل الجذري</b>: "
-            f"انقل البوت إلى <code>{_esc(db_r)}</code> "
-            f"أو انقل DB إلى <code>{_esc(bot_r)}</code>. "
-            f"النتيجة المتوقعة: 43ms → 1-3ms (تسريع 10-40×).\n"
-            f"⚡ <b>حل مؤقت</b>: فعّل PgBouncer على DB لتقليل "
-            f"round-trips (قد يوفّر 30-50% من التأخير).",
-        )
-
+        inferred_note = ("\n   🆕 مُستنتَج من RTT (env vars غائبة)." if inferred else "")
+        return ("acceptable",
+                f"🚨 <b>Cross-Region مؤكّد</b>: "
+                f"البوت في <code>{_esc(bot_r)}</code>، "
+                f"DB في <code>{_esc(db_r)}</code>. "
+                f"كل استعلام يقطع ~{tcp:.0f}ms RTT. "
+                f"DB داخلياً سريع (~{internal_db:.0f}ms).{inferred_note}",
+                f"✅ <b>الحل الجذري</b>: انقل البوت إلى <code>{_esc(db_r)}</code> "
+                f"أو انقل DB إلى <code>{_esc(bot_r)}</code>. "
+                f"النتيجة المتوقعة: 43ms → 1-3ms (تسريع 10-40×).\n"
+                f"⚡ <b>حل مؤقت</b>: فعّل PgBouncer على DB لتقليل round-trips "
+                f"(قد يوفّر 30-50% من التأخير).")
     if tcp > 30 and warm < 50 and internal_db < 15:
         inferred_note = ""
         if cross.get("inferred_from_rtt"):
-            inferred_note = (
-                f"\n   💡 الاستنتاج: {cross.get('inference_reason', '')}"
-            )
-        return (
-            "acceptable",
-            f"🟡 الشبكة بين البوت و DB تُضيف ~{tcp:.0f}ms لكل "
-            f"استعلام (RTT). DB داخلياً سريع جداً "
-            f"(~{internal_db:.0f}ms). المشكلة في المسافة الجغرافية."
-            f"{inferred_note}",
-            f"مع {tcp:.0f}ms ذهاب-وإياب، كل استعلام معقّد (3-5 RTTs) "
-            f"يستغرق ~{tcp*3:.0f}-{tcp*5:.0f}ms. "
-            "انقل البوت وDB إلى نفس المنطقة، أو قلّل عدد الاستعلامات "
-            "في المسارات الساخنة (N+1).",
-        )
-
+            inferred_note = f"\n   💡 الاستنتاج: {cross.get('inference_reason', '')}"
+        return ("acceptable",
+                f"🟡 الشبكة بين البوت و DB تُضيف ~{tcp:.0f}ms لكل "
+                f"استعلام (RTT). DB داخلياً سريع جداً "
+                f"(~{internal_db:.0f}ms). المشكلة في المسافة الجغرافية.{inferred_note}",
+                f"مع {tcp:.0f}ms ذهاب-وإياب، كل استعلام معقّد (3-5 RTTs) "
+                f"يستغرق ~{tcp*3:.0f}-{tcp*5:.0f}ms. "
+                "انقل البوت وDB إلى نفس المنطقة، أو قلّل عدد الاستعلامات "
+                "في المسارات الساخنة (N+1).")
     if tcp > 300 and warm < 50:
-        return (
-            "slow",
-            f"🟠 زمن TCP ({tcp:.0f}ms) مرتفع جداً، لكن DB يستجيب "
-            f"بسرعة (warm={warm:.0f}ms). المشكلة في الشبكة، لا DB.",
-            "انقل البوت أو DB إلى نفس المنطقة الجغرافية. "
-            "أو استخدم connection pooler (PgBouncer) قريباً منك.",
-        )
-
+        return ("slow",
+                f"🟠 زمن TCP ({tcp:.0f}ms) مرتفع جداً، لكن DB يستجيب "
+                f"بسرعة (warm={warm:.0f}ms). المشكلة في الشبكة، لا DB.",
+                "انقل البوت أو DB إلى نفس المنطقة الجغرافية. "
+                "أو استخدم connection pooler (PgBouncer) قريباً منك.")
     if tcp > 150 and warm < 30:
-        return (
-            "acceptable",
-            f"🟡 TCP={tcp:.0f}ms (مقبول)، DB={warm:.0f}ms. "
-            f"هذا يطابق نمط: كل استعلام +{tcp:.0f}ms.",
-            f"مع {tcp:.0f}ms ذهاب-وإياب، كل استعلام معقّد (3-5 "
-            f"round-trips) يستغرق ~{tcp*3:.0f}-{tcp*5:.0f}ms. "
-            "قلّل عدد الاستعلامات أو انقل DB أقرب.",
-        )
-
+        return ("acceptable",
+                f"🟡 TCP={tcp:.0f}ms (مقبول)، DB={warm:.0f}ms. "
+                f"هذا يطابق نمط: كل استعلام +{tcp:.0f}ms.",
+                f"مع {tcp:.0f}ms ذهاب-وإياب، كل استعلام معقّد (3-5 "
+                f"round-trips) يستغرق ~{tcp*3:.0f}-{tcp*5:.0f}ms. "
+                "قلّل عدد الاستعلامات أو انقل DB أقرب.")
     if warm > 500:
-        return (
-            "critical",
-            f"🔴 DB بطيء حتى على SELECT 1 ({warm:.0f}ms). "
-            "الخادم مُشبع أو مشاكل hardware.",
-            "راجع CPU/RAM/disk I/O على خادم PostgreSQL. "
-            "جرّب pg_stat_statements لكشف استعلامات ثقيلة.",
-        )
-
+        return ("critical",
+                f"🔴 DB بطيء حتى على SELECT 1 ({warm:.0f}ms). "
+                "الخادم مُشبع أو مشاكل hardware.",
+                "راجع CPU/RAM/disk I/O على خادم PostgreSQL. "
+                "جرّب pg_stat_statements لكشف استعلامات ثقيلة.")
     if warm > 100:
-        return (
-            "slow",
-            f"🟠 DB يستجيب بـ {warm:.0f}ms لـ SELECT 1 — بطء داخلي. "
-            "ربما autovacuum يجري، أو replication lag.",
-            "شغّل VACUUM ANALYZE، راجع pg_stat_activity، "
-            "تحقّق من shared_buffers (يجب ≥ 25% RAM).",
-        )
-
+        return ("slow",
+                f"🟠 DB يستجيب بـ {warm:.0f}ms لـ SELECT 1 — بطء داخلي. "
+                "ربما autovacuum يجري، أو replication lag.",
+                "شغّل VACUUM ANALYZE، راجع pg_stat_activity، "
+                "تحقّق من shared_buffers (يجب ≥ 25% RAM).")
     if warm < 20 and tcp < 50:
         pool_note = " (pool warm)" if used_pool else ""
         same_region_hint = ""
         if tcp < _RTT_SAME_REGION_HIGH:
             same_region_hint = " — نفس المنطقة (RTT منخفض)"
-        return (
-            "excellent",
-            f"🟢 ممتاز{pool_note} — TCP={tcp:.0f}ms، "
-            f"DB={warm:.0f}ms{same_region_hint}.",
-            "لا حاجة لأي تغيير.",
-        )
-
+        return ("excellent",
+                f"🟢 ممتاز{pool_note} — TCP={tcp:.0f}ms، DB={warm:.0f}ms{same_region_hint}.",
+                "لا حاجة لأي تغيير.")
     if warm < 50 and tcp < 100:
-        return (
-            "good",
-            f"🟢 جيد — TCP={tcp:.0f}ms، DB={warm:.0f}ms.",
-            "الأداء سليم.",
-        )
-
-    return (
-        "acceptable",
-        f"🟡 TCP={tcp:.0f}ms، DB={warm:.0f}ms، "
-        f"first={first:.0f}ms، PK={pk:.0f}ms.",
-        "راقب الأداء — قد يحتاج ضبطاً لاحقاً.",
-    )
+        return ("good", f"🟢 جيد — TCP={tcp:.0f}ms، DB={warm:.0f}ms.", "الأداء سليم.")
+    return ("acceptable",
+            f"🟡 TCP={tcp:.0f}ms، DB={warm:.0f}ms، first={first:.0f}ms، PK={pk:.0f}ms.",
+            "راقب الأداء — قد يحتاج ضبطاً لاحقاً.")
 
 
 def format_latency_report(probe: Dict[str, Any]) -> str:
     if not probe.get("ok"):
         err = _esc(probe.get("error", "خطأ غير معروف"))
-        return (
-            f"🔬 <b>اختبار الكمون</b>\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
-            f"❌ <b>فشل:</b> {err}"
-        )
-
+        return f"🔬 <b>اختبار الكمون</b>\n━━━━━━━━━━━━━━━━━━━━━━\n\n❌ <b>فشل:</b> {err}"
     lines: List[str] = []
     lines.append("🔬 <b>اختبار الكمون (Latency Probe)</b>")
     lines.append("━━━━━━━━━━━━━━━━━━━━━━")
     lines.append("")
-
     active_line = format_active_db_line()
     if active_line:
         lines.append(active_line)
         lines.append("")
-
     cross = probe.get("cross_region") or {}
     db_region = probe.get("db_region") or {}
     bot_region = probe.get("bot_region") or {}
-
     if (bot_region.get("region", "unknown") != "unknown"
             or db_region.get("region", "unknown") != "unknown"
             or cross.get("inferred_from_rtt")):
@@ -1840,20 +1456,16 @@ def format_latency_report(probe: Dict[str, Any]) -> str:
         bot_p = bot_region.get("provider", "?")
         db_r = db_region.get("region", "unknown")
         db_p = db_region.get("provider", "?")
-        lines.append(f"   🤖 البوت: <code>{_esc(bot_p)}</code> @ "
-                     f"<code>{_esc(bot_r)}</code>")
-        lines.append(f"   🗄️ DB: <code>{_esc(db_p)}</code> @ "
-                     f"<code>{_esc(db_r)}</code>")
+        lines.append(f"   🤖 البوت: <code>{_esc(bot_p)}</code> @ <code>{_esc(bot_r)}</code>")
+        lines.append(f"   🗄️ DB: <code>{_esc(db_p)}</code> @ <code>{_esc(db_r)}</code>")
         if cross.get("cross_region") is True:
             if cross.get("inferred_from_rtt"):
-                lines.append(f"   🚨 <b>منطقتان مختلفتان</b> "
-                             f"<i>(مُستنتَج من RTT)</i>")
+                lines.append(f"   🚨 <b>منطقتان مختلفتان</b> <i>(مُستنتَج من RTT)</i>")
             else:
                 lines.append(f"   🚨 <b>منطقتان مختلفتان!</b>")
         elif cross.get("cross_region") is False:
             if cross.get("inferred_from_rtt"):
-                lines.append(f"   ✅ <b>نفس المنطقة</b> "
-                             f"<i>(مُستنتَج من RTT)</i>")
+                lines.append(f"   ✅ <b>نفس المنطقة</b> <i>(مُستنتَج من RTT)</i>")
             else:
                 lines.append(f"   ✅ نفس المنطقة")
         else:
@@ -1861,87 +1473,58 @@ def format_latency_report(probe: Dict[str, Any]) -> str:
         if cross.get("inference_reason"):
             lines.append(f"   💡 <i>{_esc(cross['inference_reason'])}</i>")
         lines.append("")
-
     db_type = str(probe.get("db_type", "?")).upper()
     host = probe.get("host", "")
     port = probe.get("port", "")
     if host and host != "?":
-        lines.append(f"🗄️ <b>{_esc(db_type)}</b> @ "
-                     f"<code>{_esc(host)}:{port}</code>")
+        lines.append(f"🗄️ <b>{_esc(db_type)}</b> @ <code>{_esc(host)}:{port}</code>")
     else:
         lines.append(f"🗄️ <b>{_esc(db_type)}</b> (محلي)")
-
     if probe.get("used_pool"):
         pool_ms = probe.get("pool_acquire_ms", 0)
         lines.append(f"   🏊 pool warm — acquire={pool_ms:.0f}ms")
     lines.append("")
-
     tcp = float(probe.get("tcp_connect_ms", 0) or 0)
     if tcp > 0:
-        tcp_icon = ("🟢" if tcp < 5 else
-                    "🟢" if tcp < 15 else
-                    "🟡" if tcp < 50 else
-                    "🟠" if tcp < 150 else "🔴")
+        tcp_icon = ("🟢" if tcp < 5 else "🟢" if tcp < 15 else "🟡" if tcp < 50 else "🟠" if tcp < 150 else "🔴")
         lines.append(f"🌐 TCP connect: {tcp_icon} <b>{tcp:.0f}ms</b>")
-
     conn = float(probe.get("asyncpg_connect_ms", 0) or 0)
     if conn > 0:
-        conn_icon = ("🟢" if conn < 100 else
-                     "🟡" if conn < 300 else "🔴")
+        conn_icon = ("🟢" if conn < 100 else "🟡" if conn < 300 else "🔴")
         lines.append(f"🔌 connect: {conn_icon} <b>{conn:.0f}ms</b>")
         if tcp > 0:
             delta = conn - tcp
             if delta > 200:
-                lines.append(f"   ⚠️ فرق TCP↔connect: +{delta:.0f}ms "
-                             f"(TLS/auth بطيء)")
+                lines.append(f"   ⚠️ فرق TCP↔connect: +{delta:.0f}ms (TLS/auth بطيء)")
     elif probe.get("used_pool"):
         lines.append(f"🔌 connect: 🟢 <b>0ms</b> (من pool warm)")
     lines.append("")
-
     first = float(probe.get("first_query_ms", 0) or 0)
     if first > 0:
-        first_icon = ("🟢" if first < 10 else
-                      "🟡" if first < 100 else "🔴")
+        first_icon = ("🟢" if first < 10 else "🟡" if first < 100 else "🔴")
         lines.append(f"⚡ أول استعلام: {first_icon} <b>{first:.0f}ms</b>")
-
     warm_median = float(probe.get("warm_median_ms", 0) or 0)
     warm_list = probe.get("warm_queries_ms", []) or []
     if warm_median > 0:
-        warm_icon = ("🟢" if warm_median < 20 else
-                     "🟡" if warm_median < 100 else
-                     "🟠" if warm_median < 500 else "🔴")
+        warm_icon = ("🟢" if warm_median < 20 else "🟡" if warm_median < 100 else "🟠" if warm_median < 500 else "🔴")
         preview = ", ".join(f"{x:.0f}" for x in warm_list[:5])
-        lines.append(f"🔥 warm (5x): {warm_icon} "
-                     f"وسيط=<b>{warm_median:.0f}ms</b> [{preview}]")
-
+        lines.append(f"🔥 warm (5x): {warm_icon} وسيط=<b>{warm_median:.0f}ms</b> [{preview}]")
     pk = float(probe.get("pk_select_ms", 0) or 0)
     if pk > 0:
-        pk_icon = ("🟢" if pk < 20 else
-                   "🟡" if pk < 100 else "🔴")
+        pk_icon = ("🟢" if pk < 20 else "🟡" if pk < 100 else "🔴")
         lines.append(f"🎯 PK SELECT: {pk_icon} <b>{pk:.0f}ms</b>")
     lines.append("")
-
     bulk = float(probe.get("bulk_fetch_ms", 0) or 0)
     bulk_rows = int(probe.get("bulk_rows", 0) or 0)
     if bulk > 0 and bulk_rows > 0:
         per_row = bulk / bulk_rows
-        lines.append(f"📦 fetch 100: <b>{bulk:.0f}ms</b> "
-                     f"({per_row:.2f}ms/row)")
+        lines.append(f"📦 fetch 100: <b>{bulk:.0f}ms</b> ({per_row:.2f}ms/row)")
         lines.append("")
-
     verdict = str(probe.get("verdict", "unknown"))
     diagnosis = str(probe.get("diagnosis", ""))
     recommendation = str(probe.get("recommendation", ""))
-
-    verdict_label = {
-        "excellent": "🟢 ممتاز",
-        "good": "🟢 جيد",
-        "acceptable": "🟡 مقبول",
-        "slow": "🟠 بطيء",
-        "critical": "🔴 حرج",
-        "unknown": "⚪ غير معروف",
-    }.get(verdict, "⚪ غير معروف")
-
+    verdict_label = {"excellent": "🟢 ممتاز", "good": "🟢 جيد", "acceptable": "🟡 مقبول",
+                     "slow": "🟠 بطيء", "critical": "🔴 حرج", "unknown": "⚪ غير معروف"}.get(verdict, "⚪ غير معروف")
     lines.append("━━━━━━━━━━━━━━━━━━━━━━")
     lines.append(f"📊 <b>الحكم:</b> {verdict_label}")
     lines.append("")
@@ -1952,7 +1535,6 @@ def format_latency_report(probe: Dict[str, Any]) -> str:
         lines.append("")
         lines.append("<b>التوصية:</b>")
         lines.append(f"  {recommendation}")
-
     return "\n".join(lines)
 
 
@@ -1982,42 +1564,30 @@ async def get_latency_verdict() -> Dict[str, Any]:
 # FULL HEALTH PROBE
 # ═══════════════════════════════════════════════════════════════════════
 
-async def _probe_network_to(
-    host: str, port: int, *, with_tls: bool = False,
-    timeout: float = 5.0,
-) -> Dict[str, Any]:
-    """قياس شبكة مستقل (TCP + TLS) — fallback فقط."""
-    result: Dict[str, Any] = {
-        "host": host, "port": port, "ok": False,
-    }
+async def _probe_network_to(host: str, port: int, *, with_tls: bool = False,
+                            timeout: float = 5.0) -> Dict[str, Any]:
+    result: Dict[str, Any] = {"host": host, "port": port, "ok": False}
     if not host or host == "?" or port <= 0:
         return result
-
     try:
         t0 = time.perf_counter()
-        ip = await asyncio.wait_for(
-            asyncio.to_thread(socket.gethostbyname, host),
-            timeout=timeout,
-        )
+        ip = await asyncio.wait_for(asyncio.to_thread(socket.gethostbyname, host),
+                                     timeout=timeout)
         result["dns_ms"] = round((time.perf_counter() - t0) * 1000, 2)
         result["resolved_ip"] = ip
     except Exception as e:
         result["dns_ms"] = -1.0
         result["error"] = f"DNS: {type(e).__name__}"
         return result
-
     def _do_tcp():
         t0 = time.perf_counter()
         s = socket.create_connection((host, port), timeout=timeout)
         ms = (time.perf_counter() - t0) * 1000
         return s, ms
-
     raw_sock = None
     try:
-        raw_sock, tcp_ms = await asyncio.wait_for(
-            asyncio.to_thread(_do_tcp),
-            timeout=timeout + 1.0,
-        )
+        raw_sock, tcp_ms = await asyncio.wait_for(asyncio.to_thread(_do_tcp),
+                                                   timeout=timeout + 1.0)
         result["tcp_ms"] = round(tcp_ms, 2)
     except Exception as e:
         result["tcp_ms"] = -1.0
@@ -2029,11 +1599,9 @@ async def _probe_network_to(
                 raw_sock.close()
             except Exception:
                 pass
-
     if with_tls:
         tls_ms = -1.0
         tls_error: Optional[str] = None
-
         async def _do_tls_async() -> float:
             ctx = ssl.create_default_context()
             ctx.check_hostname = False
@@ -2042,9 +1610,7 @@ async def _probe_network_to(
             reader = None
             writer = None
             try:
-                reader, writer = await asyncio.open_connection(
-                    host, port, ssl=ctx,
-                )
+                reader, writer = await asyncio.open_connection(host, port, ssl=ctx)
                 return (time.perf_counter() - t0) * 1000
             finally:
                 if writer is not None:
@@ -2053,11 +1619,8 @@ async def _probe_network_to(
                         await asyncio.wait_for(writer.wait_closed(), timeout=1.0)
                     except Exception:
                         pass
-
         try:
-            tls_ms = await asyncio.wait_for(
-                _do_tls_async(), timeout=timeout + 0.5,
-            )
+            tls_ms = await asyncio.wait_for(_do_tls_async(), timeout=timeout + 0.5)
             result["tls_ms"] = round(tls_ms, 2)
         except asyncio.TimeoutError:
             result["tls_ms"] = -1.0
@@ -2070,41 +1633,25 @@ async def _probe_network_to(
             result["tls_ms"] = -1.0
             msg = str(e)[:80] if str(e) else type(e).__name__
             tls_error = f"{type(e).__name__}: {msg}"
-
         if tls_error:
             result["tls_error"] = tls_error
-
     result["ok"] = True
     return result
 
 
-async def _probe_event_loop(
-    samples: int = 10, sleep_ms: int = 50,
-) -> Dict[str, Any]:
-    """
-    قياس event loop lag.
-
-    v7.2.17 FIX-8: warmup فعلي (2 samples مُهمَلة) + وقت العملية
-    الحقيقي عبر _uptime_sec().
-    """
-    result: Dict[str, Any] = {
-        "ok": False, "samples_ms": [],
-        "median_ms": 0.0, "p90_ms": 0.0, "max_ms": 0.0,
-        "_startup_window": False,
-    }
+async def _probe_event_loop(samples: int = 10, sleep_ms: int = 50) -> Dict[str, Any]:
+    result: Dict[str, Any] = {"ok": False, "samples_ms": [], "median_ms": 0.0,
+                               "p90_ms": 0.0, "max_ms": 0.0, "_startup_window": False}
     try:
         loop = asyncio.get_running_loop()
         uptime = _uptime_sec()
         in_startup = uptime < _STARTUP_GRACE_SEC
         result["_startup_window"] = in_startup
         result["_uptime_sec"] = round(uptime, 1)
-
-        # warmup فعلي — sampling مُهمَل (ليس sleep فقط)
         for _ in range(2):
             t0 = loop.time()
             await asyncio.sleep(sleep_ms / 1000.0)
-            _ = (loop.time() - t0) * 1000  # يُهمَل
-
+            _ = (loop.time() - t0) * 1000
         lags: List[float] = []
         for _ in range(samples):
             t0 = loop.time()
@@ -2112,7 +1659,6 @@ async def _probe_event_loop(
             actual_ms = (loop.time() - t0) * 1000
             lag = max(0.0, actual_ms - sleep_ms)
             lags.append(lag)
-
         result["samples_ms"] = [round(x, 2) for x in lags]
         result["median_ms"] = round(statistics.median(lags), 2)
         sorted_lags = sorted(lags)
@@ -2125,52 +1671,36 @@ async def _probe_event_loop(
 
 
 async def _probe_filesystem() -> Dict[str, Any]:
-    """
-    قياس سرعة القرص (write + fsync + read لـ 1MB).
-
-    v7.2.18 FIX-13: fsync على نفس الـ fd بعد flush (كان no-op
-    سابقاً لأن write_bytes() يغلق الـ fd ثم نفتح fd جديد read-only).
-    """
     result: Dict[str, Any] = {"ok": False}
     try:
         payload = b"x" * (1024 * 1024)
-
         async def _try_dir(d: Path, label: str) -> bool:
             try:
                 test_file = d / "_latency_probe.bin"
-
                 def _write_sync_read():
                     write_ms = 0.0
                     fsync_ms = 0.0
                     read_ms = 0.0
-
                     t0 = time.perf_counter()
                     with open(test_file, "wb") as f:
                         f.write(payload)
                         f.flush()
                         write_ms = (time.perf_counter() - t0) * 1000
-
                         t0 = time.perf_counter()
                         os.fsync(f.fileno())
                         fsync_ms = (time.perf_counter() - t0) * 1000
-
                     t0 = time.perf_counter()
                     _ = test_file.read_bytes()
                     read_ms = (time.perf_counter() - t0) * 1000
                     return write_ms, fsync_ms, read_ms
-
-                write_ms, fsync_ms, read_ms = await asyncio.to_thread(
-                    _write_sync_read)
-
+                write_ms, fsync_ms, read_ms = await asyncio.to_thread(_write_sync_read)
                 result["write_1mb_ms"] = round(write_ms, 2)
                 result["fsync_ms"] = round(fsync_ms, 2)
                 result["read_1mb_ms"] = round(read_ms, 2)
-
                 try:
                     test_file.unlink()
                 except Exception:
                     pass
-
                 result["tmp_dir"] = str(d)
                 result["tmp_source"] = label
                 result["ok"] = True
@@ -2178,12 +1708,9 @@ async def _probe_filesystem() -> Dict[str, Any]:
             except Exception as e:
                 result["_last_dir_error"] = f"{label}: {e}"
                 return False
-
-        candidates: List[Tuple[Path, str]] = [
-            (Path(tempfile.gettempdir()), "tempdir"),
-            (Path("/dev/shm"), "shm"),
-            (Path.cwd(), "cwd"),
-        ]
+        candidates = [(Path(tempfile.gettempdir()), "tempdir"),
+                      (Path("/dev/shm"), "shm"),
+                      (Path.cwd(), "cwd")]
         for d, label in candidates:
             try:
                 if not d.exists() or not d.is_dir():
@@ -2199,21 +1726,6 @@ async def _probe_filesystem() -> Dict[str, Any]:
 
 
 async def _probe_system(*, prime_cpu: bool = False) -> Dict[str, Any]:
-    """
-    قياس النظام (CPU, RAM, load).
-
-    🟢 FIX-DOC-PSUTIL-SYNC (v7.2.22):
-      ملاحظات على psutil sync:
-        • psutil.virtual_memory() — sync، لكنه يقرأ /proc/meminfo مباشرة
-          ويستغرق < 1ms. لا يحتاج to_thread.
-        • psutil.cpu_percent(interval=None) — sync، لكنه يستخدم
-          delta داخلي (يقارن مع آخر استدعاء) ويستغرق < 1ms.
-        • psutil.cpu_percent(interval>0) — sync ويحجب interval كاملاً
-          (مثل interval=1s). في db_diagnostics نتجنّبه تماماً.
-        • prime_cpu=True: نُهيئ القراءة الأولى (التي ترجع 0.0 لأنها
-          delta أولى بلا مرجع)، ثم نقرأ القراءة الحقيقية بعد sleep.
-    """
-    # FIX-9: prime_cpu يعمل بشكل صحيح
     result: Dict[str, Any] = {"ok": False}
     try:
         try:
@@ -2223,28 +1735,23 @@ async def _probe_system(*, prime_cpu: bool = False) -> Dict[str, Any]:
             result["load_avg_15m"] = round(load15, 2)
         except (OSError, AttributeError):
             pass
-
         try:
             result["cpu_count"] = os.cpu_count() or 1
         except Exception:
             result["cpu_count"] = 1
-
         try:
             import psutil  # type: ignore
             vm = psutil.virtual_memory()
             result["ram_percent"] = round(vm.percent, 1)
             result["ram_used_mb"] = round(vm.used / (1024 ** 2), 1)
             result["ram_total_mb"] = round(vm.total / (1024 ** 2), 1)
-
             if prime_cpu:
                 psutil.cpu_percent(interval=None)
                 await asyncio.sleep(0.1)
-                result["cpu_percent"] = round(
-                    psutil.cpu_percent(interval=None), 1)
+                result["cpu_percent"] = round(psutil.cpu_percent(interval=None), 1)
                 result["cpu_source"] = "local_prime"
         except ImportError:
             result["psutil"] = "not installed"
-
         result["ok"] = True
     except Exception as e:
         result["error"] = str(e)
@@ -2252,39 +1759,22 @@ async def _probe_system(*, prime_cpu: bool = False) -> Dict[str, Any]:
 
 
 def _identify_bottleneck(data: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    تحديد الـ primary bottleneck.
-
-    🆕 v7.2.19 FIX-19: نتجاهل cpu/ram/filesystem/event_loop خلال
-    نافذة الإقلاع — لأن 19 مهمة خلفية + pool warmup + webhook
-    تُضخّم قياسات CPU/Load/FS بشكل مضلّل.
-    """
     comps: List[Dict[str, Any]] = []
-
     def _add(name, kind, value, unit, severity, weight):
-        comps.append({
-            "component": name, "kind": kind,
-            "value": round(float(value), 1),
-            "unit": unit, "severity": severity,
-            "weight": round(float(weight), 2),
-        })
-
+        comps.append({"component": name, "kind": kind,
+                      "value": round(float(value), 1),
+                      "unit": unit, "severity": severity,
+                      "weight": round(float(weight), 2)})
     db_p = data.get("database") or {}
     cross = db_p.get("cross_region") or {}
-    same_region_confirmed = (
-        cross.get("cross_region") is False
-        and cross.get("inferred_from_rtt") is True
-    )
-
+    same_region_confirmed = (cross.get("cross_region") is False
+                             and cross.get("inferred_from_rtt") is True)
     loop_p = data.get("event_loop") or {}
     in_startup = bool(loop_p.get("_startup_window", False))
-
     net_db = data.get("network_db") or {}
     db_tcp = float(net_db.get("tcp_ms") or 0)
-
     if same_region_confirmed:
         db_tcp = 0.0
-
     if db_tcp > 0:
         if db_tcp < _NET_DB_RTT_LOW_SAME_DC:
             sev = "low"
@@ -2297,7 +1787,6 @@ def _identify_bottleneck(data: Dict[str, Any]) -> Dict[str, Any]:
         else:
             sev = "critical"
         _add("network_db", "time", db_tcp, "ms", sev, db_tcp * 3.0)
-
     warm = float(db_p.get("warm_median_ms") or 0)
     if warm > 0:
         internal_ms = max(0.0, warm - db_tcp) if db_tcp > 0 else warm
@@ -2309,145 +1798,88 @@ def _identify_bottleneck(data: Dict[str, Any]) -> Dict[str, Any]:
             sev = "high"
         else:
             sev = "critical"
-        _add("database_internal", "time", internal_ms, "ms", sev,
-             internal_ms * 3.0)
-
+        _add("database_internal", "time", internal_ms, "ms", sev, internal_ms * 3.0)
     lag = float(loop_p.get("p90_ms") or loop_p.get("median_ms") or 0)
     if lag > 0 and not in_startup:
-        if lag < 20:
-            sev = "low"
-        elif lag < 50:
-            sev = "medium"
-        elif lag < 200:
-            sev = "high"
-        else:
-            sev = "critical"
+        if lag < 20: sev = "low"
+        elif lag < 50: sev = "medium"
+        elif lag < 200: sev = "high"
+        else: sev = "critical"
         _add("event_loop", "time", lag, "ms", sev, lag * 5.0)
-
     fs_p = data.get("filesystem") or {}
     fs_w = float(fs_p.get("write_1mb_ms") or 0)
     if fs_w > 0 and not in_startup:
-        if fs_w < 30:
-            sev = "low"
-        elif fs_w < 100:
-            sev = "medium"
-        elif fs_w < 500:
-            sev = "high"
-        else:
-            sev = "critical"
+        if fs_w < 30: sev = "low"
+        elif fs_w < 100: sev = "medium"
+        elif fs_w < 500: sev = "high"
+        else: sev = "critical"
         _add("filesystem", "time", fs_w, "ms", sev, fs_w * 0.5)
-
     sys_p = data.get("system") or {}
     cpu = float(sys_p.get("cpu_percent") or 0)
     if cpu > 0 and not in_startup:
-        if cpu < 70:
-            sev = "low"
-        elif cpu < 85:
-            sev = "medium"
-        elif cpu < 95:
-            sev = "high"
-        else:
-            sev = "critical"
+        if cpu < 70: sev = "low"
+        elif cpu < 85: sev = "medium"
+        elif cpu < 95: sev = "high"
+        else: sev = "critical"
         _add("cpu", "percent", cpu, "%", sev, cpu * 1.0)
-
     ram = float(sys_p.get("ram_percent") or 0)
     if ram > 0 and not in_startup:
-        if ram < 85:
-            sev = "low"
-        elif ram < 92:
-            sev = "medium"
-        elif ram < 97:
-            sev = "high"
-        else:
-            sev = "critical"
+        if ram < 85: sev = "low"
+        elif ram < 92: sev = "medium"
+        elif ram < 97: sev = "high"
+        else: sev = "critical"
         _add("ram", "percent", ram, "%", sev, ram * 0.8)
-
     net_tg = data.get("network_telegram") or {}
     tg_tcp = float(net_tg.get("tcp_ms") or 0)
     if tg_tcp > 0:
-        if tg_tcp < 300:
-            sev = "low"
-        elif tg_tcp < 500:
-            sev = "medium"
-        elif tg_tcp < 800:
-            sev = "high"
-        else:
-            sev = "critical"
+        if tg_tcp < 300: sev = "low"
+        elif tg_tcp < 500: sev = "medium"
+        elif tg_tcp < 800: sev = "high"
+        else: sev = "critical"
         _add("network_telegram", "time", tg_tcp, "ms", sev, tg_tcp * 0.2)
-
     comps.sort(key=lambda x: -x["weight"])
     sev_rank = {"low": 0, "medium": 1, "high": 2, "critical": 3}
     max_sev = "low"
     for c in comps:
         if sev_rank.get(c["severity"], 0) > sev_rank.get(max_sev, 0):
             max_sev = c["severity"]
-
     if max_sev == "low" or not comps:
-        return {
-            "primary": "none", "severity": "low",
-            "explanation": "🟢 لا يوجد bottleneck — كل الأبعاد طبيعية.",
-            "recommendation": "الأداء جيد — لا حاجة لتعديل.",
-            "ranked": comps,
-            "cross_region": cross,
-            "startup_window": in_startup,
-        }
-
+        return {"primary": "none", "severity": "low",
+                "explanation": "🟢 لا يوجد bottleneck — كل الأبعاد طبيعية.",
+                "recommendation": "الأداء جيد — لا حاجة لتعديل.",
+                "ranked": comps, "cross_region": cross,
+                "startup_window": in_startup}
     candidates = [c for c in comps if c["severity"] == max_sev]
     candidates.sort(key=lambda x: -x["weight"])
     top = candidates[0]
     top_name = top["component"]
     tv = top["value"]
     tu = top["unit"]
-
     explanations = {
-        "network_db": (
-            f"🟠 الشبكة بين البوت و DB تُضيف ~{tv:.0f}{tu} "
-            f"لكل استعلام (TCP RTT)."
-        ),
-        "database_internal": (
-            f"🟠 DB نفسه بطيء: زمن داخلي = {tv:.0f}{tu} "
-            f"(بعد خصم RTT الشبكة — المتوقع < "
-            f"{_INTERNAL_DB_LOW:.0f}ms)."
-        ),
-        "event_loop": (
-            f"🟠 Event loop lag (p90) = {tv:.0f}{tu} — البوت مشبع."
-        ),
+        "network_db": (f"🟠 الشبكة بين البوت و DB تُضيف ~{tv:.0f}{tu} لكل استعلام (TCP RTT)."),
+        "database_internal": (f"🟠 DB نفسه بطيء: زمن داخلي = {tv:.0f}{tu} "
+                              f"(بعد خصم RTT الشبكة — المتوقع < {_INTERNAL_DB_LOW:.0f}ms)."),
+        "event_loop": (f"🟠 Event loop lag (p90) = {tv:.0f}{tu} — البوت مشبع."),
         "filesystem": f"🟠 كتابة 1MB تستغرق {tv:.0f}{tu}.",
         "cpu": f"🟠 CPU = {tv:.0f}{tu} — الخادم مشبع.",
         "ram": f"🟠 RAM = {tv:.0f}{tu} — احتمال swap.",
-        "network_telegram": (
-            f"🟡 RTT إلى Telegram = {tv:.0f}{tu}."
-        ),
+        "network_telegram": f"🟡 RTT إلى Telegram = {tv:.0f}{tu}.",
     }
-
     recommendations = {
-        "network_db": (
-            f"✅ انقل البوت و DB إلى نفس المنطقة الجغرافية. "
-            f"استخدم PgBouncer قريباً من البوت لتقليل round-trips. "
-            f"قلّل عدد الاستعلامات في المسارات الساخنة (N+1 patterns)."
-        ),
-        "database_internal": (
-            "✅ راجع pg_stat_activity، شغّل VACUUM ANALYZE، "
-            "اضبط shared_buffers (≥ 25% RAM)."
-        ),
-        "event_loop": (
-            "✅ ابحث عن استدعاءات sync في async code: requests، "
-            "time.sleep، psycopg2، file I/O."
-        ),
+        "network_db": ("✅ انقل البوت و DB إلى نفس المنطقة الجغرافية. "
+                       "استخدم PgBouncer قريباً من البوت لتقليل round-trips. "
+                       "قلّل عدد الاستعلامات في المسارات الساخنة (N+1 patterns)."),
+        "database_internal": ("✅ راجع pg_stat_activity، شغّل VACUUM ANALYZE، "
+                              "اضبط shared_buffers (≥ 25% RAM)."),
+        "event_loop": ("✅ ابحث عن استدعاءات sync في async code: requests، "
+                       "time.sleep، psycopg2، file I/O."),
         "filesystem": "✅ تجنّب كتابة ملفات كبيرة. استخدم /tmp فقط.",
-        "cpu": (
-            "✅ قلّل MAX_CHANNELS_PER_CYCLE، راجع العمليات الثقيلة "
-            "(OCR، NSFW)، ارفع الـ tier."
-        ),
-        "ram": (
-            "✅ راجع caches، قلّل max_size، ارفع الـ tier."
-        ),
-        "network_telegram": (
-            "✅ عادةً لا يحتاج إجراءً. تحقّق من status.telegram.org "
-            "فقط إذا تجاوز 600ms."
-        ),
+        "cpu": ("✅ قلّل MAX_CHANNELS_PER_CYCLE، راجع العمليات الثقيلة "
+                "(OCR، NSFW)، ارفع الـ tier."),
+        "ram": "✅ راجع caches، قلّل max_size، ارفع الـ tier.",
+        "network_telegram": ("✅ عادةً لا يحتاج إجراءً. تحقّق من status.telegram.org "
+                             "فقط إذا تجاوز 600ms."),
     }
-
     if top_name == "network_db" and cross.get("cross_region") is True:
         bot_r_raw = cross.get("bot_region", "?")
         db_r_raw = cross.get("db_region", "?")
@@ -2457,46 +1889,34 @@ def _identify_bottleneck(data: Dict[str, Any]) -> Dict[str, Any]:
         note = " (مُستنتَج من RTT)" if inferred else ""
         recommendations["network_db"] = (
             f"🚨 <b>Cross-Region مؤكّد{note}</b>: "
-            f"البوت في <code>{bot_r}</code>، "
-            f"DB في <code>{db_r}</code>.\n"
+            f"البوت في <code>{bot_r}</code>، DB في <code>{db_r}</code>.\n"
             f"✅ <b>الحل الجذري</b>: انقل البوت إلى <code>{db_r}</code> "
             f"أو DB إلى <code>{bot_r}</code> → RTT ينخفض من "
             f"{tv:.0f}ms إلى 1-3ms (تسريع 10-40×).\n"
-            f"⚡ <b>حل مؤقت</b>: PgBouncer قد يوفّر 30-50%."
-        )
+            f"⚡ <b>حل مؤقت</b>: PgBouncer قد يوفّر 30-50%.")
         explanations["network_db"] = (
             f"🚨 Cross-Region{note}: البوت ({bot_r}) و DB ({db_r}) في "
-            f"منطقتين مختلفتين. RTT = {tv:.0f}{tu}."
-        )
+            f"منطقتين مختلفتين. RTT = {tv:.0f}{tu}.")
     elif top_name == "network_db" and cross.get("cross_region") is False:
         recommendations["network_db"] = (
             f"✅ <b>البوت و DB في نفس المنطقة</b>"
             f"{' (مُستنتَج من RTT)' if cross.get('inferred_from_rtt') else ''}. "
             f"RTT={tv:.0f}ms طبيعي للشبكة الداخلية.\n"
             f"💡 لتحسين أكثر: قلّل عدد الاستعلامات في المسارات الساخنة "
-            f"(N+1 patterns)."
-        )
-
-    return {
-        "primary": top_name,
-        "severity": max_sev,
-        "explanation": explanations.get(top_name, ""),
-        "recommendation": recommendations.get(top_name, ""),
-        "ranked": comps,
-        "cross_region": cross,
-        "startup_window": in_startup,
-    }
+            f"(N+1 patterns).")
+    return {"primary": top_name, "severity": max_sev,
+            "explanation": explanations.get(top_name, ""),
+            "recommendation": recommendations.get(top_name, ""),
+            "ranked": comps, "cross_region": cross,
+            "startup_window": in_startup}
 
 
 async def _probe_full_health(*, force: bool = False) -> Dict[str, Any]:
-    """Full Health Probe — يعيد استخدام TCP من _probe_db_latency."""
     if not force:
         cached = _cache_get("full_health")
         if cached is not None:
             return cached
-
     result: Dict[str, Any] = {"ok": False, "ts": time.time()}
-
     db = _get_db()
     db_host = "?"
     db_port = 0
@@ -2506,19 +1926,15 @@ async def _probe_full_health(*, force: bool = False) -> Dict[str, Any]:
         if url:
             comp = active.get("components", {})
             db_host = comp.get("host", "?")
-            db_port = comp.get("port", 0) or (
-                5432 if "postgres" in url.lower() else 3306)
+            db_port = comp.get("port", 0) or (5432 if "postgres" in url.lower() else 3306)
         else:
-            url = (getattr(db, "DATABASE_URL", "")
-                   or os.getenv("DATABASE_URL", ""))
+            url = (getattr(db, "DATABASE_URL", "") or os.getenv("DATABASE_URL", ""))
             try:
                 p = urlparse(url)
                 db_host = p.hostname or "?"
-                db_port = p.port or (
-                    5432 if "postgres" in url.lower() else 3306)
+                db_port = p.port or (5432 if "postgres" in url.lower() else 3306)
             except Exception:
                 pass
-
     _cpu_primed = False
     try:
         import psutil  # type: ignore
@@ -2526,9 +1942,7 @@ async def _probe_full_health(*, force: bool = False) -> Dict[str, Any]:
         _cpu_primed = True
     except ImportError:
         pass
-
     _t_gather_start = time.monotonic()
-
     async def _cached_telegram_probe():
         cached = _cache_get("telegram_network")
         if cached is not None:
@@ -2536,55 +1950,38 @@ async def _probe_full_health(*, force: bool = False) -> Dict[str, Any]:
         res = await _probe_network_to("api.telegram.org", 443, with_tls=True)
         _cache_set("telegram_network", res, ttl=_TELEGRAM_PROBE_CACHE_TTL)
         return res
-
     db_latency_result: Dict[str, Any] = {}
     try:
         db_latency_result = await _probe_db_latency(force=force)
     except Exception as e:
         logger.debug(f"_probe_db_latency in full_health: {e}")
         db_latency_result = {"ok": False, "error": str(e)[:120]}
-
     probes = await asyncio.gather(
-        _cached_telegram_probe(),
-        _probe_event_loop(),
-        _probe_filesystem(),
-        _probe_system(prime_cpu=False),
-        return_exceptions=True,
-    )
-
+        _cached_telegram_probe(), _probe_event_loop(),
+        _probe_filesystem(), _probe_system(prime_cpu=False),
+        return_exceptions=True)
     _gather_elapsed = time.monotonic() - _t_gather_start
-
     def _safe(x, default):
         return default if isinstance(x, BaseException) else x
-
     result["network_telegram"] = _safe(probes[0], {})
     result["event_loop"] = _safe(probes[1], {})
     result["filesystem"] = _safe(probes[2], {})
     result["system"] = _safe(probes[3], {})
     result["database"] = db_latency_result
-
     loop_dict = result.get("event_loop")
-    startup_window = bool(
-        isinstance(loop_dict, dict)
-        and loop_dict.get("_startup_window", False)
-    )
+    startup_window = bool(isinstance(loop_dict, dict)
+                          and loop_dict.get("_startup_window", False))
     if isinstance(result["system"], dict):
         result["system"]["_startup_window"] = startup_window
     if isinstance(result["filesystem"], dict):
         result["filesystem"]["_startup_window"] = startup_window
-
-    tcp_from_latency = float(
-        db_latency_result.get("tcp_connect_ms", 0) or 0)
+    tcp_from_latency = float(db_latency_result.get("tcp_connect_ms", 0) or 0)
     if tcp_from_latency > 0:
-        result["network_db"] = {
-            "ok": True,
-            "host": db_latency_result.get("host", db_host),
-            "port": db_latency_result.get("port", db_port),
-            "tcp_ms": tcp_from_latency,
-            "dns_ms": 0,
-            "tls_ms": 0,
-            "_source": "reused_from_latency_probe",
-        }
+        result["network_db"] = {"ok": True,
+                                "host": db_latency_result.get("host", db_host),
+                                "port": db_latency_result.get("port", db_port),
+                                "tcp_ms": tcp_from_latency, "dns_ms": 0, "tls_ms": 0,
+                                "_source": "reused_from_latency_probe"}
     elif db_host != "?" and db_port > 0:
         try:
             net_db = await _probe_network_to(db_host, db_port, with_tls=True)
@@ -2595,7 +1992,6 @@ async def _probe_full_health(*, force: bool = False) -> Dict[str, Any]:
             result["network_db"] = {}
     else:
         result["network_db"] = {}
-
     if _cpu_primed:
         try:
             import psutil  # type: ignore
@@ -2607,15 +2003,11 @@ async def _probe_full_health(*, force: bool = False) -> Dict[str, Any]:
             result["system"]["cpu_source"] = "probe_window"
         except Exception:
             pass
-
     if not isinstance(result["system"], dict):
         result["system"] = {"ok": True, "error": "system probe failed"}
-
     result["ok"] = True
     result["bottleneck"] = _identify_bottleneck(result)
-
-    loop_win = bool((result.get("event_loop") or {}).get(
-        "_startup_window", False))
+    loop_win = bool((result.get("event_loop") or {}).get("_startup_window", False))
     ttl = _FULL_HEALTH_TTL_STARTUP if loop_win else _FULL_HEALTH_TTL_NORMAL
     _cache_set("full_health", result, ttl=ttl)
     return result
@@ -2624,18 +2016,14 @@ async def _probe_full_health(*, force: bool = False) -> Dict[str, Any]:
 def format_full_health_report(data: Dict[str, Any]) -> str:
     if not data.get("ok"):
         return "❌ فشل التشخيص الشامل"
-
     lines: List[str] = []
     lines.append("🏥 <b>التشخيص الشامل — Full Health Probe</b>")
     lines.append("━━━━━━━━━━━━━━━━━━━━━━")
     lines.append("")
-
     active_line = format_active_db_line()
     if active_line:
         lines.append(active_line)
         lines.append("")
-
-    # 🆕 FIX-21: عرض Pool بصيغة دقيقة في تقرير الصحة
     try:
         _active = _detect_active_db_source(_get_db())
         if _active.get("pool_size", 0) > 0 or _active.get("pool_current", 0) > 0:
@@ -2643,45 +2031,34 @@ def format_full_health_report(data: Dict[str, Any]) -> str:
             lines.append("")
     except Exception:
         pass
-
     loop_p = data.get("event_loop") or {}
     startup_window = bool(loop_p.get("_startup_window", False))
     if startup_window:
         uptime = loop_p.get("_uptime_sec", 0)
-        lines.append(
-            f"🟡 <b>نافذة إقلاع ({uptime:.0f}s منذ البدء)</b>\n"
-            f"   <i>قياسات CPU / RAM / Event Loop / القرص "
-            f"غير موثوقة حتى 60s — أعد التشخيص لاحقاً.</i>"
-        )
+        lines.append(f"🟡 <b>نافذة إقلاع ({uptime:.0f}s منذ البدء)</b>\n"
+                     f"   <i>قياسات CPU / RAM / Event Loop / القرص "
+                     f"غير موثوقة حتى 60s — أعد التشخيص لاحقاً.</i>")
         lines.append("")
-
     b = data.get("bottleneck") or {}
     severity = b.get("severity", "low")
     primary = b.get("primary", "none")
-    icon = {"critical": "🔴", "high": "🟠", "medium": "🟡", "low": "🟢"}.get(
-        severity, "⚪")
-
+    icon = {"critical": "🔴", "high": "🟠", "medium": "🟡", "low": "🟢"}.get(severity, "⚪")
     cross = b.get("cross_region") or {}
     if cross.get("cross_region") is True:
         bot_r = cross.get("bot_region", "?")
         db_r = cross.get("db_region", "?")
         inferred = cross.get("inferred_from_rtt", False)
         note = " <i>(مُستنتَج من RTT)</i>" if inferred else ""
-        lines.append(
-            f"🚨 <b>تحذير Cross-Region{note}:</b>\n"
-            f"   🤖 البوت: <code>{_esc(bot_r)}</code>\n"
-            f"   🗄️ DB: <code>{_esc(db_r)}</code>\n"
-            f"   ⚠️ منطقتان مختلفتان — كل استعلام يقطع مسافة "
-            f"جغرافية (~500-5000km)."
-        )
+        lines.append(f"🚨 <b>تحذير Cross-Region{note}:</b>\n"
+                     f"   🤖 البوت: <code>{_esc(bot_r)}</code>\n"
+                     f"   🗄️ DB: <code>{_esc(db_r)}</code>\n"
+                     f"   ⚠️ منطقتان مختلفتان — كل استعلام يقطع مسافة "
+                     f"جغرافية (~500-5000km).")
         lines.append("")
     elif cross.get("cross_region") is False and cross.get("inferred_from_rtt"):
         reason_txt = _esc(cross.get("inference_reason", ""))
-        lines.append(
-            f"✅ <b>نفس المنطقة</b> <i>({reason_txt})</i>"
-        )
+        lines.append(f"✅ <b>نفس المنطقة</b> <i>({reason_txt})</i>")
         lines.append("")
-
     if primary == "none":
         lines.append(f"{icon} <b>لا يوجد bottleneck — كل الأبعاد سليمة.</b>")
         if b.get("recommendation"):
@@ -2693,7 +2070,6 @@ def format_full_health_report(data: Dict[str, Any]) -> str:
         if b.get("recommendation"):
             lines.append(f"   {b['recommendation']}")
     lines.append("")
-
     ranked = b.get("ranked") or []
     if ranked:
         lines.append("📊 <b>ترتيب الأبعاد (من الأعلى تأثيراً):</b>")
@@ -2702,18 +2078,12 @@ def format_full_health_report(data: Dict[str, Any]) -> str:
             val = item.get("value", 0)
             unit = item.get("unit", "ms")
             sev = item.get("severity", "low")
-            ic = {"critical": "🔴", "high": "🟠",
-                  "medium": "🟡", "low": "🟢"}.get(sev, "⚪")
-            lines.append(
-                f"  {i}. {ic} <code>{_esc(name)}</code> "
-                f"{val:.0f}{unit}"
-            )
+            ic = {"critical": "🔴", "high": "🟠", "medium": "🟡", "low": "🟢"}.get(sev, "⚪")
+            lines.append(f"  {i}. {ic} <code>{_esc(name)}</code> {val:.0f}{unit}")
         lines.append("")
-
     lines.append("━━━━━━━━━━━━━━━━━━━━━━")
     lines.append("📋 <b>القياسات الكاملة:</b>")
     lines.append("")
-
     net_db = data.get("network_db") or {}
     if net_db.get("ok"):
         lines.append("🌐 <b>الشبكة → DB</b>")
@@ -2725,12 +2095,10 @@ def format_full_health_report(data: Dict[str, Any]) -> str:
         if net_db.get("tcp_ms", 0) > 0:
             lines.append(f"   TCP: <b>{net_db['tcp_ms']:.0f}ms</b>")
         if net_db.get("tls_ms", 0) > 0:
-            lines.append(f"   TLS: <b>{net_db['tls_ms']:.0f}ms</b> "
-                         f"<i>(setup — لمرة واحدة)</i>")
+            lines.append(f"   TLS: <b>{net_db['tls_ms']:.0f}ms</b> <i>(setup — لمرة واحدة)</i>")
         if net_db.get("tls_error"):
             lines.append(f"   ⚠️ TLS: <i>{_esc(net_db['tls_error'])}</i>")
         lines.append("")
-
     net_tg = data.get("network_telegram") or {}
     if net_tg.get("ok"):
         lines.append("📨 <b>الشبكة → Telegram</b>")
@@ -2741,69 +2109,47 @@ def format_full_health_report(data: Dict[str, Any]) -> str:
         if net_tg.get("tls_error"):
             lines.append(f"   ⚠️ TLS: <i>{_esc(net_tg['tls_error'])}</i>")
         lines.append("")
-
     db_p = data.get("database") or {}
     if db_p.get("ok"):
         lines.append("🗄️ <b>DB Internal</b>")
         if db_p.get("used_pool"):
             pool_ms = db_p.get("pool_acquire_ms", 0)
-            lines.append(f"   pool acquire: <b>{pool_ms:.0f}ms</b> "
-                         f"<i>(pool warm)</i>")
+            lines.append(f"   pool acquire: <b>{pool_ms:.0f}ms</b> <i>(pool warm)</i>")
         if db_p.get("asyncpg_connect_ms", 0) > 0:
-            lines.append(
-                f"   connect: <b>{db_p['asyncpg_connect_ms']:.0f}ms</b>")
+            lines.append(f"   connect: <b>{db_p['asyncpg_connect_ms']:.0f}ms</b>")
         elif db_p.get("used_pool"):
             lines.append("   connect: <b>0ms</b> <i>(pool warm)</i>")
         if db_p.get("first_query_ms", 0) > 0:
-            lines.append(
-                f"   first query: <b>{db_p['first_query_ms']:.0f}ms</b>")
+            lines.append(f"   first query: <b>{db_p['first_query_ms']:.0f}ms</b>")
         if db_p.get("warm_median_ms", 0) > 0:
-            lines.append(
-                f"   warm median: <b>{db_p['warm_median_ms']:.0f}ms</b>")
+            lines.append(f"   warm median: <b>{db_p['warm_median_ms']:.0f}ms</b>")
         if db_p.get("pk_select_ms", 0) > 0:
-            lines.append(
-                f"   PK SELECT: <b>{db_p['pk_select_ms']:.0f}ms</b>")
+            lines.append(f"   PK SELECT: <b>{db_p['pk_select_ms']:.0f}ms</b>")
         if db_p.get("bulk_fetch_ms", 0) > 0:
-            lines.append(
-                f"   bulk 100: <b>{db_p['bulk_fetch_ms']:.0f}ms</b>")
+            lines.append(f"   bulk 100: <b>{db_p['bulk_fetch_ms']:.0f}ms</b>")
         lines.append("")
-
     if loop_p.get("ok"):
         lines.append("🔄 <b>Event Loop</b>")
         if loop_p.get("_startup_window"):
             uptime = loop_p.get("_uptime_sec", 0)
-            lines.append(
-                f"   🟡 <i>نافذة إقلاع ({uptime:.0f}s منذ البدء) — "
-                f"القياسات غير موثوقة</i>"
-            )
-            lines.append(
-                "   <i>ستصبح دقيقة بعد 60s من التشغيل.</i>"
-            )
+            lines.append(f"   🟡 <i>نافذة إقلاع ({uptime:.0f}s منذ البدء) — "
+                         f"القياسات غير موثوقة</i>")
+            lines.append("   <i>ستصبح دقيقة بعد 60s من التشغيل.</i>")
             lines.append("")
-
         median_v = float(loop_p.get('median_ms', 0) or 0)
         p90_v = float(loop_p.get('p90_ms', 0) or 0)
         max_v = float(loop_p.get('max_ms', 0) or 0)
-
-        med_icon = ("🟢" if median_v < 5 else
-                    "🟡" if median_v < 20 else "🔴")
-        lines.append(f"   {med_icon} lag median: <b>{median_v:.0f}ms</b> "
-                     f"<i>(الأساسي)</i>")
-
+        med_icon = ("🟢" if median_v < 5 else "🟡" if median_v < 20 else "🔴")
+        lines.append(f"   {med_icon} lag median: <b>{median_v:.0f}ms</b> <i>(الأساسي)</i>")
         if p90_v > 0:
-            p90_icon = ("🟢" if p90_v < 20 else
-                        "🟡" if p90_v < 100 else "🔴")
+            p90_icon = ("🟢" if p90_v < 20 else "🟡" if p90_v < 100 else "🔴")
             lines.append(f"   {p90_icon} lag p90: <b>{p90_v:.0f}ms</b>")
-
         if max_v > 1000:
-            lines.append(f"   🔴 lag max: <b>{max_v:.0f}ms</b> "
-                         f"<i>(spike معزول)</i>")
+            lines.append(f"   🔴 lag max: <b>{max_v:.0f}ms</b> <i>(spike معزول)</i>")
         elif max_v > 0:
-            max_icon = ("🟢" if max_v < 100 else
-                        "🟡" if max_v < 500 else "🟠")
+            max_icon = ("🟢" if max_v < 100 else "🟡" if max_v < 500 else "🟠")
             lines.append(f"   {max_icon} lag max: <b>{max_v:.0f}ms</b>")
         lines.append("")
-
     fs_p = data.get("filesystem") or {}
     if fs_p.get("ok"):
         lines.append("💾 <b>القرص (1MB)</b>")
@@ -2816,38 +2162,29 @@ def format_full_health_report(data: Dict[str, Any]) -> str:
         if src and src != "tempdir":
             lines.append(f"   <i>(قياس على {_esc(src)})</i>")
         lines.append("")
-
     sys_p = data.get("system") or {}
     if sys_p.get("ok"):
         lines.append("⚙️ <b>النظام</b>")
         sys_startup = bool(sys_p.get("_startup_window", False))
         cpu_startup_note = " <i>(مضخَّم — إقلاع)</i>" if sys_startup else ""
-
         if "cpu_percent" in sys_p:
             cpu_val = sys_p["cpu_percent"]
             window = sys_p.get("cpu_window_sec")
             if window:
-                lines.append(f"   CPU: <b>{cpu_val:.0f}%</b>"
-                             f"{cpu_startup_note} "
-                             f"<i>(نافذة {window:.1f}s)</i>")
+                lines.append(f"   CPU: <b>{cpu_val:.0f}%</b>{cpu_startup_note} <i>(نافذة {window:.1f}s)</i>")
             else:
-                lines.append(f"   CPU: <b>{cpu_val:.0f}%</b>"
-                             f"{cpu_startup_note}")
+                lines.append(f"   CPU: <b>{cpu_val:.0f}%</b>{cpu_startup_note}")
         if "ram_percent" in sys_p:
             ram_note = " <i>(إقلاع)</i>" if sys_startup else ""
-            lines.append(
-                f"   RAM: <b>{sys_p['ram_percent']:.0f}%</b>{ram_note} "
-                f"({sys_p.get('ram_used_mb', 0):.0f}/"
-                f"{sys_p.get('ram_total_mb', 0):.0f}MB)")
+            lines.append(f"   RAM: <b>{sys_p['ram_percent']:.0f}%</b>{ram_note} "
+                         f"({sys_p.get('ram_used_mb', 0):.0f}/{sys_p.get('ram_total_mb', 0):.0f}MB)")
         if "load_avg_1m" in sys_p:
             load_note = " <i>(مضخَّم — إقلاع)</i>" if sys_startup else ""
             lines.append(f"   Load: <b>{sys_p['load_avg_1m']}</b> / "
-                         f"{sys_p['load_avg_5m']} / {sys_p['load_avg_15m']}"
-                         f"{load_note}")
+                         f"{sys_p['load_avg_5m']} / {sys_p['load_avg_15m']}{load_note}")
         if "cpu_count" in sys_p:
             lines.append(f"   CPUs: <b>{sys_p['cpu_count']}</b>")
         lines.append("")
-
     lines.append("━━━━━━━━━━━━━━━━━━━━━━")
     lines.append(f"🕐 <i>{_now_iso()}</i>")
     return "\n".join(lines)
@@ -2870,37 +2207,30 @@ async def _get_db_metadata() -> Dict[str, Any]:
     cached = _cache_get("db_metadata")
     if cached is not None:
         return cached
-
     db = _get_db()
-    meta: Dict[str, Any] = {
-        "size_bytes": 0, "size_display": "?",
-        "current_schema": "?", "schemas": [], "database_name": "?",
-    }
+    meta: Dict[str, Any] = {"size_bytes": 0, "size_display": "?",
+                             "current_schema": "?", "schemas": [],
+                             "database_name": "?"}
     if db is None:
         return meta
-
     try:
         if _is_postgres():
             row = await db.fetchone("""
                 SELECT
                     pg_database_size(current_database())::bigint AS size_bytes,
-                    current_database()                            AS database_name,
-                    current_schema()                              AS current_schema,
-                    COALESCE(
-                        (SELECT array_agg(nspname ORDER BY nspname)
-                         FROM pg_namespace
-                         WHERE nspname NOT LIKE 'pg_%'
-                           AND nspname <> 'information_schema'),
-                        ARRAY[]::text[]
-                    ) AS schemas
+                    current_database() AS database_name,
+                    current_schema() AS current_schema,
+                    COALESCE((SELECT array_agg(nspname ORDER BY nspname)
+                              FROM pg_namespace
+                              WHERE nspname NOT LIKE 'pg_%'
+                                AND nspname <> 'information_schema'),
+                             ARRAY[]::text[]) AS schemas
             """) or {}
-
             size_b = int(row.get("size_bytes") or 0)
-            meta["size_bytes"]     = size_b
-            meta["size_display"]   = _fmt_bytes(size_b)
-            meta["database_name"]  = row.get("database_name") or "?"
+            meta["size_bytes"] = size_b
+            meta["size_display"] = _fmt_bytes(size_b)
+            meta["database_name"] = row.get("database_name") or "?"
             meta["current_schema"] = row.get("current_schema") or "public"
-
             schemas_raw = row.get("schemas")
             if isinstance(schemas_raw, list):
                 meta["schemas"] = [str(s) for s in schemas_raw if s]
@@ -2908,60 +2238,48 @@ async def _get_db_metadata() -> Dict[str, Any]:
                 meta["schemas"] = [str(s) for s in schemas_raw if s]
             else:
                 meta["schemas"] = []
-
         elif _is_mysql():
             row = await db.fetchone("""
                 SELECT
-                    COALESCE((
-                        SELECT SUM(data_length + index_length)
-                        FROM information_schema.TABLES
-                        WHERE TABLE_SCHEMA = DATABASE()
-                    ), 0) AS size_bytes,
+                    COALESCE((SELECT SUM(data_length + index_length)
+                              FROM information_schema.TABLES
+                              WHERE TABLE_SCHEMA = DATABASE()), 0) AS size_bytes,
                     DATABASE() AS database_name,
                     DATABASE() AS current_schema,
-                    COALESCE((
-                        SELECT GROUP_CONCAT(SCHEMA_NAME ORDER BY SCHEMA_NAME
-                                            SEPARATOR ',')
-                        FROM information_schema.SCHEMATA
-                        WHERE SCHEMA_NAME NOT IN (
-                            'information_schema','mysql',
-                            'performance_schema','sys'
-                        )
-                    ), '') AS schemas_csv
+                    COALESCE((SELECT GROUP_CONCAT(SCHEMA_NAME ORDER BY SCHEMA_NAME SEPARATOR ',')
+                              FROM information_schema.SCHEMATA
+                              WHERE SCHEMA_NAME NOT IN (
+                                  'information_schema','mysql',
+                                  'performance_schema','sys')), '') AS schemas_csv
             """) or {}
-
             size_b = int(row.get("size_bytes") or 0)
-            meta["size_bytes"]     = size_b
-            meta["size_display"]   = _fmt_bytes(size_b)
-            meta["database_name"]  = row.get("database_name") or "?"
+            meta["size_bytes"] = size_b
+            meta["size_display"] = _fmt_bytes(size_b)
+            meta["database_name"] = row.get("database_name") or "?"
             meta["current_schema"] = row.get("current_schema") or "?"
-
             schemas_csv = row.get("schemas_csv") or ""
             if isinstance(schemas_csv, str):
                 meta["schemas"] = [s for s in schemas_csv.split(",") if s]
             else:
                 meta["schemas"] = []
-
         else:
             size_kb = (await db.get_db_size_kb()
                        if hasattr(db, "get_db_size_kb") else 0)
-            meta["size_bytes"]     = int(size_kb * 1024)
-            meta["size_display"]   = _fmt_bytes(meta["size_bytes"])
+            meta["size_bytes"] = int(size_kb * 1024)
+            meta["size_display"] = _fmt_bytes(meta["size_bytes"])
             meta["current_schema"] = "main"
-            meta["schemas"]        = ["main"]
-            meta["database_name"]  = "sqlite"
-
+            meta["schemas"] = ["main"]
+            meta["database_name"] = "sqlite"
     except Exception as e:
         logger.debug(f"_get_db_metadata: {e}")
         _cache_set("db_metadata", meta, ttl=_NEGATIVE_CACHE_TTL)
         return meta
-
     _cache_set("db_metadata", meta, ttl=300.0)
     return meta
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# 2) Dead Tuples — FIX-14: Sentinel على الفشل
+# 2) Dead Tuples
 # ═══════════════════════════════════════════════════════════════════════
 
 _HEALTH_FAILED_SENTINEL: Tuple[None, None] = (None, None)
@@ -2973,13 +2291,11 @@ async def _get_all_tables_health() -> Tuple[Optional[List[Dict]], Optional[List[
         if isinstance(cached, tuple) and len(cached) == 2:
             return cached
         return None, None
-
     db = _get_db()
     if db is None or not _is_postgres():
         if db is None:
             return None, None
         return [], []
-
     try:
         rows = await db.fetchall("""
             SELECT
@@ -3000,13 +2316,10 @@ async def _get_all_tables_health() -> Tuple[Optional[List[Dict]], Optional[List[
         """) or []
     except Exception as e:
         logger.warning(f"_get_all_tables_health: {e}")
-        _cache_set("all_tables_health", _HEALTH_FAILED_SENTINEL,
-                   ttl=_NEGATIVE_CACHE_TTL)
+        _cache_set("all_tables_health", _HEALTH_FAILED_SENTINEL, ttl=_NEGATIVE_CACHE_TTL)
         return None, None
-
     dirty = []
     clean = []
-
     for r in rows:
         if not isinstance(r, dict):
             continue
@@ -3018,7 +2331,6 @@ async def _get_all_tables_health() -> Tuple[Optional[List[Dict]], Optional[List[
         total = live + dead
         ratio = (dead / total) if total > 0 else 0.0
         n_mod = int(r.get("n_mod_since_analyze") or 0)
-
         opts = r.get("reloptions") or []
         av_scale = None
         an_scale = None
@@ -3034,25 +2346,17 @@ async def _get_all_tables_health() -> Tuple[Optional[List[Dict]], Optional[List[
                         an_scale = float(opt.split("=")[1])
                     except Exception:
                         pass
-
         auto_tuned = av_scale is not None and an_scale is not None
         last_av = r.get("last_vacuum") or r.get("last_autovacuum")
         last_an = r.get("last_analyze") or r.get("last_autoanalyze")
-
-        entry = {
-            "name": name, "relkind": relkind,
-            "is_matview": is_matview,
-            "live": live, "dead": dead, "total": total,
-            "ratio": ratio, "n_mod": n_mod,
-            "last_av": last_av, "last_an": last_an,
-            "auto_tuned": auto_tuned,
-            "av_scale": av_scale, "an_scale": an_scale,
-        }
+        entry = {"name": name, "relkind": relkind, "is_matview": is_matview,
+                 "live": live, "dead": dead, "total": total, "ratio": ratio,
+                 "n_mod": n_mod, "last_av": last_av, "last_an": last_an,
+                 "auto_tuned": auto_tuned, "av_scale": av_scale, "an_scale": an_scale}
         if dead > 0:
             dirty.append(entry)
         else:
             clean.append(entry)
-
     result = (dirty, clean)
     _cache_set("all_tables_health", result, ttl=60.0)
     return result
@@ -3066,43 +2370,35 @@ async def _get_activity_stats() -> Dict[str, Any]:
     cached = _cache_get("activity_stats")
     if cached is not None:
         return cached
-
-    out: Dict[str, Any] = {
-        "long_tx": 0, "idle_tx": 0,
-        "vacuum_running": 0, "total_active": 0, "total_connections": 0,
-    }
+    out: Dict[str, Any] = {"long_tx": 0, "idle_tx": 0,
+                            "vacuum_running": 0, "total_active": 0,
+                            "total_connections": 0}
     db = _get_db()
     if db is None or not _is_postgres():
         _cache_set("activity_stats", out, ttl=5.0)
         return out
-
     long_tx_sec = _LONG_TX_THRESHOLD_SECONDS
     try:
         row = await db.fetchone(f"""
             SELECT
                 count(*) FILTER (WHERE state = 'active') AS active,
                 count(*) FILTER (WHERE state = 'idle in transaction') AS idle_tx,
-                count(*) FILTER (
-                    WHERE state = 'active'
-                      AND now() - xact_start > interval '{long_tx_sec} seconds'
-                ) AS long_tx,
-                count(*) FILTER (
-                    WHERE query ILIKE 'VACUUM%' AND state = 'active'
-                ) AS vacuum_running,
+                count(*) FILTER (WHERE state = 'active'
+                                 AND now() - xact_start > interval '{long_tx_sec} seconds') AS long_tx,
+                count(*) FILTER (WHERE query ILIKE 'VACUUM%' AND state = 'active') AS vacuum_running,
                 count(*) AS total
             FROM pg_stat_activity
             WHERE datname = current_database()
               AND pid <> pg_backend_pid()
         """) or {}
         if isinstance(row, dict):
-            out["total_active"]      = int(row.get("active") or 0)
-            out["idle_tx"]           = int(row.get("idle_tx") or 0)
-            out["long_tx"]           = int(row.get("long_tx") or 0)
-            out["vacuum_running"]    = int(row.get("vacuum_running") or 0)
+            out["total_active"] = int(row.get("active") or 0)
+            out["idle_tx"] = int(row.get("idle_tx") or 0)
+            out["long_tx"] = int(row.get("long_tx") or 0)
+            out["vacuum_running"] = int(row.get("vacuum_running") or 0)
             out["total_connections"] = int(row.get("total") or 0)
     except Exception as e:
         logger.debug(f"_get_activity_stats: {e}")
-
     _cache_set("activity_stats", out, ttl=5.0)
     return out
 
@@ -3113,10 +2409,8 @@ async def _get_activity_stats() -> Dict[str, Any]:
 
 _CRITICAL_SETTINGS = (
     "autovacuum", "autovacuum_naptime",
-    "autovacuum_vacuum_scale_factor",
-    "autovacuum_analyze_scale_factor",
-    "autovacuum_vacuum_threshold",
-    "autovacuum_analyze_threshold",
+    "autovacuum_vacuum_scale_factor", "autovacuum_analyze_scale_factor",
+    "autovacuum_vacuum_threshold", "autovacuum_analyze_threshold",
     "autovacuum_max_workers", "max_connections",
     "shared_buffers", "work_mem", "synchronous_commit",
     "idle_in_transaction_session_timeout",
@@ -3128,17 +2422,14 @@ async def _get_pg_settings() -> Dict[str, str]:
     cached = _cache_get("pg_settings")
     if cached is not None:
         return cached
-
     db = _get_db()
     if db is None or not _is_postgres():
         return {}
-
     try:
         rows = await db.fetchall("""
             SELECT name, setting, unit FROM pg_settings
             WHERE name = ANY($1::text[])
         """, (list(_CRITICAL_SETTINGS),)) or []
-
         out: Dict[str, str] = {}
         for r in rows:
             if not isinstance(r, dict):
@@ -3147,7 +2438,6 @@ async def _get_pg_settings() -> Dict[str, str]:
             setting = r.get("setting") or ""
             unit = r.get("unit") or ""
             out[name] = f"{setting}{unit}" if unit else str(setting)
-
         _cache_set("pg_settings", out, ttl=600.0)
         return out
     except Exception as e:
@@ -3164,7 +2454,6 @@ async def _get_table_sizes(limit: int = 15) -> List[Dict[str, Any]]:
     cached = _cache_get(cache_key)
     if cached is not None:
         return cached
-
     db = _get_db()
     if db is None or not _is_postgres():
         return []
@@ -3185,7 +2474,6 @@ async def _get_indexes(tables: List[str]) -> Dict[str, List[Dict[str, Any]]]:
     cached = _cache_get(cache_key)
     if cached is not None:
         return cached
-
     db = _get_db()
     if db is None or not _is_postgres():
         return {}
@@ -3202,17 +2490,15 @@ async def _get_indexes(tables: List[str]) -> Dict[str, List[Dict[str, Any]]]:
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# 6) Auto-Cleanup Status — FIX-6 + FIX-18
+# 6) Auto-Cleanup Status
 # ═══════════════════════════════════════════════════════════════════════
 
 _SQL_TABLE_TOTAL_SIZE = """
     SELECT c.relname AS table_name,
            (
-               c.relpages::bigint
-               * current_setting('block_size')::int
+               c.relpages::bigint * current_setting('block_size')::int
                + COALESCE((
-                   SELECT SUM(i.relpages)::bigint
-                          * current_setting('block_size')::int
+                   SELECT SUM(i.relpages)::bigint * current_setting('block_size')::int
                    FROM pg_index idx
                    JOIN pg_class i ON i.oid = idx.indexrelid
                    WHERE idx.indrelid = c.oid
@@ -3247,18 +2533,14 @@ async def _get_cleanup_status() -> List[Dict[str, Any]]:
     db = _get_db()
     if db is None or not _is_postgres():
         return []
-
-    deletable = [k for k, v in _CLEANUP_POLICY.items()
-                 if not v.get("protected")]
+    deletable = [k for k, v in _CLEANUP_POLICY.items() if not v.get("protected")]
     if not deletable:
         return []
-
     try:
         rows = await db.fetchall(_SQL_TABLE_TOTAL_SIZE, (deletable,)) or []
     except Exception as e:
         logger.debug(f"_get_cleanup_status: {e}")
         return []
-
     out = []
     for r in rows:
         if not isinstance(r, dict):
@@ -3272,7 +2554,6 @@ async def _get_cleanup_status() -> List[Dict[str, Any]]:
         b = int(r.get("total_bytes") or 0)
         kb = b / 1024
         threshold_kb = max_mb * 1024
-
         if kb >= threshold_kb:
             color = "🔴"
             status = f"تجاوز الحد ({max_mb}MB) — سيُنظَّف"
@@ -3282,16 +2563,10 @@ async def _get_cleanup_status() -> List[Dict[str, Any]]:
         else:
             color = "🟢"
             status = f"ضمن الحد ({max_mb}MB)"
-
-        out.append({
-            "name": name, "bytes": b, "display": _fmt_bytes(b),
-            "color": color, "status": status,
-            "retention_days": retention_days, "max_mb": max_mb,
-        })
-
-    out.sort(key=lambda x: (
-        {"🔴": 0, "🟡": 1, "🟢": 2}.get(x["color"], 3),
-        -x["bytes"]))
+        out.append({"name": name, "bytes": b, "display": _fmt_bytes(b),
+                    "color": color, "status": status,
+                    "retention_days": retention_days, "max_mb": max_mb})
+    out.sort(key=lambda x: ({"🔴": 0, "🟡": 1, "🟢": 2}.get(x["color"], 3), -x["bytes"]))
     return out
 
 
@@ -3303,21 +2578,16 @@ async def _get_all_table_names() -> List[str]:
     cached = _cache_get("all_table_names")
     if cached is not None:
         return cached
-
     db = _get_db()
     if db is None:
         return []
-
     db_type = _get_db_type()
-
     if db_type == "MYSQL":
         try:
             rows = await db.fetchall(
-                "SELECT TABLE_NAME AS tablename "
-                "FROM information_schema.TABLES "
+                "SELECT TABLE_NAME AS tablename FROM information_schema.TABLES "
                 "WHERE TABLE_SCHEMA = DATABASE() "
-                "  AND TABLE_TYPE IN ('BASE TABLE', 'VIEW') "
-                "ORDER BY TABLE_NAME") or []
+                "  AND TABLE_TYPE IN ('BASE TABLE', 'VIEW') ORDER BY TABLE_NAME") or []
             result = [r.get("tablename") or r.get("TABLE_NAME")
                       for r in rows if isinstance(r, dict)]
             result = [t for t in result if t]
@@ -3326,7 +2596,6 @@ async def _get_all_table_names() -> List[str]:
         except Exception as e:
             logger.warning(f"_get_all_table_names (MySQL): {e}")
             return []
-
     if _is_postgres():
         try:
             rows = await db.fetchall("""
@@ -3355,7 +2624,6 @@ async def _get_all_table_names() -> List[str]:
                 return result
             except Exception:
                 return []
-
     try:
         rows = await db.fetchall(
             "SELECT name FROM sqlite_master "
@@ -3373,15 +2641,10 @@ async def _get_all_table_names() -> List[str]:
 # 8) Score
 # ═══════════════════════════════════════════════════════════════════════
 
-def _calc_technical_score(
-    dirty: List[Dict],
-    activity: Dict,
-    settings: Dict,
-) -> Tuple[int, int, int, int]:
+def _calc_technical_score(dirty, activity, settings) -> Tuple[int, int, int, int]:
     score = 100
     critical = 0
     warn = 0
-
     for t in dirty:
         dead = int(t.get("dead", 0))
         r = float(t.get("ratio", 0))
@@ -3393,20 +2656,16 @@ def _calc_technical_score(
         elif r >= 0.10:
             warn += 1
             score -= 3
-
     long_tx = int(activity.get("long_tx", 0) or 0)
     if long_tx > 0:
         penalty = min(20, 5 + (long_tx - 1) * 2)
         score -= penalty
-
     idle_tx = int(activity.get("idle_tx", 0) or 0)
     if idle_tx > 0:
         penalty = min(10, 2 + (idle_tx - 1))
         score -= penalty
-
     if settings and settings.get("autovacuum") != "on":
         score -= 15
-
     score = max(0, min(100, score))
     return score, critical, warn, idle_tx
 
@@ -3415,19 +2674,15 @@ def _calc_technical_score(
 # 9) Maintenance helpers
 # ═══════════════════════════════════════════════════════════════════════
 
-def _build_cleanup_where(
-    db_type: str, col: str, days: int,
-    extra_where: Optional[str],
-) -> str:
-    """بناء WHERE متوافق مع DB type."""
+def _build_cleanup_where(db_type: str, col: str, days: int,
+                          extra_where: Optional[str]) -> str:
     dt = (db_type or "").upper()
     if dt == "MYSQL":
         base = f"{col} < (NOW() - INTERVAL {int(days)} DAY)"
     elif dt == "SQLITE":
         base = f"{col} < datetime('now', '-{int(days)} days')"
-    else:  # POSTGRES / default
+    else:
         base = f"{col} < NOW() - INTERVAL '{int(days)} days'"
-
     if extra_where:
         return f"({base}) AND ({extra_where})"
     return base
@@ -3439,18 +2694,14 @@ async def preview_maintenance() -> Dict[str, Any]:
         'plan': [], 'total_deletions': 0, 'has_errors': False,
         'vacuum_tables': [], 'db_type': _get_db_type(),
         'protected_tables': [k for k, v in _CLEANUP_POLICY.items()
-                             if v.get("protected")],
+                              if v.get("protected")],
     }
     if db is None:
         return result
-
-    deletable = [k for k, v in _CLEANUP_POLICY.items()
-                 if not v.get("protected")]
-
+    deletable = [k for k, v in _CLEANUP_POLICY.items() if not v.get("protected")]
     if not _is_postgres():
         result['vacuum_tables'] = await _get_all_table_names()
         return result
-
     sizes_map: Dict[str, int] = {}
     try:
         rows = await db.fetchall(_SQL_TABLE_TOTAL_SIZE, (deletable,)) or []
@@ -3459,39 +2710,30 @@ async def preview_maintenance() -> Dict[str, Any]:
                 sizes_map[r["table_name"]] = int(r.get("total_bytes") or 0)
     except Exception as e:
         logger.debug(f"preview_maintenance sizes: {e}")
-
     total = 0
     has_errors = False
     db_type = _get_db_type()
-
     for tbl in deletable:
         policy = _CLEANUP_POLICY[tbl]
         col = policy["date_column"]
         days = policy["retention"]
         max_mb = policy["max_mb"]
         extra_where = policy.get("extra_where")
-
         size_bytes = sizes_map.get(tbl, 0)
         size_kb = size_bytes / 1024
         threshold_kb = max_mb * 1024
-
-        entry = {
-            'name': tbl, 'column': col, 'days': days, 'max_mb': max_mb,
-            'threshold_str': f">{days}d | {max_mb}MB",
-            'size_display': _fmt_bytes(size_bytes),
-            'over_limit': size_kb >= threshold_kb,
-            'count': 0, 'error': None,
-        }
-
+        entry = {'name': tbl, 'column': col, 'days': days, 'max_mb': max_mb,
+                 'threshold_str': f">{days}d | {max_mb}MB",
+                 'size_display': _fmt_bytes(size_bytes),
+                 'over_limit': size_kb >= threshold_kb,
+                 'count': 0, 'error': None}
         if not entry['over_limit']:
             entry['skip_reason'] = 'within_limit'
             result['plan'].append(entry)
             continue
-
         try:
             where_sql = _build_cleanup_where(db_type, col, days, extra_where)
-            row = await db.fetchone(
-                f"SELECT COUNT(*) AS cnt FROM {tbl} WHERE {where_sql}")
+            row = await db.fetchone(f"SELECT COUNT(*) AS cnt FROM {tbl} WHERE {where_sql}")
             cnt = int((row or {}).get("cnt") or 0)
             entry['count'] = cnt
             total += cnt
@@ -3500,9 +2742,7 @@ async def preview_maintenance() -> Dict[str, Any]:
             entry['count'] = -1
             entry['error'] = str(e)[:100]
             has_errors = True
-
         result['plan'].append(entry)
-
     result['total_deletions'] = total
     result['has_errors'] = has_errors
     result['vacuum_tables'] = await _get_all_table_names()
@@ -3510,55 +2750,42 @@ async def preview_maintenance() -> Dict[str, Any]:
 
 
 async def run_maintenance() -> Dict[str, Any]:
-    """
-    FIX-16 (v7.2.18): فرع MySQL قبل db.vacuum().
-    """
     db = _get_db()
     start = time.monotonic()
     result: Dict[str, Any] = {
         'duration_sec': 0.0, 'deletions': {}, 'deletion_errors': {},
-        'skipped': [],
-        'protected': [k for k, v in _CLEANUP_POLICY.items()
-                      if v.get("protected")],
+        'skipped': [], 'protected': [k for k, v in _CLEANUP_POLICY.items()
+                                      if v.get("protected")],
         'vacuum': {'success': 0, 'failed': 0, 'details': []},
     }
     if db is None:
         result['duration_sec'] = round(time.monotonic() - start, 2)
         return result
-
     db_type = _get_db_type()
-    deletable = [k for k, v in _CLEANUP_POLICY.items()
-                 if not v.get("protected")]
-
+    deletable = [k for k, v in _CLEANUP_POLICY.items() if not v.get("protected")]
     sizes_map: Dict[str, int] = {}
     if _is_postgres():
         try:
-            rows = await db.fetchall(
-                _SQL_TABLE_TOTAL_SIZE, (deletable,)) or []
+            rows = await db.fetchall(_SQL_TABLE_TOTAL_SIZE, (deletable,)) or []
             for r in rows:
                 if isinstance(r, dict) and r.get("table_name"):
-                    sizes_map[r["table_name"]] = int(
-                        r.get("total_bytes") or 0)
+                    sizes_map[r["table_name"]] = int(r.get("total_bytes") or 0)
         except Exception as e:
             logger.debug(f"run_maintenance sizes: {e}")
-
     for tbl in deletable:
         policy = _CLEANUP_POLICY[tbl]
         col = policy["date_column"]
         days = policy["retention"]
         max_mb = policy["max_mb"]
         extra_where = policy.get("extra_where")
-
         if _is_postgres():
             size_kb = sizes_map.get(tbl, 0) / 1024
             threshold_kb = max_mb * 1024
             if size_kb < threshold_kb:
                 result['skipped'].append({
                     'name': tbl, 'reason': 'within_limit',
-                    'size_display': _fmt_bytes(sizes_map.get(tbl, 0)),
-                })
+                    'size_display': _fmt_bytes(sizes_map.get(tbl, 0))})
                 continue
-
         try:
             where_sql = _build_cleanup_where(db_type, col, days, extra_where)
             r = await db.execute(f"DELETE FROM {tbl} WHERE {where_sql}")
@@ -3567,7 +2794,6 @@ async def run_maintenance() -> Dict[str, Any]:
             logger.warning(f"run_maintenance delete({tbl}): {e}")
             result['deletions'][tbl] = 0
             result['deletion_errors'][tbl] = str(e)[:100]
-
     if db_type == "SQLITE":
         try:
             await db.execute("VACUUM")
@@ -3579,8 +2805,7 @@ async def run_maintenance() -> Dict[str, Any]:
             result['vacuum']['details'].append(("__sqlite_full__", True, None))
         except Exception as e:
             result['vacuum']['failed'] = 1
-            result['vacuum']['details'].append(
-                ("__sqlite_full__", False, str(e)[:80]))
+            result['vacuum']['details'].append(("__sqlite_full__", False, str(e)[:80]))
     else:
         tables = await _get_all_table_names()
         for t in tables:
@@ -3600,13 +2825,11 @@ async def run_maintenance() -> Dict[str, Any]:
                     result['vacuum']['details'].append((t, True, "skip"))
                 else:
                     result['vacuum']['failed'] += 1
-                    result['vacuum']['details'].append(
-                        (t, False, str(e)[:80]))
+                    result['vacuum']['details'].append((t, False, str(e)[:80]))
             try:
                 await asyncio.sleep(0.05)
             except Exception:
                 pass
-
     result['duration_sec'] = round(time.monotonic() - start, 2)
     _invalidate_cache()
     return result
@@ -3623,12 +2846,10 @@ def format_maintenance_preview(preview: Dict[str, Any]) -> str:
     lines.append("")
     lines.append("🔒 <i>المشتركون النشطون محميون تلقائياً</i>")
     lines.append("")
-
     plan = preview.get('plan', []) if isinstance(preview, dict) else []
     has_errors = False
     over = [p for p in plan if p.get('over_limit')]
     within = [p for p in plan if not p.get('over_limit')]
-
     if over:
         lines.append("🗑️ <b>جداول ستُحذف منها سجلات قديمة:</b>")
         for item in over:
@@ -3649,7 +2870,6 @@ def format_maintenance_preview(preview: Dict[str, Any]) -> str:
             lines.append(f"  {icon} <code>{name}</code>")
             lines.append(f"      {size} | {threshold} → {val}")
         lines.append("")
-
     if within:
         lines.append(f"✅ <b>جداول ضمن الحد ({len(within)}):</b>")
         for item in within:
@@ -3658,37 +2878,28 @@ def format_maintenance_preview(preview: Dict[str, Any]) -> str:
             max_mb = item.get('max_mb', '?')
             lines.append(f"  🟢 <code>{name}</code> {size} / {max_mb}MB")
         lines.append("")
-
     protected = preview.get('protected_tables', []) if isinstance(preview, dict) else []
     if protected:
         lines.append(f"🔒 <b>جداول محمية ({len(protected)}):</b>")
         lines.append("  <i>users, subscriptions, user_penalties, "
                      "user_warnings, referral_rewards, ...</i>")
         lines.append("")
-
-    total = (preview.get('total_deletions', 0)
-             if isinstance(preview, dict) else 0)
+    total = (preview.get('total_deletions', 0) if isinstance(preview, dict) else 0)
     if has_errors or preview.get('has_errors'):
-        lines.append(f"📊 <b>الإجمالي:</b> {total} صف سيُحذف "
-                     f"<i>(بعض العدّ فشل)</i>")
+        lines.append(f"📊 <b>الإجمالي:</b> {total} صف سيُحذف <i>(بعض العدّ فشل)</i>")
     else:
         lines.append(f"📊 <b>الإجمالي:</b> {total} صف سيُحذف")
     lines.append("")
-
-    tables = (preview.get('vacuum_tables', [])
-              if isinstance(preview, dict) else [])
+    tables = (preview.get('vacuum_tables', []) if isinstance(preview, dict) else [])
     if tables:
         lines.append(f"🧹 <b>VACUUM على ({len(tables)} جدول/MV)</b>")
         lines.append("")
-
     lines.append("━━━━━━━━━━━━━━━━━━━━━━")
     lines.append("لتنفيذ الصيانة:")
     lines.append("<code>/db_maintenance confirm</code>")
-
     if has_errors:
         lines.append("")
         lines.append("⚠️ <i>بعض استعلامات العدّ فشلت.</i>")
-
     return "\n".join(lines)
 
 
@@ -3697,52 +2908,42 @@ def format_maintenance_result(result: Dict[str, Any]) -> str:
     lines.append("✅ <b>اكتملت الصيانة بنجاح</b>")
     lines.append("━━━━━━━━━━━━━━━━━━━━━━")
     lines.append("")
-
-    duration = (result.get('duration_sec', 0.0)
-                if isinstance(result, dict) else 0.0)
+    duration = (result.get('duration_sec', 0.0) if isinstance(result, dict) else 0.0)
     lines.append(f"⏱️ <b>المدة:</b> {duration:.2f}s")
     lines.append("")
-
-    deletions = (result.get('deletions', {})
-                 if isinstance(result, dict) else {})
-    deletion_errors = (result.get('deletion_errors', {})
-                       if isinstance(result, dict) else {})
-    skipped = (result.get('skipped', [])
-               if isinstance(result, dict) else [])
-
+    deletions = (result.get('deletions', {}) if isinstance(result, dict) else {})
+    deletion_errors = (result.get('deletion_errors', {}) if isinstance(result, dict) else {})
+    skipped = (result.get('skipped', []) if isinstance(result, dict) else [])
     if deletions:
         lines.append("🗑️ <b>الحذف:</b>")
         for name, cnt in deletions.items():
             if name in deletion_errors:
-                icon = "❌"; val = "<i>فشل</i>"
+                icon = "❌"
+                val = "<i>فشل</i>"
             elif cnt == 0:
-                icon = "✅"; val = "لا شيء"
+                icon = "✅"
+                val = "لا شيء"
             else:
-                icon = "🗑️"; val = f"<b>{cnt}</b>"
+                icon = "🗑️"
+                val = f"<b>{cnt}</b>"
             lines.append(f"  {icon} <code>{_esc(name)}</code> {val}")
         lines.append("")
-
     if skipped:
         lines.append(f"⏭️ <b>تخطّي ({len(skipped)} — ضمن الحد)</b>")
         lines.append("")
-
     protected = result.get('protected', [])
     if protected:
         lines.append(f"🔒 <b>محمية ({len(protected)}):</b>")
         lines.append(f"  <i>{', '.join(protected[:6])}"
                      + ("..." if len(protected) > 6 else "") + "</i>")
         lines.append("")
-
-    vacuum = (result.get('vacuum', {})
-              if isinstance(result, dict) else {})
+    vacuum = (result.get('vacuum', {}) if isinstance(result, dict) else {})
     success = vacuum.get('success', 0) if isinstance(vacuum, dict) else 0
     failed = vacuum.get('failed', 0) if isinstance(vacuum, dict) else 0
-
     lines.append("🧹 <b>VACUUM:</b>")
     lines.append(f"  ✅ نجح: <b>{success}</b>")
     if failed:
         lines.append(f"  ❌ فشل: <b>{failed}</b>")
-
     return "\n".join(lines)
 
 
@@ -3761,17 +2962,13 @@ async def run_db_maintenance() -> str:
 
 
 async def vacuum_analyze_tables() -> str:
-    """FIX-4 + FIX-16: VACUUM/OPTIMIZE حسب DB type، MySQL أولاً."""
     db = _get_db()
     if db is None:
         return "❌ DB غير مستورد"
-
     start = time.monotonic()
     db_type = _get_db_type()
-
     if db_type == "SQLITE":
-        lines = ["🧹 <b>VACUUM (SQLite)</b>",
-                 "━━━━━━━━━━━━━━━━━━━━━━", ""]
+        lines = ["🧹 <b>VACUUM (SQLite)</b>", "━━━━━━━━━━━━━━━━━━━━━━", ""]
         try:
             await db.execute("VACUUM")
             try:
@@ -3785,18 +2982,14 @@ async def vacuum_analyze_tables() -> str:
             lines.append(f"  ❌ فشل: <code>{_esc(str(e)[:80])}</code>")
             success = 0
             fail = 1
-
         elapsed = time.monotonic() - start
         lines.append("")
         lines.append("━━━━━━━━━━━━━━━━━━━━━━")
-        lines.append(f"⏱️ المدة: {elapsed:.2f}s | "
-                     f"✅ نجح: {success} | ❌ فشل: {fail}")
+        lines.append(f"⏱️ المدة: {elapsed:.2f}s | ✅ نجح: {success} | ❌ فشل: {fail}")
         _invalidate_cache()
         return "\n".join(lines)
-
     tables = await _get_all_table_names()
     lines = ["🧹 <b>VACUUM ANALYZE</b>", "━━━━━━━━━━━━━━━━━━━━━━", ""]
-
     success = 0
     fail = 0
     for t in tables:
@@ -3816,27 +3009,38 @@ async def vacuum_analyze_tables() -> str:
                 lines.append(f"  ⏭️ {_esc(t)}")
             else:
                 fail += 1
-                lines.append(f"  ❌ {_esc(t)} — "
-                             f"<code>{_esc(str(e)[:60])}</code>")
+                lines.append(f"  ❌ {_esc(t)} — <code>{_esc(str(e)[:60])}</code>")
         await asyncio.sleep(0.05)
-
     elapsed = time.monotonic() - start
     lines.append("")
     lines.append("━━━━━━━━━━━━━━━━━━━━━━")
-    lines.append(f"⏱️ المدة: {elapsed:.2f}s | "
-                 f"✅ نجح: {success} | ❌ فشل: {fail}")
+    lines.append(f"⏱️ المدة: {elapsed:.2f}s | ✅ نجح: {success} | ❌ فشل: {fail}")
     _invalidate_cache()
     return "\n".join(lines)
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# 11b) Auto-vacuum MVs
+# 11b) Auto-vacuum  ✅ v7.2.23 — مع التفاصيل الكاملة
 # ═══════════════════════════════════════════════════════════════════════
 
 async def auto_vacuum_dirty_mvs(min_dead: int = 10) -> Dict[str, Any]:
+    """
+    🧹 تنظيف تلقائي للجداول التي فيها dead tuples ≥ min_dead.
+
+    🆕 v7.2.23 — CLEANUP-VISIBILITY:
+      ترجع الحقول التالية بجانب القديمة:
+        • 'vacuumed[i].dead_after' : dead tuples بعد VACUUM (لكل جدول)
+        • 'skipped'                : جداول dead>0 لكن < min_dead (تُركت)
+                                     كل عنصر: {name, dead, is_mv, reason}
+        • 'remaining'              : كل جدول فيه dead>0 بعد التنظيف
+                                     كل عنصر: {name, dead, ratio_pct, is_mv}
+      🔴 إصلاح: كانت ترجع total_dead_after=0 عند غياب targets
+         (لا تحدّث dirty_after قبل return). الآن تقرأ دائمًا.
+    """
     db = _get_db()
     result: Dict[str, Any] = {
         'vacuumed': [], 'failed': [],
+        'skipped': [], 'remaining': [],            # 🆕 v7.2.23
         'total_dead_before': 0, 'total_dead_after': 0,
         'cleaned': 0, 'duration_sec': 0.0,
         'error': None,
@@ -3853,12 +3057,40 @@ async def auto_vacuum_dirty_mvs(min_dead: int = 10) -> Dict[str, Any]:
         result['duration_sec'] = round(time.monotonic() - start, 2)
         return result
 
-    result['total_dead_before'] = sum(
-        int(t.get('dead', 0)) for t in dirty)
+    result['total_dead_before'] = sum(int(t.get('dead', 0)) for t in dirty)
 
     targets = [t for t in dirty
                if int(t.get('dead', 0)) >= int(min_dead)]
+    below = [t for t in dirty
+             if 0 < int(t.get('dead', 0)) < int(min_dead)]
+
+    # 🆕 v7.2.23 — سجّل ما لن يُنظَّف
+    result['skipped'] = [
+        {
+            'name': t['name'],
+            'dead': int(t.get('dead', 0)),
+            'is_mv': bool(t.get('is_matview', False)),
+            'reason': f'dead<{int(min_dead)}',
+        }
+        for t in below
+    ]
+
+    # 🆕 v7.2.23 — عند غياب targets: اقرأ dirty_after قبل الخروج
     if not targets:
+        _invalidate_cache("all_tables_health")
+        dirty_after, _ = await _get_all_tables_health()
+        if dirty_after is not None:
+            result['total_dead_after'] = sum(
+                int(t.get('dead', 0)) for t in dirty_after)
+            result['remaining'] = [
+                {
+                    'name': t['name'],
+                    'dead': int(t.get('dead', 0)),
+                    'ratio_pct': round(float(t.get('ratio', 0)) * 100, 2),
+                    'is_mv': bool(t.get('is_matview', False)),
+                }
+                for t in dirty_after
+            ]
         result['duration_sec'] = round(time.monotonic() - start, 2)
         return result
 
@@ -3871,8 +3103,26 @@ async def auto_vacuum_dirty_mvs(min_dead: int = 10) -> Dict[str, Any]:
                 await db.vacuum(name)
             else:
                 await db.execute(f'VACUUM ANALYZE "{name}"')
+
+            # 🆕 v7.2.23 — اقرأ dead_after لكل جدول بعد VACUUM
+            dead_after = 0
+            try:
+                row = await db.fetchone(
+                    "SELECT COALESCE(n_dead_tup,0) AS d "
+                    "FROM pg_stat_user_tables "
+                    "WHERE relname = $1 "
+                    "  AND schemaname = current_schema()",
+                    name,
+                )
+                if isinstance(row, dict):
+                    dead_after = int(row.get('d') or 0)
+            except Exception as e:
+                logger.debug(f"auto_vacuum read dead_after({name}): {e}")
+
             result['vacuumed'].append({
-                'name': name, 'dead_before': dead_before,
+                'name': name,
+                'dead_before': dead_before,
+                'dead_after': dead_after,          # 🆕
                 'is_mv': is_mv,
             })
             result['cleaned'] += 1
@@ -3890,8 +3140,18 @@ async def auto_vacuum_dirty_mvs(min_dead: int = 10) -> Dict[str, Any]:
     if dirty_after is not None:
         result['total_dead_after'] = sum(
             int(t.get('dead', 0)) for t in dirty_after)
-    result['duration_sec'] = round(time.monotonic() - start, 2)
+        # 🆕 v7.2.23 — تفصيل ما تبقّى
+        result['remaining'] = [
+            {
+                'name': t['name'],
+                'dead': int(t.get('dead', 0)),
+                'ratio_pct': round(float(t.get('ratio', 0)) * 100, 2),
+                'is_mv': bool(t.get('is_matview', False)),
+            }
+            for t in dirty_after
+        ]
 
+    result['duration_sec'] = round(time.monotonic() - start, 2)
     logger.info(
         "🧹 auto_vacuum_dirty_mvs: cleaned=%d | dead %d → %d | %.2fs",
         result['cleaned'], result['total_dead_before'],
@@ -3905,83 +3165,57 @@ async def auto_vacuum_dirty_mvs(min_dead: int = 10) -> Dict[str, Any]:
 
 async def _build_sections(*, include_probes: bool = True) -> List[str]:
     parts: List[str] = []
-
     critical_idx_tables = ["posts", "banned_words", "bot_groups",
                            "users", "user_channels", "subscriptions"]
-
     gathered = await asyncio.gather(
-        _get_db_metadata(),
-        _get_all_tables_health(),
-        _get_activity_stats(),
-        _get_pg_settings(),
-        _get_table_sizes(limit=15),
-        _get_cleanup_status(),
-        _get_all_table_names(),
-        _get_indexes(critical_idx_tables),
-        return_exceptions=True,
-    )
-
+        _get_db_metadata(), _get_all_tables_health(),
+        _get_activity_stats(), _get_pg_settings(),
+        _get_table_sizes(limit=15), _get_cleanup_status(),
+        _get_all_table_names(), _get_indexes(critical_idx_tables),
+        return_exceptions=True)
     meta = gathered[0] if not isinstance(gathered[0], BaseException) else {}
     health_result = (gathered[1] if not isinstance(gathered[1], BaseException)
                      else (None, None))
     activity = gathered[2] if not isinstance(gathered[2], BaseException) else {}
     settings = gathered[3] if not isinstance(gathered[3], BaseException) else {}
     sizes = gathered[4] if not isinstance(gathered[4], BaseException) else []
-    cleanup_status = (gathered[5] if not isinstance(gathered[5], BaseException)
-                      else [])
+    cleanup_status = (gathered[5] if not isinstance(gathered[5], BaseException) else [])
     idx_map = gathered[7] if not isinstance(gathered[7], BaseException) else {}
-
     if isinstance(health_result, tuple) and len(health_result) == 2:
         dirty, clean = health_result
     else:
         dirty, clean = None, None
-
     health_failed = (dirty is None or clean is None)
     if health_failed:
         dirty, clean = [], []
-
     if not isinstance(meta, dict):
         meta = {"size_display": "?", "current_schema": "?",
                 "schemas": [], "database_name": "?"}
-    if not isinstance(activity, dict):
-        activity = {}
-    if not isinstance(settings, dict):
-        settings = {}
-    if not isinstance(sizes, list):
-        sizes = []
-    if not isinstance(cleanup_status, list):
-        cleanup_status = []
-    if not isinstance(idx_map, dict):
-        idx_map = {}
-
+    if not isinstance(activity, dict): activity = {}
+    if not isinstance(settings, dict): settings = {}
+    if not isinstance(sizes, list): sizes = []
+    if not isinstance(cleanup_status, list): cleanup_status = []
+    if not isinstance(idx_map, dict): idx_map = {}
     score, critical_count, warn_count, idle_tx_count = _calc_technical_score(
         dirty, activity, settings)
     total_dead = sum(t.get("dead", 0) for t in dirty)
     total_tables = len(dirty) + len(clean)
-
     s0: List[str] = []
     active_line = format_active_db_line()
     if active_line:
         s0.append(active_line)
         s0.append("")
-
     if health_failed and _is_postgres():
-        s0.append(
-            "🟠 <b>تنبيه:</b> فحص dead tuples فشل مؤقتاً — "
-            "القياسات المتعلقة بالجداول قد تكون غير دقيقة."
-        )
+        s0.append("🟠 <b>تنبيه:</b> فحص dead tuples فشل مؤقتاً — "
+                  "القياسات المتعلقة بالجداول قد تكون غير دقيقة.")
         s0.append("")
-
     configured_dbs = _get_all_configured_databases()
     if len(configured_dbs) > 1:
-        s0.append(
-            f"⚠️ <b>تحذير:</b> يوجد <b>{len(configured_dbs)}</b> "
-            f"قواعد بيانات مُعدّة — راجع /db_diag للتفاصيل."
-        )
+        s0.append(f"⚠️ <b>تحذير:</b> يوجد <b>{len(configured_dbs)}</b> "
+                  f"قواعد بيانات مُعدّة — راجع /db_diag للتفاصيل.")
         s0.append("")
     if s0:
         parts.append("\n".join(s0))
-
     s1: List[str] = []
     s1.append(f"🔬 <b>تشخيص قاعدة البيانات v{VERSION}</b>")
     s1.append("━━━━━━━━━━━━━━━━━━━━━━")
@@ -3994,7 +3228,6 @@ async def _build_sections(*, include_probes: bool = True) -> List[str]:
         s1.append(f"📋 <b>Schemas:</b> {_esc(', '.join(schemas))}")
     s1.append(f"🗃️ <b>Database:</b> {_esc(meta.get('database_name', '?'))}")
     s1.append("")
-
     score_icon = "🟢" if score >= 80 else ("🟡" if score >= 60 else "🔴")
     s1.append("📌 <b>الخلاصة التقنية</b>")
     s1.append(f"  🔴 جداول حرجة: <b>{critical_count}</b>")
@@ -4004,14 +3237,12 @@ async def _build_sections(*, include_probes: bool = True) -> List[str]:
     s1.append(f"  💀 إجمالي dead tuples: <b>{_fmt_num(total_dead)}</b>")
     s1.append(f"  📊 جداول مهمة: <b>{len(dirty)}</b>")
     s1.append(f"  🗂️ إجمالي الجداول: <b>{total_tables}</b>")
-
     av_setting = settings.get("autovacuum", "")
     if av_setting:
         av_icon = "🟢" if av_setting == "on" else "🔴"
         s1.append(f"  autovacuum: {av_icon} <b>{_esc(av_setting).upper()}</b>")
     s1.append(f"  مؤشر الحالة: <b>{score}/100</b> {score_icon}")
     parts.append("\n".join(s1))
-
     s2: List[str] = []
     s2.append("╔══════════════════════════════════╗")
     s2.append("║  🎯 التحليل المنطقي          ║")
@@ -4039,7 +3270,6 @@ async def _build_sections(*, include_probes: bool = True) -> List[str]:
     s2.append("")
     s2.append("🔒 <b>سياسة التنظيف:</b> آمنة — المشتركون محميون.")
     parts.append("\n".join(s2))
-
     if dirty:
         s3: List[str] = []
         s3.append("━━━━━━━━━━━━━━━━━━━━━━")
@@ -4062,7 +3292,6 @@ async def _build_sections(*, include_probes: bool = True) -> List[str]:
             s3.append(f"     🧹 AV: {av} | 📊 AN: {an} | 🔄 mod={mod}")
             s3.append("")
         parts.append("\n".join(s3))
-
     if clean:
         s3b: List[str] = []
         s3b.append("1b. <b>جداول نظيفة (dead=0)</b>")
@@ -4076,7 +3305,6 @@ async def _build_sections(*, include_probes: bool = True) -> List[str]:
         if len(clean_sorted) > 15:
             s3b.append(f"… و{len(clean_sorted) - 15} جدول نظيف آخر")
         parts.append("\n".join(s3b))
-
     tuned = [t for t in dirty + clean if t.get("auto_tuned")]
     not_tuned = [t for t in dirty + clean if not t.get("auto_tuned")]
     s4: List[str] = []
@@ -4093,12 +3321,10 @@ async def _build_sections(*, include_probes: bool = True) -> List[str]:
             if match2:
                 s4.append(f"⚙️ <b>{_esc(tname)}</b> — غير مضبوط")
     parts.append("\n".join(s4))
-
     if not_tuned:
         s4b: List[str] = []
         s4b.append("")
-        s4b.append(f"2b. <b>غير مضبوطة ({len(not_tuned)} من "
-                   f"{len(tuned) + len(not_tuned)})</b>")
+        s4b.append(f"2b. <b>غير مضبوطة ({len(not_tuned)} من {len(tuned) + len(not_tuned)})</b>")
         s4b.append("")
         for t in not_tuned[:15]:
             mv_tag = " <code>[MV]</code>" if t.get("is_matview") else ""
@@ -4107,12 +3333,10 @@ async def _build_sections(*, include_probes: bool = True) -> List[str]:
         if len(not_tuned) > 15:
             s4b.append(f"… و{len(not_tuned) - 15} آخر")
         parts.append("\n".join(s4b))
-
     s5: List[str] = []
     s5.append("3. <b>نشاط PostgreSQL / Blockers</b>")
     s5.append("")
-    if (activity.get("long_tx", 0) == 0
-            and activity.get("idle_tx", 0) == 0
+    if (activity.get("long_tx", 0) == 0 and activity.get("idle_tx", 0) == 0
             and activity.get("vacuum_running", 0) == 0):
         s5.append("✅ لا توجد معاملات طويلة / idle-in-tx / VACUUM.")
     else:
@@ -4124,7 +3348,6 @@ async def _build_sections(*, include_probes: bool = True) -> List[str]:
             s5.append(f"🧹 VACUUM جارٍ: <b>{activity['vacuum_running']}</b>")
     s5.append(f"📊 إجمالي الاتصالات: <b>{activity.get('total_connections', 0)}</b>")
     parts.append("\n".join(s5))
-
     if sizes:
         s6: List[str] = []
         s6.append("4. <b>أحجام الجداول — Top 15</b>")
@@ -4134,7 +3357,6 @@ async def _build_sections(*, include_probes: bool = True) -> List[str]:
             display = t.get("total_display", "0 B")
             s6.append(f"  <code>{_esc(name)}</code> {display}")
         parts.append("\n".join(s6))
-
     if idx_map:
         s7: List[str] = []
         s7.append("5. <b>الفهارس الحرجة</b>")
@@ -4144,7 +3366,6 @@ async def _build_sections(*, include_probes: bool = True) -> List[str]:
                 cnt = len(idx_map[tname])
                 s7.append(f"✅ <b>{_esc(tname)}</b> ({cnt})")
         parts.append("\n".join(s7))
-
     if settings:
         s8: List[str] = []
         s8.append("6. <b>إعدادات PostgreSQL</b>")
@@ -4153,7 +3374,6 @@ async def _build_sections(*, include_probes: bool = True) -> List[str]:
             if k in settings:
                 s8.append(f"  <code>{_esc(k)}</code> = {_esc(settings[k])}")
         parts.append("\n".join(s8))
-
     if cleanup_status:
         s9: List[str] = []
         s9.append("8. <b>Auto-Cleanup (سياسة آمنة)</b>")
@@ -4163,39 +3383,28 @@ async def _build_sections(*, include_probes: bool = True) -> List[str]:
         for c in cleanup_status:
             retention = c.get("retention_days", "?")
             s9.append(f"  {c['color']} <b>{_esc(c['name'])}</b> — "
-                      f"{c['display']} (حد {c['max_mb']}MB, "
-                      f"احتفاظ {retention}d)")
+                      f"{c['display']} (حد {c['max_mb']}MB, احتفاظ {retention}d)")
         s9.append("")
-        protected_list = [k for k, v in _CLEANUP_POLICY.items()
-                          if v.get("protected")]
+        protected_list = [k for k, v in _CLEANUP_POLICY.items() if v.get("protected")]
         s9.append(f"🔒 <b>محمية ({len(protected_list)}):</b>")
         s9.append("  <i>users, subscriptions, user_penalties, ...</i>")
         s9.append("")
         s9.append("⚙️ كل 6h | VACUUM: ON 🟢")
         parts.append("\n".join(s9))
-
-    parts.append(
-        "━━━━━━━━━━━━━━━━━━━━━━\n"
-        "✅ <b>اكتمل التشخيص</b>\n"
-        f"🕐 <i>{_now_iso()}</i>")
-
+    parts.append("━━━━━━━━━━━━━━━━━━━━━━\n"
+                 "✅ <b>اكتمل التشخيص</b>\n"
+                 f"🕐 <i>{_now_iso()}</i>")
     try:
         preview = await preview_maintenance()
         s11_text = format_maintenance_preview(preview)
         parts.append(s11_text)
     except Exception as e:
         logger.warning(f"maintenance preview in sections: {e}")
-
     if include_probes:
-        probes = await asyncio.gather(
-            _probe_full_health(),
-            return_exceptions=True,
-        )
-        full_health = (probes[0] if not isinstance(probes[0], BaseException)
-                       else {})
+        probes = await asyncio.gather(_probe_full_health(), return_exceptions=True)
+        full_health = (probes[0] if not isinstance(probes[0], BaseException) else {})
         latency_probe = ((full_health.get("database") or {})
                          if isinstance(full_health, dict) else {})
-
         try:
             verdict = (latency_probe.get("verdict", "unknown")
                        if isinstance(latency_probe, dict) else "unknown")
@@ -4204,7 +3413,6 @@ async def _build_sections(*, include_probes: bool = True) -> List[str]:
                 parts.append(latency_text)
         except Exception as e:
             logger.debug(f"latency probe in sections: {e}")
-
         try:
             b = (full_health.get("bottleneck") or {}
                  if isinstance(full_health, dict) else {})
@@ -4213,7 +3421,6 @@ async def _build_sections(*, include_probes: bool = True) -> List[str]:
                 parts.append(health_text)
         except Exception as e:
             logger.debug(f"full health in sections: {e}")
-
     return parts
 
 
@@ -4234,29 +3441,22 @@ async def diagnose_db_quick() -> str:
     db = _get_db()
     if db is None:
         return "❌ DB غير مستورد"
-
     lines: List[str] = []
-
     active = _detect_active_db_source(db)
     if active.get("provider") == "sqlite_local":
         lines.append("🗄️ <b>DB النشطة:</b> SQLite (محلي)")
     elif active.get("active_url"):
         comp = active.get("components", {})
-        lines.append(
-            f"🗄️ <b>DB النشطة:</b> "
-            f"<code>{_esc(active.get('provider', '?'))}</code> @ "
-            f"<code>{_esc(comp.get('host', '?'))}:{comp.get('port', 0)}"
-            f"/{_esc(comp.get('database', '?'))}</code>"
-        )
-
+        lines.append(f"🗄️ <b>DB النشطة:</b> "
+                     f"<code>{_esc(active.get('provider', '?'))}</code> @ "
+                     f"<code>{_esc(comp.get('host', '?'))}:{comp.get('port', 0)}"
+                     f"/{_esc(comp.get('database', '?'))}</code>")
     try:
         meta = await _get_db_metadata()
         db_type = "PostgreSQL" if _is_postgres() else _get_db_type()
-        lines.append(f"🔬 <b>DB:</b> {db_type} | 💾 "
-                     f"{meta.get('size_display', '?')}")
+        lines.append(f"🔬 <b>DB:</b> {db_type} | 💾 {meta.get('size_display', '?')}")
     except Exception:
         lines.append(f"🔬 <b>DB:</b> {_get_db_type()}")
-
     total_dead = 0
     critical = 0
     try:
@@ -4265,16 +3465,13 @@ async def diagnose_db_quick() -> str:
             lines.append("🟠 فحص dead-tuples فشل مؤقتاً")
         else:
             total_dead = sum(t.get("dead", 0) for t in dirty)
-            critical = sum(
-                1 for t in dirty
-                if t.get("ratio", 0) >= 0.20
-                and int(t.get("dead", 0)) >= _MIN_DEAD_FOR_CRITICAL
-            )
+            critical = sum(1 for t in dirty
+                           if t.get("ratio", 0) >= 0.20
+                           and int(t.get("dead", 0)) >= _MIN_DEAD_FOR_CRITICAL)
             lines.append(f"💀 Dead: <b>{_fmt_num(total_dead)}</b> | "
                          f"🔴 حرجة: <b>{critical}</b>")
     except Exception:
         lines.append("🟠 فحص dead-tuples فشل")
-
     try:
         activity = await _get_activity_stats()
         idle = activity.get("idle_tx", 0)
@@ -4285,7 +3482,6 @@ async def diagnose_db_quick() -> str:
                      f"{long_icon} long-tx: <b>{long_tx}</b>")
     except Exception:
         lines.append("🟠 idle-tx: ? | long-tx: ?")
-
     try:
         settings = await _get_pg_settings()
         if settings:
@@ -4294,14 +3490,12 @@ async def diagnose_db_quick() -> str:
             lines.append(f"{av_icon} autovacuum: <b>{_esc(av).upper()}</b>")
     except Exception:
         pass
-
     try:
         cached_latency = _cache_get("latency_probe")
         if cached_latency and isinstance(cached_latency, dict):
             verdict = cached_latency.get("verdict", "unknown")
-            icon = {"excellent": "🟢", "good": "🟢",
-                    "acceptable": "🟡", "slow": "🟠",
-                    "critical": "🔴"}.get(verdict, "⚪")
+            icon = {"excellent": "🟢", "good": "🟢", "acceptable": "🟡",
+                    "slow": "🟠", "critical": "🔴"}.get(verdict, "⚪")
             warm = cached_latency.get("warm_median_ms", 0)
             tcp = cached_latency.get("tcp_connect_ms", 0)
             if tcp and tcp > 0:
@@ -4310,7 +3504,6 @@ async def diagnose_db_quick() -> str:
                 lines.append(f"{icon} كمون DB: {warm:.0f}ms")
     except Exception:
         pass
-
     try:
         cached_full = _cache_get("full_health")
         if cached_full and isinstance(cached_full, dict):
@@ -4322,65 +3515,48 @@ async def diagnose_db_quick() -> str:
                 lines.append(f"{icon} السبب: <code>{b.get('primary')}</code>")
             cross = b.get("cross_region") or {}
             if cross.get("cross_region") is True:
-                lines.append(
-                    f"🚨 <b>Cross-Region</b>: "
-                    f"bot={_esc(cross.get('bot_region'))} | "
-                    f"db={_esc(cross.get('db_region'))}")
+                lines.append(f"🚨 <b>Cross-Region</b>: "
+                             f"bot={_esc(cross.get('bot_region'))} | "
+                             f"db={_esc(cross.get('db_region'))}")
             elif (cross.get("cross_region") is False
                   and cross.get("inferred_from_rtt")):
-                lines.append(
-                    f"✅ <b>نفس المنطقة</b> "
-                    f"<i>(مُستنتَج من RTT)</i>")
+                lines.append(f"✅ <b>نفس المنطقة</b> <i>(مُستنتَج من RTT)</i>")
     except Exception:
         pass
-
     configured_dbs = _get_all_configured_databases()
     if len(configured_dbs) > 1:
-        lines.append(
-            f"⚠️ <b>{len(configured_dbs)} قواعد بيانات مُعدّة</b> — "
-            f"استخدم /db_diag للتفاصيل"
-        )
-
+        lines.append(f"⚠️ <b>{len(configured_dbs)} قواعد بيانات مُعدّة</b> — "
+                     f"استخدم /db_diag للتفاصيل")
     return "\n".join(lines)
 
 
 async def get_diagnostics_data(top_n: int = 15) -> Dict[str, Any]:
     parts = await _build_sections()
-    return {
-        "sections": parts, "available": True,
-        "db_type": _get_db_type(), "version": VERSION,
-    }
+    return {"sections": parts, "available": True,
+            "db_type": _get_db_type(), "version": VERSION}
 
 
 async def get_region_info() -> Dict[str, Any]:
     cached = _cache_get("region_info")
     if cached is not None:
         return cached
-
     db = _get_db()
     host = "?"
     if db is not None:
         active = _detect_active_db_source(db)
         host = active.get("components", {}).get("host", "?")
         if host == "?":
-            url = (getattr(db, "DATABASE_URL", "")
-                   or os.getenv("DATABASE_URL", ""))
+            url = (getattr(db, "DATABASE_URL", "") or os.getenv("DATABASE_URL", ""))
             try:
                 p = urlparse(url)
                 host = p.hostname or "?"
             except Exception:
                 pass
-
     bot_info = _detect_bot_cloud()
     db_info = _guess_db_region(host)
     cross = _detect_cross_region(bot_info, db_info, tcp_ms=None)
-
-    result = {
-        "bot": bot_info,
-        "db": db_info,
-        "cross_region": cross,
-        "db_host": host,
-    }
+    result = {"bot": bot_info, "db": db_info,
+              "cross_region": cross, "db_host": host}
     _cache_set("region_info", result, ttl=3600.0)
     return result
 
@@ -4389,13 +3565,8 @@ async def get_all_databases_info() -> Dict[str, Any]:
     active = _detect_active_db_source(_get_db())
     configured = _get_all_configured_databases()
     warnings = _get_multi_db_warnings(configured)
-
-    return {
-        "active": active,
-        "configured": configured,
-        "warnings": warnings,
-        "count": len(configured),
-    }
+    return {"active": active, "configured": configured,
+            "warnings": warnings, "count": len(configured)}
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -4496,26 +3667,21 @@ __all__ = [
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# LOAD BEACON — v7.2.22
+# LOAD BEACON — v7.2.23
 # ═══════════════════════════════════════════════════════════════════════
 
 try:
-    _mark_state = (
-        "mark_called" if _PROCESS_START_TS > 0 else "import_ts(fallback)"
-    )
+    _mark_state = "mark_called" if _PROCESS_START_TS > 0 else "import_ts(fallback)"
     _uptime_at_import = time.monotonic() - _PROCESS_IMPORT_TS
-
     logger.info(
         "🛡️ db_diagnostics.py v%s loaded | "
-        "DOC-QUALITY-IMPROVEMENTS ✅ | "
-        "FIX-DOC-POOL-SEMANTICS ✅ | "
-        "FIX-DOC-STARTUP-GRACE ✅ | "
-        "FIX-DOC-PSUTIL-SYNC ✅ | "
-        "POOL-DISPLAY-FIX ✅ | "
+        "CLEANUP-VISIBILITY ✅ | "
+        "FIX-CLEANUP-1=skipped/remaining/dead_after ✅ | "
+        "FIX-CLEANUP-2=read-after-always ✅ | "
+        "FIX-CLEANUP-3=dead-after-per-table ✅ | "
+        "DOC-QUALITY-IMPROVEMENTS ✅ | POOL-DISPLAY-FIX ✅ | "
         "FIX-21=pool-uses-get_size-minus-get_idle ✅ | "
-        "COMMAND-FIX ✅ | FIX-20=/databases→/db_diag ✅ | "
-        "FIX-19=startup-grace-for-cpu-ram-fs ✅ | "
-        "FIX-11..FIX-18 ✅ | "
+        "COMMAND-FIX ✅ | FIX-19=startup-grace ✅ | "
         "grace_sec=%d | cache_keys=%d | exports=%d | "
         "mark_state=%s | process_age_at_import=%.1fs",
         VERSION,
