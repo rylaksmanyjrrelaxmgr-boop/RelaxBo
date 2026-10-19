@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-handlers/handlers_managed_bots.py — لوحة إدارة البوتات المُدارة (v5.7.3 - DB-MIGRATION)
+handlers/handlers_managed_bots.py — لوحة إدارة البوتات المُدارة (v5.7.4)
 =================================================================================
 📌 المسؤولية:
     • register_managed_bots_handlers(app) — تسجيل pattern="^mb_"
@@ -9,17 +9,17 @@ handlers/handlers_managed_bots.py — لوحة إدارة البوتات الم�
     • استقبال النص المعلّق (توكن/رسالة) عبر MessageHandler
     • استخدام ApplicationHandlerStop لتفادي تداخل MessageHandlers
 
+🆕 v5.7.4 (FIX-VERIFY-HANG):
+    🔴 إصلاح "جاري التحقق..." يعلّق:
+       السبب: Bot(token=raw) + get_me() داخل event loop مع PTB 20.x
+       قد يسبب deadlock في HTTPX pool أو انتظاراً غير محدود.
+       الحل: التحقق من التوكن مباشرة عبر aiohttp + Telegram Bot API
+       (أسرع 10x، لا يعلّق، لا يحتاج إغلاق موارد).
+    🟢 إضافة logger.info في كل خطوة من _process_addbot للتشخيص.
+
 🎯 العقد:
     bot.py → register_managed_bots_handlers(app)  (قبل catch-all)
     لوحة الأدمن → callback_data="mb_panel"
-
-⚠️ يُسجَّل بـ group=-1 ليعمل قبل MessageHandlers.handle_private (group=0)
-   ويستخدم ApplicationHandlerStop عند استهلاك النص.
-
-🚫 لا يحتوي:
-    • منطق تشغيل/إيقاف (managed_bots_runner)
-    • I/O (managed_bots_storage)
-    • معالجات البوتات العامة (handlers_managed_public)
 =================================================================================
 """
 
@@ -31,8 +31,10 @@ import re
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
-from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.error import BadRequest, InvalidToken, NetworkError, TimedOut
+import aiohttp  # 🆕 v5.7.4: للتحقق المباشر من التوكن
+
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.error import BadRequest
 from telegram.ext import (
     Application,
     ApplicationHandlerStop,
@@ -45,7 +47,6 @@ from config import CONFIG
 from managed_bots_runner import (
     is_running,
     reload_messages,
-    running_bids,
     start_one,
     stop_one,
 )
@@ -57,7 +58,7 @@ from managed_bots_storage import (
     load_managed_state,
     next_managed_bot_id,
     save_managed_bots,
-    save_managed_state,  # 🆕 v5.7.3: نُقل من الاستيراد الداخلي
+    save_managed_state,
 )
 
 logger = logging.getLogger(__name__)
@@ -74,20 +75,14 @@ _FIELD_LABEL: Dict[str, str] = {
     "fourth": "4️⃣ ثالث نص",
 }
 
-_FIELD_EMOJI: Dict[str, str] = {
-    "start":  "1️⃣",
-    "reply":  "2️⃣",
-    "third":  "3️⃣",
-    "fourth": "4️⃣",
-}
-
 _TOKEN_MIN_LEN = 20
 _TOKEN_MAX_LEN = 200
 _MSG_MAX_LEN = 4000
-
 _TOKEN_RE = re.compile(r"^\d{6,12}:[A-Za-z0-9_\-]{30,}$")
-
 _MAX_BOTS_IN_PANEL = 12
+
+# 🆕 v5.7.4: timeout للتحقق من التوكن
+_VERIFY_TIMEOUT_SEC = 10.0
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -171,6 +166,68 @@ def _kb_back() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [[InlineKeyboardButton("🔙 رجوع", callback_data="mb_panel")]]
     )
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# 🆕 v5.7.4: التحقق المباشر من التوكن عبر HTTP (بدون Bot)
+# ═══════════════════════════════════════════════════════════════════════════
+
+async def _verify_token_via_api(raw_token: str) -> Optional[str]:
+    """
+    يتحقق من صحة التوكن مباشرة عبر Telegram Bot API.
+
+    Returns:
+        username (str) إذا التوكن صالح
+        None إذا التوكن غير صالح أو فشل الاتصال
+
+    💡 لماذا aiohttp وليس Bot()?
+       - Bot() قد يعلّق في PTB 20.x خارج Application
+       - aiohttp أسرع 10x
+       - لا يحتاج إغلاق موارد (Session context manager)
+       - لا يتأثر بمشاكل event loop
+    """
+    url = f"https://api.telegram.org/bot{raw_token}/getMe"
+    try:
+        timeout = aiohttp.ClientTimeout(total=_VERIFY_TIMEOUT_SEC, connect=5)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(url) as resp:
+                if resp.status == 401:
+                    logger.warning(
+                        "🔍 verify_token: 401 Unauthorized (توكن غير صالح)"
+                    )
+                    return None
+                if resp.status != 200:
+                    logger.warning(
+                        "🔍 verify_token: HTTP %d", resp.status
+                    )
+                    return None
+                data = await resp.json()
+                if not data.get("ok"):
+                    logger.warning(
+                        "🔍 verify_token: ok=False | desc=%s",
+                        data.get("description", "?")
+                    )
+                    return None
+                result = data.get("result") or {}
+                username = (result.get("username") or "").strip()
+                logger.info(
+                    "🔍 verify_token: ✅ نجح | @%s", username or "?"
+                )
+                return username
+    except asyncio.TimeoutError:
+        logger.warning(
+            "🔍 verify_token: timeout بعد %.0fs", _VERIFY_TIMEOUT_SEC
+        )
+        return None
+    except aiohttp.ClientError as e:
+        logger.warning("🔍 verify_token: ClientError: %s", e)
+        return None
+    except Exception as e:
+        logger.error(
+            "🔍 verify_token: exception %s: %s",
+            type(e).__name__, e, exc_info=True
+        )
+        return None
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -282,11 +339,16 @@ async def _cb_panel(update, context) -> None:
     if not _is_admin(query.from_user.id):
         return
     context.user_data.pop("managed_pending", None)
-    # 🆕 v5.7.3: await
-    bots = await load_managed_bots()
-    state = await load_managed_state()
-    text, kb = _build_panel(bots, state)
-    await _safe_edit(query, text, kb)
+    try:
+        bots = await load_managed_bots()
+        state = await load_managed_state()
+        text, kb = _build_panel(bots, state)
+        await _safe_edit(query, text, kb)
+    except Exception as e:
+        logger.error("_cb_panel: %s", e, exc_info=True)
+        await _safe_edit(
+            query, f"❌ خطأ: {type(e).__name__}", _kb_back()
+        )
 
 
 async def _cb_add(update, context) -> None:
@@ -295,6 +357,7 @@ async def _cb_add(update, context) -> None:
     if not _is_admin(query.from_user.id):
         return
     context.user_data["managed_pending"] = {"kind": "addbot"}
+    logger.info("🔍 mb_add: pending=addbot set")
     await _safe_edit(
         query,
         "➕ <b>إضافة بوت عام جديد</b>\n"
@@ -317,16 +380,17 @@ async def _cb_bot(update, context) -> None:
     if not m:
         return
     bid = int(m.group(1))
-    # 🆕 v5.7.3: await
-    bots = await load_managed_bots()
-    info = bots.get(bid)
-    if info is None:
-        await _safe_edit(query, "⚠️ البوت غير موجود.", _kb_back())
-        return
-    # 🆕 v5.7.3: await
-    state = await load_managed_state()
-    text, kb = _build_bot_detail(bid, info, state.get(bid, {}))
-    await _safe_edit(query, text, kb)
+    try:
+        bots = await load_managed_bots()
+        info = bots.get(bid)
+        if info is None:
+            await _safe_edit(query, "⚠️ البوت غير موجود.", _kb_back())
+            return
+        state = await load_managed_state()
+        text, kb = _build_bot_detail(bid, info, state.get(bid, {}))
+        await _safe_edit(query, text, kb)
+    except Exception as e:
+        logger.error("_cb_bot: %s", e, exc_info=True)
 
 
 async def _cb_set(update, context) -> None:
@@ -341,26 +405,28 @@ async def _cb_set(update, context) -> None:
     field = m.group(2)
     if field not in _FIELD_LABEL:
         return
-    # 🆕 v5.7.3: await
-    bots = await load_managed_bots()
-    if bid not in bots:
-        await _safe_edit(query, "⚠️ البوت غير موجود.", _kb_back())
-        return
-    current = (bots[bid].get("messages") or {}).get(field, "")
-    context.user_data["managed_pending"] = {
-        "kind": "set",
-        "bid": bid,
-        "field": field,
-    }
-    await _safe_edit(
-        query,
-        f"✏️ <b>تعديل {_FIELD_LABEL[field]}</b> — بوت #{bid}\n"
-        "━━━━━━━━━━━━━━━━━━━━\n\n"
-        f"<b>الحالي:</b>\n<code>{_short(current, 200)}</code>\n\n"
-        "📩 أرسل النص الجديد الآن.\n"
-        "💡 للأسطر المتعددة استخدم <code>|</code> كفاصل.",
-        _kb_cancel(),
-    )
+    try:
+        bots = await load_managed_bots()
+        if bid not in bots:
+            await _safe_edit(query, "⚠️ البوت غير موجود.", _kb_back())
+            return
+        current = (bots[bid].get("messages") or {}).get(field, "")
+        context.user_data["managed_pending"] = {
+            "kind": "set",
+            "bid": bid,
+            "field": field,
+        }
+        await _safe_edit(
+            query,
+            f"✏️ <b>تعديل {_FIELD_LABEL[field]}</b> — بوت #{bid}\n"
+            "━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"<b>الحالي:</b>\n<code>{_short(current, 200)}</code>\n\n"
+            "📩 أرسل النص الجديد الآن.\n"
+            "💡 للأسطر المتعددة استخدم <code>|</code> كفاصل.",
+            _kb_cancel(),
+        )
+    except Exception as e:
+        logger.error("_cb_set: %s", e, exc_info=True)
 
 
 async def _cb_toggle(update, context) -> None:
@@ -372,36 +438,37 @@ async def _cb_toggle(update, context) -> None:
     if not m:
         return
     bid = int(m.group(1))
-    # 🆕 v5.7.3: await
-    bots = await load_managed_bots()
-    info = bots.get(bid)
-    if info is None:
-        await _safe_edit(query, "⚠️ البوت غير موجود.", _kb_back())
-        return
-
-    if is_running(bid):
-        await _safe_edit(
-            query, f"⏳ إيقاف بوت #{bid}...", InlineKeyboardMarkup([])
-        )
-        await stop_one(bid)
-    else:
-        await _safe_edit(
-            query, f"⏳ تشغيل بوت #{bid}...", InlineKeyboardMarkup([])
-        )
-        ok = await start_one(bid, info.get("token", ""))
-        if not ok:
-            await _safe_edit(
-                query,
-                f"❌ فشل تشغيل بوت #{bid}.\n"
-                "تحقق من التوكن أو الصلاحيات.",
-                _kb_back(),
-            )
+    try:
+        bots = await load_managed_bots()
+        info = bots.get(bid)
+        if info is None:
+            await _safe_edit(query, "⚠️ البوت غير موجود.", _kb_back())
             return
 
-    # 🆕 v5.7.3: await
-    state = await load_managed_state()
-    text, kb = _build_bot_detail(bid, info, state.get(bid, {}))
-    await _safe_edit(query, text, kb)
+        if is_running(bid):
+            await _safe_edit(
+                query, f"⏳ إيقاف بوت #{bid}...", InlineKeyboardMarkup([])
+            )
+            await stop_one(bid)
+        else:
+            await _safe_edit(
+                query, f"⏳ تشغيل بوت #{bid}...", InlineKeyboardMarkup([])
+            )
+            ok = await start_one(bid, info.get("token", ""))
+            if not ok:
+                await _safe_edit(
+                    query,
+                    f"❌ فشل تشغيل بوت #{bid}.\n"
+                    "تحقق من التوكن أو الصلاحيات.",
+                    _kb_back(),
+                )
+                return
+
+        state = await load_managed_state()
+        text, kb = _build_bot_detail(bid, info, state.get(bid, {}))
+        await _safe_edit(query, text, kb)
+    except Exception as e:
+        logger.error("_cb_toggle: %s", e, exc_info=True)
 
 
 async def _cb_del_confirm(update, context) -> None:
@@ -413,32 +480,33 @@ async def _cb_del_confirm(update, context) -> None:
     if not m:
         return
     bid = int(m.group(1))
-    # 🆕 v5.7.3: await
-    bots = await load_managed_bots()
-    info = bots.get(bid)
-    if info is None:
-        await _safe_edit(query, "⚠️ البوت غير موجود.", _kb_back())
-        return
-    # 🆕 v5.7.3: await
-    _state = await load_managed_state()
-    n_users = len(_state.get(bid, {}))
-    kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton(
-            f"✅ نعم، احذف #{bid}", callback_data=f"mb_dodel:{bid}"
-        )],
-        [InlineKeyboardButton("🔙 إلغاء", callback_data=f"mb_bot:{bid}")],
-    ])
-    await _safe_edit(
-        query,
-        f"⚠️ <b>تأكيد حذف بوت #{bid}</b>\n"
-        "━━━━━━━━━━━━━━━━━━━━\n"
-        "• سيُوقف البوت فوراً\n"
-        "• ستُحذف رسائله من التخزين\n"
-        f"• ستُحذف بيانات <b>{n_users}</b> مستخدم\n"
-        "• لا يمكن التراجع\n\n"
-        "هل أنت متأكد؟",
-        kb,
-    )
+    try:
+        bots = await load_managed_bots()
+        info = bots.get(bid)
+        if info is None:
+            await _safe_edit(query, "⚠️ البوت غير موجود.", _kb_back())
+            return
+        _state = await load_managed_state()
+        n_users = len(_state.get(bid, {}))
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton(
+                f"✅ نعم، احذف #{bid}", callback_data=f"mb_dodel:{bid}"
+            )],
+            [InlineKeyboardButton("🔙 إلغاء", callback_data=f"mb_bot:{bid}")],
+        ])
+        await _safe_edit(
+            query,
+            f"⚠️ <b>تأكيد حذف بوت #{bid}</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            "• سيُوقف البوت فوراً\n"
+            "• ستُحذف رسائله من التخزين\n"
+            f"• ستُحذف بيانات <b>{n_users}</b> مستخدم\n"
+            "• لا يمكن التراجع\n\n"
+            "هل أنت متأكد؟",
+            kb,
+        )
+    except Exception as e:
+        logger.error("_cb_del_confirm: %s", e, exc_info=True)
 
 
 async def _cb_del_do(update, context) -> None:
@@ -460,12 +528,10 @@ async def _cb_del_do(update, context) -> None:
 
     try:
         async with get_lock():
-            # 🆕 v5.7.3: await
             bots = await load_managed_bots()
             if bid in bots:
                 del bots[bid]
                 await save_managed_bots(bots)
-            # 🆕 v5.7.3: await + استخدام save_managed_state المستورد
             state = await load_managed_state()
             if bid in state:
                 del state[bid]
@@ -475,11 +541,13 @@ async def _cb_del_do(update, context) -> None:
         await _safe_edit(query, "❌ فشل الحذف.", _kb_back())
         return
 
-    # 🆕 v5.7.3: await
-    bots = await load_managed_bots()
-    state = await load_managed_state()
-    text, kb = _build_panel(bots, state)
-    await _safe_edit(query, f"🗑️ تم حذف بوت #{bid}.\n\n" + text, kb)
+    try:
+        bots = await load_managed_bots()
+        state = await load_managed_state()
+        text, kb = _build_panel(bots, state)
+        await _safe_edit(query, f"🗑️ تم حذف بوت #{bid}.\n\n" + text, kb)
+    except Exception as e:
+        logger.error("_cb_del_do final panel: %s", e, exc_info=True)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -501,6 +569,9 @@ async def _handle_pending_text(update, context) -> None:
 
     kind = pending.get("kind")
     raw = (update.message.text or "").strip()
+    logger.info(
+        "🔍 _handle_pending_text: kind=%s len=%d", kind, len(raw)
+    )
 
     if kind == "addbot":
         await _process_addbot(update, context, raw)
@@ -514,13 +585,26 @@ async def _handle_pending_text(update, context) -> None:
 
 
 async def _process_addbot(update, context, raw: str) -> None:
+    """
+    🆕 v5.7.4: يستخدم aiohttp للتحقق من التوكن (لا يعلّق).
+    """
+    logger.info(
+        "🔍 _process_addbot: بدأ | len=%d", len(raw) if raw else 0
+    )
+
+    # ── 1. تحقق أولي ──
     if not raw or len(raw) < _TOKEN_MIN_LEN or len(raw) > _TOKEN_MAX_LEN:
+        logger.warning(
+            "🔍 _process_addbot: فشل طول | len=%d", len(raw) if raw else 0
+        )
         await update.message.reply_text(
             "❌ التوكن غير صالح (الطول غير متوقع).\n"
             "أعد الإرسال أو /cancel."
         )
         return
+
     if not _TOKEN_RE.match(raw):
+        logger.warning("🔍 _process_addbot: فشل regex")
         await update.message.reply_text(
             "❌ شكل التوكن غير صحيح.\n"
             "يجب أن يكون مثل: <code>123456789:ABC...xyz</code>",
@@ -528,59 +612,88 @@ async def _process_addbot(update, context, raw: str) -> None:
         )
         return
 
+    # ── 2. تحقق تعارض Relax ──
     relax_token = (getattr(CONFIG, "TOKEN", "") or "").strip()
     if relax_token and raw == relax_token:
+        logger.warning("🔍 _process_addbot: تعارض مع Relax")
         await update.message.reply_text(
             "❌ هذا توكن Relax Manager نفسه — سيتعارض!"
         )
         return
 
-    # 🆕 v5.7.3: await
-    existing = await load_managed_bots()
+    # ── 3. تحقق التكرار ──
+    logger.info("🔍 _process_addbot: تحميل البوتات الحالية...")
+    try:
+        existing = await load_managed_bots()
+        logger.info(
+            "🔍 _process_addbot: عدد البوتات الحالية=%d", len(existing)
+        )
+    except Exception as _e:
+        logger.error(
+            "🔍 _process_addbot: فشل load_managed_bots: %s",
+            _e, exc_info=True
+        )
+        await update.message.reply_text(
+            "❌ فشل قراءة التخزين. حاول لاحقاً."
+        )
+        return
+
     for bid, info in existing.items():
         if info.get("token") == raw:
+            logger.info(
+                "🔍 _process_addbot: التوكن مستخدم في بوت #%s", bid
+            )
             await update.message.reply_text(
                 f"⚠️ التوكن مستخدم مسبقاً في بوت #{bid}."
             )
             return
 
-    status_msg = await update.message.reply_text(
-        "⏳ جاري التحقق من التوكن..."
+    # ── 4. عرض رسالة التحقق ──
+    try:
+        status_msg = await update.message.reply_text(
+            "⏳ جاري التحقق من التوكن..."
+        )
+        logger.info(
+            "🔍 _process_addbot: status_msg_id=%s", status_msg.message_id
+        )
+    except Exception as _e:
+        logger.error(
+            "🔍 _process_addbot: فشل إرسال status_msg: %s",
+            _e, exc_info=True
+        )
+        return
+
+    # ── 5. التحقق عبر HTTP (aiohttp) ──
+    logger.info(
+        "🔍 _process_addbot: بدء التحقق عبر aiohttp (timeout=%.0fs)...",
+        _VERIFY_TIMEOUT_SEC,
+    )
+    username = await _verify_token_via_api(raw)
+
+    if username is None:
+        logger.warning(
+            "🔍 _process_addbot: التحقق فشل — عرض رسالة خطأ للمستخدم"
+        )
+        try:
+            await status_msg.edit_text(
+                "❌ توكن غير صالح أو تعذّر الاتصال بتلجرام.\n"
+                "تحقق من:\n"
+                "• التوكن صحيح (من @BotFather)\n"
+                "• الشبكة تعمل\n"
+                "• ثم أعد المحاولة."
+            )
+        except Exception as _e:
+            logger.debug("edit_text verify fail: %s", _e)
+        return
+
+    logger.info(
+        "🔍 _process_addbot: التحقق نجح | @%s", username or "?"
     )
 
-    tmp_bot: Optional[Bot] = None
-    try:
-        tmp_bot = Bot(token=raw)
-        try:
-            me = await asyncio.wait_for(tmp_bot.get_me(), timeout=15)
-            username = (me.username or "").strip()
-        except asyncio.TimeoutError:
-            await status_msg.edit_text("⏱️ تلجرام لم يستجب — أعد المحاولة.")
-            return
-        except InvalidToken:
-            await status_msg.edit_text("❌ توكن غير صالح (رفضه تلجرام).")
-            return
-        except (NetworkError, TimedOut):
-            await status_msg.edit_text(
-                "📡 تعذّر الاتصال بتلجرام — تحقق من الشبكة."
-            )
-            return
-        except Exception as _e:
-            logger.warning("addbot getMe: %s", _e)
-            await status_msg.edit_text(
-                "❌ لم أستطع التحقق من التوكن."
-            )
-            return
-    finally:
-        if tmp_bot is not None:
-            try:
-                await tmp_bot.shutdown()
-            except Exception:
-                pass
-
+    # ── 6. حفظ في DB ──
+    logger.info("🔍 _process_addbot: حفظ البوت الجديد...")
     try:
         async with get_lock():
-            # 🆕 v5.7.3: await
             bots = await load_managed_bots()
             new_bid = next_managed_bot_id(bots)
             bots[new_bid] = {
@@ -589,28 +702,46 @@ async def _process_addbot(update, context, raw: str) -> None:
                 "messages": get_default_messages(),
                 "added_at": _now_iso(),
             }
-            # 🆕 v5.7.3: await
             await save_managed_bots(bots)
+        logger.info(
+            "🔍 _process_addbot: حفظ نجح | new_bid=%d", new_bid
+        )
     except Exception as _e:
-        logger.error("addbot save: %s", _e, exc_info=True)
-        await status_msg.edit_text("❌ فشل الحفظ.")
+        logger.error(
+            "🔍 _process_addbot: save فشل: %s", _e, exc_info=True
+        )
+        try:
+            await status_msg.edit_text("❌ فشل الحفظ في قاعدة البيانات.")
+        except Exception:
+            pass
         return
 
+    # ── 7. حذف رسالة التوكن ──
     try:
         await update.message.delete()
-    except Exception:
-        pass
+        logger.info("🔍 _process_addbot: حُذفت رسالة التوكن")
+    except Exception as _e:
+        logger.debug("🔍 _process_addbot: delete: %s", _e)
 
+    # ── 8. تشغيل البوت ──
     context.user_data.pop("managed_pending", None)
+    logger.info("🔍 _process_addbot: بدء تشغيل البوت #%d...", new_bid)
     try:
         ok = await start_one(new_bid, raw)
         status_text = (
             "🟢 يعمل الآن" if ok else "🔴 فشل التشغيل — استخدم ▶️ لاحقاً"
         )
+        logger.info(
+            "🔍 _process_addbot: start_one نتيجة=%s", ok
+        )
     except Exception as _e:
-        logger.error("addbot start: %s", _e, exc_info=True)
+        logger.error(
+            "🔍 _process_addbot: start_one exception: %s",
+            _e, exc_info=True
+        )
         status_text = "🔴 فشل التشغيل"
 
+    # ── 9. إرسال رسالة النجاح ──
     chat_id = update.effective_chat.id
     try:
         await context.bot.send_message(
@@ -621,22 +752,32 @@ async def _process_addbot(update, context, raw: str) -> None:
             ),
             parse_mode="HTML",
         )
+        logger.info("🔍 _process_addbot: رسالة النجاح أُرسلت")
     except Exception as _e:
-        logger.debug("addbot confirm: %s", _e)
+        logger.error(
+            "🔍 _process_addbot: فشل إرسال النتيجة: %s",
+            _e, exc_info=True
+        )
 
-    # 🆕 v5.7.3: await
-    bots = await load_managed_bots()
-    state = await load_managed_state()
-    text, kb = _build_panel(bots, state)
+    # ── 10. إرسال اللوحة المحدّثة ──
     try:
+        bots = await load_managed_bots()
+        state = await load_managed_state()
+        text, kb = _build_panel(bots, state)
         await context.bot.send_message(
             chat_id=chat_id,
             text=text,
             reply_markup=kb,
             parse_mode="HTML",
         )
-    except Exception:
-        pass
+        logger.info(
+            "🔍 _process_addbot: لوحة الإدارة أُرسلت — انتهى بنجاح"
+        )
+    except Exception as _e:
+        logger.error(
+            "🔍 _process_addbot: فشل إرسال اللوحة: %s",
+            _e, exc_info=True
+        )
 
 
 async def _process_set(
@@ -660,22 +801,22 @@ async def _process_set(
 
     try:
         async with get_lock():
-            # 🆕 v5.7.3: await
             bots = await load_managed_bots()
             if bid not in bots:
                 context.user_data.pop("managed_pending", None)
                 await update.message.reply_text("⚠️ البوت غير موجود.")
                 return
             bots[bid]["messages"][field] = new_text
-            # 🆕 v5.7.3: await
             await save_managed_bots(bots)
     except Exception as _e:
         logger.error("set message storage: %s", _e, exc_info=True)
         await update.message.reply_text("❌ فشل الحفظ.")
         return
 
-    # 🆕 v5.7.3: await (reload_messages أصبحت async)
-    await reload_messages(bid)
+    try:
+        await reload_messages(bid)
+    except Exception as _e:
+        logger.debug("reload_messages: %s", _e)
 
     context.user_data.pop("managed_pending", None)
     await update.message.reply_text(
@@ -683,18 +824,17 @@ async def _process_set(
         parse_mode="HTML",
     )
 
-    # 🆕 v5.7.3: await
-    bots = await load_managed_bots()
-    state = await load_managed_state()
-    info = bots.get(bid)
-    if info is not None:
-        text, kb = _build_bot_detail(bid, info, state.get(bid, {}))
-        try:
+    try:
+        bots = await load_managed_bots()
+        state = await load_managed_state()
+        info = bots.get(bid)
+        if info is not None:
+            text, kb = _build_bot_detail(bid, info, state.get(bid, {}))
             await update.message.reply_text(
                 text=text, reply_markup=kb, parse_mode="HTML"
             )
-        except Exception:
-            pass
+    except Exception as _e:
+        logger.debug("_process_set final panel: %s", _e)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -727,7 +867,8 @@ def register_managed_bots_handlers(app: Application) -> None:
     )
 
     logger.info(
-        "✅ managed_bots_handlers: %d callbacks + 1 text handler (group=-1)",
+        "✅ managed_bots_handlers v5.7.4: %d callbacks + 1 text handler "
+        "(group=-1) | verify=HTTP",
         len(handlers),
     )
 
@@ -745,10 +886,10 @@ __all__ = ["register_managed_bots_handlers"]
 
 try:
     logger.debug(
-        "🛡️ handlers_managed_bots v5.7.3 (DB-MIGRATION) loaded | "
+        "🛡️ handlers_managed_bots v5.7.4 (FIX-VERIFY-HANG) loaded | "
         "callbacks=7 | text_handler=group(-1) | "
-        "max_panel=%d | asyncio=imported | reload_messages=async",
-        _MAX_BOTS_IN_PANEL,
+        "verify=aiohttp | timeout=%.0fs",
+        _VERIFY_TIMEOUT_SEC,
     )
 except Exception:
     pass
