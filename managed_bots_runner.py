@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-managed_bots_runner.py — دورة حياة البوتات المُدارة (v5.7.0)
+managed_bots_runner.py — دورة حياة البوتات المُدارة (v5.7.3 - DB-MIGRATION)
 =================================================================================
 📌 المسؤولية:
     • تشغيل/إيقاف كل بوت مُدار كـ Application مستقل (polling).
@@ -11,20 +11,13 @@ managed_bots_runner.py — دورة حياة البوتات المُدارة (v5
     • منع تعارض التوكن مع Relax Manager.
     • إعادة تحميل الرسائل في الذاكرة (reload_messages) بدون restart.
 
-🎯 العقد مع الملفات الأخرى:
-    bot.py                  → start_all_managed_bots, stop_all_managed_bots
-    handlers_managed_bots   → start_one, stop_one, restart_one,
-                              reload_messages, is_running, running_count
-    managed_bots_storage    → load_managed_bots, get_default_messages
-
-⚠️ المتطلبات:
-    handlers/handlers_managed_public.py يجب أن يحتوي:
-        make_managed_handlers(bid) → (on_start, on_text)
-        post_init_managed(app) → coroutine
-    إن كان مفقوداً، start_one يفشل بلطف مع رسالة واضحة.
+🎯 التغييرات الأساسية في v5.7.3:
+    • await load_managed_bots() (لأن التخزين أصبح async).
+    • reload_messages() أصبحت async.
+    • لا تغيير في أي منطق آخر.
 
 🚫 لا يحتوي:
-    • JSON I/O (مكانه: managed_bots_storage.py)
+    • DB I/O (مكانه: managed_bots_storage.py)
     • معالجات Telegram (مكانه: handlers_managed_*.py)
 =================================================================================
 """
@@ -64,7 +57,6 @@ logger = logging.getLogger(__name__)
 # 1. ثوابت
 # ═══════════════════════════════════════════════════════════════════════════
 
-# مهلة الاتصال لشبكات بطيئة (Termux / موبايل)
 _TIMEOUTS: Dict[str, float] = {
     "read_timeout": 30.0,
     "write_timeout": 30.0,
@@ -72,13 +64,10 @@ _TIMEOUTS: Dict[str, float] = {
     "pool_timeout": 20.0,
 }
 
-# تأخير retry بين المحاولات (بالثواني)
 _RETRY_DELAYS: Tuple[int, ...] = (2, 4, 6)
 
-# فواصل بين تشغيل البوتات عند الإقلاع (rate limit)
 _INTER_START_DELAY = 0.3
 
-# توكن Relax Manager — لرفض التعارض
 _RELAX_TOKEN: str = (getattr(CONFIG, "TOKEN", "") or "").strip()
 
 
@@ -108,11 +97,7 @@ def _is_token_conflict(token: str) -> bool:
 
 
 async def _safe_cleanup(app: Optional[Application]) -> None:
-    """
-    تنظيف آمن بعد فشل جزئي.
-    ترتيب PTB الرسمي: updater → app.stop → app.shutdown.
-    كل خطوة معزولة بـ try/except — لا توقف التنظيف.
-    """
+    """تنظيف آمن: updater → app.stop → app.shutdown."""
     if app is None:
         return
     try:
@@ -133,10 +118,7 @@ async def _safe_cleanup(app: Optional[Application]) -> None:
 
 
 async def _error_handler(update: Any, context: Any) -> None:
-    """
-    معالج أخطاء محلي للبوت المُدار.
-    لا نستخدم Relax Manager's ErrorHandler (يحتاج DB / log channel).
-    """
+    """معالج أخطاء محلي للبوت المُدار."""
     err = context.error
     if isinstance(err, RetryAfter):
         logger.debug("managed bot: RetryAfter %ss", err.retry_after)
@@ -174,24 +156,16 @@ async def start_one(
     *,
     max_retries: int = 3,
 ) -> bool:
-    """
-    يبدأ بوتاً مُداراً واحداً.
-
-    Returns:
-        True إن نجح التشغيل أو كان يعمل مسبقاً بنفس التوكن.
-        False عند الفشل النهائي (token invalid، forbidden، إلخ).
-    """
+    """يبدأ بوتاً مُداراً واحداً."""
     if not token or not token.strip():
         logger.error("start_one(#%s): token فارغ", bid)
         return False
 
     token = token.strip()
 
-    # تعارض مع Relax؟
     if _is_token_conflict(token):
         return False
 
-    # يعمل مسبقاً؟
     existing = RUNNING.get(bid)
     if existing is not None:
         try:
@@ -206,7 +180,7 @@ async def start_one(
         )
         await stop_one(bid)
 
-    # استيراد متأخر للـ handlers (لتفادي خطأ إن لم تُنشأ بعد)
+    # استيراد متأخر للـ handlers
     try:
         from handlers.handlers_managed_public import (  # type: ignore
             make_managed_handlers,
@@ -220,8 +194,8 @@ async def start_one(
         )
         return False
 
-    # تحميل الرسائل من التخزين (fallback إلى الافتراضي)
-    stored = load_managed_bots()
+    # 🆕 v5.7.3: await (التخزين أصبح async)
+    stored = await load_managed_bots()
     messages = (
         stored.get(bid, {}).get("messages")
         or get_default_messages()
@@ -238,10 +212,8 @@ async def start_one(
             app.bot_data["managed_messages"] = dict(messages)
             app.bot_data["managed_name"] = name
 
-            # تسجيل post_init
             app.post_init = post_init_managed
 
-            # handlers
             on_start, on_text = make_managed_handlers(bid)
             private = filters.ChatType.PRIVATE
             app.add_handler(
@@ -255,7 +227,6 @@ async def start_one(
             )
             app.add_error_handler(_error_handler)
 
-            # دورة حياة
             await app.initialize()
             await app.start()
             await app.updater.start_polling(  # type: ignore[union-attr]
@@ -298,7 +269,6 @@ async def start_one(
                 )
                 await asyncio.sleep(delay)
                 continue
-            # نفدت المحاولات
 
         except asyncio.CancelledError:
             await _safe_cleanup(app)
@@ -325,7 +295,7 @@ async def start_one(
 # ═══════════════════════════════════════════════════════════════════════════
 
 async def stop_one(bid: int, timeout: float = 10.0) -> None:
-    """يوقف بوتاً مُداراً واحداً. آمن إن لم يكن يعمل."""
+    """يوقف بوتاً مُداراً واحداً."""
     app = RUNNING.pop(bid, None)
     if app is None:
         return
@@ -354,7 +324,7 @@ async def stop_one(bid: int, timeout: float = 10.0) -> None:
         logger.info("🛑 managed_bot #%s stopped", bid)
     except asyncio.TimeoutError:
         logger.warning(
-            "⏱️ stop_one(#%s): timeout %.0fs — أُهمل", bid, timeout
+            "⏱️ stop_one(#%s): timeout %.0fs", bid, timeout
         )
     except asyncio.CancelledError:
         raise
@@ -372,7 +342,7 @@ async def restart_one(
     *,
     max_retries: int = 3,
 ) -> bool:
-    """يوقف ثم يبدأ (للاستخدام بعد تعديل التوكن)."""
+    """يوقف ثم يبدأ."""
     await stop_one(bid)
     return await start_one(bid, token, max_retries=max_retries)
 
@@ -381,16 +351,17 @@ async def restart_one(
 # 7. reload_messages — بدون restart
 # ═══════════════════════════════════════════════════════════════════════════
 
-def reload_messages(bid: int) -> bool:
+async def reload_messages(bid: int) -> bool:
     """
-    يعيد قراءة رسائل بوت من القرص إلى bot_data.
-    يُستخدم من اللوحة بعد تعديل الرسائل — يظهر التأثير فوراً.
+    يعيد قراءة رسائل بوت من DB إلى bot_data.
+    🆕 v5.7.3: أصبحت async (لأن التخزين async).
     """
     app = RUNNING.get(bid)
     if app is None:
         return False
 
-    bots = load_managed_bots()
+    # 🆕 v5.7.3: await
+    bots = await load_managed_bots()
     entry = bots.get(bid)
     if entry is None:
         return False
@@ -424,12 +395,10 @@ def running_count() -> int:
 # ═══════════════════════════════════════════════════════════════════════════
 
 async def start_all_managed_bots() -> Dict[int, bool]:
-    """
-    يبدأ كل البوتات المُدارة المحفوظة.
-    Returns: {bid: True/False}
-    """
+    """يبدأ كل البوتات المُدارة المحفوظة."""
     try:
-        bots = load_managed_bots()
+        # 🆕 v5.7.3: await
+        bots = await load_managed_bots()
     except Exception as _e:
         logger.error(
             "❌ start_all_managed_bots: فشل قراءة التخزين — %s", _e
@@ -473,9 +442,7 @@ async def stop_all_managed_bots(timeout: float = 15.0) -> None:
     if not RUNNING:
         return
     bids = list(RUNNING.keys())
-    logger.info(
-        "🛑 managed_bots: إيقاف %d بوت...", len(bids)
-    )
+    logger.info("🛑 managed_bots: إيقاف %d بوت...", len(bids))
     try:
         await asyncio.gather(
             *(stop_one(bid, timeout=timeout) for bid in bids),
@@ -516,8 +483,8 @@ __all__ = [
 
 try:
     logger.debug(
-        "🛡️ managed_bots_runner v5.7.0 loaded | "
-        "timeouts=%s | retries=%d | poll_only=True",
+        "🛡️ managed_bots_runner v5.7.3 (DB-MIGRATION) loaded | "
+        "timeouts=%s | retries=%d | reload_messages=async",
         _TIMEOUTS, len(_RETRY_DELAYS),
     )
 except Exception:
