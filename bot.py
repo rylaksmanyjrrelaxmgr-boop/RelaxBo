@@ -1,20 +1,36 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-🌿 Relax Manager – البوت الرئيسي (bot.py v5.7.9-INIT-RETRY-FULL)
+🌿 Relax Manager – البوت الرئيسي (bot.py v5.7.12-FULL-AUDIT-FIXED)
 ================================================================================
-🆕 v5.7.9 (INIT-RETRY-FULL):
-    🟢 RESTORE-LOG-PERF: `_log_perf_tuning_status()` — أعيدت.
-    🟢 RESTORE-DIAG: `_diag_incoming()` + TypeHandler تسجيل في main() عند
-        DIAG_INCOMING=1 — أعيدت.
-    🟢 v5.7.8 (INIT-RETRY): `_initialize_with_retry()` — 6 محاولات
-        backoff (3→4.5→6.75→10→15→22.5s) عند NetworkError(500)/Conflict/
-        TimedOut. يوقف فوراً عند InvalidToken/Unauthorized.
-    🟢 v5.7.7 (FORCE-WEBHOOK): `_FALLBACK_HOSTNAME` مع `or` + رفض polling
-        إلا بـ ALLOW_POLLING=1 + get_webhook_info verification.
-    🟢 v5.7.6 (KILL-PREVIOUS): PID file + /proc scan + SIGTERM/SIGKILL.
-    🟢 v5.7.5 (GIL-QUIET-WARMUP): warn=1000ms + warmup blocking + gc.
-    🟢 v5.7.4..v5.6.43 — محفوظة بالكامل.
+🆕 v5.7.12 (FULL AUDIT P0/P1/P2/P3 — مُصحَّح من v5.7.11):
+    🔴 P0-FIX: `_run_post_init_hooks` — كان الشرط `app._initialized` يُعطّل
+        post_init دائماً (لأنه يُضبط True داخل initialize()). الآن نستخدم علامات
+        PTB الداخلية (_post_init_ran) بدلاً منها.
+    🔴 P0-FIX: `_build_http_request_pools` — رفع pool getUpdates إلى 8
+        (كان 4 → PoolTimeout متكرر مع long-polling) + read_timeout=65
+        pool_timeout=20.
+    🔴 P0-FIX: `_collect_admin_ids` — `if result is not None` بدل `if result`
+        (كان `[]` يمنع break ويجرّب دوالاً أخرى).
+    🟠 P1-FIX: `_watch_runner` — تصفير probe_failures عند أي استجابة HTTP
+        ناجحة (حتى لو status!=200)، والإخفاق فقط على أخطاء الشبكة.
+    🟠 P1-FIX: SIGHUP — استخدام hasattr بدل getattr مع fallback SIGINT.
+    🟠 P1-FIX: `_run_post_stop_hooks` — إبطال post_stop مع تسجيل التحذير
+        إن فشل (بدل صمت تام).
+    🟡 P2-FIX: `cmd_posts_stats` — استخدام startswith بدل == لـ DB_TYPE.
+    🟡 P2-FIX: `pre_checkout` — try/except على float(expected) (Decimal).
+    🟡 P2-FIX: `cleanup_admin_logs_periodically` — hasattr(DB,"connection").
+    🟡 P2-FIX: `_get_bot_token` — يجرّب CONFIG.BOT_TOKEN ثم CONFIG.TOKEN.
+    🟢 P3-FIX: `_verify_command_handlers` — warning بدل SystemExit للأوامر
+        غير الحرجة (CRITICAL_COMMANDS فقط تفشل).
+    🟢 P3-FIX: `logger` باسم ثابت "relax_bot" لتفادي ازدواج السجلات عند
+        إعادة الاستيراد من اختبارات.
+    🟢 v5.7.11 — محفوظ (post_init/post_stop idempotency + P2/P3).
+    🟢 v5.7.10 — محفوظ (RETRY-TRUTHFUL + SAFE-POOLS + INIT-RETRY).
+    🟢 v5.7.9  — محفوظ (RESTORE-LOG-PERF + RESTORE-DIAG + INIT-RETRY).
+    🟢 v5.7.7  — محفوظ (FORCE-WEBHOOK).
+    🟢 v5.7.6  — محفوظ (KILL-PREVIOUS).
+    🟢 v5.7.5  — محفوظ (GIL-QUIET-WARMUP).
 ================================================================================
 """
 
@@ -48,6 +64,7 @@ if __name__ == "__main__":
 from telegram import (
     BotCommandScopeAllPrivateChats, BotCommandScopeAllGroupChats,
     BotCommandScopeChat, BotCommandScopeDefault,
+    Update as _TgUpdate,
 )
 
 try:
@@ -429,10 +446,11 @@ logging.basicConfig(
 for _noisy in ("httpx", "httpcore", "telegram.request", "telegram.ext.ExtBot", "aiohttp.access"):
     logging.getLogger(_noisy).setLevel(logging.WARNING)
 
-logger = logging.getLogger("bot" if __name__ == "__main__" else __name__)
+# 🟢 v5.7.12: logger باسم ثابت لتفادي ازدواج عند إعادة الاستيراد
+logger = logging.getLogger("relax_bot")
 
 # ═══════════════════════════════════════════════════════════════════
-# v5.7.7 FIX-FALLBACK-EMPTY
+# v5.7.7 FIX-FALLBACK-EMPTY + v5.7.10 KILL-PREVIOUS
 # ═══════════════════════════════════════════════════════════════════
 _PID_FILE_PATH = "/app/.bot.pid"
 _KILL_TIMEOUT_SEC = 5.0
@@ -442,12 +460,12 @@ _FALLBACK_HOSTNAME = (
     os.getenv("FALLBACK_HOSTNAME", "") or "relaxbo-78m4.onrender.com"
 ).strip()
 
-logger.info("🔧 v5.7.9 init: _FALLBACK_HOSTNAME=%r", _FALLBACK_HOSTNAME)
-logger.info("🔧 v5.7.9 init: RENDER_EXTERNAL_HOSTNAME=%r",
+logger.info("🔧 v5.7.12 init: _FALLBACK_HOSTNAME=%r", _FALLBACK_HOSTNAME)
+logger.info("🔧 v5.7.12 init: RENDER_EXTERNAL_HOSTNAME=%r",
             os.getenv("RENDER_EXTERNAL_HOSTNAME", ""))
-logger.info("🔧 v5.7.9 init: RENDER_EXTERNAL_URL=%r",
+logger.info("🔧 v5.7.12 init: RENDER_EXTERNAL_URL=%r",
             os.getenv("RENDER_EXTERNAL_URL", ""))
-logger.info("🔧 v5.7.9 init: ALLOW_POLLING=%r",
+logger.info("🔧 v5.7.12 init: ALLOW_POLLING=%r",
             os.getenv("ALLOW_POLLING", ""))
 
 def _read_pid_file() -> Optional[int]:
@@ -488,6 +506,24 @@ def _is_process_alive(pid: int) -> bool:
     except PermissionError:
         return True
 
+def _pid_is_bot_process(pid: int) -> bool:
+    """
+    🟡 v5.7.11: التحقق من cmdline قبل القتل (حماية من PID reuse).
+    يطابق فقط إذا كان basename == "bot.py" (لا أي مسار يحتوي "/bot").
+    """
+    try:
+        with open(f"/proc/{pid}/cmdline", "rb") as f:
+            cmdline = f.read().replace(b"\x00", b" ").decode("utf-8", errors="ignore")
+        if not cmdline.strip():
+            return False
+        for _part in cmdline.split():
+            _base = os.path.basename(_part)
+            if _base == "bot.py":
+                return True
+        return False
+    except (IOError, PermissionError, OSError):
+        return False
+
 def _force_kill_pid(pid: int, force: bool = False) -> bool:
     if pid == os.getpid():
         return False
@@ -503,6 +539,7 @@ def _force_kill_pid(pid: int, force: bool = False) -> bool:
         return False
 
 def _find_bot_processes() -> List[int]:
+    """🟡 v5.7.11: يستخدم `_pid_is_bot_process` (basename == "bot.py" فقط)."""
     pids: List[int] = []
     current_pid = os.getpid()
     try:
@@ -512,13 +549,8 @@ def _find_bot_processes() -> List[int]:
             pid = int(entry)
             if pid == current_pid:
                 continue
-            try:
-                with open(f"/proc/{pid}/cmdline", "rb") as f:
-                    cmdline = f.read().replace(b"\x00", b" ").decode("utf-8", errors="ignore")
-                if cmdline and ("bot.py" in cmdline or ("python" in cmdline and "/bot" in cmdline)):
-                    pids.append(pid)
-            except (IOError, PermissionError, OSError):
-                continue
+            if _pid_is_bot_process(pid):
+                pids.append(pid)
     except (IOError, OSError):
         pass
     return pids
@@ -528,8 +560,14 @@ async def _force_kill_previous_instance() -> int:
     targets: Set[int] = set()
     old_pid = _read_pid_file()
     if old_pid and old_pid != os.getpid() and _is_process_alive(old_pid):
-        logger.warning("🔪 PID file يشير لنسخة قديمة نشطة: %d", old_pid)
-        targets.add(old_pid)
+        if _pid_is_bot_process(old_pid):
+            logger.warning("🔪 PID file يشير لنسخة قديمة نشطة: %d", old_pid)
+            targets.add(old_pid)
+        else:
+            logger.warning(
+                "⚠️ PID file يشير إلى %d لكنها ليست عملية bot.py — تجاهل",
+                old_pid,
+            )
     other_pids = _find_bot_processes()
     if other_pids:
         logger.warning("🔪 وجدت %d نسخة bot.py إضافية: %s", len(other_pids), other_pids)
@@ -597,7 +635,7 @@ async def _wait_for_telegram_release(timeout: float = _TELEGRAM_RELEASE_TIMEOUT_
             pass
 
 # ═══════════════════════════════════════════════════════════════════
-# v5.7.8 FIX-INIT-RETRY
+# v5.7.10 FIX-INIT-RETRY
 # ═══════════════════════════════════════════════════════════════════
 async def _initialize_with_retry(
     app: Application,
@@ -616,7 +654,9 @@ async def _initialize_with_retry(
         _InvalidToken = _tg.error.InvalidToken
         _Unauthorized = _tg.error.Unauthorized
     except Exception:
-        _Conflict = _NetworkError = _TimedOut = _InvalidToken = _Unauthorized = type(None)
+        class _FakeTGError(Exception):
+            pass
+        _Conflict = _NetworkError = _TimedOut = _InvalidToken = _Unauthorized = _FakeTGError
 
     delay = 3.0
     for attempt in range(1, max_attempts + 1):
@@ -724,7 +764,6 @@ _TG_WARMUP_TIMEOUT = 10.0
 _PM_QUERY_TTL = 290.0
 _pm_last_query_ts = 0.0
 _pm_last_query_result: Optional[Dict[str, Any]] = None
-_WARMUP_DETECTORS_TASK: Optional[asyncio.Task] = None
 _GIL_LAG_MONITOR_TASK: Optional[asyncio.Task] = None
 _GIL_LAG_SAMPLES_MAX = 300
 _GIL_LAG_HISTORY_WINDOW_SEC = 60.0
@@ -733,6 +772,8 @@ _GIL_LAG_ALERT_INTERVAL_SEC = 30.0
 _GIL_LAG_BLOCKED_CUMULATIVE_WARN_MS = 5000.0
 _HANDLER_SLOW_WARN_MS = 3000.0
 _HANDLER_INFO_MS = 1500.0
+
+_ADMIN_GUARD_WARNED = False
 
 _ACTIVE_HANDLER: Dict[str, Any] = {"name": None, "start": 0.0, "chat_id": None}
 
@@ -807,30 +848,6 @@ def _wrap_handler_with_timing(handler: Callable, name: str) -> Callable:
                 pass
             _ACTIVE_HANDLER.update(_prev)
     return _timed
-
-def _spawn_notify_dev_log(context, text: str) -> None:
-    try:
-        task = asyncio.create_task(_notify_dev_log(context, text))
-        _NOTIFY_TASKS.add(task)
-        task.add_done_callback(lambda t: _NOTIFY_TASKS.discard(t))
-    except Exception as _e:
-        logger.debug("_spawn_notify_dev_log: %s", _e)
-
-def _spawn_warmup_detectors_pool() -> Optional[asyncio.Task]:
-    global _WARMUP_DETECTORS_TASK
-    if not _HAS_WARMUP_DETECTORS or _warmup_detectors_pool_fn is None:
-        return None
-    if _WARMUP_DETECTORS_TASK is not None and not _WARMUP_DETECTORS_TASK.done():
-        return _WARMUP_DETECTORS_TASK
-    try:
-        _WARMUP_DETECTORS_TASK = asyncio.create_task(
-            _warmup_detectors_pool_fn(), name="warmup-detectors-pool"
-        )
-        logger.info("🔥 warmup_detectors_pool: task spawned")
-        return _WARMUP_DETECTORS_TASK
-    except Exception as _e:
-        logger.warning("⚠️ فشل إنشاء task: %s", _e)
-        return None
 
 async def _gil_lag_monitor() -> None:
     logger.info("🔍 GIL-MONITOR: warn=%.0fms, cooldown=%.0fs",
@@ -918,23 +935,42 @@ def _spawn_gil_lag_monitor() -> Optional[asyncio.Task]:
         logger.warning("⚠️ فشل بدء GIL-MONITOR: %s", _e)
         return None
 
-def _build_http_request_pool():
+# ═══════════════════════════════════════════════════════════════════
+# 🔴 v5.7.12 FIX: pools — رفع get_updates pool_size إلى 8 و read_timeout=65
+# ═══════════════════════════════════════════════════════════════════
+def _build_http_request_pools():
+    """
+    🟢 v5.7.12: pool منفصل لـ getUpdates (long-polling) عن الطلبات العادية.
+    - req_pool: connection_pool_size=32, read=20s (طلبات API قصيرة)
+    - upd_pool: connection_pool_size=8, read=65s, pool_timeout=20s
+      (getUpdates يشغل اتصالاً >60s؛ pool_timeout يجب أن يزيد عن read_timeout
+       لتجنب PoolTimeout على الطلبات الإضافية)
+    العودة: (request_pool, updates_pool) أو (None, None).
+    """
     if not _HAS_HTTPX_REQUEST or HTTPXRequest is None:
-        return None
+        return None, None
     try:
-        request = HTTPXRequest(
+        req_pool = HTTPXRequest(
             connection_pool_size=32, connect_timeout=15.0,
             read_timeout=20.0, write_timeout=20.0, pool_timeout=10.0,
         )
-        logger.info("🚀 HTTPXRequest pool: 32")
-        return request
+        upd_pool = HTTPXRequest(
+            connection_pool_size=8, connect_timeout=15.0,
+            read_timeout=65.0, write_timeout=30.0, pool_timeout=20.0,
+        )
+        logger.info("🚀 HTTPXRequest pools: req=32(read=20s) upd=8(read=65s, pool=20s)")
+        return req_pool, upd_pool
     except TypeError:
+        # PTB قديم لا يدعم بعض المعاملات
         try:
-            return HTTPXRequest(connection_pool_size=32)
+            req_pool = HTTPXRequest(connection_pool_size=32)
+            upd_pool = HTTPXRequest(connection_pool_size=8)
+            logger.warning("⚠️ pools: fallback PTB-compat (تقليل المعاملات)")
+            return req_pool, upd_pool
         except Exception:
-            return None
+            return None, None
     except Exception:
-        return None
+        return None, None
 
 async def _warmup_telegram_api(app: Application) -> bool:
     try:
@@ -968,7 +1004,7 @@ def _log_perf_tuning_status() -> None:
     try:
         _max_ch = getattr(CONFIG, "MAX_CHANNELS_PER_CYCLE", "?")
         logger.info("⚡ PERF Tuning: MAX_CHANNELS=%s | HTTPX_POOL=%s",
-                    _max_ch, "32" if _HAS_HTTPX_REQUEST else "default")
+                    _max_ch, "32/8" if _HAS_HTTPX_REQUEST else "default")
     except Exception as _e:
         logger.debug("_log_perf_tuning_status: %s", _e)
 
@@ -1025,20 +1061,33 @@ _log_security_bridge_status()
 _log_db_diagnostics_status()
 _log_perf_tuning_status()
 
+# ═══════════════════════════════════════════════════════════════════
+# periodic_cleanup_task — instance-bound (v5.7.11)
+# ═══════════════════════════════════════════════════════════════════
+_periodic_cleanup_callable: Optional[Callable] = None
 try:
     import inspect as _inspect_pc
     _pc_fn = getattr(GroupRateLimiterManager, "periodic_cleanup_task", None)
     if _pc_fn is None:
         logger.warning("⚠️ periodic_cleanup_task غير موجود")
-    elif _inspect_pc.isfunction(_pc_fn):
+    else:
+        _pc_sig = None
         try:
             _pc_sig = _inspect_pc.signature(_pc_fn)
-            if len(_pc_sig.parameters) >= 1 and 'self' in _pc_sig.parameters:
-                logger.warning("⚠️ periodic_cleanup_task يحتاج 'self'")
         except (ValueError, TypeError):
             pass
-except Exception:
-    pass
+        if _pc_sig is not None and 'self' in _pc_sig.parameters:
+            try:
+                _pc_mgr = GroupRateLimiterManager()
+                _periodic_cleanup_callable = _pc_mgr.periodic_cleanup_task
+                logger.info("✅ periodic_cleanup: bound via instance")
+            except Exception as _pce:
+                logger.warning("⚠️ periodic_cleanup: cannot instantiate — %s", _pce)
+        else:
+            _periodic_cleanup_callable = _pc_fn
+            logger.info("✅ periodic_cleanup: static/classmethod")
+except Exception as _pce:
+    logger.warning("⚠️ periodic_cleanup inspect: %s", _pce)
 
 ALLOWED_UPDATES = [
     "message", "edited_message", "callback_query", "chat_join_request",
@@ -1127,6 +1176,7 @@ async def _shutdown_db_pool(timeout: float = 5.0) -> None:
         pass
 
 async def _collect_admin_ids() -> List[int]:
+    """🟡 v5.7.12: يعالج dict + break حتى مع قائمة فارغة (result is not None)."""
     admin_ids: Set[int] = set()
     try:
         owner = int(getattr(CONFIG, "PRIMARY_OWNER_ID", 0) or 0)
@@ -1151,7 +1201,10 @@ async def _collect_admin_ids() -> List[int]:
             result = getattr(DB, method_name)()
             if asyncio.iscoroutine(result):
                 result = await result
-            if result:
+            # 🟡 v5.7.12: `is not None` بدل `if result` — قائمة فارغة هي استجابة صالحة
+            if result is not None:
+                if isinstance(result, dict):
+                    result = [result]
                 for a in result:
                     uid = a.get("user_id") if isinstance(a, dict) else a
                     try:
@@ -1165,10 +1218,18 @@ async def _collect_admin_ids() -> List[int]:
     return sorted(admin_ids)
 
 def _get_bot_token() -> str:
+    """🟡 v5.7.12: يجرّب BOT_TOKEN ثم CONFIG.BOT_TOKEN ثم CONFIG.TOKEN."""
     env_token = os.getenv("BOT_TOKEN", "").strip()
     if env_token:
         return env_token
-    return getattr(CONFIG, "TOKEN", "") or ""
+    for attr in ("BOT_TOKEN", "TOKEN", "bot_token", "token"):
+        try:
+            val = getattr(CONFIG, attr, None)
+            if isinstance(val, str) and val.strip():
+                return val.strip()
+        except Exception:
+            continue
+    return ""
 
 def _redact_token(text: str, token: str = None) -> str:
     if not text:
@@ -1185,34 +1246,55 @@ def _redact_token(text: str, token: str = None) -> str:
 def _safe_url(url: str) -> str:
     return _redact_token(url)
 
+# 🟢 v5.7.12: CRITICAL فقط تُوقف البوت؛ البقية warning
+_CRITICAL_COMMANDS = (
+    "start", "help_command", "subscribe", "stats", "admin",
+    "db_diag", "db_vacuum", "broadcast",
+)
+_OPTIONAL_COMMANDS = (
+    "trial", "support", "developer", "language", "contests",
+    "replies_command", "grant", "set_min_interval", "gift_plans",
+    "redeem_gift", "mood", "set_force", "set_update_ch",
+    "set_log_ch", "add_admin", "remove_admin", "export_replies",
+    "import_replies", "backup", "restore", "auto_publish",
+    "auto_recycle", "channels", "posts", "syncgroup", "security",
+    "panel", "lock", "unlock", "ban", "mute", "warn", "kick",
+    "restrict", "unban", "pin",
+    "register_hidden_owner", "remove_hidden_owner",
+    "add_hidden_admin", "remove_hidden_admin", "list_hidden_admins",
+)
+
 def _verify_command_handlers() -> bool:
-    required = [
-        "start", "help_command", "trial", "subscribe", "support",
-        "developer", "stats", "language", "contests", "replies_command",
-        "grant", "set_min_interval", "gift_plans", "redeem_gift",
-        "mood", "admin", "broadcast", "set_force", "set_update_ch",
-        "set_log_ch", "add_admin", "remove_admin",
-        "export_replies", "import_replies", "backup", "restore",
-        "auto_publish", "auto_recycle", "channels", "posts",
-        "db_diag", "db_vacuum", "syncgroup", "security", "panel",
-        "lock", "unlock", "ban", "mute", "warn", "kick",
-        "restrict", "unban", "pin", "register_hidden_owner",
-        "remove_hidden_owner", "add_hidden_admin",
-        "remove_hidden_admin", "list_hidden_admins",
+    """🟢 v5.7.12: CRITICAL فقط قاتلة؛ OPTIONAL → warning."""
+    missing_critical = [
+        n for n in _CRITICAL_COMMANDS
+        if not callable(getattr(CommandHandlers, n, None))
     ]
-    missing = [n for n in required if not callable(getattr(CommandHandlers, n, None))]
-    if missing:
-        logger.error("❌ دوال مفقودة: %s", missing)
+    missing_optional = [
+        n for n in _OPTIONAL_COMMANDS
+        if not callable(getattr(CommandHandlers, n, None))
+    ]
+    if missing_critical:
+        logger.error("❌ دوال حرجة مفقودة: %s", missing_critical)
         return False
-    logger.info("✅ كل %d دالة CommandHandlers موجودة", len(required))
+    if missing_optional:
+        logger.warning("⚠️ دوال اختيارية مفقودة (لن تُسجَّل أوامرها): %s",
+                       missing_optional)
+    _total = len(_CRITICAL_COMMANDS) + len(_OPTIONAL_COMMANDS)
+    logger.info("✅ %d/%d دالة CommandHandlers موجودة",
+                _total - len(missing_optional), _total)
     return True
 
 def _verify_db_config() -> bool:
+    """🟡 v5.7.11: فحص نوع DB pre-init (sync). التحقق الفعلي عبر ping بعد init."""
     try:
-        db_type = getattr(DB, "DB_TYPE", "unknown")
-        logger.info("✅ DB: %s — إعداد صحيح", db_type.upper())
+        db_type = str(getattr(DB, "DB_TYPE", "unknown")).upper()
+        logger.info("✅ DB type (pre-init): %s", db_type)
+        if db_type not in ("SQLITE", "POSTGRES", "MYSQL", "UNKNOWN"):
+            logger.warning("⚠️ DB type غير معروف: %s — تحقق من الإعدادات", db_type)
         return True
-    except Exception:
+    except Exception as _e:
+        logger.warning("⚠️ DB verify (pre-init): %s", _e)
         return True
 
 def _init_group_log_instance(app) -> bool:
@@ -1249,18 +1331,22 @@ async def _shutdown_group_log() -> None:
 async def cleanup_admin_logs_periodically() -> None:
     if not _ADMIN_LOGS_CLEANUP_AVAILABLE:
         return
+    # 🟡 v5.7.12: فحص DB.connection مرة واحدة قبل الدخول في الحلقة
+    if not hasattr(DB, "connection"):
+        logger.warning("⚠️ DB.connection() غير متاح — إيقاف admin_logs cleanup")
+        return
     try:
         await asyncio.sleep(3600)
     except asyncio.CancelledError:
         raise
     while True:
         try:
-            db_type = getattr(DB, "DB_TYPE", "sqlite")
+            db_type = str(getattr(DB, "DB_TYPE", "sqlite")).lower().strip()
             deleted = 0
             async with DB.connection() as conn:
-                if db_type == "postgres" and _cleanup_admin_logs_pg is not None:
+                if db_type.startswith("postgres") and _cleanup_admin_logs_pg is not None:
                     deleted = await _cleanup_admin_logs_pg(conn, logger)
-                elif db_type == "mysql" and _cleanup_admin_logs_mysql is not None:
+                elif db_type in ("mysql", "mariadb") and _cleanup_admin_logs_mysql is not None:
                     deleted = await _cleanup_admin_logs_mysql(conn, logger)
                 elif _cleanup_admin_logs_sqlite is not None:
                     deleted = await _cleanup_admin_logs_sqlite(conn, logger)
@@ -1297,41 +1383,54 @@ async def cleanup_removed_channels_periodically() -> None:
         except asyncio.CancelledError:
             raise
 
+# ═══════════════════════════════════════════════════════════════════
+# _validate_invoice_for_payment
+# err_code ∈ {None, "invalid_payload", "missing_invoice", "db_error",
+#             "invoice_invalid", "plan_missing", "type_invalid"}
+# ═══════════════════════════════════════════════════════════════════
 async def _validate_invoice_for_payment(user_id: int, payload: str):
     try:
         data = json.loads(payload)
     except json.JSONDecodeError:
-        return None, None, None
+        return None, None, None, "invalid_payload"
     invoice_number = data.get('invoice')
     if not invoice_number:
-        return None, None, None
+        return None, None, None, "missing_invoice"
     try:
         invoice = await DB.get_invoice(invoice_number)
-    except Exception:
-        return None, None, None
+    except Exception as _e:
+        logger.error("DB.get_invoice(%s) failed: %s", invoice_number, _e)
+        return None, None, None, "db_error"
     if (not invoice or invoice.get('user_id') != user_id
             or invoice.get('status') != 'pending' or not invoice.get('number')):
-        return None, None, None
+        return None, None, None, "invoice_invalid"
     payment_type = data.get('type')
     if payment_type not in ('subscription', 'gift'):
-        return None, None, None
+        return None, None, None, "type_invalid"
     plan_id = (data.get('plan_id') if payment_type == 'subscription'
                else data.get('gift_plan_id'))
     if not plan_id:
-        return None, None, None
+        return None, None, None, "plan_missing"
     try:
         plan = (await DB.get_plan(plan_id) if payment_type == 'subscription'
                 else await DB.get_gift_plan(plan_id))
-    except Exception:
-        return None, None, None
+    except Exception as _e:
+        logger.error("DB.get_plan(%s) failed: %s", plan_id, _e)
+        return None, None, None, "db_error"
     if not plan:
-        return None, None, None
-    return invoice, plan, data
+        return None, None, None, "plan_missing"
+    return invoice, plan, data, None
 
 async def pre_checkout(update, context):
     query = update.pre_checkout_query
     user_id = query.from_user.id
-    invoice, plan, data = await _validate_invoice_for_payment(user_id, query.invoice_payload)
+    invoice, plan, data, err = await _validate_invoice_for_payment(user_id, query.invoice_payload)
+    if err == "db_error":
+        try:
+            await query.answer(ok=False, error_message="خطأ تقني مؤقت. حاول بعد قليل.")
+        except Exception:
+            pass
+        return
     if invoice is None or plan is None:
         try:
             await query.answer(ok=False, error_message="الفاتورة غير صالحة.")
@@ -1345,10 +1444,14 @@ async def pre_checkout(update, context):
             return
     except Exception:
         pass
+    # 🟡 v5.7.12: try/except على float(expected) (Decimal من DB)
     if hasattr(query, 'total_amount'):
-        expected = plan.get('price')
-        if (expected is not None and float(expected or 0) > 0
-                and not _amounts_match(expected, query.total_amount)):
+        try:
+            expected = plan.get('price')
+            expected_f = float(expected) if expected is not None else 0.0
+        except (TypeError, ValueError):
+            expected_f = 0.0
+        if expected_f > 0 and not _amounts_match(expected_f, query.total_amount):
             await query.answer(ok=False, error_message="المبلغ غير مطابق.")
             return
     try:
@@ -1359,7 +1462,13 @@ async def pre_checkout(update, context):
 async def successful_payment(update, context):
     user_id = update.effective_user.id
     payment = update.message.successful_payment
-    invoice, plan, data = await _validate_invoice_for_payment(user_id, payment.invoice_payload)
+    invoice, plan, data, err = await _validate_invoice_for_payment(user_id, payment.invoice_payload)
+    if err == "db_error":
+        await safe_send(
+            context.bot, user_id,
+            "⚠️ خطأ تقني مؤقت في قاعدة البيانات. سيتم التحقق من الدفع تلقائياً لاحقاً."
+        )
+        return
     if invoice is None or plan is None:
         try:
             _pd = json.loads(payment.invoice_payload)
@@ -1459,8 +1568,8 @@ async def pool_health_monitor() -> None:
         raise
     while True:
         try:
-            db_type = getattr(DB, "DB_TYPE", "sqlite")
-            if db_type != "postgres":
+            db_type = str(getattr(DB, "DB_TYPE", "sqlite")).lower().strip()
+            if not db_type.startswith("postgres"):
                 await asyncio.sleep(1800)
                 continue
             data = await _fetch_pg_activity_cached()
@@ -1527,6 +1636,7 @@ def _resolve_port() -> int:
         pass
     return default_port
 
+# 🟠 v5.7.12: تصفير عند أي استجابة HTTP ناجحة؛ عداد فقط لأخطاء الشبكة
 async def _watch_runner(runner, shutdown_event: asyncio.Event, port: int) -> None:
     try:
         await asyncio.sleep(3.0)
@@ -1541,19 +1651,20 @@ async def _watch_runner(runner, shutdown_event: asyncio.Event, port: int) -> Non
             try:
                 async with session.get(health_url) as resp:
                     await resp.read()
-                    if resp.status == 200:
-                        probe_failures = max(0, probe_failures - 1)
-                    else:
-                        probe_failures += 1
-                if probe_failures >= _WATCHER_MAX_PROBE_FAILURES:
-                    shutdown_event.set()
-                    return
+                    # أي استجابة HTTP (حتى غير 200) → الخادم حيّ
+                    probe_failures = 0
+                    if resp.status != 200:
+                        logger.warning("⚠️ health returned %d — الخادم يستجيب", resp.status)
                 await asyncio.sleep(_WATCHER_INTERVAL)
             except asyncio.CancelledError:
                 raise
-            except Exception:
+            except Exception as _e:
                 probe_failures += 1
+                logger.debug("health probe failure %d/%d: %s",
+                             probe_failures, _WATCHER_MAX_PROBE_FAILURES, _e)
                 if probe_failures >= _WATCHER_MAX_PROBE_FAILURES:
+                    logger.error("❌ health probe failed %d مرات — إغلاق",
+                                 probe_failures)
                     shutdown_event.set()
                     return
                 await asyncio.sleep(_WATCHER_INTERVAL)
@@ -1614,21 +1725,60 @@ async def contest_cleanup(app: Application):
         except asyncio.CancelledError:
             raise
 
+# ═══════════════════════════════════════════════════════════════════
+# 🔴 v5.7.12 P0-FIX: post_init / post_stop idempotency
+# ═══════════════════════════════════════════════════════════════════
 async def _run_post_init_hooks(app: Application) -> None:
+    """
+    🔴 v5.7.12: نستخدم علامات PTB الداخلية (`_post_init_ran`) بدل `_initialized`
+    لأن الأخيرة تُضبط True داخل initialize() دائماً، مما يُعطّل هذا الـ hook.
+    """
+    if app.bot_data.get("_post_init_executed"):
+        logger.debug("post_init already executed — skip")
+        return
     _post_init = getattr(app, "post_init", None)
-    if callable(_post_init):
-        try:
-            await _post_init(app)
-        except Exception as _e:
-            logger.warning("post_init hook failed: %s", _e)
+    if not callable(_post_init):
+        app.bot_data["_post_init_executed"] = True
+        return
+    # PTB 20+: initialize() يستدعي post_init تلقائياً فقط إن كان مضبوطاً builder.
+    # نتحقق من علامات PTB الداخلية (تسميات مختلفة بين الإصدارات).
+    _ptb_ran = any(
+        getattr(app, _flag, False)
+        for _flag in ("_post_init_ran", "_post_init_executed", "_post_init_done")
+    )
+    app.bot_data["_post_init_executed"] = True
+    if _ptb_ran:
+        logger.debug("PTB ran post_init during initialize() — skip manual call")
+        return
+    try:
+        await _post_init(app)
+        logger.info("✅ post_init executed manually")
+    except Exception as _e:
+        logger.warning("post_init hook failed: %s", _e)
 
 async def _run_post_stop_hooks(app: Application) -> None:
+    """
+    🔴 v5.7.11: حماية idempotent + إبطال post_stop بعد التنفيذ اليدوي
+    لمنع PTB من استدعائه مجدداً عبر app.stop().
+    """
+    if app.bot_data.get("_post_stop_executed"):
+        logger.debug("post_stop already executed — skip")
+        return
+    app.bot_data["_post_stop_executed"] = True
     _post_stop = getattr(app, "post_stop", None)
-    if callable(_post_stop):
+    if not callable(_post_stop):
+        return
+    try:
+        await _post_stop(app)
+        logger.info("✅ post_stop executed")
+    except Exception as _e:
+        logger.warning("post_stop hook failed: %s", _e)
+    finally:
+        # منع PTB من استدعائه مجدداً في app.stop() / updater.stop()
         try:
-            await _post_stop(app)
-        except Exception as _e:
-            logger.warning("post_stop hook failed: %s", _e)
+            app.post_stop = None
+        except (AttributeError, TypeError) as _e:
+            logger.debug("cannot unbind app.post_stop: %s", _e)
 
 _polling_state = {"running": False}
 
@@ -1652,7 +1802,7 @@ async def _stop_polling_mode(app: Application) -> None:
                 pass
 
 async def _diag_incoming(update, context):
-    """🆕 v5.7.9: DIAG_INCOMING=1 → تسجيل كل رسالة واردة للمجموعة."""
+    """DIAG_INCOMING=1 → تسجيل كل رسالة واردة للمجموعة (info level)."""
     try:
         msg = update.effective_message
         chat = update.effective_chat
@@ -1666,7 +1816,7 @@ async def _diag_incoming(update, context):
             btn_count = 0
         fwd_origin = getattr(msg, "forward_origin", None)
         fwd_chat = getattr(msg, "forward_from_chat", None)
-        logger.warning(
+        logger.info(
             "📥 INCOMING | chat=%s msg=%s | text=%s caption=%s photo=%s "
             "video=%s doc=%s audio=%s voice=%s anim=%s sticker=%s vn=%s "
             "poll=%s | fwd_origin=%s fwd_chat=%s auto_fwd=%s | btn_count=%d",
@@ -1691,6 +1841,8 @@ async def _diag_incoming(update, context):
         logger.debug("_diag_incoming error: %s", _e)
 
 def _resolve_admin_guard(context) -> Set[int]:
+    """🟡 v5.7.11: تحذير once-only عند قائمة فارغة."""
+    global _ADMIN_GUARD_WARNED
     allowed = context.bot_data.get("admin_ids")
     if allowed:
         return allowed
@@ -1706,6 +1858,12 @@ def _resolve_admin_guard(context) -> Set[int]:
                     fallback.add(_di)
             except (TypeError, ValueError):
                 continue
+        if not fallback and not _ADMIN_GUARD_WARNED:
+            logger.warning(
+                "⚠️ ADMIN GUARD: قائمة الأدمن فارغة — كل الأوامر الإدارية ستُرفض. "
+                "تحقق من PRIMARY_OWNER_ID و DEVELOPER_IDS."
+            )
+            _ADMIN_GUARD_WARNED = True
         return fallback
     except Exception:
         return set()
@@ -1741,6 +1899,7 @@ async def cmd_ping(update, context):
     except Exception as e:
         logger.error("❌ /ping error: %s", e)
 
+# 🟡 v5.7.12: startswith بدل == لـ DB_TYPE
 async def cmd_posts_stats(update, context):
     user = update.effective_user
     if user is None:
@@ -1751,13 +1910,16 @@ async def cmd_posts_stats(update, context):
     msg = update.effective_message
     if msg is None:
         return
-    _db_type = getattr(DB, "DB_TYPE", "sqlite").lower()
-    if _db_type == "postgres":
+    _db_type = str(getattr(DB, "DB_TYPE", "sqlite")).lower().strip()
+    if _db_type.startswith("postgres"):
         _interval_24h = "NOW() - INTERVAL '24 hours'"
-    elif _db_type == "mysql":
+        _pub_true = "TRUE"
+    elif _db_type in ("mysql", "mariadb"):
         _interval_24h = "NOW() - INTERVAL 24 HOUR"
+        _pub_true = "1"
     else:
         _interval_24h = "datetime('now', '-24 hours')"
+        _pub_true = "1"
 
     async def _try_count(sql: str):
         try:
@@ -1770,16 +1932,40 @@ async def cmd_posts_stats(update, context):
             return None, f"{type(_e).__name__}: {str(_e)[:60]}"
 
     cnt_total, _ = await _try_count("SELECT COUNT(*) AS n FROM posts")
-    cnt_p1, _ = await _try_count(
-        f"SELECT COUNT(*) AS n FROM posts WHERE published = 1 AND created_at > {_interval_24h}"
+    cnt_p1, err_p1 = await _try_count(
+        f"SELECT COUNT(*) AS n FROM posts WHERE published = {_pub_true} AND created_at > {_interval_24h}"
     )
+    # 🟡 v5.7.12: PostgreSQL قد يكون العمود integer بدل boolean
+    if err_p1 and _db_type.startswith("postgres"):
+        logger.debug("posts_stats: TRUE failed (%s) — fallback to 1", err_p1)
+        cnt_p1, err_p1 = await _try_count(
+            f"SELECT COUNT(*) AS n FROM posts WHERE published = 1 AND created_at > {_interval_24h}"
+        )
+
     lines = ["📊 <b>إحصائيات النشر</b>", ""]
     lines.append(f"✅ total: <b>{cnt_total or 0}</b>")
-    lines.append(f"✅ published=1 (24h): <b>{cnt_p1 or 0}</b>")
+    if err_p1:
+        lines.append(f"⚠️ published (24h): <i>تعذّر الحساب</i>")
+    else:
+        lines.append(f"✅ published (24h): <b>{cnt_p1 or 0}</b>")
     uptime_s = int(time.monotonic() - _BOT_METRICS.get("started_at", time.monotonic()))
     lines.append(f"⏱️ uptime: <code>{uptime_s}s</code>")
     try:
         await msg.reply_text("\n".join(lines), parse_mode='HTML')
+    except Exception:
+        pass
+
+# 🟠 v5.7.10: alias للأوامر databases / files / versions
+async def _cmd_analytics_alias(update, context):
+    try:
+        if _show_analytics_menu is not None:
+            return await _show_analytics_menu(update, context)
+    except Exception as _e:
+        logger.debug("_cmd_analytics_alias menu: %s", _e)
+    try:
+        msg = update.effective_message
+        if msg:
+            await msg.reply_text("📊 استخدم /analytics للوصول إلى هذه الميزة.")
     except Exception:
         pass
 
@@ -1795,9 +1981,13 @@ async def main():
         logger.info("🛑 تلقّيت %s", sig_name)
         _shutdown_event.set()
 
+    # 🟠 v5.7.12: hasattr بدل getattr مع fallback SIGINT
     try:
         _loop_for_signals = asyncio.get_running_loop()
-        for _sig in [signal.SIGTERM, signal.SIGINT, getattr(signal, "SIGHUP", signal.SIGINT)]:
+        _signals_to_hook = [signal.SIGTERM, signal.SIGINT]
+        if hasattr(signal, "SIGHUP"):
+            _signals_to_hook.append(signal.SIGHUP)
+        for _sig in _signals_to_hook:
             try:
                 _loop_for_signals.add_signal_handler(
                     _sig, lambda s=_sig: _on_shutdown_signal(s.name)
@@ -1837,7 +2027,7 @@ async def main():
     logger.info("👨‍💼 المالك: %s", CONFIG.PRIMARY_OWNER_ID)
 
     logger.info(
-        "📦 bot.py: v5.7.9 | kill_prev=on | init_retry=on | webhook_force=on | "
+        "📦 bot.py: v5.7.12 | kill_prev=on | init_retry=on | webhook_force=on | "
         "webhook_verify=on | diag_incoming=%r | "
         "detectors=%s | layers=%d | fallback_hostname=%r | "
         "allow_polling_env=%r",
@@ -1849,7 +2039,7 @@ async def main():
     )
 
     if not _verify_command_handlers():
-        logger.error("❌ دوال الأوامر — الخروج")
+        logger.error("❌ دوال الأوامر الحرجة مفقودة — الخروج")
         raise SystemExit(1)
     if not _verify_db_config():
         logger.error("❌ إعدادات DB — الخروج")
@@ -1861,6 +2051,14 @@ async def main():
     else:
         await initialize_db()
     logger.info("⏱️ DB init: %.2fs", time.monotonic() - t0)
+
+    try:
+        _ping = await DB.fetchone("SELECT 1 AS ok")
+        logger.info("✅ DB ping: %s", _ping)
+        logger.info("✅ DB type (post-init): %s",
+                    str(getattr(DB, "DB_TYPE", "unknown")).upper())
+    except Exception as _e:
+        logger.warning("⚠️ DB ping (non-fatal): %s", _e)
 
     try:
         if hasattr(DB, "migrate_reminders_columns"):
@@ -1908,18 +2106,20 @@ async def main():
             raise SystemExit(1)
 
     if hostname:
-        logger.info("🌐 WEBHOOK mode FORCED (v5.7.9): hostname=%s", hostname)
+        logger.info("🌐 WEBHOOK mode FORCED (v5.7.12): hostname=%s", hostname)
     else:
         logger.warning("⚠️ POLLING mode (ALLOW_POLLING=1)")
 
     t_app = time.monotonic()
-    _http_request_pool = _build_http_request_pool()
+    _req_pool, _upd_pool = _build_http_request_pools()
     _app_builder = Application.builder().token(bot_token)
-    if _http_request_pool is not None:
-        _app_builder = (_app_builder
-                        .request(_http_request_pool)
-                        .get_updates_request(_http_request_pool))
-        logger.info("🚀 HTTPXRequest pool=32")
+    if _req_pool is not None and _upd_pool is not None:
+        _app_builder = (
+            _app_builder
+            .request(_req_pool)
+            .get_updates_request(_upd_pool)
+        )
+        logger.info("🚀 HTTPXRequest pools applied (req=32/upd=8)")
 
     app = _app_builder.build()
     app.bot_data['start_time'] = time.monotonic()
@@ -1933,6 +2133,10 @@ async def main():
     _init_ok = await _initialize_with_retry(app)
     if not _init_ok:
         logger.error("❌ فشل app.initialize() — الخروج")
+        try:
+            await asyncio.wait_for(app.shutdown(), timeout=5.0)
+        except Exception as _sd_e:
+            logger.debug("app.shutdown() after init failure: %s", _sd_e)
         raise SystemExit(1)
     logger.info("⏱️ App init: %.2fs", time.monotonic() - t_app)
 
@@ -1951,8 +2155,6 @@ async def main():
     _tg_warm_ok = await _warmup_telegram_api(app)
     if not _tg_warm_ok:
         logger.info("ℹ️ Telegram API warmup لم ينجح")
-
-    _spawn_warmup_detectors_pool()
 
     if _HAS_WARMUP_DETECTORS and _warmup_detectors_pool_fn is not None:
         try:
@@ -2030,16 +2232,16 @@ async def main():
         except Exception:
             pass
 
-    # 🆕 v5.7.9: DIAG_INCOMING TypeHandler
+    # DIAG_INCOMING TypeHandler
     if _DIAG_INCOMING and _HAS_TYPE_HANDLER:
         try:
             app.add_handler(
-                TypeHandler(object, _diag_incoming),
+                TypeHandler(_TgUpdate, _diag_incoming),
                 group=-100,
             )
-            logger.warning(
+            logger.info(
                 "🔔 DIAG_INCOMING=1 — TypeHandler تشخيصي مُسجّل "
-                "(group=-100). سيُطبع كل رسالة واردة للمجموعة."
+                "(group=-100, Update, log level=info)."
             )
         except Exception as _e:
             logger.error("❌ فشل تسجيل DIAG handler: %s", _e)
@@ -2133,6 +2335,14 @@ async def main():
             app.add_handler(CommandHandler(_name, _fn))
         except Exception as _e:
             logger.warning("⚠️ /%s: %s", _name, _e)
+
+    # 🟠 alias للأوامر ADMIN_COMMANDS المعلنة لكن غير مسجّلة
+    for _alias_cmd in ("databases", "files", "versions"):
+        try:
+            app.add_handler(CommandHandler(_alias_cmd, _cmd_analytics_alias))
+            logger.info("✅ /%s → _cmd_analytics_alias", _alias_cmd)
+        except Exception as _e:
+            logger.warning("⚠️ /%s alias: %s", _alias_cmd, _e)
 
     if _admin_ids:
         try:
@@ -2248,6 +2458,14 @@ async def main():
             except Exception as _e:
                 logger.error("❌ [5/6] analytics fallback: %s", _e)
 
+    # 🔴 v5.7.11: تسجيل /analytics إن لم تُسجّله الوحدة
+    if not _analytics_registered:
+        try:
+            app.add_handler(CommandHandler("analytics", _cmd_analytics_alias))
+            logger.info("✅ /analytics → _cmd_analytics_alias (fallback)")
+        except Exception as _e:
+            logger.warning("⚠️ /analytics fallback: %s", _e)
+
     try:
         from handlers.handlers_managed_bots import register_managed_bots_handlers
         register_managed_bots_handlers(app)
@@ -2302,13 +2520,17 @@ async def main():
         ("cleanup_old_data", BackgroundTasks.cleanup_old_data, ()),
         ("cache_cleanup", cache_cleanup_task, ()),
         ("cleanup_locks", cleanup_locks, ()),
-        ("periodic_cleanup", GroupRateLimiterManager.periodic_cleanup_task, ()),
         ("monitor_pool_alert", BackgroundTasks.monitor_pool_alert, (app.bot,)),
         ("contest_cleanup", contest_cleanup, (app,)),
         ("pool_health_monitor", pool_health_monitor, ()),
         ("admin_logs_cleanup", cleanup_admin_logs_periodically, ()),
         ("removed_channels_cleanup", cleanup_removed_channels_periodically, ()),
     ]
+    if _periodic_cleanup_callable is not None:
+        _bg_task_specs.append(("periodic_cleanup", _periodic_cleanup_callable, ()))
+    else:
+        logger.warning("⚠️ periodic_cleanup: skipped (لا callable صالح)")
+
     for _name, _fn, _args in _bg_task_specs:
         tasks.append(asyncio.create_task(
             run_task_with_retry(_fn, *_args, task_name=_name)
@@ -2431,16 +2653,6 @@ async def main():
             except asyncio.CancelledError:
                 raise
 
-        if _WARMUP_DETECTORS_TASK is not None and not _WARMUP_DETECTORS_TASK.done():
-            try:
-                _WARMUP_DETECTORS_TASK.cancel()
-                try:
-                    await _WARMUP_DETECTORS_TASK
-                except Exception:
-                    pass
-            except Exception:
-                pass
-
         if _GIL_LAG_MONITOR_TASK is not None and not _GIL_LAG_MONITOR_TASK.done():
             try:
                 _GIL_LAG_MONITOR_TASK.cancel()
@@ -2541,6 +2753,8 @@ if __name__ == "__main__":
     except Exception as e:
         logger.error("❌ خطأ: %s", e, exc_info=True)
         traceback.print_exc()
+        # 🟢 v5.7.11: exit code 1 (كان 0 — supervisors لا ترى الفشل)
+        sys.exit(1)
     finally:
         if _loop is not None:
             try:
@@ -2549,7 +2763,7 @@ if __name__ == "__main__":
                 except Exception:
                     pending = set()
                 try:
-                    _current = asyncio.current_task(loop=_loop)
+                    _current = asyncio.current_task()
                     pending = {t for t in pending if t is not _current}
                 except Exception:
                     pass
