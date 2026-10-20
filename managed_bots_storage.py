@@ -1,13 +1,21 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-managed_bots_storage.py — طبقة I/O ذرية للبوتات المُدارة (v5.7.6 - REENTRANT-LOCK)
+managed_bots_storage.py — طبقة I/O (v5.7.7 - KEYWORDS-SUPPORT)
 =================================================================================
-🆕 v5.7.6 (FIX-DEADLOCK):
-    🔴 إصلاح Deadlock في save_managed_bots / save_managed_state.
-    السبب: asyncio.Lock ليس reentrant. استدعاء save_* من داخل
-           async with get_lock(): كان يسبب انتظاراً أبدياً.
-    الحل: ReentrantLock — يسمح للـ Task الحالي بإعادة الحصول على القفل.
+📌 المسؤولية:
+    • حفظ التوكنات والرسائل في جدول managed_bots.
+    • حفظ تقدم المستخدمين في جدول managed_bot_users.
+    • حفظ الكلمات المفتاحية في جدول managed_bot_keywords.
+
+🎯 التغييرات في v5.7.7:
+    • جدول managed_bot_keywords (الكلمة + الرد لكل بوت).
+    • دوال: load/save/add/delete keyword.
+    • حذف تلقائي للكلمات عند حذف البوت.
+
+🛡️ الحماية:
+    • ReentrantLock يمنع deadlock (v5.7.6).
+    • _ensure_tables ينشئ الجداول تلقائياً عند أول استخدام.
 =================================================================================
 """
 
@@ -16,7 +24,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from datetime import datetime, timezone
-from typing import Any, Dict, Optional, Set
+from typing import Any, Dict, List, Optional, Set
 
 from config import CONFIG
 from database import DB
@@ -25,17 +33,17 @@ logger = logging.getLogger(__name__)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# 🆕 v5.7.6: ReentrantLock — يسمح للـ Task الحالي بإعادة الحصول على القفل
+# 1. ReentrantLock — يمنع deadlock عند الحصول المتكرر
 # ═══════════════════════════════════════════════════════════════════════════
 
 class ReentrantLock:
     """
     قفل يدعم الحصول المتكرر من نفس asyncio.Task.
-
-    💡 لماذا نحتاجه؟
-       - save_managed_bots يحاول الحصول على القفل.
-       - بعض المستدعين (handlers) يحصلون عليه أولاً.
-       - asyncio.Lock العادي يسبب deadlock عند إعادة الحصول.
+    
+    💡 لماذا؟
+       - save_managed_bots يستدعي get_lock().
+       - بعض المستدعين يحصلون عليه أولاً.
+       - asyncio.Lock العادي يسبب deadlock.
     """
     def __init__(self):
         self._lock = asyncio.Lock()
@@ -82,6 +90,10 @@ def get_lock() -> ReentrantLock:
     return _io_lock
 
 
+# ═══════════════════════════════════════════════════════════════════════════
+# 2. الرسائل الافتراضية
+# ═══════════════════════════════════════════════════════════════════════════
+
 _FALLBACK_MESSAGES: Dict[str, str] = {
     "start":  "👋 أهلاً بك!",
     "reply":  "📩 تم استلام رسالتك.",
@@ -91,6 +103,7 @@ _FALLBACK_MESSAGES: Dict[str, str] = {
 
 
 def get_default_messages() -> Dict[str, str]:
+    """أولويات: 1) CONFIG 2) القيمة الافتراضية"""
     return {
         k: str(getattr(CONFIG, f"MANAGED_{k.upper()}_MESSAGE", None)
                or _FALLBACK_MESSAGES[k])
@@ -98,11 +111,22 @@ def get_default_messages() -> Dict[str, str]:
     }
 
 
+# ═══════════════════════════════════════════════════════════════════════════
+# 3. إنشاء الجداول تلقائياً
+# ═══════════════════════════════════════════════════════════════════════════
+
 async def _ensure_tables():
+    """
+    إنشاء 3 جداول تلقائياً عند أول استخدام:
+      • managed_bots (التوكنات + الرسائل)
+      • managed_bot_users (تقدم المستخدمين)
+      • managed_bot_keywords (الكلمات المفتاحية)
+    """
     global _tables_created
     if _tables_created:
         return
     try:
+        # جدول البوتات
         await DB.execute("""
             CREATE TABLE IF NOT EXISTS managed_bots (
                 bot_id INTEGER PRIMARY KEY,
@@ -115,6 +139,7 @@ async def _ensure_tables():
                 added_at TEXT
             )
         """)
+        # جدول المستخدمين
         await DB.execute("""
             CREATE TABLE IF NOT EXISTS managed_bot_users (
                 bot_id INTEGER,
@@ -127,15 +152,33 @@ async def _ensure_tables():
                 PRIMARY KEY (bot_id, user_id)
             )
         """)
+        # 🆕 جدول الكلمات المفتاحية
+        await DB.execute("""
+            CREATE TABLE IF NOT EXISTS managed_bot_keywords (
+                bot_id INTEGER NOT NULL,
+                keyword TEXT NOT NULL,
+                reply TEXT NOT NULL,
+                created_at TIMESTAMP,
+                PRIMARY KEY (bot_id, keyword)
+            )
+        """)
         _tables_created = True
-        logger.info("✅ managed_bots: تم التأكد من إنشاء الجداول في DB")
+        logger.info(
+            "✅ managed_bots: تم التأكد من إنشاء 3 جداول في DB "
+            "(bots, users, keywords)"
+        )
     except Exception as e:
         logger.error(
             "❌ managed_bots: فشل إنشاء الجداول: %s", e, exc_info=True
         )
 
 
+# ═══════════════════════════════════════════════════════════════════════════
+# 4. البوتات — load/save
+# ═══════════════════════════════════════════════════════════════════════════
+
 async def load_managed_bots() -> Dict[int, Dict[str, Any]]:
+    """يقرأ جميع البوتات من قاعدة البيانات."""
     await _ensure_tables()
     result: Dict[int, Dict[str, Any]] = {}
     try:
@@ -147,9 +190,9 @@ async def load_managed_bots() -> Dict[int, Dict[str, Any]]:
                 "token": str(rd.get("token")),
                 "name": str(rd.get("name") or ""),
                 "messages": {
-                    "start": str(rd.get("msg_start") or _FALLBACK_MESSAGES["start"]),
-                    "reply": str(rd.get("msg_reply") or _FALLBACK_MESSAGES["reply"]),
-                    "third": str(rd.get("msg_third") or _FALLBACK_MESSAGES["third"]),
+                    "start":  str(rd.get("msg_start") or _FALLBACK_MESSAGES["start"]),
+                    "reply":  str(rd.get("msg_reply") or _FALLBACK_MESSAGES["reply"]),
+                    "third":  str(rd.get("msg_third") or _FALLBACK_MESSAGES["third"]),
                     "fourth": str(rd.get("msg_fourth") or _FALLBACK_MESSAGES["fourth"]),
                 },
                 "added_at": str(rd.get("added_at") or ""),
@@ -160,6 +203,10 @@ async def load_managed_bots() -> Dict[int, Dict[str, Any]]:
 
 
 async def save_managed_bots(bots: Dict[int, Dict[str, Any]]) -> bool:
+    """
+    يحفظ القاموس كاملاً (DELETE + INSERT لضمان التطابق التام).
+    عدد البوتات عادة صغير (< 50).
+    """
     await _ensure_tables()
     try:
         async with get_lock():
@@ -186,7 +233,12 @@ async def save_managed_bots(bots: Dict[int, Dict[str, Any]]) -> bool:
         return False
 
 
+# ═══════════════════════════════════════════════════════════════════════════
+# 5. المستخدمون — load/save
+# ═══════════════════════════════════════════════════════════════════════════
+
 async def load_managed_state() -> Dict[int, Dict[int, Dict[str, bool]]]:
+    """يقرأ حالة جميع المستخدمين من قاعدة البيانات."""
     await _ensure_tables()
     result: Dict[int, Dict[int, Dict[str, bool]]] = {}
     try:
@@ -198,9 +250,9 @@ async def load_managed_state() -> Dict[int, Dict[int, Dict[str, bool]]]:
             if bid not in result:
                 result[bid] = {}
             result[bid][uid] = {
-                "start": bool(rd.get("started")),
-                "reply": bool(rd.get("replied")),
-                "third": bool(rd.get("third")),
+                "start":  bool(rd.get("started")),
+                "reply":  bool(rd.get("replied")),
+                "third":  bool(rd.get("third")),
                 "fourth": bool(rd.get("fourth")),
             }
     except Exception as e:
@@ -211,9 +263,16 @@ async def load_managed_state() -> Dict[int, Dict[int, Dict[str, bool]]]:
 async def save_managed_state(
     state: Dict[int, Dict[int, Dict[str, bool]]],
 ) -> bool:
+    """
+    يحفظ حالة المستخدمين.
+    استراتيجية:
+      - حذف البوتات التي أُزيلت من state.
+      - UPSERT لكل مستخدم.
+    """
     await _ensure_tables()
     try:
         async with get_lock():
+            # حذف البوتات التي لم تعد موجودة
             db_bots = await DB.fetchall(
                 "SELECT DISTINCT bot_id FROM managed_bot_users"
             )
@@ -228,6 +287,7 @@ async def save_managed_state(
                         (bid,)
                     )
 
+            # UPSERT لكل مستخدم
             now = datetime.now(timezone.utc)
             for bid, users in state.items():
                 for uid, st in users.items():
@@ -257,7 +317,171 @@ async def save_managed_state(
         return False
 
 
+# ═══════════════════════════════════════════════════════════════════════════
+# 6. 🆕 الكلمات المفتاحية — CRUD
+# ═══════════════════════════════════════════════════════════════════════════
+
+async def load_managed_keywords(bid: int) -> Dict[str, str]:
+    """
+    يقرأ كلمات بوت واحد.
+    Returns: {keyword: reply}
+    """
+    await _ensure_tables()
+    result: Dict[str, str] = {}
+    try:
+        rows = await DB.fetchall(
+            "SELECT keyword, reply FROM managed_bot_keywords "
+            "WHERE bot_id = ?",
+            (int(bid),)
+        )
+        for r in rows:
+            rd = dict(r) if not isinstance(r, dict) else r
+            kw = (rd.get("keyword") or "").strip()
+            rp = (rd.get("reply") or "").strip()
+            if kw and rp:
+                result[kw] = rp
+    except Exception as e:
+        logger.error("❌ load_managed_keywords(#%s): %s", bid, e)
+    return result
+
+
+async def load_all_keywords() -> Dict[int, Dict[str, str]]:
+    """يقرأ كل الكلمات لكل البوتات دفعة واحدة."""
+    await _ensure_tables()
+    result: Dict[int, Dict[str, str]] = {}
+    try:
+        rows = await DB.fetchall(
+            "SELECT bot_id, keyword, reply FROM managed_bot_keywords"
+        )
+        for r in rows:
+            rd = dict(r) if not isinstance(r, dict) else r
+            bid = int(rd.get("bot_id"))
+            kw = (rd.get("keyword") or "").strip()
+            rp = (rd.get("reply") or "").strip()
+            if kw and rp:
+                result.setdefault(bid, {})[kw] = rp
+    except Exception as e:
+        logger.error("❌ load_all_keywords: %s", e)
+    return result
+
+
+async def save_managed_keywords(
+    bid: int, keywords: Dict[str, str],
+) -> bool:
+    """يستبدل كل كلمات بوت واحد."""
+    await _ensure_tables()
+    try:
+        async with get_lock():
+            await DB.execute(
+                "DELETE FROM managed_bot_keywords WHERE bot_id = ?",
+                (int(bid),)
+            )
+            now = datetime.now(timezone.utc)
+            for kw, rp in keywords.items():
+                kw_clean = (kw or "").strip()
+                rp_clean = (rp or "").strip()
+                if not kw_clean or not rp_clean:
+                    continue
+                await DB.execute(
+                    """INSERT INTO managed_bot_keywords 
+                       (bot_id, keyword, reply, created_at) 
+                       VALUES (?, ?, ?, ?)""",
+                    (int(bid), kw_clean, rp_clean, now)
+                )
+        return True
+    except Exception as e:
+        logger.error(
+            "❌ save_managed_keywords(#%s): %s", bid, e, exc_info=True
+        )
+        return False
+
+
+async def add_managed_keyword(
+    bid: int, keyword: str, reply: str,
+) -> bool:
+    """يضيف/يحدّث كلمة واحدة (UPSERT)."""
+    await _ensure_tables()
+    kw_clean = (keyword or "").strip()
+    rp_clean = (reply or "").strip()
+    if not kw_clean or not rp_clean:
+        return False
+    try:
+        async with get_lock():
+            now = datetime.now(timezone.utc)
+            await DB.execute(
+                """INSERT INTO managed_bot_keywords 
+                   (bot_id, keyword, reply, created_at) 
+                   VALUES (?, ?, ?, ?)
+                   ON CONFLICT (bot_id, keyword) DO UPDATE SET
+                   reply = EXCLUDED.reply,
+                   created_at = EXCLUDED.created_at""",
+                (int(bid), kw_clean, rp_clean, now)
+            )
+        return True
+    except Exception as e:
+        logger.error(
+            "❌ add_managed_keyword(#%s, %r): %s",
+            bid, kw_clean[:30], e, exc_info=True
+        )
+        return False
+
+
+async def delete_managed_keyword(bid: int, keyword: str) -> bool:
+    """يحذف كلمة واحدة."""
+    await _ensure_tables()
+    kw_clean = (keyword or "").strip()
+    if not kw_clean:
+        return False
+    try:
+        async with get_lock():
+            await DB.execute(
+                "DELETE FROM managed_bot_keywords "
+                "WHERE bot_id = ? AND keyword = ?",
+                (int(bid), kw_clean)
+            )
+        return True
+    except Exception as e:
+        logger.error(
+            "❌ delete_managed_keyword(#%s): %s", bid, e
+        )
+        return False
+
+
+async def delete_all_keywords_for_bot(bid: int) -> bool:
+    """يحذف كل كلمات بوت (عند حذف البوت)."""
+    await _ensure_tables()
+    try:
+        await DB.execute(
+            "DELETE FROM managed_bot_keywords WHERE bot_id = ?",
+            (int(bid),)
+        )
+        return True
+    except Exception as e:
+        logger.error(
+            "❌ delete_all_keywords_for_bot(#%s): %s", bid, e
+        )
+        return False
+
+
+async def get_keyword_count(bid: int) -> int:
+    """عدد كلمات بوت واحد (للعرض في اللوحة)."""
+    await _ensure_tables()
+    try:
+        val = await DB.fetchval(
+            "SELECT COUNT(*) FROM managed_bot_keywords WHERE bot_id = ?",
+            (int(bid),), default=0
+        )
+        return int(val or 0)
+    except Exception:
+        return 0
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# 7. أدوات مساعدة
+# ═══════════════════════════════════════════════════════════════════════════
+
 def next_managed_bot_id(existing: Dict[int, Any]) -> int:
+    """أول رقم موجب غير مستخدم."""
     used: Set[int] = set()
     for k in existing.keys():
         try:
@@ -271,6 +495,7 @@ def next_managed_bot_id(existing: Dict[int, Any]) -> int:
 
 
 def ensure_default_state() -> Dict[str, bool]:
+    """حالة مستخدم جديد."""
     return {"start": False, "reply": False, "third": False, "fourth": False}
 
 
@@ -278,6 +503,7 @@ def get_stats(
     bots: Dict[int, Dict[str, Any]],
     state: Dict[int, Dict[int, Dict[str, bool]]],
 ) -> Dict[str, int]:
+    """إحصاء سريع للعرض في اللوحة."""
     total_users = 0
     completed = 0
     for users in state.values():
@@ -293,8 +519,13 @@ def get_stats(
 
 
 def health_check() -> Dict[str, Any]:
+    """للتوافق فقط. التخزين في قاعدة البيانات."""
     return {"db_migration": True, "status": "ok"}
 
+
+# ═══════════════════════════════════════════════════════════════════════════
+# 8. __all__
+# ═══════════════════════════════════════════════════════════════════════════
 
 __all__ = [
     "get_default_messages",
@@ -303,6 +534,13 @@ __all__ = [
     "save_managed_bots",
     "load_managed_state",
     "save_managed_state",
+    "load_managed_keywords",
+    "load_all_keywords",
+    "save_managed_keywords",
+    "add_managed_keyword",
+    "delete_managed_keyword",
+    "delete_all_keywords_for_bot",
+    "get_keyword_count",
     "next_managed_bot_id",
     "ensure_default_state",
     "get_stats",
@@ -311,11 +549,14 @@ __all__ = [
 ]
 
 
+# ═══════════════════════════════════════════════════════════════════════════
+# LOAD BEACON
+# ═══════════════════════════════════════════════════════════════════════════
+
 try:
     logger.debug(
-        "🛡️ managed_bots_storage v5.7.6 (REENTRANT-LOCK) loaded | "
-        "tables=managed_bots,managed_bot_users | "
-        "lock=reentrant"
+        "🛡️ managed_bots_storage v5.7.7 (KEYWORDS) loaded | "
+        "tables=bots,users,keywords | lock=reentrant"
     )
 except Exception:
     pass
