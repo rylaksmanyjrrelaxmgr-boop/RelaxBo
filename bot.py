@@ -1,20 +1,28 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-🌿 Relax Manager – البوت الرئيسي (bot.py v5.7.4-GIL-DIAGNOSTICS)
+🌿 Relax Manager – البوت الرئيسي (bot.py v5.7.5-GIL-QUIET-WARMUP)
 ================================================================================
 📌 نقطة الدخول الرسمية للتطبيق (entrypoint).
 
+🆕 v5.7.5 (GIL-QUIET-WARMUP):
+    🟢 _GIL_LAG_WARN_MS: 50 → 1000ms (تقليل الضجيج — lag حقيقي فقط).
+    🟢 _GIL_LAG_ALERT_INTERVAL_SEC: 5 → 30s (cooldown أطول).
+    🟢 _HANDLER_SLOW_WARN_MS: 2000 → 3000ms (تنبيه فقط عند البطء الحقيقي).
+    🟢 _HANDLER_INFO_MS: 1500ms (INFO، ليس WARNING).
+    🟢 _wrap_handler_with_timing: + stack hint عند WARNING (يكشف مكان البطء).
+    🟢 _gil_lag_monitor: + memory_mb + task_count + gc_count (تشخيص أعمق).
+    🟢 warmup_detectors_pool: blocking (يمنع 13s lazy-load في أول رسالة).
+    🟢 gc.collect() بعد warmup (baseline ذاكرة نظيف).
+
 🆕 v5.7.4 (GIL-DIAGNOSTICS):
-    🟢 _wrap_handler_with_timing: يكشف الـ handlers البطيئة (> 2s) تلقائياً.
+    🟢 _wrap_handler_with_timing: يكشف الـ handlers البطيئة (> 2s).
     🟢 _active_handler tracker: يسجّل الـ handler النشط عند GIL lag.
-    🟢 GIL monitor محسّن: تاريخ 60s + p50/p90/p99/max + suspect attribution.
+    🟢 GIL monitor محسّن: تاريخ 60s + p50/p90/p99/max.
     🟢 _resolve_hostname محسّن: يجرّب متغيرات بيئة أكثر.
-    🟢 beacon محدّث: v5.7.4 + العلامات الجديدة.
 
 🆕 v5.7.3 (AUTOTUNE-INTEGRATION):
     🟢 ADMIN_COMMANDS + autotune, db_tune, analytics, versions, analytics_reset.
-    🟢 _AUTOTUNE_AVAILABLE للـ beacon.
 
 🆕 v5.7.2 (FIX-ACTIVE-CHANNELS-SCOPE):
     🟢 إصلاح NameError في _active_channels.
@@ -747,12 +755,13 @@ _pm_last_query_result: Optional[Dict[str, Any]] = None
 _pm_slow_query_warned = False
 _WARMUP_DETECTORS_TASK: Optional[asyncio.Task] = None
 _GIL_LAG_MONITOR_TASK: Optional[asyncio.Task] = None
-_GIL_LAG_SAMPLES_MAX = 300              # 🆕 v5.7.4: 300 samples (30s)
-_GIL_LAG_HISTORY_WINDOW_SEC = 60.0      # 🆕 v5.7.4
-_GIL_LAG_WARN_MS = 50.0
-_GIL_LAG_ALERT_INTERVAL_SEC = 5.0
-_GIL_LAG_BLOCKED_CUMULATIVE_WARN_MS = 5000.0  # 🆕 v5.7.4
-_HANDLER_SLOW_WARN_MS = 2000.0          # 🆕 v5.7.4
+_GIL_LAG_SAMPLES_MAX = 300
+_GIL_LAG_HISTORY_WINDOW_SEC = 60.0
+_GIL_LAG_WARN_MS = 1000.0                # 🆕 v5.7.5: 50 → 1000
+_GIL_LAG_ALERT_INTERVAL_SEC = 30.0       # 🆕 v5.7.5: 5 → 30
+_GIL_LAG_BLOCKED_CUMULATIVE_WARN_MS = 5000.0
+_HANDLER_SLOW_WARN_MS = 3000.0           # 🆕 v5.7.5: 2000 → 3000
+_HANDLER_INFO_MS = 1500.0                # 🆕 v5.7.5
 
 # 🆕 v5.7.4 — tracking handler النشط
 _ACTIVE_HANDLER: Dict[str, Any] = {
@@ -790,7 +799,7 @@ def record_bot_metric(key: str, value: Any = 1) -> None:
         logger.debug("record_bot_metric(%r): %s", key, _e)
 
 # ═══════════════════════════════════════════════════════════════════
-# 🆕 v5.7.4 — Handler timing wrapper (يكشف الـ handlers البطيئة)
+# 🆕 v5.7.5 — Handler timing wrapper (INFO @ 1.5s، WARNING + stack @ 3s)
 # ═══════════════════════════════════════════════════════════════════
 
 def _wrap_handler_with_timing(
@@ -798,8 +807,9 @@ def _wrap_handler_with_timing(
     name: str,
 ) -> Callable:
     """
-    يلفّ handler بـ timer — يسجّل تنبيه إذا تجاوز _HANDLER_SLOW_WARN_MS.
-    يسجّل أيضاً اسم الـ handler النشط في _ACTIVE_HANDLER (لـ GIL monitor).
+    v5.7.5: محسّن.
+      - INFO فقط عند >= 1.5s (تقليل الضجيج).
+      - WARNING + stack trace عند >= 3s (يكشف أين يتوقف).
     """
     if not callable(handler):
         return handler
@@ -823,14 +833,31 @@ def _wrap_handler_with_timing(
         finally:
             elapsed_ms = (time.monotonic() - t0) * 1000.0
             try:
-                if elapsed_ms >= _HANDLER_SLOW_WARN_MS:
-                    logger.warning(
-                        "🐌 SLOW handler: %s took %.0fms | chat=%s",
+                if elapsed_ms >= _HANDLER_INFO_MS:
+                    logger.info(
+                        "⏱️ handler %s: %.0fms | chat=%s",
                         name, elapsed_ms, _ACTIVE_HANDLER.get("chat_id"),
                     )
-                elif elapsed_ms >= 500.0:
-                    logger.info(
-                        "⏱️ handler %s: %.0fms", name, elapsed_ms,
+                if elapsed_ms >= _HANDLER_SLOW_WARN_MS:
+                    _stack_hint = ""
+                    try:
+                        _frames = traceback.extract_stack()
+                        _relevant = [
+                            f"  {f.filename.split('/')[-1]}:{f.lineno} "
+                            f"in {f.name}"
+                            for f in _frames[-6:]
+                            if "handlers_message" in f.filename
+                            or "handlers/" in f.filename
+                        ]
+                        if _relevant:
+                            _stack_hint = "\n" + "\n".join(_relevant)
+                    except Exception:
+                        pass
+                    logger.warning(
+                        "🐌 SLOW handler: %s took %.0fms | chat=%s%s",
+                        name, elapsed_ms,
+                        _ACTIVE_HANDLER.get("chat_id"),
+                        _stack_hint,
                     )
             except Exception:
                 pass
@@ -899,17 +926,22 @@ async def _await_warmup_detectors_pool(timeout: float = 15.0) -> bool:
 
 async def _gil_lag_monitor() -> None:
     """
-    v5.7.4: نسخة محسّنة.
-      - تاريخ 60s (قائمة انزلاقية)
-      - يحسب p50/p90/p99/max
-      - عند lag > warn: يعرض الـ handler النشط
-      - إنبّه إذا التراكم > 5s خلال النافذة
+    v5.7.5: lag warn = 1000ms, cooldown = 30s.
+    يعرض gc_count + memory_mb + active_tasks.
     """
-    logger.info("🔍 GIL-MONITOR: بدء المراقبة (window=%.0fs)",
-                _GIL_LAG_HISTORY_WINDOW_SEC)
-    history: List[Tuple[float, float]] = []  # (ts, lag_ms)
+    logger.info(
+        "🔍 GIL-MONITOR: بدء المراقبة (warn=%.0fms, cooldown=%.0fs)",
+        _GIL_LAG_WARN_MS, _GIL_LAG_ALERT_INTERVAL_SEC,
+    )
+    history: List[Tuple[float, float]] = []
     last_alert_ts = 0.0
     cumulative_blocked_ms = 0.0
+
+    try:
+        import psutil as _psu_t
+        _proc = _psu_t.Process()
+    except Exception:
+        _proc = None
 
     while True:
         try:
@@ -948,21 +980,40 @@ async def _gil_lag_monitor() -> None:
                 )
                 active_chat = _ACTIVE_HANDLER.get("chat_id")
 
+                _mem_mb = 0.0
+                try:
+                    if _proc is not None:
+                        _mem_mb = _proc.memory_info().rss / (1024 * 1024)
+                except Exception:
+                    pass
+                _task_count = 0
+                try:
+                    _task_count = len(asyncio.all_tasks())
+                except Exception:
+                    pass
+                _gc_count = 0
+                try:
+                    import gc as _gc_t
+                    _gc_count = _gc_t.get_count()
+                except Exception:
+                    pass
+
                 logger.warning(
                     "🔴 GIL-MONITOR: lag=%.0fms | "
-                    "p50=%.0fms p90=%.0fms p99=%.0fms max=%.0fms | "
+                    "p50=%.0f p90=%.0f p99=%.0f max=%.0f | "
                     "active=%s (%.1fs, chat=%s) | "
-                    "cum=%.0fms/%.0fs",
+                    "mem=%.0fMB tasks=%d gc=%d | cum=%.0fms/%.0fs",
                     lag_ms, p50, p90, p99, maxv,
                     active_name, active_elapsed,
                     active_chat or "-",
+                    _mem_mb, _task_count, _gc_count,
                     cumulative_blocked_ms, _GIL_LAG_HISTORY_WINDOW_SEC,
                 )
 
                 if cumulative_blocked_ms > _GIL_LAG_BLOCKED_CUMULATIVE_WARN_MS:
                     logger.error(
                         "🚨 GIL-MONITOR: تراكم %.0fms خلال %.0fs — "
-                        "المشكلة منهجية (sync code؟ OCR؟ backup؟)",
+                        "sync code؟ OCR؟ backup؟",
                         cumulative_blocked_ms, _GIL_LAG_HISTORY_WINDOW_SEC,
                     )
                     cumulative_blocked_ms = 0.0
@@ -2194,10 +2245,6 @@ async def cmd_ping(update, context):
         except Exception:
             pass
 
-# ═══════════════════════════════════════════════════════════════════
-# v5.7.2: /posts_stats — إحصائيات النشر من DB مباشرة
-# ═══════════════════════════════════════════════════════════════════
-
 async def cmd_posts_stats(update, context):
     """
     📊 إحصائيات النشر من DB مباشرة.
@@ -2739,7 +2786,7 @@ async def main():
     logger.info("👨‍💼 المالك: %s", CONFIG.PRIMARY_OWNER_ID)
 
     logger.info(
-        "📦 bot.py: v5.7.4 | "
+        "📦 bot.py: v5.7.5 | "
         "detectors=%s | layers=%d | helpers=%s | "
         "db_idle=%s | cache_stats=%s | analytics=%s | "
         "fullhealth=%s | latency=%s | maint_cmds=%s | "
@@ -2782,7 +2829,8 @@ async def main():
         "analytics_menu=on | versions_cmd=on | files_cmd=on | "
         "admin_commands_extended=on | "
         "handler_timing=on | active_handler_tracker=on | "
-        "gil_diagnostics_enhanced=on | resolve_hostname_extended=on",
+        "gil_diagnostics_enhanced=on | resolve_hostname_extended=on | "
+        "gil_quiet=on | warmup_blocking=on | gc_collect=on",
         _SPAM_DETECTOR_VERSION or "N/A",
         _SPAM_DETECTOR_LAYERS_COUNT,
         (
@@ -2957,6 +3005,45 @@ async def main():
 
     _spawn_warmup_detectors_pool()
 
+    # 🆕 v5.7.5: انتظر warmup blocking قبل handlers
+    if _HAS_WARMUP_DETECTORS and _warmup_detectors_pool_fn is not None:
+        try:
+            logger.info(
+                "🔥 warmup_detectors_pool: blocking (prevents 13s first-msg lag)..."
+            )
+            _warm_t0 = time.monotonic()
+            _warm_result = await asyncio.wait_for(
+                _warmup_detectors_pool_fn(),
+                timeout=30.0,
+            )
+            _warm_elapsed = time.monotonic() - _warm_t0
+            if _warm_result:
+                logger.info(
+                    "✅ detectors pool ready in %.1fs — أول رسالة ستكون سريعة",
+                    _warm_elapsed,
+                )
+            else:
+                logger.warning(
+                    "⚠️ detectors pool returned False (%.1fs) — سيُحمَّل lazy",
+                    _warm_elapsed,
+                )
+        except asyncio.TimeoutError:
+            logger.warning(
+                "⚠️ detectors warmup timeout (30s) — سيُحمَّل lazy"
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as _we:
+            logger.warning("⚠️ detectors warmup error: %s", _we)
+
+    # 🆕 v5.7.5: gc.collect قبل أول رسالة
+    try:
+        import gc as _gc_t
+        _gc_t.collect()
+        logger.info("🧹 gc.collect() — memory baseline")
+    except Exception:
+        pass
+
     # ═══ v5.7.0: Managed Bots — بدء البوتات المُدارة ═══
     _managed_apps: Dict[str, Any] = {}
     try:
@@ -3089,7 +3176,6 @@ async def main():
         & ~filters.COMMAND
     )
 
-    # 🆕 v5.7.4: timing wrappers
     try:
         _handle_group_timed = _wrap_handler_with_timing(
             MessageHandlers.handle_group, "handle_group"
@@ -3594,18 +3680,6 @@ async def main():
             "لن تُرسل تقارير إضافة البوت: %s",
             _MEMBERSHIP_IMPORT_ERROR or "unknown",
         )
-
-    if _WARMUP_DETECTORS_TASK is not None and not _WARMUP_DETECTORS_TASK.done():
-        _warmup_ok = await _await_warmup_detectors_pool(timeout=2.0)
-        if _warmup_ok:
-            logger.info(
-                "✅ detectors pool: جاهز قبل أول رسالة حقيقية"
-            )
-        else:
-            logger.info(
-                "⏳ detectors pool: سيكمل في الخلفية "
-                "(محمي بـ _SPAM_ASYNC_TIMEOUT=2.5s في handlers_message)"
-            )
 
     tasks: List[asyncio.Task] = []
 
