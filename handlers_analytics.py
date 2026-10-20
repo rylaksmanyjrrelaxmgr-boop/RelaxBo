@@ -1,30 +1,29 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-handlers_analytics.py — واجهة التحليلات المتقدمة (v1.3.3 — AUTOTUNE-INTEGRATION)
+handlers_analytics.py — واجهة التحليلات المتقدمة (v1.3.4 — VERSIONS-PATH-FIX)
 ================================================================================
-v1.3.3 — فوق v1.3.2:
+v1.3.4 — فوق v1.3.3:
 
-    🆕 AUTO-1: زر جديد ⚙️ "ضبط autovacuum" (autotune_btn) —
-        يستدعي diagnose_autovacuum_tuning(force=True) من db_diagnostics
-        v7.2.24+ ويعرض التقرير الناتج.
+    🟢 FIX-VERSIONS-PATH: cmd_versions تجرّب كل مسار ممكن لكل موديول
+        (handlers.X ثم X) قبل الحكم بـ "غير محمّل". يزيل false-negatives
+        للموديولات التي تعيش فقط داخل مجلد handlers/ (handlers_callback,
+        handlers_channels_list, handlers_membership,
+        handlers_message_detectors).
 
-    🆕 AUTO-2: أمر /autotune — مكافئ للزر، من أي محادثة.
+    🟢 FIX-VERSIONS-ERR: عرض نوع الاستثناء عند الفشل (ImportError، etc.)
+        لتشخيص أدق.
 
-    🆕 AUTO-3: cmd_autotune + show_autotune — fallback آمن إذا
-        db_diagnostics < v7.2.24 (رسالة إرشادية بدل خطأ).
+    🟢 STRUCTURE: modules_to_check أصبح قائمة (name, [paths]) بدل
+        (name, single_path) — نفس التكلفة، مرونة أكبر.
 
-    🆕 AUTO-4: الزر يظهر دائماً في القائمة، لكن يعرض "غير متاح"
-        إذا لم يكن db_diagnostics >= v7.2.24.
-
-    🆕 AUTO-5: ANALYTICS_BUTTONS أضيف فيه "autotune_btn".
-
-    🆕 AUTO-6: __all__ تصدير show_autotune + cmd_autotune.
+v1.3.3 — محفوظ:
+    🆕 AUTO-1..6: autotune_btn + /autotune + show_autotune.
 
 v1.3.2 — محفوظ:
     🟢 CLEAN-1: regex-escape آمن.
     🟢 CLEAN-2: إزالة الفحص المزدوج في cmd_analytics.
-    🟢 CLEAN-3: تصدير صريح لـ_register_analytics_handlers.
+    🟢 CLEAN-3: تصدير صريح لـ_register_analytics_handlers في __all__.
 
 v1.3.1 — محفوظ:
     🔴 FIX-1: force_refresh=True → False.
@@ -35,7 +34,10 @@ v1.3.1 — محفوظ:
 v1.3.0 — محفوظ:
     🚀 PERF-1: cache ذكي (TTL=60s).
     🚀 PERF-2: رد فوري على callback.
-    🎯 FEAT-1..3.
+    🎯 FEAT-1: مقارنة تاريخية في show_growth_30d.
+    🎯 FEAT-2: /versions.
+    🎯 FEAT-3: /analytics_reset.
+    🟡 IMPROVE-1..4.
     ✅ HA1..HA31 محفوظة.
 
 v1.2.3..1.1.1 — محفوظة.
@@ -1727,7 +1729,7 @@ async def show_databases(update: Update,
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# 🆕 v1.3.3 — 12b) ضبط autovacuum (db_diagnostics v7.2.24+)
+# 12b) ضبط autovacuum (db_diagnostics v7.2.24+)
 # ═══════════════════════════════════════════════════════════════════════
 
 async def show_autotune(update: Update,
@@ -1877,6 +1879,7 @@ async def show_autotune(update: Update,
 
 # ═══════════════════════════════════════════════════════════════════════
 # 13) /versions
+# 🆕 v1.3.4 FIX-VERSIONS-PATH: تجربة handlers.X ثم X لكل موديول
 # ═══════════════════════════════════════════════════════════════════════
 
 async def cmd_versions(update: Update,
@@ -1892,26 +1895,36 @@ async def cmd_versions(update: Update,
         await _reject_non_dev(context.bot, chat_id, query)
         return
 
-    modules_to_check = [
-        ("bot.py", "bot"),
-        ("config.py", "config"),
-        ("database.py", "database"),
-        ("db_diagnostics.py", "db_diagnostics"),
-        ("database_groups.py", "database_groups"),
-        ("database_channels_posts.py", "database_channels_posts"),
-        ("database_subscriptions.py", "database_subscriptions"),
-        ("db_maintenance_commands.py", "db_maintenance_commands"),
-        ("handlers_message.py", "handlers.handlers_message"),
-        ("handlers_command.py", "handlers.handlers_command"),
-        ("handlers_callback.py", "handlers_callback"),
-        ("handlers_analytics.py", "handlers_analytics"),
-        ("handlers_channels_list.py", "handlers_channels_list"),
-        ("handlers_membership.py", "handlers_membership"),
-        ("handlers_group_log.py", "handlers.handlers_group_log"),
-        ("handlers_message_detectors.py", "handlers_message_detectors"),
-        ("cache.py", "cache"),
-        ("utils.py", "utils"),
-        ("sleep_probe.py", "sleep_probe"),
+    # 🆕 v1.3.4 FIX-VERSIONS-PATH: (name, [paths_to_try])
+    modules_to_check: List[Tuple[str, List[str]]] = [
+        ("bot.py", ["bot"]),
+        ("config.py", ["config"]),
+        ("database.py", ["database"]),
+        ("db_diagnostics.py", ["db_diagnostics"]),
+        ("database_groups.py", ["database_groups"]),
+        ("database_channels_posts.py", ["database_channels_posts"]),
+        ("database_subscriptions.py", ["database_subscriptions"]),
+        ("db_maintenance_commands.py", ["db_maintenance_commands"]),
+        ("handlers_message.py",
+         ["handlers.handlers_message", "handlers_message"]),
+        ("handlers_command.py",
+         ["handlers.handlers_command", "handlers_command"]),
+        ("handlers_callback.py",
+         ["handlers.handlers_callback", "handlers_callback"]),
+        ("handlers_analytics.py",
+         ["handlers.handlers_analytics", "handlers_analytics"]),
+        ("handlers_channels_list.py",
+         ["handlers.handlers_channels_list", "handlers_channels_list"]),
+        ("handlers_membership.py",
+         ["handlers.handlers_membership", "handlers_membership"]),
+        ("handlers_group_log.py",
+         ["handlers.handlers_group_log", "handlers_group_log"]),
+        ("handlers_message_detectors.py",
+         ["handlers.handlers_message_detectors",
+          "handlers_message_detectors"]),
+        ("cache.py", ["cache"]),
+        ("utils.py", ["utils"]),
+        ("sleep_probe.py", ["sleep_probe"]),
     ]
 
     lines = [
@@ -1922,29 +1935,44 @@ async def cmd_versions(update: Update,
 
     loaded = 0
     missing = 0
-    for name, mod_path in modules_to_check:
-        try:
-            mod = importlib.import_module(mod_path)
-            ver = (
-                getattr(mod, "VERSION", None)
-                or getattr(mod, "__version__", None)
-                or getattr(mod, "_VERSION", None)
-                or "?"
+
+    for name, paths in modules_to_check:
+        mod = None
+        last_err: Optional[str] = None
+
+        for path in paths:
+            try:
+                mod = importlib.import_module(path)
+                break
+            except ImportError as _ie:
+                last_err = f"{type(_ie).__name__}"
+                continue
+            except Exception as _ex:
+                last_err = f"{type(_ex).__name__}"
+                continue
+
+        if mod is None:
+            lines.append(
+                f"❌ <code>{name}</code>: <i>غير محمّل</i>"
+                + (f" <code>({last_err})</code>" if last_err else "")
             )
-            if ver == "?":
-                doc = getattr(mod, "__doc__", "") or ""
-                m = _re_mod.search(r"v?(\d+\.\d+\.\d+)", doc[:500])
-                if m:
-                    ver = m.group(1)
-            icon = "✅" if ver != "?" else "🟡"
-            lines.append(f"{icon} <code>{name}</code>: v{ver}")
-            loaded += 1
-        except ImportError:
-            lines.append(f"❌ <code>{name}</code>: <i>غير محمّل</i>")
             missing += 1
-        except Exception as e:
-            lines.append(f"⚠️ <code>{name}</code>: <i>{type(e).__name__}</i>")
-            missing += 1
+            continue
+
+        ver = (
+            getattr(mod, "VERSION", None)
+            or getattr(mod, "__version__", None)
+            or getattr(mod, "_VERSION", None)
+            or "?"
+        )
+        if ver == "?":
+            doc = getattr(mod, "__doc__", "") or ""
+            m = _re_mod.search(r"v?(\d+\.\d+\.\d+)", doc[:500])
+            if m:
+                ver = m.group(1)
+        icon = "✅" if ver != "?" else "🟡"
+        lines.append(f"{icon} <code>{name}</code>: v{ver}")
+        loaded += 1
 
     lines.append("")
     lines.append("━━━━━━━━━━━━━━━━━━━━━━")
@@ -1960,7 +1988,9 @@ async def cmd_versions(update: Update,
     lines.append(
         "⚙️ autotune: " + (
             "🟢 متاح" if _AUTOTUNE_AVAILABLE else
-            f"🔴 غير متاح <i>(db_diagnostics={_html_mod.escape(str(_DB_DIAG_VERSION_AT))})</i>"
+            f"🔴 غير متاح "
+            f"<i>(db_diagnostics="
+            f"{_html_mod.escape(str(_DB_DIAG_VERSION_AT))})</i>"
         )
     )
 
@@ -2158,7 +2188,7 @@ async def cmd_autotune(update: Update,
 
 def register_handlers(application) -> bool:
     """
-    v1.3.3: يُسجّل كل الـ handlers (buttons + commands).
+    v1.3.4: يُسجّل كل الـ handlers (buttons + commands).
 
     يُستدعى من bot.py v5.6.32+ ضمن [ORDER 5/6].
     في حال نجاحه، لا حاجة للتسجيل اليدوي في bot.py.
@@ -2167,6 +2197,7 @@ def register_handlers(application) -> bool:
         True إن نجح التسجيل (كل الأوامر)، False إن فشل.
     """
     try:
+        # 🆕 v1.3.2 CLEAN-1: regex-escape آمن للأزرار
         _safe_buttons = "|".join(
             _re_mod.escape(b) for b in ANALYTICS_BUTTONS
         )
@@ -2208,7 +2239,7 @@ def register_handlers(application) -> bool:
             "analytics_reset, databases, autotune"
         )
         logger.info(
-            "✅ handlers_analytics v1.3.3: %d زر + 7 أوامر (%s)",
+            "✅ handlers_analytics v1.3.4: %d زر + 7 أوامر (%s)",
             len(ANALYTICS_BUTTONS),
             cmds,
         )
@@ -2258,19 +2289,16 @@ __all__ = [
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# LOAD BEACON — v1.3.3
+# LOAD BEACON — v1.3.4
 # ═══════════════════════════════════════════════════════════════════════
 
 try:
     logger.info(
-        "✅ handlers_analytics v1.3.3 loaded | "
+        "✅ handlers_analytics v1.3.4 loaded | "
         "buttons=%d | "
-        "AUTO-1=autotune-btn | "
-        "AUTO-2=/autotune | "
-        "AUTO-3=safe-fallback | "
-        "AUTO-4=btn-always-visible | "
-        "AUTO-5=buttons-tuple | "
-        "AUTO-6=exports | "
+        "FIX-VERSIONS-PATH=on | "
+        "FIX-VERSIONS-ERR=on | "
+        "AUTO-1..6=on | "
         "autotune_available=%s | "
         "db_diag_version=%s | "
         "CLEAN-1=regex-escape | "
