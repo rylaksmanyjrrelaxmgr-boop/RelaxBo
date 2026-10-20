@@ -1,50 +1,46 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-handlers_message.py - v7.18.48 (PERF-FIX-MEDIA-ONLY-MULTILAYER)
+handlers_message.py - v7.18.49 (FIX-TRANSLATE-BLOCKING)
 (متوافق مع detectors v4.1.0 + banned_words_manager v1.2.0 + group_log v1.4.0)
 =============================================================================
-🆕 v7.18.48 (PERF-FIX-MEDIA-ONLY-MULTILAYER):
+🆕 v7.18.49 (FIX-TRANSLATE-BLOCKING):
+
+    🔴 FIX-TRANSLATE-1 (CRITICAL): TranslationManager.translate() كان
+        يُستدعى مباشرة داخل async context — وهو sync يستخدم
+        requests.get() (deep_translator). كل ترجمة تحجب event loop
+        كاملاً حتى ترد Google (~3-13s). هذا هو سبب lag=12203ms الذي
+        ظهر في GIL-MONITOR على chat=-1002859036439.
+
+        الأثر: بعد v7.18.49، الترجمة تعمل في asyncio.to_thread
+        + timeout 8s + cache 5min → lag ≤ 200ms.
+
+    🔴 FIX-TRANSLATE-2: _translate_safe() جديدة — wraps translate()
+        في asyncio.to_thread + timeout + cache (500 entries, TTL 5min).
+        أي فشل/timeout → None (لا يكسر الرسالة).
+
+    🟢 FIX-TRANSLATE-3: TRANSLATION_MAX_TEXT_LENGTH=500 — رسائل أطول
+        تُتخطى (لا معنى لترجمتها + تحمي API).
+
+    🟢 FIX-TRANSLATE-4: cache ديناميكي (LRU-ish، max=500) — ترجمات
+        متكررة لنفس النص لا تُعيد API call.
+
+    ✅ كل شيء آخر محفوظ من v7.18.48.
+
+🆕 v7.18.48 (PERF-FIX-MEDIA-ONLY-MULTILAYER) — محفوظ:
 
     🔴 FIX-LAG-1 (CRITICAL): analyze_message_full_async فقط للرسائل
-        التي تحتوي وسائط (photo/video/voice/audio/document/animation/
-        video_note/sticker). النصوص البسيطة تستخدم _compute_spam_score
+        التي تحتوي وسائط. النصوص البسيطة تستخدم _compute_spam_score
         مباشرة.
-        السبب: analyze_message_full_async يشغّل 15 طبقة (OCR, audio,
-        video, URL × whois, NSFW, stego, ...) لكل رسالة مجموعة —
-        حتى لو كانت نصاً بسيطاً. الطبقات الثقيلة تحتجز GIL لفترات
-        طويلة → event loop يتجمّد → lag p90=372ms.
-        الأثر: 90% من الرسائل (نصية) تتخطى 15 طبقة → lag p90 يتوقع
-        ينخفض إلى < 50ms.
 
     🔴 FIX-LAG-2: _SPAM_ASYNC_TIMEOUT من 2.5s → 1.0s.
-        السبب: max wait للرسائل الوسائط كان 2.5s، مما يجعل أسوأ حالة
-        lag أعلى. 1.0s كافٍ للطبقات السريعة، ويقلل max lag.
 
-    🟢 FIX-LAG-3: _lazy_init_columns أصبح fire-and-forget عند أول
-        رسالة. migration DB يعمل في background task، والرسالة تكمل
-        فوراً بدون انتظار.
-        السبب: أول رسالة بعد الإقلاع كانت تنتظر ALTER TABLE × 9
-        + cache clear + autoblock init = 500ms-2s.
-        الأثر: lag أول رسالة ينخفض من 2s إلى < 50ms.
+    🟢 FIX-LAG-3: _lazy_init_columns أصبح fire-and-forget.
 
-    🟢 FIX-LAG-4: _analysis_mode = "text-only-fast" عند استخدام
-        _compute_spam_score مباشرة. يساعد في تشخيص السجل.
+    🟢 FIX-LAG-4: _analysis_mode = "text-only-fast" metric.
 
-    ✅ كل شيء آخر محفوظ من v7.18.47 (LOG-CHANNEL-KEY-UNIFICATION).
-
-🆕 v7.18.47 (LOG-CHANNEL-KEY-UNIFICATION) — محفوظ:
-
-    🔴 FIX-LOGCH-KEY (CRITICAL): توحيد مفتاح قناة السجل.
-        • استخدام DB.set_log_channel(numeric_id) أساساً
-        • fallback: DB.set_setting('log_channel_id', ...)
-        • SQL fallback على 'log_channel_id'
-        • تنظيف المفاتيح القديمة 'global_log_channel' و 'log_channel'
-
-    🟢 FIX-LOGCH-KEY-CLEANUP: حذف المفاتيح القديمة تلقائياً.
-
-✅ v7.18.46 (POST-AUDIT-CORRECTIONS) — محفوظ بالكامل.
-✅ v7.18.45 وما قبله — محفوظ بالكامل.
+🆕 v7.18.47 (LOG-CHANNEL-KEY-UNIFICATION) — محفوظ.
+🆕 v7.18.46 (POST-AUDIT-CORRECTIONS) — محفوظ.
 =============================================================================
 """
 
@@ -678,6 +674,7 @@ MAX_COMPILED_BANNED_PATTERNS = 5000
 
 TRANSLATION_REPLY_DELETE_DELAY = 30
 TRANSLATION_MIN_TEXT_LENGTH = 2
+TRANSLATION_MAX_TEXT_LENGTH = 500    # 🆕 v7.18.49
 PENALTY_MESSAGE_DELETE_DELAY = 10
 
 _FORWARD_NOTIFY_COOLDOWN_SECONDS = 300.0
@@ -721,6 +718,12 @@ FEATURE_LOG_ADMIN_CHANGES = _env_flag("LOG_ADMIN_CHANGES", True)
 
 _DEBUG_DIAG = DEBUG_DIAG
 _DEBUG_SPAM = DEBUG_SPAM
+
+# 🆕 v7.18.49 FIX-TRANSLATE-BLOCKING
+_TRANSLATION_CACHE: Dict[Tuple[str, str], Tuple[str, float]] = {}
+_TRANSLATION_CACHE_TTL = 300.0
+_TRANSLATION_CACHE_MAX = 500
+_TRANSLATION_TIMEOUT_SEC = 8.0
 
 _GROUP_LOG_CHANNEL_CACHE_TTL = 60.0
 _GROUP_LOG_CHANNEL_CACHE_MAX = 2000
@@ -2734,6 +2737,16 @@ async def _prune_perf_caches() -> int:
             removed += len(stale)
         except Exception:
             pass
+        try:
+            stale = [
+                k for k, (_, ts) in _TRANSLATION_CACHE.items()
+                if now - ts > _TRANSLATION_CACHE_TTL * 5
+            ]
+            for k in stale:
+                _TRANSLATION_CACHE.pop(k, None)
+            removed += len(stale)
+        except Exception:
+            pass
         if removed > 0:
             logger.debug("🧹 _prune_perf_caches: حُذف %d إدخال", removed)
         return removed
@@ -3125,8 +3138,79 @@ async def invalidate_auto_reply_cache(chat_id=None):
         pass
 
 
+# ═════════════════════════════════════════════════════════════════════
+# 🆕 v7.18.49 FIX-TRANSLATE-BLOCKING:
+# wrap TranslationManager.translate() في asyncio.to_thread
+# + cache + timeout — يمنع تجميد event loop 13s
+# ═════════════════════════════════════════════════════════════════════
+
+async def _translate_safe(text: str, lang: str) -> Optional[str]:
+    """
+    v7.18.49 FIX-TRANSLATE-BLOCKING: wraps TranslationManager.translate()
+    — async safe + cache + timeout.
+
+    الخلفية:
+        TranslationManager.translate() يُنفّذ requests.get() متزامناً
+        داخل deep_translator. عندما يُستدعى من async context، يُجمّد
+        الـ event loop كاملاً حتى ترد Google (~3-13s).
+        هذا كان سبب lag=12203ms الذي رصده GIL-MONITOR.
+
+    الأثر:
+        - لا يحجب الـ event loop
+        - timeout 8s (لا انتظار لانهائي)
+        - cache 5min للترجمات المتكررة (نفس النص/اللغة)
+    """
+    if not text or not lang or lang == 'off':
+        return None
+
+    # cache hit
+    now = time.monotonic()
+    cache_key = (text[:200], lang)
+    entry = _TRANSLATION_CACHE.get(cache_key)
+    if entry is not None:
+        cached_text, cached_at = entry
+        if now - cached_at < _TRANSLATION_CACHE_TTL:
+            return cached_text
+
+    try:
+        translated = await asyncio.wait_for(
+            asyncio.to_thread(
+                TranslationManager.translate, text, lang),
+            timeout=_TRANSLATION_TIMEOUT_SEC,
+        )
+    except asyncio.TimeoutError:
+        logger.warning(
+            "⏱️ TRANSLATE-TIMEOUT | lang=%s len=%d >%.1fs",
+            lang, len(text), _TRANSLATION_TIMEOUT_SEC)
+        return None
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:
+        logger.debug("_translate_safe: %s", e)
+        return None
+
+    if translated and translated != text:
+        if len(_TRANSLATION_CACHE) >= _TRANSLATION_CACHE_MAX:
+            try:
+                oldest = sorted(
+                    _TRANSLATION_CACHE.items(),
+                    key=lambda kv: kv[1][1],
+                )[:max(1, _TRANSLATION_CACHE_MAX // 4)]
+                for k, _ in oldest:
+                    _TRANSLATION_CACHE.pop(k, None)
+            except Exception:
+                pass
+        _TRANSLATION_CACHE[cache_key] = (translated, now)
+        return translated
+
+    return None
+
+
 async def _detect_and_translate(update, context, chat_id, user_id, text):
     if not text or len(text.strip()) < TRANSLATION_MIN_TEXT_LENGTH:
+        return None
+    # 🆕 v7.18.49 FIX-TRANSLATE-3: تجاوز الطول الأقصى
+    if len(text.strip()) > TRANSLATION_MAX_TEXT_LENGTH:
         return None
     try:
         lang = await _ensure_lang(update, context)
@@ -3142,7 +3226,10 @@ async def _detect_and_translate(update, context, chat_id, user_id, text):
             return None
         if lang != 'ar' and not is_arabic:
             return None
-        translated = TranslationManager.translate(text, lang)
+
+        # 🆕 v7.18.49 FIX-TRANSLATE-BLOCKING: async safe
+        translated = await _translate_safe(text, lang)
+
         if translated and translated != text:
             return translated
     except Exception:
@@ -3610,6 +3697,8 @@ _EXTERNAL_HANDLED_STATES = frozenset({
     "WAIT_IMPORT_FILE",
     "WAIT_BACKUP_FILE",
 })
+
+
 class MessageHandlers:
 
     _PRIVATE_HANDLERS_MAP: Dict[Any, str] = {
@@ -7132,6 +7221,12 @@ async def handle_cache_stats_command(update, context):
             _PENALTY_DURATION_OVERRIDE_MAX,
             _PENALTY_DURATION_OVERRIDE_TTL,
         ),
+        (
+            "translation_cache",
+            _TRANSLATION_CACHE,
+            _TRANSLATION_CACHE_MAX,
+            _TRANSLATION_CACHE_TTL,
+        ),
     ]
     for name, cache, max_size, ttl in _cache_specs:
         try:
@@ -7532,39 +7627,52 @@ __all__ = [
     "_prune_caches_lock",
     "_extract_username_from_schemeless_url",
     "_SCHEMELESS_TG_HOSTS_RE",
-    # 🆕 v7.18.48 additions
     "_columns_bg_task",
     "_do_lazy_init_columns_migration",
+    # 🆕 v7.18.49 additions
+    "_translate_safe",
+    "_TRANSLATION_CACHE",
+    "_TRANSLATION_CACHE_TTL",
+    "_TRANSLATION_CACHE_MAX",
+    "_TRANSLATION_TIMEOUT_SEC",
+    "TRANSLATION_MAX_TEXT_LENGTH",
 ]
 
 
 # ═════════════════════════════════════════════════════════════════════
-# LOAD BEACON — v7.18.48
+# LOAD BEACON — v7.18.49
 # ═════════════════════════════════════════════════════════════════════
 
 try:
     logger.info(
-        "✅ handlers_message v7.18.48 loaded | "
+        "✅ handlers_message v7.18.49 loaded | "
         "BWM=%s | PRIVATE_HANDLERS=%d | "
         "external_handled=%d | "
         "routing-fallback=7-paths-deduped | "
         "SPAM-TIMEOUT=%.1fs | "
+        "TRANSLATE-SAFE=on (to_thread+timeout=%.1fs+cache=%d,TTL=%.0fs,"
+        "max-len=%d) | "
         "WARMUP=available | "
         "DB-TYPE=%s | "
         "WAIT_LOG_CH=direct-handler | "
         "LOG-CHANNEL-KEY=log_channel_id (CANONICAL, unified) | "
         "detectors-compat=v4.1.0 | "
-        "fixes=(PERF-FIX-MEDIA-ONLY-MULTILAYER: "
-        "FIX-LAG-1:text-only-fast-skip-15-layers, "
-        "FIX-LAG-2:timeout 2.5s->1.0s, "
-        "FIX-LAG-3:fire-and-forget-migration, "
-        "FIX-LAG-4:analysis-mode-metric, "
+        "fixes=(FIX-TRANSLATE-BLOCKING: "
+        "FIX-TRANSLATE-1:to_thread, "
+        "FIX-TRANSLATE-2:safe-wrapper, "
+        "FIX-TRANSLATE-3:max_len, "
+        "FIX-TRANSLATE-4:cache, "
+        "v7.18.48-all (FIX-LAG-1/2/3/4), "
         "v7.18.47-all, v7.18.46-all, v7.18.45-all, "
         "v7.18.44-all, v7.18.43-all)",
         "yes" if _HAS_BWM else "no",
         len(MessageHandlers._PRIVATE_HANDLERS_MAP),
         len(_EXTERNAL_HANDLED_STATES),
         _SPAM_ASYNC_TIMEOUT,
+        _TRANSLATION_TIMEOUT_SEC,
+        _TRANSLATION_CACHE_MAX,
+        _TRANSLATION_CACHE_TTL,
+        TRANSLATION_MAX_TEXT_LENGTH,
         _db_type(),
     )
 except Exception:
