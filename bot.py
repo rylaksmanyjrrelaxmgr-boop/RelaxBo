@@ -1,23 +1,26 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-🌿 Relax Manager – البوت الرئيسي (bot.py v5.7.3-AUTOTUNE-INTEGRATION)
+🌿 Relax Manager – البوت الرئيسي (bot.py v5.7.4-GIL-DIAGNOSTICS)
 ================================================================================
 📌 نقطة الدخول الرسمية للتطبيق (entrypoint).
 
+🆕 v5.7.4 (GIL-DIAGNOSTICS):
+    🟢 _wrap_handler_with_timing: يكشف الـ handlers البطيئة (> 2s) تلقائياً.
+    🟢 _active_handler tracker: يسجّل الـ handler النشط عند GIL lag.
+    🟢 GIL monitor محسّن: تاريخ 60s + p50/p90/p99/max + suspect attribution.
+    🟢 _resolve_hostname محسّن: يجرّب متغيرات بيئة أكثر.
+    🟢 beacon محدّث: v5.7.4 + العلامات الجديدة.
+
 🆕 v5.7.3 (AUTOTUNE-INTEGRATION):
-    🟢 ADMIN_COMMANDS أضيف فيه: autotune, db_tune, analytics,
-       versions, analytics_reset — الميزات كانت مسجّلة لكن غير ظاهرة.
-    🟢 _AUTOTUNE_AVAILABLE للـ beacon — يكشف توفّر db_diagnostics v7.2.24+.
-    🟢 Version bump v5.7.2 → v5.7.3.
+    🟢 ADMIN_COMMANDS + autotune, db_tune, analytics, versions, analytics_reset.
+    🟢 _AUTOTUNE_AVAILABLE للـ beacon.
 
 🆕 v5.7.2 (FIX-ACTIVE-CHANNELS-SCOPE):
-    🟢 إصلاح خطأ NameError في _active_channels.
-    🟢 تعريف المتغير يتم قبل البلوكين (rate + 15m) لضمان العمل
-       حتى لو كانت posts_success = 0.
+    🟢 إصلاح NameError في _active_channels.
 
 🆕 v5.7.1 (STATS-CHANNELS-FIX):
-    🟢 حساب معدل النشر المتوقع بناءً على عدد القنوات النشطة الفعلي.
+    🟢 حساب معدل النشر المتوقع بناءً على عدد القنوات النشطة.
 
 🆕 v5.7.0 (MANAGED-BOTS-INTEGRATION):
     3 hooks جراحية — دون أي تعديل على منطق v5.6.44.
@@ -33,10 +36,11 @@ import signal
 import sys
 import time
 import aiohttp
+import functools
 from datetime import datetime, timedelta, timezone
 from html import escape as _html_escape
 from urllib.parse import urlparse
-from typing import Set, Any, Dict, Optional, List, Tuple
+from typing import Set, Any, Dict, Optional, List, Tuple, Callable, Awaitable
 from aiohttp import web
 
 # ═══════════════════════════════════════════════════════════════════
@@ -121,9 +125,7 @@ except ImportError as _e_dbdiag:
 except Exception as _e_dbdiag:
     _DB_DIAG_IMPORT_ERROR = f"unexpected: {_e_dbdiag}"
 
-# ═════════════════════════════════════════════════════════════════════
 # 🆕 v5.7.3 — كشف توفر auto-tuning من db_diagnostics v7.2.24+
-# ═════════════════════════════════════════════════════════════════════
 _AUTOTUNE_AVAILABLE = False
 try:
     from db_diagnostics import ensure_autovacuum_tuning as _fn_autotune
@@ -702,7 +704,6 @@ def _log_db_diagnostics_status() -> None:
         logger.info("✅ db_diagnostics: v%s متاح | mark_process_start ✅", _DB_DIAG_VERSION)
     else:
         logger.warning("⚠️ db_diagnostics: v%s محمّل لكن بلا mark_process_start", _DB_DIAG_VERSION)
-    # 🆕 v5.7.3
     if _AUTOTUNE_AVAILABLE:
         logger.info("⚙️ auto-tuning: ✅ متاح (ensure_autovacuum_tuning)")
     else:
@@ -746,9 +747,19 @@ _pm_last_query_result: Optional[Dict[str, Any]] = None
 _pm_slow_query_warned = False
 _WARMUP_DETECTORS_TASK: Optional[asyncio.Task] = None
 _GIL_LAG_MONITOR_TASK: Optional[asyncio.Task] = None
-_GIL_LAG_SAMPLES_MAX = 100
+_GIL_LAG_SAMPLES_MAX = 300              # 🆕 v5.7.4: 300 samples (30s)
+_GIL_LAG_HISTORY_WINDOW_SEC = 60.0      # 🆕 v5.7.4
 _GIL_LAG_WARN_MS = 50.0
 _GIL_LAG_ALERT_INTERVAL_SEC = 5.0
+_GIL_LAG_BLOCKED_CUMULATIVE_WARN_MS = 5000.0  # 🆕 v5.7.4
+_HANDLER_SLOW_WARN_MS = 2000.0          # 🆕 v5.7.4
+
+# 🆕 v5.7.4 — tracking handler النشط
+_ACTIVE_HANDLER: Dict[str, Any] = {
+    "name": None,
+    "start": 0.0,
+    "chat_id": None,
+}
 
 _GROUP_CHAT_FILTER = filters.ChatType.GROUP | filters.ChatType.SUPERGROUP
 
@@ -777,6 +788,55 @@ def record_bot_metric(key: str, value: Any = 1) -> None:
             _BOT_METRICS[key] = value
     except Exception as _e:
         logger.debug("record_bot_metric(%r): %s", key, _e)
+
+# ═══════════════════════════════════════════════════════════════════
+# 🆕 v5.7.4 — Handler timing wrapper (يكشف الـ handlers البطيئة)
+# ═══════════════════════════════════════════════════════════════════
+
+def _wrap_handler_with_timing(
+    handler: Callable,
+    name: str,
+) -> Callable:
+    """
+    يلفّ handler بـ timer — يسجّل تنبيه إذا تجاوز _HANDLER_SLOW_WARN_MS.
+    يسجّل أيضاً اسم الـ handler النشط في _ACTIVE_HANDLER (لـ GIL monitor).
+    """
+    if not callable(handler):
+        return handler
+
+    @functools.wraps(handler)
+    async def _timed(update, context):
+        _prev = _ACTIVE_HANDLER.copy()
+        _ACTIVE_HANDLER["name"] = name
+        _ACTIVE_HANDLER["start"] = time.monotonic()
+        try:
+            _ACTIVE_HANDLER["chat_id"] = (
+                update.effective_chat.id
+                if getattr(update, "effective_chat", None) else None
+            )
+        except Exception:
+            _ACTIVE_HANDLER["chat_id"] = None
+
+        t0 = time.monotonic()
+        try:
+            return await handler(update, context)
+        finally:
+            elapsed_ms = (time.monotonic() - t0) * 1000.0
+            try:
+                if elapsed_ms >= _HANDLER_SLOW_WARN_MS:
+                    logger.warning(
+                        "🐌 SLOW handler: %s took %.0fms | chat=%s",
+                        name, elapsed_ms, _ACTIVE_HANDLER.get("chat_id"),
+                    )
+                elif elapsed_ms >= 500.0:
+                    logger.info(
+                        "⏱️ handler %s: %.0fms", name, elapsed_ms,
+                    )
+            except Exception:
+                pass
+            _ACTIVE_HANDLER.update(_prev)
+
+    return _timed
 
 def _spawn_notify_dev_log(context, text: str) -> None:
     try:
@@ -838,25 +898,74 @@ async def _await_warmup_detectors_pool(timeout: float = 15.0) -> bool:
         return False
 
 async def _gil_lag_monitor() -> None:
-    logger.info("🔍 GIL-MONITOR: بدء المراقبة")
-    lags: List[float] = []
+    """
+    v5.7.4: نسخة محسّنة.
+      - تاريخ 60s (قائمة انزلاقية)
+      - يحسب p50/p90/p99/max
+      - عند lag > warn: يعرض الـ handler النشط
+      - إنبّه إذا التراكم > 5s خلال النافذة
+    """
+    logger.info("🔍 GIL-MONITOR: بدء المراقبة (window=%.0fs)",
+                _GIL_LAG_HISTORY_WINDOW_SEC)
+    history: List[Tuple[float, float]] = []  # (ts, lag_ms)
     last_alert_ts = 0.0
+    cumulative_blocked_ms = 0.0
+
     while True:
         try:
             t0 = time.monotonic()
             await asyncio.sleep(0.1)
-            elapsed = time.monotonic() - t0
-            lag_ms = max(0.0, (elapsed - 0.1) * 1000.0)
-            lags.append(lag_ms)
-            if len(lags) > _GIL_LAG_SAMPLES_MAX:
-                lags.pop(0)
             now = time.monotonic()
-            if (lag_ms > _GIL_LAG_WARN_MS and now - last_alert_ts >= _GIL_LAG_ALERT_INTERVAL_SEC):
+            elapsed = now - t0
+            lag_ms = max(0.0, (elapsed - 0.1) * 1000.0)
+
+            history.append((now, lag_ms))
+            cutoff = now - _GIL_LAG_HISTORY_WINDOW_SEC
+            history = [(ts, l) for (ts, l) in history if ts >= cutoff]
+            if len(history) > _GIL_LAG_SAMPLES_MAX:
+                history = history[-_GIL_LAG_SAMPLES_MAX:]
+
+            if lag_ms > _GIL_LAG_WARN_MS:
+                cumulative_blocked_ms += lag_ms
+
+            if (lag_ms > _GIL_LAG_WARN_MS
+                    and (now - last_alert_ts) >= _GIL_LAG_ALERT_INTERVAL_SEC):
                 last_alert_ts = now
-                sorted_lags = sorted(lags)
-                n = len(sorted_lags)
-                p90 = sorted_lags[min(int(n * 0.9), n - 1)] if n else 0.0
-                logger.warning("🔴 GIL-MONITOR: lag=%.0fms | p90=%.0fms", lag_ms, p90)
+                lags = sorted(l for (_, l) in history)
+                n = len(lags)
+                if n:
+                    p50 = lags[n // 2]
+                    p90 = lags[min(int(n * 0.9), n - 1)]
+                    p99 = lags[min(int(n * 0.99), n - 1)]
+                    maxv = lags[-1]
+                else:
+                    p50 = p90 = p99 = maxv = 0.0
+
+                active_name = _ACTIVE_HANDLER.get("name") or "none"
+                active_elapsed = (
+                    now - _ACTIVE_HANDLER["start"]
+                    if _ACTIVE_HANDLER.get("name") else 0.0
+                )
+                active_chat = _ACTIVE_HANDLER.get("chat_id")
+
+                logger.warning(
+                    "🔴 GIL-MONITOR: lag=%.0fms | "
+                    "p50=%.0fms p90=%.0fms p99=%.0fms max=%.0fms | "
+                    "active=%s (%.1fs, chat=%s) | "
+                    "cum=%.0fms/%.0fs",
+                    lag_ms, p50, p90, p99, maxv,
+                    active_name, active_elapsed,
+                    active_chat or "-",
+                    cumulative_blocked_ms, _GIL_LAG_HISTORY_WINDOW_SEC,
+                )
+
+                if cumulative_blocked_ms > _GIL_LAG_BLOCKED_CUMULATIVE_WARN_MS:
+                    logger.error(
+                        "🚨 GIL-MONITOR: تراكم %.0fms خلال %.0fs — "
+                        "المشكلة منهجية (sync code؟ OCR؟ backup؟)",
+                        cumulative_blocked_ms, _GIL_LAG_HISTORY_WINDOW_SEC,
+                    )
+                    cumulative_blocked_ms = 0.0
         except asyncio.CancelledError:
             logger.info("🛑 GIL-MONITOR: تم الإيقاف")
             raise
@@ -1060,9 +1169,6 @@ PUBLIC_COMMANDS = [
     ("auto_publish", "📤 تبديل النشر التلقائي"), ("auto_recycle", "♻️ تبديل التدوير"),
 ]
 
-# ═════════════════════════════════════════════════════════════════════
-# 🆕 v5.7.3 — ADMIN_COMMANDS: أُضيفت أوامر auto-tuning + analytics
-# ═════════════════════════════════════════════════════════════════════
 ADMIN_COMMANDS = [
     ("stats", "📊 الإحصائيات"), ("grant", "🎁 منح اشتراك يدوي"),
     ("set_min_interval", "⏱️ تعيين الحد الأدنى للفاصل"), ("admin", "👑 لوحة الأدمن"),
@@ -1078,12 +1184,12 @@ ADMIN_COMMANDS = [
     ("fullhealth", "🏥 التشخيص الشامل"), ("latency", "🔬 اختبار الكمون"),
     ("databases", "🗂️ قواعد البيانات المُعدّة"), ("ping", "🏓 قياس كمون الاتصال"),
     ("posts_stats", "📊 إحصائيات النشر (DB)"),
-    # 🆕 v5.7.3 — auto-tuning + analytics
     ("autotune", "⚙️ ضبط autovacuum"),
     ("db_tune", "⚙️ ضبط autovacuum (اختصار)"),
     ("analytics", "📊 التحليلات المتقدمة"),
     ("versions", "📦 إصدارات الوحدات"),
     ("analytics_reset", "🗑️ إبطال كاش التحليلات"),
+    ("files", "📂 ملفات المشروع"),
 ]
 
 GROUP_COMMANDS = [
@@ -1719,39 +1825,33 @@ async def pool_health_monitor() -> None:
             raise
 
 def _resolve_hostname() -> Optional[str]:
-    rh = os.getenv("RENDER_EXTERNAL_HOSTNAME")
-    if rh:
-        return rh.strip()
-    ru = os.getenv("RENDER_EXTERNAL_URL")
-    if ru:
-        ru = ru.strip()
-        if ru.startswith("http"):
+    """v5.7.4: يجرّب متغيرات بيئة أكثر."""
+    for var in (
+        "RENDER_EXTERNAL_HOSTNAME",
+        "RENDER_EXTERNAL_URL",
+        "RAILWAY_PUBLIC_DOMAIN",
+        "WEBHOOK_URL",
+        "PUBLIC_URL",
+        "BOT_HOSTNAME",
+        "FLY_APP_NAME",
+    ):
+        val = (os.getenv(var) or "").strip()
+        if not val:
+            continue
+        if val.startswith("http://") or val.startswith("https://"):
             try:
-                n = urlparse(ru).netloc
+                n = urlparse(val).netloc
                 if n:
                     return n
             except Exception:
-                pass
+                continue
         else:
-            logger.warning("⚠️ RENDER_EXTERNAL_URL غير URL صالح: %r", ru)
-    rw = os.getenv("RAILWAY_PUBLIC_DOMAIN")
-    if rw:
-        return rw.strip()
-    heroku_app = os.getenv("HEROKU_APP_NAME")
-    if heroku_app and heroku_app.strip():
-        return f"{heroku_app.strip()}.herokuapp.com"
-    wh = os.getenv("WEBHOOK_URL")
-    if wh:
-        wh = wh.strip()
-        if wh.startswith("http"):
-            try:
-                n = urlparse(wh).netloc
-                if n:
-                    return n
-            except Exception:
-                pass
-        else:
-            logger.warning("⚠️ WEBHOOK_URL غير URL صالح: %r", wh)
+            return val
+
+    heroku_app = (os.getenv("HEROKU_APP_NAME") or "").strip()
+    if heroku_app:
+        return f"{heroku_app}.herokuapp.com"
+
     return None
 
 def _resolve_port() -> int:
@@ -2095,8 +2195,7 @@ async def cmd_ping(update, context):
             pass
 
 # ═══════════════════════════════════════════════════════════════════
-# 🆕 v5.7.2: /posts_stats — إحصائيات النشر من DB مباشرة
-#    (FIX-ACTIVE-CHANNELS-SCOPE: تم نقل تعريف _active_channels للأعلى)
+# v5.7.2: /posts_stats — إحصائيات النشر من DB مباشرة
 # ═══════════════════════════════════════════════════════════════════
 
 async def cmd_posts_stats(update, context):
@@ -2133,7 +2232,7 @@ async def cmd_posts_stats(update, context):
         _interval_24h = "NOW() - INTERVAL 24 HOUR"
         _interval_15m = "NOW() - INTERVAL 15 MINUTE"
         _info_schema_query = "SHOW COLUMNS FROM posts"
-    else:  # sqlite
+    else:
         _interval_24h = "datetime('now', '-24 hours')"
         _interval_15m = "datetime('now', '-15 minutes')"
         _info_schema_query = "PRAGMA table_info(posts)"
@@ -2438,8 +2537,6 @@ async def cmd_posts_stats(update, context):
         "started_at", time.monotonic()
     ))
 
-    # 🆕 v5.7.2 FIX-ACTIVE-CHANNELS-SCOPE:
-    # نحسب _active_channels هنا (قبل أي بلوك يستخدمه) لتفادي NameError.
     _active_channels = 1
     if uptime_s > 0:
         try:
@@ -2641,11 +2738,8 @@ async def main():
     logger.info("🌿 %s", CONFIG.BOT_NAME)
     logger.info("👨‍💼 المالك: %s", CONFIG.PRIMARY_OWNER_ID)
 
-    # ═══════════════════════════════════════════════════════════════
-    # 🆕 v5.7.3 — Beacon محدّث (v5.7.3 + autotune_available)
-    # ═══════════════════════════════════════════════════════════════
     logger.info(
-        "📦 bot.py: v5.7.3 | "
+        "📦 bot.py: v5.7.4 | "
         "detectors=%s | layers=%d | helpers=%s | "
         "db_idle=%s | cache_stats=%s | analytics=%s | "
         "fullhealth=%s | latency=%s | maint_cmds=%s | "
@@ -2685,8 +2779,10 @@ async def main():
         "managed_bots_shutdown=on | stats_channels_rate_fix=on | "
         "stats_active_channels_scope_fix=on | "
         "autotune_available=%s | autotune_cmd=on | db_tune_cmd=on | "
-        "analytics_menu=on | versions_cmd=on | "
-        "admin_commands_extended=on",
+        "analytics_menu=on | versions_cmd=on | files_cmd=on | "
+        "admin_commands_extended=on | "
+        "handler_timing=on | active_handler_tracker=on | "
+        "gil_diagnostics_enhanced=on | resolve_hostname_extended=on",
         _SPAM_DETECTOR_VERSION or "N/A",
         _SPAM_DETECTOR_LAYERS_COUNT,
         (
@@ -2793,6 +2889,20 @@ async def main():
     port = _resolve_port()
     hostname = _resolve_hostname()
 
+    if hostname:
+        logger.info(
+            "🌐 وضع الاتصال: WEBHOOK (hostname=%s) — "
+            "آمن ضد تكرار instances",
+            hostname,
+        )
+    else:
+        logger.warning(
+            "⚠️ وضع الاتصال: POLLING (لا hostname) — "
+            "يتطلب instance واحد فقط.\n"
+            "   💡 لتجنب Conflict: اضبط RENDER_EXTERNAL_HOSTNAME "
+            "أو WEBHOOK_URL، أو تأكد أن Render type=Web Service."
+        )
+
     t_app = time.monotonic()
 
     _http_request_pool = _build_http_request_pool()
@@ -2847,9 +2957,7 @@ async def main():
 
     _spawn_warmup_detectors_pool()
 
-    # ═══════════════════════════════════════════════════════════════
     # ═══ v5.7.0: Managed Bots — بدء البوتات المُدارة ═══
-    # ═══════════════════════════════════════════════════════════════
     _managed_apps: Dict[str, Any] = {}
     try:
         from managed_bots_runner import start_all_managed_bots
@@ -2981,31 +3089,38 @@ async def main():
         & ~filters.COMMAND
     )
 
+    # 🆕 v5.7.4: timing wrappers
     try:
+        _handle_group_timed = _wrap_handler_with_timing(
+            MessageHandlers.handle_group, "handle_group"
+        )
         app.add_handler(
-            MessageHandler(_group_msg_filter, MessageHandlers.handle_group),
+            MessageHandler(_group_msg_filter, _handle_group_timed),
             group=-1,
         )
         logger.info(
             "✅ handle_group مُسجَّل في group=-1 "
-            "(فلتر شامل — كل الأنواع، رسائل جديدة فقط)"
+            "(فلتر شامل — كل الأنواع، رسائل جديدة فقط) [timed]"
         )
     except Exception as _e:
         logger.error("❌ فشل تسجيل handle_group: %s", _e, exc_info=True)
 
     if hasattr(MessageHandlers, "handle_edited"):
         try:
+            _handle_edited_timed = _wrap_handler_with_timing(
+                MessageHandlers.handle_edited, "handle_edited"
+            )
             app.add_handler(
                 MessageHandler(
                     _GROUP_CHAT_FILTER
                     & filters.UpdateType.EDITED_MESSAGE,
-                    MessageHandlers.handle_edited,
+                    _handle_edited_timed,
                 ),
                 group=-1,
             )
             logger.info(
                 "✅ handle_edited مُسجَّل في group=-1 "
-                "(رسائل معدّلة فقط)"
+                "(رسائل معدّلة فقط) [timed]"
             )
         except Exception as _e:
             logger.error(
@@ -3018,14 +3133,17 @@ async def main():
         )
 
     try:
+        _handle_service_timed = _wrap_handler_with_timing(
+            MessageHandlers.handle_service, "handle_service"
+        )
         app.add_handler(
             MessageHandler(
                 filters.StatusUpdate.ALL & _GROUP_CHAT_FILTER,
-                MessageHandlers.handle_service,
+                _handle_service_timed,
             ),
             group=-1,
         )
-        logger.info("✅ handle_service مُسجَّل في group=-1")
+        logger.info("✅ handle_service مُسجَّل في group=-1 [timed]")
     except Exception as _e:
         logger.error("❌ فشل تسجيل handle_service: %s", _e, exc_info=True)
 
@@ -3327,7 +3445,8 @@ async def main():
                     "✅ [ORDER 5/6] handlers_analytics: register_handlers() "
                     "نجح — يشمل /databases + /versions + /analytics_reset "
                     "+ /analytics + databases_btn + versions_refresh + "
-                    "analytics_reset_cache + /autotune + autotune_btn"
+                    "analytics_reset_cache + /autotune + autotune_btn + "
+                    "/files + files_btn"
                 )
             else:
                 logger.warning(
@@ -3362,15 +3481,15 @@ async def main():
                         r"channels_rate_btn|subscriptions_btn|pool_live_btn|"
                         r"slow_queries_btn|export_excel_btn|"
                         r"full_health_btn|latency_btn|"
-                        r"databases_btn|autotune_btn|"
+                        r"databases_btn|autotune_btn|files_btn|"
                         r"refresh_btn)$"
                     ),
                 ))
                 logger.info(
                     "✅ [ORDER 5/6] handlers_analytics (fallback يدوي): "
-                    "12 زر مُسجّل — databases_btn + autotune_btn ✅ "
+                    "13 زر مُسجّل — databases_btn + autotune_btn + files_btn ✅ "
                     "(لكن /databases, /versions, /analytics_reset, "
-                    "/autotune قد لا تعمل — يتطلب register_handlers "
+                    "/autotune, /files قد لا تعمل — يتطلب register_handlers "
                     "من v1.3.1+)"
                 )
             except Exception as _e:
@@ -3385,9 +3504,7 @@ async def main():
                 _ANALYTICS_HANDLERS_IMPORT_ERROR or "unknown",
             )
 
-    # ═══════════════════════════════════════════════════════════════
     # ═══ v5.7.0: Managed Bots handlers — قبل catch-all ═══
-    # ═══════════════════════════════════════════════════════════════
     try:
         from handlers.handlers_managed_bots import (
             register_managed_bots_handlers,
@@ -3416,14 +3533,29 @@ async def main():
             _e, exc_info=True,
         )
 
-    app.add_handler(MessageHandler(
-        (filters.TEXT | filters.PHOTO | filters.VIDEO | filters.Document.ALL |
-         filters.AUDIO | filters.VOICE | filters.ANIMATION | filters.Sticker.ALL |
-         filters.VIDEO_NOTE) &
-        filters.ChatType.PRIVATE & ~filters.COMMAND
-        & ~filters.SUCCESSFUL_PAYMENT,
-        MessageHandlers.handle_private
-    ))
+    try:
+        _handle_private_timed = _wrap_handler_with_timing(
+            MessageHandlers.handle_private, "handle_private"
+        )
+        app.add_handler(MessageHandler(
+            (filters.TEXT | filters.PHOTO | filters.VIDEO | filters.Document.ALL |
+             filters.AUDIO | filters.VOICE | filters.ANIMATION | filters.Sticker.ALL |
+             filters.VIDEO_NOTE) &
+            filters.ChatType.PRIVATE & ~filters.COMMAND
+            & ~filters.SUCCESSFUL_PAYMENT,
+            _handle_private_timed
+        ))
+        logger.info("✅ handle_private مُسجَّل [timed]")
+    except Exception as _e:
+        logger.error("❌ فشل تسجيل handle_private: %s", _e, exc_info=True)
+        app.add_handler(MessageHandler(
+            (filters.TEXT | filters.PHOTO | filters.VIDEO | filters.Document.ALL |
+             filters.AUDIO | filters.VOICE | filters.ANIMATION | filters.Sticker.ALL |
+             filters.VIDEO_NOTE) &
+            filters.ChatType.PRIVATE & ~filters.COMMAND
+            & ~filters.SUCCESSFUL_PAYMENT,
+            MessageHandlers.handle_private
+        ))
 
     app.add_handler(ChatJoinRequestHandler(MessageHandlers.handle_join_request))
     app.add_error_handler(ErrorHandler.handle_error)
@@ -3768,9 +3900,7 @@ async def main():
             except Exception as _e:
                 logger.debug("app.shutdown: %s", _e)
 
-        # ═══════════════════════════════════════════════════════════════
         # ═══ v5.7.0: Managed Bots shutdown ═══
-        # ═══════════════════════════════════════════════════════════════
         try:
             from managed_bots_runner import stop_all_managed_bots
             await stop_all_managed_bots(timeout=15.0)
