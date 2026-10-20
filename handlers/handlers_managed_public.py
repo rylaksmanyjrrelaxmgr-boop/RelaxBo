@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-handlers/handlers_managed_public.py — معالجات البوتات المُدارة (v5.7.8)
+handlers/handlers_managed_public.py — معالجات البوتات المُدارة (v5.7.9)
 =================================================================================
+🆕 v5.7.9 (KEYWORD-DELAY-5S):
+    • تأخير 5 ثوانٍ قبل إرسال رد الكلمة المفتاحية.
+    • لا تغيير في أي سلوك آخر (صمت التكرار، التسلسل، الخاص فقط).
+
 🆕 v5.7.8 (ONE-TIME-KEYWORD):
     • كل مستخدم يستلم رد الكلمة المفتاحية مرة واحدة فقط.
-    • إذا كرر نفس الكلمة → صمت (لا رد، لا تسلسل).
-    • إذا أرسل كلمة مختلفة → يرد عليها (مرة واحدة).
-    • في الخاص فقط (المجموعات تُتجاهل).
+    • إذا كرر نفس الكلمة → صمت.
 =================================================================================
 """
 
@@ -25,9 +27,9 @@ from utils import safe_send
 from managed_bots_storage import (
     get_default_messages,
     get_lock,
-    is_keyword_already_replied,   # 🆕 v5.7.8
+    is_keyword_already_replied,
     load_managed_state,
-    mark_keyword_as_replied,      # 🆕 v5.7.8
+    mark_keyword_as_replied,
     save_managed_state,
 )
 
@@ -35,6 +37,9 @@ logger = logging.getLogger(__name__)
 
 _FIELDS: Tuple[str, str, str, str] = ("start", "reply", "third", "fourth")
 _NUM_LOCK_STRIPES = 64
+
+# 🆕 v5.7.9: تأخير رد الكلمة المفتاحية (بالثواني)
+_KEYWORD_REPLY_DELAY_SEC = 5.0
 
 
 def _is_privileged(user_id: int) -> bool:
@@ -122,10 +127,7 @@ def _normalize_for_match(text: str) -> str:
 def _find_keyword_match(
     user_text: str, keywords: Dict[str, str],
 ) -> Tuple[str, str]:
-    """
-    يبحث عن أول كلمة مفتاحية موجودة في نص المستخدم (الأطول أولاً).
-    Returns: (keyword, reply) أو ("", "")
-    """
+    """يبحث عن أول كلمة مفتاحية موجودة في نص المستخدم (الأطول أولاً)."""
     if not user_text or not keywords:
         return "", ""
 
@@ -191,7 +193,6 @@ def make_managed_handlers(bid: int) -> Tuple[Callable, Callable]:
     async def on_text(update: Any, context: Any) -> None:
         try:
             chat = update.effective_chat
-            # ⚠️ في الخاص فقط
             if chat is None or chat.type != "private":
                 return
             msg = update.message
@@ -205,19 +206,18 @@ def make_managed_handlers(bid: int) -> Tuple[Callable, Callable]:
             lock = _lock_for_user(app, user.id)
 
             async with lock:
-                # ═══ 1. الكلمات المفتاحية أولاً ═══
+                # ═══ 1. الكلمات المفتاحية ═══
                 keywords = _get_keywords(app)
                 if keywords:
                     kw_matched, reply = _find_keyword_match(
                         msg.text, keywords
                     )
                     if kw_matched and reply:
-                        # 🆕 v5.7.8: هل سبق الرد على هذا المستخدم؟
+                        # هل سبق الرد على هذا المستخدم؟
                         already = await is_keyword_already_replied(
                             bid, user.id, kw_matched
                         )
                         if already:
-                            # صمت تام — لا رد، لا تسلسل
                             logger.debug(
                                 "managed_bot #%s: keyword '%s' "
                                 "already replied to user %s — silent",
@@ -225,7 +225,15 @@ def make_managed_handlers(bid: int) -> Tuple[Callable, Callable]:
                             )
                             return
 
-                        # الرد الأول — أرسل + سجّل
+                        # 🆕 v5.7.9: تأخير 5 ثوانٍ قبل الرد
+                        logger.debug(
+                            "managed_bot #%s: delaying keyword reply "
+                            "%.1fs for user %s",
+                            bid, _KEYWORD_REPLY_DELAY_SEC, user.id,
+                        )
+                        await asyncio.sleep(_KEYWORD_REPLY_DELAY_SEC)
+
+                        # إرسال الرد + تسجيل
                         sent = await safe_send(
                             context.bot, chat.id, reply
                         )
@@ -235,7 +243,7 @@ def make_managed_handlers(bid: int) -> Tuple[Callable, Callable]:
                             )
                             logger.debug(
                                 "managed_bot #%s: keyword '%s' "
-                                "replied once for user %s",
+                                "replied once (delayed) for user %s",
                                 bid, kw_matched[:30], user.id,
                             )
                         return  # لا يتقدم التسلسل
@@ -292,9 +300,10 @@ __all__ = ["make_managed_handlers", "post_init_managed"]
 
 try:
     logger.debug(
-        "🛡️ handlers_managed_public v5.7.8 (ONE-TIME-KEYWORD) loaded | "
-        "flow=keywords(once)→reply→third→fourth | "
+        "🛡️ handlers_managed_public v5.7.9 (KEYWORD-DELAY) loaded | "
+        "flow=keywords(once,delay=%.1fs)→reply→third→fourth | "
         "locks=striped(%d) | private_only=True",
+        _KEYWORD_REPLY_DELAY_SEC,
         _NUM_LOCK_STRIPES,
     )
 except Exception:
