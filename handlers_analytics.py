@@ -1,21 +1,42 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-handlers_analytics.py — واجهة التحليلات المتقدمة (v1.3.4 — VERSIONS-PATH-FIX)
+handlers_analytics.py — واجهة التحليلات المتقدمة (v1.3.5 — DYNAMIC-FILES-SCAN)
 ================================================================================
-v1.3.4 — فوق v1.3.3:
+v1.3.5 — فوق v1.3.4:
 
-    🟢 FIX-VERSIONS-PATH: cmd_versions تجرّب كل مسار ممكن لكل موديول
-        (handlers.X ثم X) قبل الحكم بـ "غير محمّل". يزيل false-negatives
-        للموديولات التي تعيش فقط داخل مجلد handlers/ (handlers_callback,
-        handlers_channels_list, handlers_membership,
-        handlers_message_detectors).
+    🆕 FILES-SCAN-1: /files command — يفحص كل ملفات المشروع .py
+        ديناميكياً (root + handlers/ + subdirs) ويعرض:
+        • إصدار كل ملف (VERSION/__version__/_VERSION/docstring)
+        • حالة الاستيراد (نجح / فشل)
+        • تجميع حسب المجلد
+        • إجمالي + محمّل + بلا إصدار + فشل
 
-    🟢 FIX-VERSIONS-ERR: عرض نوع الاستثناء عند الفشل (ImportError، etc.)
-        لتشخيص أدق.
+    🆕 FILES-SCAN-2: زر "📂 كل الملفات" في صفحة /versions
+        (callback: files_open) + زر "🔄 إعادة الفحص" داخل صفحة
+        الملفات (callback: files_refresh).
 
-    🟢 STRUCTURE: modules_to_check أصبح قائمة (name, [paths]) بدل
-        (name, single_path) — نفس التكلفة، مرونة أكبر.
+    🆕 FILES-SCAN-3: زر "📂 ملفات المشروع" في قائمة analytics
+        (files_btn) — نفس الصفحة.
+
+    🆕 FILES-SCAN-4: _find_project_root() — يحاول cwd ثم يمشي
+        من __file__ صعوداً للعثور على bot.py/config.py.
+
+    🆕 FILES-SCAN-5: _EXCLUDED_DIRS — تجاهل .git, __pycache__,
+        venv, tests, node_modules, migrations, إلخ.
+
+    🆕 FILES-SCAN-6: _file_to_module_path() — تحويل مسار ملف إلى
+        module path (handlers/handlers_x.py → handlers.handlers_x).
+
+    🆕 FILES-SCAN-7: معالجة خاصة لـ bot.py (يُعرَض كـ bot.py مع
+        الإصدار من docstring).
+
+    🆕 FILES-SCAN-8: _MAX_FILES_SCAN=500 — سقف أماني لمنع runaway.
+
+v1.3.4 — محفوظ:
+    🟢 FIX-VERSIONS-PATH: cmd_versions تجرّب handlers.X ثم X.
+    🟢 FIX-VERSIONS-ERR: عرض نوع الاستثناء عند الفشل.
+    🟢 STRUCTURE: modules_to_check أصبح قائمة (name, [paths]).
 
 v1.3.3 — محفوظ:
     🆕 AUTO-1..6: autotune_btn + /autotune + show_autotune.
@@ -27,18 +48,10 @@ v1.3.2 — محفوظ:
 
 v1.3.1 — محفوظ:
     🔴 FIX-1: force_refresh=True → False.
-    🟢 NEW-1: /databases command.
-    🟢 NEW-2: زر 🗂️ قواعد البيانات.
-    🟢 NEW-3: show_databases() يستدعي diagnose_databases().
+    🟢 NEW-1..3: /databases + databases_btn + show_databases.
 
 v1.3.0 — محفوظ:
-    🚀 PERF-1: cache ذكي (TTL=60s).
-    🚀 PERF-2: رد فوري على callback.
-    🎯 FEAT-1: مقارنة تاريخية في show_growth_30d.
-    🎯 FEAT-2: /versions.
-    🎯 FEAT-3: /analytics_reset.
-    🟡 IMPROVE-1..4.
-    ✅ HA1..HA31 محفوظة.
+    🚀 PERF-1..2, 🎯 FEAT-1..3, ✅ HA1..HA31.
 
 v1.2.3..1.1.1 — محفوظة.
 ================================================================================
@@ -52,6 +65,7 @@ import html as _html_mod
 import traceback as _tb
 import importlib
 from datetime import datetime, timedelta
+from pathlib import Path  # 🆕 v1.3.5
 from typing import Optional, Dict, Any, List, Tuple, Callable, Awaitable, Union
 
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
@@ -85,7 +99,105 @@ ANALYTICS_BUTTONS = (
     "latency_btn",
     "databases_btn",
     "autotune_btn",         # 🆕 v1.3.3
+    "files_btn",            # 🆕 v1.3.5
 )
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# 🆕 v1.3.5 — FILES-SCAN helpers
+# ═══════════════════════════════════════════════════════════════════════
+
+_EXCLUDED_DIRS = frozenset({
+    ".git", "__pycache__", "venv", ".venv", "env", ".env",
+    "node_modules", "tests", "test", ".pytest_cache",
+    ".mypy_cache", ".tox", "build", "dist", ".eggs",
+    "site-packages", ".idea", ".vscode", ".vscode-test",
+    "migrations",
+})
+
+_SKIP_FILENAMES = frozenset({
+    "setup.py", "conftest.py", "__init__.py",
+})
+
+_MAX_FILES_SCAN = 500
+
+
+def _find_project_root() -> Path:
+    """Determine project root — try cwd, then walk up from __file__."""
+    try:
+        cwd = Path.cwd()
+        if (cwd / "bot.py").exists() or (cwd / "config.py").exists():
+            return cwd
+    except Exception:
+        pass
+    try:
+        here = Path(__file__).resolve().parent
+        for _ in range(4):
+            if (here / "bot.py").exists() or (here / "config.py").exists():
+                return here
+            parent = here.parent
+            if parent == here:
+                break
+            here = parent
+    except Exception:
+        pass
+    try:
+        return Path.cwd()
+    except Exception:
+        return Path(".")
+
+
+def _file_to_module_path(rel_path: Path) -> str:
+    """Convert relative .py path to module path."""
+    try:
+        parts = rel_path.with_suffix("").parts
+        return ".".join(parts)
+    except Exception:
+        return ""
+
+
+def _extract_version(mod) -> Optional[str]:
+    """Extract version from module."""
+    if mod is None:
+        return None
+    try:
+        v = (
+            getattr(mod, "VERSION", None)
+            or getattr(mod, "__version__", None)
+            or getattr(mod, "_VERSION", None)
+        )
+        if v:
+            return str(v)
+    except Exception:
+        pass
+    try:
+        doc = getattr(mod, "__doc__", "") or ""
+        m = _re_mod.search(r"v?(\d+\.\d+\.\d+)", doc[:800])
+        if m:
+            return m.group(1)
+    except Exception:
+        pass
+    return None
+
+
+def _try_import_any(paths: List[str]) -> Tuple[Optional[Any], Optional[str]]:
+    """Try multiple import paths, return first success + last error."""
+    last_err: Optional[str] = None
+    for p in paths:
+        if not p:
+            continue
+        try:
+            return importlib.import_module(p), None
+        except ImportError as ie:
+            last_err = f"ImportError: {str(ie)[:80]}"
+            continue
+        except SyntaxError as se:
+            last_err = f"SyntaxError: {str(se)[:80]}"
+            continue
+        except Exception as ex:
+            last_err = f"{type(ex).__name__}: {str(ex)[:80]}"
+            continue
+    return None, last_err
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -604,13 +716,16 @@ def _default_analytics_keyboard(lang: str = "ar") -> InlineKeyboardMarkup:
          InlineKeyboardButton(
             _lbl("analytics_latency", "🔬 اختبار الكمون"),
             callback_data="latency_btn")],
-        # 🆕 v1.3.3 — صف واحد: databases + autotune
         [InlineKeyboardButton(
             _lbl("analytics_databases", "🗂️ قواعد البيانات"),
             callback_data="databases_btn"),
          InlineKeyboardButton(
             _lbl("analytics_autotune", "⚙️ ضبط autovacuum"),
             callback_data="autotune_btn")],
+        # 🆕 v1.3.5
+        [InlineKeyboardButton(
+            _lbl("analytics_files", "📂 ملفات المشروع"),
+            callback_data="files_btn")],
         [InlineKeyboardButton(
             _lbl("refresh_btn", "🔄 تحديث"),
             callback_data="refresh_btn")],
@@ -702,7 +817,6 @@ async def show_analytics_menu(update: Update,
             f"/{cache_stats['max_entries']}"
         )
 
-        # 🆕 v1.3.3 — مؤشر توفّر الضبط التلقائي
         autotune_line = (
             "⚙️ autovacuum-tuning: 🟢 متاح"
             if _AUTOTUNE_AVAILABLE else
@@ -1748,7 +1862,6 @@ async def show_autotune(update: Update,
     if chat_id is None:
         return
 
-    # فحص التوفّر
     if not _AUTOTUNE_AVAILABLE or _diagnose_autovacuum_tuning_fn is None:
         err = (
             "⚙️ <b>ضبط autovacuum — غير متاح</b>\n"
@@ -1772,7 +1885,6 @@ async def show_autotune(update: Update,
             await safe_send(context.bot, chat_id, err, reply_markup=kb)
         return
 
-    # فحص PG
     try:
         if not bool(getattr(DB, "USE_POSTGRES", False)):
             err = (
@@ -1878,8 +1990,252 @@ async def show_autotune(update: Update,
 
 
 # ═══════════════════════════════════════════════════════════════════════
+# 12c) 🆕 v1.3.5 — /files : فحص كل ملفات المشروع .py
+# ═══════════════════════════════════════════════════════════════════════
+
+async def cmd_files(update: Update,
+                    context: ContextTypes.DEFAULT_TYPE) -> None:
+    """📂 v1.3.5 — عرض كل ملفات المشروع .py ديناميكياً."""
+    user_id = _get_safe_user_id(update)
+    chat_id = _safe_get_chat_id(update, None)
+    query = update.callback_query
+
+    if query:
+        await _quick_answer(query, "⏳ جاري فحص الملفات...")
+
+    if not _check_developer(user_id):
+        await _reject_non_dev(context.bot, chat_id, query)
+        return
+
+    waiting_text = (
+        "📂 <b>جاري فحص ملفات المشروع...</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        "🔍 يبحث في root + handlers/ + subdirs\n"
+        "⏳ 2-5 ثواني..."
+    )
+
+    waiting_msg = None
+    if query:
+        try:
+            await _safe_edit(query, waiting_text, None)
+        except Exception as e:
+            logger.debug(f"cmd_files waiting (edit): {e}")
+    else:
+        try:
+            waiting_msg = await context.bot.send_message(
+                chat_id, waiting_text, parse_mode="HTML",
+                disable_web_page_preview=True,
+            )
+        except Exception as e:
+            logger.debug(f"cmd_files waiting (send): {e}")
+
+    try:
+        root = _find_project_root()
+
+        py_files: List[Path] = []
+        try:
+            for py_file in root.rglob("*.py"):
+                try:
+                    parts = py_file.relative_to(root).parts
+                except ValueError:
+                    continue
+                if any(p in _EXCLUDED_DIRS for p in parts[:-1]):
+                    continue
+                if py_file.name in _SKIP_FILENAMES:
+                    continue
+                py_files.append(py_file)
+                if len(py_files) >= _MAX_FILES_SCAN:
+                    logger.warning(
+                        "cmd_files: reached %d files, truncating",
+                        _MAX_FILES_SCAN,
+                    )
+                    break
+        except Exception as e:
+            logger.warning(f"cmd_files rglob: {e}")
+
+        py_files.sort(key=lambda p: str(p.relative_to(root)).lower())
+
+        loaded: List[Dict[str, Any]] = []
+        no_version: List[Dict[str, Any]] = []
+        failed: List[Dict[str, Any]] = []
+
+        for py_file in py_files:
+            try:
+                rel = py_file.relative_to(root)
+                mod_path = _file_to_module_path(rel)
+                if not mod_path:
+                    continue
+
+                if rel.parent == Path("."):
+                    candidates = [mod_path]
+                    if rel.name == "bot.py":
+                        candidates = ["bot", "__main__"]
+                else:
+                    candidates = [mod_path]
+                    if len(rel.parts) >= 2:
+                        candidates.append(rel.stem)
+
+                mod, err = _try_import_any(candidates)
+
+                if mod is None:
+                    failed.append({
+                        "name": str(rel),
+                        "reason": err or "unknown",
+                    })
+                    continue
+
+                ver = _extract_version(mod)
+                if ver:
+                    loaded.append({
+                        "name": str(rel),
+                        "version": str(ver),
+                    })
+                else:
+                    no_version.append({"name": str(rel)})
+            except Exception as e:
+                failed.append({
+                    "name": str(py_file),
+                    "reason": f"{type(e).__name__}: {str(e)[:80]}",
+                })
+
+        total = len(py_files)
+        lines: List[str] = []
+        lines.append("📂 <b>ملفات المشروع (.py)</b>")
+        lines.append("━━━━━━━━━━━━━━━━━━━━━━")
+        lines.append("")
+        lines.append(f"📊 إجمالي: <b>{total}</b> ملف")
+        lines.append(f"✅ محمّل بإصدار: <b>{len(loaded)}</b>")
+        lines.append(f"🟡 محمّل بلا إصدار: <b>{len(no_version)}</b>")
+        lines.append(f"❌ فشل الاستيراد: <b>{len(failed)}</b>")
+        lines.append("")
+
+        by_dir: Dict[str, List[Dict[str, Any]]] = {}
+        for item in loaded:
+            try:
+                parent = str(Path(item["name"]).parent)
+            except Exception:
+                parent = "?"
+            if parent == "." or parent == "":
+                parent = "(root)"
+            by_dir.setdefault(parent, []).append(item)
+
+        for parent in sorted(by_dir.keys(), key=lambda x: (x != "(root)", x)):
+            lines.append(f"<b>📁 {_html_mod.escape(parent)}</b>")
+            for item in by_dir[parent]:
+                try:
+                    name = Path(item["name"]).name
+                except Exception:
+                    name = item["name"]
+                lines.append(
+                    f"  ✅ <code>{_html_mod.escape(name)}</code>: "
+                    f"v{_html_mod.escape(item['version'])}"
+                )
+            lines.append("")
+
+        if no_version:
+            lines.append(f"<b>🟡 بلا إصدار ({len(no_version)}):</b>")
+            for item in no_version[:25]:
+                try:
+                    name = Path(item["name"]).name
+                except Exception:
+                    name = item["name"]
+                lines.append(
+                    f"  🟡 <code>{_html_mod.escape(name)}</code>"
+                )
+            if len(no_version) > 25:
+                lines.append(f"  … و{len(no_version) - 25} آخر")
+            lines.append("")
+
+        if failed:
+            lines.append(f"<b>❌ فشل الاستيراد ({len(failed)}):</b>")
+            for item in failed[:15]:
+                try:
+                    name = Path(item["name"]).name
+                except Exception:
+                    name = item["name"]
+                lines.append(
+                    f"  ❌ <code>{_html_mod.escape(name)}</code>\n"
+                    f"     <i>{_html_mod.escape(item['reason'][:100])}</i>"
+                )
+            if len(failed) > 15:
+                lines.append(f"  … و{len(failed) - 15} آخر")
+            lines.append("")
+
+        lines.append("━━━━━━━━━━━━━━━━━━━━━━")
+        try:
+            lines.append(
+                f"📂 <b>المسح من:</b> "
+                f"<code>{_html_mod.escape(str(root))}</code>"
+            )
+        except Exception:
+            pass
+        lines.append(f"🕐 <i>{TimeUtils.mecca_iso()[:19]}</i>")
+
+        text = "\n".join(lines)
+
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton(
+                "🔄 إعادة الفحص",
+                callback_data="files_refresh",
+            )],
+            [InlineKeyboardButton(
+                "📦 الإصدارات المختصرة",
+                callback_data="versions_refresh",
+            )],
+            [InlineKeyboardButton(
+                "🔙 رجوع",
+                callback_data="admin",
+            )],
+        ])
+
+        MAX_SINGLE = 3800
+        if query:
+            if len(text) <= MAX_SINGLE:
+                ok = await _safe_edit(query, text, kb)
+                if ok:
+                    return
+            try:
+                if waiting_msg is not None:
+                    await waiting_msg.delete()
+            except Exception:
+                pass
+            if chat_id is not None:
+                await _safe_send_long(
+                    context.bot, chat_id, text,
+                    reply_markup=kb,
+                )
+        elif chat_id is not None:
+            try:
+                if waiting_msg is not None:
+                    await waiting_msg.delete()
+            except Exception:
+                pass
+            await _safe_send_long(
+                context.bot, chat_id, text,
+                reply_markup=kb,
+            )
+
+    except Exception as e:
+        logger.error("cmd_files: %s", e, exc_info=True)
+        try:
+            if waiting_msg is not None:
+                await waiting_msg.delete()
+        except Exception:
+            pass
+        err_html = _err_detail(e)
+        err_text = (
+            f"❌ <b>فشل فحص الملفات</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━\n{err_html}"
+        )
+        if query:
+            await _safe_edit(
+                query, err_text, _back_keyboard("admin_analytics"))
+        elif chat_id is not None:
+            await safe_send(context.bot, chat_id, err_text)
+
+
+# ═══════════════════════════════════════════════════════════════════════
 # 13) /versions
-# 🆕 v1.3.4 FIX-VERSIONS-PATH: تجربة handlers.X ثم X لكل موديول
 # ═══════════════════════════════════════════════════════════════════════
 
 async def cmd_versions(update: Update,
@@ -1895,7 +2251,6 @@ async def cmd_versions(update: Update,
         await _reject_non_dev(context.bot, chat_id, query)
         return
 
-    # 🆕 v1.3.4 FIX-VERSIONS-PATH: (name, [paths_to_try])
     modules_to_check: List[Tuple[str, List[str]]] = [
         ("bot.py", ["bot"]),
         ("config.py", ["config"]),
@@ -1984,7 +2339,6 @@ async def cmd_versions(update: Update,
         f"/{cache_stats['max_entries']}"
     )
 
-    # 🆕 v1.3.3 — مؤشر الضبط
     lines.append(
         "⚙️ autotune: " + (
             "🟢 متاح" if _AUTOTUNE_AVAILABLE else
@@ -2002,6 +2356,11 @@ async def cmd_versions(update: Update,
         [InlineKeyboardButton(
             "🔄 تحديث",
             callback_data="versions_refresh",
+        )],
+        # 🆕 v1.3.5
+        [InlineKeyboardButton(
+            "📂 كل الملفات",
+            callback_data="files_open",
         )],
         [InlineKeyboardButton(
             "💾 إبطال cache",
@@ -2091,7 +2450,8 @@ _ANALYTICS_HANDLERS = {
     "full_health_btn": show_full_health,
     "latency_btn": show_latency,
     "databases_btn": show_databases,
-    "autotune_btn": show_autotune,       # 🆕 v1.3.3
+    "autotune_btn": show_autotune,       # v1.3.3
+    "files_btn": cmd_files,              # 🆕 v1.3.5
 }
 
 
@@ -2109,6 +2469,10 @@ async def handle_analytics_callback(
         return
     if data == "analytics_reset_cache":
         await cmd_analytics_reset(update, context)
+        return
+    # 🆕 v1.3.5
+    if data in ("files_open", "files_refresh"):
+        await cmd_files(update, context)
         return
 
     if data not in ANALYTICS_BUTTONS:
@@ -2188,7 +2552,7 @@ async def cmd_autotune(update: Update,
 
 def register_handlers(application) -> bool:
     """
-    v1.3.4: يُسجّل كل الـ handlers (buttons + commands).
+    v1.3.5: يُسجّل كل الـ handlers (buttons + commands).
 
     يُستدعى من bot.py v5.6.32+ ضمن [ORDER 5/6].
     في حال نجاحه، لا حاجة للتسجيل اليدوي في bot.py.
@@ -2197,13 +2561,13 @@ def register_handlers(application) -> bool:
         True إن نجح التسجيل (كل الأوامر)، False إن فشل.
     """
     try:
-        # 🆕 v1.3.2 CLEAN-1: regex-escape آمن للأزرار
         _safe_buttons = "|".join(
             _re_mod.escape(b) for b in ANALYTICS_BUTTONS
         )
         pattern = (
             r"^(?:" + _safe_buttons + r"|"
-            r"versions_refresh|analytics_reset_cache"
+            r"versions_refresh|analytics_reset_cache|"
+            r"files_open|files_refresh"
             r")(?::\d+)?$"
         )
         application.add_handler(
@@ -2233,13 +2597,16 @@ def register_handlers(application) -> bool:
         application.add_handler(
             CommandHandler("autotune", cmd_autotune)
         )
+        application.add_handler(  # 🆕 v1.3.5
+            CommandHandler("files", cmd_files)
+        )
 
         cmds = (
             "analytics, fullhealth, latency, versions, "
-            "analytics_reset, databases, autotune"
+            "analytics_reset, databases, autotune, files"
         )
         logger.info(
-            "✅ handlers_analytics v1.3.4: %d زر + 7 أوامر (%s)",
+            "✅ handlers_analytics v1.3.5: %d زر + 8 أوامر (%s)",
             len(ANALYTICS_BUTTONS),
             cmds,
         )
@@ -2271,31 +2638,44 @@ __all__ = [
     "show_full_health",
     "show_latency",
     "show_databases",
-    "show_autotune",            # 🆕 v1.3.3
+    "show_autotune",
     "cmd_analytics",
     "cmd_fullhealth",
     "cmd_latency",
     "cmd_versions",
     "cmd_analytics_reset",
     "cmd_databases",
-    "cmd_autotune",             # 🆕 v1.3.3
+    "cmd_autotune",
+    "cmd_files",                # 🆕 v1.3.5
     "register_handlers",
     "register",
     "_cached_db_call",
     "_invalidate_analytics_cache",
     "_get_cache_stats",
     "_quick_answer",
+    "_find_project_root",       # 🆕 v1.3.5
+    "_file_to_module_path",     # 🆕 v1.3.5
+    "_extract_version",         # 🆕 v1.3.5
+    "_try_import_any",          # 🆕 v1.3.5
 ]
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# LOAD BEACON — v1.3.4
+# LOAD BEACON — v1.3.5
 # ═══════════════════════════════════════════════════════════════════════
 
 try:
     logger.info(
-        "✅ handlers_analytics v1.3.4 loaded | "
+        "✅ handlers_analytics v1.3.5 loaded | "
         "buttons=%d | "
+        "FILES-SCAN-1=/files | "
+        "FILES-SCAN-2=files_open+files_refresh | "
+        "FILES-SCAN-3=files_btn | "
+        "FILES-SCAN-4=_find_project_root | "
+        "FILES-SCAN-5=_EXCLUDED_DIRS | "
+        "FILES-SCAN-6=_file_to_module_path | "
+        "FILES-SCAN-7=bot.py-special | "
+        "FILES-SCAN-8=max_scan=%d | "
         "FIX-VERSIONS-PATH=on | "
         "FIX-VERSIONS-ERR=on | "
         "AUTO-1..6=on | "
@@ -2303,11 +2683,8 @@ try:
         "db_diag_version=%s | "
         "CLEAN-1=regex-escape | "
         "CLEAN-2=cmd-analytics-no-double-check | "
-        "INTEGRATION=bot.py-v5.6.32-register-handlers | "
+        "INTEGRATION=bot.py-v5.7.3-register-handlers | "
         "FIX-1=force-refresh-false | "
-        "NEW-1=/databases | "
-        "NEW-2=databases-btn | "
-        "NEW-3=show-databases | "
         "PERF-1=db-cache(ttl=%.0fs,max=%d) | "
         "PERF-2=quick-answer | "
         "FEAT-1=growth-comparison | "
@@ -2315,6 +2692,7 @@ try:
         "FEAT-3=/analytics_reset | "
         "KEPT: HA1..HA31",
         len(ANALYTICS_BUTTONS),
+        _MAX_FILES_SCAN,
         _AUTOTUNE_AVAILABLE,
         _DB_DIAG_VERSION_AT,
         _DB_CACHE_TTL_DEFAULT,
