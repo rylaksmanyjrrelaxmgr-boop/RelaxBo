@@ -1,27 +1,33 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-handlers_analytics.py — واجهة التحليلات المتقدمة (v1.3.2 — INTEGRATION-CLEAN)
+handlers_analytics.py — واجهة التحليلات المتقدمة (v1.3.3 — AUTOTUNE-INTEGRATION)
 ================================================================================
-v1.3.2 — فوق v1.3.1:
+v1.3.3 — فوق v1.3.2:
 
-    🟢 CLEAN-1: Regex-escape آمن في register_handlers() — يمنع كسر
-        الـpattern لو أُضيف زر جديد يحوي metachars في المستقبل.
+    🆕 AUTO-1: زر جديد ⚙️ "ضبط autovacuum" (autotune_btn) —
+        يستدعي diagnose_autovacuum_tuning(force=True) من db_diagnostics
+        v7.2.24+ ويعرض التقرير الناتج.
 
-    🟢 CLEAN-2: cmd_analytics() — إزالة الفحص المزدوج للمطور
-        (كان _check_developer يُنفَّذ مرتين: في cmd_analytics + في
-        show_analytics_menu).
+    🆕 AUTO-2: أمر /autotune — مكافئ للزر، من أي محادثة.
 
-    🟢 CLEAN-3: تصدير صريح لـ_register_analytics_handlers في __all__.
+    🆕 AUTO-3: cmd_autotune + show_autotune — fallback آمن إذا
+        db_diagnostics < v7.2.24 (رسالة إرشادية بدل خطأ).
 
-    🟢 INTEGRATION: يعمل مع bot.py v5.6.32+ الذي يستدعي
-        register_handlers(app) مباشرة، فيسجّل:
-          • CallbackQueryHandler: 12 زر (بما فيها databases_btn)
-          • /analytics, /fullhealth, /latency, /versions,
-            /analytics_reset, /databases
+    🆕 AUTO-4: الزر يظهر دائماً في القائمة، لكن يعرض "غير متاح"
+        إذا لم يكن db_diagnostics >= v7.2.24.
+
+    🆕 AUTO-5: ANALYTICS_BUTTONS أضيف فيه "autotune_btn".
+
+    🆕 AUTO-6: __all__ تصدير show_autotune + cmd_autotune.
+
+v1.3.2 — محفوظ:
+    🟢 CLEAN-1: regex-escape آمن.
+    🟢 CLEAN-2: إزالة الفحص المزدوج في cmd_analytics.
+    🟢 CLEAN-3: تصدير صريح لـ_register_analytics_handlers.
 
 v1.3.1 — محفوظ:
-    🔴 FIX-1: force_refresh=True → False (cache يعمل الآن).
+    🔴 FIX-1: force_refresh=True → False.
     🟢 NEW-1: /databases command.
     🟢 NEW-2: زر 🗂️ قواعد البيانات.
     🟢 NEW-3: show_databases() يستدعي diagnose_databases().
@@ -29,10 +35,7 @@ v1.3.1 — محفوظ:
 v1.3.0 — محفوظ:
     🚀 PERF-1: cache ذكي (TTL=60s).
     🚀 PERF-2: رد فوري على callback.
-    🎯 FEAT-1: مقارنة تاريخية في show_growth_30d.
-    🎯 FEAT-2: /versions.
-    🎯 FEAT-3: /analytics_reset.
-    🟡 IMPROVE-1..4.
+    🎯 FEAT-1..3.
     ✅ HA1..HA31 محفوظة.
 
 v1.2.3..1.1.1 — محفوظة.
@@ -79,7 +82,30 @@ ANALYTICS_BUTTONS = (
     "full_health_btn",
     "latency_btn",
     "databases_btn",
+    "autotune_btn",         # 🆕 v1.3.3
 )
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# 🆕 v1.3.3 — كشف توفر ميزة الضبط التلقائي (v7.2.24+)
+# ═══════════════════════════════════════════════════════════════════════
+
+_AUTOTUNE_AVAILABLE = False
+_AUTOTUNE_IMPORT_ERROR: Optional[str] = None
+
+try:
+    from db_diagnostics import (
+        diagnose_autovacuum_tuning as _diagnose_autovacuum_tuning_fn,
+        VERSION as _DB_DIAG_VERSION_AT,
+    )
+    _AUTOTUNE_AVAILABLE = True
+except Exception as _at_err:
+    _diagnose_autovacuum_tuning_fn = None
+    try:
+        from db_diagnostics import VERSION as _DB_DIAG_VERSION_AT
+    except Exception:
+        _DB_DIAG_VERSION_AT = "unknown"
+    _AUTOTUNE_IMPORT_ERROR = f"{type(_at_err).__name__}: {_at_err}"
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -100,7 +126,7 @@ async def _cached_db_call(
     """
     cache ذكي لاستعلامات DB.
 
-    v1.3.1 FIX-1: افتراضي force_refresh=False — يقرأ cache طبيعياً.
+    v1.3.1 FIX-1: افتراضي force_refresh=False.
     زر التحديث في handle_analytics_callback يُبطل cache ثم يستدعي.
     """
     now = time.monotonic()
@@ -576,9 +602,13 @@ def _default_analytics_keyboard(lang: str = "ar") -> InlineKeyboardMarkup:
          InlineKeyboardButton(
             _lbl("analytics_latency", "🔬 اختبار الكمون"),
             callback_data="latency_btn")],
+        # 🆕 v1.3.3 — صف واحد: databases + autotune
         [InlineKeyboardButton(
             _lbl("analytics_databases", "🗂️ قواعد البيانات"),
-            callback_data="databases_btn")],
+            callback_data="databases_btn"),
+         InlineKeyboardButton(
+            _lbl("analytics_autotune", "⚙️ ضبط autovacuum"),
+            callback_data="autotune_btn")],
         [InlineKeyboardButton(
             _lbl("refresh_btn", "🔄 تحديث"),
             callback_data="refresh_btn")],
@@ -670,11 +700,21 @@ async def show_analytics_menu(update: Update,
             f"/{cache_stats['max_entries']}"
         )
 
+        # 🆕 v1.3.3 — مؤشر توفّر الضبط التلقائي
+        autotune_line = (
+            "⚙️ autovacuum-tuning: 🟢 متاح"
+            if _AUTOTUNE_AVAILABLE else
+            "⚙️ autovacuum-tuning: 🔴 غير متاح "
+            f"<i>(يتطلب v7.2.24+، الحالي: "
+            f"{_html_mod.escape(str(_DB_DIAG_VERSION_AT))})</i>"
+        )
+
         text = (
             "📊 <b>التحليلات المتقدمة</b>\n"
             "━━━━━━━━━━━━━━━━━━━━━━\n\n"
             f"✅ DB: <code>{db_type}</code>\n"
             f"✅ AnalyticsMixin: مُحمَّل\n"
+            f"{autotune_line}\n"
             f"{cache_info}\n"
             f"🕐 <i>{TimeUtils.mecca_iso()[:19]}</i>"
         )
@@ -705,7 +745,6 @@ async def show_growth_30d(update: Update,
         await _reject_non_dev(context.bot, chat_id, query)
         return
 
-    # 🆕 v1.3.1 FIX-1: cache طبيعي — زر التحديث يُبطله عبر handle_analytics_callback
     force_refresh = False
 
     try:
@@ -816,7 +855,7 @@ async def show_top_channels(update: Update,
             "top_channels_10",
             lambda: DB.get_top_channels(limit=10),
             ttl=60.0,
-            force_refresh=False,  # v1.3.1 FIX-1
+            force_refresh=False,
         )
         rows = rows or []
 
@@ -879,7 +918,7 @@ async def show_publish_stats(update: Update,
             "publish_stats",
             lambda: DB.get_publish_stats(),
             ttl=60.0,
-            force_refresh=False,  # v1.3.1 FIX-1
+            force_refresh=False,
         )
         stats = stats or {}
 
@@ -944,7 +983,7 @@ async def show_channels_rate(update: Update,
             lambda: DB.get_channel_success_rate(
                 limit=20, filter_min_attempts=3),
             ttl=60.0,
-            force_refresh=False,  # v1.3.1 FIX-1
+            force_refresh=False,
         )
         rows = rows or []
 
@@ -1009,7 +1048,7 @@ async def show_subscriptions(update: Update,
             "subscriptions_6m",
             lambda: DB.get_subscription_rate(months=6),
             ttl=120.0,
-            force_refresh=False,  # v1.3.1 FIX-1
+            force_refresh=False,
         )
         rows = rows or []
 
@@ -1067,7 +1106,6 @@ async def show_pool_live(update: Update,
         if not hasattr(DB, "get_pool_live"):
             raise AttributeError("DB.get_pool_live غير موجود")
 
-        # Pool live → دائماً fresh (لا cache)
         pool = await DB.get_pool_live() or {}
 
         if not pool.get("available"):
@@ -1150,7 +1188,7 @@ async def show_slow_queries(update: Update,
             "slow_queries_15",
             lambda: DB.get_slowest_queries(limit=15),
             ttl=30.0,
-            force_refresh=False,  # v1.3.1 FIX-1
+            force_refresh=False,
         )
         rows = rows or []
 
@@ -1255,7 +1293,7 @@ async def export_excel(update: Update,
             "export_growth_30d",
             lambda: DB.get_user_growth(days=30),
             ttl=60.0,
-            force_refresh=False,  # v1.3.1 FIX-1
+            force_refresh=False,
         ) or []
         for r in rows1:
             ws1.append([r.get("date"), r.get("count")])
@@ -1689,6 +1727,155 @@ async def show_databases(update: Update,
 
 
 # ═══════════════════════════════════════════════════════════════════════
+# 🆕 v1.3.3 — 12b) ضبط autovacuum (db_diagnostics v7.2.24+)
+# ═══════════════════════════════════════════════════════════════════════
+
+async def show_autotune(update: Update,
+                        context: ContextTypes.DEFAULT_TYPE) -> None:
+    """⚙️ ضبط autovacuum تلقائي — تقرير + تنفيذ فوري."""
+    query = update.callback_query
+    chat_id = _safe_get_chat_id(update, query)
+    user_id = _get_safe_user_id(update)
+
+    await _quick_answer(query, "⏳ جاري الضبط...")
+
+    if not _check_developer(user_id):
+        await _reject_non_dev(context.bot, chat_id, query)
+        return
+
+    if chat_id is None:
+        return
+
+    # فحص التوفّر
+    if not _AUTOTUNE_AVAILABLE or _diagnose_autovacuum_tuning_fn is None:
+        err = (
+            "⚙️ <b>ضبط autovacuum — غير متاح</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"❌ يتطلب <code>db_diagnostics ≥ v7.2.24</code>\n"
+            f"📦 الحالي: <code>{_html_mod.escape(str(_DB_DIAG_VERSION_AT))}</code>\n"
+        )
+        if _AUTOTUNE_IMPORT_ERROR:
+            err += (
+                f"\n<b>سبب الاستيراد:</b>\n"
+                f"<code>{_html_mod.escape(_AUTOTUNE_IMPORT_ERROR[:200])}</code>\n"
+            )
+        err += (
+            "\n💡 <b>الحل:</b> ارفع <code>db_diagnostics.py</code> "
+            "إلى v7.2.24+ (يحتوي على ensure_autovacuum_tuning)."
+        )
+        kb = _back_keyboard("admin_analytics")
+        if query:
+            await _safe_edit(query, err, kb)
+        else:
+            await safe_send(context.bot, chat_id, err, reply_markup=kb)
+        return
+
+    # فحص PG
+    try:
+        if not bool(getattr(DB, "USE_POSTGRES", False)):
+            err = (
+                "⚠️ <b>الضبط التلقائي يتطلب PostgreSQL</b>\n"
+                "━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                f"النوع الحالي: "
+                f"<code>{_html_mod.escape(str(getattr(DB, 'DB_TYPE', '?')).upper())}</code>"
+            )
+            kb = _back_keyboard("admin_analytics")
+            if query:
+                await _safe_edit(query, err, kb)
+            else:
+                await safe_send(context.bot, chat_id, err, reply_markup=kb)
+            return
+    except Exception:
+        pass
+
+    waiting_text = (
+        "⚙️ <b>جاري ضبط autovacuum...</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        "🔍 فحص reloptions الحالية + اكتشاف الجداول عالية الـ churn\n"
+        "⏳ 2-5 ثواني..."
+    )
+
+    waiting_msg = None
+    if query:
+        try:
+            await _safe_edit(query, waiting_text, None)
+        except Exception as e:
+            logger.debug(f"show_autotune waiting (edit): {e}")
+    else:
+        try:
+            waiting_msg = await context.bot.send_message(
+                chat_id, waiting_text, parse_mode="HTML",
+                disable_web_page_preview=True,
+            )
+        except Exception as e:
+            logger.debug(f"show_autotune waiting (send): {e}")
+
+    async def _cleanup_waiting(success: bool = False):
+        if waiting_msg is None:
+            return
+        try:
+            if success:
+                await waiting_msg.edit_text(
+                    "✅ <b>التقرير جاهز 👇</b>",
+                    parse_mode="HTML",
+                    disable_web_page_preview=True,
+                )
+            else:
+                await waiting_msg.delete()
+        except Exception as e:
+            logger.debug(f"_cleanup_waiting: {e}")
+
+    try:
+        report = await _diagnose_autovacuum_tuning_fn(force=True)
+        if not report:
+            report = "⚠️ لا توجد بيانات."
+
+        back_kb = _back_refresh_keyboard(
+            target="admin_analytics",
+            refresh="autotune_btn",
+        )
+
+        MAX_SINGLE = 3800
+        if len(report) <= MAX_SINGLE and query:
+            ok = await _safe_edit(query, report, back_kb)
+            if ok:
+                return
+            await _safe_send_long(
+                context.bot, chat_id, report,
+                reply_markup=back_kb,
+            )
+        else:
+            await _cleanup_waiting(success=True)
+            if query:
+                try:
+                    await _safe_edit(
+                        query,
+                        "✅ <b>التقرير جاهز 👇</b>",
+                        None,
+                    )
+                except Exception as e:
+                    logger.debug(f"show_autotune after: {e}")
+            await _safe_send_long(
+                context.bot, chat_id, report,
+                reply_markup=back_kb,
+            )
+
+    except Exception as e:
+        logger.error("show_autotune: %s", e, exc_info=True)
+        await _cleanup_waiting(success=False)
+        err_html = _err_detail(e)
+        err_text = (
+            f"❌ <b>فشل ضبط autovacuum</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━\n{err_html}"
+        )
+        if query:
+            await _safe_edit(
+                query, err_text, _back_keyboard("admin_analytics"))
+        else:
+            await safe_send(context.bot, chat_id, err_text)
+
+
+# ═══════════════════════════════════════════════════════════════════════
 # 13) /versions
 # ═══════════════════════════════════════════════════════════════════════
 
@@ -1767,6 +1954,14 @@ async def cmd_versions(update: Update,
     lines.append(
         f"💾 cache: <b>{cache_stats['total_keys']}</b>"
         f"/{cache_stats['max_entries']}"
+    )
+
+    # 🆕 v1.3.3 — مؤشر الضبط
+    lines.append(
+        "⚙️ autotune: " + (
+            "🟢 متاح" if _AUTOTUNE_AVAILABLE else
+            f"🔴 غير متاح <i>(db_diagnostics={_html_mod.escape(str(_DB_DIAG_VERSION_AT))})</i>"
+        )
     )
 
     lines.append(f"🕐 <i>{TimeUtils.mecca_iso()[:19]}</i>")
@@ -1866,6 +2061,7 @@ _ANALYTICS_HANDLERS = {
     "full_health_btn": show_full_health,
     "latency_btn": show_latency,
     "databases_btn": show_databases,
+    "autotune_btn": show_autotune,       # 🆕 v1.3.3
 }
 
 
@@ -1892,7 +2088,6 @@ async def handle_analytics_callback(
         last = context.user_data.get(
             "last_analytics_btn", "admin_analytics")
         data = last
-        # 🆕 v1.3.1 FIX-1: refresh يُبطل cache → الدوال تقرأ fresh
         _invalidate_analytics_cache()
     else:
         context.user_data["last_analytics_btn"] = data
@@ -1929,7 +2124,7 @@ async def handle_analytics_callback(
 async def cmd_analytics(update: Update,
                         context: ContextTypes.DEFAULT_TYPE) -> None:
     """
-    🆕 v1.3.2 CLEAN-2: نُفوّض التحقق الكامل إلى show_analytics_menu
+    v1.3.2 CLEAN-2: نُفوّض التحقق الكامل إلى show_analytics_menu
     (التي تفحص _check_developer بنفسها) — لتفادي التنفيذ المزدوج.
     """
     await show_analytics_menu(update, context)
@@ -1951,13 +2146,19 @@ async def cmd_databases(update: Update,
     await show_databases(update, context)
 
 
+async def cmd_autotune(update: Update,
+                       context: ContextTypes.DEFAULT_TYPE) -> None:
+    """⚙️ v1.3.3: أمر مباشر لضبط autovacuum."""
+    await show_autotune(update, context)
+
+
 # ═══════════════════════════════════════════════════════════════════════
 # 17) التسجيل
 # ═══════════════════════════════════════════════════════════════════════
 
 def register_handlers(application) -> bool:
     """
-    v1.3.2: يُسجّل كل الـ handlers (buttons + commands).
+    v1.3.3: يُسجّل كل الـ handlers (buttons + commands).
 
     يُستدعى من bot.py v5.6.32+ ضمن [ORDER 5/6].
     في حال نجاحه، لا حاجة للتسجيل اليدوي في bot.py.
@@ -1966,7 +2167,6 @@ def register_handlers(application) -> bool:
         True إن نجح التسجيل (كل الأوامر)، False إن فشل.
     """
     try:
-        # 🆕 v1.3.2 CLEAN-1: regex-escape آمن للأزرار
         _safe_buttons = "|".join(
             _re_mod.escape(b) for b in ANALYTICS_BUTTONS
         )
@@ -1999,12 +2199,18 @@ def register_handlers(application) -> bool:
         application.add_handler(
             CommandHandler("databases", cmd_databases)
         )
+        application.add_handler(
+            CommandHandler("autotune", cmd_autotune)
+        )
 
+        cmds = (
+            "analytics, fullhealth, latency, versions, "
+            "analytics_reset, databases, autotune"
+        )
         logger.info(
-            "✅ handlers_analytics v1.3.2: %d زر + 6 أوامر "
-            "(analytics, fullhealth, latency, versions, "
-            "analytics_reset, databases)",
+            "✅ handlers_analytics v1.3.3: %d زر + 7 أوامر (%s)",
             len(ANALYTICS_BUTTONS),
+            cmds,
         )
         return True
     except Exception as e:
@@ -2034,12 +2240,14 @@ __all__ = [
     "show_full_health",
     "show_latency",
     "show_databases",
+    "show_autotune",            # 🆕 v1.3.3
     "cmd_analytics",
     "cmd_fullhealth",
     "cmd_latency",
     "cmd_versions",
     "cmd_analytics_reset",
     "cmd_databases",
+    "cmd_autotune",             # 🆕 v1.3.3
     "register_handlers",
     "register",
     "_cached_db_call",
@@ -2050,13 +2258,21 @@ __all__ = [
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# LOAD BEACON — v1.3.2
+# LOAD BEACON — v1.3.3
 # ═══════════════════════════════════════════════════════════════════════
 
 try:
     logger.info(
-        "✅ handlers_analytics v1.3.2 loaded | "
+        "✅ handlers_analytics v1.3.3 loaded | "
         "buttons=%d | "
+        "AUTO-1=autotune-btn | "
+        "AUTO-2=/autotune | "
+        "AUTO-3=safe-fallback | "
+        "AUTO-4=btn-always-visible | "
+        "AUTO-5=buttons-tuple | "
+        "AUTO-6=exports | "
+        "autotune_available=%s | "
+        "db_diag_version=%s | "
         "CLEAN-1=regex-escape | "
         "CLEAN-2=cmd-analytics-no-double-check | "
         "INTEGRATION=bot.py-v5.6.32-register-handlers | "
@@ -2071,6 +2287,8 @@ try:
         "FEAT-3=/analytics_reset | "
         "KEPT: HA1..HA31",
         len(ANALYTICS_BUTTONS),
+        _AUTOTUNE_AVAILABLE,
+        _DB_DIAG_VERSION_AT,
         _DB_CACHE_TTL_DEFAULT,
         _DB_CACHE_MAX_ENTRIES,
     )
