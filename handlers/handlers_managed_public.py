@@ -1,28 +1,21 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-handlers/handlers_managed_public.py — معالجات البوتات المُدارة (v5.7.3 - DB-MIGRATION)
+handlers/handlers_managed_public.py — معالجات البوتات المُدارة (v5.7.7 - KEYWORDS)
 =================================================================================
 📌 المسؤولية:
     • بناء (on_start, on_text) لكل بوت مُدار (bid).
-    • منطق الرسائل الأربع المتتالية (start → reply → third → fourth).
+    • مطابقة الكلمات المفتاحية في on_text (قبل التسلسل).
+    • إذا وُجدت كلمة → يرد بها (لا يتقدم التسلسل).
+    • إذا لم توجد → يكمل التسلسل (reply → third → fourth).
     • إدارة حالة المستخدم في الذاكرة + حفظها في قاعدة البيانات.
-    • منع الأدمن/المطور من استهلاك دورة الرسائل (للاختبار).
-    • قفل per-user (lock striping بـ 64) لتجنب race على double-tap.
+    • قفل per-user (lock striping) لتجنب race على double-tap.
 
-🎯 العقد:
-    managed_bots_runner.start_one() → يستورد:
-        • make_managed_handlers(bid) → (on_start, on_text)
-        • post_init_managed(app) → coroutine
-
-    يعتمد على:
-        • utils.safe_send — إرسال آمن مع retry
-        • managed_bots_storage.load/save_managed_state (async) + get_lock
-        • config.CONFIG.PRIMARY_OWNER_ID / DEVELOPER_IDS (skip)
-
-🚫 لا يحتوي:
-    • تشغيل/إيقاف البوتات (مكانه: managed_bots_runner.py)
-    • لوحة الإدارة (مكانه: handlers_managed_bots.py)
+🆕 v5.7.7 (KEYWORDS):
+    • إضافة دالة _find_keyword_match للبحث عن الكلمات.
+    • مطابقة ذكية: تبحث عن الكلمة داخل نص المستخدم (سواء في البداية أو الوسط).
+    • الأولوية للكلمات الأطول (أكثر تحديداً).
+    • في الخاص فقط: البوت يتجاهل المجموعات تماماً.
 =================================================================================
 """
 
@@ -52,8 +45,6 @@ logger = logging.getLogger(__name__)
 # ═══════════════════════════════════════════════════════════════════════════
 
 _FIELDS: Tuple[str, str, str, str] = ("start", "reply", "third", "fourth")
-
-# عدد stripes للأقفال (per-user lock via hashing) — لا ننشئ 10K lock
 _NUM_LOCK_STRIPES = 64
 
 
@@ -93,18 +84,16 @@ def _stripes(app: Application) -> List[asyncio.Lock]:
 
 
 def _lock_for_user(app: Application, user_id: int) -> asyncio.Lock:
-    """قفل per-user (striped) — يمنع race على double-tap."""
+    """قفل per-user (striped)."""
     return _stripes(app)[int(user_id) % _NUM_LOCK_STRIPES]
 
 
-# 🆕 v5.7.3: def → async def (لأن load_managed_state أصبح async)
 async def _get_state(
     app: Application, bid: int,
 ) -> Dict[int, Dict[str, bool]]:
     """يحمل حالة هذا البوت مرة واحدة إلى bot_data."""
     state = app.bot_data.get("_managed_state")
     if state is None:
-        # 🆕 v5.7.3: await
         full = await load_managed_state()
         state = full.get(bid, {})
         app.bot_data["_managed_state"] = state
@@ -112,11 +101,19 @@ async def _get_state(
 
 
 def _get_messages(app: Application) -> Dict[str, str]:
-    """رسائل البوت من bot_data (fallback إلى الافتراضي)."""
+    """رسائل البوت من bot_data."""
     msgs = app.bot_data.get("managed_messages")
     if not isinstance(msgs, dict):
         return get_default_messages()
     return msgs
+
+
+def _get_keywords(app: Application) -> Dict[str, str]:
+    """🆕 v5.7.7: كلمات هذا البوت من bot_data."""
+    kws = app.bot_data.get("managed_keywords")
+    if not isinstance(kws, dict):
+        return {}
+    return kws
 
 
 async def _persist(
@@ -124,26 +121,63 @@ async def _persist(
     bid: int,
     state: Dict[int, Dict[str, bool]],
 ) -> None:
-    """حفظ حالة هذا البوت (read-modify-write مع قفل مشترك)."""
+    """حفظ حالة هذا البوت (read-modify-write)."""
     try:
         async with get_lock():
-            # 🆕 v5.7.3: await
             full = await load_managed_state()
             full[bid] = state
-            # 🆕 v5.7.3: await
             await save_managed_state(full)
     except Exception as e:
         logger.warning("managed_bot #%s: persist state: %s", bid, e)
 
 
 def _ensure_fields(user_state: Dict[str, bool]) -> None:
-    """يضمن وجود المفاتيح الأربعة."""
     for f in _FIELDS:
         user_state.setdefault(f, False)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# 3. make_managed_handlers — المصنع
+# 🆕 v5.7.7: مطابقة الكلمات المفتاحية
+# ═══════════════════════════════════════════════════════════════════════════
+
+def _normalize_for_match(text: str) -> str:
+    """تطبيع النص للمطابقة (trim + lowercase)."""
+    if not text:
+        return ""
+    return text.strip().lower()
+
+
+def _find_keyword_match(
+    user_text: str, keywords: Dict[str, str],
+) -> Tuple[str, str]:
+    """
+    يبحث عن أول كلمة مفتاحية موجودة في نص المستخدم.
+    
+    Returns: (keyword, reply) أو ("", "") إذا لم يوجد.
+    
+    💡 الأولوية: الكلمات الأطول أولاً (أكثر تحديداً).
+       مثال: لو أضفت "اليمن" و "أنا من اليمن"،
+              فالبوت سيفضل "أنا من اليمن" عند مطابقتها.
+    """
+    if not user_text or not keywords:
+        return "", ""
+
+    text_norm = _normalize_for_match(user_text)
+    if not text_norm:
+        return "", ""
+
+    # ترتيب الكلمات بالأطول أولاً
+    sorted_kws = sorted(keywords.items(), key=lambda x: -len(x[0]))
+    for kw, reply in sorted_kws:
+        kw_norm = _normalize_for_match(kw)
+        if kw_norm and kw_norm in text_norm:
+            return kw, reply
+
+    return "", ""
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# 3. make_managed_handlers
 # ═══════════════════════════════════════════════════════════════════════════
 
 def make_managed_handlers(bid: int) -> Tuple[Callable, Callable]:
@@ -151,12 +185,13 @@ def make_managed_handlers(bid: int) -> Tuple[Callable, Callable]:
     يبني (on_start, on_text) لبوت محدد.
 
     المنطق:
-        /start  → رسالة "start" (مرة واحدة) → mark start=True
-        نص 1    → رسالة "reply"              → mark reply=True
-        نص 2    → رسالة "third"              → mark third=True
-        نص 3    → رسالة "fourth"             → mark fourth=True
-        نص 4+   → صمت (اكتملت الدورة)
-        /start#2 → صمت (start=True)
+        /start  → رسالة "start" (مرة واحدة)
+        
+        نص:
+          1. ابحث في الكلمات المفتاحية → إذا وُجدت → رد بها (لا يتقدم التسلسل)
+          2. إذا لم تُوجد → أكمل التسلسل (reply → third → fourth)
+        
+        ⚠️ في الخاص فقط (المجموعات تُتجاهل تماماً).
     """
 
     async def on_start(update: Any, context: Any) -> None:
@@ -175,13 +210,12 @@ def make_managed_handlers(bid: int) -> Tuple[Callable, Callable]:
             lock = _lock_for_user(app, user.id)
 
             async with lock:
-                # 🆕 v5.7.3: await (لأن _get_state أصبح async)
                 state = await _get_state(app, bid)
                 user_state = state.get(user.id, {})
                 _ensure_fields(user_state)
 
                 if user_state.get("start", False):
-                    return  # صمت — بدأ مسبقاً
+                    return
 
                 msgs = _get_messages(app)
                 text = msgs.get("start", "")
@@ -190,10 +224,6 @@ def make_managed_handlers(bid: int) -> Tuple[Callable, Callable]:
 
                 sent = await safe_send(context.bot, chat.id, text)
                 if sent is None:
-                    logger.debug(
-                        "managed_bot #%s: send 'start' failed for %s",
-                        bid, user.id,
-                    )
                     return
 
                 user_state = state.setdefault(user.id, {})
@@ -207,6 +237,7 @@ def make_managed_handlers(bid: int) -> Tuple[Callable, Callable]:
     async def on_text(update: Any, context: Any) -> None:
         try:
             chat = update.effective_chat
+            # ⚠️ في الخاص فقط — المجموعات تُتجاهل تماماً
             if chat is None or chat.type != "private":
                 return
             msg = update.message
@@ -220,7 +251,25 @@ def make_managed_handlers(bid: int) -> Tuple[Callable, Callable]:
             lock = _lock_for_user(app, user.id)
 
             async with lock:
-                # 🆕 v5.7.3: await (لأن _get_state أصبح async)
+                # ═══ 1. الكلمات المفتاحية أولاً ═══
+                keywords = _get_keywords(app)
+                if keywords:
+                    kw_matched, reply = _find_keyword_match(
+                        msg.text, keywords
+                    )
+                    if kw_matched and reply:
+                        sent = await safe_send(
+                            context.bot, chat.id, reply
+                        )
+                        if sent is not None:
+                            logger.debug(
+                                "managed_bot #%s: keyword '%s' "
+                                "matched for user %s",
+                                bid, kw_matched[:30], user.id,
+                            )
+                            return  # ✅ لا يتقدم التسلسل
+
+                # ═══ 2. التسلسل الأربع ═══
                 state = await _get_state(app, bid)
                 user_state = state.get(user.id, {})
                 _ensure_fields(user_state)
@@ -237,10 +286,6 @@ def make_managed_handlers(bid: int) -> Tuple[Callable, Callable]:
 
                     sent = await safe_send(context.bot, chat.id, text)
                     if sent is None:
-                        logger.debug(
-                            "managed_bot #%s: send '%s' failed for %s",
-                            bid, field, user.id,
-                        )
                         return
 
                     user_state = state.setdefault(user.id, {})
@@ -264,7 +309,6 @@ def make_managed_handlers(bid: int) -> Tuple[Callable, Callable]:
 async def post_init_managed(app: Application) -> None:
     """
     يمسح أوامر Telegram للبوت المُدار (لا /help، لا /start preview).
-    يُستدعى يدوياً من runner بعد app.start().
     """
     try:
         await app.bot.set_my_commands(
@@ -297,9 +341,9 @@ __all__ = [
 
 try:
     logger.debug(
-        "🛡️ handlers_managed_public v5.7.3 (DB-MIGRATION) loaded | "
-        "flow=start→reply→third→fourth | "
-        "locks=striped(%d) | persist=async",
+        "🛡️ handlers_managed_public v5.7.7 (KEYWORDS) loaded | "
+        "flow=keywords→reply→third→fourth | "
+        "locks=striped(%d) | private_only=True",
         _NUM_LOCK_STRIPES,
     )
 except Exception:
