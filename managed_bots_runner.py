@@ -1,24 +1,21 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-managed_bots_runner.py — دورة حياة البوتات المُدارة (v5.7.3 - DB-MIGRATION)
+managed_bots_runner.py — دورة حياة البوتات المُدارة (v5.7.7 - KEYWORDS)
 =================================================================================
 📌 المسؤولية:
     • تشغيل/إيقاف كل بوت مُدار كـ Application مستقل (polling).
     • إدارة القاموس العالمي RUNNING[bid] → Application.
+    • تحميل الكلمات المفتاحية في bot_data عند التشغيل.
     • retry ذكي عند أخطاء الشبكة (لا retry عند invalid token).
-    • تنظيف آمن عند فشل جزئي (updater → app → shutdown).
     • منع تعارض التوكن مع Relax Manager.
-    • إعادة تحميل الرسائل في الذاكرة (reload_messages) بدون restart.
 
-🎯 التغييرات الأساسية في v5.7.3:
-    • await load_managed_bots() (لأن التخزين أصبح async).
-    • reload_messages() أصبحت async.
-    • لا تغيير في أي منطق آخر.
-
-🚫 لا يحتوي:
-    • DB I/O (مكانه: managed_bots_storage.py)
-    • معالجات Telegram (مكانه: handlers_managed_*.py)
+🆕 v5.7.7 (KEYWORDS):
+    • استيراد load_managed_keywords من managed_bots_storage.
+    • تحميل الكلمات المفتاحية وإضافتها إلى app.bot_data["managed_keywords"]
+      عند تشغيل كل بوت (start_one).
+    • دالة reload_messages أصبحت تُحدّث الكلمات المفتاحية أيضاً 
+      (للتأثير الفوري عند إضافة/حذف كلمة من اللوحة).
 =================================================================================
 """
 
@@ -26,6 +23,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from typing import Any, Dict, List, Optional, Tuple
 
 from telegram import Update
@@ -48,6 +46,7 @@ from config import CONFIG
 from managed_bots_storage import (
     get_default_messages,
     load_managed_bots,
+    load_managed_keywords,  # 🆕 v5.7.7
 )
 
 logger = logging.getLogger(__name__)
@@ -65,10 +64,14 @@ _TIMEOUTS: Dict[str, float] = {
 }
 
 _RETRY_DELAYS: Tuple[int, ...] = (2, 4, 6)
-
 _INTER_START_DELAY = 0.3
 
-_RELAX_TOKEN: str = (getattr(CONFIG, "TOKEN", "") or "").strip()
+# قراءة توكن Relax Manager من env أولاً (مطابق لـ bot.py)
+_RELAX_TOKEN: str = (
+    os.getenv("BOT_TOKEN", "").strip()
+    or getattr(CONFIG, "TOKEN", "")
+    or ""
+).strip()
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -175,32 +178,30 @@ async def start_one(
         if existing_token == token:
             logger.debug("start_one(#%s): يعمل مسبقاً بنفس التوكن", bid)
             return True
-        logger.warning(
-            "start_one(#%s): التوكن تغيّر — إعادة تشغيل", bid
-        )
+        logger.warning("start_one(#%s): التوكن تغيّر — إعادة تشغيل", bid)
         await stop_one(bid)
 
-    # استيراد متأخر للـ handlers
+    # استيراد متأخر للـ handlers (لتفادي خطأ إن لم تُنشأ بعد)
     try:
-        from handlers.handlers_managed_public import (  # type: ignore
+        from handlers.handlers_managed_public import (
             make_managed_handlers,
             post_init_managed,
         )
     except ImportError as _ie:
         logger.error(
-            "❌ start_one(#%s): handlers.handlers_managed_public مفقود — %s\n"
-            "   أنشئ handlers/handlers_managed_public.py أولاً.",
+            "❌ start_one(#%s): handlers.handlers_managed_public مفقود — %s",
             bid, _ie,
         )
         return False
 
-    # 🆕 v5.7.3: await (التخزين أصبح async)
+    # تحميل الرسائل + الكلمات من قاعدة البيانات
     stored = await load_managed_bots()
     messages = (
         stored.get(bid, {}).get("messages")
         or get_default_messages()
     )
     name = stored.get(bid, {}).get("name", "")
+    keywords = await load_managed_keywords(bid)  # 🆕 v5.7.7
 
     last_err: Optional[BaseException] = None
 
@@ -211,54 +212,45 @@ async def start_one(
             app.bot_data["managed_bid"] = bid
             app.bot_data["managed_messages"] = dict(messages)
             app.bot_data["managed_name"] = name
-
+            app.bot_data["managed_keywords"] = dict(keywords)  # 🆕 v5.7.7
+            
             app.post_init = post_init_managed
 
             on_start, on_text = make_managed_handlers(bid)
             private = filters.ChatType.PRIVATE
-            app.add_handler(
-                CommandHandler("start", on_start, filters=private)
-            )
-            app.add_handler(
-                MessageHandler(
-                    filters.TEXT & ~filters.COMMAND & private,
-                    on_text,
-                )
-            )
+            app.add_handler(CommandHandler("start", on_start, filters=private))
+            app.add_handler(MessageHandler(
+                filters.TEXT & ~filters.COMMAND & private, on_text,
+            ))
             app.add_error_handler(_error_handler)
 
             await app.initialize()
             await app.start()
-            await app.updater.start_polling(  # type: ignore[union-attr]
+            await app.updater.start_polling(
                 drop_pending_updates=True,
                 allowed_updates=[Update.MESSAGE],
             )
 
             RUNNING[bid] = app
             logger.info(
-                "✅ managed_bot #%s (@%s) started", bid, name or "?"
+                "✅ managed_bot #%s (@%s) started | keywords=%d",
+                bid, name or "?", len(keywords)
             )
             return True
 
         except InvalidToken as _e:
-            logger.error(
-                "❌ managed_bot #%s: توكن غير صالح — %s", bid, _e
-            )
+            logger.error("❌ managed_bot #%s: توكن غير صالح — %s", bid, _e)
             await _safe_cleanup(app)
             return False
-
         except Forbidden as _e:
-            logger.error(
-                "❌ managed_bot #%s: محظور/موقوف — %s", bid, _e
-            )
+            logger.error("❌ managed_bot #%s: محظور — %s", bid, _e)
             await _safe_cleanup(app)
             return False
-
         except (NetworkError, TimedOut) as _e:
             last_err = _e
             logger.warning(
-                "📡 managed_bot #%s: خطأ شبكة (%d/%d) — %s",
-                bid, attempt, max_retries, type(_e).__name__,
+                "📡 managed_bot #%s: خطأ شبكة (%d/%d)",
+                bid, attempt, max_retries,
             )
             await _safe_cleanup(app)
             if attempt < max_retries:
@@ -269,16 +261,13 @@ async def start_one(
                 )
                 await asyncio.sleep(delay)
                 continue
-
         except asyncio.CancelledError:
             await _safe_cleanup(app)
             raise
-
         except Exception as _e:
             logger.error(
                 "❌ managed_bot #%s: %s: %s",
-                bid, type(_e).__name__, _e,
-                exc_info=True,
+                bid, type(_e).__name__, _e, exc_info=True,
             )
             await _safe_cleanup(app)
             return False
@@ -307,13 +296,11 @@ async def stop_one(bid: int, timeout: float = 10.0) -> None:
                 await updater.stop()
         except Exception as _e:
             logger.debug("stop_one(#%s) updater: %s", bid, _e)
-
         try:
             if getattr(app, "running", False):
                 await app.stop()
         except Exception as _e:
             logger.debug("stop_one(#%s) app.stop: %s", bid, _e)
-
         try:
             await app.shutdown()
         except Exception as _e:
@@ -323,9 +310,7 @@ async def stop_one(bid: int, timeout: float = 10.0) -> None:
         await asyncio.wait_for(_do(), timeout=timeout)
         logger.info("🛑 managed_bot #%s stopped", bid)
     except asyncio.TimeoutError:
-        logger.warning(
-            "⏱️ stop_one(#%s): timeout %.0fs", bid, timeout
-        )
+        logger.warning("⏱️ stop_one(#%s): timeout %.0fs", bid, timeout)
     except asyncio.CancelledError:
         raise
     except Exception as _e:
@@ -348,19 +333,18 @@ async def restart_one(
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# 7. reload_messages — بدون restart
+# 7. reload_messages — بدون restart (يُحدّث الرسائل + الكلمات)
 # ═══════════════════════════════════════════════════════════════════════════
 
 async def reload_messages(bid: int) -> bool:
     """
-    يعيد قراءة رسائل بوت من DB إلى bot_data.
-    🆕 v5.7.3: أصبحت async (لأن التخزين async).
+    يعيد قراءة رسائل وكلمات بوت من DB إلى bot_data.
+    يُستخدم من اللوحة بعد تعديل الرسائل أو الكلمات.
     """
     app = RUNNING.get(bid)
     if app is None:
         return False
 
-    # 🆕 v5.7.3: await
     bots = await load_managed_bots()
     entry = bots.get(bid)
     if entry is None:
@@ -370,7 +354,15 @@ async def reload_messages(bid: int) -> bool:
         entry.get("messages") or get_default_messages()
     )
     app.bot_data["managed_name"] = entry.get("name", "")
-    logger.debug("managed_bot #%s: messages reloaded", bid)
+
+    # 🆕 v5.7.7: إعادة تحميل الكلمات المفتاحية
+    keywords = await load_managed_keywords(bid)
+    app.bot_data["managed_keywords"] = dict(keywords)
+
+    logger.debug(
+        "managed_bot #%s: reloaded (messages + keywords=%d)",
+        bid, len(keywords)
+    )
     return True
 
 
@@ -397,21 +389,16 @@ def running_count() -> int:
 async def start_all_managed_bots() -> Dict[int, bool]:
     """يبدأ كل البوتات المُدارة المحفوظة."""
     try:
-        # 🆕 v5.7.3: await
         bots = await load_managed_bots()
     except Exception as _e:
-        logger.error(
-            "❌ start_all_managed_bots: فشل قراءة التخزين — %s", _e
-        )
+        logger.error("❌ start_all_managed_bots: %s", _e)
         return {}
 
     if not bots:
         logger.info("ℹ️ managed_bots: لا توجد بوتات محفوظة — تخطي")
         return {}
 
-    logger.info(
-        "🚀 managed_bots: بدء %d بوت مُدار...", len(bots)
-    )
+    logger.info("🚀 managed_bots: بدء %d بوت مُدار...", len(bots))
 
     results: Dict[int, bool] = {}
     for bid, info in bots.items():
@@ -422,14 +409,9 @@ async def start_all_managed_bots() -> Dict[int, bool]:
     started = sum(1 for v in results.values() if v)
     failed = [b for b, v in results.items() if not v]
 
-    logger.info(
-        "✅ managed_bots: %d/%d يعمل الآن", started, len(results)
-    )
+    logger.info("✅ managed_bots: %d/%d يعمل الآن", started, len(results))
     if failed:
-        logger.warning(
-            "⚠️ managed_bots: فشل تشغيل %s — يمكن إعادة المحاولة من اللوحة",
-            failed,
-        )
+        logger.warning("⚠️ managed_bots: فشل تشغيل %s", failed)
     return results
 
 
@@ -451,9 +433,7 @@ async def stop_all_managed_bots(timeout: float = 15.0) -> None:
     except asyncio.CancelledError:
         raise
     except Exception as _e:
-        logger.warning(
-            "stop_all_managed_bots: %s", _e, exc_info=True
-        )
+        logger.warning("stop_all_managed_bots: %s", _e, exc_info=True)
     finally:
         RUNNING.clear()
     logger.info("✅ managed_bots: أُوقفت كل البوتات")
@@ -483,8 +463,8 @@ __all__ = [
 
 try:
     logger.debug(
-        "🛡️ managed_bots_runner v5.7.3 (DB-MIGRATION) loaded | "
-        "timeouts=%s | retries=%d | reload_messages=async",
+        "🛡️ managed_bots_runner v5.7.7 (KEYWORDS) loaded | "
+        "timeouts=%s | retries=%d | keywords_enabled=True",
         _TIMEOUTS, len(_RETRY_DELAYS),
     )
 except Exception:
