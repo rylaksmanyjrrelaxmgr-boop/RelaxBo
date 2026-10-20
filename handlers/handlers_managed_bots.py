@@ -1,23 +1,19 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-handlers/handlers_managed_bots.py — لوحة إدارة البوتات المُدارة (v5.7.5)
+handlers/handlers_managed_bots.py — لوحة إدارة (v5.7.7 - KEYWORDS-UI)
 =================================================================================
 📌 المسؤولية:
     • register_managed_bots_handlers(app) — تسجيل pattern="^mb_"
     • لوحة إدارة كاملة: عرض/إضافة/تعديل/تشغيل/إيقاف/حذف
-    • استقبال النص المعلّق (توكن/رسالة) عبر MessageHandler
-    • استخدام ApplicationHandlerStop لتفادي تداخل MessageHandlers
+    • 🆕 إدارة الكلمات المفتاحية (عرض/إضافة/حذف).
+    • استقبال النص المعلّق (توكن/رسالة/كلمة/رد).
 
-🆕 v5.7.5 (FIX-INFINITE-HANG):
-    🔴 إصلاح "جاري التحقق" يعلّق للأبد.
-    السبب: Event Loop يحجب بسبب استعلام DB بطيء (12.4s)،
-           فلا يستطيع aiohttp إكمال الطلب.
-    الحل:
-       • asyncio.wait_for(verify, 15s) — حد أقصى 15 ثانية.
-       • asyncio.wait_for(start_one, 30s) — حد أقصى 30 ثانية.
-       • تحديث status_msg بعد التحقق ("✅ تم التحقق، جاري التشغيل...").
-       • عرض الخطأ بوضوح للمستخدم إذا فشل أي مؤقت.
+🆕 v5.7.7 (KEYWORDS-UI):
+    • زر "🔑 الكلمات المفتاحية (N)" في تفاصيل كل بوت.
+    • لوحة إدارة الكلمات: عرض الكلمات المخزنة + أزرار حذف.
+    • إضافة كلمة = خطوتان (الكلمة، ثم الرد).
+    • حذف كل الكلمات تلقائياً عند حذف البوت.
 =================================================================================
 """
 
@@ -27,7 +23,8 @@ import asyncio
 import logging
 import re
 from datetime import datetime, timezone
-from typing import Any, Dict, Optional
+from html import escape as _html_escape
+from typing import Any, Dict, List, Optional, Tuple
 
 import aiohttp
 
@@ -49,10 +46,15 @@ from managed_bots_runner import (
     stop_one,
 )
 from managed_bots_storage import (
+    add_managed_keyword,
+    delete_all_keywords_for_bot,
+    delete_managed_keyword,
     get_default_messages,
+    get_keyword_count,
     get_lock,
     get_stats,
     load_managed_bots,
+    load_managed_keywords,
     load_managed_state,
     next_managed_bot_id,
     save_managed_bots,
@@ -61,26 +63,33 @@ from managed_bots_storage import (
 
 logger = logging.getLogger(__name__)
 
-# ─── ثوابت ───
+
+# ═══════════════════════════════════════════════════════════════════════════
+# 1. ثوابت
+# ═══════════════════════════════════════════════════════════════════════════
+
 _FIELD_LABEL: Dict[str, str] = {
     "start":  "1️⃣ /start",
     "reply":  "2️⃣ أول نص",
     "third":  "3️⃣ ثاني نص",
     "fourth": "4️⃣ رابع نص",
 }
+
 _TOKEN_MIN_LEN = 20
 _TOKEN_MAX_LEN = 200
 _MSG_MAX_LEN = 4000
-_TOKEN_RE = re.compile(r"^\d{6,12}:[A-Za-z0-9_\-]{30,}$")
-_MAX_BOTS_IN_PANEL = 12
+_KW_MAX_LEN = 100
 
-# ─── v5.7.5: Timeouts صارمة ───
+_TOKEN_RE = re.compile(r"^\d{6,12}:[A-Za-z0-9_\-]{30,}$")
+
+_MAX_BOTS_IN_PANEL = 12
+_MAX_KW_DISPLAY = 15
 _VERIFY_TIMEOUT_SEC = 15.0
 _START_TIMEOUT_SEC = 30.0
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# 1. أدوات
+# 2. أدوات
 # ═══════════════════════════════════════════════════════════════════════════
 
 def _is_admin(user_id: Optional[int]) -> bool:
@@ -111,15 +120,19 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
 
 
-async def _safe_edit(query: Any, text: str,
-                    reply_markup: Optional[InlineKeyboardMarkup] = None,
-                    parse_mode: str = "HTML") -> None:
+async def _safe_edit(
+    query: Any,
+    text: str,
+    reply_markup: Optional[InlineKeyboardMarkup] = None,
+    parse_mode: str = "HTML",
+) -> None:
     msg = getattr(query, "message", None)
     if msg is None:
         try:
             await query.bot.send_message(
-                chat_id=query.from_user.id, text=text,
-                reply_markup=reply_markup, parse_mode=parse_mode,
+                chat_id=query.from_user.id,
+                text=text, reply_markup=reply_markup,
+                parse_mode=parse_mode,
             )
         except Exception:
             pass
@@ -153,12 +166,8 @@ def _kb_back() -> InlineKeyboardMarkup:
     )
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-# 2. التحقق من التوكن (aiohttp مباشر)
-# ═══════════════════════════════════════════════════════════════════════════
-
 async def _verify_token_via_api(raw_token: str) -> Optional[str]:
-    """يتحقق من التوكن عبر Telegram Bot API مباشرة."""
+    """التحقق من التوكن عبر Telegram Bot API (لا يعلّق)."""
     url = f"https://api.telegram.org/bot{raw_token}/getMe"
     try:
         timeout = aiohttp.ClientTimeout(total=_VERIFY_TIMEOUT_SEC, connect=5)
@@ -167,15 +176,12 @@ async def _verify_token_via_api(raw_token: str) -> Optional[str]:
                 if resp.status == 401:
                     return None
                 if resp.status != 200:
-                    logger.warning("verify_token: HTTP %d", resp.status)
                     return None
                 data = await resp.json()
                 if not data.get("ok"):
                     return None
-                username = (data.get("result", {}).get("username") or "").strip()
-                return username
+                return (data.get("result", {}).get("username") or "").strip()
     except asyncio.TimeoutError:
-        logger.warning("verify_token: timeout")
         return None
     except Exception as e:
         logger.error("verify_token: %s: %s", type(e).__name__, e)
@@ -183,22 +189,20 @@ async def _verify_token_via_api(raw_token: str) -> Optional[str]:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# 3. بناء اللوحة
+# 3. بناء اللوحات
 # ═══════════════════════════════════════════════════════════════════════════
 
-def _build_panel(bots: Dict[int, Dict[str, Any]],
-                 state: Dict[int, Any]) -> tuple:
+def _build_panel(bots, state) -> tuple:
     if not bots:
-        text = (
+        return (
             "🎛️ <b>مدير البوتات العامة</b>\n"
             "━━━━━━━━━━━━━━━━━━━━\n\n"
             "📭 لا توجد بوتات مضافة بعد.\n\n"
-            "💡 اضغط الزر أدناه لإضافة بوت عام جديد عبر توكنه."
+            "💡 اضغط الزر أدناه لإضافة بوت عام جديد عبر توكنه.",
+            InlineKeyboardMarkup([[
+                InlineKeyboardButton("➕ إضافة بوت جديد", callback_data="mb_add")
+            ]]),
         )
-        kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton("➕ إضافة بوت جديد", callback_data="mb_add")],
-        ])
-        return text, kb
 
     stats = get_stats(bots, state)
     lines = [
@@ -230,8 +234,12 @@ def _build_panel(bots: Dict[int, Dict[str, Any]],
     return "\n".join(lines), InlineKeyboardMarkup(rows)
 
 
-def _build_bot_detail(bid: int, info: Dict[str, Any],
-                     users_state: Dict[int, Any]) -> tuple:
+def _build_bot_detail(
+    bid: int,
+    info: Dict[str, Any],
+    users_state: Dict[int, Any],
+    n_keywords: int = 0,
+) -> tuple:
     msgs = info.get("messages") or get_default_messages()
     alive = "🟢 يعمل" if is_running(bid) else "🔴 متوقف"
     uname = info.get("name") or "?"
@@ -249,6 +257,7 @@ def _build_bot_detail(bid: int, info: Dict[str, Any],
         f"🔌 الحالة: {alive}\n"
         f"👥 المستخدمون: <b>{n_users}</b>\n"
         f"✅ أكملوا: <b>{n_completed}</b>\n"
+        f"🔑 الكلمات المفتاحية: <b>{n_keywords}</b>\n"
         f"📅 أُضيف: <code>{added}</code>\n\n"
         "📝 <b>الرسائل:</b>\n"
         f"1️⃣ <code>{_short(msgs.get('start',  ''), 60)}</code>\n"
@@ -269,9 +278,71 @@ def _build_bot_detail(bid: int, info: Dict[str, Any],
         [InlineKeyboardButton("✏️ رسالة 2", callback_data=f"mb_set:{bid}:reply"),
          InlineKeyboardButton("✏️ رسالة 3", callback_data=f"mb_set:{bid}:third")],
         [InlineKeyboardButton("✏️ رسالة 4", callback_data=f"mb_set:{bid}:fourth")],
+        [InlineKeyboardButton(
+            f"🔑 الكلمات المفتاحية ({n_keywords})",
+            callback_data=f"mb_kw:{bid}",
+        )],
         [InlineKeyboardButton("🗑️ حذف البوت", callback_data=f"mb_del:{bid}")],
         [InlineKeyboardButton("🔙 رجوع", callback_data="mb_panel")],
     ]
+    return text, InlineKeyboardMarkup(rows)
+
+
+def _build_keyword_panel(
+    bid: int, keywords: Dict[str, str],
+) -> tuple:
+    if not keywords:
+        text = (
+            f"🔑 <b>الكلمات المفتاحية — بوت #{bid}</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━\n\n"
+            "📭 لا توجد كلمات مفتاحية مضافة بعد.\n\n"
+            "💡 مثال:\n"
+            "  • الكلمة: <code>اليمن</code>\n"
+            "  • الرد: <code>🇾🇪 أهلاً بك يا يمني!</code>\n\n"
+            "عندما يكتب أي مستخدم كلمة 'اليمن' في رسالته،\n"
+            "سيرد البوت بهذا الرد فوراً."
+        )
+    else:
+        lines = [
+            f"🔑 <b>الكلمات المفتاحية — بوت #{bid}</b>",
+            "━━━━━━━━━━━━━━━━━━━━",
+            f"📋 <b>{len(keywords)}</b> كلمة مخزنة:",
+            "",
+        ]
+        sorted_kws = sorted(keywords.items())
+        for idx, (kw, rp) in enumerate(sorted_kws[:_MAX_KW_DISPLAY], 1):
+            lines.append(
+                f"{idx}. 🔹 <code>{_html_escape(_short(kw, 30))}</code>\n"
+                f"   ↪️ {_html_escape(_short(rp, 50))}"
+            )
+        if len(sorted_kws) > _MAX_KW_DISPLAY:
+            lines.append(
+                f"\n⚠️ يُعرض {_MAX_KW_DISPLAY}/{len(sorted_kws)} — "
+                f"احذف بعضها لعرض الباقي"
+            )
+        text = "\n".join(lines)
+
+    rows = []
+    sorted_kws = sorted(keywords.items()) if keywords else []
+    # أزرار حذف (2 في كل صف)
+    for i in range(0, min(len(sorted_kws), _MAX_KW_DISPLAY), 2):
+        chunk = sorted_kws[i:i + 2]
+        row = []
+        for j, (kw, _) in enumerate(chunk):
+            idx = i + j
+            row.append(InlineKeyboardButton(
+                f"🗑️ {_short(kw, 12)}",
+                callback_data=f"mb_kw_del:{bid}:{idx}",
+            ))
+        rows.append(row)
+
+    rows.append([InlineKeyboardButton(
+        "➕ إضافة كلمة جديدة", callback_data=f"mb_kw_add:{bid}"
+    )])
+    rows.append([InlineKeyboardButton(
+        "🔙 رجوع للبوت", callback_data=f"mb_bot:{bid}"
+    )])
+
     return text, InlineKeyboardMarkup(rows)
 
 
@@ -329,7 +400,8 @@ async def _cb_bot(update, context) -> None:
             await _safe_edit(query, "⚠️ البوت غير موجود.", _kb_back())
             return
         state = await load_managed_state()
-        text, kb = _build_bot_detail(bid, info, state.get(bid, {}))
+        n_kw = await get_keyword_count(bid)
+        text, kb = _build_bot_detail(bid, info, state.get(bid, {}), n_kw)
         await _safe_edit(query, text, kb)
     except Exception as e:
         logger.error("_cb_bot: %s", e, exc_info=True)
@@ -399,21 +471,121 @@ async def _cb_toggle(update, context) -> None:
                 )
             except asyncio.TimeoutError:
                 ok = False
-                logger.error("toggle start_one timeout")
             if not ok:
                 await _safe_edit(
                     query,
-                    f"❌ فشل تشغيل بوت #{bid}.\nتحقق من التوكن أو الصلاحيات.",
+                    f"❌ فشل تشغيل بوت #{bid}.\n"
+                    "تحقق من التوكن أو الصلاحيات.",
                     _kb_back(),
                 )
                 return
 
         state = await load_managed_state()
-        text, kb = _build_bot_detail(bid, info, state.get(bid, {}))
+        n_kw = await get_keyword_count(bid)
+        text, kb = _build_bot_detail(bid, info, state.get(bid, {}), n_kw)
         await _safe_edit(query, text, kb)
     except Exception as e:
         logger.error("_cb_toggle: %s", e, exc_info=True)
 
+
+# ═══ 🆕 v5.7.7: لوحة الكلمات المفتاحية ═══
+
+async def _cb_kw_panel(update, context) -> None:
+    """عرض لوحة الكلمات المفتاحية."""
+    query = update.callback_query
+    await query.answer()
+    if not _is_admin(query.from_user.id):
+        return
+    m = re.match(r"^mb_kw:(\d+)$", query.data or "")
+    if not m:
+        return
+    bid = int(m.group(1))
+    context.user_data.pop("managed_pending", None)
+    try:
+        keywords = await load_managed_keywords(bid)
+        text, kb = _build_keyword_panel(bid, keywords)
+        await _safe_edit(query, text, kb)
+    except Exception as e:
+        logger.error("_cb_kw_panel: %s", e, exc_info=True)
+
+
+async def _cb_kw_add(update, context) -> None:
+    """بدء إضافة كلمة مفتاحية (خطوة 1: الكلمة)."""
+    query = update.callback_query
+    await query.answer()
+    if not _is_admin(query.from_user.id):
+        return
+    m = re.match(r"^mb_kw_add:(\d+)$", query.data or "")
+    if not m:
+        return
+    bid = int(m.group(1))
+    context.user_data["managed_pending"] = {
+        "kind": "kw_keyword", "bid": bid,
+    }
+    await _safe_edit(
+        query,
+        f"➕ <b>إضافة كلمة مفتاحية — بوت #{bid}</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━\n\n"
+        "<b>الخطوة 1 من 2: الكلمة</b>\n\n"
+        "📩 أرسل الكلمة التي تريد أن يبحث عنها البوت.\n"
+        "مثل: <code>اليمن</code> أو <code>صنعاء</code> أو <code>عدن</code>\n\n"
+        "💡 المطابقة: إذا كانت الكلمة موجودة داخل رسالة المستخدم.\n"
+        f"الحد الأقصى: {_KW_MAX_LEN} حرف.",
+        _kb_cancel(),
+    )
+
+
+async def _cb_kw_del(update, context) -> None:
+    """حذف كلمة بالترتيب (index)."""
+    query = update.callback_query
+    await query.answer()
+    if not _is_admin(query.from_user.id):
+        return
+    m = re.match(r"^mb_kw_del:(\d+):(\d+)$", query.data or "")
+    if not m:
+        return
+    bid = int(m.group(1))
+    idx = int(m.group(2))
+    try:
+        keywords = await load_managed_keywords(bid)
+        sorted_kws = sorted(keywords.items())
+        if not (0 <= idx < len(sorted_kws)):
+            await _safe_edit(
+                query, "⚠️ الكلمة غير موجودة (ربما حُذفت).",
+                InlineKeyboardMarkup([[
+                    InlineKeyboardButton("🔙 رجوع", callback_data=f"mb_kw:{bid}")
+                ]])
+            )
+            return
+        kw_to_del, _ = sorted_kws[idx]
+        ok = await delete_managed_keyword(bid, kw_to_del)
+        if not ok:
+            await _safe_edit(
+                query, "❌ فشل الحذف.",
+                InlineKeyboardMarkup([[
+                    InlineKeyboardButton("🔙 رجوع", callback_data=f"mb_kw:{bid}")
+                ]])
+            )
+            return
+        # إعادة تحميل الكلمات في البوت العامل
+        try:
+            await reload_messages(bid)
+        except Exception:
+            pass
+        # عرض اللوحة المحدثة
+        keywords = await load_managed_keywords(bid)
+        text, kb = _build_keyword_panel(bid, keywords)
+        await _safe_edit(
+            query,
+            f"🗑️ حُذفت: <code>{_html_escape(_short(kw_to_del, 30))}</code>\n\n"
+            + text,
+            kb,
+        )
+    except Exception as e:
+        logger.error("_cb_kw_del: %s", e, exc_info=True)
+
+
+# ═══ حذف البوت ═══
 
 async def _cb_del_confirm(update, context) -> None:
     query = update.callback_query
@@ -431,6 +603,7 @@ async def _cb_del_confirm(update, context) -> None:
             return
         state = await load_managed_state()
         n_users = len(state.get(bid, {}))
+        n_kw = await get_keyword_count(bid)
         kb = InlineKeyboardMarkup([
             [InlineKeyboardButton(
                 f"✅ نعم، احذف #{bid}", callback_data=f"mb_dodel:{bid}"
@@ -442,8 +615,9 @@ async def _cb_del_confirm(update, context) -> None:
             f"⚠️ <b>تأكيد حذف بوت #{bid}</b>\n"
             "━━━━━━━━━━━━━━━━━━━━\n"
             "• سيُوقف البوت فوراً\n"
-            "• ستُحذف رسائله من التخزين\n"
+            "• ستُحذف رسائله\n"
             f"• ستُحذف بيانات <b>{n_users}</b> مستخدم\n"
+            f"• ستُحذف <b>{n_kw}</b> كلمة مفتاحية\n"
             "• لا يمكن التراجع\n\n"
             "هل أنت متأكد؟",
             kb,
@@ -466,8 +640,8 @@ async def _cb_del_do(update, context) -> None:
 
     try:
         await stop_one(bid)
-    except Exception as _e:
-        logger.debug("del_bot stop: %s", _e)
+    except Exception:
+        pass
 
     try:
         async with get_lock():
@@ -479,8 +653,10 @@ async def _cb_del_do(update, context) -> None:
             if bid in state:
                 del state[bid]
                 await save_managed_state(state)
-    except Exception as _e:
-        logger.error("del_bot storage: %s", _e, exc_info=True)
+        # 🆕 v5.7.7: حذف الكلمات المفتاحية
+        await delete_all_keywords_for_bot(bid)
+    except Exception as e:
+        logger.error("del_bot: %s", e, exc_info=True)
         await _safe_edit(query, "❌ فشل الحذف.", _kb_back())
         return
 
@@ -490,11 +666,11 @@ async def _cb_del_do(update, context) -> None:
         text, kb = _build_panel(bots, state)
         await _safe_edit(query, f"🗑️ تم حذف بوت #{bid}.\n\n" + text, kb)
     except Exception as e:
-        logger.error("_cb_del_do final panel: %s", e, exc_info=True)
+        logger.error("_cb_del_do: %s", e, exc_info=True)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# 5. معالج النص
+# 5. معالج النص المعلّق
 # ═══════════════════════════════════════════════════════════════════════════
 
 async def _handle_pending_text(update, context) -> None:
@@ -517,6 +693,10 @@ async def _handle_pending_text(update, context) -> None:
         await _process_addbot(update, context, raw)
     elif kind == "set":
         await _process_set(update, context, pending, raw)
+    elif kind == "kw_keyword":
+        await _process_kw_keyword(update, context, pending, raw)
+    elif kind == "kw_reply":
+        await _process_kw_reply(update, context, pending, raw)
     else:
         context.user_data.pop("managed_pending", None)
         return
@@ -525,40 +705,28 @@ async def _handle_pending_text(update, context) -> None:
 
 
 async def _process_addbot(update, context, raw: str) -> None:
-    """
-    🆕 v5.7.5: timeouts صارمة لكل خطوة.
-    """
-    logger.info("_process_addbot: بدأ | len=%d", len(raw) if raw else 0)
+    logger.info("_process_addbot: len=%d", len(raw) if raw else 0)
 
-    # ── 1. تحقق أولي ──
     if not raw or len(raw) < _TOKEN_MIN_LEN or len(raw) > _TOKEN_MAX_LEN:
-        await update.message.reply_text(
-            "❌ التوكن غير صالح (الطول غير متوقع).\nأعد الإرسال أو /cancel."
-        )
+        await update.message.reply_text("❌ التوكن غير صالح (الطول).")
         return
-
     if not _TOKEN_RE.match(raw):
         await update.message.reply_text(
-            "❌ شكل التوكن غير صحيح.\n"
-            "يجب أن يكون مثل: <code>123456789:ABC...xyz</code>",
+            "❌ شكل التوكن غير صحيح.\nمثل: <code>123456789:ABC...xyz</code>",
             parse_mode="HTML",
         )
         return
 
-    # ── 2. تحقق تعارض Relax ──
     relax_token = (getattr(CONFIG, "TOKEN", "") or "").strip()
     if relax_token and raw == relax_token:
         await update.message.reply_text("❌ هذا توكن Relax Manager نفسه!")
         return
 
-    # ── 3. عرض رسالة الحالة ──
     try:
         status_msg = await update.message.reply_text("⏳ جاري التحقق...")
-    except Exception as e:
-        logger.error("addbot status_msg: %s", e)
+    except Exception:
         return
 
-    # ── 4. التحقق مع timeout صارم ──
     username = None
     try:
         username = await asyncio.wait_for(
@@ -566,56 +734,36 @@ async def _process_addbot(update, context, raw: str) -> None:
             timeout=_VERIFY_TIMEOUT_SEC + 2.0,
         )
     except asyncio.TimeoutError:
-        logger.error("verify timeout +2s")
+        logger.error("verify timeout")
     except Exception as e:
         logger.error("verify exception: %s", e)
 
     if not username:
         try:
             await status_msg.edit_text(
-                "❌ فشل التحقق من التوكن.\n\n"
-                "الأسباب المحتملة:\n"
-                "• التوكن غير صالح (تأكد من @BotFather)\n"
-                "• السيرفر مشغول — انتظر دقيقة وأعد المحاولة\n"
-                "• شبكة Render تواجه مشاكل مؤقتة"
+                "❌ فشل التحقق من التوكن.\n"
+                "تحقق من التوكن أو الشبكة."
             )
         except Exception:
             pass
         return
 
-    # ── 5. تحديث الحالة (مهم! يخبر المستخدم أن التحقق نجح) ──
     try:
-        await status_msg.edit_text(
-            f"✅ تم التحقق من @{username}\n"
-            f"⏳ جاري حفظ البوت وتشغيله..."
-        )
+        await status_msg.edit_text(f"✅ تم التحقق من @{username}")
     except Exception:
         pass
 
-    # ── 6. تحقق التكرار ──
     try:
-        existing = await asyncio.wait_for(
-            load_managed_bots(), timeout=10.0
-        )
-    except Exception as e:
-        logger.error("load_managed_bots: %s", e)
-        try:
-            await status_msg.edit_text("❌ فشل قراءة التخزين.")
-        except Exception:
-            pass
+        existing = await load_managed_bots()
+    except Exception:
+        await status_msg.edit_text("❌ فشل قراءة التخزين.")
         return
 
     for bid, info in existing.items():
         if info.get("token") == raw:
-            try:
-                await status_msg.edit_text(
-                    f"⚠️ هذا التوكن مستخدم في بوت #{bid}."
-                )
-            except Exception:
-                pass
+            await status_msg.edit_text(f"⚠️ التوكن مستخدم في بوت #{bid}.")
             return
 
-    # ── 7. حفظ في DB ──
     try:
         async with get_lock():
             bots = await load_managed_bots()
@@ -626,82 +774,55 @@ async def _process_addbot(update, context, raw: str) -> None:
                 "messages": get_default_messages(),
                 "added_at": _now_iso(),
             }
-            await asyncio.wait_for(
-                save_managed_bots(bots), timeout=10.0
-            )
+            await save_managed_bots(bots)
     except Exception as e:
-        logger.error("save_managed_bots: %s", e)
-        try:
-            await status_msg.edit_text("❌ فشل الحفظ في قاعدة البيانات.")
-        except Exception:
-            pass
+        logger.error("addbot save: %s", e)
+        await status_msg.edit_text("❌ فشل الحفظ.")
         return
 
-    # ── 8. حذف رسالة التوكن ──
     try:
         await update.message.delete()
     except Exception:
         pass
 
-    # ── 9. تشغيل البوت (مع timeout صارم) ──
     context.user_data.pop("managed_pending", None)
-    logger.info("addbot: تشغيل #%d...", new_bid)
-
+    ok = False
     try:
         ok = await asyncio.wait_for(
-            start_one(new_bid, raw),
-            timeout=_START_TIMEOUT_SEC,
+            start_one(new_bid, raw), timeout=_START_TIMEOUT_SEC,
         )
-    except asyncio.TimeoutError:
-        logger.error("start_one timeout (%ss)", _START_TIMEOUT_SEC)
-        ok = False
-    except Exception as e:
-        logger.error("start_one exception: %s", e)
+    except (asyncio.TimeoutError, Exception) as e:
+        logger.error("start_one: %s", e)
         ok = False
 
-    status_text = "🟢 يعمل الآن" if ok else "🔴 فشل التشغيل — استخدم ▶️ لاحقاً"
-
-    # ── 10. رسالة النجاح ──
+    status_text = "🟢 يعمل الآن" if ok else "🔴 فشل التشغيل — استخدم ▶️"
     chat_id = update.effective_chat.id
     try:
         await context.bot.send_message(
             chat_id=chat_id,
             text=(
-                f"✅ أُضيف بوت <b>#{new_bid}</b> — @{username}\n"
-                f"{status_text}"
+                f"✅ أُضيف بوت <b>#{new_bid}</b> — @{username}\n{status_text}"
             ),
             parse_mode="HTML",
         )
-    except Exception as e:
-        logger.error("addbot success msg: %s", e)
+    except Exception:
+        pass
 
-    # ── 11. إرسال اللوحة ──
     try:
         bots = await load_managed_bots()
         state = await load_managed_state()
         text, kb = _build_panel(bots, state)
         await context.bot.send_message(
-            chat_id=chat_id, text=text,
-            reply_markup=kb, parse_mode="HTML",
+            chat_id=chat_id, text=text, reply_markup=kb, parse_mode="HTML",
         )
-    except Exception as e:
-        logger.error("addbot final panel: %s", e)
+    except Exception:
+        pass
 
 
-async def _process_set(update, context, pending: Dict[str, Any],
-                       raw: str) -> None:
+async def _process_set(update, context, pending, raw: str) -> None:
     bid = int(pending.get("bid", 0))
     field = pending.get("field", "")
-    if field not in _FIELD_LABEL:
-        context.user_data.pop("managed_pending", None)
-        return
-    if not raw:
-        await update.message.reply_text("⚠️ النص فارغ.")
-        return
-    if len(raw) > _MSG_MAX_LEN:
-        await update.message.reply_text(
-            f"⚠️ النص طويل جداً (الحد {_MSG_MAX_LEN} حرف)."
-        )
+    if field not in _FIELD_LABEL or not raw or len(raw) > _MSG_MAX_LEN:
         return
 
     new_text = raw.replace("|", "\n")
@@ -715,15 +836,15 @@ async def _process_set(update, context, pending: Dict[str, Any],
                 return
             bots[bid]["messages"][field] = new_text
             await save_managed_bots(bots)
-    except Exception as _e:
-        logger.error("set message: %s", _e, exc_info=True)
+    except Exception as e:
+        logger.error("set message: %s", e)
         await update.message.reply_text("❌ فشل الحفظ.")
         return
 
     try:
         await reload_messages(bid)
-    except Exception as _e:
-        logger.debug("reload_messages: %s", _e)
+    except Exception:
+        pass
 
     context.user_data.pop("managed_pending", None)
     await update.message.reply_text(
@@ -735,13 +856,97 @@ async def _process_set(update, context, pending: Dict[str, Any],
         bots = await load_managed_bots()
         state = await load_managed_state()
         info = bots.get(bid)
-        if info is not None:
-            text, kb = _build_bot_detail(bid, info, state.get(bid, {}))
+        if info:
+            n_kw = await get_keyword_count(bid)
+            text, kb = _build_bot_detail(bid, info, state.get(bid, {}), n_kw)
             await update.message.reply_text(
-                text=text, reply_markup=kb, parse_mode="HTML"
+                text=text, reply_markup=kb, parse_mode="HTML",
             )
-    except Exception as _e:
-        logger.debug("set final panel: %s", _e)
+    except Exception:
+        pass
+
+
+# ═══ 🆕 v5.7.7: إضافة كلمة مفتاحية (خطوتان) ═══
+
+async def _process_kw_keyword(update, context, pending, raw: str) -> None:
+    """الخطوة 1: استلام الكلمة."""
+    bid = int(pending.get("bid", 0))
+    if not raw:
+        await update.message.reply_text("⚠️ الكلمة فارغة.")
+        return
+    if len(raw) > _KW_MAX_LEN:
+        await update.message.reply_text(
+            f"⚠️ الكلمة طويلة (الحد {_KW_MAX_LEN} حرف)."
+        )
+        return
+
+    # حفظ الكلمة في pending، وطلب الرد
+    context.user_data["managed_pending"] = {
+        "kind": "kw_reply",
+        "bid": bid,
+        "keyword": raw,
+    }
+    await update.message.reply_text(
+        f"✅ الكلمة: <code>{_html_escape(raw)}</code>\n\n"
+        "<b>الخطوة 2 من 2: الرد</b>\n\n"
+        "📩 الآن أرسل الرد الذي سيرسله البوت عند مطابقة هذه الكلمة.\n\n"
+        "💡 مثال: <code>🇾🇪 أهلاً بك يا يمني!</code>",
+        parse_mode="HTML",
+    )
+
+
+async def _process_kw_reply(update, context, pending, raw: str) -> None:
+    """الخطوة 2: استلام الرد وحفظه."""
+    bid = int(pending.get("bid", 0))
+    keyword = (pending.get("keyword") or "").strip()
+
+    if not keyword:
+        context.user_data.pop("managed_pending", None)
+        await update.message.reply_text("⚠️ حدث خطأ، أعد المحاولة.")
+        return
+    if not raw:
+        await update.message.reply_text("⚠️ الرد فارغ.")
+        return
+    if len(raw) > _MSG_MAX_LEN:
+        await update.message.reply_text(
+            f"⚠️ الرد طويل (الحد {_MSG_MAX_LEN} حرف)."
+        )
+        return
+
+    try:
+        ok = await add_managed_keyword(bid, keyword, raw)
+    except Exception as e:
+        logger.error("add_keyword: %s", e)
+        ok = False
+
+    if not ok:
+        await update.message.reply_text("❌ فشل حفظ الكلمة.")
+        context.user_data.pop("managed_pending", None)
+        return
+
+    # إعادة تحميل الكلمات في البوت العامل
+    try:
+        await reload_messages(bid)
+    except Exception:
+        pass
+
+    context.user_data.pop("managed_pending", None)
+    await update.message.reply_text(
+        f"✅ <b>أُضيفت الكلمة المفتاحية</b>\n\n"
+        f"🔹 الكلمة: <code>{_html_escape(keyword)}</code>\n"
+        f"↪️ الرد: {_html_escape(_short(raw, 100))}",
+        parse_mode="HTML",
+    )
+
+    # عرض لوحة الكلمات المحدثة
+    try:
+        keywords = await load_managed_keywords(bid)
+        text, kb = _build_keyword_panel(bid, keywords)
+        await update.message.reply_text(
+            text=text, reply_markup=kb, parse_mode="HTML",
+        )
+    except Exception:
+        pass
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -757,6 +962,10 @@ def register_managed_bots_handlers(app: Application) -> None:
         (r"^mb_toggle:\d+$", _cb_toggle),
         (r"^mb_del:\d+$", _cb_del_confirm),
         (r"^mb_dodel:\d+$", _cb_del_do),
+        # 🆕 v5.7.7: الكلمات المفتاحية
+        (r"^mb_kw:\d+$", _cb_kw_panel),
+        (r"^mb_kw_add:\d+$", _cb_kw_add),
+        (r"^mb_kw_del:\d+:\d+$", _cb_kw_del),
     ]
 
     for pattern, cb in handlers:
@@ -774,8 +983,9 @@ def register_managed_bots_handlers(app: Application) -> None:
     )
 
     logger.info(
-        "✅ managed_bots v5.7.5: %d callbacks | verify=%ss | start=%ss",
-        len(handlers), _VERIFY_TIMEOUT_SEC, _START_TIMEOUT_SEC,
+        "✅ managed_bots v5.7.7: %d callbacks + 1 text handler | "
+        "keywords=enabled",
+        len(handlers),
     )
 
 
@@ -784,7 +994,7 @@ __all__ = ["register_managed_bots_handlers"]
 
 try:
     logger.debug(
-        "🛡️ handlers_managed_bots v5.7.5 (FIX-INFINITE-HANG) loaded"
+        "🛡️ handlers_managed_bots v5.7.7 (KEYWORDS-UI) loaded"
     )
 except Exception:
     pass
