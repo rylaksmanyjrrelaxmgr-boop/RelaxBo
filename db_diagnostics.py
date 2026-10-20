@@ -1,8 +1,29 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-db_diagnostics.py — واجهة تشخيص وصيانة قاعدة البيانات (v7.2.23 — CLEANUP-VISIBILITY)
+db_diagnostics.py — واجهة تشخيص وصيانة قاعدة البيانات (v7.2.24 — AUTO-TUNING)
 ================================================================================
+🆕 v7.2.24 — AUTO-TUNING (ضبط autovacuum تلقائيًا — بدون تغيير سلوكي للواجهات القديمة):
+
+    🆕 AUTO-TUNE-1: ensure_autovacuum_tuning() — يضبط autovacuum لكل جدول
+        حسب قواعد ثابتة + اكتشاف تلقائي للجداول عالية الـ churn.
+        • قواعد ثابتة للجداول المعروفة (managed_bot_*).
+        • اكتشاف تلقائي: أي جدول فيه dead_ratio ≥ 10% أو mod ≥ 1000 → يُضبط.
+        • يتحقق من reloptions قبل ALTER (idempotent — آمن للاستدعاء المتكرر).
+        • matviews تُتخطّى (لا تدعم reloptions autovacuum).
+
+    🆕 AUTO-TUNE-2: init_autovacuum_tuning() — يُستدعى مرة عند بدء البوت
+        لضمان أن الجداول مضبوطة من الثانية الأولى.
+
+    🆕 AUTO-TUNE-3: diagnose_autovacuum_tuning() + format_autovacuum_tuning()
+        — واجهة تشخيص/ضبط يدوية عبر أمر /db_tune.
+
+    🆕 AUTO-TUNE-4: _read_reloptions() + _build_alter_sql() — أدوات مساعدة
+        لقراءة الإعدادات الحالية وبناء ALTER آمن.
+
+    🆕 AUTO-TUNE-5: __all__ أضيفت فيه الدوال الجديدة.
+        load beacon محدث بـ v7.2.24.
+
 🆕 v7.2.23 — CLEANUP-VISIBILITY (بدون تغيير سلوكي لمستخدمي التشخيص):
 
     🔴 FIX-CLEANUP-1: auto_vacuum_dirty_mvs تُرجع الآن:
@@ -65,7 +86,7 @@ logger = logging.getLogger(__name__)
 # الإصدار + Startup grace
 # ═══════════════════════════════════════════════════════════════════════
 
-VERSION = "7.2.23"
+VERSION = "7.2.24"
 
 
 def _compute_process_start_monotonic() -> float:
@@ -218,6 +239,7 @@ _CACHE_TTL: Dict[str, float] = {
     "region_info":       3600.0,
     "multi_db":          60.0,
     "activity_stats":    5.0,
+    "autovacuum_tuning": 600.0,
 }
 
 
@@ -3160,6 +3182,254 @@ async def auto_vacuum_dirty_mvs(min_dead: int = 10) -> Dict[str, Any]:
 
 
 # ═══════════════════════════════════════════════════════════════════════
+# 11c) 🆕 v7.2.24 — AUTO-TUNING — ضبط autovacuum تلقائيًا لكل جدول
+# ═══════════════════════════════════════════════════════════════════════
+
+# قواعد ثابتة للجداول المعروفة (None = اتركها افتراضية)
+_AUTOVACUUM_TUNING_RULES: Dict[str, Optional[Dict[str, float]]] = {
+    # جداول صغيرة عالية التغيير (churn) → عتبات منخفضة
+    "managed_bot_users": {
+        "vacuum_scale_factor": 0.02,
+        "vacuum_threshold": 20,
+        "analyze_scale_factor": 0.01,
+        "analyze_threshold": 10,
+    },
+    "managed_bot_keywords": {
+        "vacuum_scale_factor": 0.05,
+        "vacuum_threshold": 20,
+        "analyze_scale_factor": 0.02,
+        "analyze_threshold": 10,
+    },
+    "managed_bot_keyword_replied": {
+        "vacuum_scale_factor": 0.05,
+        "vacuum_threshold": 20,
+        "analyze_scale_factor": 0.02,
+        "analyze_threshold": 10,
+    },
+    "managed_bots": {
+        "vacuum_scale_factor": 0.05,
+        "vacuum_threshold": 20,
+        "analyze_scale_factor": 0.02,
+        "analyze_threshold": 10,
+    },
+    # جداول نظامية شبه ثابتة → اتركها افتراضية
+    "schema_version": None,
+    "_dual_sync_state": None,
+    "mv_active_user_limits": None,
+}
+
+# اكتشاف تلقائي للجداول الأخرى عالية الـ churn
+_AUTOVACUUM_AUTO_DISCOVER = True
+_AUTOVACUUM_AUTO_RATIO = 0.10        # dead ratio ≥ 10% → ضبط
+_AUTOVACUUM_AUTO_MOD = 1000          # أو n_mod_since_analyze ≥ 1000
+_AUTOVACUUM_AUTO_MIN_DEAD = 20       # لا تلمس جداول صغيرة جدًا
+
+_AUTOVACUUM_TUNE_CACHE_KEY = "autovacuum_tuning"
+
+
+async def _read_reloptions(table: str) -> Dict[str, str]:
+    """يقرأ reloptions الحالية للجدول من pg_class."""
+    db = _get_db()
+    if db is None or not _is_postgres():
+        return {}
+    try:
+        row = await db.fetchone("""
+            SELECT COALESCE(reloptions, ARRAY[]::text[]) AS opts
+            FROM pg_class c
+            JOIN pg_namespace n ON n.oid = c.relnamespace
+            WHERE c.relname = $1 AND n.nspname = current_schema()
+            LIMIT 1
+        """, table)
+        if not isinstance(row, dict):
+            return {}
+        out: Dict[str, str] = {}
+        for o in (row.get("opts") or []):
+            if isinstance(o, str) and "=" in o:
+                k, v = o.split("=", 1)
+                out[k.strip()] = v.strip()
+        return out
+    except Exception:
+        return {}
+
+
+def _build_alter_sql(table: str, rules: Dict[str, float]) -> Optional[str]:
+    """يبني ALTER TABLE آمن (مع اقتباس الاسم)."""
+    if not rules:
+        return None
+    params = []
+    if "vacuum_scale_factor" in rules:
+        params.append(f"autovacuum_vacuum_scale_factor = {rules['vacuum_scale_factor']}")
+    if "vacuum_threshold" in rules:
+        params.append(f"autovacuum_vacuum_threshold = {int(rules['vacuum_threshold'])}")
+    if "analyze_scale_factor" in rules:
+        params.append(f"autovacuum_analyze_scale_factor = {rules['analyze_scale_factor']}")
+    if "analyze_threshold" in rules:
+        params.append(f"autovacuum_analyze_threshold = {int(rules['analyze_threshold'])}")
+    if not params:
+        return None
+    safe = str(table).replace('"', '""')
+    return f'ALTER TABLE "{safe}" SET ({", ".join(params)})'
+
+
+async def ensure_autovacuum_tuning(*, force: bool = False) -> Dict[str, Any]:
+    """
+    يضبط autovacuum لكل جدول حسب القواعد + الاكتشاف التلقائي.
+    آمن للاستدعاء المتكرر — يتحقق من reloptions ويتخطى المضبوط.
+    """
+    result: Dict[str, Any] = {
+        'ok': False, 'tuned': [], 'skipped': [], 'failed': [],
+        'duration_sec': 0.0,
+    }
+    db = _get_db()
+    if db is None or not _is_postgres():
+        result['ok'] = True
+        result['skipped'].append({'name': '*', 'reason': 'not_postgres'})
+        return result
+
+    if not force:
+        cached = _cache_get(_AUTOVACUUM_TUNE_CACHE_KEY)
+        if cached is not None:
+            return cached
+
+    start = time.monotonic()
+    targets: Dict[str, Dict[str, float]] = {}
+
+    # 1) الجداول المعروفة
+    for name, rules in _AUTOVACUUM_TUNING_RULES.items():
+        if rules is None:
+            result['skipped'].append({'name': name, 'reason': 'system_default'})
+            continue
+        targets[name] = rules
+
+    # 2) الاكتشاف التلقائي — جداول عالية churn
+    if _AUTOVACUUM_AUTO_DISCOVER:
+        try:
+            dirty, _ = await _get_all_tables_health()
+            for t in (dirty or []):
+                name = t['name']
+                if name in targets or name in _AUTOVACUUM_TUNING_RULES:
+                    continue
+                if t.get('is_matview'):
+                    continue  # MVs لا تدعم autovacuum options
+                dead = int(t.get('dead', 0))
+                ratio = float(t.get('ratio', 0))
+                mod = int(t.get('n_mod', 0))
+                if dead < _AUTOVACUUM_AUTO_MIN_DEAD:
+                    continue
+                if ratio < _AUTOVACUUM_AUTO_RATIO and mod < _AUTOVACUUM_AUTO_MOD:
+                    continue
+                targets[name] = {
+                    'vacuum_scale_factor': 0.05,
+                    'vacuum_threshold': 50,
+                    'analyze_scale_factor': 0.02,
+                    'analyze_threshold': 50,
+                }
+        except Exception as e:
+            logger.debug(f"ensure_autovacuum_tuning discovery: {e}")
+
+    # 3) تحقق + تطبيق
+    keymap = {
+        'vacuum_scale_factor':   'autovacuum_vacuum_scale_factor',
+        'vacuum_threshold':      'autovacuum_vacuum_threshold',
+        'analyze_scale_factor':  'autovacuum_analyze_scale_factor',
+        'analyze_threshold':     'autovacuum_analyze_threshold',
+    }
+    for name, rules in targets.items():
+        try:
+            current = await _read_reloptions(name)
+
+            already_ok = True
+            for k, want in rules.items():
+                cur = current.get(keymap.get(k, ""))
+                if cur is None or abs(float(cur) - float(want)) > 1e-9:
+                    already_ok = False
+                    break
+
+            if already_ok:
+                result['skipped'].append({
+                    'name': name, 'reason': 'already_tuned',
+                })
+                continue
+
+            sql = _build_alter_sql(name, rules)
+            if sql is None:
+                result['skipped'].append({'name': name, 'reason': 'no_rules'})
+                continue
+
+            await db.execute(sql)
+            result['tuned'].append({
+                'name': name,
+                'before': current,
+                'after': rules,
+            })
+            logger.info(f"🔧 autovacuum tuned: {name} → {rules}")
+        except Exception as e:
+            err = str(e)[:120]
+            logger.warning(f"ensure_autovacuum_tuning({name}): {err}")
+            result['failed'].append({'name': name, 'error': err})
+
+    result['duration_sec'] = round(time.monotonic() - start, 2)
+    result['ok'] = len(result['failed']) == 0
+    _cache_set(_AUTOVACUUM_TUNE_CACHE_KEY, result, ttl=600.0)
+    return result
+
+
+async def init_autovacuum_tuning() -> Dict[str, Any]:
+    """
+    يُستدعى مرة عند بدء البوت — يضبط autovacuum لكل الجداول.
+    آمن للاستدعاء المتكرر.
+    """
+    try:
+        result = await ensure_autovacuum_tuning()
+        tuned = len(result.get('tuned', []))
+        skipped = len(result.get('skipped', []))
+        failed = len(result.get('failed', []))
+        if tuned or failed:
+            logger.info(
+                "🔧 autovacuum auto-tuning: tuned=%d skipped=%d failed=%d (%.2fs)",
+                tuned, skipped, failed, result.get('duration_sec', 0.0),
+            )
+        return result
+    except Exception as e:
+        logger.warning(f"init_autovacuum_tuning: {e}")
+        return {'ok': False, 'error': str(e)}
+
+
+def format_autovacuum_tuning(result: Dict[str, Any]) -> str:
+    lines = ["⚙️ <b>ضبط autovacuum تلقائيًا</b>", "━━━━━━━━━━━━━━━━━━━━━━", ""]
+    tuned = result.get('tuned', [])
+    if tuned:
+        lines.append(f"✅ <b>ضُبطت ({len(tuned)}):</b>")
+        for t in tuned:
+            lines.append(f"  🔧 <code>{_esc(t['name'])}</code>")
+        lines.append("")
+    skipped = result.get('skipped', [])
+    if skipped:
+        lines.append(f"⏭️ <b>تخطّي ({len(skipped)}):</b>")
+        for t in skipped[:10]:
+            lines.append(f"  • <code>{_esc(t['name'])}</code> — "
+                         f"{_esc(t.get('reason', '?'))}")
+        if len(skipped) > 10:
+            lines.append(f"  … و{len(skipped) - 10} آخر")
+        lines.append("")
+    failed = result.get('failed', [])
+    if failed:
+        lines.append(f"❌ <b>فشل ({len(failed)}):</b>")
+        for t in failed[:10]:
+            lines.append(f"  • <code>{_esc(t['name'])}</code> — "
+                         f"{_esc(t.get('error', '?'))}")
+        lines.append("")
+    lines.append(f"⏱️ <i>{result.get('duration_sec', 0):.2f}s</i>")
+    return "\n".join(lines)
+
+
+async def diagnose_autovacuum_tuning(*, force: bool = False) -> str:
+    """واجهة تشخيص + ضبط يدوي عبر أمر /db_tune."""
+    result = await ensure_autovacuum_tuning(force=force)
+    return format_autovacuum_tuning(result)
+
+
+# ═══════════════════════════════════════════════════════════════════════
 # 12) Build Sections
 # ═══════════════════════════════════════════════════════════════════════
 
@@ -3608,6 +3878,12 @@ auto_cleanup = auto_vacuum_dirty_mvs
 cleanup_dead_tuples = auto_vacuum_dirty_mvs
 vacuum_dirty_tables = auto_vacuum_dirty_mvs
 
+# 🆕 v7.2.24 — AUTO-TUNING aliases
+autovacuum_tune = ensure_autovacuum_tuning
+tune_autovacuum = ensure_autovacuum_tuning
+tune_vacuum = ensure_autovacuum_tuning
+ensure_auto_tuning = ensure_autovacuum_tuning
+
 invalidate_cache = _invalidate_cache
 clear_cache = _invalidate_cache
 
@@ -3646,6 +3922,10 @@ __all__ = [
     "full_health", "check_full_health", "health_report",
     "auto_vacuum_dirty_mvs", "auto_vacuum", "auto_cleanup",
     "cleanup_dead_tuples", "vacuum_dirty_tables",
+    # 🆕 v7.2.24 — AUTO-TUNING
+    "ensure_autovacuum_tuning", "init_autovacuum_tuning",
+    "format_autovacuum_tuning", "diagnose_autovacuum_tuning",
+    "autovacuum_tune", "tune_autovacuum", "tune_vacuum", "ensure_auto_tuning",
     "preview_maintenance", "run_maintenance",
     "format_maintenance_preview", "format_maintenance_result",
     "diagnose_maintenance_preview", "run_db_maintenance",
@@ -3667,7 +3947,7 @@ __all__ = [
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# LOAD BEACON — v7.2.23
+# LOAD BEACON — v7.2.24
 # ═══════════════════════════════════════════════════════════════════════
 
 try:
@@ -3675,6 +3955,12 @@ try:
     _uptime_at_import = time.monotonic() - _PROCESS_IMPORT_TS
     logger.info(
         "🛡️ db_diagnostics.py v%s loaded | "
+        "AUTO-TUNING ✅ | "
+        "AUTO-TUNE-1=ensure_autovacuum_tuning ✅ | "
+        "AUTO-TUNE-2=init_autovacuum_tuning ✅ | "
+        "AUTO-TUNE-3=diagnose_autovacuum_tuning ✅ | "
+        "AUTO-TUNE-4=read_reloptions+build_alter_sql ✅ | "
+        "AUTO-TUNE-5=exports+beacon ✅ | "
         "CLEANUP-VISIBILITY ✅ | "
         "FIX-CLEANUP-1=skipped/remaining/dead_after ✅ | "
         "FIX-CLEANUP-2=read-after-always ✅ | "
