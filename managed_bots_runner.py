@@ -1,21 +1,28 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-managed_bots_runner.py — دورة حياة البوتات المُدارة (v5.7.7 - KEYWORDS)
+managed_bots_runner.py — دورة حياة البوتات المُدارة (v5.7.10)
 =================================================================================
 📌 المسؤولية:
     • تشغيل/إيقاف كل بوت مُدار كـ Application مستقل (polling).
     • إدارة القاموس العالمي RUNNING[bid] → Application.
     • تحميل الكلمات المفتاحية في bot_data عند التشغيل.
-    • retry ذكي عند أخطاء الشبكة (لا retry عند invalid token).
+    • retry ذكي عند أخطاء الشبكة.
     • منع تعارض التوكن مع Relax Manager.
+    • إعادة تحميل الرسائل والكلمات بدون restart.
+
+🆕 v5.7.10 (DEPLOY-CONFLICT-HANDLING):
+    • معالجة أفضل لـ Conflict أثناء النشر (Render Zero-Downtime):
+      - `_error_handler` يتعامل مع Conflict بلطف (بدون traceback مخيف).
+      - `_RETRY_DELAYS` أطول: (10, 20, 30) بدلاً من (2, 4, 6).
+      - يقلل من نافذة تعارض التوكن أثناء النشر.
 
 🆕 v5.7.7 (KEYWORDS):
-    • استيراد load_managed_keywords من managed_bots_storage.
-    • تحميل الكلمات المفتاحية وإضافتها إلى app.bot_data["managed_keywords"]
-      عند تشغيل كل بوت (start_one).
-    • دالة reload_messages أصبحت تُحدّث الكلمات المفتاحية أيضاً 
-      (للتأثير الفوري عند إضافة/حذف كلمة من اللوحة).
+    • تحميل الكلمات المفتاحية في bot_data عند التشغيل.
+    • reload_messages يعيد تحميل الكلمات أيضاً.
+
+🆕 v5.7.6 (ENV-TOKEN-FIX):
+    • _RELAX_TOKEN يقرأ من os.getenv("BOT_TOKEN") أولاً.
 =================================================================================
 """
 
@@ -29,6 +36,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from telegram import Update
 from telegram.error import (
     BadRequest,
+    Conflict,
     Forbidden,
     InvalidToken,
     NetworkError,
@@ -46,7 +54,7 @@ from config import CONFIG
 from managed_bots_storage import (
     get_default_messages,
     load_managed_bots,
-    load_managed_keywords,  # 🆕 v5.7.7
+    load_managed_keywords,
 )
 
 logger = logging.getLogger(__name__)
@@ -63,10 +71,11 @@ _TIMEOUTS: Dict[str, float] = {
     "pool_timeout": 20.0,
 }
 
-_RETRY_DELAYS: Tuple[int, ...] = (2, 4, 6)
+# 🆕 v5.7.10: تأخير أطول لتفادي Conflict أثناء النشر
+_RETRY_DELAYS: Tuple[int, ...] = (10, 20, 30)
+
 _INTER_START_DELAY = 0.3
 
-# قراءة توكن Relax Manager من env أولاً (مطابق لـ bot.py)
 _RELAX_TOKEN: str = (
     os.getenv("BOT_TOKEN", "").strip()
     or getattr(CONFIG, "TOKEN", "")
@@ -121,8 +130,23 @@ async def _safe_cleanup(app: Optional[Application]) -> None:
 
 
 async def _error_handler(update: Any, context: Any) -> None:
-    """معالج أخطاء محلي للبوت المُدار."""
+    """
+    معالج أخطاء محلي للبوت المُدار.
+    
+    🆕 v5.7.10: يتعامل مع Conflict بلطف (لا traceback مخيف).
+    Conflict طبيعي أثناء النشر (Render Zero-Downtime).
+    PTB يعيد المحاولة تلقائياً.
+    """
     err = context.error
+
+    # 🆕 v5.7.10: Conflict — أثناء النشر فقط، لا traceback
+    if isinstance(err, Conflict):
+        logger.debug(
+            "managed bot: Conflict (deploy in progress) — "
+            "PTB retries automatically"
+        )
+        return
+
     if isinstance(err, RetryAfter):
         logger.debug("managed bot: RetryAfter %ss", err.retry_after)
     elif isinstance(err, BadRequest):
@@ -181,7 +205,7 @@ async def start_one(
         logger.warning("start_one(#%s): التوكن تغيّر — إعادة تشغيل", bid)
         await stop_one(bid)
 
-    # استيراد متأخر للـ handlers (لتفادي خطأ إن لم تُنشأ بعد)
+    # استيراد متأخر للـ handlers
     try:
         from handlers.handlers_managed_public import (
             make_managed_handlers,
@@ -201,7 +225,7 @@ async def start_one(
         or get_default_messages()
     )
     name = stored.get(bid, {}).get("name", "")
-    keywords = await load_managed_keywords(bid)  # 🆕 v5.7.7
+    keywords = await load_managed_keywords(bid)
 
     last_err: Optional[BaseException] = None
 
@@ -212,7 +236,7 @@ async def start_one(
             app.bot_data["managed_bid"] = bid
             app.bot_data["managed_messages"] = dict(messages)
             app.bot_data["managed_name"] = name
-            app.bot_data["managed_keywords"] = dict(keywords)  # 🆕 v5.7.7
+            app.bot_data["managed_keywords"] = dict(keywords)
             
             app.post_init = post_init_managed
 
@@ -242,10 +266,34 @@ async def start_one(
             logger.error("❌ managed_bot #%s: توكن غير صالح — %s", bid, _e)
             await _safe_cleanup(app)
             return False
+
         except Forbidden as _e:
             logger.error("❌ managed_bot #%s: محظور — %s", bid, _e)
             await _safe_cleanup(app)
             return False
+
+        except Conflict as _e:
+            # 🆕 v5.7.10: Conflict أثناء النشر — إعادة محاولة بعد تأخير
+            last_err = _e
+            logger.warning(
+                "⚠️ managed_bot #%s: Conflict (deploy) — "
+                "retry in %ds (%d/%d)",
+                bid,
+                _RETRY_DELAYS[attempt - 1]
+                if attempt - 1 < len(_RETRY_DELAYS)
+                else _RETRY_DELAYS[-1],
+                attempt, max_retries,
+            )
+            await _safe_cleanup(app)
+            if attempt < max_retries:
+                delay = (
+                    _RETRY_DELAYS[attempt - 1]
+                    if attempt - 1 < len(_RETRY_DELAYS)
+                    else _RETRY_DELAYS[-1]
+                )
+                await asyncio.sleep(delay)
+                continue
+
         except (NetworkError, TimedOut) as _e:
             last_err = _e
             logger.warning(
@@ -261,9 +309,11 @@ async def start_one(
                 )
                 await asyncio.sleep(delay)
                 continue
+
         except asyncio.CancelledError:
             await _safe_cleanup(app)
             raise
+
         except Exception as _e:
             logger.error(
                 "❌ managed_bot #%s: %s: %s",
@@ -333,7 +383,7 @@ async def restart_one(
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# 7. reload_messages — بدون restart (يُحدّث الرسائل + الكلمات)
+# 7. reload_messages — بدون restart
 # ═══════════════════════════════════════════════════════════════════════════
 
 async def reload_messages(bid: int) -> bool:
@@ -355,7 +405,7 @@ async def reload_messages(bid: int) -> bool:
     )
     app.bot_data["managed_name"] = entry.get("name", "")
 
-    # 🆕 v5.7.7: إعادة تحميل الكلمات المفتاحية
+    # إعادة تحميل الكلمات المفتاحية
     keywords = await load_managed_keywords(bid)
     app.bot_data["managed_keywords"] = dict(keywords)
 
@@ -463,9 +513,10 @@ __all__ = [
 
 try:
     logger.debug(
-        "🛡️ managed_bots_runner v5.7.7 (KEYWORDS) loaded | "
-        "timeouts=%s | retries=%d | keywords_enabled=True",
-        _TIMEOUTS, len(_RETRY_DELAYS),
+        "🛡️ managed_bots_runner v5.7.10 (DEPLOY-CONFLICT-HANDLING) loaded | "
+        "timeouts=%s | retries=%s | keywords_enabled=True | "
+        "conflict_handling=graceful",
+        _TIMEOUTS, _RETRY_DELAYS,
     )
 except Exception:
     pass
