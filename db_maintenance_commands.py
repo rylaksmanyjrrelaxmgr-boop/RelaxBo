@@ -1,38 +1,47 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-db_maintenance_commands.py - أوامر صيانة قاعدة البيانات (v1.1.3)
+db_maintenance_commands.py - أوامر صيانة قاعدة البيانات (v1.1.4)
 ================================================================================
-🆕 v1.1.3 — REPORT-VISIBILITY-FIX (بدون تغيير سلوكي):
+🆕 v1.1.4 — AUTO-TUNING-INTEGRATION (بدون تغيير سلوكي للقديم):
 
-    🔴 FIX-AM16: إصلاح مفتاح MV — كان v.get('is_matview') بينما
-        auto_vacuum_dirty_mvs يُرجع 'is_mv' → وسم [MV] لم يظهر أبدًا.
+    🆕 FIX-AM20: استيراد دوال الضبط التلقائي من db_diagnostics v7.2.24
+        (ensure_autovacuum_tuning, init_autovacuum_tuning,
+         diagnose_autovacuum_tuning, format_autovacuum_tuning)
+        مع fallback آمن للنسخ الأقدم → __AUTO_TUNING_AVAILABLE__.
 
-    🔴 FIX-AM17: توسيع تقرير auto_now ليشمل:
-        • 'dead_before → dead_after' لكل جدول تم تنظيفه.
-        • قسم "💀 ما تبقّى في القاعدة" من result['remaining'].
-        • قسم "⏭️ تُرك" من result['skipped'] (جداول dead<min_dead).
-        • رسالة توضيحية عند cleaned=0 و before>0.
-        • يعمل مع db_diagnostics قديم (الحقول الجديدة اختيارية).
+    🆕 FIX-AM21: استدعاء init_autovacuum_tuning() مرة عند التسجيل
+        (register_maintenance_commands) — يضبط الجداول المعروفة
+        فور بدء البوت.
 
-    🟠 FIX-AM18: عرض "dead قبل/بعد" بعلامة '?' عند غياب القيمة
-        بدلاً من إظهار 0 مضلّل.
+    🆕 FIX-AM22: أمر جديد /db_tune — ضبط يدوي فوري.
 
-    🟡 FIX-AM19: نفس إصلاح m v_tag في إشعار scheduled_auto_vacuum.
+    🆕 FIX-AM23: إعادة ضبط دورية كل 6 ساعات داخل scheduled_auto_vacuum
+        (كل 12 دورة من 30 دقيقة) — عبر ensure_autovacuum_tuning(force=True).
+        محكوم بمفتاح db_auto_tune_enabled (افتراضي '1').
 
-🆕 v1.1.2 — IDEMPOTENT-REG + HTML-SAFE + DB-AWARE — محفوظ بالكامل.
+    🆕 FIX-AM24: أوامر /db_weekly tune_now|tune_on|tune_off.
+
+    🆕 FIX-AM25: get_tasks_status() يعرض auto_tuning_available
+        + auto_tuning_enabled + auto_tuning_recycle_cycles.
+
+    🆕 FIX-AM26: /db_weekly status يعرض قسم "ضبط autovacuum".
+
+🆕 v1.1.3 — REPORT-VISIBILITY-FIX — محفوظ.
+🆕 v1.1.2 — IDEMPOTENT-REG + HTML-SAFE + DB-AWARE — محفوظ.
 🆕 v1.1.1 — FIX-AM1 — محفوظ.
 🆕 v1.1.0 — التنظيف التلقائي الكامل — محفوظ.
 
 📋 الأوامر:
   /db_diag_quick   — تقرير صحي مختصر
   /db_maintenance  — معاينة + تنفيذ يدوي
-  /db_weekly       — التقرير الأسبوعي + التنظيف التلقائي
+  /db_weekly       — التقرير الأسبوعي + التنظيف التلقائي + الضبط
+  /db_tune         — 🆕 ضبط autovacuum يدوي فوري (v1.1.4)
 
 ⚠️ الاعتماديات:
-    • db_diagnostics >= v7.2.23 (للحصول على skipped/remaining/dead_after/is_mv)
-    • النسخ الأقدم تعمل لكن بدون التفاصيل الكاملة.
-    • config.CONFIG.PRIMARY_OWNER_ID أو CONFIG.is_developer
+    • db_diagnostics >= v7.2.24 (لـ /db_tune والضبط التلقائي)
+    • db_diagnostics >= v7.2.23 (لـ skipped/remaining/dead_after/is_mv)
+    • النسخ الأقدم تعمل لكن بدون الميزات الجديدة.
 
 ⚠️ الصلاحيات:
     كل الأوامر تتطلب PRIMARY_OWNER_ID أو is_developer.
@@ -44,7 +53,7 @@ db_maintenance_commands.py - أوامر صيانة قاعدة البيانات (
 ================================================================================
 """
 
-__version__ = "1.1.3"
+__version__ = "1.1.4"
 
 import os
 import asyncio
@@ -129,6 +138,27 @@ except ImportError as _imp_err:
     _VERSION_OK = False
 
 
+# 🆕 v1.1.4 — استيراد دوال الضبط التلقائي (v7.2.24+) — مع fallback آمن
+_AUTO_TUNING_AVAILABLE = False
+try:
+    from db_diagnostics import (
+        ensure_autovacuum_tuning,
+        init_autovacuum_tuning,
+        diagnose_autovacuum_tuning,
+        format_autovacuum_tuning,
+    )
+    _AUTO_TUNING_AVAILABLE = True
+except ImportError:
+    ensure_autovacuum_tuning = None
+    init_autovacuum_tuning = None
+    diagnose_autovacuum_tuning = None
+    format_autovacuum_tuning = None
+    logger.info(
+        "ℹ️ db_diagnostics < v7.2.24 — ميزة /db_tune والضبط التلقائي معطّلة "
+        "(يمكن ترقية db_diagnostics لتفعيلها)."
+    )
+
+
 try:
     from utils import safe_send
 except ImportError:
@@ -162,9 +192,17 @@ _AUTO_VACUUM_MIN_DEAD = int(
 # 🆕 FIX-AM13: ثابت موثّق
 _AUTO_VACUUM_NOTIFY_MIN_CLEANED = 3
 
+# 🆕 v1.1.4 — إعادة ضبط autovacuum كل N دورة تنظيف
+# (30min × 12 = 6 ساعات) — يمكن تعطيلها عبر db_auto_tune_enabled='0'
+_AUTO_TUNING_RECYCLE_CYCLES = int(
+    os.getenv("AUTO_TUNING_RECYCLE_CYCLES", "12")
+)
+
 # 🆕 FIX-AM2: idempotency
 _commands_registered = False
 _auto_vacuum_previous_state: Optional[bool] = None
+_auto_tune_previous_state: Optional[bool] = None
+_auto_tuning_cycle_counter = 0
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -263,6 +301,7 @@ def _is_db_closing() -> bool:
 def get_tasks_status() -> Dict[str, Any]:
     """
     🆕 FIX-AM14: حالة المهام الدورية للتشخيص.
+    🆕 FIX-AM25: أضيف auto_tuning_available + enabled + recycle_cycles.
     """
     return {
         "weekly_running": (
@@ -278,6 +317,10 @@ def get_tasks_status() -> Dict[str, Any]:
         "is_postgres": _is_postgres(),
         "auto_vacuum_min_dead": _AUTO_VACUUM_MIN_DEAD,
         "auto_vacuum_interval_sec": _AUTO_VACUUM_INTERVAL_SEC,
+        # 🆕 v1.1.4
+        "auto_tuning_available": _AUTO_TUNING_AVAILABLE,
+        "auto_tuning_recycle_cycles": _AUTO_TUNING_RECYCLE_CYCLES,
+        "auto_tuning_cycle_counter": _auto_tuning_cycle_counter,
     }
 
 
@@ -314,6 +357,53 @@ async def db_diag_quick_command(
         try:
             await update.message.reply_text(
                 f"❌ فشل التشخيص: {_esc(str(e)[:150])}"
+            )
+        except Exception:
+            pass
+
+
+# ═══════════════════════════════════════════════════════════════════
+# /db_tune  (🆕 v1.1.4)
+# ═══════════════════════════════════════════════════════════════════
+
+async def db_tune_command(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+):
+    """
+    ⚙️ ضبط autovacuum يدوي فوري على كل الجداول المعروفة + التلقائية.
+    مكافئ لـ `/db_weekly tune_now` لكن مستقل.
+    """
+    if not update.effective_user or not update.message:
+        return
+
+    user_id = update.effective_user.id
+
+    if not _is_authorized(user_id):
+        await update.message.reply_text("⛔ غير مصرح.")
+        return
+
+    if not _AUTO_TUNING_AVAILABLE or diagnose_autovacuum_tuning is None:
+        await update.message.reply_text(
+            "❌ /db_tune يتطلب db_diagnostics >= v7.2.24.\n"
+            f"الإصدار الحالي: <code>{_esc(_DB_DIAGNOSTICS_VERSION)}</code>",
+            parse_mode='HTML',
+        )
+        return
+
+    if not _is_postgres():
+        await update.message.reply_text(
+            "⚠️ الضبط التلقائي يعمل فقط على PostgreSQL."
+        )
+        return
+
+    try:
+        text = await diagnose_autovacuum_tuning(force=True)
+        await update.message.reply_text(text, parse_mode='HTML')
+    except Exception as e:
+        logger.error(f"db_tune: {e}", exc_info=True)
+        try:
+            await update.message.reply_text(
+                f"❌ فشل الضبط: {_esc(str(e)[:150])}"
             )
         except Exception:
             pass
@@ -626,11 +716,53 @@ def _build_auto_now_report(result: Dict[str, Any]) -> str:
     return text
 
 
+def _build_auto_tune_report(result: Dict[str, Any]) -> str:
+    """
+    🆕 v1.1.4: تقرير ضبط autovacuum — يفوّض لـ format_autovacuum_tuning
+    إن كانت متاحة، وإلا يبني تقريرًا مبسّطًا.
+    """
+    if format_autovacuum_tuning is not None:
+        try:
+            return format_autovacuum_tuning(result)
+        except Exception as e:
+            logger.debug(f"format_autovacuum_tuning: {e}")
+
+    tuned = result.get('tuned', []) or []
+    skipped = result.get('skipped', []) or []
+    failed = result.get('failed', []) or []
+    duration = float(result.get('duration_sec', 0) or 0)
+
+    lines = ["⚙️ <b>ضبط autovacuum</b>", "━━━━━━━━━━━━━━━━━━━━━━", ""]
+    if tuned:
+        lines.append(f"✅ <b>ضُبطت ({len(tuned)}):</b>")
+        for t in tuned[:10]:
+            lines.append(f"  🔧 <code>{_esc(t.get('name', '?'))}</code>")
+        lines.append("")
+    if skipped:
+        lines.append(f"⏭️ <b>تخطّي ({len(skipped)}):</b>")
+        for t in skipped[:5]:
+            lines.append(
+                f"  • <code>{_esc(t.get('name', '?'))}</code> — "
+                f"{_esc(t.get('reason', '?'))}"
+            )
+        lines.append("")
+    if failed:
+        lines.append(f"❌ <b>فشل ({len(failed)}):</b>")
+        for t in failed[:5]:
+            lines.append(
+                f"  • <code>{_esc(t.get('name', '?'))}</code> — "
+                f"{_esc(str(t.get('error', '?'))[:60])}"
+            )
+        lines.append("")
+    lines.append(f"⏱️ <i>{duration:.2f}s</i>")
+    return "\n".join(lines)
+
+
 async def db_weekly_command(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ):
     """
-    📅 إدارة التقرير الأسبوعي + التنظيف التلقائي.
+    📅 إدارة التقرير الأسبوعي + التنظيف التلقائي + الضبط التلقائي.
 
     الاستخدام:
       /db_weekly status      — عرض حالة كل المهام
@@ -639,6 +771,9 @@ async def db_weekly_command(
       /db_weekly auto_on     — تفعيل التنظيف التلقائي
       /db_weekly auto_off    — تعطيله
       /db_weekly auto_now    — تشغيل التنظيف فوراً
+      /db_weekly tune_on     — 🆕 تفعيل الضبط الدوري
+      /db_weekly tune_off    — 🆕 تعطيله
+      /db_weekly tune_now    — 🆕 ضبط فوري
     """
     if not update.effective_user or not update.message:
         return
@@ -672,6 +807,14 @@ async def db_weekly_command(
                 '1', 'true', 'yes', 'on'
             )
 
+            # 🆕 v1.1.4
+            tune_raw = await DB.get_setting(
+                'db_auto_tune_enabled', default='1'
+            )
+            tune_enabled = str(tune_raw).strip() in (
+                '1', 'true', 'yes', 'on'
+            )
+
             # حالة المهام
             weekly_running = (
                 _weekly_task is not None
@@ -689,6 +832,34 @@ async def db_weekly_command(
                     "\n⚠️ <i>Auto-vacuum معطّل — DB ليست PostgreSQL.</i>"
                 )
 
+            # 🆕 v1.1.4 — قسم الضبط
+            tune_section = "\n"
+            if not _AUTO_TUNING_AVAILABLE:
+                tune_section += (
+                    "⚙️ <b>ضبط autovacuum:</b> 🔴 غير متاح\n"
+                    f"   <i>يتطلب db_diagnostics ≥ v7.2.24 "
+                    f"(الحالي: {_esc(_DB_DIAGNOSTICS_VERSION)})</i>\n"
+                )
+            elif not _is_postgres():
+                tune_section += (
+                    "⚙️ <b>ضبط autovacuum:</b> 🔴 غير متاح (ليست PG)\n"
+                )
+            else:
+                tune_icon = "🟢" if tune_enabled else "🔴"
+                tune_state = "مفعّل" if tune_enabled else "معطّل"
+                recycle_min = (
+                    _AUTO_TUNING_RECYCLE_CYCLES
+                    * _AUTO_VACUUM_INTERVAL_SEC // 60
+                )
+                tune_section += (
+                    f"⚙️ <b>ضبط autovacuum:</b> {tune_icon} {tune_state}\n"
+                    f"⏱️ إعادة الضبط: كل {recycle_min} دقيقة "
+                    f"({_AUTO_TUNING_RECYCLE_CYCLES} دورة)\n"
+                    f"🔁 دورات منذ آخر ضبط: "
+                    f"{_auto_tuning_cycle_counter}"
+                    f"/{_AUTO_TUNING_RECYCLE_CYCLES}\n"
+                )
+
             text = (
                 "📅 <b>حالة المهام الدورية</b>\n"
                 "━━━━━━━━━━━━━━━━━━━━━━\n\n"
@@ -704,12 +875,16 @@ async def db_weekly_command(
                 f"⏱️ الدورة: كل "
                 f"{_AUTO_VACUUM_INTERVAL_SEC // 60} دقيقة\n"
                 f"🎯 الحد الأدنى: {_AUTO_VACUUM_MIN_DEAD} dead tuples"
-                f"{pg_note}\n\n"
+                f"{pg_note}\n"
+                f"{tune_section}\n"
                 f"━━━━━━━━━━━━━━━━━━━━━━\n"
                 f"<b>أوامر التحكم:</b>\n"
                 f"<code>/db_weekly on|off</code> — التقرير الأسبوعي\n"
                 f"<code>/db_weekly auto_on|auto_off</code> — التنظيف\n"
-                f"<code>/db_weekly auto_now</code> — تنظيف فوري"
+                f"<code>/db_weekly auto_now</code> — تنظيف فوري\n"
+                f"<code>/db_weekly tune_on|tune_off</code> — الضبط\n"
+                f"<code>/db_weekly tune_now</code> — ضبط فوري\n"
+                f"<code>/db_tune</code> — ضبط فوري (مكافئ)"
             )
 
             await update.message.reply_text(
@@ -788,6 +963,55 @@ async def db_weekly_command(
             )
             return
 
+        # ═══════════ 🆕 v1.1.4 — TUNE ON/OFF/NOW ═══════════
+        if action == "tune_on":
+            if not _AUTO_TUNING_AVAILABLE:
+                await update.message.reply_text(
+                    "❌ الضبط التلقائي يتطلب db_diagnostics ≥ v7.2.24.\n"
+                    f"الحالي: <code>{_esc(_DB_DIAGNOSTICS_VERSION)}</code>",
+                    parse_mode='HTML',
+                )
+                return
+            await DB.set_setting('db_auto_tune_enabled', '1')
+            await update.message.reply_text(
+                "✅ تم تفعيل الضبط الدوري.\n"
+                f"⏱️ سيعمل كل "
+                f"{_AUTO_TUNING_RECYCLE_CYCLES * _AUTO_VACUUM_INTERVAL_SEC // 60} دقيقة."
+            )
+            return
+
+        if action == "tune_off":
+            await DB.set_setting('db_auto_tune_enabled', '0')
+            await update.message.reply_text(
+                "🔴 تم تعطيل الضبط الدوري.\n"
+                "ℹ️ يمكنك الضبط الفوري عبر <code>/db_tune</code>.",
+                parse_mode='HTML',
+            )
+            return
+
+        if action == "tune_now":
+            if not _AUTO_TUNING_AVAILABLE or diagnose_autovacuum_tuning is None:
+                await update.message.reply_text(
+                    "❌ الضبط الفوري يتطلب db_diagnostics ≥ v7.2.24.\n"
+                    f"الحالي: <code>{_esc(_DB_DIAGNOSTICS_VERSION)}</code>",
+                    parse_mode='HTML',
+                )
+                return
+            if not _is_postgres():
+                await update.message.reply_text(
+                    "⚠️ الضبط التلقائي يعمل فقط على PostgreSQL."
+                )
+                return
+            try:
+                text = await diagnose_autovacuum_tuning(force=True)
+                await update.message.reply_text(text, parse_mode='HTML')
+            except Exception as e:
+                logger.error(f"tune_now: {e}", exc_info=True)
+                await update.message.reply_text(
+                    f"❌ فشل الضبط: {_esc(str(e)[:150])}"
+                )
+            return
+
         # ═══════════ استخدام غير صحيح ═══════════
         await update.message.reply_text(
             "❌ استخدام غير صحيح.\n\n"
@@ -795,7 +1019,9 @@ async def db_weekly_command(
             "<code>/db_weekly status</code>\n"
             "<code>/db_weekly on|off</code>\n"
             "<code>/db_weekly auto_on|auto_off</code>\n"
-            "<code>/db_weekly auto_now</code>",
+            "<code>/db_weekly auto_now</code>\n"
+            "<code>/db_weekly tune_on|tune_off</code>\n"
+            "<code>/db_weekly tune_now</code>",
             parse_mode='HTML',
         )
 
@@ -897,9 +1123,91 @@ async def scheduled_weekly_diagnostic(bot):
 # 🆕 v1.1.0 — المهمة الدورية: التنظيف التلقائي
 # ═══════════════════════════════════════════════════════════════════
 
+async def _maybe_run_auto_tuning(bot) -> None:
+    """
+    🆕 v1.1.4 — تنفيذ الضبط الدوري كل N دورة.
+    يُستدعى من داخل scheduled_auto_vacuum — لا يعمل بذاته.
+    """
+    global _auto_tuning_cycle_counter, _auto_tune_previous_state
+
+    if not _AUTO_TUNING_AVAILABLE or ensure_autovacuum_tuning is None:
+        return
+    if not _is_postgres():
+        return
+    if _is_db_closing():
+        return
+
+    # هل الميزة مفعّلة؟
+    enabled = True
+    try:
+        raw = await DB.get_setting(
+            'db_auto_tune_enabled', default='1'
+        )
+        enabled = str(raw).strip() in ('1', 'true', 'yes', 'on')
+    except Exception as e:
+        logger.debug(f"auto_tune setting: {e}")
+
+    if _auto_tune_previous_state != enabled:
+        if _auto_tune_previous_state is None:
+            logger.info(
+                f"⚙️ auto-tuning: الحالة الأولية = "
+                f"{'مفعّل' if enabled else 'معطّل'}"
+            )
+        else:
+            logger.info(
+                f"🔄 auto-tuning: "
+                f"{'عُطِّل' if not enabled else 'فُعِّل'}"
+            )
+        _auto_tune_previous_state = enabled
+
+    if not enabled:
+        return
+
+    _auto_tuning_cycle_counter += 1
+    if _auto_tuning_cycle_counter < _AUTO_TUNING_RECYCLE_CYCLES:
+        return
+
+    # حان وقت الضبط
+    _auto_tuning_cycle_counter = 0
+    try:
+        result = await ensure_autovacuum_tuning(force=True)
+        tuned = result.get('tuned', []) if isinstance(result, dict) else []
+        failed = result.get('failed', []) if isinstance(result, dict) else []
+        if tuned:
+            logger.info(
+                f"⚙️ auto-tuning periodic: {len(tuned)} جدول ضُبط"
+            )
+            # إشعار بقناة المطور (اختياري)
+            try:
+                log_ch = await DB.get_dev_log_channel()
+                if log_ch and len(tuned) >= 1:
+                    names = ", ".join(
+                        _esc(t.get('name', '?')) for t in tuned[:5]
+                    )
+                    await safe_send(
+                        bot, log_ch,
+                        "⚙️ <b>ضبط دوري لـ autovacuum</b>\n"
+                        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+                        f"✅ ضُبط: <b>{len(tuned)}</b>\n"
+                        f"<code>{names}</code>",
+                        parse_mode='HTML',
+                    )
+            except Exception as e:
+                logger.debug(f"auto-tuning notify: {e}")
+        if failed:
+            logger.warning(
+                f"⚠️ auto-tuning: {len(failed)} فشل"
+            )
+    except Exception as e:
+        logger.warning(
+            f"auto-tuning periodic: {e}", exc_info=True
+        )
+
+
 async def scheduled_auto_vacuum(bot):
     """
     🧹 تنظيف تلقائي دوري.
+    🆕 v1.1.4: يشمل إعادة ضبط autovacuum كل N دورة.
 
     🆕 FIX-AM3: يتوقف فوراً إذا DB_TYPE != postgres.
     🆕 FIX-AM6: يتخطى الدورة إذا DB في حالة إغلاق.
@@ -919,7 +1227,8 @@ async def scheduled_auto_vacuum(bot):
         f"🧹 auto-vacuum scheduler started | "
         f"interval={_AUTO_VACUUM_INTERVAL_SEC}s | "
         f"initial_delay={_AUTO_VACUUM_INITIAL_DELAY}s | "
-        f"min_dead={_AUTO_VACUUM_MIN_DEAD}"
+        f"min_dead={_AUTO_VACUUM_MIN_DEAD} | "
+        f"auto_tune_recycle={_AUTO_TUNING_RECYCLE_CYCLES} cycles"
     )
 
     try:
@@ -941,6 +1250,15 @@ async def scheduled_auto_vacuum(bot):
                     logger.info("⏹️ scheduled_auto_vacuum: أُلغي")
                     return
                 continue
+
+            # 🆕 v1.1.4 — قد يُشغّل الضبط الدوري
+            try:
+                await _maybe_run_auto_tuning(bot)
+            except asyncio.CancelledError:
+                logger.info("⏹️ scheduled_auto_vacuum: أُلغي")
+                return
+            except Exception as e:
+                logger.warning(f"_maybe_run_auto_tuning: {e}")
 
             # هل الميزة مفعّلة؟
             enabled = True
@@ -1182,12 +1500,70 @@ async def stop_auto_vacuum_task(timeout: float = 3.0) -> None:
 
 
 # ═══════════════════════════════════════════════════════════════════
-# 🆕 v1.1.0 — التسجيل الرئيسي
+# 🆕 v1.1.4 — التسجيل الرئيسي
 # ═══════════════════════════════════════════════════════════════════
+
+async def _init_autovacuum_tuning_at_startup() -> None:
+    """
+    🆕 v1.1.4 — استدعاء init_autovacuum_tuning() مرة عند التسجيل.
+    آمن للاستدعاء المتكرر + مقيد بمفتاح db_auto_tune_enabled.
+    """
+    if not _AUTO_TUNING_AVAILABLE or init_autovacuum_tuning is None:
+        logger.debug(
+            "⏭️ startup auto-tuning: db_diagnostics < v7.2.24 — تخطي."
+        )
+        return
+    if not _is_postgres():
+        logger.debug(
+            "⏭️ startup auto-tuning: DB ليست PostgreSQL — تخطي."
+        )
+        return
+
+    # هل الميزة مفعّلة؟
+    try:
+        raw = await DB.get_setting(
+            'db_auto_tune_enabled', default='1'
+        )
+        enabled = str(raw).strip() in ('1', 'true', 'yes', 'on')
+    except Exception as e:
+        logger.debug(f"startup auto-tuning setting: {e}")
+        enabled = True
+
+    if not enabled:
+        logger.info(
+            "⏭️ startup auto-tuning: db_auto_tune_enabled='0' — تخطي."
+        )
+        return
+
+    try:
+        result = await init_autovacuum_tuning()
+        tuned = result.get('tuned', []) if isinstance(result, dict) else []
+        failed = result.get('failed', []) if isinstance(result, dict) else []
+        if tuned:
+            names = ", ".join(
+                _esc(t.get('name', '?')) for t in tuned[:5]
+            )
+            logger.info(
+                f"⚙️ startup auto-tuning: {len(tuned)} جدول ضُبط | "
+                f"{names}"
+            )
+        elif failed:
+            logger.warning(
+                f"⚠️ startup auto-tuning: {len(failed)} فشل"
+            )
+        else:
+            logger.info(
+                "⚙️ startup auto-tuning: كل الجداول مضبوطة مسبقاً."
+            )
+    except Exception as e:
+        logger.warning(
+            f"startup auto-tuning: {e}", exc_info=True
+        )
+
 
 def register_maintenance_commands(application) -> bool:
     """
-    ✅ v1.1.0: تسجيل الأوامر + بدء مهمة التنظيف التلقائي.
+    ✅ v1.1.4: تسجيل الأوامر + بدء مهمة التنظيف التلقائي + الضبط الأولي.
 
     كل أمر في try/except منفصل — إذا فشل أمر، الآخرون يُسجَّلون.
     🆕 FIX-AM2: idempotent — لا يُسجَّل مرتين.
@@ -1228,6 +1604,20 @@ def register_maintenance_commands(application) -> bool:
     except Exception as e:
         logger.error(f"❌ register db_weekly: {e}", exc_info=True)
         ok_all = False
+
+    # 🆕 v1.1.4 — /db_tune
+    if _AUTO_TUNING_AVAILABLE:
+        try:
+            application.add_handler(CommandHandler(
+                "db_tune", db_tune_command
+            ))
+        except Exception as e:
+            logger.error(f"❌ register db_tune: {e}", exc_info=True)
+            ok_all = False
+    else:
+        logger.info(
+            "⏭️ /db_tune لم يُسجَّل — db_diagnostics < v7.2.24"
+        )
 
     # ═══════════ بدء المهام الدورية ═══════════
     # 1) المهمة الأسبوعية
@@ -1273,6 +1663,22 @@ def register_maintenance_commands(application) -> bool:
     except Exception as e:
         logger.error(f"auto_vacuum startup: {e}", exc_info=True)
 
+    # ═══════════ 🆕 v1.1.4 — الضبط الأولي ═══════════
+    # نشغّله كـ task منفصل حتى لا يُبطئ التسجيل (async)
+    try:
+        if (_AUTO_TUNING_AVAILABLE
+                and init_autovacuum_tuning is not None
+                and _is_postgres()):
+            try:
+                asyncio.create_task(_init_autovacuum_tuning_at_startup())
+                logger.info("⚙️ startup auto-tuning scheduled")
+            except Exception as e:
+                logger.warning(
+                    f"schedule startup auto-tuning: {e}"
+                )
+    except Exception as e:
+        logger.error(f"auto_tuning startup: {e}", exc_info=True)
+
     # 🆕 FIX-AM2: تحديث flag
     if ok_all:
         _commands_registered = True
@@ -1293,11 +1699,13 @@ def register_maintenance_commands(application) -> bool:
     # ═══════════════════════════════════════════════════════════════════
 
     if ok_all:
+        cmd_list = "/db_diag_quick, /db_maintenance, /db_weekly"
+        if _AUTO_TUNING_AVAILABLE:
+            cmd_list += ", /db_tune"
         logger.info(
-            "✅ Maintenance commands registered: "
-            "/db_diag_quick, /db_maintenance, /db_weekly | "
-            "⚠️ تأكد من bot.py: stop_auto_vacuum_task + "
-            "stop_weekly_diagnostic_task عند الإغلاق"
+            f"✅ Maintenance commands registered: {cmd_list} | "
+            f"⚠️ تأكد من bot.py: stop_auto_vacuum_task + "
+            f"stop_weekly_diagnostic_task عند الإغلاق"
         )
     else:
         logger.warning(
@@ -1329,6 +1737,7 @@ __all__ = [
     "db_diag_quick_command",
     "db_maintenance_command",
     "db_weekly_command",
+    "db_tune_command",                    # 🆕 v1.1.4
     # المهمة الأسبوعية
     "scheduled_weekly_diagnostic",
     "start_weekly_diagnostic_task",
@@ -1341,6 +1750,8 @@ __all__ = [
     "get_tasks_status",
     # 🆕 v1.1.3: باني التقرير (للاستخدام الداخلي/الاختبار)
     "_build_auto_now_report",
+    # 🆕 v1.1.4: باني تقرير الضبط
+    "_build_auto_tune_report",
     # التسجيل (الرئيسي + aliases)
     "register_maintenance_commands",
     "register",
@@ -1359,11 +1770,16 @@ __all__ = [
 try:
     _beacon_parts = [
         f"🛡️ db_maintenance_commands.py v{__version__} loaded",
-        f"commands: /db_diag_quick, /db_maintenance, /db_weekly",
+        f"commands: /db_diag_quick, /db_maintenance, /db_weekly"
+        + (", /db_tune" if _AUTO_TUNING_AVAILABLE else ""),
         f"auto-vacuum: ✅ every {_AUTO_VACUUM_INTERVAL_SEC // 60} min",
         f"min_dead={_AUTO_VACUUM_MIN_DEAD}",
+        f"auto-tuning: "
+        + ("✅" if _AUTO_TUNING_AVAILABLE else "❌")
+        + f" recycle={_AUTO_TUNING_RECYCLE_CYCLES} cycles",
         f"db_diagnostics={_DB_DIAGNOSTICS_VERSION}",
         f"version_ok={_VERSION_OK}",
+        f"auto_tuning_available={_AUTO_TUNING_AVAILABLE}",
         "FIX-AM1 shutdown docs ✅",
         "FIX-AM2 idempotent-reg ✅",
         "FIX-AM3 db-type-aware ✅",
@@ -1382,6 +1798,13 @@ try:
         "FIX-AM17 report-visibility ✅",
         "FIX-AM18 dead-after-display ✅",
         "FIX-AM19 notify-is_mv ✅",
+        "FIX-AM20 tune-imports ✅",
+        "FIX-AM21 tune-startup ✅",
+        "FIX-AM22 db_tune-cmd ✅",
+        "FIX-AM23 tune-periodic ✅",
+        "FIX-AM24 tune-subcommands ✅",
+        "FIX-AM25 tune-status ✅",
+        "FIX-AM26 tune-weekly-status ✅",
     ]
     logger.info(" | ".join(_beacon_parts))
 except Exception:
