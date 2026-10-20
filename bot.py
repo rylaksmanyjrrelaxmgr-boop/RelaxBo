@@ -1,9 +1,15 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-🌿 Relax Manager – البوت الرئيسي (bot.py v5.7.2-STATS-CHANNELS-FIX)
+🌿 Relax Manager – البوت الرئيسي (bot.py v5.7.3-AUTOTUNE-INTEGRATION)
 ================================================================================
 📌 نقطة الدخول الرسمية للتطبيق (entrypoint).
+
+🆕 v5.7.3 (AUTOTUNE-INTEGRATION):
+    🟢 ADMIN_COMMANDS أضيف فيه: autotune, db_tune, analytics,
+       versions, analytics_reset — الميزات كانت مسجّلة لكن غير ظاهرة.
+    🟢 _AUTOTUNE_AVAILABLE للـ beacon — يكشف توفّر db_diagnostics v7.2.24+.
+    🟢 Version bump v5.7.2 → v5.7.3.
 
 🆕 v5.7.2 (FIX-ACTIVE-CHANNELS-SCOPE):
     🟢 إصلاح خطأ NameError في _active_channels.
@@ -114,6 +120,20 @@ except ImportError as _e_dbdiag:
     _DB_DIAG_IMPORT_ERROR = str(_e_dbdiag)
 except Exception as _e_dbdiag:
     _DB_DIAG_IMPORT_ERROR = f"unexpected: {_e_dbdiag}"
+
+# ═════════════════════════════════════════════════════════════════════
+# 🆕 v5.7.3 — كشف توفر auto-tuning من db_diagnostics v7.2.24+
+# ═════════════════════════════════════════════════════════════════════
+_AUTOTUNE_AVAILABLE = False
+try:
+    from db_diagnostics import ensure_autovacuum_tuning as _fn_autotune
+    _AUTOTUNE_AVAILABLE = callable(_fn_autotune)
+except ImportError:
+    _fn_autotune = None
+    _AUTOTUNE_AVAILABLE = False
+except Exception:
+    _fn_autotune = None
+    _AUTOTUNE_AVAILABLE = False
 
 from config import CONFIG
 from database import DB, initialize_db, TimeUtils
@@ -682,6 +702,13 @@ def _log_db_diagnostics_status() -> None:
         logger.info("✅ db_diagnostics: v%s متاح | mark_process_start ✅", _DB_DIAG_VERSION)
     else:
         logger.warning("⚠️ db_diagnostics: v%s محمّل لكن بلا mark_process_start", _DB_DIAG_VERSION)
+    # 🆕 v5.7.3
+    if _AUTOTUNE_AVAILABLE:
+        logger.info("⚙️ auto-tuning: ✅ متاح (ensure_autovacuum_tuning)")
+    else:
+        logger.info(
+            "⚙️ auto-tuning: ℹ️ غير متاح (يتطلب db_diagnostics v7.2.24+)"
+        )
 
 _NOTIFY_SHUTDOWN_TIMEOUT = 5.0
 _BG_TASKS_SHUTDOWN_TIMEOUT = 10.0
@@ -1033,6 +1060,9 @@ PUBLIC_COMMANDS = [
     ("auto_publish", "📤 تبديل النشر التلقائي"), ("auto_recycle", "♻️ تبديل التدوير"),
 ]
 
+# ═════════════════════════════════════════════════════════════════════
+# 🆕 v5.7.3 — ADMIN_COMMANDS: أُضيفت أوامر auto-tuning + analytics
+# ═════════════════════════════════════════════════════════════════════
 ADMIN_COMMANDS = [
     ("stats", "📊 الإحصائيات"), ("grant", "🎁 منح اشتراك يدوي"),
     ("set_min_interval", "⏱️ تعيين الحد الأدنى للفاصل"), ("admin", "👑 لوحة الأدمن"),
@@ -1048,6 +1078,12 @@ ADMIN_COMMANDS = [
     ("fullhealth", "🏥 التشخيص الشامل"), ("latency", "🔬 اختبار الكمون"),
     ("databases", "🗂️ قواعد البيانات المُعدّة"), ("ping", "🏓 قياس كمون الاتصال"),
     ("posts_stats", "📊 إحصائيات النشر (DB)"),
+    # 🆕 v5.7.3 — auto-tuning + analytics
+    ("autotune", "⚙️ ضبط autovacuum"),
+    ("db_tune", "⚙️ ضبط autovacuum (اختصار)"),
+    ("analytics", "📊 التحليلات المتقدمة"),
+    ("versions", "📦 إصدارات الوحدات"),
+    ("analytics_reset", "🗑️ إبطال كاش التحليلات"),
 ]
 
 GROUP_COMMANDS = [
@@ -2605,8 +2641,11 @@ async def main():
     logger.info("🌿 %s", CONFIG.BOT_NAME)
     logger.info("👨‍💼 المالك: %s", CONFIG.PRIMARY_OWNER_ID)
 
+    # ═══════════════════════════════════════════════════════════════
+    # 🆕 v5.7.3 — Beacon محدّث (v5.7.3 + autotune_available)
+    # ═══════════════════════════════════════════════════════════════
     logger.info(
-        "📦 bot.py: v5.7.2 | "
+        "📦 bot.py: v5.7.3 | "
         "detectors=%s | layers=%d | helpers=%s | "
         "db_idle=%s | cache_stats=%s | analytics=%s | "
         "fullhealth=%s | latency=%s | maint_cmds=%s | "
@@ -2644,7 +2683,10 @@ async def main():
         "gil_contention_fix=on | gil_lag_monitor=on | "
         "managed_bots_startup=on | managed_bots_handlers=on | "
         "managed_bots_shutdown=on | stats_channels_rate_fix=on | "
-        "stats_active_channels_scope_fix=on",
+        "stats_active_channels_scope_fix=on | "
+        "autotune_available=%s | autotune_cmd=on | db_tune_cmd=on | "
+        "analytics_menu=on | versions_cmd=on | "
+        "admin_commands_extended=on",
         _SPAM_DETECTOR_VERSION or "N/A",
         _SPAM_DETECTOR_LAYERS_COUNT,
         (
@@ -2673,6 +2715,7 @@ async def main():
         "yes" if _HAS_WARMUP_DETECTORS else "no",
         "yes" if _ANALYTICS_REGISTER_AVAILABLE else "no",
         "yes" if _HAS_REPLY_PARAMETERS else "no",
+        "yes" if _AUTOTUNE_AVAILABLE else "no",
     )
 
     try:
@@ -3284,7 +3327,7 @@ async def main():
                     "✅ [ORDER 5/6] handlers_analytics: register_handlers() "
                     "نجح — يشمل /databases + /versions + /analytics_reset "
                     "+ /analytics + databases_btn + versions_refresh + "
-                    "analytics_reset_cache"
+                    "analytics_reset_cache + /autotune + autotune_btn"
                 )
             else:
                 logger.warning(
@@ -3319,15 +3362,16 @@ async def main():
                         r"channels_rate_btn|subscriptions_btn|pool_live_btn|"
                         r"slow_queries_btn|export_excel_btn|"
                         r"full_health_btn|latency_btn|"
-                        r"databases_btn|"
+                        r"databases_btn|autotune_btn|"
                         r"refresh_btn)$"
                     ),
                 ))
                 logger.info(
                     "✅ [ORDER 5/6] handlers_analytics (fallback يدوي): "
-                    "11 زر مُسجّل — databases_btn ✅ (لكن /databases, "
-                    "/versions, /analytics_reset قد لا تعمل — يتطلب "
-                    "register_handlers من v1.3.1+)"
+                    "12 زر مُسجّل — databases_btn + autotune_btn ✅ "
+                    "(لكن /databases, /versions, /analytics_reset, "
+                    "/autotune قد لا تعمل — يتطلب register_handlers "
+                    "من v1.3.1+)"
                 )
             except Exception as _e:
                 logger.error(
