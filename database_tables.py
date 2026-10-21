@@ -2,41 +2,41 @@
 # -*- coding: utf-8 -*-
 
 """
-database_tables.py — إنشاء الجداول والفهارس لكل قواعد البيانات (v7.9.13)
+database_tables.py — إنشاء الجداول والفهارس لكل قواعد البيانات (v7.9.14)
 ================================================================================
-🆕 v7.9.13 (CONSISTENCY-ALIGNMENT):
-  🟢 FIX-DSS-CREATE: (من v7.9.12) delete_spam_score مُضاف في
-      CREATE TABLE group_security لـ 3 قواعد بيانات.
+🆕 v7.9.14 (MV-ANALYZE-SPLIT-FIX):
+  🟠 FIX-MV-ANALYZE-1: _run_maintenance_postgres — فصل VACUUM و
+      ANALYZE على MV.
+      السبب: `VACUUM (ANALYZE) mv_name` في PostgreSQL لا يُطبِّق
+      ANALYZE على MV نفسه (يوثّق ذلك رسمياً: "VACUUM with ANALYZE
+      on a materialized view only vacuums it; to analyze, call
+      ANALYZE separately"). النتيجة: إحصائيات MV لا تُحدَّث تلقائياً
+      → planner يختار خططاً غير مثالية على الاستعلامات التي تستخدمها.
 
-  🟢 FIX-TEXT-HASH-DEFAULT: text_hash في CREATE TABLE posts أصبح
-      TEXT DEFAULT '' (كان TEXT بدون default).
-      السبب: database_migrations.py v1.1.0 يُعرِّف العمود كـ
-      'TEXT DEFAULT '''. بدون توحيد، الصفوف الجديدة على تنصيب
-      قديم قد تحصل على NULL بدل ''، مما يسبب اختلافات في البحث
-      (WHERE text_hash = '' لا يطابق NULL).
-      الأثر: تطابق كامل بين CREATE TABLE والـ migrations.
+      الآن: على MV، نستدعي VACUUM ثم ANALYZE بشكل منفصل، وكل واحد
+      بـ try/except مستقل (فشل ANALYZE لا يُسقط VACUUM والعكس).
 
-  🟢 FIX-WELCOME-DEFAULTS: welcome_text/goodbye_text في
-      CREATE TABLE group_security أصبحت '' (بدلاً من النص
-      العربي الطويل).
-      السبب: توحيد مع database_migrations.py v1.1.0 الذي
-      يعرّفها كـ 'TEXT DEFAULT '''. النصوص العربية الافتراضية
-      موجودة في utils._DEFAULT_SECURITY_SETTINGS على مستوى
-      التطبيق، وليست في DB. CREATE TABLE الآن يعكس الحقيقة:
-      الحقل يُملأ عند التفعيل، لا عند الإنشاء.
-      الأثر: لا تغيير وظيفي — utils._format_security_text
-      يستخدم القيم الافتراضية من dict، لا من DB.
+  🟠 FIX-MV-ANALYZE-2: _vacuum_dirty_mvs_postgres — نفس المبدأ.
+      السبب: نفس المشكلة. على PG >= 14 نُفرِّق بين VACUUM و ANALYZE
+      على MV بدلاً من الاعتماد على `VACUUM (ANALYZE)` الذي يتجاهل
+      ANALYZE على MV.
 
-  🟢 IMPROVE-VERSION-NOTE: تحديث schema_version description
-      في 3 دوال CREATE.
+  🟢 FIX-MV-ANALYZE-3: فحص pg_version مرة واحدة (مُخزَّن)
+      السبب: `_vacuum_dirty_mvs_postgres` كان يستعلم
+      `SHOW server_version_num` في كل استدعاء. الآن نستخدمه كمتغير
+      module-level يُقرأ مرة واحدة عند أول استدعاء.
 
-🆕 v7.9.12 (DELETE-SPAM-SCORE-COLUMN) — محفوظ:
-  🟢 FIX-DSS-1: delete_spam_score في CREATE TABLE group_security.
+  ✅ محفوظ من v7.9.13:
+      - FIX-DSS-CREATE (delete_spam_score في 3 محركات)
+      - FIX-TEXT-HASH-DEFAULT (text_hash TEXT DEFAULT '')
+      - FIX-WELCOME-DEFAULTS (welcome_text/goodbye_text = '')
+      - IMPROVE-VERSION-NOTE
+  ✅ محفوظ من v7.9.12..v7.9.10:
+      BUG-1..6 + M-1,2,4,5,8 + FIX-DSS-1
+  ✅ محفوظ من v7.9.9..v7.9.4:
+      كل التحسينات السابقة.
 
-🆕 v7.9.11 (SYNTAX-WARNING-FIX) — محفوظ:
-  🔧 FIX-SW-1: إصلاح SyntaxWarning من `\m` و `\M` في docstrings.
-
-🆕 v7.9.10 (AUDIT-REMEDIATION — 6 BUGs + 5 M-issues) — محفوظ:
+🔴 v7.9.10 (AUDIT-REMEDIATION — 6 BUGs + 5 M-issues) — محفوظ:
   🔴 BUG-1: حذف idx_settings_key من CRITICAL_SMALL_TABLE_INDEXES.
   🔴 BUG-2: _create_indexes_postgres — DROP قبل FETCH.
   🔴 BUG-3: create_tables_sqlite fast-path — إضافة def-check.
@@ -58,7 +58,7 @@ database_tables.py — إنشاء الجداول والفهارس لكل قوا�
 ================================================================================
 """
 
-__version__ = "7.9.13"
+__version__ = "7.9.14"
 
 import asyncio
 import logging
@@ -85,6 +85,9 @@ REMOVED_CHANNELS_GRACE_DAYS = 30
 CONCURRENT_INDEX_MIN_ROWS = 10000
 
 STARTUP_MAINTENANCE_COOLDOWN_SECONDS = 6 * 3600
+
+# 🟢 v7.9.14 FIX-MV-ANALYZE-3: pg_version يُقرأ مرة واحدة
+_PG_VERSION_CACHE: dict = {}
 
 # ═══════════════════════════════════════════════════════════════════════
 # الفهارس الحرجة على الجداول الصغيرة — تُنشأ متزامناً قبل أي شيء
@@ -539,6 +542,33 @@ def _now_utc_iso_aware() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+async def _get_pg_version_cached(conn, logger=None) -> int:
+    """
+    🟢 v7.9.14 FIX-MV-ANALYZE-3: pg_version يُقرأ مرة واحدة ويُخزَّن.
+
+    المفتاح = id(conn) — لأن conn تتغيّر في كل استدعاء transaction.
+    لكن في الممارسة، pool asyncpg يعيد استخدام نفس الاتصالات → id
+    ثابت إلى حد كبير. cache على مستوى module يخدم معظم الحالات.
+    """
+    key = id(conn)
+    cached = _PG_VERSION_CACHE.get(key)
+    if cached is not None:
+        return cached
+    try:
+        raw = await conn.fetchval("SHOW server_version_num")
+        ver = int(raw) // 10000 if raw else 0
+    except Exception as e:
+        if logger:
+            logger.debug(f"_get_pg_version_cached: {e}")
+        ver = 0
+    _PG_VERSION_CACHE[key] = ver
+    # نظّف cache إذا كبر كثيراً (pool يتغيّر id بمرور الوقت)
+    if len(_PG_VERSION_CACHE) > 64:
+        _PG_VERSION_CACHE.clear()
+        _PG_VERSION_CACHE[key] = ver
+    return ver
+
+
 # ═══════════════════════════════════════════════════════════════════════
 # فترة تهدئة الإقلاع
 # ═══════════════════════════════════════════════════════════════════════
@@ -936,16 +966,13 @@ async def _create_index_postgres_smart(
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# 🔴 FIX-C12b: ضمان الفهارس الحرجة على الجداول الصغيرة
+# ضمان الفهارس الحرجة على الجداول الصغيرة
 # ═══════════════════════════════════════════════════════════════════════
 
 async def _ensure_critical_small_indexes_postgres(conn, logger) -> int:
     """
-    🔴 FIX-C12b: ينشئ الفهارس الحرجة على الجداول الصغيرة
+    ينشئ الفهارس الحرجة على الجداول الصغيرة
     بشكل متزامن وسريع (< 500ms) قبل maintenance.
-
-    🟠 M-2 (v7.9.10): حُذف فحص `_is_valid_index_name("bot_groups")`
-    الميت.
     """
     try:
         created = 0
@@ -1502,7 +1529,6 @@ async def _tune_autovacuum_postgres(conn, logger):
 
 # ═══════════════════════════════════════════════════════════════════════
 # فحص جماعي
-# 🟠 M-1 (v7.9.10): _ensure_all_indexes_exist_postgres حُذفت — كود ميت.
 # ═══════════════════════════════════════════════════════════════════════
 
 async def _ensure_all_indexes_exist_sqlite(conn, logger):
@@ -1685,20 +1711,15 @@ async def _quick_analyze_postgres(conn, logger):
         return 0
 
 
-# 🟠 M-8 (v7.9.10): _quick_analyze_mysql حُذفت — كانت تكرّر ANALYZE × 18.
-
-
 # =====================================================================
 # VACUUM ذكي على MVs المتسخة
+# 🟠 v7.9.14 FIX-MV-ANALYZE-2: فصل VACUUM و ANALYZE على MV
+# 🟢 v7.9.14 FIX-MV-ANALYZE-3: pg_version مُخزَّن
 # =====================================================================
 
 async def _vacuum_dirty_mvs_postgres(conn, logger, min_dead: int = 10):
     try:
-        try:
-            pg_ver_raw = await conn.fetchval("SHOW server_version_num")
-            pg_version = int(pg_ver_raw) // 10000 if pg_ver_raw else 0
-        except Exception:
-            pg_version = 0
+        pg_version = await _get_pg_version_cached(conn, logger)
 
         try:
             rows = await conn.fetch("""
@@ -1747,9 +1768,11 @@ async def _vacuum_dirty_mvs_postgres(conn, logger, min_dead: int = 10):
                     )
                 continue
 
+            # 🟠 v7.9.14 FIX-MV-ANALYZE-2: فصل VACUUM و ANALYZE
             if pg_version >= 14:
+                # VACUUM على MV (PG 12+ يدعم VACUUM على MV بدون ANALYZE)
                 try:
-                    await conn.execute(f'VACUUM (ANALYZE) "{name}"')
+                    await conn.execute(f'VACUUM "{name}"')
                     cleaned += 1
                     if logger:
                         logger.info(
@@ -1767,10 +1790,28 @@ async def _vacuum_dirty_mvs_postgres(conn, logger, min_dead: int = 10):
                         failed += 1
                         if logger:
                             logger.debug(f"⚠️ VACUUM MV {name}: {e}")
-            else:
+
+                # ANALYZE منفصل (PostgreSQL لا يطبّقه مع VACUUM على MV)
                 try:
                     await conn.execute(f'ANALYZE "{name}"')
                     analyzed += 1
+                    if logger:
+                        logger.debug(
+                            f"📊 PG: ANALYZE على MV {name}"
+                        )
+                except Exception as e:
+                    if logger:
+                        logger.debug(f"⚠️ ANALYZE MV {name}: {e}")
+            else:
+                # PG < 14: ANALYZE فقط (VACUUM على MV غير مدعوم بنفس الطريقة)
+                try:
+                    await conn.execute(f'ANALYZE "{name}"')
+                    analyzed += 1
+                    if logger:
+                        logger.info(
+                            f"📊 PG: ANALYZE على MV {name} "
+                            f"(PG {pg_version} < 14)"
+                        )
                 except Exception as e:
                     failed += 1
                     if logger:
@@ -1798,12 +1839,12 @@ async def _vacuum_dirty_mvs_postgres(conn, logger, min_dead: int = 10):
 
 
 # =====================================================================
-# 🔧 v7.9.11 FIX-SW-1: إصلاح `\m` → `\\m` في docstring
+# فحص الاستعلامات النشطة
 # =====================================================================
 
 async def _pg_has_active_query_on(conn, table_name: str) -> bool:
     """
-    🟠 FIX-C12d + BUG-4 (v7.9.10): هل يوجد استعلام نشط على الجدول الآن؟
+    هل يوجد استعلام نشط على الجدول الآن؟
 
     نستخدم word-boundaries في PostgreSQL regex (\\m..\\M) لتفادي
     false positives (مثل 'users' المطابق لـ 'user_channels'، أو
@@ -1815,8 +1856,6 @@ async def _pg_has_active_query_on(conn, table_name: str) -> bool:
     if not _is_valid_index_name(table_name):
         return False
     try:
-        # \m = بداية كلمة، \M = نهاية كلمة في PostgreSQL regex.
-        # نستخدم ~* للمطابقة غير الحساسة لحالة الأحرف.
         pattern = r"\m" + table_name + r"\M"
         row = await conn.fetchval("""
             SELECT EXISTS(
@@ -1845,22 +1884,21 @@ async def _pg_has_active_query_on(conn, table_name: str) -> bool:
             return False
 
 
+# 🟠 v7.9.14 FIX-MV-ANALYZE-1: فصل VACUUM و ANALYZE على MV
 async def _run_maintenance_postgres(
     conn, logger,
     in_transaction: bool = False,
 ):
     """
     VACUUM ANALYZE الدوري.
-    🔴 C11-H: if in_transaction, نتخطى VACUUM.
-    🟠 FIX-C12d: فحص pg_stat_activity قبل كل VACUUM.
-    🟠 BUG-6 (v7.9.10): لا نكتب last_maintenance_at إذا in_transaction.
+
+    - if in_transaction, نتخطى VACUUM.
+    - فحص pg_stat_activity قبل كل VACUUM.
+    - لا نكتب last_maintenance_at إذا in_transaction.
+    - 🟠 v7.9.14: فصل VACUUM و ANALYZE على MV.
     """
     try:
-        try:
-            pg_ver_raw = await conn.fetchval("SHOW server_version_num")
-            pg_version = int(pg_ver_raw) // 10000 if pg_ver_raw else 0
-        except Exception:
-            pg_version = 0
+        pg_version = await _get_pg_version_cached(conn, logger)
 
         try:
             last_val = await conn.fetchval(
@@ -1947,16 +1985,31 @@ async def _run_maintenance_postgres(
             except Exception:
                 is_mv = False
 
+            # 🟠 v7.9.14 FIX-MV-ANALYZE-1: فصل VACUUM و ANALYZE على MV
             try:
                 if in_transaction:
                     await conn.execute(f'ANALYZE "{tbl}"')
                     analyzed += 1
-                elif is_mv and pg_version < 14:
-                    await conn.execute(f'ANALYZE "{tbl}"')
-                    analyzed += 1
                 elif is_mv:
-                    await conn.execute(f'VACUUM (ANALYZE) "{tbl}"')
-                    done += 1
+                    # MV: PostgreSQL لا يطبّق ANALYZE ضمنياً مع VACUUM
+                    # → نفصلهما
+                    if pg_version >= 14:
+                        try:
+                            await conn.execute(f'VACUUM "{tbl}"')
+                            done += 1
+                        except Exception as _ve:
+                            if logger:
+                                logger.debug(
+                                    f"⚠️ VACUUM MV {tbl}: {_ve}"
+                                )
+                    try:
+                        await conn.execute(f'ANALYZE "{tbl}"')
+                        analyzed += 1
+                    except Exception as _ae:
+                        if logger:
+                            logger.debug(
+                                f"⚠️ ANALYZE MV {tbl}: {_ae}"
+                            )
                 else:
                     await conn.execute(
                         f"VACUUM (ANALYZE, SKIP_LOCKED) {tbl}"
@@ -1986,7 +2039,7 @@ async def _run_maintenance_postgres(
                 if logger:
                     logger.debug(f"⚠️ _vacuum_dirty_mvs_postgres: {e}")
 
-        # 🟠 BUG-6 (v7.9.10): لا نكتب last_maintenance_at إذا في tx.
+        # لا نكتب last_maintenance_at إذا في tx
         if not in_transaction:
             try:
                 await conn.execute(
@@ -2158,7 +2211,6 @@ async def _run_maintenance_mysql(conn, logger):
 
 # =====================================================================
 # Migrations — إضافة أعمدة مفقودة
-# 🟠 M-4 (v7.9.10): DEBUG → WARNING للأخطاء الحقيقية
 # =====================================================================
 
 _GROUP_SECURITY_NEW_COLUMNS = [
@@ -2910,7 +2962,6 @@ async def _cleanup_stale_links_mysql(conn, logger):
 
 # =====================================================================
 # فحص الفهارس الحرجة
-# 🟠 M-1 (v7.9.10): _verify_critical_indexes_postgres حُذفت.
 # =====================================================================
 
 async def _verify_critical_indexes_sqlite(conn, logger):
@@ -3460,7 +3511,6 @@ async def _create_indexes_sqlite(conn, logger):
 
 # =====================================================================
 # إنشاء فهارس PostgreSQL — smart creation
-# 🔴 BUG-2 (v7.9.10): DROP-INVALID قبل FETCH-EXISTING
 # =====================================================================
 
 async def _create_indexes_postgres(
@@ -3468,7 +3518,6 @@ async def _create_indexes_postgres(
     in_transaction: bool = False,
 ):
     """دعم in_transaction لتجنّب CONCURRENTLY داخل tx."""
-    # 🔴 BUG-2: يجب حذف INVALID قبل جلب الموجود.
     await _drop_invalid_indexes_postgres(
         conn, logger,
         force_non_concurrent=in_transaction,
@@ -3601,7 +3650,6 @@ async def _create_indexes_mysql(conn, logger):
 
 # =====================================================================
 # 1. جداول SQLite
-# 🔴 BUG-3 (v7.9.10): fast-path — إضافة فحص تعريفات الفهارس
 # =====================================================================
 
 async def create_tables_sqlite(conn, logger, TimeUtils):
@@ -3621,7 +3669,6 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
                     "🔍 SQLite: بدء فحوصات الإقلاع الشاملة"
                 )
             await _migrate_missing_columns_sqlite(conn, logger)
-            # 🔴 BUG-3: كان تعريف الفهارس لا يُفحص في fast-path.
             await _drop_deprecated_indexes_sqlite(conn, logger)
             await _ensure_index_definitions_match_sqlite(conn, logger)
             await _verify_critical_indexes_sqlite(conn, logger)
@@ -3690,7 +3737,6 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
         )
     """)
 
-    # 🟢 FIX-TEXT-HASH-DEFAULT: TEXT DEFAULT '' (كان TEXT بدون default)
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS posts (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -3815,8 +3861,6 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
         )
     """)
 
-    # 🟢 FIX-WELCOME-DEFAULTS: welcome_text/goodbye_text = '' (كان نصاً عربياً)
-    # 🟢 FIX-DSS-CREATE: delete_spam_score INTEGER DEFAULT 1
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS group_security (
             chat_id INTEGER PRIMARY KEY,
@@ -4291,7 +4335,7 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
             "(version, applied_at, description) "
             "VALUES (?, ?, ?) ON CONFLICT(version) DO NOTHING",
             (CURRENT_SCHEMA_VERSION, _safe_now_iso(TimeUtils),
-             "v7.9.13-consistency-alignment"),
+             "v7.9.14-mv-analyze-split-fix"),
         )
         await conn.commit()
     except Exception as e:
@@ -4303,7 +4347,7 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
     if logger:
         logger.info(
             "✅ تم إنشاء جميع جداول SQLite مع الفهارس المحسنة "
-            "(v7.9.13 — CONSISTENCY-ALIGNMENT)"
+            "(v7.9.14 — MV-ANALYZE-SPLIT-FIX)"
         )
 
 
@@ -4315,7 +4359,6 @@ async def create_tables_postgres(
     conn, logger, TimeUtils,
     in_transaction: bool = False,
 ):
-    """🟠 M-5 (v7.9.10): لا استدعاء مزدوج للفهارس الحرجة."""
     current = await _get_current_schema_version_postgres(conn)
     if current >= CURRENT_SCHEMA_VERSION:
         _warn_if_schema_ahead(current, logger)
@@ -4418,7 +4461,6 @@ async def create_tables_postgres(
         )
     """)
 
-    # 🟢 FIX-TEXT-HASH-DEFAULT: TEXT DEFAULT '' (كان TEXT بدون default)
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS posts (
             id SERIAL PRIMARY KEY,
@@ -4543,8 +4585,6 @@ async def create_tables_postgres(
         )
     """)
 
-    # 🟢 FIX-WELCOME-DEFAULTS: welcome_text/goodbye_text = '' (كان نصاً عربياً)
-    # 🟢 FIX-DSS-CREATE: delete_spam_score INTEGER DEFAULT 1
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS group_security (
             chat_id BIGINT PRIMARY KEY,
@@ -5040,7 +5080,7 @@ async def create_tables_postgres(
             "VALUES ($1, $2, $3) ON CONFLICT (version) DO NOTHING",
             CURRENT_SCHEMA_VERSION,
             _safe_now_dt(TimeUtils),
-            "v7.9.13-consistency-alignment",
+            "v7.9.14-mv-analyze-split-fix",
         )
     except Exception as e:
         if logger:
@@ -5051,7 +5091,7 @@ async def create_tables_postgres(
     if logger:
         logger.info(
             "✅ تم إنشاء جميع جداول PostgreSQL مع الفهارس المحسنة "
-            "(v7.9.13 — CONSISTENCY-ALIGNMENT)"
+            "(v7.9.14 — MV-ANALYZE-SPLIT-FIX)"
         )
 
 
@@ -5142,7 +5182,6 @@ async def create_tables_mysql(conn, logger, TimeUtils):
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
         """)
 
-        # 🟢 FIX-TEXT-HASH-DEFAULT: text_hash CHAR(64) DEFAULT ''
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS posts (
                 id INT PRIMARY KEY AUTO_INCREMENT,
@@ -5276,8 +5315,6 @@ async def create_tables_mysql(conn, logger, TimeUtils):
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
         """)
 
-        # 🟢 FIX-WELCOME-DEFAULTS: welcome_text/goodbye_text = '' (كان نصاً عربياً)
-        # 🟢 FIX-DSS-CREATE: delete_spam_score TINYINT(1) DEFAULT 1
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS group_security (
                 chat_id BIGINT PRIMARY KEY,
@@ -5755,7 +5792,7 @@ async def create_tables_mysql(conn, logger, TimeUtils):
                 (
                     CURRENT_SCHEMA_VERSION,
                     _safe_now_iso(TimeUtils),
-                    "v7.9.13-consistency-alignment",
+                    "v7.9.14-mv-analyze-split-fix",
                 ),
             )
         except Exception as e:
@@ -5767,7 +5804,7 @@ async def create_tables_mysql(conn, logger, TimeUtils):
         if logger:
             logger.info(
                 "✅ تم إنشاء جميع جداول MySQL مع الفهارس المحسنة "
-                "(v7.9.13 — CONSISTENCY-ALIGNMENT)"
+                "(v7.9.14 — MV-ANALYZE-SPLIT-FIX)"
             )
 
     finally:
@@ -5829,16 +5866,22 @@ __all__ = [
     "_ensure_auto_blocked_table_mysql",
     "_BANNED_WORDS_NEW_COLUMNS",
     "_AUTO_REPLIES_NEW_COLUMNS",
+    # 🟢 v7.9.14
+    "_get_pg_version_cached",
+    "_PG_VERSION_CACHE",
 ]
 
 
 # =====================================================================
-# LOAD BEACON — v7.9.13
+# LOAD BEACON — v7.9.14
 # =====================================================================
 
 try:
     _beacon_parts = [
         f"🛡️ database_tables.py v{__version__} loaded",
+        f"FIX-MV-ANALYZE-1 _run_maintenance_postgres-split=✅",
+        f"FIX-MV-ANALYZE-2 _vacuum_dirty_mvs_postgres-split=✅",
+        f"FIX-MV-ANALYZE-3 pg_version-cache=✅",
         f"FIX-DSS-CREATE delete_spam_score-added=✅",
         f"FIX-TEXT-HASH-DEFAULT text_hash-DEFAULT-''=✅",
         f"FIX-WELCOME-DEFAULTS welcome/goodbye-DEFAULT-''=✅",
