@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-🌿 Relax Manager – البوت الرئيسي (bot.py v5.7.15-AUTO-HOSTNAME)
+🌿 Relax Manager – البوت الرئيسي (bot.py v5.7.16-AUTO-URL-LOG)
 ================================================================================
-🆕 v5.7.15 (AUTO-HOSTNAME — فوق v5.7.14):
-    🔴 FIX-19: حذف hardcoded "relaxbo-78m4.onrender.com" من _FALLBACK_HOSTNAME.
-              → الاعتماد التام على env vars (RENDER_*, RAILWAY_*, HEROKU_*, إلخ).
-              → فشل صريح إن لم يوجد أي hostname بدلاً من استخدام قيمة قديمة خاطئة.
-    🟢 محفوظ: كل إصلاحات v5.7.14 (FIX-17..18) و v5.7.13 (P0..P3).
+🆕 v5.7.16 (AUTO-URL-LOG — فوق v5.7.15):
+    🟢 FIX-20: `_print_public_url_hint()` تطبع رابط النبض دائماً، حتى في polling mode.
+    🟢 FIX-21: keep_alive() يطبع تلميح الرابط عند التعطيل.
+    🟢 FIX-22: رسالة صريحة عند POLLING mode تطبع /health المتوقع.
+    🟢 محفوظ: v5.7.15 (AUTO-HOSTNAME) + v5.7.14 (FIX-17..18) + v5.7.13 (P0..P3).
 ================================================================================
 """
 
@@ -436,7 +436,6 @@ _GIL_DIAG_ENABLED = False
 
 def _init_faulthandler() -> bool:
     global _gil_diag_fd, _GIL_DIAG_ENABLED
-    # 🔴 FIX-17: التعطيل التلقائي إذا لم يتم تحديد مسار صريح
     if not _GIL_DIAG_LOG:
         _gil_diag_fd = None
         _GIL_DIAG_ENABLED = False
@@ -486,15 +485,14 @@ _PID_FILE_PATH = "/app/.bot.pid"
 _KILL_TIMEOUT_SEC = 5.0
 _TELEGRAM_RELEASE_TIMEOUT_SEC = 15.0
 
-# 🆕 v5.7.15 (AUTO-HOSTNAME): لا hardcoded — اعتماد على env + RENDER_EXTERNAL_URL
 _FALLBACK_HOSTNAME = (os.getenv("FALLBACK_HOSTNAME", "")).strip()
 
-logger.info("🔧 v5.7.15 init: _FALLBACK_HOSTNAME=%r", _FALLBACK_HOSTNAME)
-logger.info("🔧 v5.7.15 init: RENDER_EXTERNAL_HOSTNAME=%r",
+logger.info("🔧 v5.7.16 init: _FALLBACK_HOSTNAME=%r", _FALLBACK_HOSTNAME)
+logger.info("🔧 v5.7.16 init: RENDER_EXTERNAL_HOSTNAME=%r",
             os.getenv("RENDER_EXTERNAL_HOSTNAME", ""))
-logger.info("🔧 v5.7.15 init: RENDER_EXTERNAL_URL=%r",
+logger.info("🔧 v5.7.16 init: RENDER_EXTERNAL_URL=%r",
             os.getenv("RENDER_EXTERNAL_URL", ""))
-logger.info("🔧 v5.7.15 init: ALLOW_POLLING=%r",
+logger.info("🔧 v5.7.16 init: ALLOW_POLLING=%r",
             os.getenv("ALLOW_POLLING", ""))
 
 def _read_pid_file() -> Optional[int]:
@@ -1658,6 +1656,15 @@ async def keep_alive():
     url = (os.getenv("KEEP_ALIVE_URL") or os.getenv("RENDER_EXTERNAL_URL"))
     if not url:
         logger.info("ℹ️ keep_alive: معطّل (لا KEEP_ALIVE_URL / RENDER_EXTERNAL_URL)")
+        # 🆕 v5.7.16 FIX-21: اطبع تلميح الرابط حتى عند التعطيل
+        _h = (os.getenv("RENDER_EXTERNAL_HOSTNAME") or "").strip()
+        if _h:
+            logger.info("💡 تلميح: جرّب https://%s/health يدوياً", _h)
+        else:
+            logger.info(
+                "💡 تلميح: على Render → Dashboard → أعلى صفحة الخدمة → URL، "
+                "ثم أضف /health"
+            )
         await asyncio.Event().wait()
         return
     url = url.rstrip('/')
@@ -1782,6 +1789,59 @@ def _resolve_port() -> int:
     except (TypeError, ValueError):
         pass
     return default_port
+
+# 🆕 v5.7.16 FIX-20: اطبع رابط النبض دائماً، حتى في polling mode
+def _print_public_url_hint(port: int, hostname: Optional[str]) -> None:
+    """
+    يطبع رابط النبض بغض النظر عن وضع التشغيل:
+      • webhook mode: يعرض https://{hostname}/health
+      • polling mode: يحاول استخراج النطاق من env vars ليعرض الرابط المتوقع
+      • لا شيء متاح: يطبع تعليمات واضحة
+    """
+    # 1) المسار الطبيعي: webhook mode
+    if hostname:
+        logger.info("🌐 PUBLIC URL: https://%s", hostname)
+        logger.info("💓 HEALTH URL: https://%s/health", hostname)
+        return
+
+    # 2) polling mode: حاول استخراج النطاق من env vars مباشرة
+    for var in (
+        "RENDER_EXTERNAL_URL", "RENDER_EXTERNAL_HOSTNAME",
+        "RAILWAY_PUBLIC_DOMAIN", "RAILWAY_STATIC_URL",
+        "FLY_APP_NAME", "VERCEL_URL",
+        "KEEP_ALIVE_URL", "PUBLIC_URL", "WEBHOOK_URL", "BOT_HOSTNAME",
+    ):
+        val = (os.getenv(var) or "").strip()
+        if not val:
+            continue
+        _host = None
+        if val.startswith("http"):
+            try:
+                _host = urlparse(val).netloc
+            except Exception:
+                _host = None
+        else:
+            _host = val
+        if _host:
+            logger.warning(
+                "💓 HEALTH URL (from %s, POLLING mode): https://%s/health",
+                var, _host,
+            )
+            logger.info(
+                "ℹ️ البوت يعمل في polling، لكن الخادم المحلي يستمع على 0.0.0.0:%d. "
+                "إذا كانت خدمتك Web Service على Render، فهذا الرابط يعمل من الخارج.",
+                port,
+            )
+            return
+
+    # 3) لا شيء متاح
+    logger.warning(
+        "⚠️ لا يمكن تحديد رابط النبض — لا hostname في أي env var.\n"
+        "   المنفذ المحلي: 0.0.0.0:%d/health (يعمل داخلياً فقط)\n"
+        "   على Render: Dashboard → أعلى صفحة الخدمة → URL، ثم أضف /health\n"
+        "   لإيقاظ الخدمة تلقائياً: أضف env متغير KEEP_ALIVE_URL=https://<نطاقك>",
+        port,
+    )
 
 async def _watch_runner(runner, shutdown_event: asyncio.Event, port: int) -> None:
     try:
@@ -2170,7 +2230,7 @@ async def main():
     logger.info("👨‍💼 المالك: %s", CONFIG.PRIMARY_OWNER_ID)
 
     logger.info(
-        "📦 bot.py: v5.7.15 | kill_prev=on | init_retry=on | webhook_force=on | "
+        "📦 bot.py: v5.7.16 | kill_prev=on | init_retry=on | webhook_force=on | "
         "webhook_verify=on | diag_incoming=%r | "
         "detectors=%s | layers=%d | fallback_hostname=%r | "
         "allow_polling_env=%r | faulthandler=%s",
@@ -2237,6 +2297,9 @@ async def main():
     port = _resolve_port()
     hostname = _resolve_hostname()
 
+    # 🆕 v5.7.16 FIX-20: اطبع رابط النبض دائماً
+    _print_public_url_hint(port, hostname)
+
     _allow_polling = os.getenv("ALLOW_POLLING", "0").strip() == "1"
 
     if not hostname:
@@ -2253,6 +2316,11 @@ async def main():
         logger.info("🌐 WEBHOOK mode FORCED: hostname=%s", hostname)
     else:
         logger.warning("⚠️ POLLING mode (ALLOW_POLLING=1)")
+        # 🆕 v5.7.16 FIX-22: رسالة صريحة بالـ /health المتوقع
+        logger.warning(
+            "⚠️ HEALTH endpoint: http://0.0.0.0:%d/health (يعمل داخلياً)",
+            port,
+        )
 
     t_app = time.monotonic()
     _req_pool, _upd_pool = _build_http_request_pools()
