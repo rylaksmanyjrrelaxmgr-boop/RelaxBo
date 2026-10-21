@@ -1,38 +1,29 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-🌿 Relax Manager – البوت الرئيسي (bot.py v5.7.13-FULL-AUDIT-FIXED)
+🌿 Relax Manager – البوت الرئيسي (bot.py v5.7.14-GIL-DIAG-READY)
 ================================================================================
-🆕 v5.7.13 (تصحيحات الفحص الدقيق — فوق v5.7.12):
+🆕 v5.7.14 (GIL-DIAG-READY — فوق v5.7.13):
+    🔴 FIX-17: `faulthandler` instrumentation لتشخيص GIL.
+        السبب: `traceback.extract_stack()` داخل `finally` لا يعمل — المكدّس
+        في تلك اللحظة هو مكدّس asyncio فقط، لا الكود الذي حجب.
+        الحل: `faulthandler.dump_traceback_later(2s, repeat=True, file=fd)`
+        أثناء تنفيذ كل handler. يعمل بـ SIGALRM على مستوى OS فيقاطع
+        حتى C-extensions (re, hashlib, json) التي لا تُحرّر GIL.
+        الإخراج: `/app/logs/gil_blocks.log` (كل stack dump).
+    🔴 FIX-18: `_wrap_handler_with_timing` — يقرأ من faulthandler dump
+        عند SLOW handler بدل `traceback.extract_stack()` المكسور.
+    🟢 محفوظ: كل إصلاحات v5.7.13.
+
+🆕 v5.7.13 (FULL-AUDIT-FIXED) — محفوظ:
     🔴 P0-FIX-1: `_run_post_init_hooks` — إزالة الاستدعاء اليدوي الخاطئ.
-        PTB 20.x يستدعي post_init تلقائياً داخل initialize()؛ الأعلام
-        `_post_init_ran`/`_post_init_executed`/`_post_init_done` غير موجودة
-        في PTB، لذا كان الاستدعاء اليدوي يُنفّذ post_init مرتين.
-        الحل: فحص `app._post_init` وإذا كان مضبوطاً نفترض أن PTB استدعاه.
-    🔴 P0-FIX-2: `_run_post_stop_hooks` — إبطال `_post_stop` (الخاصية الداخلية)
-        بدل `post_stop` (قد تكون read-only property في PTB).
-    🔴 P0-FIX-3: `_watch_runner` — التصفير فقط عند `2xx/3xx`، وعدّ `5xx`
-        كفشل (كان يُصفّر قبل الفحص → خادم ميت 502 لا يُغلق البوت).
-    🟠 P1-FIX-4: `_collect_admin_ids` — `break` فقط إذا كانت القائمة غير فارغة
-        (كان `[]` يمنع تجربة `get_all_admins`).
-    🟠 P1-FIX-5: `pre_checkout` — إغلاق ثغرة تخطي التحقق من المبلغ عندما
-        يكون `float(plan['price'])` فاشلاً (كان `expected_f=0.0` يُقبل أي مبلغ).
-    🟠 P1-FIX-6: `successful_payment` — إشعار المطور عند فشل `create_gift_code`
-        بعد دفع ناجح (كان فشلاً صامتاً).
-    🟠 P1-FIX-7: `_pid_is_bot_process` — مقارنة cwd لتفادي قتل managed bots.
-    🟡 P2-FIX-8: `_get_bot_token` — تحقق من صيغة التوكن بـ regex.
-    🟡 P2-FIX-9: `cleanup_admin_logs_periodically` — دعم `DB.connection()`
-        إذا كانت ترجع coroutine.
-    🟡 P2-FIX-10: `run_task_with_retry` — عدم التقاط SystemExit/KeyboardInterrupt.
-    🟢 P3-FIX-11: `_verify_command_handlers` — نقل grant/broadcast/backup/restore
-        إلى CRITICAL.
-    🟢 P3-FIX-12: `_init_group_log_instance` — idempotency check.
-    🟢 P3-FIX-13: `_write_pid_file` — إنشاء المجلد الأب.
-    🟢 P3-FIX-14: `pool_health_monitor` — PG_MAX_CONNECTIONS configurable.
-    🟢 P3-FIX-15: `cmd_ping` — تسجيل مقاييس ping.
-    🟢 P3-FIX-16: `keep_alive` — تسجيل سبب عدم التشغيل.
-    🟢 محفوظ: كل إصلاحات v5.7.11 / v5.7.12 (init_retry, pools, kill_prev,
-        webhook_force, init idempotency, ...).
+    🔴 P0-FIX-2: `_run_post_stop_hooks` — إبطال `_post_stop` الداخلية.
+    🔴 P0-FIX-3: `_watch_runner` — التصفير فقط عند 2xx/3xx.
+    🟠 P1-FIX-4: `_collect_admin_ids` — `break` فقط عند وجود عناصر.
+    🟠 P1-FIX-5: `pre_checkout` — إغلاق ثغرة تخطي المبلغ.
+    🟠 P1-FIX-6: `successful_payment` — إشعار المطور عند الفشل.
+    🟠 P1-FIX-7: `_pid_is_bot_process` — مقارنة cwd.
+    🟡 P2-FIX-8..16: token regex، cleanup coroutine، etc.
 ================================================================================
 """
 
@@ -47,6 +38,7 @@ import sys
 import time
 import aiohttp
 import functools
+import faulthandler
 from datetime import datetime, timedelta, timezone
 from html import escape as _html_escape
 from urllib.parse import urlparse
@@ -453,6 +445,59 @@ for _noisy in ("httpx", "httpcore", "telegram.request", "telegram.ext.ExtBot", "
 logger = logging.getLogger("relax_bot")
 
 # ═══════════════════════════════════════════════════════════════════
+# 🔴 v5.7.14 FIX-17: faulthandler — التقاط stacks حقيقية عند GIL
+# ═══════════════════════════════════════════════════════════════════
+_GIL_DIAG_LOG = os.getenv("GIL_DIAG_LOG", "/app/logs/gil_blocks.log")
+_gil_diag_fd: Optional[int] = None
+_GIL_DIAG_ENABLED = False
+
+def _init_faulthandler() -> bool:
+    """
+    🔴 v5.7.14 FIX-17: تفعيل faulthandler → ملف.
+    يعمل بـ SIGALRM على مستوى OS — يقاطع حتى C-extensions (re, hashlib)
+    التي لا تُحرّر GIL. هذا هو الأداة الوحيدة التي تُظهر stack الحجب
+    الحقيقي عند sync handlers.
+    """
+    global _gil_diag_fd, _GIL_DIAG_ENABLED
+    try:
+        _dir = os.path.dirname(_GIL_DIAG_LOG)
+        if _dir:
+            os.makedirs(_dir, exist_ok=True)
+        _gil_diag_fd = os.open(
+            _GIL_DIAG_LOG,
+            os.O_WRONLY | os.O_CREAT | os.O_APPEND,
+            0o644,
+        )
+        faulthandler.enable(file=_gil_diag_fd)
+        _GIL_DIAG_ENABLED = True
+        logger.info("🔍 FIX-17: faulthandler enabled → %s", _GIL_DIAG_LOG)
+        return True
+    except Exception as _e:
+        _gil_diag_fd = None
+        _GIL_DIAG_ENABLED = False
+        logger.warning("⚠️ FIX-17: faulthandler failed — %s", _e)
+        return False
+
+def _shutdown_faulthandler() -> None:
+    """إيقاف faulthandler وإغلاق الملف."""
+    global _gil_diag_fd, _GIL_DIAG_ENABLED
+    try:
+        faulthandler.cancel_dump_traceback_later()
+    except Exception:
+        pass
+    try:
+        faulthandler.disable()
+    except Exception:
+        pass
+    if _gil_diag_fd is not None:
+        try:
+            os.close(_gil_diag_fd)
+        except Exception:
+            pass
+        _gil_diag_fd = None
+    _GIL_DIAG_ENABLED = False
+
+# ═══════════════════════════════════════════════════════════════════
 # PID / KILL-PREVIOUS
 # ═══════════════════════════════════════════════════════════════════
 _PID_FILE_PATH = "/app/.bot.pid"
@@ -463,12 +508,12 @@ _FALLBACK_HOSTNAME = (
     os.getenv("FALLBACK_HOSTNAME", "") or "relaxbo-78m4.onrender.com"
 ).strip()
 
-logger.info("🔧 v5.7.13 init: _FALLBACK_HOSTNAME=%r", _FALLBACK_HOSTNAME)
-logger.info("🔧 v5.7.13 init: RENDER_EXTERNAL_HOSTNAME=%r",
+logger.info("🔧 v5.7.14 init: _FALLBACK_HOSTNAME=%r", _FALLBACK_HOSTNAME)
+logger.info("🔧 v5.7.14 init: RENDER_EXTERNAL_HOSTNAME=%r",
             os.getenv("RENDER_EXTERNAL_HOSTNAME", ""))
-logger.info("🔧 v5.7.13 init: RENDER_EXTERNAL_URL=%r",
+logger.info("🔧 v5.7.14 init: RENDER_EXTERNAL_URL=%r",
             os.getenv("RENDER_EXTERNAL_URL", ""))
-logger.info("🔧 v5.7.13 init: ALLOW_POLLING=%r",
+logger.info("🔧 v5.7.14 init: ALLOW_POLLING=%r",
             os.getenv("ALLOW_POLLING", ""))
 
 def _read_pid_file() -> Optional[int]:
@@ -484,7 +529,6 @@ def _read_pid_file() -> Optional[int]:
     return None
 
 def _write_pid_file() -> None:
-    # 🩹 FIX-13: إنشاء المجلد الأب
     try:
         os.makedirs(os.path.dirname(_PID_FILE_PATH), exist_ok=True)
         with open(_PID_FILE_PATH, "w") as f:
@@ -512,10 +556,6 @@ def _is_process_alive(pid: int) -> bool:
         return True
 
 def _pid_is_bot_process(pid: int) -> bool:
-    """
-    التحقق من cmdline وcwd لتفادي قتل managed bots التي تشغّل bot.py
-    من مجلد آخر.
-    """
     try:
         with open(f"/proc/{pid}/cmdline", "rb") as f:
             cmdline = f.read().replace(b"\x00", b" ").decode("utf-8", errors="ignore")
@@ -529,7 +569,6 @@ def _pid_is_bot_process(pid: int) -> bool:
                 break
         if not _has_bot_py:
             return False
-        # 🩹 FIX-7: مقارنة cwd — لا تقتل bot.py من مجلد آخر (managed bots)
         try:
             _pid_cwd = os.readlink(f"/proc/{pid}/cwd")
             _my_cwd = os.getcwd()
@@ -540,7 +579,6 @@ def _pid_is_bot_process(pid: int) -> bool:
                 )
                 return False
         except (IOError, OSError):
-            # /proc/{pid}/cwd قد لا يكون مقروءاً — نرفض القتل للأمان
             return False
         return True
     except (IOError, PermissionError, OSError):
@@ -789,13 +827,15 @@ _GIL_LAG_BLOCKED_CUMULATIVE_WARN_MS = 5000.0
 _HANDLER_SLOW_WARN_MS = 3000.0
 _HANDLER_INFO_MS = 1500.0
 
+# 🔴 v5.7.14: عتبة تفعيل faulthandler أثناء تنفيذ handler
+_FAULTHANDLER_DUMP_INTERVAL_SEC = 2.0
+
 _ADMIN_GUARD_WARNED = False
 
 _ACTIVE_HANDLER: Dict[str, Any] = {"name": None, "start": 0.0, "chat_id": None}
 
 _GROUP_CHAT_FILTER = filters.ChatType.GROUP | filters.ChatType.SUPERGROUP
 
-# 🩹 FIX-8: تحقق من صيغة توكن تيليجرام
 _TG_TOKEN_RE = re.compile(r"^\d{8,10}:[A-Za-z0-9_-]{35}$")
 
 def _amounts_match(expected: Any, actual: Any) -> bool:
@@ -824,7 +864,30 @@ def record_bot_metric(key: str, value: Any = 1) -> None:
     except Exception:
         pass
 
+def _read_gil_dump_tail(max_bytes: int = 3000) -> str:
+    """
+    🔴 v5.7.14 FIX-18: يقرأ آخر part من ملف faulthandler.
+    يُستخدم عندما handler بطيء — يُظهر stack الحجب الحقيقي.
+    """
+    if not _GIL_DIAG_ENABLED:
+        return ""
+    try:
+        with open(_GIL_DIAG_LOG, "r", encoding="utf-8", errors="replace") as f:
+            f.seek(0, os.SEEK_END)
+            size = f.tell()
+            f.seek(max(0, size - max_bytes))
+            return f.read()
+    except Exception:
+        return ""
+
 def _wrap_handler_with_timing(handler: Callable, name: str) -> Callable:
+    """
+    🔴 v5.7.14 FIX-18: يستخدم faulthandler لأخذ stack حقيقي عند الحجب.
+
+    السبب: `traceback.extract_stack()` داخل finally لا يعمل — المكدّس
+    في تلك اللحظة هو asyncio فقط. faulthandler يقرأ بـ SIGALRM من OS
+    فيقاطع C-extensions التي لا تُحرّر GIL (re، json، hashlib...).
+    """
     if not callable(handler):
         return handler
 
@@ -840,9 +903,30 @@ def _wrap_handler_with_timing(handler: Callable, name: str) -> Callable:
         except Exception:
             _ACTIVE_HANDLER["chat_id"] = None
         t0 = time.monotonic()
+
+        # 🔴 FIX-18: تفعيل stack dump دوري أثناء التنفيذ
+        _fh_armed = False
+        if _GIL_DIAG_ENABLED:
+            try:
+                faulthandler.dump_traceback_later(
+                    timeout=_FAULTHANDLER_DUMP_INTERVAL_SEC,
+                    repeat=True,
+                    file=_gil_diag_fd,
+                    exit=False,
+                )
+                _fh_armed = True
+            except Exception:
+                pass
+
         try:
             return await handler(update, context)
         finally:
+            if _fh_armed:
+                try:
+                    faulthandler.cancel_dump_traceback_later()
+                except Exception:
+                    pass
+
             elapsed_ms = (time.monotonic() - t0) * 1000.0
             try:
                 if elapsed_ms >= _HANDLER_INFO_MS:
@@ -850,19 +934,30 @@ def _wrap_handler_with_timing(handler: Callable, name: str) -> Callable:
                                 name, elapsed_ms, _ACTIVE_HANDLER.get("chat_id"))
                 if elapsed_ms >= _HANDLER_SLOW_WARN_MS:
                     _stack_hint = ""
-                    try:
-                        _frames = traceback.extract_stack()
-                        _relevant = [
-                            f"  {f.filename.split('/')[-1]}:{f.lineno} in {f.name}"
-                            for f in _frames[-6:]
-                            if "handlers_message" in f.filename or "handlers/" in f.filename
-                        ]
-                        if _relevant:
-                            _stack_hint = "\n" + "\n".join(_relevant)
-                    except Exception:
-                        pass
-                    logger.warning("🐌 SLOW handler: %s took %.0fms | chat=%s%s",
-                                   name, elapsed_ms, _ACTIVE_HANDLER.get("chat_id"), _stack_hint)
+                    # 🔴 FIX-18: اقرأ من faulthandler dump بدل extract_stack
+                    if _GIL_DIAG_ENABLED:
+                        _tail = _read_gil_dump_tail(max_bytes=3000)
+                        if _tail.strip():
+                            _stack_hint = (
+                                "\n🔍 FAULTHANDLER STACK (آخر dump):\n" + _tail
+                            )
+                    # fallback نادر (extract_stack عادة فارغ هنا)
+                    if not _stack_hint:
+                        try:
+                            _frames = traceback.extract_stack()
+                            _relevant = [
+                                f"  {f.filename.split('/')[-1]}:{f.lineno} in {f.name}"
+                                for f in _frames[-6:]
+                                if "handlers_message" in f.filename or "handlers/" in f.filename
+                            ]
+                            if _relevant:
+                                _stack_hint = "\n" + "\n".join(_relevant)
+                        except Exception:
+                            pass
+                    logger.warning(
+                        "🐌 SLOW handler: %s took %.0fms | chat=%s%s",
+                        name, elapsed_ms, _ACTIVE_HANDLER.get("chat_id"), _stack_hint,
+                    )
             except Exception:
                 pass
             _ACTIVE_HANDLER.update(_prev)
@@ -1068,9 +1163,6 @@ _log_security_bridge_status()
 _log_db_diagnostics_status()
 _log_perf_tuning_status()
 
-# ═══════════════════════════════════════════════════════════════════
-# periodic_cleanup_task — instance-bound
-# ═══════════════════════════════════════════════════════════════════
 _periodic_cleanup_callable: Optional[Callable] = None
 try:
     import inspect as _inspect_pc
@@ -1183,9 +1275,6 @@ async def _shutdown_db_pool(timeout: float = 5.0) -> None:
         pass
 
 async def _collect_admin_ids() -> List[int]:
-    """
-    🟠 FIX-4: break فقط عند وجود عناصر فعلية — القائمة الفارغة تُجرّب الدالة التالية.
-    """
     admin_ids: Set[int] = set()
     try:
         owner = int(getattr(CONFIG, "PRIMARY_OWNER_ID", 0) or 0)
@@ -1215,7 +1304,6 @@ async def _collect_admin_ids() -> List[int]:
             if isinstance(result, dict):
                 result = [result]
             if not result:
-                # 🩹 FIX-4: قائمة فارغة — جرّب الدالة التالية بدل break
                 continue
             for a in result:
                 uid = a.get("user_id") if isinstance(a, dict) else a
@@ -1230,7 +1318,6 @@ async def _collect_admin_ids() -> List[int]:
     return sorted(admin_ids)
 
 def _get_bot_token() -> str:
-    """🩹 FIX-8: تحقق من صيغة توكن تيليجرام قبل القبول."""
     env_token = os.getenv("BOT_TOKEN", "").strip()
     if env_token and _TG_TOKEN_RE.match(env_token):
         return env_token
@@ -1243,7 +1330,6 @@ def _get_bot_token() -> str:
                     return val_stripped
         except Exception:
             continue
-    # fallback: قبول أي توكن غير فارغ (مع تحذير) — لتفادي كسر إعدادات قديمة
     if env_token:
         logger.warning("⚠️ BOT_TOKEN لا يطابق الصيغة القياسية — سيُستخدم كما هو")
         return env_token
@@ -1272,7 +1358,6 @@ def _redact_token(text: str, token: str = None) -> str:
 def _safe_url(url: str) -> str:
     return _redact_token(url)
 
-# 🟢 FIX-11: دوال حرجة إضافية
 _CRITICAL_COMMANDS = (
     "start", "help_command", "subscribe", "stats", "admin",
     "db_diag", "db_vacuum", "broadcast", "grant", "backup", "restore",
@@ -1322,7 +1407,6 @@ def _verify_db_config() -> bool:
         return True
 
 def _init_group_log_instance(app) -> bool:
-    # 🩹 FIX-12: idempotency
     global _GROUP_LOG_INSTANCE
     if _GROUP_LOG_INSTANCE is not None:
         logger.debug("group_log already initialized — skip")
@@ -1370,7 +1454,6 @@ async def cleanup_admin_logs_periodically() -> None:
         try:
             db_type = str(getattr(DB, "DB_TYPE", "sqlite")).lower().strip()
             deleted = 0
-            # 🩹 FIX-9: دعم DB.connection() التي ترجع coroutine
             _conn_cm = DB.connection()
             if asyncio.iscoroutine(_conn_cm):
                 _conn_cm = await _conn_cm
@@ -1414,9 +1497,6 @@ async def cleanup_removed_channels_periodically() -> None:
         except asyncio.CancelledError:
             raise
 
-# ═══════════════════════════════════════════════════════════════════
-# _validate_invoice_for_payment
-# ═══════════════════════════════════════════════════════════════════
 async def _validate_invoice_for_payment(user_id: int, payload: str):
     try:
         data = json.loads(payload)
@@ -1473,7 +1553,6 @@ async def pre_checkout(update, context):
             return
     except Exception:
         pass
-    # 🩹 FIX-5: إغلاق ثغرة تخطي التحقق من المبلغ
     if hasattr(query, 'total_amount'):
         try:
             _price_raw = plan.get('price')
@@ -1562,7 +1641,6 @@ async def successful_payment(update, context):
             try:
                 code = await DB.create_gift_code(plan_id=plan['id'], creator_id=user_id)
             except Exception as _e:
-                # 🩹 FIX-6: إشعار المطور عند استثناء
                 logger.error("create_gift_code(%s) exception: %s", plan['id'], _e)
                 try:
                     await _notify_dev_log(
@@ -1587,7 +1665,6 @@ async def successful_payment(update, context):
                     parse_mode='HTML',
                 )
             else:
-                # 🩹 FIX-6: فشل صامت سابقاً — إشعار المطور والمستخدم
                 logger.error(
                     "create_gift_code(%s) returned None — invoice=%s",
                     plan['id'], invoice['number'],
@@ -1615,7 +1692,6 @@ async def keep_alive():
         raise
     url = (os.getenv("KEEP_ALIVE_URL") or os.getenv("RENDER_EXTERNAL_URL"))
     if not url:
-        # 🩹 FIX-16: تسجيل سبب عدم التشغيل
         logger.info("ℹ️ keep_alive: معطّل (لا KEEP_ALIVE_URL / RENDER_EXTERNAL_URL)")
         await asyncio.Event().wait()
         return
@@ -1653,7 +1729,6 @@ async def _fetch_pg_activity_cached() -> Dict[str, Any]:
         return {}
 
 async def pool_health_monitor() -> None:
-    # 🩹 FIX-14: PG_MAX_CONNECTIONS configurable
     try:
         _max_conn = int(os.getenv("PG_MAX_CONNECTIONS", "20"))
         if _max_conn <= 0:
@@ -1743,7 +1818,6 @@ def _resolve_port() -> int:
         pass
     return default_port
 
-# 🩹 FIX-3: التصفير فقط عند 2xx/3xx
 async def _watch_runner(runner, shutdown_event: asyncio.Event, port: int) -> None:
     try:
         await asyncio.sleep(3.0)
@@ -1797,7 +1871,6 @@ async def run_task_with_retry(task_func, *args, task_name=""):
         except asyncio.CancelledError:
             raise
         except (KeyboardInterrupt, SystemExit):
-            # 🩹 FIX-10: عدم التقاط SystemExit/KeyboardInterrupt
             raise
         except Exception as e:
             consecutive_failures += 1
@@ -1846,18 +1919,7 @@ async def contest_cleanup(app: Application):
         except asyncio.CancelledError:
             raise
 
-# ═══════════════════════════════════════════════════════════════════
-# 🔴 FIX-1/FIX-2: post_init / post_stop idempotency (correct)
-# ═══════════════════════════════════════════════════════════════════
 async def _run_post_init_hooks(app: Application) -> None:
-    """
-    🔴 FIX-1: PTB 20.x يستدعي post_init تلقائياً داخل initialize() إذا كان
-    مضبوطاً. الأعلام `_post_init_ran`/`_post_init_executed`/`_post_init_done`
-    غير موجودة في PTB. لذلك:
-    - إذا كان `app._post_init` مضبوطاً → PTB استدعاه (أو سيستدعيه) → لا نتدخل.
-    - إذا لم يكن مضبوطاً → لا شيء لندعوه.
-    - نستخدم bot_data[..] للـ idempotency فقط.
-    """
     if app.bot_data.get("_post_init_executed"):
         logger.debug("post_init already executed — skip")
         return
@@ -1866,14 +1928,9 @@ async def _run_post_init_hooks(app: Application) -> None:
     if not callable(_post_init):
         logger.debug("post_init غير مضبوط — skip")
         return
-    # إذا كان PTB سيتكفل به (post_init مضبوط على app)
     logger.info("✅ post_init مُدار من PTB.initialize() — لا استدعاء يدوي")
 
 async def _run_post_stop_hooks(app: Application) -> None:
-    """
-    🔴 FIX-2: إبطال `_post_stop` (الخاصية الداخلية) بدل `post_stop` (قد تكون
-    read-only property في PTB).
-    """
     if app.bot_data.get("_post_stop_executed"):
         logger.debug("post_stop already executed — skip")
         return
@@ -1887,7 +1944,6 @@ async def _run_post_stop_hooks(app: Application) -> None:
     except Exception as _e:
         logger.warning("post_stop hook failed: %s", _e)
     finally:
-        # منع PTB من استدعائه مجدداً
         try:
             if hasattr(app, "_post_stop"):
                 app._post_stop = None
@@ -1921,7 +1977,6 @@ async def _stop_polling_mode(app: Application) -> None:
                 pass
 
 async def _diag_incoming(update, context):
-    """DIAG_INCOMING=1 → تسجيل كل رسالة واردة للمجموعة (info level)."""
     try:
         msg = update.effective_message
         chat = update.effective_chat
@@ -2009,7 +2064,6 @@ async def cmd_ping(update, context):
         except TypeError:
             sent = await msg.reply_text("🏓 قياس...")
         send_rtt_ms = int((time.monotonic() - t0) * 1000)
-        # 🩹 FIX-15: تسجيل مقاييس ping
         try:
             record_bot_metric("pings_total", 1)
             record_bot_metric("ping_sum_ms", send_rtt_ms)
@@ -2096,10 +2150,6 @@ async def _cmd_analytics_alias(update, context):
     except Exception:
         pass
 
-# ═══════════════════════════════════════════════════════════════════
-# Main
-# ═══════════════════════════════════════════════════════════════════
-
 async def main():
     t_start = time.monotonic()
     _shutdown_event = asyncio.Event()
@@ -2122,6 +2172,9 @@ async def main():
                 pass
     except Exception:
         pass
+
+    # 🔴 v5.7.14 FIX-17: تفعيل faulthandler قبل أي شيء ثقيل
+    _init_faulthandler()
 
     logger.info("🔪 FORCE-KILL-PREVIOUS: بدء الفحص...")
     try:
@@ -2153,15 +2206,16 @@ async def main():
     logger.info("👨‍💼 المالك: %s", CONFIG.PRIMARY_OWNER_ID)
 
     logger.info(
-        "📦 bot.py: v5.7.13 | kill_prev=on | init_retry=on | webhook_force=on | "
+        "📦 bot.py: v5.7.14 | kill_prev=on | init_retry=on | webhook_force=on | "
         "webhook_verify=on | diag_incoming=%r | "
         "detectors=%s | layers=%d | fallback_hostname=%r | "
-        "allow_polling_env=%r",
+        "allow_polling_env=%r | faulthandler=%s",
         _DIAG_INCOMING,
         _SPAM_DETECTOR_VERSION or "N/A",
         _SPAM_DETECTOR_LAYERS_COUNT,
         _FALLBACK_HOSTNAME,
         os.getenv("ALLOW_POLLING", ""),
+        "on" if _GIL_DIAG_ENABLED else "off",
     )
 
     if not _verify_command_handlers():
@@ -2378,7 +2432,7 @@ async def main():
     try:
         _hg_timed = _wrap_handler_with_timing(MessageHandlers.handle_group, "handle_group")
         app.add_handler(MessageHandler(_group_msg_filter, _hg_timed), group=-1)
-        logger.info("✅ handle_group [timed]")
+        logger.info("✅ handle_group [timed+faulthandler]")
     except Exception as _e:
         logger.error("❌ handle_group: %s", _e)
 
@@ -2389,7 +2443,7 @@ async def main():
                 MessageHandler(_GROUP_CHAT_FILTER & filters.UpdateType.EDITED_MESSAGE, _he_timed),
                 group=-1,
             )
-            logger.info("✅ handle_edited [timed]")
+            logger.info("✅ handle_edited [timed+faulthandler]")
         except Exception as _e:
             logger.error("❌ handle_edited: %s", _e)
 
@@ -2399,7 +2453,7 @@ async def main():
             MessageHandler(filters.StatusUpdate.ALL & _GROUP_CHAT_FILTER, _hs_timed),
             group=-1,
         )
-        logger.info("✅ handle_service [timed]")
+        logger.info("✅ handle_service [timed+faulthandler]")
     except Exception as _e:
         logger.error("❌ handle_service: %s", _e)
 
@@ -2609,7 +2663,7 @@ async def main():
             & ~filters.SUCCESSFUL_PAYMENT,
             _hp_timed,
         ))
-        logger.info("✅ handle_private [timed]")
+        logger.info("✅ handle_private [timed+faulthandler]")
     except Exception as _e:
         logger.error("❌ handle_private: %s", _e)
 
@@ -2853,6 +2907,12 @@ async def main():
 
         try:
             await _shutdown_db_pool(timeout=5.0)
+        except Exception:
+            pass
+
+        # 🔴 v5.7.14 FIX-17: تنظيف faulthandler
+        try:
+            _shutdown_faulthandler()
         except Exception:
             pass
 
