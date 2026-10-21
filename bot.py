@@ -4,7 +4,7 @@
 🌿 Relax Manager – البوت الرئيسي (bot.py v5.7.14-GIL-DIAG-READY)
 ================================================================================
 🆕 v5.7.14 (GIL-DIAG-READY — فوق v5.7.13):
-    🔴 FIX-17: `faulthandler` instrumentation لتشخيص GIL.
+    🔴 FIX-17: `faulthandler` instrumentation لتشخيص GIL (يُفعّل فقط إذا طُلب).
     🔴 FIX-18: `_wrap_handler_with_timing` — يقرأ من faulthandler dump.
     🟢 محفوظ: كل إصلاحات v5.7.13 (P0-FIX-1..3, P1-FIX-4..7, P2-FIX-8..10, P3-FIX-11..16).
 ================================================================================
@@ -429,12 +429,18 @@ logger = logging.getLogger("relax_bot")
 # ═══════════════════════════════════════════════════════════════════
 # 🔴 v5.7.14 FIX-17: faulthandler — التقاط stacks حقيقية عند GIL
 # ═══════════════════════════════════════════════════════════════════
-_GIL_DIAG_LOG = os.getenv("GIL_DIAG_LOG", "/app/logs/gil_blocks.log")
+_GIL_DIAG_LOG = os.getenv("GIL_DIAG_LOG", "").strip()
 _gil_diag_fd: Optional[int] = None
 _GIL_DIAG_ENABLED = False
 
 def _init_faulthandler() -> bool:
     global _gil_diag_fd, _GIL_DIAG_ENABLED
+    # 🔴 FIX-17: التعطيل التلقائي إذا لم يتم تحديد مسار صريح
+    if not _GIL_DIAG_LOG:
+        _gil_diag_fd = None
+        _GIL_DIAG_ENABLED = False
+        logger.info("ℹ️ faulthandler: معطّل (GIL_DIAG_LOG فارغ)")
+        return False
     try:
         _dir = os.path.dirname(_GIL_DIAG_LOG)
         if _dir:
