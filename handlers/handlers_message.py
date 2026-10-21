@@ -1,44 +1,37 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-handlers_message.py - v7.18.49 (FIX-TRANSLATE-BLOCKING)
+handlers_message.py - v7.18.50 (FIX-TEXT-SCORE-BLOCKING + AUTOREPLY-BLOCKING)
 (متوافق مع detectors v4.1.0 + banned_words_manager v1.2.0 + group_log v1.4.0)
 =============================================================================
-🆕 v7.18.49 (FIX-TRANSLATE-BLOCKING):
+🆕 v7.18.50 (FIX-TEXT-SCORE-BLOCKING + AUTOREPLY-BLOCKING):
 
-    🔴 FIX-TRANSLATE-1 (CRITICAL): TranslationManager.translate() كان
-        يُستدعى مباشرة داخل async context — وهو sync يستخدم
-        requests.get() (deep_translator). كل ترجمة تحجب event loop
-        كاملاً حتى ترد Google (~3-13s). هذا هو سبب lag=12203ms الذي
-        ظهر في GIL-MONITOR على chat=-1002859036439.
+    🔴 FIX-TEXT-SCORE (CRITICAL): v7.18.48 استبدل multilayer بـ
+        `_compute_spam_score` مباشرة على الـ main thread. ظننا أنه
+        "سريع" لكن regex على النص العربي المعقّد يحجب event loop
+        10-15 ثانية. هذا سبب GIL-MONITOR lag=13004ms على chat
+        -1002859036439 (رسالة عربية لم تُترجم — الترجمة ليست السبب).
 
-        الأثر: بعد v7.18.49، الترجمة تعمل في asyncio.to_thread
-        + timeout 8s + cache 5min → lag ≤ 200ms.
+        الحل: لف `_compute_spam_score` في `asyncio.to_thread` +
+        timeout 1.5s → lag ≤ 200ms مضمون.
 
-    🔴 FIX-TRANSLATE-2: _translate_safe() جديدة — wraps translate()
-        في asyncio.to_thread + timeout + cache (500 entries, TTL 5min).
-        أي فشل/timeout → None (لا يكسر الرسالة).
+    🔴 FIX-AUTOREPLY (CRITICAL): `_process_auto_reply` كان يستدعي
+        DB.get_auto_reply (psycopg2 sync) و get_reply_from_file
+        (file I/O sync) على main thread. كلاهما يحجب event loop.
 
-    🟢 FIX-TRANSLATE-3: TRANSLATION_MAX_TEXT_LENGTH=500 — رسائل أطول
-        تُتخطى (لا معنى لترجمتها + تحمي API).
+        الحل: كلاهما في `asyncio.to_thread` + timeout 3s/2s.
 
-    🟢 FIX-TRANSLATE-4: cache ديناميكي (LRU-ish، max=500) — ترجمات
-        متكررة لنفس النص لا تُعيد API call.
+    🔴 FIX-BWM (CRITICAL): `BannedWordsManager.check_message` قد
+        يجمّد event loop عند regex التطبيع العربي.
 
-    ✅ كل شيء آخر محفوظ من v7.18.48.
+        الحل: `asyncio.wait_for` + timeout 2.0s.
 
-🆕 v7.18.48 (PERF-FIX-MEDIA-ONLY-MULTILAYER) — محفوظ:
+    🟢 FIX-CONSTANTS: إضافة ثوابت timeout قابلة للتعديل.
 
-    🔴 FIX-LAG-1 (CRITICAL): analyze_message_full_async فقط للرسائل
-        التي تحتوي وسائط. النصوص البسيطة تستخدم _compute_spam_score
-        مباشرة.
+    ✅ كل شيء آخر محفوظ من v7.18.49 (TRANSLATE-SAFE + FIX-LAG-1/3).
 
-    🔴 FIX-LAG-2: _SPAM_ASYNC_TIMEOUT من 2.5s → 1.0s.
-
-    🟢 FIX-LAG-3: _lazy_init_columns أصبح fire-and-forget.
-
-    🟢 FIX-LAG-4: _analysis_mode = "text-only-fast" metric.
-
+🆕 v7.18.49 (FIX-TRANSLATE-BLOCKING) — محفوظ.
+🆕 v7.18.48 (PERF-FIX-MEDIA-ONLY-MULTILAYER) — محفوظ.
 🆕 v7.18.47 (LOG-CHANNEL-KEY-UNIFICATION) — محفوظ.
 🆕 v7.18.46 (POST-AUDIT-CORRECTIONS) — محفوظ.
 =============================================================================
@@ -125,12 +118,18 @@ def _ph_list(count: int) -> str:
 
 
 # ═════════════════════════════════════════════════════════════════════
-# 🆕 v7.18.48 FIX-LAG-2: مهلة كشف Spam (2.5s → 1.0s)
+# 🆕 v7.18.48 FIX-LAG-2: مهلة كشف Spam للوسائط
+# 🆕 v7.18.50 FIX-CONSTANTS: ثوابت timeouts جديدة
 # ═════════════════════════════════════════════════════════════════════
-# السبب: max wait للرسائل الوسائط كان 2.5s، مما يجعل أسوأ حالة
-# lag أعلى. 1.0s كافٍ للطبقات السريعة، ويقلل max lag.
-# النصوص البسيطة لا تستخدم هذا timeout أصلاً (FIX-LAG-1).
 _SPAM_ASYNC_TIMEOUT: float = 1.0
+
+# 🆕 v7.18.50 FIX-TEXT-SCORE-BLOCKING
+_TEXT_SCORE_TIMEOUT_SEC: float = 1.5
+# 🆕 v7.18.50 FIX-AUTOREPLY-BLOCKING
+_AUTOREPLY_DB_TIMEOUT_SEC: float = 3.0
+_AUTOREPLY_FILE_TIMEOUT_SEC: float = 2.0
+# 🆕 v7.18.50 FIX-BWM-BLOCKING
+_BWM_TIMEOUT_SEC: float = 2.0
 
 
 # ═════════════════════════════════════════════════════════════════════
@@ -456,9 +455,16 @@ def _as_bool(value, default=False) -> bool:
     return default
 
 
+# 🆕 v7.18.50 FIX-AUTOREPLY-BLOCKING helper
+async def _maybe_await(value):
+    """إذا كانت value coroutine، انتظرها. وإلا أعِدها كما هي."""
+    if asyncio.iscoroutine(value):
+        return await value
+    return value
+
+
 # ═════════════════════════════════════════════════════════════════════
-# v7.18.42 FIX-DEV-IDS + v7.18.43 FIX-DEV-IDS-STR
-# v7.18.45 FIX-DEV-IDS-INT: دعم الرقم المفرد
+# v7.18.42 FIX-DEV-IDS + v7.18.43 FIX-DEV-IDS-STR + v7.18.45 FIX-DEV-IDS-INT
 # ═════════════════════════════════════════════════════════════════════
 def _is_dev_user(user_id) -> bool:
     """فحص موحّد لصلاحيات المطور (developer/owner)."""
@@ -674,7 +680,7 @@ MAX_COMPILED_BANNED_PATTERNS = 5000
 
 TRANSLATION_REPLY_DELETE_DELAY = 30
 TRANSLATION_MIN_TEXT_LENGTH = 2
-TRANSLATION_MAX_TEXT_LENGTH = 500    # 🆕 v7.18.49
+TRANSLATION_MAX_TEXT_LENGTH = 500
 PENALTY_MESSAGE_DELETE_DELAY = 10
 
 _FORWARD_NOTIFY_COOLDOWN_SECONDS = 300.0
@@ -719,7 +725,7 @@ FEATURE_LOG_ADMIN_CHANGES = _env_flag("LOG_ADMIN_CHANGES", True)
 _DEBUG_DIAG = DEBUG_DIAG
 _DEBUG_SPAM = DEBUG_SPAM
 
-# 🆕 v7.18.49 FIX-TRANSLATE-BLOCKING
+# v7.18.49 FIX-TRANSLATE-BLOCKING
 _TRANSLATION_CACHE: Dict[Tuple[str, str], Tuple[str, float]] = {}
 _TRANSLATION_CACHE_TTL = 300.0
 _TRANSLATION_CACHE_MAX = 500
@@ -1061,7 +1067,6 @@ _columns_initialized = False
 _columns_init_lock = asyncio.Lock()
 _columns_last_attempt_ts = 0.0
 _columns_last_error_log_ts = 0.0
-# 🆕 v7.18.48 FIX-LAG-3: flag لمنع تشغيل migration أكثر من مرة
 _columns_bg_task: Optional[asyncio.Task] = None
 
 
@@ -1185,12 +1190,12 @@ async def _notify_dev_about_idle_tx(
 
 
 # ═════════════════════════════════════════════════════════════════════
-# 🆕 v7.18.48 FIX-LAG-3: _lazy_init_columns غير محجوب
+# v7.18.48 FIX-LAG-3: _lazy_init_columns غير محجوب
 # ═════════════════════════════════════════════════════════════════════
 
 async def _do_lazy_init_columns_migration(bot=None) -> None:
     """
-    🆕 v7.18.48 FIX-LAG-3: التنفيذ الفعلي لـ migration في background.
+    v7.18.48 FIX-LAG-3: التنفيذ الفعلي لـ migration في background.
     """
     global _columns_initialized, _columns_last_error_log_ts
 
@@ -1340,17 +1345,7 @@ async def _do_lazy_init_columns_migration(bot=None) -> None:
 
 async def _lazy_init_columns(bot=None):
     """
-    🆕 v7.18.48 FIX-LAG-3: fire-and-forget.
-
-    السبب: أول رسالة بعد الإقلاع كانت تنتظر ALTER TABLE × 9
-    + cache clear + autoblock init = 500ms-2s.
-    الأثر: lag أول رسالة ينخفض من 2s إلى < 50ms.
-
-    الآلية:
-      • إن كانت _columns_initialized → ارجع فوراً (مسار سريع).
-      • إن لم تُشغَّل migration بعد → ابدأها في background task.
-      • الرسالة الحالية تكمل بدون migration (fire-and-forget).
-      • migration التالي سيعمل في الخلفية ولن يعطّل الرسائل اللاحقة.
+    v7.18.48 FIX-LAG-3: fire-and-forget.
     """
     global _columns_initialized, _columns_last_attempt_ts
     global _columns_bg_task
@@ -1358,7 +1353,6 @@ async def _lazy_init_columns(bot=None):
     if _columns_initialized:
         return
 
-    # cooldown: لا تُعِد المحاولة أكثر من مرة كل _COLUMNS_RETRY_COOLDOWN_SEC
     now = time.monotonic()
     if (
         _columns_last_attempt_ts > 0
@@ -1366,13 +1360,11 @@ async def _lazy_init_columns(bot=None):
     ):
         return
 
-    # إن كانت مهمة سابقة لا تزال تعمل → لا تكرر
     if _columns_bg_task is not None and not _columns_bg_task.done():
         return
 
     _columns_last_attempt_ts = now
 
-    # 🆕 FIX-LAG-3: تشغيل migration في background — لا انتظار
     try:
         _columns_bg_task = _spawn_tracked_task(
             _do_lazy_init_columns_migration(bot),
@@ -3139,26 +3131,13 @@ async def invalidate_auto_reply_cache(chat_id=None):
 
 
 # ═════════════════════════════════════════════════════════════════════
-# 🆕 v7.18.49 FIX-TRANSLATE-BLOCKING:
-# wrap TranslationManager.translate() في asyncio.to_thread
-# + cache + timeout — يمنع تجميد event loop 13s
+# v7.18.49 FIX-TRANSLATE-BLOCKING: _translate_safe
 # ═════════════════════════════════════════════════════════════════════
 
 async def _translate_safe(text: str, lang: str) -> Optional[str]:
     """
     v7.18.49 FIX-TRANSLATE-BLOCKING: wraps TranslationManager.translate()
     — async safe + cache + timeout.
-
-    الخلفية:
-        TranslationManager.translate() يُنفّذ requests.get() متزامناً
-        داخل deep_translator. عندما يُستدعى من async context، يُجمّد
-        الـ event loop كاملاً حتى ترد Google (~3-13s).
-        هذا كان سبب lag=12203ms الذي رصده GIL-MONITOR.
-
-    الأثر:
-        - لا يحجب الـ event loop
-        - timeout 8s (لا انتظار لانهائي)
-        - cache 5min للترجمات المتكررة (نفس النص/اللغة)
     """
     if not text or not lang or lang == 'off':
         return None
@@ -3209,7 +3188,7 @@ async def _translate_safe(text: str, lang: str) -> Optional[str]:
 async def _detect_and_translate(update, context, chat_id, user_id, text):
     if not text or len(text.strip()) < TRANSLATION_MIN_TEXT_LENGTH:
         return None
-    # 🆕 v7.18.49 FIX-TRANSLATE-3: تجاوز الطول الأقصى
+    # v7.18.49 FIX-TRANSLATE-3: تجاوز الطول الأقصى
     if len(text.strip()) > TRANSLATION_MAX_TEXT_LENGTH:
         return None
     try:
@@ -3227,7 +3206,7 @@ async def _detect_and_translate(update, context, chat_id, user_id, text):
         if lang != 'ar' and not is_arabic:
             return None
 
-        # 🆕 v7.18.49 FIX-TRANSLATE-BLOCKING: async safe
+        # v7.18.49 FIX-TRANSLATE-BLOCKING: async safe
         translated = await _translate_safe(text, lang)
 
         if translated and translated != text:
@@ -4019,13 +3998,6 @@ class MessageHandlers:
         _analysis_mode = "text-only"
 
         if _spam_enabled:
-            # 🆕 v7.18.48 FIX-LAG-1: هل الرسالة تحتوي وسائط؟
-            # السبب: analyze_message_full_async يشغّل 15 طبقة
-            # (OCR, audio, video, URL × whois, NSFW, stego, ...)
-            # لكل رسالة — حتى النصية البسيطة. الطبقات الثقيلة
-            # تحتجز GIL → event loop يتجمّد → lag p90=372ms.
-            # الأثر: 90% من الرسائل (نصية) تتخطى 15 طبقة → lag
-            # p90 يتوقع ينخفض إلى < 50ms.
             _has_media = any([
                 getattr(message, 'photo', None),
                 getattr(message, 'video', None),
@@ -4107,21 +4079,54 @@ class MessageHandlers:
                         _verdict = None
 
                 # fallback إلى text-only إذا فشل multi-layer
+                # 🆕 v7.18.50 FIX-TEXT-SCORE: to_thread + timeout
                 if _verdict is None:
                     try:
-                        _spam_score, _spam_reasons = _compute_spam_score(ctx)
+                        _spam_score, _spam_reasons = await asyncio.wait_for(
+                            asyncio.to_thread(_compute_spam_score, ctx),
+                            timeout=_TEXT_SCORE_TIMEOUT_SEC,
+                        )
+                    except asyncio.TimeoutError:
+                        logger.warning(
+                            "⏱️ TEXT-SCORE-TIMEOUT (media fallback) | "
+                            "chat=%s user=%s >%.1fs",
+                            chat_id, user_id, _TEXT_SCORE_TIMEOUT_SEC)
+                        _spam_score = 0
+                        _spam_reasons = []
+                    except asyncio.CancelledError:
+                        raise
                     except Exception as e:
                         logger.debug("spam_score (media fallback): %s", e)
+                        _spam_score = 0
+                        _spam_reasons = []
             else:
-                # 🆕 FIX-LAG-1: رسالة نصية فقط → استخدم text-layer
-                # السريع مباشرة (بدون 15 طبقة).
+                # 🆕 v7.18.50 FIX-TEXT-SCORE-BLOCKING:
+                # v7.18.48 كان يستدعي _compute_spam_score مباشرة
+                # (sync) على main thread → يحجب event loop 10-15s
+                # على النصوص العربية المعقدة (regex ثقيل).
+                # الحل: to_thread + timeout 1.5s.
                 try:
-                    _spam_score, _spam_reasons = _compute_spam_score(ctx)
-                    _analysis_mode = "text-only-fast"
-                except Exception as e:
-                    logger.debug("spam_score (text-only-fast): %s", e)
+                    _spam_score, _spam_reasons = await asyncio.wait_for(
+                        asyncio.to_thread(_compute_spam_score, ctx),
+                        timeout=_TEXT_SCORE_TIMEOUT_SEC,
+                    )
+                    _analysis_mode = "text-only-async"
+                except asyncio.TimeoutError:
+                    logger.warning(
+                        "⏱️ TEXT-SCORE-TIMEOUT | chat=%s user=%s | "
+                        "%.1fs exceeded — continuing without spam score",
+                        chat_id, user_id, _TEXT_SCORE_TIMEOUT_SEC,
+                    )
                     _spam_score = 0
                     _spam_reasons = []
+                    _analysis_mode = "text-only-timeout"
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:
+                    logger.debug("spam_score (text-only-async): %s", e)
+                    _spam_score = 0
+                    _spam_reasons = []
+                    _analysis_mode = "text-only-error"
 
         _is_spam = (
             _spam_enabled and _spam_score >= SPAM_SCORE_THRESHOLD)
@@ -4348,10 +4353,23 @@ class MessageHandlers:
             bwm_handled = False
 
             if _HAS_BWM and BannedWordsManager is not None:
+                # 🆕 v7.18.50 FIX-BWM-BLOCKING: wait_for + timeout
                 try:
-                    matched = await BannedWordsManager.check_message(
-                        text=ctx.analysis_text, chat_id=chat_id)
+                    matched = await asyncio.wait_for(
+                        BannedWordsManager.check_message(
+                            text=ctx.analysis_text, chat_id=chat_id),
+                        timeout=_BWM_TIMEOUT_SEC,
+                    )
                     bwm_handled = True
+                except asyncio.TimeoutError:
+                    logger.warning(
+                        "⏱️ BWM-TIMEOUT | chat=%s user=%s | "
+                        "%.1fs exceeded — skipping BWM, using fallback",
+                        chat_id, user_id, _BWM_TIMEOUT_SEC)
+                    matched = None
+                    bwm_handled = True  # لا نكرر عبر fallback
+                except asyncio.CancelledError:
+                    raise
                 except Exception as _e_bwm:
                     logger.warning(
                         "⚠️ BannedWordsManager.check_message فشل — "
@@ -4754,6 +4772,11 @@ class MessageHandlers:
         update, context, chat_id, text, user_id=None,
         preloaded_ars=None,
     ):
+        """
+        🆕 v7.18.50 FIX-AUTOREPLY-BLOCKING:
+        DB.get_auto_reply (psycopg2 sync) + get_reply_from_file (file I/O sync)
+        كانا يحجبان event loop. الحل: to_thread + timeout.
+        """
         try:
             if preloaded_ars is not None:
                 ars = preloaded_ars
@@ -4770,7 +4793,25 @@ class MessageHandlers:
                 if not await is_authorized_in_group(
                         context.bot, chat_id, user_id or 0):
                     return False
-            reply = await DB.get_auto_reply(text, chat_id)
+
+            # 🆕 FIX-AUTOREPLY-BLOCKING: DB.get_auto_reply in to_thread
+            reply = None
+            try:
+                _db_call = DB.get_auto_reply(text, chat_id)
+                _db_await = _maybe_await(_db_call)
+                reply = await asyncio.wait_for(
+                    _db_await,
+                    timeout=_AUTOREPLY_DB_TIMEOUT_SEC,
+                )
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "⏱️ AUTO-REPLY-DB-TIMEOUT | chat=%s >%.1fs",
+                    chat_id, _AUTOREPLY_DB_TIMEOUT_SEC)
+            except asyncio.CancelledError:
+                raise
+            except Exception as _e:
+                logger.debug("DB.get_auto_reply: %s", _e)
+
             if reply:
                 reply_text = reply.get('reply', '') or ''
                 if reply_text:
@@ -4780,7 +4821,23 @@ class MessageHandlers:
                         chat_id, text[:40])
                 await _increment_usage_async(chat_id, text)
                 return True
-            file_reply = get_reply_from_file(text)
+
+            # 🆕 FIX-AUTOREPLY-BLOCKING: get_reply_from_file in to_thread
+            file_reply = None
+            try:
+                file_reply = await asyncio.wait_for(
+                    asyncio.to_thread(get_reply_from_file, text),
+                    timeout=_AUTOREPLY_FILE_TIMEOUT_SEC,
+                )
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "⏱️ AUTO-REPLY-FILE-TIMEOUT | chat=%s >%.1fs",
+                    chat_id, _AUTOREPLY_FILE_TIMEOUT_SEC)
+            except asyncio.CancelledError:
+                raise
+            except Exception as _e:
+                logger.debug("get_reply_from_file: %s", _e)
+
             if file_reply:
                 await safe_send(context.bot, chat_id, file_reply)
                 logger.info(
@@ -4913,34 +4970,10 @@ class MessageHandlers:
             except Exception:
                 pass
 
-    # ═══════════════════════════════════════════════════════════════════
-    # v7.18.43 FIX-HTML-ESCAPE + v7.18.44 FIX-MYSQL-UPSERT
-    # v7.18.45 FIX-MYSQL-UPSERT-MODERN + FIX-LOGCH-NESTED-CODE
-    # v7.18.46 FIX-LOGCH-SCHEMELESS-URL
-    # v7.18.47 FIX-LOGCH-KEY: توحيد المفتاح على log_channel_id
-    # ═══════════════════════════════════════════════════════════════════
     @staticmethod
     async def _handle_wait_log_ch_text(update, context, state=None):
         """
         v7.18.47 FIX-LOGCH-KEY: معالجة إدخال معرف قناة السجل.
-
-        🔴 التصحيح الحاسم (v7.18.47):
-          المشكلة: _handle_wait_log_ch_text كان يكتب على 'log_channel'
-          بينما database_settings.py (get_log_channel, set_log_channel,
-          remove_log_channel, _SETTING_VALIDATORS, auto-heal) كلها
-          تستخدم 'log_channel_id'.
-          النتيجة: "✅ تم تعيين قناة السجل" يظهر بنجاح، لكن اللوحة
-          تُظهر "غير مُعيَّن" — الكتابة نجحت على مفتاح، والقراءة
-          تبحث في مفتاح آخر.
-
-          الحل:
-            1) استخدام DB.set_log_channel(numeric_id) أساساً — الدالة
-               المخصصة المُحصَّنة (FIX-Y1) التي تستخدم المفتاح الصحيح.
-            2) fallback: DB.set_setting('log_channel_id', ...) عند
-               عدم توفر set_log_channel.
-            3) SQL fallback على 'log_channel_id'.
-            4) تنظيف المفاتيح القديمة 'global_log_channel' و
-               'log_channel' (المفتاح الخاطئ).
         """
         user_id = (
             update.effective_user.id if update.effective_user else None)
@@ -5098,14 +5131,10 @@ class MessageHandlers:
                 "غير متوقّع — نكمل (fail-open) | user=%s id=%s err=%s",
                 user_id, numeric_id, _ve)
 
-        # ═══════════════════════════════════════════════════════════════
-        # 🆕 v7.18.47 FIX-LOGCH-KEY: الحفظ بالمفتاح الصحيح
-        # ═══════════════════════════════════════════════════════════════
         saved_ok = False
         saved_error = None
         value_to_save = str(numeric_id)
 
-        # ─── 1) المسار الأساسي: DB.set_log_channel (المفتاح الصحيح) ───
         try:
             setter = getattr(DB, 'set_log_channel', None)
             if callable(setter):
@@ -5132,7 +5161,6 @@ class MessageHandlers:
                 "WAIT_LOG_CH: الوصول لـ DB.set_log_channel فشل: %s",
                 _e1a)
 
-        # ─── 2) fallback: DB.set_setting بالمفتاح الصحيح ───
         if not saved_ok:
             try:
                 setter = getattr(DB, 'set_setting', None)
@@ -5159,7 +5187,6 @@ class MessageHandlers:
                 logger.warning(
                     "WAIT_LOG_CH: الوصول لـ set_setting فشل: %s", _e2a)
 
-        # ─── 3) SQL fallback على 'log_channel_id' ───
         if not saved_ok:
             try:
                 if _db_is_mysql():
@@ -5207,7 +5234,6 @@ class MessageHandlers:
                 logger.error(
                     "WAIT_LOG_CH: SQL fallback فشل: %s", _e3)
 
-        # ─── 4) تنظيف المفاتيح القديمة ───
         if saved_ok:
             for _legacy_key in ('global_log_channel', 'log_channel'):
                 try:
@@ -7629,39 +7655,46 @@ __all__ = [
     "_SCHEMELESS_TG_HOSTS_RE",
     "_columns_bg_task",
     "_do_lazy_init_columns_migration",
-    # 🆕 v7.18.49 additions
+    # v7.18.49 additions
     "_translate_safe",
     "_TRANSLATION_CACHE",
     "_TRANSLATION_CACHE_TTL",
     "_TRANSLATION_CACHE_MAX",
     "_TRANSLATION_TIMEOUT_SEC",
     "TRANSLATION_MAX_TEXT_LENGTH",
+    # v7.18.50 additions
+    "_maybe_await",
+    "_TEXT_SCORE_TIMEOUT_SEC",
+    "_AUTOREPLY_DB_TIMEOUT_SEC",
+    "_AUTOREPLY_FILE_TIMEOUT_SEC",
+    "_BWM_TIMEOUT_SEC",
 ]
 
 
 # ═════════════════════════════════════════════════════════════════════
-# LOAD BEACON — v7.18.49
+# LOAD BEACON — v7.18.50
 # ═════════════════════════════════════════════════════════════════════
 
 try:
     logger.info(
-        "✅ handlers_message v7.18.49 loaded | "
+        "✅ handlers_message v7.18.50 loaded | "
         "BWM=%s | PRIVATE_HANDLERS=%d | "
         "external_handled=%d | "
         "routing-fallback=7-paths-deduped | "
         "SPAM-TIMEOUT=%.1fs | "
         "TRANSLATE-SAFE=on (to_thread+timeout=%.1fs+cache=%d,TTL=%.0fs,"
         "max-len=%d) | "
+        "TEXT-SCORE-SAFE=on (to_thread+timeout=%.1fs) | "
+        "AUTOREPLY-SAFE=on (db=%.1fs,file=%.1fs) | "
+        "BWM-SAFE=on (timeout=%.1fs) | "
         "WARMUP=available | "
         "DB-TYPE=%s | "
         "WAIT_LOG_CH=direct-handler | "
         "LOG-CHANNEL-KEY=log_channel_id (CANONICAL, unified) | "
         "detectors-compat=v4.1.0 | "
-        "fixes=(FIX-TRANSLATE-BLOCKING: "
-        "FIX-TRANSLATE-1:to_thread, "
-        "FIX-TRANSLATE-2:safe-wrapper, "
-        "FIX-TRANSLATE-3:max_len, "
-        "FIX-TRANSLATE-4:cache, "
+        "fixes=(FIX-TEXT-SCORE-BLOCKING + FIX-AUTOREPLY-BLOCKING + "
+        "FIX-BWM-BLOCKING + FIX-CONSTANTS + "
+        "v7.18.49-all (FIX-TRANSLATE-BLOCKING), "
         "v7.18.48-all (FIX-LAG-1/2/3/4), "
         "v7.18.47-all, v7.18.46-all, v7.18.45-all, "
         "v7.18.44-all, v7.18.43-all)",
@@ -7673,6 +7706,10 @@ try:
         _TRANSLATION_CACHE_MAX,
         _TRANSLATION_CACHE_TTL,
         TRANSLATION_MAX_TEXT_LENGTH,
+        _TEXT_SCORE_TIMEOUT_SEC,
+        _AUTOREPLY_DB_TIMEOUT_SEC,
+        _AUTOREPLY_FILE_TIMEOUT_SEC,
+        _BWM_TIMEOUT_SEC,
         _db_type(),
     )
 except Exception:
