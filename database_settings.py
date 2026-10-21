@@ -1,46 +1,60 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-database_settings.py - دوال الإعدادات العامة (v7.7.33)
+database_settings.py - دوال الإعدادات العامة (v7.7.34)
 ================================================================================
-🔴 v7.7.33 (FIX-Y1-MYSQL-UPSERT-IDEMPOTENT):
-    🔴 FIX-Y1: set_setting — `result >= 0` بدل `result > 0`.
-        السبب: MySQL يُعيد rowcount=0 عند ON DUPLICATE KEY UPDATE
-        على قيمة مطابقة (no-op ناجح)، وليس فشلاً.
-        قبل: rowcount=0 → fallback → UPDATE(0) → INSERT(duplicate)
-             → return False → "❌ فشل الحفظ" كاذب.
-        بعد: rowcount >= 0 = نجاح. الفشل الحقيقي = None فقط.
-        الأثر:
-          • remove_log_channel() (لو القيمة فارغة مسبقاً) → True
-          • set_setting(key, same_value) على MySQL → True
-          • set_log_channel(chat_id) عند التكرار → True
-        ملاحظة: PostgreSQL/SQLite لا يتأثران (يُعيدان 1 دائماً).
+🆕 v7.7.34 (SAFETY-FIXES-AUDIT — 6 إصلاحات فوق v7.7.33):
 
-    🟡 FIX-Y1-FOLLOWUP: _set_setting_fallback — INSERT idempotent.
-        استخدام ON DUPLICATE KEY UPDATE (MySQL) بدل INSERT عادي
-        لمنع duplicate key error عند سباق نادر.
-        ⚠️ لم نستخدم INSERT IGNORE لأنه يكتم أخطاء حقيقية
-           (type mismatch، permission، NOT NULL ...).
+    🟠 FIX-SET-1 (IMPORTANT): get_settings_batch — توحيد `?` بدل `$N`
+        السبب: v7.7.33 كان يبني `$1, $2, ...` يدوياً على PG، بينما
+        `_convert_placeholders` في database.py لا يمس `$N` (لا يحوّلها).
+        النتيجة: يعمل، لكنه مزدوج مع `_prepare_query` في
+        database_groups v7.4.20، وغير متسق مع بقية الاستعلامات.
+        الآن: `?` في كل مكان + `_prepare_settings_query()` helper
+        يستخدم `_prepare_query` إن وُجد.
 
-🆕 v7.7.32 (LOG-CHANNEL-HARDENING):
-    ✅ _is_valid_channel_ref: يقبل كل الأنواع
-       - معرّف رقمي (قد يكون سالباً)
-       - @username
-       - username (بدون @)
-       - روابط: t.me/x, https://t.me/x, telegram.me/x
-    ✅ set_setting: يرفض القيم غير الصالحة قبل الحفظ
-    ✅ get_log_channel: auto-heal + يقبل رقم/username
-    ✅ set_log_channel: يقبل int أو str
+    🟠 FIX-SET-2 (IMPORTANT): إبطال cache شامل عبر _invalidate_setting_caches
+        السبب: set_setting كان يُبطل settings_cache فقط. القيم
+        المخزّنة في internal_cache (من database.py أو handlers_message
+        _dev_log_cache) قد تبقى دقيقة+ بعد التحديث.
+        الآن: helper موحّد يُبطل:
+          • settings_cache.invalidate_bot_settings(key)
+          • internal_cache.invalidate(key)
+          • internal_cache.invalidate(f"setting_{key}")
 
-🆕 v7.7.31:
-    ✅ set_log_channel / remove_log_channel
-    ✅ ensure_settings_unique_constraint(conn=None)
-    ✅ _get_db_type: @lru_cache
+    🟠 FIX-SET-3 (IMPORTANT): get_log_channel auto-heal — إبطال شامل
+        السبب: v7.7.33 auto-heal كان يُبطل settings_cache فقط.
+        handlers_message._dev_log_cache + internal_cache يحتاجان
+        إبطالاً أيضاً، وإلا القيمة "الملوثة" قد تُقرأ مجدداً.
+        الآن: يستدعي _invalidate_setting_caches +
+        handlers_message._invalidate_dev_log_cache (best-effort).
 
-🆕 v7.4.8 (MySQL reserved words)
-🆕 v7.4.7 (UNIQUE تلقائي)
-🆕 v7.4.6 (PostgreSQL UPSERT)
-🆕 v7.4.5 (كاش)
+    🟡 FIX-SET-4 (MINOR): _is_valid_channel_ref يرفض cid=0
+        السبب: `_is_valid_channel_ref("0")` → True، لكن chat_id=0
+        غير صالح في Telegram. `-1` مقبول للتوافق مع بعض الأنظمة.
+
+    🟡 FIX-SET-5 (MINOR): set_log_channel يُبطل cache بعد الحفظ
+        السبب: بعد set_log_channel، كان يدع set_setting يُبطل
+        settings_cache فقط. الآن: يُبطل كل cache + best-effort
+        handlers_message.
+
+    🟡 FIX-SET-6 (MINOR): _MISSING_SENTINEL معزول
+        السبب: إذا كُتب _MISSING_SENTINEL في DB (نادر جداً)،
+        get_setting كان يُعيده كقيمة صالحة. الآن: يتحقق من
+        المساواة ويُعيد default بدلاً منه + log warning.
+
+    ✅ محفوظ من v7.7.33:
+        FIX-Y1: set_setting MySQL no-op ناجح
+        FIX-Y1-FOLLOWUP: INSERT idempotent في fallback
+    ✅ محفوظ من v7.7.32:
+        _is_valid_channel_ref شامل
+        set_setting validation
+        get_log_channel auto-heal
+        set_log_channel يقبل int/str
+    ✅ محفوظ من v7.7.31:
+        ensure_settings_unique_constraint
+    ✅ محفوظ من v7.4.5-7.4.8:
+        cache, UNIQUE, PG UPSERT, MySQL reserved words
 ================================================================================
 """
 
@@ -76,7 +90,7 @@ def _q(col: str) -> str:
 
 
 # =====================================================================
-# 🆕 v7.7.32: تحقق القيم قبل الحفظ
+# تحقق القيم قبل الحفظ (v7.7.32)
 # =====================================================================
 
 # نمط username في Telegram:
@@ -101,17 +115,19 @@ _TG_URL_PREFIXES = (
 
 def _is_valid_channel_ref(value: str) -> bool:
     """
-    ✅ v7.7.32: مرجع قناة (سجل / اشتراك إجباري / تحديثات).
+    مرجع قناة (سجل / اشتراك إجباري / تحديثات).
 
     يقبل:
       - فارغ (تعطيل)
-      - معرّف رقمي (قد يكون سالباً: -1001234567890)
+      - معرّف رقمي (يبدأ بـ -100 عادةً، أو موجب للتوافق)
       - @username
       - username (بدون @)
       - https://t.me/username
       - http://t.me/username
       - t.me/username
       - telegram.me/username
+
+    🟡 v7.7.34 FIX-SET-4: يرفض cid=0 (غير صالح في Telegram).
     """
     if value is None:
         return True
@@ -120,8 +136,16 @@ def _is_valid_channel_ref(value: str) -> bool:
         return True
 
     # 1) معرّف رقمي (قد يكون سالباً)
+    # 🟡 v7.7.34 FIX-SET-4: رفض cid=0
     if v.lstrip('-').isdigit():
-        return True
+        try:
+            cid = int(v)
+            if cid == 0:
+                return False
+            # -1 محجوز في بعض الأنظمة (global) — نقبله للتوافق
+            return True
+        except (ValueError, TypeError):
+            return False
 
     # 2) @username
     if v.startswith('@'):
@@ -178,7 +202,7 @@ _SETTING_VALIDATORS: Dict[str, tuple] = {
 
 def _validate_setting_value(key: str, value) -> tuple:
     """
-    ✅ v7.7.32: يتحقق من صحة القيمة قبل الحفظ.
+    يتحقق من صحة القيمة قبل الحفظ.
 
     Returns:
         (is_valid: bool, reason: str)
@@ -210,7 +234,121 @@ class SettingsMixin:
     """Mixin يحتوي كل دوال الإعدادات العامة"""
 
     # =====================================================================
-    # 0) UNIQUE constraint على settings.key
+    # 0) helpers داخلية
+    # 🟠 v7.7.34 FIX-SET-1: توحيد الاستعلامات عبر _prepare_settings_query
+    # 🟠 v7.7.34 FIX-SET-2: إبطال cache شامل
+    # =====================================================================
+
+    def _prepare_settings_query(self, query: str) -> str:
+        """
+        🟠 v7.7.34 FIX-SET-1: يستخدم `_prepare_query` (من
+        database_groups v7.4.20) إن وُجد، وإلا يُرجع النص كما هو
+        (`execute`/`fetchall` في database.py يحوّلون `?` تلقائياً).
+
+        التوحيد: كل الاستعلامات تستخدم `?`، والتحويل مسؤولية الـ Database.
+        """
+        try:
+            fn = getattr(self, "_prepare_query", None)
+            if callable(fn):
+                return fn(query)
+        except Exception as e:
+            logger.debug(f"_prepare_settings_query: {e}")
+        return query
+
+    async def _invalidate_setting_caches(self, key: str) -> None:
+        """
+        🟠 v7.7.34 FIX-SET-2: إبطال cache شامل لمفتاح إعداد.
+
+        المستويات:
+          1) settings_cache.invalidate_bot_settings(key)
+          2) internal_cache.invalidate(key)
+          3) internal_cache.invalidate(f"setting_{key}")
+        """
+        # 1) settings_cache
+        if getattr(self, "CACHE_AVAILABLE", False):
+            try:
+                cache = getattr(self, "settings_cache", None)
+                if cache is not None:
+                    await cache.invalidate_bot_settings(key)
+            except Exception as e:
+                logger.debug(
+                    f"_invalidate_setting_caches settings_cache({key}): "
+                    f"{e}"
+                )
+
+        # 2) internal_cache
+        try:
+            ic = getattr(self, "internal_cache", None)
+            if ic is not None:
+                for _k in (key, f"setting_{key}"):
+                    try:
+                        await ic.invalidate(_k)
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
+    async def _invalidate_dev_log_cache_best_effort(self) -> None:
+        """
+        🟠 v7.7.34 FIX-SET-3: إبطال handlers_message._dev_log_cache
+        (best-effort، لا يفشل إذا handlers_message غير مستورد).
+        """
+        try:
+            import sys as _sys
+            for _mod_name in (
+                "handlers_message",
+                "handlers.handlers_message",
+            ):
+                _mod = _sys.modules.get(_mod_name)
+                if _mod is None:
+                    continue
+                _inv = getattr(_mod, "_invalidate_dev_log_cache", None)
+                if callable(_inv):
+                    try:
+                        _r = _inv()
+                        if hasattr(_r, "__await__"):
+                            await _r
+                    except Exception as e:
+                        logger.debug(
+                            f"handlers_message._invalidate_dev_log_cache: "
+                            f"{e}"
+                        )
+                    break
+        except Exception as e:
+            logger.debug(f"_invalidate_dev_log_cache_best_effort: {e}")
+
+    async def _invalidate_log_channel_caches(self) -> None:
+        """
+        🟠 v7.7.34 FIX-SET-3: إبطال شامل لكل مستويات cache
+        المتعلقة بـ log_channel_id.
+
+        يُستخدم بعد:
+          • set_log_channel
+          • remove_log_channel
+          • get_log_channel auto-heal
+        """
+        await self._invalidate_setting_caches("log_channel_id")
+        # إبطال مرادفات محتملة أخرى
+        try:
+            ic = getattr(self, "internal_cache", None)
+            if ic is not None:
+                for _k in (
+                    "log_channel",
+                    "global_log_channel",
+                    "dev_log_channel",
+                    "group_log_channel",
+                ):
+                    try:
+                        await ic.invalidate(_k)
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+        # handlers_message._dev_log_cache
+        await self._invalidate_dev_log_cache_best_effort()
+
+    # =====================================================================
+    # 1) UNIQUE constraint على settings.key
     # =====================================================================
 
     async def ensure_settings_unique_constraint(
@@ -333,28 +471,33 @@ class SettingsMixin:
             return False
 
     # =====================================================================
-    # 1) جلب إعداد واحد
+    # 2) جلب إعداد واحد
+    # 🟡 v7.7.34 FIX-SET-6: sentinel protection
     # =====================================================================
 
     async def get_setting(
         self, key: str, default: str = None
     ) -> Optional[str]:
-        if self.CACHE_AVAILABLE:
+        # 1) cache lookup
+        if getattr(self, "CACHE_AVAILABLE", False):
             try:
-                cached = await self.settings_cache.get_bot_setting(key)
-                if cached == _MISSING_SENTINEL:
-                    return default
-                if cached is not None:
-                    return cached
+                cache = getattr(self, "settings_cache", None)
+                if cache is not None:
+                    cached = await cache.get_bot_setting(key)
+                    if cached == _MISSING_SENTINEL:
+                        return default
+                    if cached is not None:
+                        return cached
             except Exception as e:
                 logger.debug(
                     f"settings_cache.get_bot_setting failed: {e}"
                 )
 
+        # 2) DB query
         try:
             key_col = _q("key")
             value_col = _q("value")
-            query = (
+            query = self._prepare_settings_query(
                 f"SELECT {value_col} FROM settings "
                 f"WHERE {key_col} = ?"
             )
@@ -363,12 +506,26 @@ class SettingsMixin:
             logger.error(f"❌ get_setting({key}): {e}")
             return default
 
-        if self.CACHE_AVAILABLE:
+        # 🟡 v7.7.34 FIX-SET-6: sentinel protection
+        # إذا كُتب _MISSING_SENTINEL في DB (نادر جداً)، لا نُعيده
+        # كقيمة صالحة — نُعيد default بدلاً منه.
+        if result == _MISSING_SENTINEL:
+            logger.warning(
+                f"⚠️ v7.7.34: get_setting({key}) — القيمة في DB هي "
+                f"sentinel. تُعامل كـ missing."
+            )
+            result = None
+
+        # 3) cache set
+        if getattr(self, "CACHE_AVAILABLE", False):
             try:
-                await self.settings_cache.set_bot_setting(
-                    key,
-                    result if result is not None else _MISSING_SENTINEL,
-                )
+                cache = getattr(self, "settings_cache", None)
+                if cache is not None:
+                    await cache.set_bot_setting(
+                        key,
+                        result if result is not None
+                        else _MISSING_SENTINEL,
+                    )
             except Exception as e:
                 logger.debug(
                     f"settings_cache.set_bot_setting failed: {e}"
@@ -377,7 +534,8 @@ class SettingsMixin:
         return result if result is not None else default
 
     # =====================================================================
-    # 1.b) جلب عدة إعدادات
+    # 2.b) جلب عدة إعدادات
+    # 🟠 v7.7.34 FIX-SET-1: توحيد `?` بدل `$N`
     # =====================================================================
 
     async def get_settings_batch(
@@ -393,10 +551,15 @@ class SettingsMixin:
         result: Dict[str, Optional[str]] = {}
         missing_keys = []
 
-        if self.CACHE_AVAILABLE:
+        # 1) cache lookup
+        if getattr(self, "CACHE_AVAILABLE", False):
+            cache = getattr(self, "settings_cache", None)
             for k in keys_list:
                 try:
-                    cached = await self.settings_cache.get_bot_setting(k)
+                    cached = (
+                        await cache.get_bot_setting(k)
+                        if cache is not None else None
+                    )
                 except Exception:
                     cached = None
 
@@ -412,39 +575,42 @@ class SettingsMixin:
         if not missing_keys:
             return result
 
+        # 2) DB query — 🟠 v7.7.34 FIX-SET-1: `?` فقط
         try:
-            db_type = _get_db_type()
-            if db_type == "postgres":
-                placeholders = ",".join(
-                    [f"${i+1}" for i in range(len(missing_keys))]
-                )
-            else:
-                placeholders = ",".join(["?"] * len(missing_keys))
-
+            placeholders = ",".join(["?"] * len(missing_keys))
             key_col = _q("key")
             value_col = _q("value")
 
-            query = (
+            query = self._prepare_settings_query(
                 f"SELECT {key_col}, {value_col} FROM settings "
                 f"WHERE {key_col} IN ({placeholders})"
             )
             rows = await self.fetchall(query, tuple(missing_keys))
 
-            found = (
-                {row["key"]: row["value"] for row in rows}
-                if rows else {}
-            )
+            found = {}
+            if rows:
+                for row in rows:
+                    try:
+                        k = row.get("key") if isinstance(row, dict) else None
+                        v = row.get("value") if isinstance(row, dict) else None
+                        if k is not None:
+                            found[str(k)] = v
+                    except Exception:
+                        continue
         except Exception as e:
             logger.error(f"❌ get_settings_batch: {e}")
             found = {}
 
+        # 3) معالجة النتائج + cache set
+        cache = getattr(self, "settings_cache", None)
         for k in missing_keys:
             val = found.get(k)
             result[k] = val if val is not None else defaults.get(k)
-            if self.CACHE_AVAILABLE:
+            if getattr(self, "CACHE_AVAILABLE", False) and cache is not None:
                 try:
-                    await self.settings_cache.set_bot_setting(
-                        k, val if val is not None else _MISSING_SENTINEL
+                    await cache.set_bot_setting(
+                        k,
+                        val if val is not None else _MISSING_SENTINEL,
                     )
                 except Exception:
                     pass
@@ -452,21 +618,18 @@ class SettingsMixin:
         return result
 
     # =====================================================================
-    # 2) ✅ v7.7.32 + 🔴 v7.7.33: حفظ إعداد مع تحقق + idempotent
+    # 3) حفظ إعداد مع تحقق + idempotent
+    # 🟠 v7.7.34 FIX-SET-2: إبطال cache شامل
     # =====================================================================
 
     async def set_setting(self, key: str, value: str) -> bool:
         """
-        ✅ v7.7.32: يتحقق من صحة القيمة أولاً.
-
-        يمنع حفظ قيم غير صالحة في:
-          - log_channel_id
-          - force_subscribe_channel
-          - updates_channel
+        يتحقق من صحة القيمة أولاً، ثم يحفظ بـ UPSERT idempotent.
 
         🔴 v7.7.33 FIX-Y1: يُقبل rowcount=0 (no-op ناجح على MySQL).
+        🟠 v7.7.34 FIX-SET-2: إبطال cache شامل بعد النجاح.
         """
-        # 🆕 v7.7.32: تحقق مسبق
+        # تحقق مسبق
         is_valid, reason = _validate_setting_value(key, value)
         if not is_valid:
             preview = str(value)[:60] if value else ""
@@ -483,61 +646,42 @@ class SettingsMixin:
             value_col = _q("value")
 
             if db_type == "postgres":
-                query = (
+                query = self._prepare_settings_query(
                     f"INSERT INTO settings ({key_col}, {value_col}) "
-                    f"VALUES ($1, $2) "
+                    f"VALUES (?, ?) "
                     f"ON CONFLICT ({key_col}) DO UPDATE "
                     f"SET {value_col} = EXCLUDED.{value_col}"
                 )
                 result = await self.execute(query, (key, value))
 
             elif db_type == "mysql":
-                query = (
+                query = self._prepare_settings_query(
                     f"INSERT INTO settings ({key_col}, {value_col}) "
-                    f"VALUES (%s, %s) "
+                    f"VALUES (?, ?) "
                     f"ON DUPLICATE KEY UPDATE "
                     f"{value_col} = VALUES({value_col})"
                 )
                 result = await self.execute(query, (key, value))
 
             else:  # SQLite
-                query = (
+                query = self._prepare_settings_query(
                     f"INSERT OR REPLACE INTO settings "
                     f"({key_col}, {value_col}) "
                     f"VALUES (?, ?)"
                 )
                 result = await self.execute(query, (key, value))
 
-            # 🔴 FIX-Y1 (v7.7.33): MySQL يُعيد rowcount=0 عندما لا
-            # تتغيّر القيمة (ON DUPLICATE KEY UPDATE على قيمة مطابقة).
-            # هذا يعني "نجاح بدون تغيير" — وليس فشلاً.
-            #
-            # قبل الإصلاح:
-            #   result = 0 → fallback → UPDATE يرجع 0 →
-            #   INSERT يفشل بـ duplicate → return False
-            #   → المستخدم يرى "❌ فشل الحفظ" رغم أن العملية نجحت.
-            #
-            # الأثر:
-            #   • remove_log_channel() → "❌ فشل الحذف"
-            #   • set_setting(key, same_value) → False
-            #
-            # الآن: rowcount >= 0 = نجاح (بما فيه 0 = no-op).
-            # الفشل الحقيقي = None فقط.
+            # 🔴 FIX-Y1 (v7.7.33): MySQL يُعيد rowcount=0 عندما
+            # لا تتغيّر القيمة (no-op ناجح). نعتبرها نجاحاً.
             if result is not None and result >= 0:
-                if self.CACHE_AVAILABLE:
-                    try:
-                        await self.settings_cache.invalidate_bot_settings(
-                            key
-                        )
-                    except Exception as e:
-                        logger.debug(
-                            f"settings_cache invalidate failed: {e}"
-                        )
+                # 🟠 v7.7.34 FIX-SET-2: إبطال شامل
+                await self._invalidate_setting_caches(key)
                 return True
 
-            # لا نصل هنا إلا إذا كان result = None (فشل حقيقي).
+            # لا نصل هنا إلا إذا كان result = None (فشل حقيقي)
             logger.debug(
-                f"⚠️ set_setting({key}): UPSERT returned {result} — fallback"
+                f"⚠️ set_setting({key}): UPSERT returned {result} "
+                f"— fallback"
             )
             return await self._set_setting_fallback(key, value)
 
@@ -562,51 +706,43 @@ class SettingsMixin:
         🟡 FIX-Y1-FOLLOWUP (v7.7.33): INSERT idempotent حسب المحرك
             لمنع duplicate key error عند no-op.
 
-        ⚠️ ملاحظة: نستخدم ON DUPLICATE KEY UPDATE (MySQL) بدل
-            INSERT IGNORE — لتفادي كتم أخطاء حقيقية (type mismatch،
-            permission، NOT NULL ...).
+        ⚠️ لا نستخدم INSERT IGNORE — لتفادي كتم أخطاء حقيقية
+            (type mismatch، permission، NOT NULL ...).
         """
         try:
             key_col = _q("key")
             value_col = _q("value")
             db_type = _get_db_type()
 
-            updated = await self.execute(
+            update_query = self._prepare_settings_query(
                 f"UPDATE settings SET {value_col} = ? "
-                f"WHERE {key_col} = ?",
-                (value, key),
+                f"WHERE {key_col} = ?"
             )
+            updated = await self.execute(update_query, (value, key))
 
             if not updated:
-                # 🟡 FIX-Y1-FOLLOWUP: INSERT idempotent — لا يكتم
-                #    أخطاء غير duplicate.
                 if db_type == "mysql":
-                    insert_sql = (
+                    insert_sql = self._prepare_settings_query(
                         f"INSERT INTO settings ({key_col}, {value_col}) "
                         f"VALUES (?, ?) "
                         f"ON DUPLICATE KEY UPDATE "
                         f"{value_col} = VALUES({value_col})"
                     )
                 elif db_type == "postgres":
-                    insert_sql = (
+                    insert_sql = self._prepare_settings_query(
                         f"INSERT INTO settings ({key_col}, {value_col}) "
                         f"VALUES (?, ?) "
                         f"ON CONFLICT ({key_col}) DO NOTHING"
                     )
                 else:  # SQLite
-                    insert_sql = (
+                    insert_sql = self._prepare_settings_query(
                         f"INSERT OR IGNORE INTO settings "
                         f"({key_col}, {value_col}) VALUES (?, ?)"
                     )
                 await self.execute(insert_sql, (key, value))
 
-            if self.CACHE_AVAILABLE:
-                try:
-                    await self.settings_cache.invalidate_bot_settings(key)
-                except Exception as e:
-                    logger.debug(
-                        f"settings_cache invalidate failed: {e}"
-                    )
+            # إبطال cache شامل
+            await self._invalidate_setting_caches(key)
 
             logger.info(f"✅ set_setting({key}) (fallback) نجح")
             return True
@@ -618,7 +754,7 @@ class SettingsMixin:
             return False
 
     # =====================================================================
-    # 3) قناة الاشتراك الإجباري
+    # 4) قناة الاشتراك الإجباري
     # =====================================================================
 
     async def get_force_subscribe_channel(self) -> Optional[str]:
@@ -628,7 +764,7 @@ class SettingsMixin:
         return value
 
     # =====================================================================
-    # 4) قناة التحديثات
+    # 5) قناة التحديثات
     # =====================================================================
 
     async def get_updates_channel(self) -> Optional[str]:
@@ -638,18 +774,19 @@ class SettingsMixin:
         return value
 
     # =====================================================================
-    # 5) ✅ v7.7.32: قناة السجلات (auto-heal + يقبل كل الأنواع)
+    # 6) قناة السجلات
+    # 🟠 v7.7.34 FIX-SET-3: auto-heal + إبطال شامل
     # =====================================================================
 
     async def get_log_channel(self):
         """
-        ✅ v7.7.32: يُعيد:
+        يُعيد:
           - int للقيم الرقمية
           - str لـ @username / username / رابط
-          - None إذا فارغ
+          - None إذا فارغ أو غير صالح (مع auto-heal)
 
-        - إذا كانت القيمة غير صالحة تماماً (نص عشوائي):
-          auto-heal → يمسحها ويُعيد None
+        🟠 v7.7.34 FIX-SET-3: auto-heal يُبطل كل cache (بما فيه
+        handlers_message._dev_log_cache).
         """
         value = await self.get_setting("log_channel_id")
         if value is None or value == "":
@@ -662,7 +799,13 @@ class SettingsMixin:
         # 1) رقمي → int
         if value_str.lstrip('-').isdigit():
             try:
-                return int(value_str)
+                cid = int(value_str)
+                if cid == 0:
+                    # قيمة غير صالحة — auto-heal
+                    await self._auto_heal_invalid_log_channel(
+                        value_str, "cid=0")
+                    return None
+                return cid
             except (TypeError, ValueError):
                 pass
 
@@ -671,42 +814,49 @@ class SettingsMixin:
             return value_str
 
         # 3) غير صالح → auto-heal
+        await self._auto_heal_invalid_log_channel(
+            value_str, "invalid_ref")
+        return None
+
+    async def _auto_heal_invalid_log_channel(
+        self, value_str: str, reason: str,
+    ) -> None:
+        """
+        🟠 v7.7.34 FIX-SET-3: auto-heal شامل لكل cache.
+        """
         preview = value_str[:60]
         logger.warning(
-            f"⚠️ v7.7.32: log_channel_id غير صالح — auto-heal "
-            f"| القيمة: {preview!r}"
+            f"⚠️ v7.7.32/34: log_channel_id غير صالح ({reason}) — "
+            f"auto-heal | القيمة: {preview!r}"
         )
         try:
             key_col = _q("key")
             value_col = _q("value")
-            await self.execute(
+            heal_query = self._prepare_settings_query(
                 f"UPDATE settings SET {value_col} = '' "
                 f"WHERE {key_col} = 'log_channel_id'"
             )
-            if self.CACHE_AVAILABLE:
-                try:
-                    await self.settings_cache.invalidate_bot_settings(
-                        "log_channel_id"
-                    )
-                except Exception:
-                    pass
+            await self.execute(heal_query)
+
+            # 🟠 v7.7.34 FIX-SET-3: إبطال شامل
+            await self._invalidate_log_channel_caches()
+
             logger.info(
-                "✅ v7.7.32: تم مسح log_channel_id غير الصالح تلقائياً"
+                "✅ v7.7.34: تم مسح log_channel_id غير الصالح "
+                "تلقائياً + إبطال cache"
             )
         except Exception as heal_err:
             logger.debug(f"auto-heal فشل: {heal_err}")
 
-        return None
-
     async def set_log_channel(self, channel_id) -> bool:
         """
-        ✅ v7.7.32: يقبل int أو str.
+        يقبل int أو str.
 
         - int: -1001234567890
         - str: @username، username، https://t.me/username
         - None أو '': إزالة
 
-        🔴 v7.7.33: يستفيد من FIX-Y1 (no-op ناجح = True).
+        🟠 v7.7.34 FIX-SET-5: يُبطل كل cache بعد الحفظ.
         """
         if channel_id is None:
             return await self.remove_log_channel()
@@ -715,19 +865,40 @@ class SettingsMixin:
         if not value:
             return await self.remove_log_channel()
 
-        return await self.set_setting("log_channel_id", value)
+        result = await self.set_setting("log_channel_id", value)
+        if result:
+            # 🟠 v7.7.34 FIX-SET-5: إبطال شامل إضافي
+            # (set_setting يُبطل عبر _invalidate_setting_caches،
+            # لكن _invalidate_log_channel_caches يُبطل مرادفات إضافية)
+            try:
+                await self._invalidate_log_channel_caches()
+            except Exception as e:
+                logger.debug(
+                    f"set_log_channel invalidate: {e}"
+                )
+        return result
 
     async def remove_log_channel(self) -> bool:
         """
-        ✅ إزالة قناة السجل.
+        إزالة قناة السجل.
 
         🔴 v7.7.33 FIX-Y1: يُعيد True حتى لو كانت القيمة فارغة
         مسبقاً (no-op ناجح على MySQL).
+
+        🟠 v7.7.34 FIX-SET-5: يُبطل كل cache بعد الحذف.
         """
-        return await self.set_setting("log_channel_id", "")
+        result = await self.set_setting("log_channel_id", "")
+        if result:
+            try:
+                await self._invalidate_log_channel_caches()
+            except Exception as e:
+                logger.debug(
+                    f"remove_log_channel invalidate: {e}"
+                )
+        return result
 
     # =====================================================================
-    # 6) فترة النشر
+    # 7) فترة النشر
     # =====================================================================
 
     async def get_publish_interval(self) -> int:
@@ -738,7 +909,7 @@ class SettingsMixin:
             return 12
 
     # =====================================================================
-    # 7) النسخ الاحتياطي التلقائي
+    # 8) النسخ الاحتياطي التلقائي
     # =====================================================================
 
     async def get_auto_backup(self) -> bool:
@@ -748,7 +919,7 @@ class SettingsMixin:
         return str(value).lower() in ("1", "true", "yes", "on")
 
     # =====================================================================
-    # 8) إعدادات /start
+    # 9) إعدادات /start
     # =====================================================================
 
     async def get_start_settings(self) -> Dict[str, Any]:
@@ -787,3 +958,44 @@ class SettingsMixin:
             "bot_username": _clean(raw.get("bot_username")),
             "support_username": _clean(raw.get("support_username")),
         }
+
+
+__all__ = [
+    "SettingsMixin",
+    # Validators
+    "_is_valid_channel_ref",
+    "_is_valid_log_channel",
+    "_validate_setting_value",
+    "_SETTING_VALIDATORS",
+    # Constants
+    "_MISSING_SENTINEL",
+    "_get_db_type",
+    "_q",
+    "_TG_USERNAME_RE",
+    "_TG_URL_PREFIXES",
+]
+
+
+# ═════════════════════════════════════════════════════════════════════
+# LOAD BEACON — v7.7.34
+# ═════════════════════════════════════════════════════════════════════
+
+try:
+    logger.info(
+        "✅ database_settings.py v7.7.34 SAFETY-FIXES-AUDIT loaded | "
+        "FIX-SET-1: qmark-unified ✅ | "
+        "FIX-SET-2: invalidate-all-levels ✅ | "
+        "FIX-SET-3: auto-heal-deep-invalidate ✅ | "
+        "FIX-SET-4: reject-cid-0 ✅ | "
+        "FIX-SET-5: set/remove-log-channel-invalidate ✅ | "
+        "FIX-SET-6: sentinel-db-protection ✅ | "
+        "✅ v7.7.33 FIX-Y1 (MySQL no-op) preserved | "
+        "✅ v7.7.33 FIX-Y1-FOLLOWUP (idempotent insert) preserved | "
+        "✅ v7.7.32 (_is_valid_channel_ref + validation + auto-heal) "
+        "preserved | "
+        "✅ v7.7.31 (ensure_settings_unique_constraint) preserved | "
+        "✅ v7.4.5-7.4.8 (cache, UNIQUE, PG UPSERT, MySQL reserved) "
+        "preserved"
+    )
+except Exception:
+    pass
