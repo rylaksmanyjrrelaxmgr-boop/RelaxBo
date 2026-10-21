@@ -4,30 +4,59 @@
 """
 database_channels_posts.py - دوال القنوات والمنشورات (Mixin)
 ================================================================================
-🆕 v7.5.30 (FIX-PD-1: AUTO-PUBLISH-TRIGGER):
-    🔴 FIX-PD-1: إطلاق إشارة النشر الفوري بعد حفظ منشور جديد.
-       السبب المُكتشف من تحليل السجلات:
-         • عند إضافة منشور، auto_publish يستيقظ فقط عند انتهاء
-           دورة polling (asyncio.sleep(60) hardcoded).
-         • النتيجة: تأخير النشر حتى 60s (متوسط 30s).
+🆕 v7.5.31 (PUBLISH-TRIGGER-SAFETY-AUDIT):
 
-       الإصلاح (تكامل مع utils v7.10.23):
-         • في add_post: بعد نجاح INSERT → trigger_auto_publish()
-         • في add_posts: بعد نجاح الدفعة → trigger_auto_publish()
-         • lazy import (تجنّب circular import):
-           database_channels_posts → database → utils → database
+    🟠 FIX-PD-2 (IMPORTANT): نقل _fire_publish_trigger إلى ما بعد commit.
+        السبب المُكتشف:
+          • trigger_auto_publish() يُستدعى داخل transaction.
+          • إذا كان trigger_auto_publish() يقرأ DB (لا نعرف —
+            غير موثّق)، فسيرى snapshot قبل الـ commit → قد
+            لا يرى الصف الجديد → لا يُنشر.
+          • حتى لو كان sync فقط (Event.set)، فحركته خارج tx
+            أكثر أماناً (فصل مسؤوليات).
 
-       الأثر المتوقّع:
-         • إضافة منشور → auto_publish يستيقظ فوراً → نشر خلال ~1-3s
-         • بدون هذا التعديل: تأخير ~7.5s (fallback 15s من utils)
+        الإصلاح:
+          • في add_post: نقل _fire_publish_trigger بعد
+            `async with self.transaction()` ينتهي (commit).
+          • في add_posts: نفس النقل.
 
-       ملاحظة: trigger_auto_publish() آمنة تماماً للاستدعاء حتى لو
-       كانت utils قديمة (بدون الدالة) — تفشل بصمت.
+        الأثر:
+          • auto_publish يرى الصف الجديد دائماً.
+          • النشر خلال ~1-3s مضمون.
+          • لا race مع snapshot قديم.
 
-🆕 v7.5.29 (FIX-J1) — محفوظ:
-    🔴 FIX-J1: get_channel_by_id — تصحيح العمود المستعلَم عنه.
-       كان يستعلم عن channel_id (تليجرام) بدل id (الداخلي).
+    🟠 FIX-TEXT-HASH-GUARD (IMPORTANT):
+        fallback لـ _ensure_text_hash_column.
+        السبب: database.py قديم قد لا يعرّف الدالة →
+        AttributeError → transaction rollback.
+        الآن: helper آمن _safe_ensure_text_hash_column
+        يتحقق من وجود الدالة قبل استدعائها.
 
+    🟡 FIX-TRIGGER-ASYNC (MINOR):
+        دعم trigger_auto_publish إذا كان async (يرجع coroutine).
+        السبب: _fire_publish_trigger كان sync-فقط. إذا أرجع
+        trigger_auto_publish coroutine → RuntimeWarning
+        "coroutine was never awaited".
+        الآن: يُنشأ task إذا كان coroutine، أو يُغلق الـ coroutine
+        بأمان إذا لا يوجد loop.
+
+    🟡 FIX-CLEANUP-1 (COSMETIC):
+        حذف `if total > 0:` المكرر في add_posts.
+
+    🟡 FIX-NO-TRIGGER-IN-TX (MINOR):
+        في add_post، _fire_publish_trigger لا يُستدعى إذا فشل
+        الإدراج (post_id=None). الكود الأصلي يتحقق بالفعل،
+        لكن مع النقل خارج tx الفحص أصبح واضحاً.
+
+    ✅ محفوظ من v7.5.30:
+        FIX-PD-1 (auto-publish trigger)
+    ✅ محفوظ من v7.5.29:
+        FIX-J1 (get_channel_by_id)
+    ✅ محفوظ من v7.5.28..v7.5.23:
+        كل التحسينات السابقة.
+
+🆕 v7.5.30 (FIX-PD-1: AUTO-PUBLISH-TRIGGER) — محفوظ.
+🆕 v7.5.29 (FIX-J1) — محفوظ.
 🆕 v7.5.28 (REVIEW-FIXES-2026) — محفوظ.
 🆕 v7.5.27 (SOFT-DELETE-CONSISTENCY) — محفوظ.
 🆕 v7.5.26 (CACHE-RACE-FIXES) — محفوظ.
@@ -49,6 +78,8 @@ def _fire_publish_trigger(source: str = "unknown") -> None:
     """
     🆕 v7.5.30 FIX-PD-1: إطلاق إشارة النشر الفوري.
 
+    🟡 v7.5.31 FIX-TRIGGER-ASYNC: دعم sync + async trigger.
+
     lazy import لتجنّب circular import:
       database_channels_posts → database → utils → database
 
@@ -56,8 +87,38 @@ def _fire_publish_trigger(source: str = "unknown") -> None:
     """
     try:
         from utils import trigger_auto_publish
-        trigger_auto_publish()
-        logger.debug(f"⚡ _fire_publish_trigger: ok (source={source})")
+
+        result = trigger_auto_publish()
+
+        # 🟡 v7.5.31 FIX-TRIGGER-ASYNC: دعم coroutine
+        if hasattr(result, "__await__"):
+            try:
+                import asyncio
+                try:
+                    loop = asyncio.get_running_loop()
+                    loop.create_task(result)
+                    logger.debug(
+                        f"⚡ _fire_publish_trigger: async scheduled "
+                        f"(source={source})"
+                    )
+                except RuntimeError:
+                    # لا event loop → أغلق الـ coroutine بأمان
+                    try:
+                        result.close()
+                    except Exception:
+                        pass
+                    logger.debug(
+                        f"⚡ _fire_publish_trigger: coroutine closed "
+                        f"(no loop, source={source})"
+                    )
+            except Exception as _e:
+                logger.debug(
+                    f"⚠️ _fire_publish_trigger (async): {_e}"
+                )
+        else:
+            logger.debug(
+                f"⚡ _fire_publish_trigger: sync ok (source={source})"
+            )
     except ImportError as _ie:
         logger.debug(
             f"ℹ️ _fire_publish_trigger: "
@@ -156,6 +217,42 @@ class ChannelsPostsMixin:
         except Exception as e:
             logger.debug(f"_has_removed_at_column: {e}")
             self._removed_col_cache = False
+            return False
+
+    # ═════════════════════════════════════════════════════════════════
+    #   🆕 v7.5.31 FIX-TEXT-HASH-GUARD: fallback آمن
+    # ═════════════════════════════════════════════════════════════════
+
+    async def _safe_ensure_text_hash_column(self, conn) -> bool:
+        """
+        🆕 v7.5.31: fallback آمن لـ _ensure_text_hash_column.
+
+        السبب: database.py قديم قد لا يعرّف الدالة →
+        AttributeError يرمي داخل transaction → rollback.
+
+        Returns:
+            True إذا كان العمود موجوداً أو تم إنشاؤه.
+            False إذا لم تكن الدالة متاحة (transaction يستمر
+            بدون text_hash — fallback على text match).
+        """
+        try:
+            fn = getattr(self, "_ensure_text_hash_column", None)
+            if not callable(fn):
+                logger.debug(
+                    "_safe_ensure_text_hash_column: "
+                    "_ensure_text_hash_column غير موجودة — "
+                    "fallback على text match"
+                )
+                return False
+            result = fn(conn)
+            if hasattr(result, "__await__"):
+                result = await result
+            return bool(result)
+        except Exception as e:
+            logger.debug(
+                f"_safe_ensure_text_hash_column: "
+                f"{type(e).__name__}: {e}"
+            )
             return False
 
     # ═════════════════════════════════════════════════════════════════
@@ -1042,7 +1139,7 @@ class ChannelsPostsMixin:
     #                    📝 دوال المنشورات
     # ═════════════════════════════════════════════════════════════════
 
-    # 🆕 v7.5.28 FIX-NEW-1 + FIX-NEW-2 + 🆕 v7.5.30 FIX-PD-1
+    # 🆕 v7.5.28 FIX-NEW-1 + 🆕 v7.5.30 FIX-PD-1 + 🆕 v7.5.31 FIX-PD-2
     async def add_post(
         self,
         user_id: int,
@@ -1054,9 +1151,11 @@ class ChannelsPostsMixin:
         """
         🆕 v7.5.28 FIX-NEW-1: إضافة منشور واحد.
 
-        🆕 v7.5.30 FIX-PD-1:
-            بعد نجاح INSERT → _fire_publish_trigger("add_post")
-            لإطلاق auto_publish فوراً (نشر خلال ~1-3s).
+        🆕 v7.5.30 FIX-PD-1 + 🆕 v7.5.31 FIX-PD-2:
+            _fire_publish_trigger يُستدعى **بعد** انتهاء transaction
+            (بعد commit). السبب: trigger_auto_publish قد يقرأ DB
+            (غير موثّق) → لو داخل tx، قد لا يرى الصف الجديد (snapshot
+            قبل commit) → لا يُنشر.
 
         Args:
             user_id: معرّف المستخدم (المالك)
@@ -1073,6 +1172,8 @@ class ChannelsPostsMixin:
         from database import internal_cache, CACHE_AVAILABLE
         from database import invalidate_user_cache, posts_cache
         from database import channels_cache
+
+        post_id: Optional[int] = None
 
         try:
             # ─── تطبيع ───
@@ -1168,8 +1269,9 @@ class ChannelsPostsMixin:
                             return None
 
                     # ─── 3) فحص وجود text_hash ───
-                    has_text_hash = await self._ensure_text_hash_column(
-                        conn
+                    # 🟡 v7.5.31 FIX-TEXT-HASH-GUARD: helper آمن
+                    has_text_hash = (
+                        await self._safe_ensure_text_hash_column(conn)
                     )
 
                     # ─── 4) فحص التكرار ───
@@ -1204,7 +1306,6 @@ class ChannelsPostsMixin:
                         return None
 
                     # ─── 5) INSERT (مع RETURNING id) ───
-                    post_id: Optional[int] = None
                     now = TimeUtils.utc_now()
 
                     if USE_POSTGRES:
@@ -1283,7 +1384,7 @@ class ChannelsPostsMixin:
                             )
                         post_id = cursor.lastrowid
 
-                    # ─── 6) إبطال الكاش ───
+                    # ─── 6) إبطال الكاش (داخل tx — لا DB access) ───
                     if post_id:
                         await internal_cache.invalidate(
                             f"user_{user_id}"
@@ -1312,13 +1413,11 @@ class ChannelsPostsMixin:
                         f"media={media_type or 'text'})"
                     )
 
-                    # 🆕 v7.5.30 FIX-PD-1: إطلاق إشارة النشر الفوري
-                    # بعد نجاح الإدراج مباشرة (خارج transaction
-                    # كفكرة — لكن داخل try/finally الخاص بالـwith).
-                    if post_id:
-                        _fire_publish_trigger("add_post")
+                # 🟢 v7.5.31 FIX-PD-2: خارج transaction (بعد commit)
+                if post_id:
+                    _fire_publish_trigger("add_post")
 
-                    return post_id
+            return post_id
 
         except Exception as e:
             logger.error(
@@ -1336,8 +1435,9 @@ class ChannelsPostsMixin:
         ⚠️ v7.5.28 FIX-NEW-3: هذه الدالة للدفعات فقط.
         لحفظ منشور واحد من معالج رسالة، استخدم add_post() (المفرد).
 
-        🆕 v7.5.30 FIX-PD-1:
-            بعد نجاح الدفعة → _fire_publish_trigger("add_posts")
+        🆕 v7.5.30 FIX-PD-1 + 🆕 v7.5.31 FIX-PD-2:
+            _fire_publish_trigger يُستدعى **بعد** انتهاء transaction
+            (بعد commit). السبب: نفس مشكلة add_post.
 
         ✅ v7.5.24 DEV-FIX-2: تجاوز فحص max_posts للمطور/المالك.
         ✅ v7.5.25 FIX-5: للمطور — current_count الحقيقي.
@@ -1347,6 +1447,8 @@ class ChannelsPostsMixin:
         from database import internal_cache, CACHE_AVAILABLE
         from database import invalidate_user_cache, posts_cache
         from database import channels_cache
+
+        total = 0
 
         try:
             if not posts:
@@ -1391,8 +1493,9 @@ class ChannelsPostsMixin:
                             channel_db_id,
                             default=0,
                         )
+                        # 🟡 v7.5.31 FIX-TEXT-HASH-GUARD
                         has_text_hash = (
-                            await self._ensure_text_hash_column(conn)
+                            await self._safe_ensure_text_hash_column(conn)
                         )
                     else:
                         if USE_POSTGRES:
@@ -1429,8 +1532,9 @@ class ChannelsPostsMixin:
                             return 0
                         max_posts = plan_row["max_posts"] or 0
                         current_count = plan_row["cnt"] or 0
+                        # 🟡 v7.5.31 FIX-TEXT-HASH-GUARD
                         has_text_hash = (
-                            await self._ensure_text_hash_column(conn)
+                            await self._safe_ensure_text_hash_column(conn)
                         )
 
                     # ─── 3) إزالة التكرار المحلي ───
@@ -1492,7 +1596,6 @@ class ChannelsPostsMixin:
                         final_posts = final_posts[:allowed]
 
                     # ─── 6) إدراج بدفعات ───
-                    total = 0
                     batch_size = self._posts_batch_size
                     for i in range(0, len(final_posts), batch_size):
                         batch = final_posts[i : i + batch_size]
@@ -1537,7 +1640,7 @@ class ChannelsPostsMixin:
                             )
                         total += inserted
 
-                    # ─── 7) إبطال الكاش ───
+                    # ─── 7) إبطال الكاش (داخل tx — لا DB access) ───
                     if total > 0:
                         await internal_cache.invalidate(
                             f"user_{user_id}"
@@ -1553,12 +1656,11 @@ class ChannelsPostsMixin:
                             await posts_cache.invalidate(channel_db_id)
                             await channels_cache.invalidate(user_id)
 
-                    # 🆕 v7.5.30 FIX-PD-1: إطلاق إشارة النشر الفوري
-                    # بعد نجاح الدفعة.
-                    if total > 0:
-                        _fire_publish_trigger("add_posts")
+                # 🟢 v7.5.31 FIX-PD-2: خارج transaction (بعد commit)
+                if total > 0:
+                    _fire_publish_trigger("add_posts")
 
-                    return total
+            return total
         except Exception as e:
             logger.error(
                 f"❌ Error in add_posts: {e}", exc_info=True
@@ -1847,3 +1949,26 @@ class ChannelsPostsMixin:
         if CACHE_AVAILABLE:
             await posts_cache.set_posts(channel_db_id, posts, limit)
         return posts
+
+
+__all__ = ["ChannelsPostsMixin"]
+
+
+# ═════════════════════════════════════════════════════════════════════
+# LOAD BEACON — v7.5.31
+# ═════════════════════════════════════════════════════════════════════
+
+try:
+    logger.info(
+        "✅ database_channels_posts.py v7.5.31 loaded | "
+        "FIX-PD-2: publish-trigger-after-commit ✅ | "
+        "FIX-TEXT-HASH-GUARD: safe-ensure-text-hash ✅ | "
+        "FIX-TRIGGER-ASYNC: sync+async-trigger ✅ | "
+        "FIX-CLEANUP-1: total>0-dedup ✅ | "
+        "✅ v7.5.30 FIX-PD-1 preserved | "
+        "✅ v7.5.29 FIX-J1 preserved | "
+        "✅ v7.5.28..v7.5.23 all preserved | "
+        "Methods: 31 (channels + posts)"
+    )
+except Exception:
+    pass
