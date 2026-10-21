@@ -1,85 +1,72 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-╔══════════════════════════════════════════════════════════════════════════╗
-║                                                                          ║
-║   🌿  Relax Manager — البوت الرئيسي                                      ║
-║   bot.py  ·  v7.0.1-FINAL                                                ║
-║                                                                          ║
-║   أعلى ما يُمكن الوصول إليه في ملف واحد — 9.4/10 إجمالي                  ║
-║                                                                          ║
-╚══════════════════════════════════════════════════════════════════════════╝
-
-🩹 إصلاحات v7.0.1 (فوق v7.0.0):
-    • P0: cmd_posts_stats — _pub = "1" بدل "TRUE" (integer = boolean)
-    • P0: _pid_write_lock يرفض البدء عند فشل القفل (منع تسرّب النسخ)
-    • P0: _force_kill_previous_instance يرفع SystemExit عند عدم الحصول على القفل
-    • P0: _assert_no_polling_conflict — يكشف poller منافس قبل set_webhook
-    • P1: _GIL_LAG_WARN_MS رُفع إلى 1500ms لتقليل الضجيج على Render
+🌿 Relax Manager – البوت الرئيسي (bot.py v5.7.13-FULL-AUDIT-FIXED)
+================================================================================
+🆕 v5.7.13 (تصحيحات الفحص الدقيق — فوق v5.7.12):
+    🔴 P0-FIX-1: `_run_post_init_hooks` — إزالة الاستدعاء اليدوي الخاطئ.
+        PTB 20.x يستدعي post_init تلقائياً داخل initialize()؛ الأعلام
+        `_post_init_ran`/`_post_init_executed`/`_post_init_done` غير موجودة
+        في PTB، لذا كان الاستدعاء اليدوي يُنفّذ post_init مرتين.
+        الحل: فحص `app._post_init` وإذا كان مضبوطاً نفترض أن PTB استدعاه.
+    🔴 P0-FIX-2: `_run_post_stop_hooks` — إبطال `_post_stop` (الخاصية الداخلية)
+        بدل `post_stop` (قد تكون read-only property في PTB).
+    🔴 P0-FIX-3: `_watch_runner` — التصفير فقط عند `2xx/3xx`، وعدّ `5xx`
+        كفشل (كان يُصفّر قبل الفحص → خادم ميت 502 لا يُغلق البوت).
+    🟠 P1-FIX-4: `_collect_admin_ids` — `break` فقط إذا كانت القائمة غير فارغة
+        (كان `[]` يمنع تجربة `get_all_admins`).
+    🟠 P1-FIX-5: `pre_checkout` — إغلاق ثغرة تخطي التحقق من المبلغ عندما
+        يكون `float(plan['price'])` فاشلاً (كان `expected_f=0.0` يُقبل أي مبلغ).
+    🟠 P1-FIX-6: `successful_payment` — إشعار المطور عند فشل `create_gift_code`
+        بعد دفع ناجح (كان فشلاً صامتاً).
+    🟠 P1-FIX-7: `_pid_is_bot_process` — مقارنة cwd لتفادي قتل managed bots.
+    🟡 P2-FIX-8: `_get_bot_token` — تحقق من صيغة التوكن بـ regex.
+    🟡 P2-FIX-9: `cleanup_admin_logs_periodically` — دعم `DB.connection()`
+        إذا كانت ترجع coroutine.
+    🟡 P2-FIX-10: `run_task_with_retry` — عدم التقاط SystemExit/KeyboardInterrupt.
+    🟢 P3-FIX-11: `_verify_command_handlers` — نقل grant/broadcast/backup/restore
+        إلى CRITICAL.
+    🟢 P3-FIX-12: `_init_group_log_instance` — idempotency check.
+    🟢 P3-FIX-13: `_write_pid_file` — إنشاء المجلد الأب.
+    🟢 P3-FIX-14: `pool_health_monitor` — PG_MAX_CONNECTIONS configurable.
+    🟢 P3-FIX-15: `cmd_ping` — تسجيل مقاييس ping.
+    🟢 P3-FIX-16: `keep_alive` — تسجيل سبب عدم التشغيل.
+    🟢 محفوظ: كل إصلاحات v5.7.11 / v5.7.12 (init_retry, pools, kill_prev,
+        webhook_force, init idempotency, ...).
+================================================================================
 """
 
-from __future__ import annotations
-
-# ═══════════════════════════════════════════════════════════════════════════
-# SECTION 0 · COMPAT SHIM
-# ═══════════════════════════════════════════════════════════════════════════
-import sys as _sys
-
-if __name__ == "__main__":
-    _existing_bot = _sys.modules.get('bot')
-    _main_mod = _sys.modules.get('__main__')
-    if _main_mod is None:
-        print("🔴 __main__ not in sys.modules", file=_sys.stderr)
-    elif _existing_bot is None:
-        _sys.modules['bot'] = _main_mod
-        print("🔗 sys.modules['bot'] = __main__", file=_sys.stderr)
-    elif _existing_bot is not _main_mod:
-        print("🔴 sys.modules['bot'] already exists as SEPARATE", file=_sys.stderr)
-
-# ═══════════════════════════════════════════════════════════════════════════
-# SECTION 1 · STANDARD LIBRARY
-# ═══════════════════════════════════════════════════════════════════════════
 import asyncio
-import functools
-import json
-import logging
 import os
+import logging
+import traceback
+import json
 import re
 import signal
 import sys
 import time
-import traceback
-from contextlib import asynccontextmanager, contextmanager
-from datetime import timedelta
-from decimal import Decimal, InvalidOperation
-from html import escape as _html_escape
-from typing import (
-    Any, AsyncIterator, Awaitable, Callable, Dict, Iterator,
-    List, Optional, Set, Tuple,
-)
-from urllib.parse import urlparse
-
-try:
-    import fcntl as _fcntl
-    _HAS_FCNTL = True
-except ImportError:
-    _fcntl = None
-    _HAS_FCNTL = False
-
-# ═══════════════════════════════════════════════════════════════════════════
-# SECTION 2 · THIRD-PARTY
-# ═══════════════════════════════════════════════════════════════════════════
 import aiohttp
+import functools
+from datetime import datetime, timedelta, timezone
+from html import escape as _html_escape
+from urllib.parse import urlparse
+from typing import Set, Any, Dict, Optional, List, Tuple, Callable, Awaitable
 from aiohttp import web
 
-# ═══════════════════════════════════════════════════════════════════════════
-# SECTION 3 · TELEGRAM
-# ═══════════════════════════════════════════════════════════════════════════
+if __name__ == "__main__":
+    _existing_bot = sys.modules.get('bot')
+    _main_mod = sys.modules.get('__main__')
+    if _main_mod is None:
+        print("🔴 __main__ not in sys.modules", file=sys.stderr)
+    elif _existing_bot is None:
+        sys.modules['bot'] = _main_mod
+        print("🔗 sys.modules['bot'] = __main__", file=sys.stderr)
+    elif _existing_bot is not _main_mod:
+        print("🔴 sys.modules['bot'] already exists as SEPARATE", file=sys.stderr)
+
 from telegram import (
-    BotCommandScopeAllPrivateChats,
-    BotCommandScopeAllGroupChats,
-    BotCommandScopeChat,
-    BotCommandScopeDefault,
+    BotCommandScopeAllPrivateChats, BotCommandScopeAllGroupChats,
+    BotCommandScopeChat, BotCommandScopeDefault,
     Update as _TgUpdate,
 )
 
@@ -91,13 +78,8 @@ except ImportError:
     _HAS_REPLY_PARAMETERS = False
 
 from telegram.ext import (
-    Application,
-    CallbackQueryHandler,
-    ChatJoinRequestHandler,
-    CommandHandler,
-    MessageHandler,
-    PreCheckoutQueryHandler,
-    filters,
+    Application, CommandHandler, CallbackQueryHandler,
+    MessageHandler, ChatJoinRequestHandler, filters, PreCheckoutQueryHandler,
 )
 
 try:
@@ -114,13 +96,10 @@ except ImportError:
     TypeHandler = None
     _HAS_TYPE_HANDLER = False
 
-# ═══════════════════════════════════════════════════════════════════════════
-# SECTION 4 · OPTIONAL: db_diagnostics
-# ═══════════════════════════════════════════════════════════════════════════
 _DB_DIAG_AVAILABLE = False
-_DB_DIAG_VERSION: Optional[str] = None
-_MARK_PROCESS_START_FN: Optional[Callable[[], Any]] = None
-_DB_DIAG_IMPORT_ERROR: Optional[str] = None
+_DB_DIAG_VERSION = None
+_MARK_PROCESS_START_FN = None
+_DB_DIAG_IMPORT_ERROR = None
 
 try:
     import db_diagnostics as _db_diag_mod
@@ -129,65 +108,64 @@ try:
     _MARK_PROCESS_START_FN = getattr(_db_diag_mod, "mark_process_start", None)
     if not callable(_MARK_PROCESS_START_FN):
         _MARK_PROCESS_START_FN = None
-except ImportError as _e:
-    _DB_DIAG_IMPORT_ERROR = str(_e)
-except Exception as _e:
-    _DB_DIAG_IMPORT_ERROR = f"unexpected: {_e}"
+except ImportError as _e_dbdiag:
+    _DB_DIAG_IMPORT_ERROR = str(_e_dbdiag)
+except Exception as _e_dbdiag:
+    _DB_DIAG_IMPORT_ERROR = f"unexpected: {_e_dbdiag}"
 
 _AUTOTUNE_AVAILABLE = False
-_fn_autotune: Optional[Callable] = None
 try:
     from db_diagnostics import ensure_autovacuum_tuning as _fn_autotune
     _AUTOTUNE_AVAILABLE = callable(_fn_autotune)
-except (ImportError, Exception):
+except ImportError:
+    _fn_autotune = None
+    _AUTOTUNE_AVAILABLE = False
+except Exception:
     _fn_autotune = None
     _AUTOTUNE_AVAILABLE = False
 
-# ═══════════════════════════════════════════════════════════════════════════
-# SECTION 5 · CORE PROJECT IMPORTS
-# ═══════════════════════════════════════════════════════════════════════════
 from config import CONFIG
 from database import DB, initialize_db, TimeUtils
 from handlers import CommandHandlers, CallbackHandlers, MessageHandlers, chat_member
 
-# ═══════════════════════════════════════════════════════════════════════════
-# SECTION 6 · OPTIONAL: handlers_membership
-# ═══════════════════════════════════════════════════════════════════════════
-register_membership_handlers: Optional[Callable] = None
+register_membership_handlers = None
 _MEMBERSHIP_AVAILABLE = False
-_MEMBERSHIP_IMPORT_ERROR: Optional[str] = None
+_MEMBERSHIP_IMPORT_ERROR = None
+_MEMBERSHIP_SOURCE = None
 
 try:
     from handlers_membership import register_handlers as _r1
     register_membership_handlers = _r1
     _MEMBERSHIP_AVAILABLE = True
+    _MEMBERSHIP_SOURCE = 'standalone'
 except ImportError as _e1:
     try:
         from handlers.handlers_membership import register_handlers as _r2
         register_membership_handlers = _r2
         _MEMBERSHIP_AVAILABLE = True
+        _MEMBERSHIP_SOURCE = 'standalone'
     except ImportError as _e2:
         try:
             from handlers_callback import register_membership_handlers as _r3
             register_membership_handlers = _r3
             _MEMBERSHIP_AVAILABLE = True
+            _MEMBERSHIP_SOURCE = 'embedded'
         except ImportError as _e3:
             try:
                 from handlers.handlers_callback import register_membership_handlers as _r4
                 register_membership_handlers = _r4
                 _MEMBERSHIP_AVAILABLE = True
+                _MEMBERSHIP_SOURCE = 'embedded'
             except ImportError as _e4:
-                _MEMBERSHIP_IMPORT_ERROR = f"{_e1}/{_e2}/{_e3}/{_e4}"
+                _MEMBERSHIP_IMPORT_ERROR = f"standalone: {_e1}/{_e2} | embedded: {_e3}/{_e4}"
 
-# ═══════════════════════════════════════════════════════════════════════════
-# SECTION 7 · OPTIONAL: handlers_analytics
-# ═══════════════════════════════════════════════════════════════════════════
 _ANALYTICS_HANDLERS_AVAILABLE = False
-_handle_analytics_callback: Optional[Callable] = None
-_show_analytics_menu: Optional[Callable] = None
-_cmd_fullhealth: Optional[Callable] = None
-_cmd_latency: Optional[Callable] = None
-_register_analytics_handlers: Optional[Callable] = None
+_ANALYTICS_HANDLERS_IMPORT_ERROR = None
+_handle_analytics_callback = None
+_show_analytics_menu = None
+_cmd_fullhealth = None
+_cmd_latency = None
+_register_analytics_handlers = None
 _ANALYTICS_REGISTER_AVAILABLE = False
 
 try:
@@ -200,7 +178,7 @@ try:
     _cmd_fullhealth = _cf
     _cmd_latency = _cl
     _ANALYTICS_HANDLERS_AVAILABLE = True
-except ImportError:
+except ImportError as _e_an1:
     try:
         from handlers_analytics import (
             handle_analytics_callback as _handle_analytics_callback,
@@ -211,8 +189,8 @@ except ImportError:
         _cmd_fullhealth = _cf
         _cmd_latency = _cl
         _ANALYTICS_HANDLERS_AVAILABLE = True
-    except ImportError:
-        pass
+    except ImportError as _e_an2:
+        _ANALYTICS_HANDLERS_IMPORT_ERROR = f"{_e_an1} | {_e_an2}"
 
 try:
     from handlers.handlers_analytics import register_handlers as _ra1
@@ -230,14 +208,11 @@ except ImportError:
 except Exception:
     pass
 
-# ═══════════════════════════════════════════════════════════════════════════
-# SECTION 8 · OPTIONAL: spam detectors
-# ═══════════════════════════════════════════════════════════════════════════
 _SPAM_DETECTOR_AVAILABLE = False
-_SPAM_DETECTOR_IMPORT_ERROR: Optional[str] = None
-_SPAM_DETECTOR_VERSION: Optional[str] = None
+_SPAM_DETECTOR_IMPORT_ERROR = None
+_SPAM_DETECTOR_VERSION = None
 _SPAM_DETECTOR_LAYERS_COUNT = 0
-_detectors_module: Any = None
+_detectors_module = None
 
 for _mod_path in ("handlers_message_detectors", "handlers.handlers_message_detectors"):
     try:
@@ -250,9 +225,11 @@ for _mod_path in ("handlers_message_detectors", "handlers.handlers_message_detec
     except Exception as _e:
         _SPAM_DETECTOR_IMPORT_ERROR = f"unexpected: {_e}"
 
-_shutdown_detector_pool_fn: Optional[Callable] = None
-_shutdown_default_executor_fn: Optional[Callable] = None
+_shutdown_detector_pool_fn = None
+_install_default_executor_fn = None
+_shutdown_default_executor_fn = None
 _DETECTORS_HAS_SHUTDOWN_HELPER = False
+_DETECTORS_HAS_INSTALL_HELPER = False
 
 if _SPAM_DETECTOR_AVAILABLE and _detectors_module is not None:
     try:
@@ -264,30 +241,25 @@ if _SPAM_DETECTOR_AVAILABLE and _detectors_module is not None:
     try:
         _shutdown_detector_pool_fn = getattr(_detectors_module, "_shutdown_shared_pool", None)
         _shutdown_default_executor_fn = getattr(_detectors_module, "shutdown_default_executor", None)
+        _install_default_executor_fn = getattr(_detectors_module, "install_default_executor", None)
         _DETECTORS_HAS_SHUTDOWN_HELPER = callable(_shutdown_default_executor_fn)
+        _DETECTORS_HAS_INSTALL_HELPER = callable(_install_default_executor_fn)
     except Exception:
         pass
 
-# ═══════════════════════════════════════════════════════════════════════════
-# SECTION 9 · OPTIONAL: security bridge
-# ═══════════════════════════════════════════════════════════════════════════
 _SECURITY_BRIDGE_AVAILABLE = False
-_SB_IMPORT_ERROR: Optional[str] = None
+_SB_IMPORT_ERROR = None
 try:
     from utils import (
         SECURITY_TOGGLE_MAP, NEW_SECURITY_DEFAULTS, get_security_settings,
-        invalidate_security_settings_cache, should_delete_by_security,
-        check_all_security,
+        invalidate_security_settings_cache, should_delete_by_security, check_all_security,
     )
     _SECURITY_BRIDGE_AVAILABLE = True
-except ImportError as _e:
-    _SB_IMPORT_ERROR = str(_e)
-except Exception as _e:
-    _SB_IMPORT_ERROR = f"unexpected: {_e}"
+except ImportError as _sb_e:
+    _SB_IMPORT_ERROR = str(_sb_e)
+except Exception as _sb_e:
+    _SB_IMPORT_ERROR = f"unexpected: {_sb_e}"
 
-# ═══════════════════════════════════════════════════════════════════════════
-# SECTION 10 · OPTIONAL: admin_logs cleanup
-# ═══════════════════════════════════════════════════════════════════════════
 try:
     from database_tables import (
         _cleanup_old_admin_logs_postgres as _cleanup_admin_logs_pg,
@@ -296,7 +268,7 @@ try:
         ADMIN_LOGS_RETENTION_DAYS, ADMIN_LOGS_MAX_ROWS,
     )
     _ADMIN_LOGS_CLEANUP_AVAILABLE = True
-except ImportError:
+except ImportError as _e:
     _cleanup_admin_logs_pg = None
     _cleanup_admin_logs_sqlite = None
     _cleanup_admin_logs_mysql = None
@@ -304,11 +276,9 @@ except ImportError:
     ADMIN_LOGS_MAX_ROWS = 5000
     _ADMIN_LOGS_CLEANUP_AVAILABLE = False
 
-# ═══════════════════════════════════════════════════════════════════════════
-# SECTION 11 · OPTIONAL: channels_delete
-# ═══════════════════════════════════════════════════════════════════════════
-register_delete_confirmation: Optional[Callable] = None
+register_delete_confirmation = None
 _CH_DELETE_AVAILABLE = False
+_CH_DELETE_IMPORT_ERROR = None
 
 try:
     from handlers.handlers_channels_delete import register_delete_confirmation as _r
@@ -319,12 +289,9 @@ except ImportError:
         from handlers_channels_delete import register_delete_confirmation as _r
         register_delete_confirmation = _r
         _CH_DELETE_AVAILABLE = True
-    except ImportError:
-        pass
+    except ImportError as _e2:
+        _CH_DELETE_IMPORT_ERROR = str(_e2)
 
-# ═══════════════════════════════════════════════════════════════════════════
-# SECTION 12 · REQUIRED: channels_list / nav_fix / message
-# ═══════════════════════════════════════════════════════════════════════════
 from handlers.handlers_channels_list import register_channels_list_handlers
 
 try:
@@ -346,7 +313,7 @@ from handlers.handlers_message import (
     handle_autoblocked_command as _handle_autoblocked_command,
 )
 
-_warmup_detectors_pool_fn: Optional[Callable] = None
+_warmup_detectors_pool_fn = None
 _HAS_WARMUP_DETECTORS = False
 
 try:
@@ -364,7 +331,7 @@ except ImportError:
         pass
 
 _HAS_DB_IDLE_CMD = False
-_handle_db_idle_command: Optional[Callable] = None
+_handle_db_idle_command = None
 
 try:
     from handlers.handlers_message import handle_db_idle_command as _h
@@ -379,7 +346,7 @@ except ImportError:
         pass
 
 _HAS_CACHE_STATS_CMD = False
-_handle_cache_stats_command: Optional[Callable] = None
+_handle_cache_stats_command = None
 
 try:
     from handlers.handlers_message import handle_cache_stats_command as _h
@@ -393,39 +360,47 @@ except ImportError:
     except ImportError:
         pass
 
-# ═══════════════════════════════════════════════════════════════════════════
-# SECTION 13 · OPTIONAL: db_maintenance_commands
-# ═══════════════════════════════════════════════════════════════════════════
-register_maintenance_commands: Optional[Callable] = None
-start_weekly_diagnostic_task: Optional[Callable] = None
-stop_weekly_diagnostic_task: Optional[Callable] = None
-stop_auto_vacuum_task: Optional[Callable] = None
+register_maintenance_commands = None
+start_weekly_diagnostic_task = None
+stop_weekly_diagnostic_task = None
+stop_auto_vacuum_task = None
 _MAINT_CMDS_AVAILABLE = False
+_MAINT_CMDS_IMPORT_ERROR = None
+_MAINT_REGISTER_NAMES = (
+    "register_maintenance_commands", "register", "register_commands",
+    "setup_commands", "setup", "register_maintenance", "register_db_maintenance",
+)
 
 try:
     import db_maintenance_commands as _maint_mod
     _mod_import_ok = True
-except ImportError:
+except ImportError as _e_mod:
     _mod_import_ok = False
+    _MAINT_CMDS_IMPORT_ERROR = str(_e_mod)
     _maint_mod = None
 
-if _mod_import_ok and _maint_mod is not None:
-    start_weekly_diagnostic_task = getattr(_maint_mod, "start_weekly_diagnostic_task", None)
-    stop_weekly_diagnostic_task = getattr(_maint_mod, "stop_weekly_diagnostic_task", None)
-    stop_auto_vacuum_task = getattr(_maint_mod, "stop_auto_vacuum_task", None)
-    for _name in (
-        "register_maintenance_commands", "register", "register_commands",
-        "setup_commands", "setup", "register_maintenance", "register_db_maintenance",
-    ):
+if _mod_import_ok:
+    try:
+        start_weekly_diagnostic_task = getattr(_maint_mod, "start_weekly_diagnostic_task", None)
+    except Exception:
+        pass
+    try:
+        stop_weekly_diagnostic_task = getattr(_maint_mod, "stop_weekly_diagnostic_task", None)
+    except Exception:
+        pass
+    try:
+        stop_auto_vacuum_task = getattr(_maint_mod, "stop_auto_vacuum_task", None)
+    except Exception:
+        pass
+    for _name in _MAINT_REGISTER_NAMES:
         _fn = getattr(_maint_mod, _name, None)
         if callable(_fn):
             register_maintenance_commands = _fn
             _MAINT_CMDS_AVAILABLE = True
             break
+    if not _MAINT_CMDS_AVAILABLE:
+        _MAINT_CMDS_IMPORT_ERROR = "لم أجد دالة register: " + ", ".join(_MAINT_REGISTER_NAMES)
 
-# ═══════════════════════════════════════════════════════════════════════════
-# SECTION 14 · OPTIONAL: _notify_dev_log
-# ═══════════════════════════════════════════════════════════════════════════
 try:
     from handlers.handlers_command import _notify_dev_log
     _DEV_LOG_AVAILABLE = True
@@ -438,13 +413,10 @@ except ImportError:
             pass
         _DEV_LOG_AVAILABLE = False
 
-# ═══════════════════════════════════════════════════════════════════════════
-# SECTION 15 · OPTIONAL: group_log
-# ═══════════════════════════════════════════════════════════════════════════
 try:
     from handlers.handlers_group_log import register_group_log_handlers
     _GROUP_LOG_AVAILABLE = True
-except ImportError:
+except ImportError as _e:
     register_group_log_handlers = None
     _GROUP_LOG_AVAILABLE = False
 
@@ -455,9 +427,6 @@ except ImportError:
     _init_group_log = None
     _GROUP_LOG_INIT_AVAILABLE = False
 
-# ═══════════════════════════════════════════════════════════════════════════
-# SECTION 16 · OPTIONAL: maintenance loop
-# ═══════════════════════════════════════════════════════════════════════════
 try:
     from maintenance import maintenance_loop as _maintenance_loop
     _MAINTENANCE_AVAILABLE = True
@@ -465,9 +434,6 @@ except ImportError:
     _maintenance_loop = None
     _MAINTENANCE_AVAILABLE = False
 
-# ═══════════════════════════════════════════════════════════════════════════
-# SECTION 17 · REQUIRED: utils + cache
-# ═══════════════════════════════════════════════════════════════════════════
 from utils import (
     TranslationManager, KeyboardFactory, BackgroundTasks,
     ErrorHandler, setup_webhook, safe_send,
@@ -475,524 +441,36 @@ from utils import (
 )
 from cache import cache_cleanup_task, user_cache, invalidate_user_cache
 
-# ═══════════════════════════════════════════════════════════════════════════
-# SECTION 18 · STRUCTURED LOGGING
-# ═══════════════════════════════════════════════════════════════════════════
-class _StructuredFormatter(logging.Formatter):
-    """
-    JSON formatter for production, text for development.
-    Controlled by LOG_FORMAT=json|text (default: text).
-
-    >>> import logging, json
-    >>> fmt = _StructuredFormatter()
-    >>> rec = logging.LogRecord('test', logging.INFO, 'f.py', 1, 'hello %s', ('world',), None)
-    >>> data = json.loads(fmt.format(rec))
-    >>> data['msg']
-    'hello world'
-    >>> data['level']
-    'INFO'
-    """
-
-    def format(self, record: logging.LogRecord) -> str:
-        try:
-            payload = {
-                "ts": self.formatTime(record, "%Y-%m-%dT%H:%M:%S.%fZ"),
-                "level": record.levelname,
-                "logger": record.name,
-                "msg": record.getMessage(),
-            }
-            if record.exc_info:
-                payload["exc"] = self.formatException(record.exc_info)
-            return json.dumps(payload, ensure_ascii=False)
-        except Exception:
-            return super().format(record)
-
-
-_LOG_FORMAT = os.getenv("LOG_FORMAT", "text").strip().lower()
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
-
-_root_handler = logging.StreamHandler()
-if _LOG_FORMAT == "json":
-    _root_handler.setFormatter(_StructuredFormatter())
-else:
-    _root_handler.setFormatter(logging.Formatter(
-        '%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    ))
-
 logging.basicConfig(
-    level=getattr(logging, LOG_LEVEL, logging.INFO),
-    handlers=[_root_handler],
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=getattr(logging, LOG_LEVEL, logging.INFO)
 )
-
-for _noisy in ("httpx", "httpcore", "telegram.request",
-               "telegram.ext.ExtBot", "aiohttp.access"):
+for _noisy in ("httpx", "httpcore", "telegram.request", "telegram.ext.ExtBot", "aiohttp.access"):
     logging.getLogger(_noisy).setLevel(logging.WARNING)
 
+# 🟢 v5.7.12: logger باسم ثابت لتفادي ازدواج عند إعادة الاستيراد
 logger = logging.getLogger("relax_bot")
 
-# ═══════════════════════════════════════════════════════════════════════════
-# SECTION 19 · CONSTANTS (single source of truth)
-# ═══════════════════════════════════════════════════════════════════════════
-# Paths
+# ═══════════════════════════════════════════════════════════════════
+# PID / KILL-PREVIOUS
+# ═══════════════════════════════════════════════════════════════════
 _PID_FILE_PATH = "/app/.bot.pid"
-_PID_LOCK_PATH = "/app/.bot.pid.lock"
-_METRICS_FILE_PATH = "/app/.bot_metrics.json"
-
-# Timing
 _KILL_TIMEOUT_SEC = 5.0
 _TELEGRAM_RELEASE_TIMEOUT_SEC = 15.0
-_NOTIFY_SHUTDOWN_TIMEOUT = 5.0
-_BG_TASKS_SHUTDOWN_TIMEOUT = 10.0
-_PENDING_TASKS_SHUTDOWN_TIMEOUT = 10.0
-_INIT_MAX_ATTEMPTS = 4
-_INIT_TIMEOUT_SEC = 15.0
 
-# Watcher
-_WATCHER_INTERVAL = 30.0
-_WATCHER_HEALTH_TIMEOUT = 5.0
-_WATCHER_MAX_PROBE_FAILURES = 3
-
-# Pool monitoring
-_PM_INITIAL_DELAY_SEC = 120.0
-_PM_IDLE_TX_ERROR_THRESHOLD = 3
-_PM_UTIL_WARN_PCT = 80.0
-_PM_UTIL_CRITICAL_PCT = 95.0
-_PM_QUERY_TTL = 290.0
-
-# Payments
-_PAYMENT_AMOUNT_EPSILON = Decimal("0.01")
-
-# Keep-alive
-_KEEP_ALIVE_INTERVAL_SEC = 180.0
-_KEEP_ALIVE_INITIAL_DELAY = 30.0
-_TG_WARMUP_TIMEOUT = 10.0
-
-# GIL monitoring — v7.0.1: raised to 1500ms for Render shared hosts
-_GIL_LAG_SAMPLES_MAX = 300
-_GIL_LAG_HISTORY_WINDOW_SEC = 60.0
-_GIL_LAG_WARN_MS = 1500.0
-_GIL_LAG_ALERT_INTERVAL_SEC = 30.0
-_GIL_LAG_BLOCKED_CUMULATIVE_WARN_MS = 5000.0
-_HANDLER_SLOW_WARN_MS = 3000.0
-_HANDLER_INFO_MS = 1500.0
-
-# Channels cleanup
-_REMOVED_CHANNELS_GRACE_DAYS = 30
-
-# Rate limiting
-_ADMIN_CMD_RATE = 5.0
-_ADMIN_CMD_BURST = 10
-_PAYMENT_RATE = 2.0
-_PAYMENT_BURST = 4
-
-# Env
 _FALLBACK_HOSTNAME = (
     os.getenv("FALLBACK_HOSTNAME", "") or "relaxbo-78m4.onrender.com"
 ).strip()
-_DIAG_INCOMING = os.getenv("DIAG_INCOMING", "0").strip().lower() in (
-    "1", "true", "yes", "on", "enabled",
-)
 
-# Regex
-_TG_TOKEN_RE = re.compile(r"^\d{8,10}:[A-Za-z0-9_-]{35}$")
+logger.info("🔧 v5.7.13 init: _FALLBACK_HOSTNAME=%r", _FALLBACK_HOSTNAME)
+logger.info("🔧 v5.7.13 init: RENDER_EXTERNAL_HOSTNAME=%r",
+            os.getenv("RENDER_EXTERNAL_HOSTNAME", ""))
+logger.info("🔧 v5.7.13 init: RENDER_EXTERNAL_URL=%r",
+            os.getenv("RENDER_EXTERNAL_URL", ""))
+logger.info("🔧 v5.7.13 init: ALLOW_POLLING=%r",
+            os.getenv("ALLOW_POLLING", ""))
 
-# Filters
-_GROUP_CHAT_FILTER = filters.ChatType.GROUP | filters.ChatType.SUPERGROUP
-
-ALLOWED_UPDATES = [
-    "message", "edited_message", "callback_query", "chat_join_request",
-    "pre_checkout_query", "chat_member", "my_chat_member",
-]
-
-logger.info("🔧 v7.0.1 init: fallback_hostname=%r", _FALLBACK_HOSTNAME)
-logger.info("🔧 v7.0.1 init: LOG_FORMAT=%r", _LOG_FORMAT)
-
-# ═══════════════════════════════════════════════════════════════════════════
-# SECTION 20 · PURE FUNCTIONS (doctested)
-# ═══════════════════════════════════════════════════════════════════════════
-def _amounts_match(expected: Any, actual: Any) -> bool:
-    """
-    Decimal-safe amount comparison.
-
-    >>> _amounts_match(100, 100)
-    True
-    >>> _amounts_match(100, 100.005)
-    True
-    >>> _amounts_match(100, 100.02)
-    False
-    >>> _amounts_match(0.1 + 0.2, 0.3)  # float precision issue
-    True
-    >>> _amounts_match(None, 5)
-    False
-    >>> _amounts_match("abc", 5)
-    False
-    """
-    try:
-        e = Decimal(str(expected or 0))
-        a = Decimal(str(actual or 0))
-    except (TypeError, ValueError, InvalidOperation):
-        return False
-    return abs(e - a) < _PAYMENT_AMOUNT_EPSILON
-
-
-def _is_valid_token_format(token: Optional[str]) -> bool:
-    """
-    >>> _is_valid_token_format("123456789:" + "A"*35)
-    True
-    >>> _is_valid_token_format("invalid")
-    False
-    >>> _is_valid_token_format(None)
-    False
-    """
-    if not token or not isinstance(token, str):
-        return False
-    return bool(_TG_TOKEN_RE.match(token.strip()))
-
-
-def _compute_utilization_pct(total: int, max_conn: int) -> float:
-    """
-    >>> _compute_utilization_pct(10, 20)
-    50.0
-    >>> _compute_utilization_pct(0, 20)
-    0.0
-    >>> _compute_utilization_pct(5, 0)
-    0.0
-    """
-    if max_conn <= 0 or total <= 0:
-        return 0.0
-    return (total / max_conn) * 100.0
-
-
-def _row_to_dict(row: Any) -> Dict[str, Any]:
-    """
-    Convert various DB row types (asyncpg.Record, sqlite3.Row) to dict.
-
-    >>> _row_to_dict(None)
-    {}
-    >>> _row_to_dict({"a": 1})
-    {'a': 1}
-    """
-    if row is None:
-        return {}
-    if isinstance(row, dict):
-        return row
-    try:
-        return dict(row)
-    except (TypeError, ValueError):
-        if hasattr(row, "keys"):
-            try:
-                return {k: row[k] for k in row.keys()}
-            except Exception:
-                return {}
-        return {}
-
-
-def _safe_parse_json(payload: str) -> Optional[Dict[str, Any]]:
-    """
-    >>> _safe_parse_json('{"a": 1}')
-    {'a': 1}
-    >>> _safe_parse_json('invalid') is None
-    True
-    >>> _safe_parse_json('[1,2,3]') is None
-    True
-    """
-    if not payload or not isinstance(payload, str):
-        return None
-    try:
-        result = json.loads(payload)
-        return result if isinstance(result, dict) else None
-    except (json.JSONDecodeError, TypeError):
-        return None
-
-
-def _redact_token(text: str, token: Optional[str] = None) -> str:
-    """Mask bot token in logs."""
-    if not text:
-        return text
-    if token is None:
-        try:
-            token = _get_bot_token()
-        except Exception:
-            return text
-    if not token or len(token) < 8:
-        return text
-    return text.replace(token, "***REDACTED***")
-
-
-def _safe_url(url: str) -> str:
-    """Sanitize URL for logs."""
-    return _redact_token(url)
-
-
-# ═══════════════════════════════════════════════════════════════════════════
-# SECTION 21 · RATE LIMITER
-# ═══════════════════════════════════════════════════════════════════════════
-class TokenBucket:
-    """
-    Per-user token bucket rate limiter.
-
-    >>> bucket = TokenBucket(rate=10.0, capacity=3)
-    >>> bucket.consume(1)
-    True
-    >>> bucket.consume(1)
-    True
-    >>> bucket.consume(1)
-    True
-    >>> bucket.consume(1)
-    False
-    """
-
-    def __init__(self, rate: float, capacity: int):
-        self.rate = rate
-        self.capacity = capacity
-        self._buckets: Dict[int, Tuple[float, float]] = {}
-        self._last_cleanup = time.monotonic()
-
-    def consume(self, user_id: int, tokens: float = 1.0) -> bool:
-        now = time.monotonic()
-        self._maybe_cleanup(now)
-        tokens_avail, last_ts = self._buckets.get(user_id, (float(self.capacity), now))
-        elapsed = now - last_ts
-        tokens_avail = min(float(self.capacity), tokens_avail + elapsed * self.rate)
-        if tokens_avail >= tokens:
-            self._buckets[user_id] = (tokens_avail - tokens, now)
-            return True
-        self._buckets[user_id] = (tokens_avail, now)
-        return False
-
-    def _maybe_cleanup(self, now: float) -> None:
-        if (now - self._last_cleanup) < 300.0:
-            return
-        cutoff = now - 600.0
-        stale = [uid for uid, (_, ts) in self._buckets.items() if ts < cutoff]
-        for uid in stale:
-            del self._buckets[uid]
-        self._last_cleanup = now
-
-
-_admin_cmd_bucket = TokenBucket(rate=_ADMIN_CMD_RATE, capacity=_ADMIN_CMD_BURST)
-_payment_bucket = TokenBucket(rate=_PAYMENT_RATE, capacity=_PAYMENT_BURST)
-
-
-# ═══════════════════════════════════════════════════════════════════════════
-# SECTION 22 · CIRCUIT BREAKER (for Telegram API)
-# ═══════════════════════════════════════════════════════════════════════════
-class CircuitBreaker:
-    """
-    Circuit breaker for external services.
-
-    States:
-      CLOSED     → normal, requests pass through
-      OPEN       → failing, requests rejected immediately
-      HALF_OPEN  → testing recovery, one request allowed
-
-    >>> cb = CircuitBreaker(failure_threshold=2, recovery_timeout=0.1)
-    >>> cb.is_open()
-    False
-    >>> cb.record_failure(); cb.record_failure()
-    >>> cb.is_open()
-    True
-    """
-
-    def __init__(
-        self,
-        failure_threshold: int = 5,
-        recovery_timeout: float = 30.0,
-        half_open_max: int = 1,
-    ):
-        self.failure_threshold = failure_threshold
-        self.recovery_timeout = recovery_timeout
-        self.half_open_max = half_open_max
-        self._failures = 0
-        self._last_failure_ts = 0.0
-        self._state = "CLOSED"
-        self._half_open_attempts = 0
-
-    def is_open(self) -> bool:
-        if self._state == "CLOSED":
-            return False
-        if self._state == "OPEN":
-            if (time.monotonic() - self._last_failure_ts) >= self.recovery_timeout:
-                self._state = "HALF_OPEN"
-                self._half_open_attempts = 0
-                return False
-            return True
-        # HALF_OPEN
-        if self._half_open_attempts >= self.half_open_max:
-            return True
-        self._half_open_attempts += 1
-        return False
-
-    def record_success(self) -> None:
-        self._failures = 0
-        self._state = "CLOSED"
-
-    def record_failure(self) -> None:
-        self._failures += 1
-        self._last_failure_ts = time.monotonic()
-        if self._failures >= self.failure_threshold:
-            self._state = "OPEN"
-
-
-_tg_circuit_breaker = CircuitBreaker(failure_threshold=5, recovery_timeout=30.0)
-
-
-# ═══════════════════════════════════════════════════════════════════════════
-# SECTION 23 · METRICS STORE (debounced + atomic + persistent)
-# ═══════════════════════════════════════════════════════════════════════════
-class MetricsStore:
-    """Persistent metrics with 30s debounce + atomic write."""
-
-    _CRITICAL_KEYS = frozenset({
-        "posts_success", "posts_failed",
-        "pings_total", "ping_min_ms", "ping_max_ms", "ping_sum_ms",
-    })
-
-    def __init__(self, path: str = _METRICS_FILE_PATH):
-        self.path = path
-        self._data = self._default_data()
-        self._dirty = False
-        self._load()
-
-    @staticmethod
-    def _default_data() -> Dict[str, Any]:
-        return {
-            "posts_success": 0, "posts_failed": 0, "commands_total": 0,
-            "pings_total": 0, "ping_min_ms": None, "ping_max_ms": None,
-            "ping_sum_ms": 0, "started_at": time.monotonic(),
-            "restarts_total": 0,
-        }
-
-    def _load(self) -> None:
-        try:
-            if os.path.exists(self.path):
-                with open(self.path, "r") as f:
-                    loaded = json.load(f)
-                if isinstance(loaded, dict):
-                    self._data.update(loaded)
-                    self._data["restarts_total"] = int(
-                        self._data.get("restarts_total", 0)
-                    ) + 1
-                    logger.info("📊 MetricsStore loaded (restarts=%d)",
-                                self._data["restarts_total"])
-        except Exception as e:
-            logger.warning("MetricsStore._load: %s", e)
-
-    def save(self) -> None:
-        try:
-            os.makedirs(os.path.dirname(self.path), exist_ok=True)
-            tmp = f"{self.path}.tmp.{os.getpid()}"
-            with open(tmp, "w") as f:
-                json.dump(self._data, f, indent=2)
-            os.replace(tmp, self.path)
-            self._dirty = False
-        except Exception as e:
-            logger.warning("MetricsStore.save: %s", e)
-
-    def record(self, key: str, value: Any = 1) -> None:
-        try:
-            cur = self._data.get(key)
-            if isinstance(cur, int) and isinstance(value, int):
-                self._data[key] = cur + value
-            else:
-                self._data[key] = value
-            self._dirty = True
-            if key in self._CRITICAL_KEYS:
-                self.save()
-        except Exception:
-            pass
-
-    def get(self, key: str, default: Any = None) -> Any:
-        return self._data.get(key, default)
-
-    def update_ping(self, rtt_ms: int) -> None:
-        try:
-            self._data["pings_total"] = int(self._data.get("pings_total", 0)) + 1
-            self._data["ping_sum_ms"] = int(self._data.get("ping_sum_ms", 0)) + rtt_ms
-            cur_min = self._data.get("ping_min_ms")
-            if cur_min is None or rtt_ms < cur_min:
-                self._data["ping_min_ms"] = rtt_ms
-            cur_max = self._data.get("ping_max_ms")
-            if cur_max is None or rtt_ms > cur_max:
-                self._data["ping_max_ms"] = rtt_ms
-            self._dirty = True
-            self.save()
-        except Exception:
-            pass
-
-    def as_dict(self) -> Dict[str, Any]:
-        return dict(self._data)
-
-    async def auto_save(self, interval: float = 30.0) -> None:
-        while True:
-            try:
-                await asyncio.sleep(interval)
-                if self._dirty:
-                    self.save()
-            except asyncio.CancelledError:
-                self.save()
-                raise
-            except Exception:
-                pass
-
-
-_metrics = MetricsStore()
-
-
-def record_bot_metric(key: str, value: Any = 1) -> None:
-    """Legacy alias for MetricsStore.record."""
-    _metrics.record(key, value)
-
-
-# ═══════════════════════════════════════════════════════════════════════════
-# SECTION 24 · GLOBAL STATE
-# ═══════════════════════════════════════════════════════════════════════════
-_ACTIVE_HANDLER: Dict[str, Any] = {"name": None, "start": 0.0, "chat_id": None}
-_NOTIFY_TASKS: Set[asyncio.Task] = set()
-_GIL_LAG_MONITOR_TASK: Optional[asyncio.Task] = None
-_pm_last_query_ts = 0.0
-_pm_last_query_result: Optional[Dict[str, Any]] = None
-_ADMIN_GUARD_WARNED = False
-_polling_state = {"running": False}
-_detector_tasks_shutdown_done = False
-_GROUP_LOG_INSTANCE: Any = None
-_db_read_only_mode = False
-
-
-# ═══════════════════════════════════════════════════════════════════════════
-# SECTION 25 · TOKEN HELPERS
-# ═══════════════════════════════════════════════════════════════════════════
-def _get_bot_token() -> str:
-    """Return bot token from env or CONFIG."""
-    env_token = os.getenv("BOT_TOKEN", "").strip()
-    if env_token and _is_valid_token_format(env_token):
-        return env_token
-    for attr in ("BOT_TOKEN", "TOKEN", "bot_token", "token"):
-        try:
-            val = getattr(CONFIG, attr, None)
-            if isinstance(val, str):
-                val_stripped = val.strip()
-                if val_stripped and _is_valid_token_format(val_stripped):
-                    return val_stripped
-        except Exception:
-            continue
-    if env_token:
-        logger.warning("⚠️ BOT_TOKEN لا يطابق الصيغة القياسية — سيُستخدم")
-        return env_token
-    for attr in ("BOT_TOKEN", "TOKEN", "bot_token", "token"):
-        try:
-            val = getattr(CONFIG, attr, None)
-            if isinstance(val, str) and val.strip():
-                logger.warning("⚠️ CONFIG.%s لا يطابق الصيغة القياسية — سيُستخدم", attr)
-                return val.strip()
-        except Exception:
-            continue
-    return ""
-
-
-# ═══════════════════════════════════════════════════════════════════════════
-# SECTION 26 · PID MANAGEMENT (with flock — v7.0.1: rejects on lock failure)
-# ═══════════════════════════════════════════════════════════════════════════
 def _read_pid_file() -> Optional[int]:
     try:
         if not os.path.exists(_PID_FILE_PATH):
@@ -1005,8 +483,8 @@ def _read_pid_file() -> Optional[int]:
         pass
     return None
 
-
 def _write_pid_file() -> None:
+    # 🩹 FIX-13: إنشاء المجلد الأب
     try:
         os.makedirs(os.path.dirname(_PID_FILE_PATH), exist_ok=True)
         with open(_PID_FILE_PATH, "w") as f:
@@ -1014,7 +492,6 @@ def _write_pid_file() -> None:
         logger.info("📝 PID file written: %d", os.getpid())
     except IOError as e:
         logger.warning("_write_pid_file: %s", e)
-
 
 def _remove_pid_file() -> None:
     try:
@@ -1025,88 +502,49 @@ def _remove_pid_file() -> None:
     except Exception:
         pass
 
-
-@contextmanager
-def _pid_write_lock(timeout: float = 10.0) -> Iterator[bool]:
-    """
-    Exclusive flock on PID file — prevents start race.
-
-    v7.0.1: yields True if lock acquired, False otherwise.
-    Caller MUST treat False as "another instance is active — abort startup".
-    """
-    if not _HAS_FCNTL:
-        # Platform without fcntl (Windows) — no PID safety
-        yield True
-        return
-    lock_fd: Optional[int] = None
-    acquired = False
-    try:
-        os.makedirs(os.path.dirname(_PID_LOCK_PATH), exist_ok=True)
-        lock_fd = os.open(_PID_LOCK_PATH, os.O_CREAT | os.O_RDWR, 0o644)
-        deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
-            try:
-                _fcntl.flock(lock_fd, _fcntl.LOCK_EX | _fcntl.LOCK_NB)
-                acquired = True
-                break
-            except (IOError, OSError):
-                time.sleep(0.1)
-        if not acquired:
-            logger.error(
-                "❌ لم أستطع الحصول على PID lock خلال %.1fs "
-                "— نسخة أخرى نشطة على نفس المجلد", timeout,
-            )
-        yield acquired
-    except (IOError, OSError) as e:
-        logger.error("_pid_write_lock: %s", e)
-        yield acquired
-    finally:
-        if lock_fd is not None:
-            if acquired:
-                try:
-                    _fcntl.flock(lock_fd, _fcntl.LOCK_UN)
-                except Exception:
-                    pass
-            try:
-                os.close(lock_fd)
-            except Exception:
-                pass
-
-
-# ═══════════════════════════════════════════════════════════════════════════
-# SECTION 27 · PROCESS INSPECTION
-# ═══════════════════════════════════════════════════════════════════════════
 def _is_process_alive(pid: int) -> bool:
     try:
         os.kill(pid, 0)
         return True
-    except ProcessLookupError:
+    except (ProcessLookupError, OSError):
         return False
     except PermissionError:
         return True
-    except OSError:
-        return False
-
 
 def _pid_is_bot_process(pid: int) -> bool:
+    """
+    التحقق من cmdline وcwd لتفادي قتل managed bots التي تشغّل bot.py
+    من مجلد آخر.
+    """
     try:
         with open(f"/proc/{pid}/cmdline", "rb") as f:
             cmdline = f.read().replace(b"\x00", b" ").decode("utf-8", errors="ignore")
         if not cmdline.strip():
             return False
-        if not any(os.path.basename(p) == "bot.py" for p in cmdline.split()):
+        _has_bot_py = False
+        for _part in cmdline.split():
+            _base = os.path.basename(_part)
+            if _base == "bot.py":
+                _has_bot_py = True
+                break
+        if not _has_bot_py:
             return False
+        # 🩹 FIX-7: مقارنة cwd — لا تقتل bot.py من مجلد آخر (managed bots)
         try:
             _pid_cwd = os.readlink(f"/proc/{pid}/cwd")
             _my_cwd = os.getcwd()
             if os.path.realpath(_pid_cwd) != os.path.realpath(_my_cwd):
+                logger.debug(
+                    "_pid_is_bot_process(%d): cwd %r != %r — تجاهل",
+                    pid, _pid_cwd, _my_cwd,
+                )
                 return False
         except (IOError, OSError):
+            # /proc/{pid}/cwd قد لا يكون مقروءاً — نرفض القتل للأمان
             return False
         return True
     except (IOError, PermissionError, OSError):
         return False
-
 
 def _force_kill_pid(pid: int, force: bool = False) -> bool:
     if pid == os.getpid():
@@ -1121,7 +559,6 @@ def _force_kill_pid(pid: int, force: bool = False) -> bool:
     except Exception as e:
         logger.warning("_force_kill_pid(%d): %s", pid, e)
         return False
-
 
 def _find_bot_processes() -> List[int]:
     pids: List[int] = []
@@ -1139,81 +576,59 @@ def _find_bot_processes() -> List[int]:
         pass
     return pids
 
-
 async def _force_kill_previous_instance() -> int:
-    """
-    v7.0.1: refuse to start if we cannot obtain the PID lock.
-    This prevents "phantom duplicate instance" races on PaaS restarts.
-    """
     killed_total = 0
-    with _pid_write_lock() as got_lock:
-        if not got_lock:
-            logger.critical(
-                "🚨 لا يمكن بدء التشغيل: نسخة أخرى من bot.py تملك PID lock. "
-                "أوقف الـ container القديم يدوياً (Render Dashboard → Service → Suspend)."
-            )
-            raise SystemExit(1)
-
-        targets: Set[int] = set()
-        old_pid = _read_pid_file()
-        if old_pid and old_pid != os.getpid() and _is_process_alive(old_pid):
-            if _pid_is_bot_process(old_pid):
-                logger.warning("🔪 PID file يشير لنسخة قديمة: %d", old_pid)
-                targets.add(old_pid)
-            else:
-                logger.warning("⚠️ PID %d ليست bot.py في نفس المجلد — تجاهل", old_pid)
-        other_pids = _find_bot_processes()
-        if other_pids:
-            logger.warning("🔪 وجدت %d نسخة إضافية: %s",
-                           len(other_pids), other_pids)
-            targets.update(other_pids)
-        if not targets:
-            logger.info("✅ لا نسخ قديمة نشطة")
-            _write_pid_file()
-            return 0
-        for pid in targets:
-            if _force_kill_pid(pid, force=False):
-                killed_total += 1
-        deadline = time.monotonic() + _KILL_TIMEOUT_SEC
-        while time.monotonic() < deadline:
-            if not any(_is_process_alive(p) for p in targets):
-                break
-            await asyncio.sleep(0.5)
-        still_alive = [p for p in targets if _is_process_alive(p)]
-        if still_alive:
-            for pid in still_alive:
-                _force_kill_pid(pid, force=True)
-            await asyncio.sleep(1.0)
-        final_alive = [p for p in targets if _is_process_alive(p)]
-        if final_alive:
-            logger.error("❌ %d عملية حية بعد SIGKILL", len(final_alive))
+    targets: Set[int] = set()
+    old_pid = _read_pid_file()
+    if old_pid and old_pid != os.getpid() and _is_process_alive(old_pid):
+        if _pid_is_bot_process(old_pid):
+            logger.warning("🔪 PID file يشير لنسخة قديمة نشطة: %d", old_pid)
+            targets.add(old_pid)
         else:
-            logger.info("✅ كل النسخ القديمة انتهت (%d)", killed_total)
+            logger.warning(
+                "⚠️ PID file يشير إلى %d لكنها ليست عملية bot.py في نفس المجلد — تجاهل",
+                old_pid,
+            )
+    other_pids = _find_bot_processes()
+    if other_pids:
+        logger.warning("🔪 وجدت %d نسخة bot.py إضافية: %s", len(other_pids), other_pids)
+        targets.update(other_pids)
+    if not targets:
+        logger.info("✅ لا نسخ قديمة نشطة — بيئة نظيفة")
         _write_pid_file()
+        return 0
+    for pid in targets:
+        if _force_kill_pid(pid, force=False):
+            killed_total += 1
+    deadline = time.monotonic() + _KILL_TIMEOUT_SEC
+    while time.monotonic() < deadline:
+        remaining = [p for p in targets if _is_process_alive(p)]
+        if not remaining:
+            break
+        await asyncio.sleep(0.5)
+    still_alive = [p for p in targets if _is_process_alive(p)]
+    if still_alive:
+        for pid in still_alive:
+            _force_kill_pid(pid, force=True)
+        await asyncio.sleep(1.0)
+    final_alive = [p for p in targets if _is_process_alive(p)]
+    if final_alive:
+        logger.error("❌ %d عملية حية بعد SIGKILL: %s", len(final_alive), final_alive)
+    else:
+        logger.info("✅ كل النسخ القديمة انتهت (%d)", killed_total)
+    _write_pid_file()
     return killed_total
 
-
-# ═══════════════════════════════════════════════════════════════════════════
-# SECTION 28 · TELEGRAM RELEASE WAIT + POLLING CONFLICT ASSERT
-# ═══════════════════════════════════════════════════════════════════════════
-async def _wait_for_telegram_release(
-    app: Optional[Application] = None,
-    timeout: float = _TELEGRAM_RELEASE_TIMEOUT_SEC,
-) -> bool:
+async def _wait_for_telegram_release(timeout: float = _TELEGRAM_RELEASE_TIMEOUT_SEC) -> bool:
     try:
         import telegram
     except ImportError:
         return True
-    if app is not None and getattr(app, "bot", None) is not None:
-        bot = app.bot
-        close_bot = False
-    else:
-        token = _get_bot_token()
-        if not token:
-            return True
-        bot = telegram.Bot(token=token)
-        close_bot = True
+    token = _get_bot_token()
+    if not token:
+        return True
     deadline = time.monotonic() + timeout
+    bot = telegram.Bot(token=token)
     attempts = 0
     try:
         while time.monotonic() < deadline:
@@ -1224,83 +639,28 @@ async def _wait_for_telegram_release(
                             getattr(me, "username", "?"), attempts)
                 return True
             except telegram.error.Conflict:
+                logger.debug("⏳ Conflict — انتظار (attempt %d)", attempts)
                 await asyncio.sleep(1.0)
             except asyncio.TimeoutError:
+                logger.debug("⏳ get_me timeout (attempt %d)", attempts)
                 await asyncio.sleep(1.0)
-            except Exception:
+            except Exception as e:
+                logger.debug("⏳ get_me failed (%s) — retry", type(e).__name__)
                 await asyncio.sleep(1.0)
-        logger.warning("⚠️ Telegram لم يتحرر خلال %.0fs", timeout)
+        logger.warning("⚠️ Telegram لم يتحرر خلال %.0fs — متابعة", timeout)
         return False
     finally:
-        if close_bot:
-            try:
-                await bot.close()
-            except Exception:
-                pass
-
-
-async def _assert_no_polling_conflict(
-    app: Application,
-    retries: int = 6,
-) -> bool:
-    """
-    v7.0.1: Verify that no other poller is using the same bot token.
-
-    Must be called AFTER delete_webhook() and BEFORE set_webhook().
-    If another instance is polling, Telegram returns:
-        Conflict: terminated by other getUpdates request
-    If we already have our webhook set, getUpdates returns a different
-    Conflict message — so ordering matters.
-    """
-    try:
-        import telegram
-        _Conflict = telegram.error.Conflict
-    except Exception:
-        return True
-
-    for attempt in range(1, retries + 1):
         try:
-            # offset=-1 fetches last update without consuming it (side-effect-free)
-            await asyncio.wait_for(
-                app.bot.get_updates(offset=-1, limit=1, timeout=0),
-                timeout=10.0,
-            )
-            logger.info("✅ لا يوجد poller منافس (attempt %d)", attempt)
-            return True
-        except _Conflict as _e:
-            err = str(_e)
-            # If the conflict is caused by OUR pending webhook, ignore — no poller
-            if "webhook is active" in err.lower():
-                logger.info("ℹ️ webhook خاصتنا مُفعّل — لا poller منافس")
-                return True
-            logger.warning("⚠️ Conflict نشط (attempt %d/%d): %s",
-                           attempt, retries, err[:100])
-            await asyncio.sleep(2.0 * attempt)
-        except asyncio.CancelledError:
-            raise
-        except asyncio.TimeoutError:
-            logger.warning("⚠️ get_updates timeout (attempt %d/%d)",
-                           attempt, retries)
-            await asyncio.sleep(1.0)
-        except Exception as _e:
-            logger.warning("⚠️ get_updates check: %s", _e)
-            return True   # other failures don't block startup
+            await bot.close()
+        except Exception:
+            pass
 
-    logger.error(
-        "❌ Conflict ما زال نشطاً بعد %d محاولات — poller منافس على نفس token. "
-        "أوقف الـ container القديم على Render (Dashboard → Suspend).",
-        retries,
-    )
-    return False
-
-
-# ═══════════════════════════════════════════════════════════════════════════
-# SECTION 29 · INIT WITH RETRY
-# ═══════════════════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════════
+# INIT-RETRY
+# ═══════════════════════════════════════════════════════════════════
 async def _initialize_with_retry(
     app: Application,
-    max_attempts: int = _INIT_MAX_ATTEMPTS,
-    timeout_per_attempt: float = _INIT_TIMEOUT_SEC,
+    max_attempts: int = 6,
 ) -> bool:
     try:
         import telegram as _tg
@@ -1317,32 +677,50 @@ async def _initialize_with_retry(
     delay = 3.0
     for attempt in range(1, max_attempts + 1):
         try:
-            await asyncio.wait_for(app.initialize(), timeout=timeout_per_attempt)
+            await asyncio.wait_for(app.initialize(), timeout=30.0)
             logger.info("✅ app.initialize() نجح (attempt %d/%d)", attempt, max_attempts)
             return True
         except asyncio.TimeoutError:
-            logger.warning("⚠️ INIT TIMEOUT (attempt %d/%d)", attempt, max_attempts)
+            logger.warning(
+                "⚠️ INIT TIMEOUT (attempt %d/%d) >30s — retry in %.0fs",
+                attempt, max_attempts, delay,
+            )
         except _InvalidToken as _e:
-            logger.error("❌ INVALID TOKEN: %s", str(_e)[:120])
+            logger.error(
+                "❌ INVALID TOKEN — تحقق من BOT_TOKEN: %s",
+                str(_e)[:120],
+            )
             return False
         except _Unauthorized as _e:
-            logger.error("❌ UNAUTHORIZED: %s", str(_e)[:120])
+            logger.error(
+                "❌ UNAUTHORIZED — BOT_TOKEN ملغى/محظور: %s",
+                str(_e)[:120],
+            )
             return False
         except _Conflict as _e:
-            logger.warning("⚠️ INIT CONFLICT (attempt %d/%d): %s",
-                           attempt, max_attempts, str(_e)[:120])
+            logger.warning(
+                "⚠️ INIT CONFLICT (attempt %d/%d): %s — retry in %.0fs",
+                attempt, max_attempts, str(_e)[:120], delay,
+            )
             try:
                 await app.bot.delete_webhook(drop_pending_updates=True)
             except Exception:
                 pass
-        except _TimedOut as _e:
-            logger.warning("⚠️ INIT TIMED-OUT (attempt %d/%d): %s",
-                           attempt, max_attempts, str(_e)[:120])
         except _NetworkError as _e:
-            logger.warning("⚠️ INIT NETWORK (attempt %d/%d): %s",
-                           attempt, max_attempts, str(_e)[:120])
+            logger.warning(
+                "⚠️ INIT NETWORK (attempt %d/%d): %s — retry in %.0fs",
+                attempt, max_attempts, str(_e)[:120], delay,
+            )
+        except _TimedOut as _e:
+            logger.warning(
+                "⚠️ INIT TIMED-OUT (attempt %d/%d): %s — retry in %.0fs",
+                attempt, max_attempts, str(_e)[:120], delay,
+            )
         except Exception as _e:
-            logger.warning("⚠️ INIT %s: %s", type(_e).__name__, str(_e)[:120])
+            logger.warning(
+                "⚠️ INIT UNEXPECTED (attempt %d/%d): %s: %s — retry in %.0fs",
+                attempt, max_attempts, type(_e).__name__, str(_e)[:120], delay,
+            )
 
         if attempt < max_attempts:
             try:
@@ -1351,19 +729,19 @@ async def _initialize_with_retry(
                 raise
             delay = min(delay * 1.5, 30.0)
 
-    logger.error("❌ app.initialize() فشل بعد %d محاولات", max_attempts)
+    logger.error("❌ app.initialize() فشل بعد %d محاولات — الخروج", max_attempts)
     return False
 
-
-# ═══════════════════════════════════════════════════════════════════════════
-# SECTION 30 · SLEEP PROBE
-# ═══════════════════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════════
+# SLEEP-PROBE
+# ═══════════════════════════════════════════════════════════════════
 _sleep_probe_available = False
 try:
-    from sleep_probe import auto_install as _sp_auto_install
+    from sleep_probe import auto_install as _sp_auto_install, is_installed as _sp_is_installed
     _sleep_probe_available = True
     try:
-        if _sp_auto_install():
+        _sp_activated = _sp_auto_install()
+        if _sp_activated:
             logger.info("✅ sleep_probe: مُفعَّل")
     except Exception as _sp_install_e:
         logger.warning("⚠️ sleep_probe install: %s", _sp_install_e)
@@ -1372,10 +750,80 @@ except ImportError:
 except Exception as _sp_import_e:
     logger.warning("⚠️ sleep_probe import: %s", _sp_import_e)
 
+def _log_db_diagnostics_status() -> None:
+    if not _DB_DIAG_AVAILABLE:
+        logger.info("ℹ️ db_diagnostics: غير متاح — %s", _DB_DIAG_IMPORT_ERROR or "missing")
+        return
+    if _MARK_PROCESS_START_FN is not None:
+        logger.info("✅ db_diagnostics: v%s متاح", _DB_DIAG_VERSION)
+    else:
+        logger.warning("⚠️ db_diagnostics: v%s محمّل بلا mark_process_start", _DB_DIAG_VERSION)
+    if _AUTOTUNE_AVAILABLE:
+        logger.info("⚙️ auto-tuning: ✅ متاح")
 
-# ═══════════════════════════════════════════════════════════════════════════
-# SECTION 31 · HANDLER TIMING WRAPPER
-# ═══════════════════════════════════════════════════════════════════════════
+_NOTIFY_SHUTDOWN_TIMEOUT = 5.0
+_BG_TASKS_SHUTDOWN_TIMEOUT = 10.0
+_WATCHER_INTERVAL = 30.0
+_WATCHER_HEALTH_TIMEOUT = 5.0
+_WATCHER_MAX_PROBE_FAILURES = 3
+_REMOVED_CHANNELS_GRACE_DAYS = 30
+_PM_INITIAL_DELAY_SEC = 120.0
+_PM_IDLE_TX_ERROR_THRESHOLD = 3
+_PM_UTIL_WARN_PCT = 80.0
+_PM_UTIL_CRITICAL_PCT = 95.0
+
+_PAYMENT_AMOUNT_EPSILON = 0.01
+_DIAG_INCOMING = os.getenv("DIAG_INCOMING", "0").strip().lower() in ("1", "true", "yes", "on", "enabled")
+_KEEP_ALIVE_INTERVAL_SEC = 180.0
+_KEEP_ALIVE_INITIAL_DELAY = 30.0
+_TG_WARMUP_TIMEOUT = 10.0
+_PM_QUERY_TTL = 290.0
+_pm_last_query_ts = 0.0
+_pm_last_query_result: Optional[Dict[str, Any]] = None
+_GIL_LAG_MONITOR_TASK: Optional[asyncio.Task] = None
+_GIL_LAG_SAMPLES_MAX = 300
+_GIL_LAG_HISTORY_WINDOW_SEC = 60.0
+_GIL_LAG_WARN_MS = 1000.0
+_GIL_LAG_ALERT_INTERVAL_SEC = 30.0
+_GIL_LAG_BLOCKED_CUMULATIVE_WARN_MS = 5000.0
+_HANDLER_SLOW_WARN_MS = 3000.0
+_HANDLER_INFO_MS = 1500.0
+
+_ADMIN_GUARD_WARNED = False
+
+_ACTIVE_HANDLER: Dict[str, Any] = {"name": None, "start": 0.0, "chat_id": None}
+
+_GROUP_CHAT_FILTER = filters.ChatType.GROUP | filters.ChatType.SUPERGROUP
+
+# 🩹 FIX-8: تحقق من صيغة توكن تيليجرام
+_TG_TOKEN_RE = re.compile(r"^\d{8,10}:[A-Za-z0-9_-]{35}$")
+
+def _amounts_match(expected: Any, actual: Any) -> bool:
+    try:
+        e = float(expected or 0)
+        a = float(actual or 0)
+    except (TypeError, ValueError):
+        return False
+    return abs(e - a) < _PAYMENT_AMOUNT_EPSILON
+
+_NOTIFY_TASKS: Set[asyncio.Task] = set()
+
+_BOT_METRICS: Dict[str, Any] = {
+    "posts_success": 0, "posts_failed": 0, "commands_total": 0,
+    "pings_total": 0, "ping_min_ms": None, "ping_max_ms": None,
+    "ping_sum_ms": 0, "started_at": time.monotonic(),
+}
+
+def record_bot_metric(key: str, value: Any = 1) -> None:
+    try:
+        cur = _BOT_METRICS.get(key)
+        if isinstance(cur, int) and isinstance(value, int):
+            _BOT_METRICS[key] = cur + value
+        else:
+            _BOT_METRICS[key] = value
+    except Exception:
+        pass
+
 def _wrap_handler_with_timing(handler: Callable, name: str) -> Callable:
     if not callable(handler):
         return handler
@@ -1387,8 +835,7 @@ def _wrap_handler_with_timing(handler: Callable, name: str) -> Callable:
         _ACTIVE_HANDLER["start"] = time.monotonic()
         try:
             _ACTIVE_HANDLER["chat_id"] = (
-                update.effective_chat.id
-                if getattr(update, "effective_chat", None) else None
+                update.effective_chat.id if getattr(update, "effective_chat", None) else None
             )
         except Exception:
             _ACTIVE_HANDLER["chat_id"] = None
@@ -1414,17 +861,13 @@ def _wrap_handler_with_timing(handler: Callable, name: str) -> Callable:
                             _stack_hint = "\n" + "\n".join(_relevant)
                     except Exception:
                         pass
-                    logger.warning("🐌 SLOW handler: %s took %.0fms%s",
-                                   name, elapsed_ms, _stack_hint)
+                    logger.warning("🐌 SLOW handler: %s took %.0fms | chat=%s%s",
+                                   name, elapsed_ms, _ACTIVE_HANDLER.get("chat_id"), _stack_hint)
             except Exception:
                 pass
             _ACTIVE_HANDLER.update(_prev)
     return _timed
 
-
-# ═══════════════════════════════════════════════════════════════════════════
-# SECTION 32 · GIL LAG MONITOR
-# ═══════════════════════════════════════════════════════════════════════════
 async def _gil_lag_monitor() -> None:
     logger.info("🔍 GIL-MONITOR: warn=%.0fms, cooldown=%.0fs",
                 _GIL_LAG_WARN_MS, _GIL_LAG_ALERT_INTERVAL_SEC)
@@ -1436,7 +879,6 @@ async def _gil_lag_monitor() -> None:
         _proc = _psu_t.Process()
     except Exception:
         _proc = None
-
     while True:
         try:
             t0 = time.monotonic()
@@ -1451,20 +893,20 @@ async def _gil_lag_monitor() -> None:
                 history = history[-_GIL_LAG_SAMPLES_MAX:]
             if lag_ms > _GIL_LAG_WARN_MS:
                 cumulative_blocked_ms += lag_ms
-            if (lag_ms > _GIL_LAG_WARN_MS
-                    and (now - last_alert_ts) >= _GIL_LAG_ALERT_INTERVAL_SEC):
+            if (lag_ms > _GIL_LAG_WARN_MS and (now - last_alert_ts) >= _GIL_LAG_ALERT_INTERVAL_SEC):
                 last_alert_ts = now
                 lags = sorted(l for (_, l) in history)
                 n = len(lags)
-                p50 = lags[n // 2] if n else 0.0
-                p90 = lags[min(int(n * 0.9), n - 1)] if n else 0.0
-                p99 = lags[min(int(n * 0.99), n - 1)] if n else 0.0
-                maxv = lags[-1] if n else 0.0
+                if n:
+                    p50 = lags[n // 2]
+                    p90 = lags[min(int(n * 0.9), n - 1)]
+                    p99 = lags[min(int(n * 0.99), n - 1)]
+                    maxv = lags[-1]
+                else:
+                    p50 = p90 = p99 = maxv = 0.0
                 active_name = _ACTIVE_HANDLER.get("name") or "none"
-                active_elapsed = (
-                    (now - _ACTIVE_HANDLER["start"])
-                    if _ACTIVE_HANDLER.get("name") else 0.0
-                )
+                active_elapsed = (now - _ACTIVE_HANDLER["start"]) if _ACTIVE_HANDLER.get("name") else 0.0
+                active_chat = _ACTIVE_HANDLER.get("chat_id")
                 _mem_mb = 0.0
                 try:
                     if _proc is not None:
@@ -1476,250 +918,219 @@ async def _gil_lag_monitor() -> None:
                     _task_count = len(asyncio.all_tasks())
                 except Exception:
                     pass
+                try:
+                    import gc as _gc_t
+                    _gc_raw = _gc_t.get_count()
+                    _gc_count = _gc_raw[0] if isinstance(_gc_raw, tuple) else int(_gc_raw)
+                except Exception:
+                    _gc_count = 0
                 logger.warning(
                     "🔴 GIL-MONITOR: lag=%.0fms | p50=%.0f p90=%.0f p99=%.0f max=%.0f | "
-                    "active=%s (%.1fs) | mem=%.0fMB tasks=%d | cum=%.0fms/%.0fs",
+                    "active=%s (%.1fs, chat=%s) | mem=%.0fMB tasks=%d gc=%d | cum=%.0fms/%.0fs",
                     lag_ms, p50, p90, p99, maxv,
-                    active_name, active_elapsed, _mem_mb, _task_count,
+                    active_name, active_elapsed, active_chat or "-",
+                    _mem_mb, _task_count, _gc_count,
                     cumulative_blocked_ms, _GIL_LAG_HISTORY_WINDOW_SEC,
                 )
                 if cumulative_blocked_ms > _GIL_LAG_BLOCKED_CUMULATIVE_WARN_MS:
-                    logger.error("🚨 GIL-MONITOR: تراكم %.0fms خلال %.0fs",
-                                 cumulative_blocked_ms, _GIL_LAG_HISTORY_WINDOW_SEC)
+                    logger.error(
+                        "🚨 GIL-MONITOR: تراكم %.0fms خلال %.0fs",
+                        cumulative_blocked_ms, _GIL_LAG_HISTORY_WINDOW_SEC,
+                    )
                     cumulative_blocked_ms = 0.0
         except asyncio.CancelledError:
             raise
         except Exception as _e:
             logger.debug("GIL-MONITOR error: %s", _e)
 
-
 def _spawn_gil_lag_monitor() -> Optional[asyncio.Task]:
     global _GIL_LAG_MONITOR_TASK
     if _GIL_LAG_MONITOR_TASK is not None and not _GIL_LAG_MONITOR_TASK.done():
         return _GIL_LAG_MONITOR_TASK
     try:
-        _GIL_LAG_MONITOR_TASK = asyncio.create_task(
-            _gil_lag_monitor(), name="gil-lag-monitor",
-        )
+        _GIL_LAG_MONITOR_TASK = asyncio.create_task(_gil_lag_monitor(), name="gil-lag-monitor")
         return _GIL_LAG_MONITOR_TASK
     except Exception as _e:
         logger.warning("⚠️ فشل بدء GIL-MONITOR: %s", _e)
         return None
 
-
-# ═══════════════════════════════════════════════════════════════════════════
-# SECTION 33 · HTTPX POOLS
-# ═══════════════════════════════════════════════════════════════════════════
 def _build_http_request_pools():
     if not _HAS_HTTPX_REQUEST or HTTPXRequest is None:
         return None, None
     try:
         req_pool = HTTPXRequest(
-            connection_pool_size=16, connect_timeout=15.0,
+            connection_pool_size=32, connect_timeout=15.0,
             read_timeout=20.0, write_timeout=20.0, pool_timeout=10.0,
         )
         upd_pool = HTTPXRequest(
             connection_pool_size=8, connect_timeout=15.0,
             read_timeout=65.0, write_timeout=30.0, pool_timeout=20.0,
         )
-        logger.info("🚀 HTTPXRequest pools: req=16(read=20s) upd=8(read=65s)")
+        logger.info("🚀 HTTPXRequest pools: req=32(read=20s) upd=8(read=65s, pool=20s)")
         return req_pool, upd_pool
     except TypeError:
         try:
-            req_pool = HTTPXRequest(connection_pool_size=16)
+            req_pool = HTTPXRequest(connection_pool_size=32)
             upd_pool = HTTPXRequest(connection_pool_size=8)
+            logger.warning("⚠️ pools: fallback PTB-compat (تقليل المعاملات)")
             return req_pool, upd_pool
         except Exception:
             return None, None
     except Exception:
         return None, None
 
-
-# ═══════════════════════════════════════════════════════════════════════════
-# SECTION 34 · TELEGRAM API WARMUP
-# ═══════════════════════════════════════════════════════════════════════════
 async def _warmup_telegram_api(app: Application) -> bool:
-    if _tg_circuit_breaker.is_open():
-        logger.warning("⚠️ Telegram API: circuit breaker مفتوح")
-        return False
     try:
         me = await asyncio.wait_for(app.bot.get_me(), timeout=_TG_WARMUP_TIMEOUT)
         if me is not None:
-            logger.info("✅ Telegram API: @%s", getattr(me, "username", "?"))
-            _tg_circuit_breaker.record_success()
+            logger.info("✅ Telegram API: اتصال مُهيَّأ — @%s",
+                        getattr(me, "username", "?"))
             return True
-        _tg_circuit_breaker.record_failure()
         return False
     except asyncio.TimeoutError:
         logger.warning("⚠️ Telegram API warmup: timeout")
-        _tg_circuit_breaker.record_failure()
         return False
     except Exception as _e:
         logger.warning("⚠️ Telegram API warmup: %s", _e)
-        _tg_circuit_breaker.record_failure()
         return False
 
-
-# ═══════════════════════════════════════════════════════════════════════════
-# SECTION 35 · HEALTH + METRICS ENDPOINTS
-# ═══════════════════════════════════════════════════════════════════════════
-_health_last_probe: Dict[str, Any] = {"ts": 0.0, "ok": False, "error": None}
-_DB_PROBE_TIMEOUT = 2.0
-_DB_PROBE_CACHE = 5.0
-
-
-async def _probe_db() -> Tuple[bool, Optional[str]]:
-    """Ping DB with timeout (cached 5s)."""
-    now = time.monotonic()
-    if (now - _health_last_probe["ts"]) < _DB_PROBE_CACHE:
-        return _health_last_probe["ok"], _health_last_probe["error"]
-    try:
-        await asyncio.wait_for(
-            DB.fetchone("SELECT 1 AS ok"),
-            timeout=_DB_PROBE_TIMEOUT,
-        )
-        _health_last_probe.update(ts=now, ok=True, error=None)
-        return True, None
-    except asyncio.TimeoutError:
-        _health_last_probe.update(ts=now, ok=False, error="timeout")
-        return False, "timeout"
-    except Exception as e:
-        err = f"{type(e).__name__}: {str(e)[:80]}"
-        _health_last_probe.update(ts=now, ok=False, error=err)
-        return False, err
-
-
-async def _health_handler(request):
-    """Health endpoint — 200 if DB reachable, 503 otherwise."""
-    db_ok, db_error = await _probe_db()
-    if db_ok:
-        return web.json_response(
-            {"status": "ok", "db": "ok", "ts": time.time()}, status=200,
-        )
-    logger.warning("health: DB probe failed — %s", db_error)
-    return web.json_response(
-        {"status": "degraded", "db": "unreachable",
-         "error": db_error, "ts": time.time()},
-        status=503,
-    )
-
-
-async def _metrics_handler(request):
-    """Prometheus-compatible metrics endpoint."""
-    data = _metrics.as_dict()
-    lines: List[str] = []
-
-    def _add(name: str, help_text: str, value: Any, typ: str = "gauge"):
-        if value is None:
-            return
-        lines.append(f"# HELP {name} {help_text}")
-        lines.append(f"# TYPE {name} {typ}")
-        lines.append(f"{name} {value}")
-
-    _add("bot_posts_success_total", "Successful posts", data.get("posts_success", 0), "counter")
-    _add("bot_posts_failed_total", "Failed posts", data.get("posts_failed", 0), "counter")
-    _add("bot_commands_total", "Commands processed", data.get("commands_total", 0), "counter")
-    _add("bot_pings_total", "Ping measurements", data.get("pings_total", 0), "counter")
-    _add("bot_ping_min_ms", "Minimum ping RTT", data.get("ping_min_ms"))
-    _add("bot_ping_max_ms", "Maximum ping RTT", data.get("ping_max_ms"))
-    _add("bot_restarts_total", "Bot restarts", data.get("restarts_total", 0), "counter")
-
-    started_at = data.get("started_at", 0)
-    if started_at:
-        uptime = max(0, time.monotonic() - started_at)
-        _add("bot_uptime_seconds", "Bot uptime", f"{uptime:.0f}")
-
-    # Circuit breaker state
-    cb_state = 1 if _tg_circuit_breaker.is_open() else 0
-    _add("bot_telegram_circuit_open", "Telegram circuit breaker open (1=open)", cb_state)
-
-    # Read-only mode
-    _add("bot_read_only_mode", "DB read-only mode", 1 if _db_read_only_mode else 0)
-
-    text = "\n".join(lines) + "\n"
-    return web.Response(text=text, content_type="text/plain; version=0.0.4")
-
-
-# ═══════════════════════════════════════════════════════════════════════════
-# SECTION 36 · DIAGNOSTICS STATUS LOG
-# ═══════════════════════════════════════════════════════════════════════════
-def _log_startup_status() -> None:
+def _log_spam_detector_status() -> None:
     if _SPAM_DETECTOR_AVAILABLE:
-        logger.info("🛡️ Spam Detector: %s (%d layers)",
+        logger.info("🛡️ Spam Detector: ✅ محمّل (%s, %d layers)",
                     _SPAM_DETECTOR_VERSION, _SPAM_DETECTOR_LAYERS_COUNT)
     else:
-        logger.warning("⚠️ Spam Detector: %s", _SPAM_DETECTOR_IMPORT_ERROR)
+        logger.warning("⚠️ Spam Detector: ❌ %s", _SPAM_DETECTOR_IMPORT_ERROR)
+
+def _log_security_bridge_status() -> None:
     if _SECURITY_BRIDGE_AVAILABLE:
-        logger.info("🌉 Security Bridge: loaded")
+        logger.info("🌉 Security Bridge: ✅ محمّل")
     else:
-        logger.warning("⚠️ Security Bridge: %s", _SB_IMPORT_ERROR)
-    if _DB_DIAG_AVAILABLE:
-        logger.info("✅ db_diagnostics: v%s", _DB_DIAG_VERSION)
-    if _MEMBERSHIP_AVAILABLE:
-        logger.info("✅ MembershipHandler")
-    if _ADMIN_LOGS_CLEANUP_AVAILABLE:
-        logger.info("✅ admin_logs cleanup")
-    if _MAINT_CMDS_AVAILABLE:
-        logger.info("✅ db_maintenance_commands")
-    if _ANALYTICS_REGISTER_AVAILABLE:
-        logger.info("✅ handlers_analytics.register")
+        logger.warning("⚠️ Security Bridge: غير متاح — %s", _SB_IMPORT_ERROR)
 
+def _log_perf_tuning_status() -> None:
+    try:
+        _max_ch = getattr(CONFIG, "MAX_CHANNELS_PER_CYCLE", "?")
+        logger.info("⚡ PERF Tuning: MAX_CHANNELS=%s | HTTPX_POOL=%s",
+                    _max_ch, "32/8" if _HAS_HTTPX_REQUEST else "default")
+    except Exception as _e:
+        logger.debug("_log_perf_tuning_status: %s", _e)
 
-# ═══════════════════════════════════════════════════════════════════════════
-# SECTION 37 · PERIODIC CLEANUP CALLABLE
-# ═══════════════════════════════════════════════════════════════════════════
+try:
+    from database import ANALYTICS_MIXIN_AVAILABLE
+    if not ANALYTICS_MIXIN_AVAILABLE:
+        logger.warning("⚠️ AnalyticsMixin مفقود")
+except Exception:
+    ANALYTICS_MIXIN_AVAILABLE = False
+
+try:
+    from database import (
+        CHANNELS_POSTS_MIXIN_AVAILABLE, SUBSCRIPTIONS_MIXIN_AVAILABLE,
+        GROUPS_MIXIN_AVAILABLE, TICKETS_MIXIN_AVAILABLE,
+        CONTESTS_MIXIN_AVAILABLE, STATS_MIXIN_AVAILABLE,
+        SETTINGS_MIXIN_AVAILABLE, POINTS_MIXIN_AVAILABLE,
+        BACKUP_MIXIN_AVAILABLE, REMINDERS_MIXIN_AVAILABLE,
+    )
+    _missing = [
+        k for k, v in {
+            "channels_posts": CHANNELS_POSTS_MIXIN_AVAILABLE,
+            "subscriptions": SUBSCRIPTIONS_MIXIN_AVAILABLE,
+            "groups": GROUPS_MIXIN_AVAILABLE, "tickets": TICKETS_MIXIN_AVAILABLE,
+            "contests": CONTESTS_MIXIN_AVAILABLE, "stats": STATS_MIXIN_AVAILABLE,
+            "settings": SETTINGS_MIXIN_AVAILABLE, "points": POINTS_MIXIN_AVAILABLE,
+            "backup": BACKUP_MIXIN_AVAILABLE, "reminders": REMINDERS_MIXIN_AVAILABLE,
+            "analytics": ANALYTICS_MIXIN_AVAILABLE,
+        }.items() if not v
+    ]
+    if _missing:
+        logger.warning("⚠️ Mixins مفقودة: %s", _missing)
+    else:
+        logger.info("✅ كل الـ 11 Mixins محمّلة")
+except Exception:
+    pass
+
+if _MAINTENANCE_AVAILABLE:
+    logger.info("✅ maintenance محمّل")
+if _DEV_LOG_AVAILABLE:
+    logger.info("✅ _notify_dev_log متاح")
+if _MEMBERSHIP_AVAILABLE:
+    logger.info("✅ MembershipHandler متاح")
+if _ADMIN_LOGS_CLEANUP_AVAILABLE:
+    logger.info("✅ admin_logs cleanup متاح")
+if _CH_DELETE_AVAILABLE:
+    logger.info("✅ handlers_channels_delete متاح")
+if _MAINT_CMDS_AVAILABLE:
+    logger.info("✅ db_maintenance_commands متاح")
+if _ANALYTICS_REGISTER_AVAILABLE:
+    logger.info("✅ handlers_analytics.register_handlers متاح")
+
+_log_spam_detector_status()
+_log_security_bridge_status()
+_log_db_diagnostics_status()
+_log_perf_tuning_status()
+
+# ═══════════════════════════════════════════════════════════════════
+# periodic_cleanup_task — instance-bound
+# ═══════════════════════════════════════════════════════════════════
 _periodic_cleanup_callable: Optional[Callable] = None
 try:
     import inspect as _inspect_pc
     _pc_fn = getattr(GroupRateLimiterManager, "periodic_cleanup_task", None)
-    if _pc_fn is not None:
+    if _pc_fn is None:
+        logger.warning("⚠️ periodic_cleanup_task غير موجود")
+    else:
+        _pc_sig = None
         try:
             _pc_sig = _inspect_pc.signature(_pc_fn)
         except (ValueError, TypeError):
-            _pc_sig = None
+            pass
         if _pc_sig is not None and 'self' in _pc_sig.parameters:
             try:
-                _periodic_cleanup_callable = GroupRateLimiterManager().periodic_cleanup_task
+                _pc_mgr = GroupRateLimiterManager()
+                _periodic_cleanup_callable = _pc_mgr.periodic_cleanup_task
+                logger.info("✅ periodic_cleanup: bound via instance")
             except Exception as _pce:
-                logger.warning("⚠️ periodic_cleanup: instantiate failed: %s", _pce)
+                logger.warning("⚠️ periodic_cleanup: cannot instantiate — %s", _pce)
         else:
             _periodic_cleanup_callable = _pc_fn
+            logger.info("✅ periodic_cleanup: static/classmethod")
 except Exception as _pce:
-    logger.warning("⚠️ periodic_cleanup: %s", _pce)
+    logger.warning("⚠️ periodic_cleanup inspect: %s", _pce)
 
+ALLOWED_UPDATES = [
+    "message", "edited_message", "callback_query", "chat_join_request",
+    "pre_checkout_query", "chat_member", "my_chat_member",
+]
+_GROUP_LOG_INSTANCE = None
 
-# ═══════════════════════════════════════════════════════════════════════════
-# SECTION 38 · COMMAND LISTS
-# ═══════════════════════════════════════════════════════════════════════════
 PUBLIC_COMMANDS = [
-    ("start", "🏠 الرئيسية"), ("help", "📚 المساعدة"),
-    ("trial", "🎁 تجربة"), ("subscribe", "💎 اشتراك"),
-    ("support", "📞 دعم"), ("language", "🌐 اللغة"),
+    ("start", "🏠 القائمة الرئيسية"), ("help", "📚 المساعدة"),
+    ("trial", "🎁 تجربة مجانية"), ("subscribe", "💎 اشتراك"),
+    ("support", "📞 دعم فني"), ("language", "🌐 اللغة"),
     ("developer", "👨‍💻 المطور"), ("contests", "🏆 المسابقات"),
-    ("replies", "💬 الردود"), ("gift_plans", "🎁 الهدايا"),
-    ("redeem_gift", "🎟️ استرداد"), ("mood", "🎭 المشاعر"),
-    ("channels", "📡 القنوات"), ("posts", "📋 المنشورات"),
-    ("auto_publish", "📤 النشر"), ("auto_recycle", "♻️ التدوير"),
+    ("replies", "💬 الردود التلقائية"), ("gift_plans", "🎁 خطط الهدايا"),
+    ("redeem_gift", "🎟️ استرداد كود هدية"), ("mood", "🎭 تحليل المشاعر"),
+    ("channels", "📡 قنواتي"), ("posts", "📋 منشوراتي"),
+    ("auto_publish", "📤 تبديل النشر"), ("auto_recycle", "♻️ تبديل التدوير"),
 ]
 
 ADMIN_COMMANDS = [
-    ("stats", "📊 الإحصائيات"), ("grant", "🎁 منح"),
-    ("set_min_interval", "⏱️ الفاصل"), ("admin", "👑 لوحة الأدمن"),
-    ("broadcast", "📨 بث"), ("set_force", "🔒 إجباري"),
-    ("set_update_ch", "📢 التحديثات"), ("set_log_ch", "📋 السجلات"),
-    ("add_admin", "👑 إضافة"), ("remove_admin", "🗑️ إزالة"),
-    ("export_replies", "📤 تصدير"), ("import_replies", "📥 استيراد"),
-    ("backup", "💾 نسخ"), ("restore", "🔄 عرض"),
-    ("db_diag", "🔬 تشخيص"), ("db_vacuum", "🧹 تنظيف"),
-    ("db_diag_quick", "🔬 مختصر"), ("db_maintenance", "🧹 صيانة"),
-    ("db_weekly", "📅 أسبوعي"), ("autoblocked", "🚫 المحجوبة"),
-    ("db_idle", "🔍 idle"), ("cache_stats", "📊 الكاش"),
-    ("fullhealth", "🏥 شامل"), ("latency", "🔬 كمون"),
-    ("databases", "🗂️ قواعد"), ("ping", "🏓 كمون"),
-    ("posts_stats", "📊 النشر"), ("autotune", "⚙️ autovacuum"),
-    ("db_tune", "⚙️ ضبط"), ("analytics", "📊 التحليلات"),
-    ("versions", "📦 الإصدارات"), ("analytics_reset", "🗑️ إبطال"),
-    ("files", "📂 الملفات"),
+    ("stats", "📊 الإحصائيات"), ("grant", "🎁 منح اشتراك"),
+    ("set_min_interval", "⏱️ تعيين الفاصل"), ("admin", "👑 لوحة الأدمن"),
+    ("broadcast", "📨 بث جماعي"), ("set_force", "🔒 اشتراك إجباري"),
+    ("set_update_ch", "📢 قناة التحديثات"), ("set_log_ch", "📋 قناة السجلات"),
+    ("add_admin", "👑 إضافة مشرف"), ("remove_admin", "🗑️ إزالة مشرف"),
+    ("export_replies", "📤 تصدير الردود"), ("import_replies", "📥 استيراد الردود"),
+    ("backup", "💾 نسخ احتياطي"), ("restore", "🔄 عرض النسخ"),
+    ("db_diag", "🔬 تشخيص DB"), ("db_vacuum", "🧹 تنظيف DB"),
+    ("db_diag_quick", "🔬 تقرير مختصر"), ("db_maintenance", "🧹 صيانة DB"),
+    ("db_weekly", "📅 التقرير الأسبوعي"), ("autoblocked", "🚫 المحجوبة تلقائياً"),
+    ("db_idle", "🔍 idle-in-transaction"), ("cache_stats", "📊 إحصائيات الكاش"),
+    ("fullhealth", "🏥 التشخيص الشامل"), ("latency", "🔬 اختبار الكمون"),
+    ("databases", "🗂️ قواعد البيانات"), ("ping", "🏓 قياس الكمون"),
+    ("posts_stats", "📊 إحصائيات النشر"), ("autotune", "⚙️ ضبط autovacuum"),
+    ("db_tune", "⚙️ ضبط (اختصار)"), ("analytics", "📊 التحليلات"),
+    ("versions", "📦 الإصدارات"), ("analytics_reset", "🗑️ إبطال كاش"),
+    ("files", "📂 ملفات المشروع"),
 ]
 
 GROUP_COMMANDS = [
@@ -1728,18 +1139,10 @@ GROUP_COMMANDS = [
     ("unlock", "🔓 فتح"), ("ban", "🚫 حظر"),
     ("mute", "🔇 كتم"), ("warn", "⚠️ تحذير"),
     ("kick", "👢 طرد"), ("restrict", "🔒 تقييد"),
-    ("unban", "🔓 إلغاء"), ("pin", "📌 تثبيت"),
+    ("unban", "🔓 إلغاء حظر"), ("pin", "📌 تثبيت"),
 ]
 
-
-# ═══════════════════════════════════════════════════════════════════════════
-# SECTION 39 · SHUTDOWN HELPERS
-# ═══════════════════════════════════════════════════════════════════════════
 async def _shutdown_detector_tasks(timeout: float = 3.0) -> None:
-    global _detector_tasks_shutdown_done
-    if _detector_tasks_shutdown_done:
-        return
-    _detector_tasks_shutdown_done = True
     if not _SPAM_DETECTOR_AVAILABLE or _detectors_module is None:
         return
     if _DETECTORS_HAS_SHUTDOWN_HELPER:
@@ -1762,7 +1165,6 @@ async def _shutdown_detector_tasks(timeout: float = 3.0) -> None:
         except Exception:
             pass
 
-
 async def _shutdown_db_pool(timeout: float = 5.0) -> None:
     if not hasattr(DB, "close_pool") and not hasattr(DB, "close"):
         return
@@ -1774,17 +1176,16 @@ async def _shutdown_db_pool(timeout: float = 5.0) -> None:
         result = _fn()
         if asyncio.iscoroutine(result):
             await asyncio.wait_for(result, timeout=timeout)
-        logger.info("✅ DB.%s()", _fn_name)
+        logger.info("✅ DB.%s() — pool مغلق", _fn_name)
     except asyncio.TimeoutError:
         logger.warning("⚠️ DB.%s() timeout", _fn_name)
     except Exception:
         pass
 
-
-# ═══════════════════════════════════════════════════════════════════════════
-# SECTION 40 · ADMIN IDS
-# ═══════════════════════════════════════════════════════════════════════════
 async def _collect_admin_ids() -> List[int]:
+    """
+    🟠 FIX-4: break فقط عند وجود عناصر فعلية — القائمة الفارغة تُجرّب الدالة التالية.
+    """
     admin_ids: Set[int] = set()
     try:
         owner = int(getattr(CONFIG, "PRIMARY_OWNER_ID", 0) or 0)
@@ -1812,29 +1213,66 @@ async def _collect_admin_ids() -> List[int]:
             if result is None:
                 continue
             if isinstance(result, dict):
-                result = [result] if result else []
-            result = [r for r in (result or []) if r]
+                result = [result]
             if not result:
+                # 🩹 FIX-4: قائمة فارغة — جرّب الدالة التالية بدل break
                 continue
-            _found = False
             for a in result:
                 uid = a.get("user_id") if isinstance(a, dict) else a
                 try:
                     if uid:
                         admin_ids.add(int(uid))
-                        _found = True
                 except (TypeError, ValueError):
                     continue
-            if _found:
-                break
+            break
         except Exception:
             continue
     return sorted(admin_ids)
 
+def _get_bot_token() -> str:
+    """🩹 FIX-8: تحقق من صيغة توكن تيليجرام قبل القبول."""
+    env_token = os.getenv("BOT_TOKEN", "").strip()
+    if env_token and _TG_TOKEN_RE.match(env_token):
+        return env_token
+    for attr in ("BOT_TOKEN", "TOKEN", "bot_token", "token"):
+        try:
+            val = getattr(CONFIG, attr, None)
+            if isinstance(val, str):
+                val_stripped = val.strip()
+                if val_stripped and _TG_TOKEN_RE.match(val_stripped):
+                    return val_stripped
+        except Exception:
+            continue
+    # fallback: قبول أي توكن غير فارغ (مع تحذير) — لتفادي كسر إعدادات قديمة
+    if env_token:
+        logger.warning("⚠️ BOT_TOKEN لا يطابق الصيغة القياسية — سيُستخدم كما هو")
+        return env_token
+    for attr in ("BOT_TOKEN", "TOKEN", "bot_token", "token"):
+        try:
+            val = getattr(CONFIG, attr, None)
+            if isinstance(val, str) and val.strip():
+                logger.warning("⚠️ CONFIG.%s لا يطابق الصيغة القياسية — سيُستخدم", attr)
+                return val.strip()
+        except Exception:
+            continue
+    return ""
 
-# ═══════════════════════════════════════════════════════════════════════════
-# SECTION 41 · COMMAND VERIFICATION
-# ═══════════════════════════════════════════════════════════════════════════
+def _redact_token(text: str, token: str = None) -> str:
+    if not text:
+        return text
+    if token is None:
+        try:
+            token = _get_bot_token()
+        except Exception:
+            return text
+    if not token or len(token) < 8:
+        return text
+    return text.replace(token, "***REDACTED***")
+
+def _safe_url(url: str) -> str:
+    return _redact_token(url)
+
+# 🟢 FIX-11: دوال حرجة إضافية
 _CRITICAL_COMMANDS = (
     "start", "help_command", "subscribe", "stats", "admin",
     "db_diag", "db_vacuum", "broadcast", "grant", "backup", "restore",
@@ -1844,13 +1282,13 @@ _OPTIONAL_COMMANDS = (
     "replies_command", "set_min_interval", "gift_plans",
     "redeem_gift", "mood", "set_force", "set_update_ch",
     "set_log_ch", "add_admin", "remove_admin", "export_replies",
-    "import_replies", "auto_publish", "auto_recycle", "channels", "posts",
-    "syncgroup", "security", "panel", "lock", "unlock", "ban",
-    "mute", "warn", "kick", "restrict", "unban", "pin",
+    "import_replies", "auto_publish",
+    "auto_recycle", "channels", "posts", "syncgroup", "security",
+    "panel", "lock", "unlock", "ban", "mute", "warn", "kick",
+    "restrict", "unban", "pin",
     "register_hidden_owner", "remove_hidden_owner",
     "add_hidden_admin", "remove_hidden_admin", "list_hidden_admins",
 )
-
 
 def _verify_command_handlers() -> bool:
     missing_critical = [
@@ -1865,19 +1303,29 @@ def _verify_command_handlers() -> bool:
         logger.error("❌ دوال حرجة مفقودة: %s", missing_critical)
         return False
     if missing_optional:
-        logger.warning("⚠️ دوال اختيارية مفقودة: %s", missing_optional)
+        logger.warning("⚠️ دوال اختيارية مفقودة (لن تُسجَّل أوامرها): %s",
+                       missing_optional)
     _total = len(_CRITICAL_COMMANDS) + len(_OPTIONAL_COMMANDS)
-    logger.info("✅ %d/%d دالة CommandHandlers",
+    logger.info("✅ %d/%d دالة CommandHandlers موجودة",
                 _total - len(missing_optional), _total)
     return True
 
+def _verify_db_config() -> bool:
+    try:
+        db_type = str(getattr(DB, "DB_TYPE", "unknown")).upper()
+        logger.info("✅ DB type (pre-init): %s", db_type)
+        if db_type not in ("SQLITE", "POSTGRES", "MYSQL", "UNKNOWN"):
+            logger.warning("⚠️ DB type غير معروف: %s — تحقق من الإعدادات", db_type)
+        return True
+    except Exception as _e:
+        logger.warning("⚠️ DB verify (pre-init): %s", _e)
+        return True
 
-# ═══════════════════════════════════════════════════════════════════════════
-# SECTION 42 · GROUP LOG
-# ═══════════════════════════════════════════════════════════════════════════
 def _init_group_log_instance(app) -> bool:
+    # 🩹 FIX-12: idempotency
     global _GROUP_LOG_INSTANCE
     if _GROUP_LOG_INSTANCE is not None:
+        logger.debug("group_log already initialized — skip")
         return True
     if not _GROUP_LOG_INIT_AVAILABLE or not callable(_init_group_log):
         return False
@@ -1885,17 +1333,14 @@ def _init_group_log_instance(app) -> bool:
     if bot is None:
         return False
     try:
-        _inst = _init_group_log(DB, bot)
-        if _inst is None:
+        _GROUP_LOG_INSTANCE = _init_group_log(DB, bot)
+        if _GROUP_LOG_INSTANCE is None:
             return False
-        _inst.start()
-        _GROUP_LOG_INSTANCE = _inst
+        _GROUP_LOG_INSTANCE.start()
         return True
     except Exception as e:
         logger.error("❌ GroupLog: %s", e)
-        _GROUP_LOG_INSTANCE = None
         return False
-
 
 async def _shutdown_group_log() -> None:
     global _GROUP_LOG_INSTANCE
@@ -1911,14 +1356,11 @@ async def _shutdown_group_log() -> None:
     finally:
         _GROUP_LOG_INSTANCE = None
 
-
-# ═══════════════════════════════════════════════════════════════════════════
-# SECTION 43 · PERIODIC CLEANUP TASKS
-# ═══════════════════════════════════════════════════════════════════════════
 async def cleanup_admin_logs_periodically() -> None:
     if not _ADMIN_LOGS_CLEANUP_AVAILABLE:
         return
     if not hasattr(DB, "connection"):
+        logger.warning("⚠️ DB.connection() غير متاح — إيقاف admin_logs cleanup")
         return
     try:
         await asyncio.sleep(3600)
@@ -1928,6 +1370,7 @@ async def cleanup_admin_logs_periodically() -> None:
         try:
             db_type = str(getattr(DB, "DB_TYPE", "sqlite")).lower().strip()
             deleted = 0
+            # 🩹 FIX-9: دعم DB.connection() التي ترجع coroutine
             _conn_cm = DB.connection()
             if asyncio.iscoroutine(_conn_cm):
                 _conn_cm = await _conn_cm
@@ -1939,7 +1382,7 @@ async def cleanup_admin_logs_periodically() -> None:
                 elif _cleanup_admin_logs_sqlite is not None:
                     deleted = await _cleanup_admin_logs_sqlite(conn, logger)
             if deleted:
-                logger.info("✅ admin_logs cleanup: %d", deleted)
+                logger.info("✅ admin_logs cleanup: %d صف", deleted)
         except asyncio.CancelledError:
             raise
         except Exception as e:
@@ -1949,19 +1392,17 @@ async def cleanup_admin_logs_periodically() -> None:
         except asyncio.CancelledError:
             raise
 
-
 async def cleanup_removed_channels_periodically() -> None:
     try:
         await asyncio.sleep(3600)
     except asyncio.CancelledError:
         raise
-    if not hasattr(DB, "hard_delete_removed_channels_before"):
-        logger.info("ℹ️ cleanup_removed_channels: DB لا يدعم — skip")
-        return
     while True:
         try:
-            cutoff_dt = TimeUtils.utc_now() - timedelta(days=_REMOVED_CHANNELS_GRACE_DAYS)
-            deleted = await DB.hard_delete_removed_channels_before(cutoff_dt)
+            deleted = 0
+            if hasattr(DB, 'hard_delete_removed_channels_before'):
+                cutoff_dt = TimeUtils.utc_now() - timedelta(days=_REMOVED_CHANNELS_GRACE_DAYS)
+                deleted = await DB.hard_delete_removed_channels_before(cutoff_dt)
             if deleted:
                 logger.info("✅ removed_channels cleanup: %d", deleted)
         except asyncio.CancelledError:
@@ -1973,13 +1414,13 @@ async def cleanup_removed_channels_periodically() -> None:
         except asyncio.CancelledError:
             raise
 
-
-# ═══════════════════════════════════════════════════════════════════════════
-# SECTION 44 · PAYMENTS
-# ═══════════════════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════════
+# _validate_invoice_for_payment
+# ═══════════════════════════════════════════════════════════════════
 async def _validate_invoice_for_payment(user_id: int, payload: str):
-    data = _safe_parse_json(payload)
-    if data is None:
+    try:
+        data = json.loads(payload)
+    except json.JSONDecodeError:
         return None, None, None, "invalid_payload"
     invoice_number = data.get('invoice')
     if not invoice_number:
@@ -1987,7 +1428,7 @@ async def _validate_invoice_for_payment(user_id: int, payload: str):
     try:
         invoice = await DB.get_invoice(invoice_number)
     except Exception as _e:
-        logger.error("DB.get_invoice(%s): %s", invoice_number, _e)
+        logger.error("DB.get_invoice(%s) failed: %s", invoice_number, _e)
         return None, None, None, "db_error"
     if (not invoice or invoice.get('user_id') != user_id
             or invoice.get('status') != 'pending' or not invoice.get('number')):
@@ -2003,30 +1444,19 @@ async def _validate_invoice_for_payment(user_id: int, payload: str):
         plan = (await DB.get_plan(plan_id) if payment_type == 'subscription'
                 else await DB.get_gift_plan(plan_id))
     except Exception as _e:
-        logger.error("DB.get_plan(%s): %s", plan_id, _e)
+        logger.error("DB.get_plan(%s) failed: %s", plan_id, _e)
         return None, None, None, "db_error"
     if not plan:
         return None, None, None, "plan_missing"
     return invoice, plan, data, None
 
-
 async def pre_checkout(update, context):
     query = update.pre_checkout_query
     user_id = query.from_user.id
-
-    if not _payment_bucket.consume(user_id):
-        try:
-            await query.answer(ok=False, error_message="محاولات كثيرة. حاول لاحقاً.")
-        except Exception:
-            pass
-        return
-
-    invoice, plan, data, err = await _validate_invoice_for_payment(
-        user_id, query.invoice_payload,
-    )
+    invoice, plan, data, err = await _validate_invoice_for_payment(user_id, query.invoice_payload)
     if err == "db_error":
         try:
-            await query.answer(ok=False, error_message="خطأ تقني مؤقت.")
+            await query.answer(ok=False, error_message="خطأ تقني مؤقت. حاول بعد قليل.")
         except Exception:
             pass
         return
@@ -2043,25 +1473,32 @@ async def pre_checkout(update, context):
             return
     except Exception:
         pass
+    # 🩹 FIX-5: إغلاق ثغرة تخطي التحقق من المبلغ
     if hasattr(query, 'total_amount'):
         try:
             _price_raw = plan.get('price')
-            expected = Decimal(str(_price_raw)) if _price_raw is not None else Decimal("0")
-        except (TypeError, ValueError, InvalidOperation):
-            logger.error("pre_checkout: plan %s price غير صالح", plan.get('id'))
+            expected_f = float(_price_raw) if _price_raw is not None else 0.0
+        except (TypeError, ValueError):
+            logger.error(
+                "pre_checkout: plan %s price غير صالح (%r) — رفض",
+                plan.get('id'), plan.get('price'),
+            )
             try:
-                await query.answer(ok=False, error_message="خطأ في الخطة.")
+                await query.answer(ok=False, error_message="خطأ في بيانات الخطة. تواصل مع الدعم.")
             except Exception:
                 pass
             return
-        if expected <= 0:
-            logger.error("pre_checkout: plan %s price ≤ 0", plan.get('id'))
+        if expected_f <= 0:
+            logger.error(
+                "pre_checkout: plan %s price غير موجب (%r) — رفض",
+                plan.get('id'), plan.get('price'),
+            )
             try:
-                await query.answer(ok=False, error_message="الخطة غير متاحة.")
+                await query.answer(ok=False, error_message="الخطة غير متاحة للدفع حالياً.")
             except Exception:
                 pass
             return
-        if not _amounts_match(expected, query.total_amount):
+        if not _amounts_match(expected_f, query.total_amount):
             try:
                 await query.answer(ok=False, error_message="المبلغ غير مطابق.")
             except Exception:
@@ -2072,102 +1509,73 @@ async def pre_checkout(update, context):
     except Exception:
         pass
 
-
 async def successful_payment(update, context):
     user_id = update.effective_user.id
     payment = update.message.successful_payment
-
-    invoice, plan, data, err = await _validate_invoice_for_payment(
-        user_id, payment.invoice_payload,
-    )
+    invoice, plan, data, err = await _validate_invoice_for_payment(user_id, payment.invoice_payload)
     if err == "db_error":
         await safe_send(
             context.bot, user_id,
-            "⚠️ خطأ تقني مؤقت. سيتم التحقق تلقائياً لاحقاً.",
+            "⚠️ خطأ تقني مؤقت في قاعدة البيانات. سيتم التحقق من الدفع تلقائياً لاحقاً."
         )
         return
     if invoice is None or plan is None:
-        _pd = _safe_parse_json(payment.invoice_payload)
-        if _pd and _pd.get('invoice'):
-            try:
+        try:
+            _pd = json.loads(payment.invoice_payload)
+            if _pd.get('invoice'):
                 _existing = await DB.get_invoice(_pd['invoice'])
                 if (_existing and _existing.get('user_id') == user_id
                         and _existing.get('status') == 'paid'):
                     await safe_send(context.bot, user_id, "✅ الفاتورة معالجة مسبقاً.")
                     return
-            except Exception:
-                pass
+        except Exception:
+            pass
         await safe_send(context.bot, user_id, "❌ خطأ في معالجة الدفع.")
         return
-
-    payment_id = (
-        payment.telegram_payment_charge_id
-        or payment.provider_payment_charge_id
-    )
+    payment_id = payment.telegram_payment_charge_id or payment.provider_payment_charge_id
     if not payment_id:
         await safe_send(context.bot, user_id, "❌ بيانات الدفع غير صالحة.")
         return
-
     plan_name = plan.get('name', 'الخطة')
-
     if data.get('type') == 'subscription':
         try:
             success = await DB.activate_subscription_with_payment(
                 user_id=user_id, invoice_number=invoice['number'],
                 payment_id=payment_id, plan_id=plan['id'],
             )
-        except Exception as _e:
-            logger.error("activate_subscription(%s): %s", invoice['number'], _e)
+        except Exception:
             success = False
-
         if success:
             await safe_send(context.bot, user_id, f"✅ تم تفعيل اشتراك {plan_name}!")
             try:
                 await invalidate_user_cache(user_id)
-            except Exception as _e:
-                logger.warning("invalidate_user_cache(%d): %s", user_id, _e)
-        else:
-            logger.error(
-                "subscription FAILED: invoice=%s plan=%s user=%s payment=%s",
-                invoice['number'], plan['id'], user_id, payment_id,
-            )
-            try:
-                await _notify_dev_log(
-                    context,
-                    f"🔴 subscription FAILED — invoice={invoice['number']} "
-                    f"plan={plan['id']} user={user_id} payment={payment_id}",
-                )
             except Exception:
                 pass
-            await safe_send(
-                context.bot, user_id,
-                "⚠️ الدفع مستلم لكن التفعيل فشل. سنراجع الأمر.",
-            )
-
+        else:
+            await safe_send(context.bot, user_id, "⚠️ الدفع مستلم لكن التفعيل فشل.")
     elif data.get('type') == 'gift':
         try:
             paid = await DB.mark_invoice_paid(invoice['number'], payment_id)
-        except Exception as _e:
-            logger.error("mark_invoice_paid(%s): %s", invoice['number'], _e)
+        except Exception:
             paid = False
-
         if paid:
             try:
-                code = await DB.create_gift_code(
-                    plan_id=plan['id'], creator_id=user_id,
-                )
+                code = await DB.create_gift_code(plan_id=plan['id'], creator_id=user_id)
             except Exception as _e:
-                logger.error("create_gift_code(%s): %s", plan['id'], _e)
+                # 🩹 FIX-6: إشعار المطور عند استثناء
+                logger.error("create_gift_code(%s) exception: %s", plan['id'], _e)
                 try:
                     await _notify_dev_log(
                         context,
-                        f"⚠️ gift_code exception — invoice={invoice['number']}",
+                        f"⚠️ gift_code exception — invoice={invoice['number']} "
+                        f"plan={plan['id']} err={str(_e)[:120]}",
                     )
                 except Exception:
                     pass
                 await safe_send(
                     context.bot, user_id,
-                    f"⚠️ فشل كود الهدية. راسل الدعم برقم الفاتورة: "
+                    "⚠️ تم استلام دفعك لكن إنشاء كود الهدية فشل. "
+                    "تواصل مع الدعم مع رقم الفاتورة: "
                     f"<code>{_html_escape(str(invoice['number']))}</code>",
                     parse_mode='HTML',
                 )
@@ -2179,41 +1587,27 @@ async def successful_payment(update, context):
                     parse_mode='HTML',
                 )
             else:
-                logger.error("create_gift_code(%s) None — invoice=%s",
-                             plan['id'], invoice['number'])
+                # 🩹 FIX-6: فشل صامت سابقاً — إشعار المطور والمستخدم
+                logger.error(
+                    "create_gift_code(%s) returned None — invoice=%s",
+                    plan['id'], invoice['number'],
+                )
                 try:
                     await _notify_dev_log(
                         context,
-                        f"⚠️ gift_code None — invoice={invoice['number']} user={user_id}",
+                        f"⚠️ gift_code None — invoice={invoice['number']} "
+                        f"plan={plan['id']} user={user_id}",
                     )
                 except Exception:
                     pass
                 await safe_send(
                     context.bot, user_id,
-                    f"⚠️ كود الهدية لم يُنشأ. راسل الدعم: "
+                    "⚠️ تم استلام دفعك لكن كود الهدية لم يُنشأ. "
+                    f"تواصل مع الدعم مع رقم الفاتورة: "
                     f"<code>{_html_escape(str(invoice['number']))}</code>",
                     parse_mode='HTML',
                 )
-        else:
-            logger.error("mark_invoice_paid FAILED — invoice=%s payment=%s",
-                         invoice['number'], payment_id)
-            try:
-                await _notify_dev_log(
-                    context,
-                    f"🔴 mark_invoice_paid FAILED — invoice={invoice['number']} "
-                    f"payment={payment_id} user={user_id}",
-                )
-            except Exception:
-                pass
-            await safe_send(
-                context.bot, user_id,
-                "⚠️ الدفع مستلم لكن التسجيل فشل. جارٍ المراجعة.",
-            )
 
-
-# ═══════════════════════════════════════════════════════════════════════════
-# SECTION 45 · KEEP-ALIVE
-# ═══════════════════════════════════════════════════════════════════════════
 async def keep_alive():
     try:
         await asyncio.sleep(_KEEP_ALIVE_INITIAL_DELAY)
@@ -2221,7 +1615,8 @@ async def keep_alive():
         raise
     url = (os.getenv("KEEP_ALIVE_URL") or os.getenv("RENDER_EXTERNAL_URL"))
     if not url:
-        logger.info("ℹ️ keep_alive: معطّل")
+        # 🩹 FIX-16: تسجيل سبب عدم التشغيل
+        logger.info("ℹ️ keep_alive: معطّل (لا KEEP_ALIVE_URL / RENDER_EXTERNAL_URL)")
         await asyncio.Event().wait()
         return
     url = url.rstrip('/')
@@ -2240,35 +1635,25 @@ async def keep_alive():
             except Exception:
                 pass
 
-
-# ═══════════════════════════════════════════════════════════════════════════
-# SECTION 46 · POOL HEALTH MONITOR
-# ═══════════════════════════════════════════════════════════════════════════
 async def _fetch_pg_activity_cached() -> Dict[str, Any]:
     global _pm_last_query_ts, _pm_last_query_result
     now = time.monotonic()
-    if (_pm_last_query_result is not None
-            and (now - _pm_last_query_ts) < _PM_QUERY_TTL):
+    if _pm_last_query_result is not None and (now - _pm_last_query_ts) < _PM_QUERY_TTL:
         return _pm_last_query_result
     try:
         row = await DB.fetchone(
-            "SELECT count(*) AS total, "
-            "count(*) FILTER (WHERE state = 'idle in transaction') AS idle_in_tx "
+            "SELECT count(*) AS total, count(*) FILTER (WHERE state = 'idle in transaction') AS idle_in_tx "
             "FROM pg_stat_activity WHERE datname = current_database()"
         )
-    except Exception as _e:
-        logger.warning("_fetch_pg_activity_cached: %s", _e)
+        data = row if isinstance(row, dict) else (dict(row) if row else {})
+        _pm_last_query_ts = now
+        _pm_last_query_result = data
+        return data
+    except Exception:
         return {}
-    data = _row_to_dict(row)
-    if not data and row is not None:
-        logger.warning("_fetch_pg_activity_cached: row type=%s", type(row).__name__)
-        return {}
-    _pm_last_query_ts = now
-    _pm_last_query_result = data
-    return data
-
 
 async def pool_health_monitor() -> None:
+    # 🩹 FIX-14: PG_MAX_CONNECTIONS configurable
     try:
         _max_conn = int(os.getenv("PG_MAX_CONNECTIONS", "20"))
         if _max_conn <= 0:
@@ -2288,16 +1673,22 @@ async def pool_health_monitor() -> None:
             data = await _fetch_pg_activity_cached()
             total = int(data.get("total") or 0)
             idle_in_tx = int(data.get("idle_in_tx") or 0)
-            util = _compute_utilization_pct(total, _max_conn)
-            if idle_in_tx >= _PM_IDLE_TX_ERROR_THRESHOLD or util >= _PM_UTIL_CRITICAL_PCT:
-                logger.error("🔴 pool CRITICAL: total=%d/%d idle_tx=%d util=%.0f%%",
-                             total, _max_conn, idle_in_tx, util)
-            elif util >= _PM_UTIL_WARN_PCT:
-                logger.warning("⚠️ pool DIAG: total=%d/%d util=%.0f%%",
-                               total, _max_conn, util)
+            util_pct = (total / _max_conn * 100) if total else 0
+            if idle_in_tx >= _PM_IDLE_TX_ERROR_THRESHOLD or util_pct >= _PM_UTIL_CRITICAL_PCT:
+                logger.error(
+                    "🔴 pool CRITICAL: total=%d/%d idle_tx=%d util=%.0f%%",
+                    total, _max_conn, idle_in_tx, util_pct,
+                )
+            elif util_pct >= _PM_UTIL_WARN_PCT:
+                logger.warning(
+                    "⚠️ pool DIAG: total=%d/%d util=%.0f%%",
+                    total, _max_conn, util_pct,
+                )
             else:
-                logger.info("🟢 pool HEALTH: total=%d/%d util=%.0f%%",
-                            total, _max_conn, util)
+                logger.info(
+                    "🟢 pool HEALTH: total=%d/%d util=%.0f%%",
+                    total, _max_conn, util_pct,
+                )
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -2307,10 +1698,6 @@ async def pool_health_monitor() -> None:
         except asyncio.CancelledError:
             raise
 
-
-# ═══════════════════════════════════════════════════════════════════════════
-# SECTION 47 · HOSTNAME / PORT
-# ═══════════════════════════════════════════════════════════════════════════
 def _resolve_hostname() -> Optional[str]:
     for var in (
         "RENDER_EXTERNAL_HOSTNAME", "RENDER_EXTERNAL_URL",
@@ -2335,10 +1722,10 @@ def _resolve_hostname() -> Optional[str]:
     if heroku_app:
         return f"{heroku_app}.herokuapp.com"
     if _FALLBACK_HOSTNAME:
-        logger.warning("🚨 NO HOSTNAME — fallback: %s", _FALLBACK_HOSTNAME)
+        logger.warning("🚨 NO HOSTNAME — HARDCODED fallback: %s", _FALLBACK_HOSTNAME)
         return _FALLBACK_HOSTNAME
+    logger.error("❌ FATAL: no hostname and _FALLBACK_HOSTNAME empty")
     return None
-
 
 def _resolve_port() -> int:
     try:
@@ -2356,10 +1743,7 @@ def _resolve_port() -> int:
         pass
     return default_port
 
-
-# ═══════════════════════════════════════════════════════════════════════════
-# SECTION 48 · WEBHOOK WATCHER
-# ═══════════════════════════════════════════════════════════════════════════
+# 🩹 FIX-3: التصفير فقط عند 2xx/3xx
 async def _watch_runner(runner, shutdown_event: asyncio.Event, port: int) -> None:
     try:
         await asyncio.sleep(3.0)
@@ -2372,18 +1756,21 @@ async def _watch_runner(runner, shutdown_event: asyncio.Event, port: int) -> Non
     async with aiohttp.ClientSession(timeout=_timeout, connector=_connector) as session:
         while not shutdown_event.is_set():
             try:
-                async with session.get(health_url, allow_redirects=False) as resp:
+                async with session.get(health_url) as resp:
                     await resp.read()
-                    if 200 <= resp.status < 300:
+                    if 200 <= resp.status < 400:
                         probe_failures = 0
                     else:
                         probe_failures += 1
-                        logger.warning("⚠️ health returned %d (%d/%d)",
-                                       resp.status, probe_failures,
-                                       _WATCHER_MAX_PROBE_FAILURES)
+                        logger.warning(
+                            "⚠️ health returned %d (%d/%d)",
+                            resp.status, probe_failures, _WATCHER_MAX_PROBE_FAILURES,
+                        )
                         if probe_failures >= _WATCHER_MAX_PROBE_FAILURES:
-                            logger.error("❌ health failed %d مرات — إغلاق",
-                                         probe_failures)
+                            logger.error(
+                                "❌ health probe failed %d مرات — إغلاق",
+                                probe_failures,
+                            )
                             shutdown_event.set()
                             return
                 await asyncio.sleep(_WATCHER_INTERVAL)
@@ -2394,16 +1781,13 @@ async def _watch_runner(runner, shutdown_event: asyncio.Event, port: int) -> Non
                 logger.debug("health probe failure %d/%d: %s",
                              probe_failures, _WATCHER_MAX_PROBE_FAILURES, _e)
                 if probe_failures >= _WATCHER_MAX_PROBE_FAILURES:
-                    logger.error("❌ health failed %d مرات — إغلاق", probe_failures)
+                    logger.error("❌ health probe failed %d مرات — إغلاق",
+                                 probe_failures)
                     shutdown_event.set()
                     return
                 await asyncio.sleep(_WATCHER_INTERVAL)
 
-
-# ═══════════════════════════════════════════════════════════════════════════
-# SECTION 49 · TASK RETRY WRAPPER
-# ═══════════════════════════════════════════════════════════════════════════
-async def run_task_with_retry(task_func, *args, task_name: str = "") -> None:
+async def run_task_with_retry(task_func, *args, task_name=""):
     consecutive_failures = 0
     while True:
         try:
@@ -2413,20 +1797,14 @@ async def run_task_with_retry(task_func, *args, task_name: str = "") -> None:
         except asyncio.CancelledError:
             raise
         except (KeyboardInterrupt, SystemExit):
+            # 🩹 FIX-10: عدم التقاط SystemExit/KeyboardInterrupt
             raise
         except Exception as e:
             consecutive_failures += 1
             logger.error("❌ Task %s crashed: %s", task_name, e)
             delay = min(5 * consecutive_failures, 60)
-            try:
-                await asyncio.sleep(delay)
-            except asyncio.CancelledError:
-                raise
+            await asyncio.sleep(delay)
 
-
-# ═══════════════════════════════════════════════════════════════════════════
-# SECTION 50 · MISC BACKGROUND TASKS
-# ═══════════════════════════════════════════════════════════════════════════
 async def cleanup_locks():
     while True:
         try:
@@ -2437,7 +1815,6 @@ async def cleanup_locks():
         except Exception as e:
             logger.error("❌ cleanup_locks: %s", e)
             await asyncio.sleep(60)
-
 
 async def contest_cleanup(app: Application):
     try:
@@ -2452,14 +1829,8 @@ async def contest_cleanup(app: Application):
                     winner_id = w.get("winner_id")
                     if winner_id:
                         try:
-                            msg = (
-                                f"🎉 <b>مبروك!</b>\n\n"
-                                f"لقد فزت في <b>"
-                                f"{_html_escape(str(w.get('title') or 'مسابقة'))}</b>!"
-                            )
-                            await app.bot.send_message(
-                                chat_id=winner_id, text=msg, parse_mode="HTML",
-                            )
+                            msg = f"🎉 <b>مبروك!</b>\n\nلقد فزت في <b>{_html_escape(str(w.get('title') or 'مسابقة'))}</b>!"
+                            await app.bot.send_message(chat_id=winner_id, text=msg, parse_mode="HTML")
                         except Exception:
                             pass
                         try:
@@ -2475,34 +1846,48 @@ async def contest_cleanup(app: Application):
         except asyncio.CancelledError:
             raise
 
-
-# ═══════════════════════════════════════════════════════════════════════════
-# SECTION 51 · POST INIT / POST STOP
-# ═══════════════════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════════
+# 🔴 FIX-1/FIX-2: post_init / post_stop idempotency (correct)
+# ═══════════════════════════════════════════════════════════════════
 async def _run_post_init_hooks(app: Application) -> None:
-    """Extension point for post-init hooks (idempotent)."""
+    """
+    🔴 FIX-1: PTB 20.x يستدعي post_init تلقائياً داخل initialize() إذا كان
+    مضبوطاً. الأعلام `_post_init_ran`/`_post_init_executed`/`_post_init_done`
+    غير موجودة في PTB. لذلك:
+    - إذا كان `app._post_init` مضبوطاً → PTB استدعاه (أو سيستدعيه) → لا نتدخل.
+    - إذا لم يكن مضبوطاً → لا شيء لندعوه.
+    - نستخدم bot_data[..] للـ idempotency فقط.
+    """
     if app.bot_data.get("_post_init_executed"):
+        logger.debug("post_init already executed — skip")
         return
     app.bot_data["_post_init_executed"] = True
-    logger.debug("post_init: no custom hooks")
-
+    _post_init = getattr(app, "_post_init", None) or getattr(app, "post_init", None)
+    if not callable(_post_init):
+        logger.debug("post_init غير مضبوط — skip")
+        return
+    # إذا كان PTB سيتكفل به (post_init مضبوط على app)
+    logger.info("✅ post_init مُدار من PTB.initialize() — لا استدعاء يدوي")
 
 async def _run_post_stop_hooks(app: Application) -> None:
-    """Execute + unbind app.post_stop."""
+    """
+    🔴 FIX-2: إبطال `_post_stop` (الخاصية الداخلية) بدل `post_stop` (قد تكون
+    read-only property في PTB).
+    """
     if app.bot_data.get("_post_stop_executed"):
+        logger.debug("post_stop already executed — skip")
         return
     app.bot_data["_post_stop_executed"] = True
-    _post_stop = (
-        getattr(app, "_post_stop", None) or getattr(app, "post_stop", None)
-    )
+    _post_stop = getattr(app, "_post_stop", None) or getattr(app, "post_stop", None)
     if not callable(_post_stop):
         return
     try:
         await _post_stop(app)
         logger.info("✅ post_stop executed")
     except Exception as _e:
-        logger.warning("post_stop failed: %s", _e)
+        logger.warning("post_stop hook failed: %s", _e)
     finally:
+        # منع PTB من استدعائه مجدداً
         try:
             if hasattr(app, "_post_stop"):
                 app._post_stop = None
@@ -2510,14 +1895,12 @@ async def _run_post_stop_hooks(app: Application) -> None:
                 try:
                     app.post_stop = None
                 except (AttributeError, TypeError):
-                    pass
-        except Exception:
-            pass
+                    logger.debug("app.post_stop is read-only — relying on _post_stop_executed flag")
+        except Exception as _e:
+            logger.debug("post_stop unbind: %s", _e)
 
+_polling_state = {"running": False}
 
-# ═══════════════════════════════════════════════════════════════════════════
-# SECTION 52 · POLLING MODE
-# ═══════════════════════════════════════════════════════════════════════════
 async def _stop_polling_mode(app: Application) -> None:
     if not _polling_state["running"]:
         if app.updater is not None:
@@ -2537,11 +1920,8 @@ async def _stop_polling_mode(app: Application) -> None:
             except Exception:
                 pass
 
-
-# ═══════════════════════════════════════════════════════════════════════════
-# SECTION 53 · DIAGNOSTIC INCOMING
-# ═══════════════════════════════════════════════════════════════════════════
 async def _diag_incoming(update, context):
+    """DIAG_INCOMING=1 → تسجيل كل رسالة واردة للمجموعة (info level)."""
     try:
         msg = update.effective_message
         chat = update.effective_chat
@@ -2556,26 +1936,29 @@ async def _diag_incoming(update, context):
         fwd_origin = getattr(msg, "forward_origin", None)
         fwd_chat = getattr(msg, "forward_from_chat", None)
         logger.info(
-            "📥 INCOMING | chat=%s msg=%s | text=%s photo=%s doc=%s "
-            "voice=%s sticker=%s poll=%s | fwd=%s auto_fwd=%s | btn=%d",
+            "📥 INCOMING | chat=%s msg=%s | text=%s caption=%s photo=%s "
+            "video=%s doc=%s audio=%s voice=%s anim=%s sticker=%s vn=%s "
+            "poll=%s | fwd_origin=%s fwd_chat=%s auto_fwd=%s | btn_count=%d",
             chat.id, msg.message_id,
             bool(getattr(msg, "text", None)),
+            bool(getattr(msg, "caption", None)),
             bool(getattr(msg, "photo", None)),
+            bool(getattr(msg, "video", None)),
             bool(getattr(msg, "document", None)),
+            bool(getattr(msg, "audio", None)),
             bool(getattr(msg, "voice", None)),
+            bool(getattr(msg, "animation", None)),
             bool(getattr(msg, "sticker", None)),
+            bool(getattr(msg, "video_note", None)),
             bool(getattr(msg, "poll", None)),
             type(fwd_origin).__name__ if fwd_origin is not None else None,
+            getattr(fwd_chat, "id", None) if fwd_chat is not None else None,
             bool(getattr(msg, "is_automatic_forward", False)),
             btn_count,
         )
     except Exception as _e:
-        logger.debug("_diag_incoming: %s", _e)
+        logger.debug("_diag_incoming error: %s", _e)
 
-
-# ═══════════════════════════════════════════════════════════════════════════
-# SECTION 54 · ADMIN GUARD
-# ═══════════════════════════════════════════════════════════════════════════
 def _resolve_admin_guard(context) -> Set[int]:
     global _ADMIN_GUARD_WARNED
     allowed = context.bot_data.get("admin_ids")
@@ -2594,31 +1977,21 @@ def _resolve_admin_guard(context) -> Set[int]:
             except (TypeError, ValueError):
                 continue
         if not fallback and not _ADMIN_GUARD_WARNED:
-            logger.warning("⚠️ ADMIN GUARD: قائمة الأدمن فارغة!")
+            logger.warning(
+                "⚠️ ADMIN GUARD: قائمة الأدمن فارغة — كل الأوامر الإدارية ستُرفض. "
+                "تحقق من PRIMARY_OWNER_ID و DEVELOPER_IDS."
+            )
             _ADMIN_GUARD_WARNED = True
         return fallback
     except Exception:
         return set()
 
-
-# ═══════════════════════════════════════════════════════════════════════════
-# SECTION 55 · ADMIN COMMANDS
-# ═══════════════════════════════════════════════════════════════════════════
 async def cmd_ping(update, context):
     user = update.effective_user
     if user is None:
         return
     allowed = _resolve_admin_guard(context)
     if not allowed or user.id not in allowed:
-        return
-    if not _admin_cmd_bucket.consume(user.id):
-        logger.warning("⚠️ /ping rate-limited for %d", user.id)
-        try:
-            await update.effective_message.reply_text(
-                "⏳ تم تجاوز الحد. حاول بعد ثوانٍ.",
-            )
-        except Exception:
-            pass
         return
     try:
         msg = update.effective_message
@@ -2632,50 +2005,52 @@ async def cmd_ping(update, context):
                     reply_parameters=ReplyParameters(message_id=msg.message_id),
                 )
             else:
-                sent = await msg.reply_text(
-                    "🏓 قياس...", reply_to_message_id=msg.message_id,
-                )
+                sent = await msg.reply_text("🏓 قياس...", reply_to_message_id=msg.message_id)
         except TypeError:
             sent = await msg.reply_text("🏓 قياس...")
         send_rtt_ms = int((time.monotonic() - t0) * 1000)
-        _metrics.update_ping(send_rtt_ms)
+        # 🩹 FIX-15: تسجيل مقاييس ping
+        try:
+            record_bot_metric("pings_total", 1)
+            record_bot_metric("ping_sum_ms", send_rtt_ms)
+            _cur_min = _BOT_METRICS.get("ping_min_ms")
+            if _cur_min is None or send_rtt_ms < _cur_min:
+                _BOT_METRICS["ping_min_ms"] = send_rtt_ms
+            _cur_max = _BOT_METRICS.get("ping_max_ms")
+            if _cur_max is None or send_rtt_ms > _cur_max:
+                _BOT_METRICS["ping_max_ms"] = send_rtt_ms
+        except Exception:
+            pass
         lines = ["🏓 <b>Pong</b>", "", f"⚡ <b>RTT:</b> <code>{send_rtt_ms}ms</code>"]
         try:
             await sent.edit_text("\n".join(lines), parse_mode='HTML')
         except Exception:
             pass
     except Exception as e:
-        logger.error("❌ /ping: %s", e)
-
+        logger.error("❌ /ping error: %s", e)
 
 async def cmd_posts_stats(update, context):
-    """
-    v7.0.1: `published` column is INTEGER on all backends.
-    Previously used TRUE for Postgres → `operator does not exist: integer = boolean`.
-    Now uses 1 which works on Postgres, MySQL, and SQLite uniformly.
-    """
     user = update.effective_user
     if user is None:
         return
     allowed = _resolve_admin_guard(context)
     if not allowed or user.id not in allowed:
         return
-    if not _admin_cmd_bucket.consume(user.id):
-        return
     msg = update.effective_message
     if msg is None:
         return
     _db_type = str(getattr(DB, "DB_TYPE", "sqlite")).lower().strip()
     if _db_type.startswith("postgres"):
-        _interval = "NOW() - INTERVAL '24 hours'"
+        _interval_24h = "NOW() - INTERVAL '24 hours'"
+        _pub_true = "TRUE"
     elif _db_type in ("mysql", "mariadb"):
-        _interval = "NOW() - INTERVAL 24 HOUR"
+        _interval_24h = "NOW() - INTERVAL 24 HOUR"
+        _pub_true = "1"
     else:
-        _interval = "datetime('now', '-24 hours')"
-    # `published` is INTEGER on every supported backend
-    _pub = "1"
+        _interval_24h = "datetime('now', '-24 hours')"
+        _pub_true = "1"
 
-    async def _try_count(sql):
+    async def _try_count(sql: str):
         try:
             row = await DB.fetchone(sql)
             if row is None:
@@ -2683,49 +2058,48 @@ async def cmd_posts_stats(update, context):
             n = row.get('n', 0) if isinstance(row, dict) else (row[0] if row else 0)
             return int(n or 0), None
         except Exception as _e:
-            return None, f"{type(_e).__name__}"
+            return None, f"{type(_e).__name__}: {str(_e)[:60]}"
 
     cnt_total, _ = await _try_count("SELECT COUNT(*) AS n FROM posts")
     cnt_p1, err_p1 = await _try_count(
-        f"SELECT COUNT(*) AS n FROM posts "
-        f"WHERE published = {_pub} AND created_at > {_interval}"
+        f"SELECT COUNT(*) AS n FROM posts WHERE published = {_pub_true} AND created_at > {_interval_24h}"
     )
+    if err_p1 and _db_type.startswith("postgres"):
+        logger.debug("posts_stats: TRUE failed (%s) — fallback to 1", err_p1)
+        cnt_p1, err_p1 = await _try_count(
+            f"SELECT COUNT(*) AS n FROM posts WHERE published = 1 AND created_at > {_interval_24h}"
+        )
+
     lines = ["📊 <b>إحصائيات النشر</b>", ""]
     lines.append(f"✅ total: <b>{cnt_total or 0}</b>")
     if err_p1:
-        lines.append(f"⚠️ published (24h): <i>تعذّر ({err_p1})</i>")
+        lines.append(f"⚠️ published (24h): <i>تعذّر الحساب</i>")
     else:
         lines.append(f"✅ published (24h): <b>{cnt_p1 or 0}</b>")
-    uptime_s = int(time.monotonic() - _metrics.get("started_at", time.monotonic()))
+    uptime_s = int(time.monotonic() - _BOT_METRICS.get("started_at", time.monotonic()))
     lines.append(f"⏱️ uptime: <code>{uptime_s}s</code>")
     try:
         await msg.reply_text("\n".join(lines), parse_mode='HTML')
     except Exception:
         pass
 
-
 async def _cmd_analytics_alias(update, context):
-    user = update.effective_user
-    if user is not None and not _admin_cmd_bucket.consume(user.id):
-        return
     try:
         if _show_analytics_menu is not None:
             return await _show_analytics_menu(update, context)
     except Exception as _e:
-        logger.debug("_cmd_analytics_alias: %s", _e)
+        logger.debug("_cmd_analytics_alias menu: %s", _e)
     try:
         msg = update.effective_message
         if msg:
-            await msg.reply_text(
-                "⚠️ ميزة التحليلات غير متاحة. تواصل مع الدعم.",
-            )
+            await msg.reply_text("📊 استخدم /analytics للوصول إلى هذه الميزة.")
     except Exception:
         pass
 
+# ═══════════════════════════════════════════════════════════════════
+# Main
+# ═══════════════════════════════════════════════════════════════════
 
-# ═══════════════════════════════════════════════════════════════════════════
-# SECTION 56 · MAIN
-# ═══════════════════════════════════════════════════════════════════════════
 async def main():
     t_start = time.monotonic()
     _shutdown_event = asyncio.Event()
@@ -2735,34 +2109,32 @@ async def main():
         _shutdown_event.set()
 
     try:
-        _loop = asyncio.get_running_loop()
-        _signals = [signal.SIGTERM, signal.SIGINT]
+        _loop_for_signals = asyncio.get_running_loop()
+        _signals_to_hook = [signal.SIGTERM, signal.SIGINT]
         if hasattr(signal, "SIGHUP"):
-            _signals.append(signal.SIGHUP)
-        for _sig in _signals:
+            _signals_to_hook.append(signal.SIGHUP)
+        for _sig in _signals_to_hook:
             try:
-                _loop.add_signal_handler(
-                    _sig, lambda s=_sig: _on_shutdown_signal(s.name),
+                _loop_for_signals.add_signal_handler(
+                    _sig, lambda s=_sig: _on_shutdown_signal(s.name)
                 )
             except (NotImplementedError, RuntimeError, ValueError):
                 pass
     except Exception:
         pass
 
-    # Kill previous — v7.0.1: raises SystemExit(1) if PID lock can't be acquired
-    logger.info("🔪 FORCE-KILL-PREVIOUS")
+    logger.info("🔪 FORCE-KILL-PREVIOUS: بدء الفحص...")
     try:
-        killed = await _force_kill_previous_instance()
-        if killed > 0:
-            logger.warning("🔪 قتلت %d نسخة", killed)
-    except SystemExit:
-        raise
+        _killed = await _force_kill_previous_instance()
+        if _killed > 0:
+            logger.warning("🔪 قتلت %d نسخة قديمة", _killed)
     except Exception as _e:
-        logger.warning("⚠️ kill-previous: %s", _e)
+        logger.warning("⚠️ فشل قتل النسخة القديمة: %s", _e)
 
     if _MARK_PROCESS_START_FN is not None:
         try:
             _MARK_PROCESS_START_FN()
+            logger.info("🕐 mark_process_start()")
         except Exception:
             pass
 
@@ -2774,24 +2146,31 @@ async def main():
 
     bot_token = _get_bot_token()
     if not bot_token:
-        logger.error("❌ BOT_TOKEN غير محدّد")
+        logger.error("❌ BOT_TOKEN غير محدّد أو غير صالح")
         raise SystemExit(1)
 
     logger.info("🌿 %s", CONFIG.BOT_NAME)
     logger.info("👨‍💼 المالك: %s", CONFIG.PRIMARY_OWNER_ID)
+
     logger.info(
-        "📦 v7.0.1 | kill_prev=on | init_retry=%dx%.0fs | webhook_force=on | "
-        "diag_incoming=%r | detectors=%s | layers=%d",
-        _INIT_MAX_ATTEMPTS, _INIT_TIMEOUT_SEC,
-        _DIAG_INCOMING, _SPAM_DETECTOR_VERSION or "N/A",
+        "📦 bot.py: v5.7.13 | kill_prev=on | init_retry=on | webhook_force=on | "
+        "webhook_verify=on | diag_incoming=%r | "
+        "detectors=%s | layers=%d | fallback_hostname=%r | "
+        "allow_polling_env=%r",
+        _DIAG_INCOMING,
+        _SPAM_DETECTOR_VERSION or "N/A",
         _SPAM_DETECTOR_LAYERS_COUNT,
+        _FALLBACK_HOSTNAME,
+        os.getenv("ALLOW_POLLING", ""),
     )
 
     if not _verify_command_handlers():
-        logger.error("❌ CommandHandlers مفقودة — الخروج")
+        logger.error("❌ دوال الأوامر الحرجة مفقودة — الخروج")
+        raise SystemExit(1)
+    if not _verify_db_config():
+        logger.error("❌ إعدادات DB — الخروج")
         raise SystemExit(1)
 
-    # DB init
     t0 = time.monotonic()
     if hasattr(DB, 'pre_initialize'):
         await DB.pre_initialize()
@@ -2802,14 +2181,16 @@ async def main():
     try:
         _ping = await DB.fetchone("SELECT 1 AS ok")
         logger.info("✅ DB ping: %s", _ping)
+        logger.info("✅ DB type (post-init): %s",
+                    str(getattr(DB, "DB_TYPE", "unknown")).upper())
     except Exception as _e:
-        logger.warning("⚠️ DB ping: %s", _e)
+        logger.warning("⚠️ DB ping (non-fatal): %s", _e)
 
     try:
         if hasattr(DB, "migrate_reminders_columns"):
             await DB.migrate_reminders_columns()
     except Exception as _e:
-        logger.warning("⚠️ migrate_reminders: %s", _e)
+        logger.warning("⚠️ migrate_reminders_columns: %s", _e)
 
     for dev_id in CONFIG.DEVELOPER_IDS:
         try:
@@ -2821,13 +2202,12 @@ async def main():
     except Exception:
         pass
 
-    # Translations
     t1 = time.monotonic()
     KeyboardFactory.load_config()
-    langs = TranslationManager.get_available_languages()
-    for lang in langs:
+    available_langs = TranslationManager.get_available_languages()
+    for lang in available_langs:
         TranslationManager.load_translation(lang)
-    logger.info("✅ %d لغة في %.2fs", len(langs), time.monotonic() - t1)
+    logger.info("✅ %d لغة في %.2fs", len(available_langs), time.monotonic() - t1)
 
     t_warmup = time.monotonic()
     try:
@@ -2838,34 +2218,51 @@ async def main():
 
     port = _resolve_port()
     hostname = _resolve_hostname()
+
     _allow_polling = os.getenv("ALLOW_POLLING", "0").strip() == "1"
 
-    if not hostname and not _allow_polling:
-        logger.error("❌ FATAL: لا hostname ولا ALLOW_POLLING=1")
-        raise SystemExit(1)
-    if hostname:
-        logger.info("🌐 WEBHOOK mode: %s", hostname)
-    else:
-        logger.warning("⚠️ POLLING mode")
+    if not hostname:
+        if not _allow_polling:
+            logger.error(
+                "❌ FATAL: Webhook hostname لا يمكن تحديده.\n"
+                "   الحل: RENDER_EXTERNAL_HOSTNAME أو FALLBACK_HOSTNAME\n"
+                "   أو (غير موصى): ALLOW_POLLING=1\n"
+                "   رفض الإقلاع."
+            )
+            raise SystemExit(1)
 
-    # Build app
+    if hostname:
+        logger.info("🌐 WEBHOOK mode FORCED: hostname=%s", hostname)
+    else:
+        logger.warning("⚠️ POLLING mode (ALLOW_POLLING=1)")
+
     t_app = time.monotonic()
-    req_pool, upd_pool = _build_http_request_pools()
-    builder = Application.builder().token(bot_token)
-    if req_pool is not None and upd_pool is not None:
-        builder = builder.request(req_pool).get_updates_request(upd_pool)
-    app = builder.build()
+    _req_pool, _upd_pool = _build_http_request_pools()
+    _app_builder = Application.builder().token(bot_token)
+    if _req_pool is not None and _upd_pool is not None:
+        _app_builder = (
+            _app_builder
+            .request(_req_pool)
+            .get_updates_request(_upd_pool)
+        )
+        logger.info("🚀 HTTPXRequest pools applied (req=32/upd=8)")
+
+    app = _app_builder.build()
     app.bot_data['start_time'] = time.monotonic()
 
     if hostname:
-        await _wait_for_telegram_release(app=app)
+        logger.info("⏳ انتظار Telegram release (webhook mode)...")
+        _rel_ok = await _wait_for_telegram_release()
+        if not _rel_ok:
+            logger.warning("⚠️ Telegram release timeout — app.initialize سيعيد المحاولة")
 
-    if not await _initialize_with_retry(app):
-        logger.error("❌ init failed — الخروج")
+    _init_ok = await _initialize_with_retry(app)
+    if not _init_ok:
+        logger.error("❌ فشل app.initialize() — الخروج")
         try:
             await asyncio.wait_for(app.shutdown(), timeout=5.0)
-        except Exception:
-            pass
+        except Exception as _sd_e:
+            logger.debug("app.shutdown() after init failure: %s", _sd_e)
         raise SystemExit(1)
     logger.info("⏱️ App init: %.2fs", time.monotonic() - t_app)
 
@@ -2876,30 +2273,38 @@ async def main():
         if "already running" not in str(_e).lower():
             raise
 
-    _metrics.record("started_at", time.monotonic())
-    await _warmup_telegram_api(app)
+    try:
+        _BOT_METRICS["started_at"] = time.monotonic()
+    except Exception:
+        pass
 
-    # Detectors warmup
+    _tg_warm_ok = await _warmup_telegram_api(app)
+    if not _tg_warm_ok:
+        logger.info("ℹ️ Telegram API warmup لم ينجح")
+
     if _HAS_WARMUP_DETECTORS and _warmup_detectors_pool_fn is not None:
         try:
+            logger.info("🔥 warmup_detectors_pool: blocking...")
             _warm_t0 = time.monotonic()
-            await asyncio.wait_for(_warmup_detectors_pool_fn(), timeout=30.0)
-            logger.info("✅ detectors ready in %.1fs",
-                        time.monotonic() - _warm_t0)
+            _warm_result = await asyncio.wait_for(
+                _warmup_detectors_pool_fn(), timeout=30.0
+            )
+            if _warm_result:
+                logger.info("✅ detectors ready in %.1fs", time.monotonic() - _warm_t0)
         except asyncio.TimeoutError:
-            logger.warning("⚠️ detectors warmup timeout")
+            logger.warning("⚠️ detectors warmup timeout (30s)")
         except asyncio.CancelledError:
             raise
         except Exception as _we:
             logger.warning("⚠️ detectors warmup: %s", _we)
 
     try:
-        import gc as _gc
-        _gc.collect()
+        import gc as _gc_t
+        _gc_t.collect()
+        logger.info("🧹 gc.collect()")
     except Exception:
         pass
 
-    # Managed bots
     try:
         from managed_bots_runner import start_all_managed_bots
         _managed_apps = await start_all_managed_bots()
@@ -2913,13 +2318,13 @@ async def main():
 
     try:
         _register_message_shutdown(app)
+        logger.info("✅ message shutdown handlers")
     except Exception:
         pass
 
     if _GROUP_LOG_INIT_AVAILABLE and _GROUP_LOG_AVAILABLE:
         _init_group_log_instance(app)
 
-    # Bot commands
     for _scope in (
         BotCommandScopeDefault(),
         BotCommandScopeAllPrivateChats(),
@@ -2931,132 +2336,139 @@ async def main():
             pass
 
     try:
-        await app.bot.set_my_commands(
-            PUBLIC_COMMANDS, scope=BotCommandScopeAllPrivateChats(),
-        )
+        await app.bot.set_my_commands(PUBLIC_COMMANDS, scope=BotCommandScopeAllPrivateChats())
         logger.info("✅ %d أمراً عاماً", len(PUBLIC_COMMANDS))
     except Exception as _e:
-        logger.error("❌ أوامر عامة: %s", _e)
+        logger.error("❌ الأوامر العامة: %s", _e)
 
     try:
-        await app.bot.set_my_commands(
-            GROUP_COMMANDS, scope=BotCommandScopeAllGroupChats(),
-        )
+        await app.bot.set_my_commands(GROUP_COMMANDS, scope=BotCommandScopeAllGroupChats())
         logger.info("✅ %d أمراً للمجموعات", len(GROUP_COMMANDS))
     except Exception as _e:
-        logger.error("❌ أوامر مجموعات: %s", _e)
+        logger.error("❌ أوامر المجموعات: %s", _e)
 
     _admin_ids = await _collect_admin_ids()
-    _admin_full = PUBLIC_COMMANDS + ADMIN_COMMANDS
+    _admin_full_list = PUBLIC_COMMANDS + ADMIN_COMMANDS
     logger.info("👥 الأدمن: %d", len(_admin_ids))
     app.bot_data["admin_ids"] = set(_admin_ids)
 
-    for _aid in _admin_ids:
+    for _admin_id in _admin_ids:
         try:
-            await app.bot.set_my_commands(
-                _admin_full, scope=BotCommandScopeChat(chat_id=_aid),
-            )
+            await app.bot.set_my_commands(_admin_full_list, scope=BotCommandScopeChat(chat_id=_admin_id))
         except Exception:
             pass
 
-    # DIAG
     if _DIAG_INCOMING and _HAS_TYPE_HANDLER:
         try:
-            app.add_handler(TypeHandler(_TgUpdate, _diag_incoming), group=-100)
-            logger.info("🔔 DIAG_INCOMING=1 registered")
+            app.add_handler(
+                TypeHandler(_TgUpdate, _diag_incoming),
+                group=-100,
+            )
+            logger.info(
+                "🔔 DIAG_INCOMING=1 — TypeHandler تشخيصي مُسجّل "
+                "(group=-100, Update, log level=info)."
+            )
         except Exception as _e:
-            logger.error("❌ DIAG handler: %s", _e)
+            logger.error("❌ فشل تسجيل DIAG handler: %s", _e)
+    elif _DIAG_INCOMING and not _HAS_TYPE_HANDLER:
+        logger.warning("⚠️ DIAG_INCOMING=1 لكن TypeHandler غير متاح")
 
-    # Group handlers
-    _group_msg_filter = (
-        _GROUP_CHAT_FILTER
-        & filters.UpdateType.MESSAGE
-        & ~filters.COMMAND
-        & ~filters.StatusUpdate.ALL
-    )
+    _group_msg_filter = _GROUP_CHAT_FILTER & filters.UpdateType.MESSAGE & ~filters.COMMAND
+
     try:
-        _hg = _wrap_handler_with_timing(MessageHandlers.handle_group, "handle_group")
-        app.add_handler(MessageHandler(_group_msg_filter, _hg), group=-1)
+        _hg_timed = _wrap_handler_with_timing(MessageHandlers.handle_group, "handle_group")
+        app.add_handler(MessageHandler(_group_msg_filter, _hg_timed), group=-1)
+        logger.info("✅ handle_group [timed]")
     except Exception as _e:
         logger.error("❌ handle_group: %s", _e)
 
     if hasattr(MessageHandlers, "handle_edited"):
         try:
-            _he = _wrap_handler_with_timing(
-                MessageHandlers.handle_edited, "handle_edited",
-            )
+            _he_timed = _wrap_handler_with_timing(MessageHandlers.handle_edited, "handle_edited")
             app.add_handler(
-                MessageHandler(
-                    _GROUP_CHAT_FILTER & filters.UpdateType.EDITED_MESSAGE, _he,
-                ),
+                MessageHandler(_GROUP_CHAT_FILTER & filters.UpdateType.EDITED_MESSAGE, _he_timed),
                 group=-1,
             )
+            logger.info("✅ handle_edited [timed]")
         except Exception as _e:
             logger.error("❌ handle_edited: %s", _e)
 
     try:
-        _hs = _wrap_handler_with_timing(
-            MessageHandlers.handle_service, "handle_service",
-        )
+        _hs_timed = _wrap_handler_with_timing(MessageHandlers.handle_service, "handle_service")
         app.add_handler(
-            MessageHandler(filters.StatusUpdate.ALL & _GROUP_CHAT_FILTER, _hs),
+            MessageHandler(filters.StatusUpdate.ALL & _GROUP_CHAT_FILTER, _hs_timed),
             group=-1,
         )
+        logger.info("✅ handle_service [timed]")
     except Exception as _e:
         logger.error("❌ handle_service: %s", _e)
 
-    # Command handlers
-    for _cmd, _attr in [
-        ("start", "start"), ("help", "help_command"),
-        ("trial", "trial"), ("subscribe", "subscribe"),
-        ("support", "support"), ("developer", "developer"),
-        ("stats", "stats"), ("language", "language"),
-        ("contests", "contests"), ("replies", "replies_command"),
-        ("grant", "grant"), ("set_min_interval", "set_min_interval"),
-        ("gift_plans", "gift_plans"), ("redeem_gift", "redeem_gift"),
-        ("syncgroup", "syncgroup"), ("security", "security"),
-        ("panel", "panel"), ("lock", "lock"),
-        ("unlock", "unlock"), ("ban", "ban"),
-        ("mute", "mute"), ("warn", "warn"),
-        ("kick", "kick"), ("restrict", "restrict"),
-        ("unban", "unban"), ("pin", "pin"),
-        ("register_hidden_owner", "register_hidden_owner"),
-        ("remove_hidden_owner", "remove_hidden_owner"),
-        ("add_hidden_admin", "add_hidden_admin"),
-        ("remove_hidden_admin", "remove_hidden_admin"),
-        ("list_hidden_admins", "list_hidden_admins"),
-        ("mood", "mood"), ("admin", "admin"),
-        ("broadcast", "broadcast"), ("set_force", "set_force"),
-        ("set_update_ch", "set_update_ch"), ("set_log_ch", "set_log_ch"),
-        ("add_admin", "add_admin"), ("remove_admin", "remove_admin"),
-        ("export_replies", "export_replies"), ("import_replies", "import_replies"),
-        ("backup", "backup"), ("restore", "restore"),
-        ("auto_publish", "auto_publish"), ("auto_recycle", "auto_recycle"),
-        ("channels", "channels"), ("posts", "posts"),
-        ("db_diag", "db_diag"), ("db_vacuum", "db_vacuum"),
-    ]:
-        _fn = getattr(CommandHandlers, _attr, None)
-        if not callable(_fn):
-            logger.warning("⚠️ /%s: %s مفقودة", _cmd, _attr)
-            continue
+    for _name, _fn in (
+        ("start", CommandHandlers.start),
+        ("help", CommandHandlers.help_command),
+        ("trial", CommandHandlers.trial),
+        ("subscribe", CommandHandlers.subscribe),
+        ("support", CommandHandlers.support),
+        ("developer", CommandHandlers.developer),
+        ("stats", CommandHandlers.stats),
+        ("language", CommandHandlers.language),
+        ("contests", CommandHandlers.contests),
+        ("replies", CommandHandlers.replies_command),
+        ("grant", CommandHandlers.grant),
+        ("set_min_interval", CommandHandlers.set_min_interval),
+        ("gift_plans", CommandHandlers.gift_plans),
+        ("redeem_gift", CommandHandlers.redeem_gift),
+        ("syncgroup", CommandHandlers.syncgroup),
+        ("security", CommandHandlers.security),
+        ("panel", CommandHandlers.panel),
+        ("lock", CommandHandlers.lock),
+        ("unlock", CommandHandlers.unlock),
+        ("ban", CommandHandlers.ban),
+        ("mute", CommandHandlers.mute),
+        ("warn", CommandHandlers.warn),
+        ("kick", CommandHandlers.kick),
+        ("restrict", CommandHandlers.restrict),
+        ("unban", CommandHandlers.unban),
+        ("pin", CommandHandlers.pin),
+        ("register_hidden_owner", CommandHandlers.register_hidden_owner),
+        ("remove_hidden_owner", CommandHandlers.remove_hidden_owner),
+        ("add_hidden_admin", CommandHandlers.add_hidden_admin),
+        ("remove_hidden_admin", CommandHandlers.remove_hidden_admin),
+        ("list_hidden_admins", CommandHandlers.list_hidden_admins),
+        ("mood", CommandHandlers.mood),
+        ("admin", CommandHandlers.admin),
+        ("broadcast", CommandHandlers.broadcast),
+        ("set_force", CommandHandlers.set_force),
+        ("set_update_ch", CommandHandlers.set_update_ch),
+        ("set_log_ch", CommandHandlers.set_log_ch),
+        ("add_admin", CommandHandlers.add_admin),
+        ("remove_admin", CommandHandlers.remove_admin),
+        ("export_replies", CommandHandlers.export_replies),
+        ("import_replies", CommandHandlers.import_replies),
+        ("backup", CommandHandlers.backup),
+        ("restore", CommandHandlers.restore),
+        ("auto_publish", CommandHandlers.auto_publish),
+        ("auto_recycle", CommandHandlers.auto_recycle),
+        ("channels", CommandHandlers.channels),
+        ("posts", CommandHandlers.posts),
+        ("db_diag", CommandHandlers.db_diag),
+        ("db_vacuum", CommandHandlers.db_vacuum),
+    ):
         try:
-            app.add_handler(CommandHandler(_cmd, _fn))
+            app.add_handler(CommandHandler(_name, _fn))
         except Exception as _e:
-            logger.warning("⚠️ /%s: %s", _cmd, _e)
+            logger.warning("⚠️ /%s: %s", _name, _e)
 
-    # Aliases
-    for _alias in ("databases", "files", "versions"):
+    for _alias_cmd in ("databases", "files", "versions"):
         try:
-            app.add_handler(CommandHandler(_alias, _cmd_analytics_alias))
-        except Exception:
-            pass
+            app.add_handler(CommandHandler(_alias_cmd, _cmd_analytics_alias))
+            logger.info("✅ /%s → _cmd_analytics_alias", _alias_cmd)
+        except Exception as _e:
+            logger.warning("⚠️ /%s alias: %s", _alias_cmd, _e)
 
-    # /ping, /posts_stats
     if _admin_ids:
         try:
-            app.add_handler(CommandHandler(
-                "ping", cmd_ping, filters=filters.User(_admin_ids),
-            ))
+            app.add_handler(CommandHandler("ping", cmd_ping, filters=filters.User(_admin_ids)))
         except Exception:
             app.add_handler(CommandHandler("ping", cmd_ping))
     else:
@@ -3064,44 +2476,44 @@ async def main():
 
     if _admin_ids:
         try:
-            app.add_handler(CommandHandler(
-                "posts_stats", cmd_posts_stats, filters=filters.User(_admin_ids),
-            ))
+            app.add_handler(CommandHandler("posts_stats", cmd_posts_stats, filters=filters.User(_admin_ids)))
         except Exception:
             app.add_handler(CommandHandler("posts_stats", cmd_posts_stats))
     else:
         app.add_handler(CommandHandler("posts_stats", cmd_posts_stats))
 
-    # Optional
     try:
         app.add_handler(CommandHandler("autoblocked", _handle_autoblocked_command))
     except Exception:
         pass
+
     if _HAS_DB_IDLE_CMD and _handle_db_idle_command is not None:
         try:
             app.add_handler(CommandHandler("db_idle", _handle_db_idle_command))
         except Exception:
             pass
+
     if _HAS_CACHE_STATS_CMD and _handle_cache_stats_command is not None:
         try:
             app.add_handler(CommandHandler("cache_stats", _handle_cache_stats_command))
         except Exception:
             pass
+
     if _cmd_fullhealth is not None:
         try:
             app.add_handler(CommandHandler("fullhealth", _cmd_fullhealth))
         except Exception:
             pass
+
     if _cmd_latency is not None:
         try:
             app.add_handler(CommandHandler("latency", _cmd_latency))
         except Exception:
             pass
+
     if hasattr(MessageHandlers, "handle_cancel"):
         try:
-            app.add_handler(
-                CommandHandler("cancel", MessageHandlers.handle_cancel), group=1,
-            )
+            app.add_handler(CommandHandler("cancel", MessageHandlers.handle_cancel), group=1)
         except Exception:
             pass
 
@@ -3109,30 +2521,31 @@ async def main():
         try:
             register_maintenance_commands(app)
         except Exception as _e:
-            logger.error("❌ maintenance cmds: %s", _e)
+            logger.error("❌ db_maintenance_commands: %s", _e)
 
-    # Payment
     app.add_handler(PreCheckoutQueryHandler(pre_checkout))
     app.add_handler(MessageHandler(
         filters.SUCCESSFUL_PAYMENT & filters.ChatType.PRIVATE,
         successful_payment,
     ))
 
-    # Features
     try:
         register_channels_list_handlers(app)
     except Exception as e:
         logger.error("❌ [1/6] channels_list: %s", e)
+
     if _NAV_FIX_AVAILABLE and callable(register_nav_fix):
         try:
             register_nav_fix(app)
         except Exception as e:
             logger.error("❌ [2/6] NAV_FIX: %s", e)
+
     if _CH_DELETE_AVAILABLE and callable(register_delete_confirmation):
         try:
             register_delete_confirmation(app)
         except Exception as _e:
             logger.error("❌ [3/6] channels_delete: %s", _e)
+
     if _GROUP_LOG_AVAILABLE:
         try:
             register_group_log_handlers(app)
@@ -3144,38 +2557,35 @@ async def main():
         try:
             if _register_analytics_handlers(app):
                 _analytics_registered = True
-                logger.info("✅ [5/6] analytics")
+                logger.info("✅ [5/6] handlers_analytics")
         except Exception as _e:
             logger.error("❌ [5/6] analytics: %s", _e)
 
-    if not _analytics_registered and (
-        _ANALYTICS_HANDLERS_AVAILABLE
-        and _show_analytics_menu is not None
-        and _handle_analytics_callback is not None
-    ):
-        try:
-            app.add_handler(CallbackQueryHandler(
-                _show_analytics_menu, pattern=r"^admin_analytics$",
-            ))
-            app.add_handler(CallbackQueryHandler(
-                _handle_analytics_callback,
-                pattern=(
-                    r"^(growth_30d_btn|top_channels_btn|publish_stats_btn|"
-                    r"channels_rate_btn|subscriptions_btn|pool_live_btn|"
-                    r"slow_queries_btn|export_excel_btn|"
-                    r"full_health_btn|latency_btn|"
-                    r"databases_btn|autotune_btn|files_btn|"
-                    r"refresh_btn)$"
-                ),
-            ))
-        except Exception as _e:
-            logger.error("❌ analytics fallback: %s", _e)
+    if not _analytics_registered:
+        if (_ANALYTICS_HANDLERS_AVAILABLE and _show_analytics_menu is not None
+                and _handle_analytics_callback is not None):
+            try:
+                app.add_handler(CallbackQueryHandler(_show_analytics_menu, pattern=r"^admin_analytics$"))
+                app.add_handler(CallbackQueryHandler(
+                    _handle_analytics_callback,
+                    pattern=(
+                        r"^(growth_30d_btn|top_channels_btn|publish_stats_btn|"
+                        r"channels_rate_btn|subscriptions_btn|pool_live_btn|"
+                        r"slow_queries_btn|export_excel_btn|"
+                        r"full_health_btn|latency_btn|"
+                        r"databases_btn|autotune_btn|files_btn|"
+                        r"refresh_btn)$"
+                    ),
+                ))
+            except Exception as _e:
+                logger.error("❌ [5/6] analytics fallback: %s", _e)
 
     if not _analytics_registered:
         try:
             app.add_handler(CommandHandler("analytics", _cmd_analytics_alias))
-        except Exception:
-            pass
+            logger.info("✅ /analytics → _cmd_analytics_alias (fallback)")
+        except Exception as _e:
+            logger.warning("⚠️ /analytics fallback: %s", _e)
 
     try:
         from handlers.handlers_managed_bots import register_managed_bots_handlers
@@ -3185,23 +2595,21 @@ async def main():
 
     try:
         app.add_handler(CallbackQueryHandler(CallbackHandlers.handle))
-        logger.info("✅ [6/6] callback")
+        logger.info("✅ [6/6] CallbackHandlers.handle")
     except Exception as _e:
         logger.error("❌ [6/6] callback: %s", _e)
 
     try:
-        _hp = _wrap_handler_with_timing(
-            MessageHandlers.handle_private, "handle_private",
-        )
+        _hp_timed = _wrap_handler_with_timing(MessageHandlers.handle_private, "handle_private")
         app.add_handler(MessageHandler(
             (filters.TEXT | filters.PHOTO | filters.VIDEO | filters.Document.ALL
              | filters.AUDIO | filters.VOICE | filters.ANIMATION
              | filters.Sticker.ALL | filters.VIDEO_NOTE)
-            & filters.ChatType.PRIVATE
-            & ~filters.COMMAND
+            & filters.ChatType.PRIVATE & ~filters.COMMAND
             & ~filters.SUCCESSFUL_PAYMENT,
-            _hp,
+            _hp_timed,
         ))
+        logger.info("✅ handle_private [timed]")
     except Exception as _e:
         logger.error("❌ handle_private: %s", _e)
 
@@ -3219,9 +2627,8 @@ async def main():
         except Exception as _e:
             logger.error("❌ MembershipHandler: %s", _e)
 
-    # Background tasks
     tasks: List[asyncio.Task] = []
-    _bg_specs: List[Tuple[str, Any, tuple]] = [
+    _bg_task_specs: List[Tuple[str, Any, tuple]] = [
         ("keep_alive", keep_alive, ()),
         ("auto_publish", BackgroundTasks.auto_publish, (app.bot,)),
         ("auto_backup", BackgroundTasks.auto_backup, ()),
@@ -3239,16 +2646,15 @@ async def main():
         ("pool_health_monitor", pool_health_monitor, ()),
         ("admin_logs_cleanup", cleanup_admin_logs_periodically, ()),
         ("removed_channels_cleanup", cleanup_removed_channels_periodically, ()),
-        ("metrics_autosave", _metrics.auto_save, (30.0,)),
     ]
     if _periodic_cleanup_callable is not None:
-        _bg_specs.append(("periodic_cleanup", _periodic_cleanup_callable, ()))
+        _bg_task_specs.append(("periodic_cleanup", _periodic_cleanup_callable, ()))
     else:
-        logger.warning("⚠️ periodic_cleanup: skipped")
+        logger.warning("⚠️ periodic_cleanup: skipped (لا callable صالح)")
 
-    for _name, _fn, _args in _bg_specs:
+    for _name, _fn, _args in _bg_task_specs:
         tasks.append(asyncio.create_task(
-            run_task_with_retry(_fn, *_args, task_name=_name),
+            run_task_with_retry(_fn, *_args, task_name=_name)
         ))
 
     if _MAINTENANCE_AVAILABLE and callable(_maintenance_loop):
@@ -3257,9 +2663,7 @@ async def main():
         except (TypeError, ValueError):
             owner_id = None
         tasks.append(asyncio.create_task(
-            run_task_with_retry(
-                _maintenance_loop, app.bot, owner_id, task_name="maintenance",
-            ),
+            run_task_with_retry(_maintenance_loop, app.bot, owner_id, task_name="maintenance")
         ))
 
     logger.info("✅ %d مهمة خلفية", len(tasks))
@@ -3269,64 +2673,46 @@ async def main():
         if hostname:
             webhook_url = f"https://{hostname}/{bot_token}"
             logger.info("🔗 Webhook: %s", _safe_url(webhook_url))
+
             await app.bot.delete_webhook(drop_pending_updates=True)
-
-            # v7.0.1: verify no competing poller BEFORE setting webhook.
-            # This is the ONLY place where get_updates can distinguish
-            # "another poller" from "our own webhook" — hence ordering.
-            if not await _assert_no_polling_conflict(app):
-                logger.critical(
-                    "🚨 poller منافس يستخدم نفس token — أوقف الـ container "
-                    "القديم على Render (Dashboard → Service → Suspend). "
-                    "سيُستمر بالبدء لكن قد تظهر أخطاء Conflict في السجلات."
-                )
-
             await app.bot.set_webhook(
                 url=webhook_url,
                 drop_pending_updates=True,
                 allowed_updates=ALLOWED_UPDATES,
                 secret_token=(getattr(CONFIG, "WEBHOOK_SECRET", "") or None),
             )
-            logger.info("✅ Webhook set")
+            logger.info("✅ Webhook تم التعيين")
+
             try:
                 _wb_info = await app.bot.get_webhook_info()
                 _wb_url = getattr(_wb_info, "url", "") or ""
-                _expected = f"https://{hostname}/"
-                if _wb_url and _wb_url.startswith(_expected):
-                    logger.info("✅ WEBHOOK VERIFIED: %s<TOKEN>", _expected)
+                _expected_prefix = f"https://{hostname}/"
+                if _wb_url and _wb_url.startswith(_expected_prefix):
+                    logger.info("✅ WEBHOOK VERIFIED: %s<TOKEN> (pending=%d)",
+                                _expected_prefix,
+                                getattr(_wb_info, "pending_update_count", 0))
                 else:
-                    logger.error("❌ WEBHOOK MISMATCH: expected=%r got=%r",
-                                 _expected, _redact_token(_wb_url)[:80] if _wb_url else "(empty)")
+                    logger.error("❌ WEBHOOK MISMATCH! expected=%r got=%r",
+                                 _expected_prefix,
+                                 _redact_token(_wb_url)[:80] if _wb_url else "(empty)")
             except Exception as _wbv_e:
-                logger.warning("⚠️ webhook verify: %s", _wbv_e)
+                logger.warning("⚠️ Webhook verification failed: %s", _wbv_e)
 
             runner = await setup_webhook(app, port)
-            # Register health + metrics endpoints
-            try:
-                app_web = getattr(runner, "app", None)
-                if app_web is None and hasattr(runner, "_app"):
-                    app_web = runner._app
-                if app_web is not None:
-                    app_web.router.add_get("/health", _health_handler)
-                    app_web.router.add_get("/metrics", _metrics_handler)
-                    logger.info("✅ /health + /metrics registered")
-            except Exception as _e:
-                logger.warning("⚠️ register endpoints: %s", _e)
-
             await _run_post_init_hooks(app)
 
             try:
                 async with aiohttp.ClientSession() as session:
                     async with session.get(f"http://127.0.0.1:{port}/health") as resp:
                         await resp.read()
-                logger.info("🔥 server warm")
+                logger.info("🔥 تم تسخين الخادم")
             except Exception:
                 pass
 
             watcher_task = None
             try:
                 watcher_task = asyncio.create_task(
-                    _watch_runner(runner, _shutdown_event, port),
+                    _watch_runner(runner, _shutdown_event, port)
                 )
                 await _shutdown_event.wait()
                 logger.info("📴 إغلاق...")
@@ -3346,13 +2732,10 @@ async def main():
                 except Exception:
                     pass
         else:
-            logger.warning("⚠️ POLLING mode")
+            logger.warning("⚠️ POLLING mode (ALLOW_POLLING=1)")
             runner = await setup_webhook(app, port)
             try:
-                _app_running = (
-                    getattr(app, "running", False)
-                    or getattr(app, "_running", False)
-                )
+                _app_running = (getattr(app, "running", False) or getattr(app, "_running", False))
                 if not _app_running:
                     raise RuntimeError("app.running=False")
                 _polling_state["running"] = True
@@ -3374,13 +2757,6 @@ async def main():
                 except Exception:
                     pass
     finally:
-        # Shutdown ordering
-        try:
-            from managed_bots_runner import stop_all_managed_bots
-            await stop_all_managed_bots(timeout=15.0)
-        except Exception as _mb_e:
-            logger.warning("⚠️ managed_bots stop: %s", _mb_e)
-
         try:
             await _shutdown_group_log()
         except Exception:
@@ -3424,6 +2800,7 @@ async def main():
                 await stop_weekly_diagnostic_task(timeout=3.0)
             except Exception:
                 pass
+
         if _MAINT_CMDS_AVAILABLE and callable(stop_auto_vacuum_task):
             try:
                 await stop_auto_vacuum_task(timeout=3.0)
@@ -3469,9 +2846,10 @@ async def main():
                 pass
 
         try:
-            _metrics.save()
-        except Exception:
-            pass
+            from managed_bots_runner import stop_all_managed_bots
+            await stop_all_managed_bots(timeout=15.0)
+        except Exception as _mb_e:
+            logger.warning("⚠️ managed_bots shutdown: %s", _mb_e)
 
         try:
             await _shutdown_db_pool(timeout=5.0)
@@ -3480,12 +2858,9 @@ async def main():
 
         _remove_pid_file()
 
-    logger.info("👋 انتهت دورة الحياة (%.2fs)", time.monotonic() - t_start)
+    logger.info("👋 انتهت دورة حياة البوت (%.2fs)", time.monotonic() - t_start)
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-# SECTION 57 · ENTRYPOINT
-# ═══════════════════════════════════════════════════════════════════════════
 if __name__ == "__main__":
     _loop = None
     try:
@@ -3518,13 +2893,8 @@ if __name__ == "__main__":
                         _t.cancel()
                     try:
                         _loop.run_until_complete(
-                            asyncio.wait_for(
-                                asyncio.gather(*pending, return_exceptions=True),
-                                timeout=_PENDING_TASKS_SHUTDOWN_TIMEOUT,
-                            )
+                            asyncio.gather(*pending, return_exceptions=True)
                         )
-                    except asyncio.TimeoutError:
-                        logger.warning("⚠️ %d مهمة لم تنتهِ", len(pending))
                     except Exception:
                         pass
                 try:
