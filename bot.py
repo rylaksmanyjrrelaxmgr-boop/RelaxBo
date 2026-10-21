@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-🌿 Relax Manager – البوت الرئيسي (bot.py v5.7.14-GIL-DIAG-READY)
+🌿 Relax Manager – البوت الرئيسي (bot.py v5.7.15-AUTO-HOSTNAME)
 ================================================================================
-🆕 v5.7.14 (GIL-DIAG-READY — فوق v5.7.13):
-    🔴 FIX-17: `faulthandler` instrumentation لتشخيص GIL (يُفعّل فقط إذا طُلب).
-    🔴 FIX-18: `_wrap_handler_with_timing` — يقرأ من faulthandler dump.
-    🟢 محفوظ: كل إصلاحات v5.7.13 (P0-FIX-1..3, P1-FIX-4..7, P2-FIX-8..10, P3-FIX-11..16).
+🆕 v5.7.15 (AUTO-HOSTNAME — فوق v5.7.14):
+    🔴 FIX-19: حذف hardcoded "relaxbo-78m4.onrender.com" من _FALLBACK_HOSTNAME.
+              → الاعتماد التام على env vars (RENDER_*, RAILWAY_*, HEROKU_*, إلخ).
+              → فشل صريح إن لم يوجد أي hostname بدلاً من استخدام قيمة قديمة خاطئة.
+    🟢 محفوظ: كل إصلاحات v5.7.14 (FIX-17..18) و v5.7.13 (P0..P3).
 ================================================================================
 """
 
@@ -485,16 +486,15 @@ _PID_FILE_PATH = "/app/.bot.pid"
 _KILL_TIMEOUT_SEC = 5.0
 _TELEGRAM_RELEASE_TIMEOUT_SEC = 15.0
 
-_FALLBACK_HOSTNAME = (
-    os.getenv("FALLBACK_HOSTNAME", "") or "relaxbo-78m4.onrender.com"
-).strip()
+# 🆕 v5.7.15 (AUTO-HOSTNAME): لا hardcoded — اعتماد على env + RENDER_EXTERNAL_URL
+_FALLBACK_HOSTNAME = (os.getenv("FALLBACK_HOSTNAME", "")).strip()
 
-logger.info("🔧 v5.7.14 init: _FALLBACK_HOSTNAME=%r", _FALLBACK_HOSTNAME)
-logger.info("🔧 v5.7.14 init: RENDER_EXTERNAL_HOSTNAME=%r",
+logger.info("🔧 v5.7.15 init: _FALLBACK_HOSTNAME=%r", _FALLBACK_HOSTNAME)
+logger.info("🔧 v5.7.15 init: RENDER_EXTERNAL_HOSTNAME=%r",
             os.getenv("RENDER_EXTERNAL_HOSTNAME", ""))
-logger.info("🔧 v5.7.14 init: RENDER_EXTERNAL_URL=%r",
+logger.info("🔧 v5.7.15 init: RENDER_EXTERNAL_URL=%r",
             os.getenv("RENDER_EXTERNAL_URL", ""))
-logger.info("🔧 v5.7.14 init: ALLOW_POLLING=%r",
+logger.info("🔧 v5.7.15 init: ALLOW_POLLING=%r",
             os.getenv("ALLOW_POLLING", ""))
 
 def _read_pid_file() -> Optional[int]:
@@ -1762,7 +1762,7 @@ def _resolve_hostname() -> Optional[str]:
     if heroku_app:
         return f"{heroku_app}.herokuapp.com"
     if _FALLBACK_HOSTNAME:
-        logger.warning("🚨 NO HOSTNAME — HARDCODED fallback: %s", _FALLBACK_HOSTNAME)
+        logger.warning("🚨 NO HOSTNAME — FALLBACK_HOSTNAME (env): %s", _FALLBACK_HOSTNAME)
         return _FALLBACK_HOSTNAME
     logger.error("❌ FATAL: no hostname and _FALLBACK_HOSTNAME empty")
     return None
@@ -2170,7 +2170,7 @@ async def main():
     logger.info("👨‍💼 المالك: %s", CONFIG.PRIMARY_OWNER_ID)
 
     logger.info(
-        "📦 bot.py: v5.7.14 | kill_prev=on | init_retry=on | webhook_force=on | "
+        "📦 bot.py: v5.7.15 | kill_prev=on | init_retry=on | webhook_force=on | "
         "webhook_verify=on | diag_incoming=%r | "
         "detectors=%s | layers=%d | fallback_hostname=%r | "
         "allow_polling_env=%r | faulthandler=%s",
