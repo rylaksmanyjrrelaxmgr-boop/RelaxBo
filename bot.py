@@ -5,25 +5,8 @@
 ================================================================================
 🆕 v5.7.14 (GIL-DIAG-READY — فوق v5.7.13):
     🔴 FIX-17: `faulthandler` instrumentation لتشخيص GIL.
-        السبب: `traceback.extract_stack()` داخل `finally` لا يعمل — المكدّس
-        في تلك اللحظة هو مكدّس asyncio فقط، لا الكود الذي حجب.
-        الحل: `faulthandler.dump_traceback_later(2s, repeat=True, file=fd)`
-        أثناء تنفيذ كل handler. يعمل بـ SIGALRM على مستوى OS فيقاطع
-        حتى C-extensions (re, hashlib, json) التي لا تُحرّر GIL.
-        الإخراج: `/app/logs/gil_blocks.log` (كل stack dump).
-    🔴 FIX-18: `_wrap_handler_with_timing` — يقرأ من faulthandler dump
-        عند SLOW handler بدل `traceback.extract_stack()` المكسور.
-    🟢 محفوظ: كل إصلاحات v5.7.13.
-
-🆕 v5.7.13 (FULL-AUDIT-FIXED) — محفوظ:
-    🔴 P0-FIX-1: `_run_post_init_hooks` — إزالة الاستدعاء اليدوي الخاطئ.
-    🔴 P0-FIX-2: `_run_post_stop_hooks` — إبطال `_post_stop` الداخلية.
-    🔴 P0-FIX-3: `_watch_runner` — التصفير فقط عند 2xx/3xx.
-    🟠 P1-FIX-4: `_collect_admin_ids` — `break` فقط عند وجود عناصر.
-    🟠 P1-FIX-5: `pre_checkout` — إغلاق ثغرة تخطي المبلغ.
-    🟠 P1-FIX-6: `successful_payment` — إشعار المطور عند الفشل.
-    🟠 P1-FIX-7: `_pid_is_bot_process` — مقارنة cwd.
-    🟡 P2-FIX-8..16: token regex، cleanup coroutine، etc.
+    🔴 FIX-18: `_wrap_handler_with_timing` — يقرأ من faulthandler dump.
+    🟢 محفوظ: كل إصلاحات v5.7.13 (P0-FIX-1..3, P1-FIX-4..7, P2-FIX-8..10, P3-FIX-11..16).
 ================================================================================
 """
 
@@ -441,7 +424,6 @@ logging.basicConfig(
 for _noisy in ("httpx", "httpcore", "telegram.request", "telegram.ext.ExtBot", "aiohttp.access"):
     logging.getLogger(_noisy).setLevel(logging.WARNING)
 
-# 🟢 v5.7.12: logger باسم ثابت لتفادي ازدواج عند إعادة الاستيراد
 logger = logging.getLogger("relax_bot")
 
 # ═══════════════════════════════════════════════════════════════════
@@ -452,12 +434,6 @@ _gil_diag_fd: Optional[int] = None
 _GIL_DIAG_ENABLED = False
 
 def _init_faulthandler() -> bool:
-    """
-    🔴 v5.7.14 FIX-17: تفعيل faulthandler → ملف.
-    يعمل بـ SIGALRM على مستوى OS — يقاطع حتى C-extensions (re, hashlib)
-    التي لا تُحرّر GIL. هذا هو الأداة الوحيدة التي تُظهر stack الحجب
-    الحقيقي عند sync handlers.
-    """
     global _gil_diag_fd, _GIL_DIAG_ENABLED
     try:
         _dir = os.path.dirname(_GIL_DIAG_LOG)
@@ -479,7 +455,6 @@ def _init_faulthandler() -> bool:
         return False
 
 def _shutdown_faulthandler() -> None:
-    """إيقاف faulthandler وإغلاق الملف."""
     global _gil_diag_fd, _GIL_DIAG_ENABLED
     try:
         faulthandler.cancel_dump_traceback_later()
@@ -826,8 +801,6 @@ _GIL_LAG_ALERT_INTERVAL_SEC = 30.0
 _GIL_LAG_BLOCKED_CUMULATIVE_WARN_MS = 5000.0
 _HANDLER_SLOW_WARN_MS = 3000.0
 _HANDLER_INFO_MS = 1500.0
-
-# 🔴 v5.7.14: عتبة تفعيل faulthandler أثناء تنفيذ handler
 _FAULTHANDLER_DUMP_INTERVAL_SEC = 2.0
 
 _ADMIN_GUARD_WARNED = False
@@ -865,10 +838,6 @@ def record_bot_metric(key: str, value: Any = 1) -> None:
         pass
 
 def _read_gil_dump_tail(max_bytes: int = 3000) -> str:
-    """
-    🔴 v5.7.14 FIX-18: يقرأ آخر part من ملف faulthandler.
-    يُستخدم عندما handler بطيء — يُظهر stack الحجب الحقيقي.
-    """
     if not _GIL_DIAG_ENABLED:
         return ""
     try:
@@ -881,13 +850,6 @@ def _read_gil_dump_tail(max_bytes: int = 3000) -> str:
         return ""
 
 def _wrap_handler_with_timing(handler: Callable, name: str) -> Callable:
-    """
-    🔴 v5.7.14 FIX-18: يستخدم faulthandler لأخذ stack حقيقي عند الحجب.
-
-    السبب: `traceback.extract_stack()` داخل finally لا يعمل — المكدّس
-    في تلك اللحظة هو asyncio فقط. faulthandler يقرأ بـ SIGALRM من OS
-    فيقاطع C-extensions التي لا تُحرّر GIL (re، json، hashlib...).
-    """
     if not callable(handler):
         return handler
 
@@ -904,7 +866,6 @@ def _wrap_handler_with_timing(handler: Callable, name: str) -> Callable:
             _ACTIVE_HANDLER["chat_id"] = None
         t0 = time.monotonic()
 
-        # 🔴 FIX-18: تفعيل stack dump دوري أثناء التنفيذ
         _fh_armed = False
         if _GIL_DIAG_ENABLED:
             try:
@@ -934,14 +895,12 @@ def _wrap_handler_with_timing(handler: Callable, name: str) -> Callable:
                                 name, elapsed_ms, _ACTIVE_HANDLER.get("chat_id"))
                 if elapsed_ms >= _HANDLER_SLOW_WARN_MS:
                     _stack_hint = ""
-                    # 🔴 FIX-18: اقرأ من faulthandler dump بدل extract_stack
                     if _GIL_DIAG_ENABLED:
                         _tail = _read_gil_dump_tail(max_bytes=3000)
                         if _tail.strip():
                             _stack_hint = (
                                 "\n🔍 FAULTHANDLER STACK (آخر dump):\n" + _tail
                             )
-                    # fallback نادر (extract_stack عادة فارغ هنا)
                     if not _stack_hint:
                         try:
                             _frames = traceback.extract_stack()
@@ -2173,7 +2132,6 @@ async def main():
     except Exception:
         pass
 
-    # 🔴 v5.7.14 FIX-17: تفعيل faulthandler قبل أي شيء ثقيل
     _init_faulthandler()
 
     logger.info("🔪 FORCE-KILL-PREVIOUS: بدء الفحص...")
@@ -2910,7 +2868,6 @@ async def main():
         except Exception:
             pass
 
-        # 🔴 v5.7.14 FIX-17: تنظيف faulthandler
         try:
             _shutdown_faulthandler()
         except Exception:
