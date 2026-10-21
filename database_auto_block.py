@@ -1,50 +1,42 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-database_auto_block.py - v1.1.1
+database_auto_block.py - v1.1.2
 =============================================================================
 🗄️ جدول تلقائي لحجب المصادر المشبوهة (Post Bot / Spam channels)
 =============================================================================
-🆕 v1.1.1 (INPUT-HARDENING + MYSQL-INTERVAL-FIX):
-  🔴 R1: _to_int_or_none() helper — تطبيع source_id في كل الدوال.
-      السبب: source_id قد يأتي من callback_data كـ string
-      ("-1001234567890") → PG/MySQL يفشلان بـ TypeError غير واضح.
-      الآن: تحويل آمن إلى int قبل الاستعلام.
-  🔴 R2: ensure_table() في كل دوال القراءة (is_blocked, get_source,
-      list_blocked, search_by_name, count_blocked, get_stats,
-      remove_source, reset_hits).
-      السبب: إذا استُدعيت قبل أول add_source، الجدول قد لا يكون موجوداً
-      → فشل صامت. الآن: ضمان تلقائي.
-  🔴 R3: cleanup_old_entries — MySQL INTERVAL placeholder.
-      السبب: `DATE_SUB(UTC_TIMESTAMP(), INTERVAL %s DAY)` قد يفشل
-      على بعض إصدارات MySQL مع prepared statements. الآن: interpolation
-      بعد التحقق (days مُطبَّع كـ int).
-  🟠 R4: update_source — counter واضح لـ placeholders (بدل تعديل ph
-      بشكل تدريجي).
-  🟠 R5: remove_source — log عند عدم وجود الصف + توثيق idempotency.
-  🟡 R6: _get_db_type — import نظيف بدل __import__("database").
-  🟡 R7: __version__ موثّق.
-  🟡 R8: count_blocked/get_stats — ensure_table قبل الاستعلام.
+🆕 v1.1.2 (SAFETY-FIXES-AUDIT):
 
-🆕 v1.1.0 (FIX + FEATURES):
-  🔴 FIX-CRITICAL: DB.DB_TYPE → استخدام USE_POSTGRES/USE_MYSQL الرسمية
-  🔴 FIX-CRITICAL: cleanup_old_entries كان يُرجع 0 دائماً
-  🔴 FIX-CRITICAL: SQLite كان يستخدم INSERT OR REPLACE (يفقد created_at)
-                   → استُبدل بـ ON CONFLICT DO UPDATE
-  🟡 FIX: MySQL cleanup استخدم NOW() بدل UTC_TIMESTAMP() للتوحيد
-  🟡 FIX: ensure_table أصبح مُخزَّناً (cache flag)
-  🟡 FIX: log levels مُحدَّثة
-  🟢 NEW: update_source()       — تحديث source_name بدون زيادة hit_count
-  🟢 NEW: get_source()          — جلب مصدر واحد
-  🟢 NEW: count_blocked()       — عدّ سريع
-  🟢 NEW: get_top_blocked()     — أعلى N مصادر
-  🟢 NEW: search_by_name()      — بحث جزئي بالاسم
-  🟢 NEW: bulk_add()            — إضافة دفعة مصادر
-  🟢 NEW: reset_hits()          — تصفير hit_count بعد مراجعة إدارية
-  🟢 NEW: add_source(auto_added=...) — تمييز الإضافة اليدوية من التلقائية
-  🟢 NEW: _execute() helper      — توافق مع DB.execute أو DB.transaction
-  🟢 NEW: _parse_delete_count()  — تحويل نتيجة DELETE إلى int بأمان
-  🟢 NEW: _normalize_source_type() — تطبيع source_type
+  🟠 FIX-AB-1 (MINOR-BUT-USEFUL): _ensure_safe() — تحذير مرة واحدة
+      السبب: إذا فشل ensure_table (permissions, schema, corrupt DB)،
+      كل الدوال ترجع False بصمت → spam يُقبل بدون حجب.
+      الآن: تحذير واضح في السجل مرة واحدة عند أول فشل + flag يمنع
+      تكرار التحذير (لا spam في السجل).
+
+  🟡 FIX-AB-2 (DEFENSIVE): _execute() — دعم MySQL cursor fallback
+      السبب: إذا لم يُعرَّف DB.execute (بيئة نادرة)، الـ fallback
+      يستخدم conn.execute() مباشرة. على MySQL (asyncmy)، هذه
+      تُرجع cursor وليس rowcount → cleanup_old_entries يعيد 0 دائماً.
+      الآن: عند MySQL، نستخدم cursor.rowcount صريحاً.
+      ملاحظة: DB.execute موجود في database.py v7.7.74 — هذا احتياطي.
+
+  🟡 FIX-AB-3 (DOCUMENTATION): توضيح قرار auto_added على MySQL
+      السبب: ON DUPLICATE KEY UPDATE لا يُحدِّث auto_added عمداً.
+      السياسة: الأولوية لليدوي (إذا أُضيف يدوياً، يبقى "يدوي" حتى
+      لو أُضيف تلقائياً لاحقاً). الآن: تعليق واضح في الكود.
+
+  ✅ محفوظ من v1.1.1:
+      R1: _to_int_or_none في كل الدوال
+      R2: ensure_table تلقائي قبل القراءة
+      R3: MySQL INTERVAL interpolation بعد int-check
+      R4: placeholder counter واضح في update_source
+      R5: remove_source idempotent + log
+      R6: import نظيف
+      R7: __version__
+      R8: ensure_table قبل count_blocked/get_stats
+
+🆕 v1.1.1 (INPUT-HARDENING + MYSQL-INTERVAL-FIX) — محفوظ.
+🆕 v1.1.0 (FIX + FEATURES) — محفوظ.
 
 الميزات:
     ✅ إنشاء الجدول تلقائياً (PostgreSQL / MySQL / SQLite)
@@ -74,7 +66,7 @@ import logging
 from typing import Optional, List, Dict, Any, Iterable
 
 
-__version__ = "1.1.1"
+__version__ = "1.1.2"
 
 logger = logging.getLogger(__name__)
 
@@ -100,6 +92,8 @@ _ALLOWED_SOURCE_TYPES = frozenset({
 # ═════════════════════════════════════════════════════════════════════
 
 _table_ensured: bool = False
+# 🟠 v1.1.2 FIX-AB-1: منع تكرار التحذير
+_table_ensure_failed_warned: bool = False
 
 
 # ═════════════════════════════════════════════════════════════════════
@@ -111,7 +105,7 @@ def _get_db_type() -> str:
     🔴 FIX v1.1.0: يعتمد على USE_POSTGRES/USE_MYSQL الرسمية
     بدلاً من DB.DB_TYPE غير المضمون.
 
-    🟡 FIX v1.1.1: import نظيف بدل __import__.
+    🟡 FIX v1.1.1 R6: import نظيف بدل __import__.
     """
     try:
         from database import USE_POSTGRES, USE_MYSQL
@@ -135,7 +129,7 @@ def _get_db_type() -> str:
 
 def _to_int_or_none(value: Any) -> Optional[int]:
     """
-    🟢 NEW v1.1.1 R1: تحويل آمن إلى int.
+    🟢 v1.1.1 R1: تحويل آمن إلى int.
 
     يُستخدم لتطبيع `source_id` القادم من callback_data (قد يكون string)
     أو من أي مصدر خارجي.
@@ -209,9 +203,15 @@ def _safe_str(value: Any, max_len: int, default: str = "") -> str:
 
 async def _execute(sql: str, params: Any = None) -> Any:
     """
-    🟢 NEW v1.1.0: مساعد تنفيذ يتوافق مع DB.execute أو DB.transaction.
+    🟢 v1.1.0: مساعد تنفيذ يتوافق مع DB.execute أو DB.transaction.
 
-    يستخدم DB.execute إن وُجد، وإلا يستخدم DB.transaction كـ fallback.
+    🟡 v1.1.2 FIX-AB-2: دعم MySQL cursor fallback.
+        إذا لم يُعرَّف DB.execute (بيئة نادرة)، الـ fallback يستخدم
+        conn.execute() مباشرة. على MySQL (asyncmy)، هذه تُرجع cursor
+        وليس rowcount → cleanup_old_entries يعيد 0 دائماً.
+        الآن: عند MySQL، نستخدم cursor.rowcount صريحاً.
+
+    ملاحظة: DB.execute موجود في database.py v7.7.74 — هذا احتياطي.
     """
     from database import DB
 
@@ -221,7 +221,27 @@ async def _execute(sql: str, params: Any = None) -> Any:
             return await execute_fn(sql)
         return await execute_fn(sql, params)
 
-    # Fallback: عبر transaction context
+    # 🟡 FIX-AB-2: MySQL يحتاج cursor للحصول على rowcount
+    try:
+        from database import USE_MYSQL
+        if USE_MYSQL:
+            async with DB.transaction() as conn:
+                cursor = await conn.cursor()
+                try:
+                    if params is None:
+                        await cursor.execute(sql)
+                    else:
+                        await cursor.execute(sql, params)
+                    return cursor.rowcount
+                finally:
+                    try:
+                        await cursor.close()
+                    except Exception:
+                        pass
+    except Exception as e:
+        logger.debug("_execute (mysql fallback): %s", e)
+
+    # PG / SQLite: conn.execute() يُرجع string/int بالشكل المتوقع
     async with DB.transaction() as conn:
         if params is None:
             return await conn.execute(sql)
@@ -299,13 +319,36 @@ async def _ensure_safe() -> bool:
     """
     🟢 v1.1.1 R2: wrapper داخلي — يضمن وجود الجدول قبل أي عملية.
 
+    🟠 v1.1.2 FIX-AB-1: تحذير مرة واحدة عند فشل التهيئة.
+        السبب: إذا فشل ensure_table (permissions, schema, corrupt DB)،
+        كل الدوال ترجع False بصمت → spam يُقبل بدون حجب.
+        الآن: تحذير واضح في السجل مرة واحدة.
+
     لا يرفع استثناءً — يُرجع False عند الفشل فقط.
     """
+    global _table_ensure_failed_warned
+
     if _table_ensured:
         return True
+
     try:
-        return await ensure_table()
-    except Exception:
+        ok = await ensure_table()
+        if not ok and not _table_ensure_failed_warned:
+            logger.warning(
+                "⚠️ auto_blocked_sources: ensure_table فشل — "
+                "الحجب التلقائي لن يعمل حتى يُصلَح (تحقق من "
+                "صلاحيات DB و schema)"
+            )
+            _table_ensure_failed_warned = True
+        return ok
+    except Exception as e:
+        if not _table_ensure_failed_warned:
+            logger.warning(
+                "⚠️ auto_blocked_sources: ensure_table exception — "
+                "الحجب التلقائي لن يعمل: %s",
+                e,
+            )
+            _table_ensure_failed_warned = True
         return False
 
 
@@ -345,7 +388,7 @@ async def is_blocked(source_id: Optional[int]) -> bool:
 
 async def get_source(source_id: Optional[int]) -> Optional[Dict[str, Any]]:
     """
-    🟢 NEW v1.1.0: جلب بيانات مصدر واحد.
+    🟢 v1.1.0: جلب بيانات مصدر واحد.
     """
     sid = _to_int_or_none(source_id)
     if sid is None:
@@ -394,6 +437,14 @@ async def add_source(
     Args:
         source_id: مُطبَّع داخلياً عبر _to_int_or_none (يقبل str رقمي).
         auto_added: True للإضافة التلقائية، False للإضافة اليدوية.
+
+    🟡 v1.1.2 FIX-AB-3: قرار auto_added على MySQL/upsert.
+        في ON DUPLICATE KEY UPDATE / ON CONFLICT DO UPDATE:
+        - auto_added **لا يُحدَّث** عمداً.
+        - السياسة: الأولوية لليدوي. إذا أُضيف يدوياً (False)، يبقى
+          "يدوي" حتى لو أُضيف تلقائياً لاحقاً.
+        - يُستخدم auto_added للتقارير: عدد المصادر المضافة يدوياً
+          vs تلقائياً — دون أن تتغيّر التصنيفات بمرور الوقت.
     """
     sid = _to_int_or_none(source_id)
     if sid is None:
@@ -425,6 +476,7 @@ async def add_source(
                     last_seen = NOW(),
                     source_name = EXCLUDED.source_name,
                     reason = EXCLUDED.reason
+                    -- auto_added لا يُحدَّث (الأولوية لليدوي)
             """
             await _execute(
                 sql,
@@ -442,6 +494,7 @@ async def add_source(
                     last_seen = NOW(),
                     source_name = VALUES(source_name),
                     reason = VALUES(reason)
+                    -- auto_added لا يُحدَّث (الأولوية لليدوي)
             """
             await _execute(
                 sql,
@@ -465,6 +518,7 @@ async def add_source(
                     last_seen = CURRENT_TIMESTAMP,
                     source_name = excluded.source_name,
                     reason = excluded.reason
+                    -- auto_added لا يُحدَّث (الأولوية لليدوي)
             """
             await _execute(
                 sql,
@@ -488,7 +542,7 @@ async def update_source(
     reason: Optional[str] = None,
 ) -> bool:
     """
-    🟢 NEW v1.1.0: تحديث بيانات مصدر بدون زيادة hit_count.
+    🟢 v1.1.0: تحديث بيانات مصدر بدون زيادة hit_count.
     مفيد لتصحيح الأسماء من لوحة الإدارة.
 
     🟠 v1.1.1 R4: counter واضح لـ placeholders.
@@ -586,7 +640,7 @@ async def list_blocked(limit: int = 100) -> List[Dict[str, Any]]:
 
 async def get_top_blocked(n: int = 10) -> List[Dict[str, Any]]:
     """
-    🟢 NEW v1.1.0: أعلى N مصادر حسب hit_count.
+    🟢 v1.1.0: أعلى N مصادر حسب hit_count.
     """
     try:
         n = max(1, min(int(n), 500))
@@ -604,7 +658,7 @@ async def search_by_name(
     limit: int = 50,
 ) -> List[Dict[str, Any]]:
     """
-    🟢 NEW v1.1.0: بحث جزئي بـ source_name (ILIKE / LIKE).
+    🟢 v1.1.0: بحث جزئي بـ source_name (ILIKE / LIKE).
     """
     if not query or not isinstance(query, str):
         return []
@@ -698,7 +752,7 @@ async def remove_source(source_id: int) -> bool:
 
 async def bulk_add(sources: Iterable[Dict[str, Any]]) -> Dict[str, int]:
     """
-    🟢 NEW v1.1.0: إضافة عدة مصادر دفعة واحدة.
+    🟢 v1.1.0: إضافة عدة مصادر دفعة واحدة.
 
     ⚠️ غير transactional: كل add_source مستقل. عند فشل عنصر،
     العناصر السابقة تبقى مُضافة والعناصر اللاحقة تُحاوَل.
@@ -746,7 +800,7 @@ async def bulk_add(sources: Iterable[Dict[str, Any]]) -> Dict[str, int]:
 
 async def reset_hits(source_id: int) -> bool:
     """
-    🟢 NEW v1.1.0: تصفير hit_count لمصدر (بعد مراجعة إدارية).
+    🟢 v1.1.0: تصفير hit_count لمصدر (بعد مراجعة إدارية).
 
     Idempotent: True حتى لو لم يكن المصدر موجوداً (UPDATE يؤثر على
     0 صفوف). لا يرفع استثناءً.
@@ -838,7 +892,7 @@ async def cleanup_old_entries(days: int = DEFAULT_CLEANUP_DAYS) -> int:
 
 async def count_blocked() -> int:
     """
-    🟢 NEW v1.1.0: عدد المصادر المحجوبة إجمالاً.
+    🟢 v1.1.0: عدد المصادر المحجوبة إجمالاً.
     🟡 v1.1.1 R8: ensure_table قبل الاستعلام.
     """
     # 🟢 R8
@@ -930,4 +984,27 @@ __all__ = [
     "_parse_delete_count",
     "_normalize_source_type",
     "_execute",
+    "_ensure_safe",
 ]
+
+
+# ═════════════════════════════════════════════════════════════════════
+# LOAD BEACON — v1.1.2
+# ═════════════════════════════════════════════════════════════════════
+
+try:
+    logger.info(
+        "🛡️ database_auto_block.py v%s loaded | "
+        "FIX-AB-1: ensure_safe warn-once ✅ | "
+        "FIX-AB-2: _execute mysql-cursor-fallback ✅ | "
+        "FIX-AB-3: auto_added-decision-documented ✅ | "
+        "✅ v1.1.1 R1..R8 preserved | "
+        "✅ v1.1.0 FIX (INSERT OR REPLACE → ON CONFLICT) preserved | "
+        "✅ v1.1.0 NEW (get_source, update_source, bulk_add, "
+        "reset_hits, count_blocked, get_top_blocked, search_by_name) "
+        "preserved | "
+        "features: 13 public + 6 internal helpers",
+        __version__,
+    )
+except Exception:
+    pass
