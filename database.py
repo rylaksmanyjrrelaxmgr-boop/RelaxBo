@@ -1,62 +1,62 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-database.py - قاعدة البيانات المتكاملة (v7.7.73 — HIGH-RTT-N1-OPTIMIZATION)
+database.py - قاعدة البيانات المتكاملة (v7.7.74 — SAFETY-FIXES-AUDIT)
 ================================================================================
-🆕 v7.7.73 (HIGH-RTT-N1-OPTIMIZATION):
+🆕 v7.7.74 (SAFETY-FIXES-AUDIT):
 
-  🔴 FIX-DB27 (HIGH IMPACT): _CONFLICT_TARGET_CACHE
-     السبب المُكتشف من تحليل RTT=42ms:
-       كل INSERT OR IGNORE/REPLACE على PostgreSQL كان يستدعي
-       `_find_best_conflict_target` التي تنفّذ JOIN على 5 جداول
-       نظام (pg_indexes + pg_class + pg_namespace + pg_index +
-       pg_attribute) = استعلام معقّد + 42ms RTT = ~50ms إضافية.
-     الإصلاح:
-       LRU cache keyed by (table, tuple(sorted(insert_columns))).
-       النتيجة لا تتغير إلا عند تغيير schema — فالكاش صالح للأبد.
-       يُفرَّغ في _migrate_schema (بجانب _UNIQUE_CACHE.clear()).
+  🔴 FIX-DB33 (IMPORTANT): USER_EXISTS_CACHE TTL 300s → 60s
+     السبب: cache يحتفظ بـ True فقط. إذا حُذف المستخدم من DB يدوياً
+     أو عبر مسار غير مُبطِل للـ cache، قد نُعيد True خطأً لمدة 5 دقائق.
+     60s توازن أفضل بين الأداء والدقة.
 
-  🔴 FIX-DB28 (HIGH IMPACT): pool min_size 5 → 10
-     السبب: على RTT=42ms، pool بـ 5 اتصالات = ~120 req/s نظرياً.
-     إذا تجاوز الحمل، الاستعلامات تصطف وتزيد latency.
-     على DB صغير (18MB)، pool أكبر لن يضرّ.
+  🟠 FIX-DB34 (IMPORTANT): CONFLICT_TARGET_CACHE حد أقصى 500
+     السبب: cache غير محدود نظرياً. عملياً صغير (~20-50 صف)، لكن
+     الحد يحمي من استخدام عشوائي أو schema ديناميكي.
 
-  🟠 FIX-DB29: _ensure_user_exists cache (TTL=300s)
-     السبب: `_ensure_user_exists` تُستدعى في add_penalty وغيرها،
-     وكل نداء = SELECT 1 + 42ms RTT. cache يوفّر ~90% من النداءات
-     المتكرّرة على نفس المستخدم.
-     يُفرَّغ في: register_user, ban_user, unban_user,
-                _invalidate_user_cache_keys.
+  🟠 FIX-DB35 (IMPORTANT): TCP-KEEPALIVE status logging
+     السبب: _pg_init_connection صامت عند فشل تطبيق TCP keepalive.
+     الآن نُسجّل الحالة بوضوح في load beacon لتشخيص الكشف البطيء
+     عن اتصالات ميتة.
 
-  🟠 FIX-DB30: PG_CONN_PING_IDLE_THRESHOLD 60s → 300s
-     السبب: على RTT=42ms، ping-before-use يُضيف 42ms لكل
-     استعلام بعد فترة خمول. TCP keepalive (20s idle) يكشف
-     الاتصال الميت أسرع بكثير من PG ping.
+  🟡 FIX-DB36 (MINOR): _compute_tables_hash fallback
+     السبب: إذا فشل inspect.getsource لملف مُجمَّع، كان يُهمل
+     بصمت → hash مختلف → create_tables على كل restart. الآن
+     نستخدم marker ثابت بدلاً من التجاهل.
 
-  🟡 FIX-DB31: add_penalty merge (CTE)
-     السبب: add_penalty كان يستخدم 6-7 RTTs (ensure_user ×2،
-     BEGIN، UPDATE، INSERT، INSERT log، COMMIT). مع RTT=42ms =
-     ~300ms لكل penalty.
-     الإصلاح (PostgreSQL): CTE واحدة تجمع UPDATE + INSERT
-     (تقليل ~2 RTTs). التحسين الكامل يحتاج refactor أكبر —
-     هذا الجزء الأقل مخاطرة.
+  🟡 FIX-DB37 (MINOR): إضافة _invalidate_user_exists_cache دالة
+     عامة لإبطال cache المستخدم من خارج الكلاس.
 
-  🟡 FIX-DB32: تحديث LOAD BEACON.
+  🟡 FIX-DB38 (MINOR): تحديث LOAD BEACON.
 
-🆕 v7.7.72 (FAST-CALLER-TX-DIAG):
-  🟢 FIX-DB23 (PERF): _get_caller_info_fast() — بديل سريع لـ inspect.stack().
-  🟢 FIX-DB24: _pg_check_tx_alive — تمييز تشخيصي.
-  🟢 FIX-DB25: حفظ tables_hash مباشرة بعد _create_tables في tx مستقلة.
-  🟡 FIX-DB26: تحديث LOAD BEACON.
+  ✅ محفوظ من v7.7.73:
+      - FIX-DB27 (conflict-target cache)
+      - FIX-DB28 (pool min_size=10)
+      - FIX-DB29 (ensure_user_exists cache)
+      - FIX-DB30 (ping_idle=300s)
+      - FIX-DB31 (add_penalty CTE)
+      - FIX-DB32 (beacon)
+      - FIX-DB23 (fast caller)
+      - FIX-DB24 (tx_alive log diff)
+      - FIX-DB25 (early tables_hash save)
+      - FIX-DB20..DB22 (bootstrap tx protect)
+      - FIX-DB19 (maintenance bg task)
+      - FIX-DB16..DB18 (stmt_cache revert)
+      - FIX-DB11..DB15 (v7.7.68)
+      - FIX-DB5..DB9 (v7.7.67)
+      - FIX-MIXIN-1/2/3 (v7.7.65)
+      - FIX-E1..E8 (v7.7.64)
 
-🆕 v7.7.71 (BOOTSTRAP-TX-PROTECT): FIX-DB20..DB22.
-🆕 v7.7.70 (MAINTENANCE-BG-FIX): FIX-DB19.
-🆕 v7.7.69 (STATEMENT-CACHE-REVERT-FIX): FIX-DB16..DB18.
-🆕 v7.7.68 (DB-POOL-LATENCY-FIX): FIX-DB11..DB15.
-🆕 v7.7.67 (NESTED-TX-LIFECYCLE-FIX): FIX-DB5..DB9.
-🆕 v7.7.66 (TIMEZONE-VACUUM-REMINDERS-FIX): FIX-DB1..DB4.
-🆕 v7.7.65 (ANALYTICS-MIXIN-FIX): FIX-MIXIN-1/2/3
-🆕 v7.7.64 (REVIEW-FIXES-2026-R2): FIX-E1..E8
+🆕 v7.7.73 (HIGH-RTT-N1-OPTIMIZATION) — محفوظ.
+🆕 v7.7.72 (FAST-CALLER-TX-DIAG) — محفوظ.
+🆕 v7.7.71 (BOOTSTRAP-TX-PROTECT) — محفوظ.
+🆕 v7.7.70 (MAINTENANCE-BG-FIX) — محفوظ.
+🆕 v7.7.69 (STATEMENT-CACHE-REVERT-FIX) — محفوظ.
+🆕 v7.7.68 (DB-POOL-LATENCY-FIX) — محفوظ.
+🆕 v7.7.67 (NESTED-TX-LIFECYCLE-FIX) — محفوظ.
+🆕 v7.7.66 (TIMEZONE-VACUUM-REMINDERS-FIX) — محفوظ.
+🆕 v7.7.65 (ANALYTICS-MIXIN-FIX) — محفوظ.
+🆕 v7.7.64 (REVIEW-FIXES-2026-R2) — محفوظ.
 ================================================================================
 """
 
@@ -98,6 +98,8 @@ database.py - قاعدة البيانات المتكاملة (v7.7.73 — HIGH-R
 # [33] v7.7.73: conflict_target cache + pool min_size=10
 #              + ensure_user_exists cache + ping_idle=300s
 #              + add_penalty CTE merge
+# [34] v7.7.74: TTL 300s→60s، cache_max=500، TCP-keepalive log،
+#              hash fallback، invalidate helper
 # =====================================================================
 
 import os
@@ -607,9 +609,6 @@ PG_MAX_INACTIVE_LIFETIME = float(
     os.getenv("PG_MAX_INACTIVE_LIFETIME", "300.0"))
 
 # 🆕 v7.7.73 FIX-DB30: 60s → 300s (الاعتماد على TCP keepalive)
-#   السبب: على RTT=42ms، ping-before-use = 42ms إضافية لكل
-#   استعلام بعد فترة خمول. TCP keepalive (20s) يكشف الاتصال
-#   الميت أسرع بكثير.
 PG_CONN_PING_IDLE_THRESHOLD = float(
     os.getenv("PG_CONN_PING_IDLE_THRESHOLD", "300.0"))
 
@@ -760,22 +759,20 @@ _UNIQUE_CACHE_LOCK = asyncio.Lock()
 
 # ═══════════════════════════════════════════════════════════════════════
 # 🆕 v7.7.73 FIX-DB27: cache لـ _find_best_conflict_target
+# 🟡 v7.7.74 FIX-DB34: حد أقصى 500 (LRU)
 # ═══════════════════════════════════════════════════════════════════════
-# السبب: على RTT=42ms، كل INSERT OR IGNORE/REPLACE على PG كان
-# يستدعي استعلام JOIN على 5 جداول نظام = ~50ms إضافية. النتيجة
-# لا تتغير إلا عند تغيير schema → cache صالح للأبد (يُفرَّغ بعد
-# migrations).
 _CONFLICT_TARGET_CACHE: Dict[
     Tuple[str, Tuple[str, ...]], Optional[str]
 ] = {}
 _CONFLICT_TARGET_CACHE_LOCK = asyncio.Lock()
+_CONFLICT_TARGET_CACHE_MAX = 500  # 🆕 v7.7.74
 
 # 🆕 v7.7.73 FIX-DB29: cache لـ _ensure_user_exists
-#   TTL=300s، key = user_id. يُفرَّغ عند register/ban/unban.
+# 🔴 v7.7.74 FIX-DB33: TTL 300s → 60s
 _USER_EXISTS_CACHE: Dict[int, float] = {}
 _USER_EXISTS_CACHE_LOCK = asyncio.Lock()
 _USER_EXISTS_CACHE_TTL = float(
-    os.getenv("USER_EXISTS_CACHE_TTL", "300.0"))
+    os.getenv("USER_EXISTS_CACHE_TTL", "60.0"))
 
 
 def _clone_start_data(data: Dict) -> Dict:
@@ -1339,9 +1336,7 @@ async def _find_best_conflict_target(
 ) -> Optional[str]:
     """
     🆕 v7.7.73 FIX-DB27: LRU cache keyed by (table, sorted columns).
-    السبب: كل INSERT OR IGNORE/REPLACE على PG يستدعي هذه الدالة،
-    والتي تنفّذ JOIN على 5 جداول نظام = ~50ms مع RTT=42ms.
-    النتيجة لا تتغير إلا عند تغيير schema → cache صالح للأبد.
+    🟡 v7.7.74 FIX-DB34: حد أقصى 500.
     """
     cache_key = (table, tuple(sorted(insert_columns)))
     if cache_key in _CONFLICT_TARGET_CACHE:
@@ -1434,6 +1429,13 @@ async def _find_best_conflict_target(
         except Exception:
             result = None
 
+    # 🟡 v7.7.74 FIX-DB34: حد أقصى + LRU eviction
+    if len(_CONFLICT_TARGET_CACHE) >= _CONFLICT_TARGET_CACHE_MAX:
+        try:
+            oldest_key = next(iter(_CONFLICT_TARGET_CACHE))
+            _CONFLICT_TARGET_CACHE.pop(oldest_key, None)
+        except (StopIteration, KeyError):
+            pass
     _CONFLICT_TARGET_CACHE[cache_key] = result
     return result
 
@@ -2202,7 +2204,6 @@ class Database(
             self._db_type = DB_TYPE
             self._max_connections = int(os.getenv("DB_POOL_SIZE", "20"))
             self._min_connections = int(os.getenv("DB_POOL_MIN_SIZE", "2"))
-            # 🆕 v7.7.68 FIX-DB14: 30 → 10
             self._connection_timeout = int(os.getenv("DB_TIMEOUT", "10"))
 
             self._cleanup_task = None
@@ -2243,6 +2244,9 @@ class Database(
             self._recovering_pool = False
             self._autovacuum_tuned = False
 
+            # 🟠 v7.7.74 FIX-DB35: تتبّع حالة TCP keepalive
+            self._tcp_keepalive_applied = False
+
             self._in_bootstrap_tx = False
             self._pending_secondary_indexes: List[
                 Tuple[str, str, str]] = []
@@ -2273,7 +2277,6 @@ class Database(
             self._max_post_text_length = MAX_POST_TEXT_LENGTH
             self._posts_batch_size = POSTS_BATCH_SIZE
             self._explain_slow_queries = EXPLAIN_SLOW_QUERIES
-            # 🆕 v7.7.68 FIX-DB15: 60s → 20s
             self._query_timeout = self._connection_timeout * 2
             self._commit_timeout = 30
             self.DB_TYPE = DB_TYPE
@@ -2322,7 +2325,6 @@ class Database(
 
             self._dev_subscription_ensured = False
 
-            # 🆕 v7.7.68 FIX-DB13: WeakKeyDictionary بدل id()-keyed dict
             try:
                 self._conn_last_used = weakref.WeakKeyDictionary()
                 self._use_weak_conn_cache = True
@@ -2757,15 +2759,10 @@ class Database(
         """
         🆕 v7.7.69 FIX-DB16: pool PG محسّن مع statement cache.
         🆕 v7.7.68 FIX-DB11: max_inactive_lifetime=300s.
-        🆕 v7.7.69 FIX-DB17: statement_cache_size=100 (default).
         🆕 v7.7.73 FIX-DB28: min_size 5 → 10 (بيئات RTT>30ms).
         """
         try:
             create_kwargs: Dict[str, Any] = {
-                # 🆕 v7.7.73 FIX-DB28: 10 بدل 5
-                # السبب: على RTT=42ms، pool بـ 5 اتصالات = ~120 req/s
-                # نظرياً. عند الحمل الأعلى، الاستعلامات تصطف.
-                # على DB صغير (18MB) pool أكبر لن يضرّ.
                 "min_size": max(10, self._min_connections),
                 "max_size": self._max_connections,
                 "max_inactive_connection_lifetime": PG_MAX_INACTIVE_LIFETIME,
@@ -3144,8 +3141,8 @@ class Database(
                         - (self._mv_refresh_cooldown - short_cooldown))
 
     # ═════════════════════════════════════════════════════════════
-    # 🆕 v7.7.71 FIX-DB21: دوال مساعدة لحماية tx
-    # 🆕 v7.7.72 FIX-DB24: log differentiation في _pg_check_tx_alive
+    # v7.7.71 FIX-DB21: دوال مساعدة لحماية tx
+    # v7.7.72 FIX-DB24: log differentiation في _pg_check_tx_alive
     # ═════════════════════════════════════════════════════════════
 
     async def _pg_check_tx_alive(self, conn) -> bool:
@@ -3465,6 +3462,10 @@ class Database(
                         PG_TCP_KEEPCNT)
                 except OSError as e:
                     logger.debug(f"TCP_KEEPCNT: {e}")
+
+            # 🟠 v7.7.74 FIX-DB35: تتبّع الحالة
+            self._tcp_keepalive_applied = True
+
             logger.debug(
                 "🔌 PG conn: TCP keepalive مُفعَّل "
                 f"(idle={PG_TCP_KEEPIDLE}s, "
@@ -4932,8 +4933,6 @@ class Database(
                 logger.warning(
                     f"⚠️ _migrate_delete_penalty_type: {e}")
             self._group_security_columns_cache = None
-            # 🆕 v7.7.73 FIX-DB27: تفريغ cache conflict target
-            #   بعد migrations (قد تتغير الفهارس).
             _UNIQUE_CACHE.clear()
             _CONFLICT_TARGET_CACHE.clear()
             logger.debug(
@@ -5060,11 +5059,7 @@ class Database(
         auto_register: bool = True,
     ) -> bool:
         """
-        🆕 v7.7.73 FIX-DB29: cache محلي (TTL=300s).
-        السبب: على RTT=42ms، كل نداء = SELECT 1 + 42ms.
-        cache يوفّر ~90% من النداءات المتكرّرة على نفس المستخدم.
-        يُفرَّغ في: register_user, ban_user, unban_user,
-                    _invalidate_user_cache_keys.
+        🆕 v7.7.73 FIX-DB29: cache محلي (TTL=60s بعد v7.7.74).
         """
         now = time.monotonic()
         cached_ts = _USER_EXISTS_CACHE.get(user_id)
@@ -5095,6 +5090,22 @@ class Database(
         except Exception as e:
             logger.error(f"❌ _ensure_user_exists({user_id}): {e}")
             return False
+
+    # 🟡 v7.7.74 FIX-DB37: دالة إبطال عامة
+    async def invalidate_user_exists_cache(self, user_id: int) -> None:
+        """
+        🟡 v7.7.74: إبطال يدوي لـ _USER_EXISTS_CACHE لمستخدم واحد.
+
+        استخدمها عند حذف مستخدم من DB يدوياً أو من مسار خارجي
+        (مثلًا عبر delete_user في mixin آخر) لتجنّب إعادة True
+        خاطئة خلال TTL.
+        """
+        try:
+            async with _USER_EXISTS_CACHE_LOCK:
+                _USER_EXISTS_CACHE.pop(user_id, None)
+        except Exception as e:
+            logger.debug(
+                f"invalidate_user_exists_cache({user_id}): {e}")
 
     async def _ensure_group_exists(
         self,
@@ -5688,6 +5699,9 @@ class Database(
             str(text).encode("utf-8")).hexdigest()
 
     def _compute_tables_hash(self) -> str:
+        """
+        🟡 v7.7.74 FIX-DB36: fallback marker بدل التجاهل الصامت.
+        """
         parts = [f"tables_v{CURRENT_SCHEMA_VERSION}"]
         for fn_name, fn in (
             ("sqlite", create_tables_sqlite),
@@ -5701,8 +5715,18 @@ class Database(
                 parts.append(
                     f"{fn_name}:"
                     f"{hashlib.sha256(src.encode()).hexdigest()}")
-            except Exception:
-                pass
+            except Exception as _he:
+                # 🟡 v7.7.74 FIX-DB36: marker ثابت بدل التجاهل
+                try:
+                    marker = (
+                        f"{getattr(fn, '__module__', '?')}."
+                        f"{getattr(fn, '__qualname__', fn_name)}")
+                except Exception:
+                    marker = fn_name
+                logger.debug(
+                    f"_compute_tables_hash: {fn_name} → "
+                    f"getsource failed ({_he}) — using marker={marker}")
+                parts.append(f"{fn_name}:fallback_{marker}")
         return hashlib.sha256(
             "|".join(parts).encode("utf-8")).hexdigest()
 
@@ -6611,7 +6635,6 @@ class Database(
                                     user_id)
                             except Exception:
                                 pass
-                        # 🆕 v7.7.73 FIX-DB29: ضع في cache
                         try:
                             async with _USER_EXISTS_CACHE_LOCK:
                                 _USER_EXISTS_CACHE[user_id] = \
@@ -6732,7 +6755,6 @@ class Database(
                 await self._invalidate_user_cache_keys(user_id)
             except Exception:
                 pass
-            # 🆕 v7.7.73 FIX-DB29: ضع في cache بعد التسجيل
             try:
                 async with _USER_EXISTS_CACHE_LOCK:
                     _USER_EXISTS_CACHE[user_id] = time.monotonic()
@@ -7579,8 +7601,6 @@ class Database(
     ) -> Optional[int]:
         """
         🆕 v7.7.73 FIX-DB31: merge UPDATE + INSERT في CTE على PG.
-        السبب: على RTT=42ms، كل round-trip إضافي = 42ms.
-        CTE يُقلّل RTTs.
         """
         if penalty_type not in self.VALID_PENALTY_TYPES:
             return None
@@ -7610,12 +7630,8 @@ class Database(
                         end_time = start_time + timedelta(
                             seconds=duration)
 
-                    # 🆕 v7.7.73 FIX-DB31: مسار PG يستخدم CTE واحدة
                     if USE_POSTGRES:
                         try:
-                            # CTE: UPDATE + INSERT في جملة واحدة
-                            # (يوفّر RTT واحد على الأقل مقارنة
-                            #  بالمسار القديم).
                             if penalty_type != "warn":
                                 row = await self._fetchone_with_conn(
                                     conn,
@@ -7645,7 +7661,6 @@ class Database(
                                     duration, start_time, end_time,
                                     reason, issued_by)
                             else:
-                                # warn: لا UPDATE مسبق
                                 row = await self._fetchone_with_conn(
                                     conn,
                                     """INSERT INTO user_penalties
@@ -7667,7 +7682,6 @@ class Database(
                                 f"⚠️ v7.7.73 FIX-DB31: CTE فشل "
                                 f"({_cte_e}) — fallback للمسار "
                                 f"التقليدي")
-                            # fallback: المسار التقليدي
                             if penalty_type != "warn":
                                 await self._execute_with_conn(
                                     conn,
@@ -8279,20 +8293,22 @@ __all__ = [
     "_load_mixin",
     "ANALYTICS_MIXIN_AVAILABLE",
     "_CONFLICT_TARGET_CACHE",
+    "_CONFLICT_TARGET_CACHE_MAX",
     "_USER_EXISTS_CACHE",
     "_USER_EXISTS_CACHE_TTL",
 ]
 
 
 # =====================================================================
-# LOAD BEACON — v7.7.73
+# LOAD BEACON — v7.7.74
 # =====================================================================
 
 try:
     _analytics_status = (
         "✅" if hasattr(Database, "get_user_growth") else "❌")
+    _tcp_status = getattr(DB, "_tcp_keepalive_applied", False)
     logger.info(
-        "🛡️ database.py v7.7.73 HIGH-RTT-N1-OPTIMIZATION loaded | "
+        "🛡️ database.py v7.7.74 SAFETY-FIXES-AUDIT loaded | "
         "DB=%s | Analytics=%s (available=%s) | "
         "Migrations=%s | Refactor=%s | Caches=%s | "
         "Idle-TX-Audit=%s (interval=%.0fs, threshold=%d) | "
@@ -8300,19 +8316,22 @@ try:
         "PG-stmt-cache=%d (pooled=%s) | "
         "PG-max-inactive=%.0fs | "
         "PG-ping-idle=%.0fs | "
+        "TCP-keepalive=%s | "
         "SLOW_QUERY_FULL_STACK=%s | "
-        "Fixes: DB27 (conflict-target cache) ← NEW، "
-        "DB28 (pool min_size=10) ← NEW، "
-        "DB29 (user_exists cache TTL=%.0fs) ← NEW، "
-        "DB30 (ping-idle 300s) ← NEW، "
-        "DB31 (add_penalty CTE) ← NEW، "
-        "DB32 (beacon update)، "
-        "DB23 (fast caller)، "
-        "DB24 (tx_alive log diff)، "
-        "DB25 (early tables_hash save)، "
-        "DB20..DB22 (bootstrap tx protect)، "
-        "DB19 (maintenance bg task)، "
-        "DB16..DB18 (stmt_cache revert)، "
+        "USER_EXISTS_CACHE_TTL=%.0fs | "
+        "CONFLICT_TARGET_CACHE_MAX=%d | "
+        "Fixes: "
+        "DB33 (user_exists TTL 60s) ← NEW، "
+        "DB34 (conflict cache max=500) ← NEW، "
+        "DB35 (TCP-keepalive log) ← NEW، "
+        "DB36 (tables_hash fallback) ← NEW، "
+        "DB37 (invalidate helper) ← NEW، "
+        "DB38 (beacon update) ← NEW، "
+        "DB27..DB32 (v7.7.73)، "
+        "DB23..DB26 (v7.7.72)، "
+        "DB20..DB22 (v7.7.71)، "
+        "DB19 (v7.7.70)، "
+        "DB16..DB18 (v7.7.69)، "
         "DB11..DB15 (v7.7.68)، "
         "DB5..DB9 (v7.7.67)، "
         "MIXIN-1/2/3 (v7.7.65)، "
@@ -8331,8 +8350,10 @@ try:
         "yes" if _PG_IS_POOLED else "no",
         PG_MAX_INACTIVE_LIFETIME,
         PG_CONN_PING_IDLE_THRESHOLD,
+        "✅ APPLIED" if _tcp_status else "❌ NOT APPLIED",
         "on" if SLOW_QUERY_FULL_STACK else "off (fast path)",
         _USER_EXISTS_CACHE_TTL,
+        _CONFLICT_TARGET_CACHE_MAX,
         MAX_SQL_IN_PARAMS,
     )
 except Exception:
