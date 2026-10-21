@@ -1,67 +1,44 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-db_diagnostics.py — واجهة تشخيص وصيانة قاعدة البيانات (v7.2.24 — AUTO-TUNING)
+db_diagnostics.py — واجهة تشخيص وصيانة قاعدة البيانات (v7.2.25 — SAFETY-FIXES-AUDIT)
 ================================================================================
-🆕 v7.2.24 — AUTO-TUNING (ضبط autovacuum تلقائيًا — بدون تغيير سلوكي للواجهات القديمة):
+🆕 v7.2.25 — SAFETY-FIXES-AUDIT (7 إصلاحات):
 
-    🆕 AUTO-TUNE-1: ensure_autovacuum_tuning() — يضبط autovacuum لكل جدول
-        حسب قواعد ثابتة + اكتشاف تلقائي للجداول عالية الـ churn.
-        • قواعد ثابتة للجداول المعروفة (managed_bot_*).
-        • اكتشاف تلقائي: أي جدول فيه dead_ratio ≥ 10% أو mod ≥ 1000 → يُضبط.
-        • يتحقق من reloptions قبل ALTER (idempotent — آمن للاستدعاء المتكرر).
-        • matviews تُتخطّى (لا تدعم reloptions autovacuum).
+    🔴 FIX-25-1 (IMPORTANT): لا اتصال مباشر إذا pool موجود وفشل acquire
+        السبب: عند pool موجود لكن acquire فشل (مثلاً pool exhausted
+        أو اتصالات ميتة)، كان الكود يحاول asyncpg.connect مباشرة —
+        مما يُضيف 5-8 ثوانٍ (connect_timeout + TLS + auth) ثم
+        يفشل غالباً. الآن نتوقف فوراً مع تشخيص دقيق.
 
-    🆕 AUTO-TUNE-2: init_autovacuum_tuning() — يُستدعى مرة عند بدء البوت
-        لضمان أن الجداول مضبوطة من الثانية الأولى.
+    🟠 FIX-25-2 (IMPORTANT): _get_activity_stats يقبل force=True
+        السبب: TTL=5s يعني أن استدعاء /db_diag ثم /db_diag_quick
+        خلال 5 ثوانٍ قد يعطي بيانات قديمة. force=True يقرأ مباشرة.
 
-    🆕 AUTO-TUNE-3: diagnose_autovacuum_tuning() + format_autovacuum_tuning()
-        — واجهة تشخيص/ضبط يدوية عبر أمر /db_tune.
+    🟠 FIX-25-3 (IMPORTANT): ensure_autovacuum_tuning يتجاهل جداول
+        database.py
+        السبب: database.py _tune_heavy_tables_autovacuum يضبط
+        HEAVY (0.02) و SMALL (0.0) بقيم أدق. db_diagnostics كان
+        يُعيد ضبطها بقيمه العامة (0.05) مما يُفسد الإعدادات.
+        الآن نتجاهل هذه الجداول مع سبب واضح.
 
-    🆕 AUTO-TUNE-4: _read_reloptions() + _build_alter_sql() — أدوات مساعدة
-        لقراءة الإعدادات الحالية وبناء ALTER آمن.
+    🟡 FIX-25-4 (MINOR): _LONG_TX_THRESHOLD_SECONDS قابل للتعديل
+        عبر env var (LONG_TX_THRESHOLD_SECONDS).
 
-    🆕 AUTO-TUNE-5: __all__ أضيفت فيه الدوال الجديدة.
-        load beacon محدث بـ v7.2.24.
+    🟡 FIX-25-5 (MINOR): _get_cleanup_status يظهر خطأ عند الفشل
+        بدلاً من قائمة فارغة صامتة.
 
-🆕 v7.2.23 — CLEANUP-VISIBILITY (بدون تغيير سلوكي لمستخدمي التشخيص):
+    🟡 FIX-25-6 (MINOR): _build_cleanup_where لـ SQLite —
+        توثيق هشاشة المقارنة النصية.
 
-    🔴 FIX-CLEANUP-1: auto_vacuum_dirty_mvs تُرجع الآن:
-        • 'skipped'   : جداول فيها dead > 0 لكن < min_dead (لن تُنظَّف).
-        • 'remaining' : كل جدول فيه dead بعد التنظيف (name, dead, ratio, is_mv).
-        • 'dead_after' لكل جدول داخل 'vacuumed'.
+    🟡 FIX-25-7 (MINOR): format_autovacuum_tuning — رسالة نجاح
+        واضحة عند "لا حاجة لتغييرات".
 
-    🔴 FIX-CLEANUP-2: لا ترجع 0 كـ 'total_dead_after' عند عدم وجود
-        targets — كانت تقرأ dirty_after فقط بعد حلقة VACUUM.
-        الآن تقرأ dirty_after دائمًا (حتى بدون targets).
-
-    🟠 FIX-CLEANUP-3: قراءة dead_after لكل جدول بعد VACUUM مباشرة
-        (كانت مفقودة تمامًا).
-
-🆕 v7.2.22 — DOC-QUALITY-IMPROVEMENTS — محفوظ بالكامل.
-🆕 v7.2.21 — POOL-DISPLAY-FIX — محفوظ.
-🆕 v7.2.20 — COMMAND-FIX — محفوظ.
-🆕 v7.2.19 — GRACE-EXTENDED — محفوظ.
-🆕 v7.2.18 — FIX-COMPLETE — محفوظ.
-🆕 v7.2.17 — FULL-FIX — محفوظ.
-🆕 v7.2.16 — STARTUP-GRACE — محفوظ.
-🆕 v7.2.15 — PERF-OPTIMIZED — محفوظ.
-🆕 v7.2.14 — TCP-CONSISTENCY-FIX — محفوظ.
-🆕 v7.2.13 — MULTI-DB-DISCOVERY — محفوظ.
-🆕 v7.2.12 — REGION-ENV-OVERRIDE — محفوظ.
-🆕 v7.2.11 — RTT-REGION-INFERENCE — محفوظ.
-🆕 v7.2.10 — QUERY-PERF-FIX — محفوظ.
-🆕 v7.2.9  — CROSS-REGION-DETECTOR — محفوظ.
-🆕 v7.2.8  — CROSS-REGION-ACCURACY — محفوظ.
-🆕 v7.2.7  — PK-TIMING-FIX — محفوظ.
-🆕 v7.2.6  — POOL-AWARE + TLS-ASYNC-FIX — محفوظ.
-🆕 v7.2.5  — TLS-DEADLINE + EL-P90-FIX — محفوظ.
-🆕 v7.2.4  — MISLEADING-FIX — محفوظ.
-🆕 v7.2.3  — MYSQL-PARITY-FIX — محفوظ.
-🆕 v7.2.2  — PROBE-ACCURACY — محفوظ.
-🆕 v7.2.1  — FIXES-BUNDLE — محفوظ.
-🆕 v7.2.0  — FULL-HEALTH-PROBE — محفوظ.
-🆕 v7.1.0  — LATENCY-PROBE — محفوظ.
+    ✅ محفوظ من v7.2.24:
+        - AUTO-TUNE-1..5
+    ✅ محفوظ من v7.2.23:
+        - CLEANUP-VISIBILITY (FIX-CLEANUP-1/2/3)
+    ✅ محفوظ من v7.2.22..v7.1.0 (كل التحسينات السابقة).
 ================================================================================
 """
 
@@ -86,7 +63,7 @@ logger = logging.getLogger(__name__)
 # الإصدار + Startup grace
 # ═══════════════════════════════════════════════════════════════════════
 
-VERSION = "7.2.24"
+VERSION = "7.2.25"
 
 
 def _compute_process_start_monotonic() -> float:
@@ -125,7 +102,10 @@ def _uptime_sec() -> float:
 _MIN_DEAD_FOR_CRITICAL = 50
 _MIN_DEAD_FOR_COLOR = 10
 
-_LONG_TX_THRESHOLD_SECONDS = 300
+# 🟡 v7.2.25 FIX-25-4: قابل للتعديل عبر env
+_LONG_TX_THRESHOLD_SECONDS = int(
+    os.getenv("LONG_TX_THRESHOLD_SECONDS", "300"))
+
 _TELEGRAM_PROBE_CACHE_TTL = 300.0
 _CONN_CLOSE_TIMEOUT = 2.0
 _NEGATIVE_CACHE_TTL = 5.0
@@ -144,6 +124,21 @@ _NET_DB_RTT_HIGH = 150.0
 _INTERNAL_DB_LOW = 5.0
 _INTERNAL_DB_MEDIUM = 20.0
 _INTERNAL_DB_HIGH = 100.0
+
+# 🟠 v7.2.25 FIX-25-3: جداول database.py _tune_heavy_tables_autovacuum
+# db_diagnostics يجب أن يتجنبها لتفادي تعارض الإعدادات.
+_DB_OWNED_TABLES: frozenset = frozenset({
+    # HEAVY (0.02 vacuum / 0.01 analyze / delay=2 / limit=2000)
+    "posts", "subscriptions", "user_penalties", "users",
+    # SMALL (0.0 / threshold=5 / delay=2 / limit=2000)
+    "plans", "settings", "user_reminder_settings",
+    "group_security", "user_points", "user_violations",
+    "auto_replies", "bot_groups", "anonymous_admins",
+    "user_warnings", "referral_rewards", "group_admins",
+    "hidden_owner_groups", "hidden_admins", "user_groups_link",
+    "auto_reply_settings", "last_publish", "schedule",
+    "support_tickets", "bot_admins", "chat_locks", "group_rules",
+})
 
 # ═══════════════════════════════════════════════════════════════════════
 # Multi-DB Discovery
@@ -1186,9 +1181,16 @@ async def _probe_db_latency(*, force: bool = False, socket_timeout: float = 5.0)
         result["tcp_connect_ms"] = -1.0
     cross = _detect_cross_region(bot_region, db_region, tcp_ms=tcp_ms)
     result["cross_region"] = cross
+
+    # ═══════════════════════════════════════════════════════════════
+    # 🔴 v7.2.25 FIX-25-1: لا اتصال مباشر إذا pool موجود لكن acquire فشل
+    # ═══════════════════════════════════════════════════════════════
     conn = None
     from_pool = False
     pool = getattr(db, "_pool", None)
+    pool_acquire_failed = False
+    pool_acquire_error: Optional[str] = None
+
     if pool is not None:
         try:
             t0 = time.monotonic()
@@ -1198,8 +1200,30 @@ async def _probe_db_latency(*, force: bool = False, socket_timeout: float = 5.0)
             result["used_pool"] = True
         except Exception as e:
             logger.debug(f"pool.acquire فشل: {e}")
+            pool_acquire_failed = True
+            pool_acquire_error = f"{type(e).__name__}: {str(e)[:120]}"
             conn = None
             from_pool = False
+
+    if conn is None and pool_acquire_failed:
+        # pool موجود لكن acquire فشل — مشكلة حقيقية، لا تحاول اتصالاً مباشراً
+        result["error"] = f"pool موجود لكن acquire فشل: {pool_acquire_error}"
+        result["verdict"] = "critical"
+        result["diagnosis"] = (
+            f"🔴 pool موجود (max={result['active_db'].get('pool_size', '?')}) "
+            f"لكن acquire فشل — مشكلة في الاتصالات الحالية.\n"
+            f"   السبب: <code>{_esc(pool_acquire_error or '?')}</code>"
+        )
+        result["recommendation"] = (
+            "✅ تحقق من:\n"
+            "   • عدد الاتصالات النشطة (pg_stat_activity)\n"
+            "   • idle-in-transaction leaks\n"
+            "   • max_connections في PostgreSQL\n"
+            "   • network بين البوت و DB"
+        )
+        _cache_set("latency_probe", result, ttl=120.0)
+        return result
+
     if conn is None:
         try:
             t0 = time.monotonic()
@@ -1458,7 +1482,19 @@ def _compute_latency_verdict(result: Dict[str, Any]) -> Tuple[str, str, str]:
 def format_latency_report(probe: Dict[str, Any]) -> str:
     if not probe.get("ok"):
         err = _esc(probe.get("error", "خطأ غير معروف"))
-        return f"🔬 <b>اختبار الكمون</b>\n━━━━━━━━━━━━━━━━━━━━━━\n\n❌ <b>فشل:</b> {err}"
+        diag = probe.get("diagnosis", "")
+        rec = probe.get("recommendation", "")
+        lines = [f"🔬 <b>اختبار الكمون</b>",
+                 "━━━━━━━━━━━━━━━━━━━━━━",
+                 "",
+                 f"❌ <b>فشل:</b> {err}"]
+        if diag:
+            lines.append("")
+            lines.append(f"<b>التشخيص:</b>\n  {diag}")
+        if rec:
+            lines.append("")
+            lines.append(f"<b>التوصية:</b>\n  {rec}")
+        return "\n".join(lines)
     lines: List[str] = []
     lines.append("🔬 <b>اختبار الكمون (Latency Probe)</b>")
     lines.append("━━━━━━━━━━━━━━━━━━━━━━")
@@ -2386,12 +2422,14 @@ async def _get_all_tables_health() -> Tuple[Optional[List[Dict]], Optional[List[
 
 # ═══════════════════════════════════════════════════════════════════════
 # 3) Activity Stats
+# 🟠 v7.2.25 FIX-25-2: force param
 # ═══════════════════════════════════════════════════════════════════════
 
-async def _get_activity_stats() -> Dict[str, Any]:
-    cached = _cache_get("activity_stats")
-    if cached is not None:
-        return cached
+async def _get_activity_stats(*, force: bool = False) -> Dict[str, Any]:
+    if not force:
+        cached = _cache_get("activity_stats")
+        if cached is not None:
+            return cached
     out: Dict[str, Any] = {"long_tx": 0, "idle_tx": 0,
                             "vacuum_running": 0, "total_active": 0,
                             "total_connections": 0}
@@ -2513,6 +2551,7 @@ async def _get_indexes(tables: List[str]) -> Dict[str, List[Dict[str, Any]]]:
 
 # ═══════════════════════════════════════════════════════════════════════
 # 6) Auto-Cleanup Status
+# 🟡 v7.2.25 FIX-25-5: يظهر خطأ عند الفشل
 # ═══════════════════════════════════════════════════════════════════════
 
 _SQL_TABLE_TOTAL_SIZE = """
@@ -2561,8 +2600,17 @@ async def _get_cleanup_status() -> List[Dict[str, Any]]:
     try:
         rows = await db.fetchall(_SQL_TABLE_TOTAL_SIZE, (deletable,)) or []
     except Exception as e:
-        logger.debug(f"_get_cleanup_status: {e}")
-        return []
+        logger.warning(f"_get_cleanup_status: {e}")
+        # 🟡 v7.2.25 FIX-25-5: إظهار الخطأ بدلاً من قائمة فارغة صامتة
+        return [{
+            "name": "__error__",
+            "bytes": 0,
+            "display": "—",
+            "color": "❌",
+            "status": f"فشل: {str(e)[:60]}",
+            "retention_days": 0,
+            "max_mb": 0,
+        }]
     out = []
     for r in rows:
         if not isinstance(r, dict):
@@ -2694,10 +2742,21 @@ def _calc_technical_score(dirty, activity, settings) -> Tuple[int, int, int, int
 
 # ═══════════════════════════════════════════════════════════════════════
 # 9) Maintenance helpers
+# 🟡 v7.2.25 FIX-25-6: توثيق هشاشة SQLite
 # ═══════════════════════════════════════════════════════════════════════
 
 def _build_cleanup_where(db_type: str, col: str, days: int,
                           extra_where: Optional[str]) -> str:
+    """
+    يبني شرط WHERE للتنظيف حسب نوع DB.
+
+    🟡 v7.2.25 FIX-25-6 — ملاحظة SQLite:
+      SQLite يخزن datetime كنص ISO 'YYYY-MM-DD HH:MM:SS'.
+      datetime('now', '-N days') يعطي نفس الصيغة.
+      المقارنة النصية تعمل فقط إذا كانت col بنفس الصيغة
+      (TimeUtils.sql_iso() يستخدمها). آمن هنا لأن كل
+      الكتابات تمر عبر TimeUtils.
+    """
     dt = (db_type or "").upper()
     if dt == "MYSQL":
         base = f"{col} < (NOW() - INTERVAL {int(days)} DAY)"
@@ -3049,20 +3108,21 @@ async def auto_vacuum_dirty_mvs(min_dead: int = 10) -> Dict[str, Any]:
     """
     🧹 تنظيف تلقائي للجداول التي فيها dead tuples ≥ min_dead.
 
-    🆕 v7.2.23 — CLEANUP-VISIBILITY:
-      ترجع الحقول التالية بجانب القديمة:
-        • 'vacuumed[i].dead_after' : dead tuples بعد VACUUM (لكل جدول)
-        • 'skipped'                : جداول dead>0 لكن < min_dead (تُركت)
-                                     كل عنصر: {name, dead, is_mv, reason}
-        • 'remaining'              : كل جدول فيه dead>0 بعد التنظيف
-                                     كل عنصر: {name, dead, ratio_pct, is_mv}
-      🔴 إصلاح: كانت ترجع total_dead_after=0 عند غياب targets
-         (لا تحدّث dirty_after قبل return). الآن تقرأ دائمًا.
+    Returns dict with:
+      'vacuumed'            : list of {name, dead_before, dead_after, is_mv}
+      'failed'              : list of {name, error}
+      'skipped'             : list of {name, dead, is_mv, reason}
+      'remaining'           : list of {name, dead, ratio_pct, is_mv}
+      'total_dead_before'   : int
+      'total_dead_after'    : int
+      'cleaned'             : int
+      'duration_sec'        : float
+      'error'               : str|None
     """
     db = _get_db()
     result: Dict[str, Any] = {
         'vacuumed': [], 'failed': [],
-        'skipped': [], 'remaining': [],            # 🆕 v7.2.23
+        'skipped': [], 'remaining': [],
         'total_dead_before': 0, 'total_dead_after': 0,
         'cleaned': 0, 'duration_sec': 0.0,
         'error': None,
@@ -3086,7 +3146,6 @@ async def auto_vacuum_dirty_mvs(min_dead: int = 10) -> Dict[str, Any]:
     below = [t for t in dirty
              if 0 < int(t.get('dead', 0)) < int(min_dead)]
 
-    # 🆕 v7.2.23 — سجّل ما لن يُنظَّف
     result['skipped'] = [
         {
             'name': t['name'],
@@ -3097,7 +3156,6 @@ async def auto_vacuum_dirty_mvs(min_dead: int = 10) -> Dict[str, Any]:
         for t in below
     ]
 
-    # 🆕 v7.2.23 — عند غياب targets: اقرأ dirty_after قبل الخروج
     if not targets:
         _invalidate_cache("all_tables_health")
         dirty_after, _ = await _get_all_tables_health()
@@ -3126,7 +3184,6 @@ async def auto_vacuum_dirty_mvs(min_dead: int = 10) -> Dict[str, Any]:
             else:
                 await db.execute(f'VACUUM ANALYZE "{name}"')
 
-            # 🆕 v7.2.23 — اقرأ dead_after لكل جدول بعد VACUUM
             dead_after = 0
             try:
                 row = await db.fetchone(
@@ -3144,7 +3201,7 @@ async def auto_vacuum_dirty_mvs(min_dead: int = 10) -> Dict[str, Any]:
             result['vacuumed'].append({
                 'name': name,
                 'dead_before': dead_before,
-                'dead_after': dead_after,          # 🆕
+                'dead_after': dead_after,
                 'is_mv': is_mv,
             })
             result['cleaned'] += 1
@@ -3162,7 +3219,6 @@ async def auto_vacuum_dirty_mvs(min_dead: int = 10) -> Dict[str, Any]:
     if dirty_after is not None:
         result['total_dead_after'] = sum(
             int(t.get('dead', 0)) for t in dirty_after)
-        # 🆕 v7.2.23 — تفصيل ما تبقّى
         result['remaining'] = [
             {
                 'name': t['name'],
@@ -3182,10 +3238,10 @@ async def auto_vacuum_dirty_mvs(min_dead: int = 10) -> Dict[str, Any]:
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# 11c) 🆕 v7.2.24 — AUTO-TUNING — ضبط autovacuum تلقائيًا لكل جدول
+# 11c) AUTO-TUNING — ضبط autovacuum تلقائيًا لكل جدول
+# 🟠 v7.2.25 FIX-25-3: يتجاهل جداول database.py
 # ═══════════════════════════════════════════════════════════════════════
 
-# قواعد ثابتة للجداول المعروفة (None = اتركها افتراضية)
 _AUTOVACUUM_TUNING_RULES: Dict[str, Optional[Dict[str, float]]] = {
     # جداول صغيرة عالية التغيير (churn) → عتبات منخفضة
     "managed_bot_users": {
@@ -3218,11 +3274,10 @@ _AUTOVACUUM_TUNING_RULES: Dict[str, Optional[Dict[str, float]]] = {
     "mv_active_user_limits": None,
 }
 
-# اكتشاف تلقائي للجداول الأخرى عالية الـ churn
 _AUTOVACUUM_AUTO_DISCOVER = True
-_AUTOVACUUM_AUTO_RATIO = 0.10        # dead ratio ≥ 10% → ضبط
-_AUTOVACUUM_AUTO_MOD = 1000          # أو n_mod_since_analyze ≥ 1000
-_AUTOVACUUM_AUTO_MIN_DEAD = 20       # لا تلمس جداول صغيرة جدًا
+_AUTOVACUUM_AUTO_RATIO = 0.10
+_AUTOVACUUM_AUTO_MOD = 1000
+_AUTOVACUUM_AUTO_MIN_DEAD = 20
 
 _AUTOVACUUM_TUNE_CACHE_KEY = "autovacuum_tuning"
 
@@ -3274,7 +3329,11 @@ def _build_alter_sql(table: str, rules: Dict[str, float]) -> Optional[str]:
 async def ensure_autovacuum_tuning(*, force: bool = False) -> Dict[str, Any]:
     """
     يضبط autovacuum لكل جدول حسب القواعد + الاكتشاف التلقائي.
-    آمن للاستدعاء المتكرر — يتحقق من reloptions ويتخطى المضبوط.
+
+    🟠 v7.2.25 FIX-25-3:
+      يتجاهل الجداول التي يديرها database.py _tune_heavy_tables_autovacuum
+      (HEAVY/SMALL) لأن قيمها أدق وأكثر تخصصاً. بلا هذا التجاهل،
+      db_diagnostics قد يُعيد ضبطها بقيم عامة أسوأ.
     """
     result: Dict[str, Any] = {
         'ok': False, 'tuned': [], 'skipped': [], 'failed': [],
@@ -3311,6 +3370,13 @@ async def ensure_autovacuum_tuning(*, force: bool = False) -> Dict[str, Any]:
                     continue
                 if t.get('is_matview'):
                     continue  # MVs لا تدعم autovacuum options
+                # 🟠 v7.2.25 FIX-25-3: تجاهل جداول database.py
+                if name in _DB_OWNED_TABLES:
+                    result['skipped'].append({
+                        'name': name,
+                        'reason': 'managed_by_database_py',
+                    })
+                    continue
                 dead = int(t.get('dead', 0))
                 ratio = float(t.get('ratio', 0))
                 mod = int(t.get('n_mod', 0))
@@ -3396,14 +3462,38 @@ async def init_autovacuum_tuning() -> Dict[str, Any]:
 
 
 def format_autovacuum_tuning(result: Dict[str, Any]) -> str:
+    """
+    🟡 v7.2.25 FIX-25-7: رسالة نجاح واضحة عند عدم الحاجة لتغييرات.
+    """
     lines = ["⚙️ <b>ضبط autovacuum تلقائيًا</b>", "━━━━━━━━━━━━━━━━━━━━━━", ""]
     tuned = result.get('tuned', [])
+    skipped = result.get('skipped', [])
+    failed = result.get('failed', [])
+
+    # 🟡 v7.2.25 FIX-25-7: حالة "لا حاجة لتغييرات"
+    if not tuned and not failed:
+        lines.append(f"✅ <b>كل الجداول مضبوطة مسبقاً ({len(skipped)})</b>")
+        lines.append("")
+        lines.append("💡 لا حاجة لأي تغيير — autovacuum يعمل بكفاءة.")
+        lines.append("")
+        # اعرض أسباب التخطي (مختصر)
+        if skipped:
+            by_reason: Dict[str, int] = {}
+            for s in skipped:
+                r = s.get('reason', '?')
+                by_reason[r] = by_reason.get(r, 0) + 1
+            lines.append("<b>تفصيل التخطي:</b>")
+            for reason, count in sorted(by_reason.items()):
+                lines.append(f"  • <code>{_esc(reason)}</code>: {count}")
+            lines.append("")
+        lines.append(f"⏱️ <i>{result.get('duration_sec', 0):.2f}s</i>")
+        return "\n".join(lines)
+
     if tuned:
         lines.append(f"✅ <b>ضُبطت ({len(tuned)}):</b>")
         for t in tuned:
             lines.append(f"  🔧 <code>{_esc(t['name'])}</code>")
         lines.append("")
-    skipped = result.get('skipped', [])
     if skipped:
         lines.append(f"⏭️ <b>تخطّي ({len(skipped)}):</b>")
         for t in skipped[:10]:
@@ -3412,7 +3502,6 @@ def format_autovacuum_tuning(result: Dict[str, Any]) -> str:
         if len(skipped) > 10:
             lines.append(f"  … و{len(skipped) - 10} آخر")
         lines.append("")
-    failed = result.get('failed', [])
     if failed:
         lines.append(f"❌ <b>فشل ({len(failed)}):</b>")
         for t in failed[:10]:
@@ -3439,7 +3528,7 @@ async def _build_sections(*, include_probes: bool = True) -> List[str]:
                            "users", "user_channels", "subscriptions"]
     gathered = await asyncio.gather(
         _get_db_metadata(), _get_all_tables_health(),
-        _get_activity_stats(), _get_pg_settings(),
+        _get_activity_stats(force=True), _get_pg_settings(),
         _get_table_sizes(limit=15), _get_cleanup_status(),
         _get_all_table_names(), _get_indexes(critical_idx_tables),
         return_exceptions=True)
@@ -3743,7 +3832,7 @@ async def diagnose_db_quick() -> str:
     except Exception:
         lines.append("🟠 فحص dead-tuples فشل")
     try:
-        activity = await _get_activity_stats()
+        activity = await _get_activity_stats(force=True)
         idle = activity.get("idle_tx", 0)
         long_tx = activity.get("long_tx", 0)
         idle_icon = "🟢" if idle == 0 else ("🟡" if idle < 3 else "🔴")
@@ -3878,7 +3967,6 @@ auto_cleanup = auto_vacuum_dirty_mvs
 cleanup_dead_tuples = auto_vacuum_dirty_mvs
 vacuum_dirty_tables = auto_vacuum_dirty_mvs
 
-# 🆕 v7.2.24 — AUTO-TUNING aliases
 autovacuum_tune = ensure_autovacuum_tuning
 tune_autovacuum = ensure_autovacuum_tuning
 tune_vacuum = ensure_autovacuum_tuning
@@ -3922,7 +4010,7 @@ __all__ = [
     "full_health", "check_full_health", "health_report",
     "auto_vacuum_dirty_mvs", "auto_vacuum", "auto_cleanup",
     "cleanup_dead_tuples", "vacuum_dirty_tables",
-    # 🆕 v7.2.24 — AUTO-TUNING
+    # AUTO-TUNING
     "ensure_autovacuum_tuning", "init_autovacuum_tuning",
     "format_autovacuum_tuning", "diagnose_autovacuum_tuning",
     "autovacuum_tune", "tune_autovacuum", "tune_vacuum", "ensure_auto_tuning",
@@ -3943,11 +4031,14 @@ __all__ = [
     "diagnose_databases", "get_all_databases_info", "format_multi_db_report",
     "format_active_db_line", "databases_report", "list_databases",
     "multi_db_report", "show_databases", "get_active_db",
+    # v7.2.25 additions
+    "_DB_OWNED_TABLES",
+    "_LONG_TX_THRESHOLD_SECONDS",
 ]
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# LOAD BEACON — v7.2.24
+# LOAD BEACON — v7.2.25
 # ═══════════════════════════════════════════════════════════════════════
 
 try:
@@ -3955,22 +4046,22 @@ try:
     _uptime_at_import = time.monotonic() - _PROCESS_IMPORT_TS
     logger.info(
         "🛡️ db_diagnostics.py v%s loaded | "
-        "AUTO-TUNING ✅ | "
-        "AUTO-TUNE-1=ensure_autovacuum_tuning ✅ | "
-        "AUTO-TUNE-2=init_autovacuum_tuning ✅ | "
-        "AUTO-TUNE-3=diagnose_autovacuum_tuning ✅ | "
-        "AUTO-TUNE-4=read_reloptions+build_alter_sql ✅ | "
-        "AUTO-TUNE-5=exports+beacon ✅ | "
-        "CLEANUP-VISIBILITY ✅ | "
-        "FIX-CLEANUP-1=skipped/remaining/dead_after ✅ | "
-        "FIX-CLEANUP-2=read-after-always ✅ | "
-        "FIX-CLEANUP-3=dead-after-per-table ✅ | "
-        "DOC-QUALITY-IMPROVEMENTS ✅ | POOL-DISPLAY-FIX ✅ | "
-        "FIX-21=pool-uses-get_size-minus-get_idle ✅ | "
-        "COMMAND-FIX ✅ | FIX-19=startup-grace ✅ | "
+        "SAFETY-FIXES-AUDIT ✅ | "
+        "FIX-25-1=no-direct-connect-on-pool-fail ✅ | "
+        "FIX-25-2=activity-force-param ✅ | "
+        "FIX-25-3=skip-db-owned-tables ✅ | "
+        "FIX-25-4=long-tx-env-configurable ✅ | "
+        "FIX-25-5=cleanup-show-errors ✅ | "
+        "FIX-25-6=sqlite-fragility-doc ✅ | "
+        "FIX-25-7=success-message-clear ✅ | "
+        "AUTO-TUNING ✅ (v7.2.24 preserved) | "
+        "CLEANUP-VISIBILITY ✅ (v7.2.23 preserved) | "
+        "DB-owned-tables=%d | long_tx_threshold=%ds | "
         "grace_sec=%d | cache_keys=%d | exports=%d | "
         "mark_state=%s | process_age_at_import=%.1fs",
         VERSION,
+        len(_DB_OWNED_TABLES),
+        _LONG_TX_THRESHOLD_SECONDS,
         int(_STARTUP_GRACE_SEC),
         len(_CACHE_TTL),
         len(__all__),
