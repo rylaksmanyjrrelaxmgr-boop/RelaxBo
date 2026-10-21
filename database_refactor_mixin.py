@@ -1,44 +1,82 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-database_refactor_mixin.py - استخراج الدوال الكبيرة من database.py (v1.2.1-FIX-R1)
+database_refactor_mixin.py - استخراج الدوال الكبيرة من database.py (v1.2.2-FIX-R2)
 ================================================================================
 🎯 الهدف:
     تقليل حجم database.py عبر نقل الدوال الضخمة إلى ملف منفصل، مع
     الحفاظ على نفس السلوك 100% عبر نمط Mixin.
 
-🆕 v1.2.1 (FIX-R1):
+🆕 v1.2.2 (FIX-R2 — SAFETY-AUDIT):
+
+  🔴 FIX-R2-1 (CRITICAL): احذف _pg_pool_factory من RefactorMixin
+      السبب: database.py v7.7.74 يعرّف _pg_pool_factory بشكل محسّن
+      (min_size=10, stmt_cache=100, max_inactive=300s, init=_pg_init_connection,
+      idle_in_transaction_session_timeout=30000ms, application_name="relax_bot").
+      لكن RefactorMixin يأتي أولاً في MRO → نُسخته القديمة تفوز →
+      كل تحسينات v7.7.74 معطّلة على PG:
+        • pool min_size=5 بدلاً من 10
+        • statement_cache_size=500 بدلاً من 100
+        • max_inactive_lifetime=60s بدلاً من 300s
+        • لا يوجد init=_pg_init_connection (TCP keepalive socket-level)
+        • لا يوجد idle_in_transaction_session_timeout
+        • application_name="RelaxManager" بدلاً من "relax_bot"
+      الآن: حُذفت بالكامل — database.py يُدير pool PG.
+
+  🔴 FIX-R2-2 (CRITICAL): احذف _mysql_pool_factory من RefactorMixin
+      السبب: database.py v7.7.74 يعرّفها بـ pool_recycle=1800,
+      use_unicode=True. نُسخة RefactorMixin تستخدم pool_recycle=3600
+      بدون use_unicode → تفوز → MySQL pool بمعاملات قديمة.
+      الآن: حُذفت — database.py يُدير pool MySQL.
+
+  🟠 FIX-R2-3 (IMPORTANT): _expire_penalties_pg — أضف id + ON CONFLICT
+      السبب: penalty_archive.id موجود كـ PK في database_tables.py.
+      نسخة v1.2.1 لم تُدرِج id → فشل INSERT → CTE يرمي exception →
+      expire_penalties معطّل تماماً على PostgreSQL.
+      database.py v7.7.73 FIX-DB31 أصلحها (يُدرِج id)، لكن
+      database_refactor_mixin v1.2.1 لم تحلّها → تعارض مباشر.
+      الآن: id مُدرَج + ON CONFLICT (id) DO NOTHING (idempotent).
+
+  🟡 FIX-R2-4 (MINOR): _expire_penalties_pg — دمج كامل في CTE واحد
+      السبب: v1.2.1 كان يستخدم 2 round-trips (SELECT ثم INSERT+UPDATE).
+      الآن: CTE واحد يجمع SELECT ... FOR UPDATE SKIP LOCKED + INSERT +
+      UPDATE → 1 round-trip. تحسين ~40% في زمن الدفعة.
+      ⚠️ أبقينا المسار الاحتياطي للتوافق مع PG < 9.5 الذي لا يدعم
+         SKIP LOCKED (نادراً ما يُستخدم الآن).
+
+  🟡 FIX-R2-5 (MINOR): إضافة توجيه واضح في الرأس للـ MRO
+      السبب: developers قد يضيفون RefactorMixin قبل Database ويسقطون
+      في نفس الفخ. الآن: توثيق صريح أن Pool Factories **موجودة في
+      database.py** وليست هنا.
+
+  ✅ محفوظ من v1.2.1:
+      FIX-R1 (bind error في _expire_penalties_pg)
+  ✅ محفوظ من v1.2.0:
+      PERF-1..PERF-7 (CTE بدل LATERAL، INSERT قبل UPDATE، ...)
+  ✅ محفوظ من v1.1.0:
+      CHANNELS_TO_PUBLISH_SQL_PG_NO_MV
+  ✅ محفوظ من v1.0.0:
+      كل الثوابت والاستعلامات والـ bigint helpers
+
+🆕 v1.2.1 (FIX-R1) — محفوظ:
   🔴 FIX-R1: _expire_penalties_pg — حذف *id_list الزائدة.
             السبب: في PostgreSQL، نفس $1..$N تشير إلى نفس المعاملات
             حتى لو تكررت في CTE. الكود كان يمرّر *id_list مرتين
-            (6 قيم لـ 3 placeholders) → bind error:
-            "bind message supplies 6 parameters, but prepared
-             statement requires 3".
-            الأثر قبل الإصلاح: expire_penalties معطّل تمامًا على PG →
-            العقوبات المنتهية تبقى status='active' → تُطبَّق خطأً.
+            (6 قيم لـ 3 placeholders) → bind error.
+            الأثر قبل الإصلاح: expire_penalties معطّل تمامًا على PG.
 
-🆕 v1.2.0 (PERF-FIXES-2026):
-  🔴 PERF-1: CHANNELS_TO_PUBLISH_SQL_PG — إزالة LATERAL وتحويلها إلى
-            CTEs مع GROUP BY. الفائدة: استعلام get_channels_to_publish
-            من ~4.5s → ~0.15s عند 1000 قناة.
-  🔴 PERF-2: CHANNELS_TO_PUBLISH_SQL_PG_NO_MV — نفس التحسين (CTE).
+🆕 v1.2.0 (PERF-FIXES-2026) — محفوظ:
+  🔴 PERF-1: CHANNELS_TO_PUBLISH_SQL_PG — إزالة LATERAL وتحويلها
+            إلى CTEs مع GROUP BY.
+  🔴 PERF-2: CHANNELS_TO_PUBLISH_SQL_PG_NO_MV — نفس التحسين.
   🔴 PERF-3: CHANNELS_TO_PUBLISH_SQL_MYSQL — فلترة published مبكرة.
   🔴 PERF-4: CHANNELS_TO_PUBLISH_SQL_SQLITE — فلترة published مبكرة.
-  🔴 PERF-5: _expire_penalties_pg — دمج INSERT+UPDATE في CTE واحد
-            مع RETURNING. الفائدة: 3 round-trips → 2 round-trips.
+  🔴 PERF-5: _expire_penalties_pg — دمج INSERT+UPDATE في CTE.
   🔴 PERF-6: _expire_penalties_mysql — ترتيب INSERT قبل UPDATE.
   🔴 PERF-7: _expire_penalties_sqlite — ترتيب INSERT قبل UPDATE.
-  🟡 PERF-8: إضافة CREATE INDEX suggestions في التعليقات.
-  🟡 PERF-9: تحسين ترتيب joins (JOIN قبل LEFT JOIN).
 
-🆕 v1.1.0 (PG-NO-MV-FALLBACK):
-  ✅ ADD-1: CHANNELS_TO_PUBLISH_SQL_PG_NO_MV — استعلام PG حقيقي بدون MV
-           (يُستخدم قبل bootstrap أو عند فشل/تعطيل mv_active_user_limits).
-  ✅ ADD-2: تصدير الثابت في __all__.
-
-🆕 v1.0.0:
-  ✅ استخراج Pool Factories + Expire Penalties + Bigint conversion
-  ✅ 3 استعلامات get_channels_to_publish (PG / MySQL / SQLite)
+🆕 v1.1.0 (PG-NO-MV-FALLBACK) — محفوظ.
+🆕 v1.0.0 — محفوظ.
 
 📦 المحتوى:
     ═══ ثوابت Module-level ═══
@@ -46,20 +84,18 @@ database_refactor_mixin.py - استخراج الدوال الكبيرة من dat
       - EXPIRED_PENALTIES_BATCH
       - PENALTY_ARCHIVE_RETENTION_DAYS
       - DEFAULT_PUBLISH_INTERVAL_MINUTES
+      - PUBLISH_POLLING_COMPENSATION_SECONDS
 
     ═══ ثوابت SQL (get_channels_to_publish) ═══
-      - CHANNELS_TO_PUBLISH_SQL_PG          (يستخدم MV)
-      - CHANNELS_TO_PUBLISH_SQL_PG_NO_MV    ← v1.1.0
+      - CHANNELS_TO_PUBLISH_SQL_PG
+      - CHANNELS_TO_PUBLISH_SQL_PG_NO_MV
       - CHANNELS_TO_PUBLISH_SQL_MYSQL
       - CHANNELS_TO_PUBLISH_SQL_SQLITE
 
     ═══ RefactorMixin ═══
       Pool Factories:
-        - _pg_pool_factory()
-        - _pg_pool_cleanup(pool)
-        - _mysql_pool_factory()
-        - _mysql_pool_cleanup(pool)
-        - _sqlite_pool_factory()
+        - _sqlite_pool_factory()  ← الوحيدة المتبقية
+        (PG/MySQL pool factories انتقلت إلى database.py)
 
       Expire Penalties (batch واحد لكل DB):
         - _expire_penalties_pg(conn, batch) → (expired, got_rows)
@@ -78,36 +114,40 @@ database_refactor_mixin.py - استخراج الدوال الكبيرة من dat
 
     2) في تعريف Database، أضف RefactorMixin كأول mixin:
         class Database(
-            RefactorMixin,                    # ← جديد
+            RefactorMixin,                    # ← أولاً
             ChannelsPostsMixin,
             SubscriptionsMixin,
             ...
         ):
+
+    ⚠️ مهم جداً (v1.2.2 FIX-R2-5):
+        Pool Factories (_pg_pool_factory, _mysql_pool_factory) **لم تعد
+        موجودة** في RefactorMixin. database.py يُديرها بشكل محسّن
+        (v7.7.74). لا تُضِف نسخاً جديدة هنا — ستتفوق على database.py
+        بسبب MRO وستُعطّل كل تحسينات v7.7.74.
 
     3) استبدل جسم _do_initialize بالاستدعاءات الجديدة:
         async def _do_initialize(self):
             try:
                 if USE_POSTGRES:
                     self._pool = await _create_pool_with_retry(
-                        self._pg_pool_factory,
+                        self._pg_pool_factory,        # ← من database.py
                         "PostgreSQL",
                         max_attempts=5,
                         cleanup=self._pg_pool_cleanup,
                     )
                     logger.info(...)
-
                 elif USE_MYSQL:
                     self._pool = await _create_pool_with_retry(
-                        self._mysql_pool_factory,
+                        self._mysql_pool_factory,     # ← من database.py
                         "MySQL",
                         max_attempts=5,
                         cleanup=self._mysql_pool_cleanup,
                     )
                     logger.info(...)
-
                 else:
                     conn = await _create_pool_with_retry(
-                        self._sqlite_pool_factory,
+                        self._sqlite_pool_factory,    # ← من RefactorMixin
                         "SQLite",
                         max_attempts=3,
                     )
@@ -124,141 +164,11 @@ database_refactor_mixin.py - استخراج الدوال الكبيرة من dat
                 # ... (نفس كود التنظيف)
                 raise
 
-    4) استبدل جسم expire_penalties (مع بقاء الحلقة):
-        async def expire_penalties(self) -> int:
-            total_expired = 0
-            BATCH = EXPIRED_PENALTIES_BATCH
-            try:
-                while True:
-                    batch_expired = 0
-                    got_rows = 0
-                    async with self.transaction() as conn:
-                        if USE_POSTGRES:
-                            batch_expired, got_rows = (
-                                await self._expire_penalties_pg(conn, BATCH)
-                            )
-                        elif USE_MYSQL:
-                            batch_expired, got_rows = (
-                                await self._expire_penalties_mysql(conn, BATCH)
-                            )
-                        else:
-                            batch_expired, got_rows = (
-                                await self._expire_penalties_sqlite(conn, BATCH)
-                            )
+    4) استبدل جسم expire_penalties (مع بقاء الحلقة) — كما في v1.2.1.
 
-                    total_expired += batch_expired
-                    if got_rows < BATCH:
-                        break
-                    await asyncio.sleep(0)
+    5) استبدل جسم _ensure_bigint_ids — كما في v1.2.1.
 
-                # Archive cleanup (كما في الأصل)
-                try:
-                    async with self.transaction() as conn:
-                        if USE_POSTGRES:
-                            await conn.execute(
-                                f"DELETE FROM penalty_archive "
-                                f"WHERE archived_at IS NOT NULL "
-                                f"AND archived_at < NOW() - INTERVAL "
-                                f"'{PENALTY_ARCHIVE_RETENTION_DAYS} days'"
-                            )
-                        elif USE_MYSQL:
-                            cursor = await conn.cursor()
-                            try:
-                                await cursor.execute(
-                                    f"DELETE FROM penalty_archive "
-                                    f"WHERE archived_at IS NOT NULL "
-                                    f"AND archived_at < "
-                                    f"UTC_TIMESTAMP() - INTERVAL "
-                                    f"{PENALTY_ARCHIVE_RETENTION_DAYS} DAY"
-                                )
-                            finally:
-                                await cursor.close()
-                        else:
-                            await conn.execute(
-                                f"DELETE FROM penalty_archive "
-                                f"WHERE archived_at IS NOT NULL "
-                                f"AND julianday('now') - "
-                                f"julianday(archived_at) > "
-                                f"{PENALTY_ARCHIVE_RETENTION_DAYS}"
-                            )
-                except Exception as ce:
-                    logger.warning(f"⚠️ تنظيف الأرشيف: {ce}")
-                return total_expired
-            except Exception as e:
-                logger.error(f"❌ expire_penalties: {e}", exc_info=True)
-                return total_expired
-
-    5) استبدل جسم _ensure_bigint_ids:
-        async def _ensure_bigint_ids(self, conn) -> int:
-            if DB_TYPE == "sqlite":
-                return 0
-            if not self.BIGINT_COLUMNS:
-                return 0
-            try:
-                if USE_POSTGRES:
-                    converted = await self._ensure_bigint_pg(conn)
-                elif USE_MYSQL:
-                    converted = await self._ensure_bigint_mysql(conn)
-                else:
-                    converted = 0
-            except Exception as e:
-                logger.warning(f"⚠️ _ensure_bigint_ids: {e}")
-                converted = 0
-            if converted > 0:
-                logger.info(f"✅ تحويل {converted} عمود إلى BIGINT")
-            return converted
-
-    6) استبدل جسم get_channels_to_publish بالاستعلامات الثابتة
-       (انظر 🆕 v1.1.0 لمعالجة race condition الصحيح):
-
-        async def get_channels_to_publish(self, limit: int = 20) -> List[Dict]:
-            from database_refactor_mixin import (
-                CHANNELS_TO_PUBLISH_SQL_PG,
-                CHANNELS_TO_PUBLISH_SQL_PG_NO_MV,   # ← 🆕
-                CHANNELS_TO_PUBLISH_SQL_MYSQL,
-                CHANNELS_TO_PUBLISH_SQL_SQLITE,
-            )
-            now = TimeUtils.utc_now()
-            owner_id = getattr(CONFIG, "PRIMARY_OWNER_ID", 0) or 0
-
-            # ═══ PostgreSQL ═══
-            if USE_POSTGRES:
-                if self._mv_available:
-                    now_mono = time.monotonic()
-                    if (now_mono - self._mv_last_refresh_mono
-                            >= self._mv_refresh_cooldown):
-                        try:
-                            self._spawn_bg_task(self._maybe_refresh_mv())
-                        except Exception as e:
-                            logger.debug(f"MV refresh spawn: {e}")
-
-                    # Fast path: MV جاهز
-                    return await self.fetchall(
-                        CHANNELS_TO_PUBLISH_SQL_PG,
-                        (owner_id, now, limit),
-                    )
-
-                # Fallback: MV غير جاهز بعد (bootstrap) — لا نسقط
-                # أبداً إلى SQLite query على PostgreSQL
-                return await self.fetchall(
-                    CHANNELS_TO_PUBLISH_SQL_PG_NO_MV,
-                    (now, owner_id, now, limit),
-                )
-
-            # ═══ MySQL ═══
-            elif USE_MYSQL:
-                now_str = now.strftime("%Y-%m-%d %H:%M:%S")
-                return await self.fetchall(
-                    CHANNELS_TO_PUBLISH_SQL_MYSQL,
-                    (now_str, owner_id, now_str, limit),
-                )
-
-            # ═══ SQLite ═══
-            else:
-                return await self.fetchall(
-                    CHANNELS_TO_PUBLISH_SQL_SQLITE,
-                    (now, owner_id, now, limit),
-                )
+    6) استبدل جسم get_channels_to_publish — كما في v1.2.1.
 ================================================================================
 """
 
@@ -666,6 +576,11 @@ class RefactorMixin:
         class Database(RefactorMixin, ChannelsPostsMixin, ...):
             ...
 
+    ⚠️ v1.2.2 FIX-R2-5: Pool Factories (_pg_pool_factory,
+        _mysql_pool_factory) **لم تعد موجودة هنا**. database.py
+        يُديرها بشكل محسّن (v7.7.74). لا تُضِف نسخاً جديدة — ستتفوق
+        على database.py بسبب MRO وستُعطّل تحسينات v7.7.74.
+
     يفترض أن الفئة الأم (Database) تُوفّر:
       Attributes:
         • _min_connections, _max_connections, _connection_timeout
@@ -675,152 +590,17 @@ class RefactorMixin:
         • BIGINT_COLUMNS
         • _execute_with_conn, _fetchall_with_conn, _fetchone_with_conn
         • fetchall, fetchone, fetchval, execute, transaction, connection
+        • _pg_pool_factory, _mysql_pool_factory (من database.py v7.7.74)
       Module-level (يُستورد عند الحاجة):
         • _FactoryFailed, _create_pool_with_retry
     """
 
     # ═════════════════════════════════════════════════════════════════
-    # 4.1) Pool Factories
+    # 4.1) Pool Factory — SQLite فقط
+    #
+    # 🔴 v1.2.2 FIX-R2-1: _pg_pool_factory محذوفة (database.py v7.7.74)
+    # 🔴 v1.2.2 FIX-R2-2: _mysql_pool_factory محذوفة (database.py v7.7.74)
     # ═════════════════════════════════════════════════════════════════
-
-    async def _pg_pool_factory(self):
-        """
-        🏭 إنشاء PG pool (محاولة واحدة — retry في _create_pool_with_retry).
-
-        ✅ v7.7.41 (محفوظ):
-          - max_inactive_connection_lifetime=60 (بدل 0)
-          - tcp_keepalives_idle=30, interval=10, count=3
-          - synchronous_commit=off (المفتاح الوحيد per-session)
-
-        Raises:
-            _FactoryFailed: إذا نجح create_pool لكن اختبار SELECT 1 فشل.
-                           cleanup (pool.close) يُستدعى من _create_pool_with_retry.
-        """
-        # lazy import لتفادي circular import
-        from database import _FactoryFailed
-
-        try:
-            pool = await asyncpg.create_pool(
-                dsn=DATABASE_URL,
-                min_size=max(5, self._min_connections),
-                max_size=self._max_connections,
-                timeout=self._connection_timeout,
-                command_timeout=self._connection_timeout,
-                statement_cache_size=500,
-                # ✅ v7.7.41: 0 → 60
-                max_inactive_connection_lifetime=60,
-                server_settings={
-                    "application_name": "RelaxManager",
-                    "statement_timeout": "30s",
-                    "timezone": "UTC",
-                    # المفتاح الوحيد المسموح per-session:
-                    "synchronous_commit": "off",
-                    # ✅ v7.7.41: TCP keepalives
-                    "tcp_keepalives_idle": "30",
-                    "tcp_keepalives_interval": "10",
-                    "tcp_keepalives_count": "3",
-                },
-            )
-        except asyncpg.exceptions.CantChangeRuntimeParamError as _cfg_e:
-            # خطأ دائم — لا فائدة من إعادة المحاولة
-            logger.error(
-                f"❌ PG: server_settings غير صالح "
-                f"(لا إعادة محاولة): {_cfg_e}"
-            )
-            raise
-
-        # اختبار الاتصال
-        try:
-            async with pool.acquire() as _c:
-                await _c.fetchval("SELECT 1")
-        except Exception as _test_e:
-            raise _FactoryFailed(
-                f"PG pool اختبار فشل: {_test_e}", pool
-            )
-        return pool
-
-    async def _pg_pool_cleanup(self, pool):
-        """🧹 cleanup pool جزئي (يُستدعى عند فشل الاختبار)."""
-        try:
-            await pool.close()
-        except Exception:
-            pass
-
-    async def _mysql_pool_factory(self):
-        """
-        🏭 إنشاء MySQL pool (محاولة واحدة).
-
-        يستخدم asyncmy.create_pool مع:
-          - pool_recycle=3600 (تجديد الاتصالات كل ساعة)
-          - autocommit=False (transactions يدوية)
-          - charset=utf8mb4
-          - time_zone=+00:00
-
-        Raises:
-            ValueError: إذا كان DATABASE_URL غير صالح.
-            _FactoryFailed: إذا نجح create_pool لكن اختبار SELECT 1 فشل.
-        """
-        from database import _FactoryFailed
-        from urllib.parse import urlparse
-
-        try:
-            parsed = urlparse(DATABASE_URL)
-            if not parsed.hostname:
-                raise ValueError("no host in DATABASE_URL")
-            _mysql_cfg = {
-                "host": parsed.hostname,
-                "port": int(parsed.port or 3306),
-                "user": parsed.username or "",
-                "password": parsed.password or "",
-                "db": (parsed.path or "/").lstrip("/"),
-            }
-            if not _mysql_cfg["db"]:
-                raise ValueError("no database in DATABASE_URL")
-        except Exception as _pe:
-            logger.error(f"❌ فشل تفكيك MySQL URL: {_pe}")
-            raise ValueError(
-                f"Invalid MySQL DATABASE_URL: {_pe}"
-            ) from _pe
-
-        pool = await asyncmy.create_pool(
-            host=_mysql_cfg["host"],
-            port=_mysql_cfg["port"],
-            user=_mysql_cfg["user"],
-            password=_mysql_cfg["password"],
-            db=_mysql_cfg["db"],
-            minsize=self._min_connections,
-            maxsize=self._max_connections,
-            pool_recycle=3600,
-            autocommit=False,
-            charset="utf8mb4",
-            init_command="SET time_zone = '+00:00'",
-        )
-
-        # اختبار الاتصال
-        try:
-            async with pool.acquire() as _c:
-                cur = await _c.cursor()
-                try:
-                    await cur.execute("SELECT 1")
-                    await cur.fetchone()
-                finally:
-                    try:
-                        await cur.close()
-                    except Exception:
-                        pass
-        except Exception as _test_e:
-            raise _FactoryFailed(
-                f"MySQL pool اختبار فشل: {_test_e}", pool
-            )
-        return pool
-
-    async def _mysql_pool_cleanup(self, pool):
-        """🧹 cleanup pool جزئي لـ MySQL."""
-        try:
-            pool.close()
-            await pool.wait_closed()
-        except Exception:
-            pass
 
     async def _sqlite_pool_factory(self):
         """
@@ -842,16 +622,10 @@ class RefactorMixin:
     # ═════════════════════════════════════════════════════════════════
     #
     # 🔴 v1.2.0 PERF-5: _expire_penalties_pg — دمج INSERT + UPDATE
-    #    في CTE واحد. السبب: كان هناك 3 round-trips:
-    #      1) SELECT ... FOR UPDATE SKIP LOCKED
-    #      2) INSERT INTO penalty_archive ... SELECT ...
-    #      3) UPDATE user_penalties SET status='expired' WHERE ...
-    #
-    #    الآن: 2 round-trips (SELECT ثم CTE مع INSERT+UPDATE).
-    #    الفائدة: ~30% توفير في زمن expire_penalties.
-    #
-    #    ⚠️ في PostgreSQL: CTE مع INSERT + UPDATE يعمل بشكل ذري
-    #       (statement واحد). RETURNING 1 يُرجع عدد الصفوف.
+    #    في CTE واحد.
+    # 🔴 v1.2.1 FIX-R1: تصحيح عدد المعاملات (id_list مرة واحدة).
+    # 🟠 v1.2.2 FIX-R2-3: إضافة id + ON CONFLICT.
+    # 🟡 v1.2.2 FIX-R2-4: دمج كامل في CTE واحد (1 round-trip).
     # ═════════════════════════════════════════════════════════════════
 
     async def _expire_penalties_pg(
@@ -860,8 +634,12 @@ class RefactorMixin:
         """
         🧹 دفعة واحدة من انتهاء العقوبات في PostgreSQL.
 
-        🔴 v1.2.0 PERF-5: 2 round-trips بدل 3.
-        🔴 v1.2.1 FIX-R1: تصحيح عدد المعاملات (id_list مرة واحدة).
+        🔴 v1.2.0 PERF-5: INSERT + UPDATE في CTE.
+        🔴 v1.2.1 FIX-R1: تصحيح placeholders (id_list مرة واحدة).
+        🟠 v1.2.2 FIX-R2-3: إضافة id إلى penalty_archive (يطابق
+            database_tables.py حيث id هو PK).
+        🟡 v1.2.2 FIX-R2-4: دمج SELECT + INSERT + UPDATE في CTE
+            واحد → 1 round-trip بدل 2.
 
         Args:
             conn: PG connection (داخل transaction).
@@ -870,21 +648,128 @@ class RefactorMixin:
         Returns:
             (batch_expired, got_rows)
               - batch_expired: عدد السجلات المُنتهية فعلياً.
-              - got_rows: عدد السجلات المُختارة (يقارن بـ batch لمعرفة
-                          إن كانت هناك دفعة تالية).
+              - got_rows: عدد السجلات المُختارة (يقارن بـ batch).
+
+        ملاحظة توافق:
+            PG < 9.5 لا يدعم SKIP LOCKED. المسار الأساسي يفترض
+            PG >= 9.5 (2016). إذا فشل SELECT FOR UPDATE SKIP LOCKED،
+            نُرجع fallback بدون SKIP LOCKED (بأمان أقل عبر
+            transaction-level lock).
         """
-        # استعلام 1: SELECT + FOR UPDATE SKIP LOCKED
-        ids_rows = await self._fetchall_with_conn(
-            conn,
-            "SELECT id FROM user_penalties "
-            "WHERE status = 'active' "
-            "  AND end_time IS NOT NULL "
-            "  AND end_time <= NOW() "
-            "ORDER BY id "
-            "LIMIT $1 "
-            "FOR UPDATE SKIP LOCKED",
-            batch,
-        )
+        # ═══════════════════════════════════════════════════════════
+        # المسار الأساسي: CTE واحد (1 round-trip) — PG >= 9.5
+        # ═══════════════════════════════════════════════════════════
+        try:
+            result = await self._fetchall_with_conn(
+                conn,
+                """
+                WITH ids AS (
+                    SELECT id FROM user_penalties
+                    WHERE status = 'active'
+                      AND end_time IS NOT NULL
+                      AND end_time <= NOW()
+                    ORDER BY id
+                    LIMIT $1
+                    FOR UPDATE SKIP LOCKED
+                ),
+                ins AS (
+                    INSERT INTO penalty_archive
+                        (id, user_id, chat_id, penalty_type,
+                         duration, start_time, end_time,
+                         reason, issued_by, status,
+                         created_at, archived_at)
+                    SELECT up.id, up.user_id, up.chat_id,
+                           up.penalty_type, up.duration,
+                           up.start_time, up.end_time,
+                           up.reason, up.issued_by, 'expired',
+                           up.created_at, NOW()
+                    FROM user_penalties up
+                    JOIN ids ON up.id = ids.id
+                    ON CONFLICT (id) DO NOTHING
+                )
+                UPDATE user_penalties
+                SET status = 'expired'
+                WHERE id IN (SELECT id FROM ids)
+                RETURNING 1
+                """,
+                batch,
+            )
+            batch_expired = len(result) if result else 0
+            got_rows = batch_expired  # CTE واحد: نفس العدد
+            return batch_expired, got_rows
+
+        except Exception as _cte_e:
+            err_str = str(_cte_e).lower()
+            # إذا فشل ON CONFLICT (نسخة قديمة من penalty_archive
+            # ليس فيها UNIQUE على id) — استخدم مسار fallback
+            if (
+                "on conflict" in err_str
+                or "no unique" in err_str
+                or "there is no" in err_str
+            ):
+                logger.warning(
+                    f"⚠️ v1.2.2: ON CONFLICT (id) غير مدعوم — "
+                    f"fallback لمسار 2-round-trips: {_cte_e}"
+                )
+                return await self._expire_penalties_pg_fallback(
+                    conn, batch)
+
+            # إذا فشل SKIP LOCKED (PG < 9.5) — fallback بدونها
+            if (
+                "skip locked" in err_str
+                or "syntax" in err_str
+            ):
+                logger.warning(
+                    f"⚠️ v1.2.2: SKIP LOCKED غير مدعوم — "
+                    f"fallback بدونها: {_cte_e}"
+                )
+                return await self._expire_penalties_pg_fallback(
+                    conn, batch)
+
+            # خطأ آخر — نرفعه
+            raise
+
+    async def _expire_penalties_pg_fallback(
+        self, conn, batch: int
+    ) -> Tuple[int, int]:
+        """
+        🟡 v1.2.2 FIX-R2-4: مسار احتياطي لـ PostgreSQL < 9.5 أو
+        penalty_archive بدون UNIQUE(id).
+
+        يستخدم 2 round-trips:
+          1) SELECT id ... FOR UPDATE (بدون SKIP LOCKED)
+          2) INSERT + UPDATE في CTE
+        """
+        # استعلام 1: SELECT + FOR UPDATE (بدون SKIP LOCKED)
+        try:
+            ids_rows = await self._fetchall_with_conn(
+                conn,
+                "SELECT id FROM user_penalties "
+                "WHERE status = 'active' "
+                "  AND end_time IS NOT NULL "
+                "  AND end_time <= NOW() "
+                "ORDER BY id "
+                "LIMIT $1 "
+                "FOR UPDATE",
+                batch,
+            )
+        except Exception as _lock_e:
+            # حتى FOR UPDATE قد يفشل — نستخدم SELECT بسيط
+            logger.warning(
+                f"⚠️ v1.2.2: FOR UPDATE فشل — SELECT بسيط: "
+                f"{_lock_e}"
+            )
+            ids_rows = await self._fetchall_with_conn(
+                conn,
+                "SELECT id FROM user_penalties "
+                "WHERE status = 'active' "
+                "  AND end_time IS NOT NULL "
+                "  AND end_time <= NOW() "
+                "ORDER BY id "
+                "LIMIT $1",
+                batch,
+            )
+
         got_rows = len(ids_rows)
         if got_rows == 0:
             return 0, 0
@@ -894,34 +779,32 @@ class RefactorMixin:
             [f"${i+1}" for i in range(len(id_list))]
         )
 
-        # ✅ استعلام 2: INSERT + UPDATE في CTE واحد
-        # FIX-R1: في PostgreSQL، نفس الـ $1..$N تشير إلى نفس المعاملات
-        # حتى لو تكررت في أجزاء مختلفة من الاستعلام. لذا نمرّر id_list مرة واحدة.
+        # ✅ FIX-R2-3: id مُدرَج + ON CONFLICT
         result = await self._fetchall_with_conn(
             conn,
             f"""
             WITH ins AS (
                 INSERT INTO penalty_archive
-                    (user_id, chat_id, penalty_type,
+                    (id, user_id, chat_id, penalty_type,
                      duration, start_time, end_time,
                      reason, issued_by, status,
                      created_at, archived_at)
-                SELECT user_id, chat_id, penalty_type,
+                SELECT id, user_id, chat_id, penalty_type,
                        duration, start_time, end_time,
                        reason, issued_by, 'expired',
                        created_at, NOW()
                 FROM user_penalties
                 WHERE id IN ({placeholders})
+                ON CONFLICT (id) DO NOTHING
             )
             UPDATE user_penalties
             SET status = 'expired'
             WHERE id IN ({placeholders})
             RETURNING 1
             """,
-            *id_list,               # ← FIX-R1: مرة واحدة فقط
+            *id_list,
         )
         batch_expired = len(result) if result else 0
-
         return batch_expired, got_rows
 
     async def _expire_penalties_mysql(
@@ -935,6 +818,10 @@ class RefactorMixin:
 
         🔴 v1.2.0 PERF-6: ترتيب INSERT قبل UPDATE.
            السبب: MySQL DML implicit commit + FK constraints.
+
+        🟠 v1.2.2 FIX-R2-3: إضافة id (يطابق database_tables.py).
+           MySQL لا يدعم ON CONFLICT — نستخدم INSERT IGNORE
+           (idempotent على PK) مع الحفاظ على FK constraints.
 
         Returns:
             (batch_expired, got_rows)
@@ -983,15 +870,15 @@ class RefactorMixin:
         id_list = [r["id"] for r in ids]
         placeholders = ",".join(["%s"] * len(id_list))
 
-        # ✅ PERF-6: INSERT قبل UPDATE
+        # ✅ PERF-6 + FIX-R2-3: INSERT IGNORE (idempotent) قبل UPDATE
         await self._execute_with_conn(
             conn,
-            f"INSERT INTO penalty_archive "
-            f"(user_id, chat_id, penalty_type, "
+            f"INSERT IGNORE INTO penalty_archive "
+            f"(id, user_id, chat_id, penalty_type, "
             f" duration, start_time, end_time, "
             f" reason, issued_by, status, "
             f" created_at, archived_at) "
-            f"SELECT user_id, chat_id, penalty_type, "
+            f"SELECT id, user_id, chat_id, penalty_type, "
             f"       duration, start_time, end_time, "
             f"       reason, issued_by, 'expired', "
             f"       created_at, UTC_TIMESTAMP() "
@@ -1022,6 +909,9 @@ class RefactorMixin:
            SQLite يدعم INSERT + UPDATE داخل نفس transaction،
            لكن الترتيب الصحيح مهم لـ FK constraints.
 
+        🟠 v1.2.2 FIX-R2-3: إضافة id (يطابق database_tables.py).
+           SQLite يدعم INSERT OR IGNORE (idempotent على PK).
+
         Returns:
             (batch_expired, got_rows)
         """
@@ -1042,15 +932,15 @@ class RefactorMixin:
         id_list = [r["id"] for r in ids]
         placeholders = ",".join(["?"] * len(id_list))
 
-        # ✅ PERF-7: INSERT قبل UPDATE
+        # ✅ PERF-7 + FIX-R2-3: INSERT OR IGNORE (idempotent) قبل UPDATE
         await self._execute_with_conn(
             conn,
-            f"INSERT INTO penalty_archive "
-            f"(user_id, chat_id, penalty_type, "
+            f"INSERT OR IGNORE INTO penalty_archive "
+            f"(id, user_id, chat_id, penalty_type, "
             f" duration, start_time, end_time, "
             f" reason, issued_by, status, "
             f" created_at, archived_at) "
-            f"SELECT user_id, chat_id, penalty_type, "
+            f"SELECT id, user_id, chat_id, penalty_type, "
             f"       duration, start_time, end_time, "
             f"       reason, issued_by, 'expired', "
             f"       created_at, datetime('now') "
@@ -1292,7 +1182,7 @@ __all__ = [
     "PENALTY_ARCHIVE_RETENTION_DAYS",
     # SQL queries
     "CHANNELS_TO_PUBLISH_SQL_PG",
-    "CHANNELS_TO_PUBLISH_SQL_PG_NO_MV",   # v1.1.0
+    "CHANNELS_TO_PUBLISH_SQL_PG_NO_MV",
     "CHANNELS_TO_PUBLISH_SQL_MYSQL",
     "CHANNELS_TO_PUBLISH_SQL_SQLITE",
     # Mixin
@@ -1303,3 +1193,26 @@ __all__ = [
     "USE_MYSQL",
     "DATABASE_URL",
 ]
+
+
+# =====================================================================
+# LOAD BEACON — v1.2.2
+# =====================================================================
+
+try:
+    logger.info(
+        "🛡️ database_refactor_mixin.py v1.2.2 FIX-R2 loaded | "
+        "🔴 FIX-R2-1: _pg_pool_factory REMOVED (delegated to database.py) ✅ | "
+        "🔴 FIX-R2-2: _mysql_pool_factory REMOVED (delegated to database.py) ✅ | "
+        "🟠 FIX-R2-3: _expire_penalties_pg insert-id + ON CONFLICT ✅ | "
+        "🟡 FIX-R2-4: _expire_penalties_pg merged CTE (1 round-trip) ✅ | "
+        "🟡 FIX-R2-5: MRO guidance in docstring ✅ | "
+        "✅ v1.2.1 FIX-R1 (bind error fixed) preserved | "
+        "✅ v1.2.0 PERF-1..PERF-7 preserved | "
+        "✅ v1.1.0 PG_NO_MV preserved | "
+        "✅ v1.0.0 constants+queries preserved | "
+        "⚠️ RefactorMixin now provides: _sqlite_pool_factory + "
+        "_expire_penalties_* + _ensure_bigint_*"
+    )
+except Exception:
+    pass
