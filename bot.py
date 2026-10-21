@@ -1,15 +1,18 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-🌿 Relax Manager – البوت الرئيسي (bot.py v5.7.17-AUTO-KEEP-ALIVE-HOST)
+🌿 Relax Manager – البوت الرئيسي (bot.py v5.7.18-GRACEFUL-PRE-SHUTDOWN)
 ================================================================================
-🆕 v5.7.17 (AUTO-KEEP-ALIVE-HOST — فوق v5.7.16):
-    🔴 FIX-23: `_resolve_hostname()` يقرأ الآن من 12 مصدراً تلقائياً بما فيها
-              `KEEP_ALIVE_URL` (الذي كان موجوداً في env لكن مُتجاهلاً!).
-              → على Render: يكشف النطاق تلقائياً حتى لو RENDER_EXTERNAL_* فارغان.
-              → يطبع DEBUG كامل عند الفشل لتشخيص سريع.
-    🟢 محفوظ: كل إصلاحات v5.7.16 (FIX-20..22) + v5.7.15 (AUTO-HOSTNAME) +
-              v5.7.14 (FIX-17..18) + v5.7.13 (P0..P3).
+🆕 v5.7.18 (GRACEFUL-PRE-SHUTDOWN — فوق v5.7.17):
+    🕊️ FIX-24: `_force_kill_previous_instance()` يصبح "graceful":
+              - SIGTERM أولاً (لا SIGKILL مباشرة)
+              - انتظار حتى 20 ثانية للإغلاق الآمن
+              - SIGKILL فقط كملاذ أخير
+    🕊️ FIX-25: عند استلام SIGTERM في النسخة القديمة → تحرير Telegram token فوراً
+              عبر delete_webhook/stop_polling قبل إغلاق التطبيق.
+    🕊️ FIX-26: `_TELEGRAM_RELEASE_TIMEOUT_SEC`: 15 → 30 ثانية (نافذة أوسع).
+    🟢 محفوظ: كل إصلاحات v5.7.17 (FIX-23) + v5.7.16 (FIX-20..22) +
+              v5.7.15 (AUTO-HOSTNAME) + v5.7.14 (FIX-17..18) + v5.7.13 (P0..P3).
 ================================================================================
 """
 
@@ -481,23 +484,26 @@ def _shutdown_faulthandler() -> None:
     _GIL_DIAG_ENABLED = False
 
 # ═══════════════════════════════════════════════════════════════════
-# PID / KILL-PREVIOUS
+# PID / KILL-PREVIOUS (v5.7.18 GRACEFUL)
 # ═══════════════════════════════════════════════════════════════════
 _PID_FILE_PATH = "/app/.bot.pid"
-_KILL_TIMEOUT_SEC = 5.0
-_TELEGRAM_RELEASE_TIMEOUT_SEC = 15.0
+_KILL_TIMEOUT_SEC = 5.0                    # timeout بعد SIGKILL (قبل SIGKILL لا يستخدم)
+_GRACEFUL_SHUTDOWN_TIMEOUT = 20.0          # 🆕 v5.7.18: نافذة الإغلاق الآمن قبل SIGKILL
+_TELEGRAM_RELEASE_TIMEOUT_SEC = 30.0       # 🆕 v5.7.18: 15 → 30 لتحرر أوسع
 
 _FALLBACK_HOSTNAME = (os.getenv("FALLBACK_HOSTNAME", "")).strip()
 
-logger.info("🔧 v5.7.17 init: _FALLBACK_HOSTNAME=%r", _FALLBACK_HOSTNAME)
-logger.info("🔧 v5.7.17 init: RENDER_EXTERNAL_HOSTNAME=%r",
+logger.info("🔧 v5.7.18 init: _FALLBACK_HOSTNAME=%r", _FALLBACK_HOSTNAME)
+logger.info("🔧 v5.7.18 init: RENDER_EXTERNAL_HOSTNAME=%r",
             os.getenv("RENDER_EXTERNAL_HOSTNAME", ""))
-logger.info("🔧 v5.7.17 init: RENDER_EXTERNAL_URL=%r",
+logger.info("🔧 v5.7.18 init: RENDER_EXTERNAL_URL=%r",
             os.getenv("RENDER_EXTERNAL_URL", ""))
-logger.info("🔧 v5.7.17 init: KEEP_ALIVE_URL=%r",
+logger.info("🔧 v5.7.18 init: KEEP_ALIVE_URL=%r",
             os.getenv("KEEP_ALIVE_URL", ""))
-logger.info("🔧 v5.7.17 init: ALLOW_POLLING=%r",
+logger.info("🔧 v5.7.18 init: ALLOW_POLLING=%r",
             os.getenv("ALLOW_POLLING", ""))
+logger.info("🔧 v5.7.18 init: graceful_timeout=%.0fs telegram_release=%.0fs",
+            _GRACEFUL_SHUTDOWN_TIMEOUT, _TELEGRAM_RELEASE_TIMEOUT_SEC)
 
 def _read_pid_file() -> Optional[int]:
     try:
@@ -573,7 +579,7 @@ def _force_kill_pid(pid: int, force: bool = False) -> bool:
     sig = signal.SIGKILL if force else signal.SIGTERM
     try:
         os.kill(pid, sig)
-        logger.warning("%s → PID %d", "💀 SIGKILL" if force else "🔪 SIGTERM", pid)
+        logger.warning("%s → PID %d", "💀 SIGKILL" if force else "🕊️ SIGTERM", pid)
         return True
     except ProcessLookupError:
         return True
@@ -597,7 +603,17 @@ def _find_bot_processes() -> List[int]:
         pass
     return pids
 
+# ═══════════════════════════════════════════════════════════════════
+# 🆕 v5.7.18 FIX-24: GRACEFUL KILL PREVIOUS
+# ═══════════════════════════════════════════════════════════════════
 async def _force_kill_previous_instance() -> int:
+    """
+    إغلاق النسخ القديمة بأمان قبل إقلاع الجديدة:
+      1. SIGTERM → تعطي القديمة وقتاً لتُغلق بنفسها (delete_webhook + app.shutdown)
+      2. انتظار حتى _GRACEFUL_SHUTDOWN_TIMEOUT (20s)
+      3. SIGKILL فقط إذا لم تنته القديمة
+      4. انتظار إضافي قصير بعد SIGKILL
+    """
     killed_total = 0
     targets: Set[int] = set()
     old_pid = _read_pid_file()
@@ -618,27 +634,50 @@ async def _force_kill_previous_instance() -> int:
         logger.info("✅ لا نسخ قديمة نشطة — بيئة نظيفة")
         _write_pid_file()
         return 0
+
+    # ─── المرحلة 1: SIGTERM لكل الأهداف (بدون SIGKILL) ───
+    logger.info(
+        "🕊️ GRACEFUL: إرسال SIGTERM لـ %d عملية — انتظار حتى %.0fs للإغلاق الآمن",
+        len(targets), _GRACEFUL_SHUTDOWN_TIMEOUT,
+    )
     for pid in targets:
         if _force_kill_pid(pid, force=False):
             killed_total += 1
-    deadline = time.monotonic() + _KILL_TIMEOUT_SEC
-    while time.monotonic() < deadline:
+
+    # ─── المرحلة 2: انتظار الإغلاق الآمن ───
+    grace_start = time.monotonic()
+    while True:
+        elapsed = time.monotonic() - grace_start
+        if elapsed >= _GRACEFUL_SHUTDOWN_TIMEOUT:
+            break
         remaining = [p for p in targets if _is_process_alive(p)]
         if not remaining:
-            break
+            logger.info(
+                "✅ GRACEFUL: كل النسخ القديمة أغلقت بأمان خلال %.1fs — لا SIGKILL",
+                elapsed,
+            )
+            _write_pid_file()
+            return len(targets)
         await asyncio.sleep(0.5)
+
+    # ─── المرحلة 3: SIGKILL لمن لم ينته ───
     still_alive = [p for p in targets if _is_process_alive(p)]
     if still_alive:
+        logger.warning(
+            "⚠️ GRACEFUL TIMEOUT: %d عملية لم تنته خلال %.0fs — SIGKILL اضطرارياً",
+            len(still_alive), _GRACEFUL_SHUTDOWN_TIMEOUT,
+        )
         for pid in still_alive:
             _force_kill_pid(pid, force=True)
-        await asyncio.sleep(1.0)
+        await asyncio.sleep(2.0)
+
     final_alive = [p for p in targets if _is_process_alive(p)]
     if final_alive:
         logger.error("❌ %d عملية حية بعد SIGKILL: %s", len(final_alive), final_alive)
     else:
-        logger.info("✅ كل النسخ القديمة انتهت (%d)", killed_total)
+        logger.info("✅ كل النسخ القديمة انتهت (بعد SIGKILL اضطرارياً)")
     _write_pid_file()
-    return killed_total
+    return len(targets)
 
 async def _wait_for_telegram_release(timeout: float = _TELEGRAM_RELEASE_TIMEOUT_SEC) -> bool:
     try:
@@ -1748,14 +1787,11 @@ async def pool_health_monitor() -> None:
         except asyncio.CancelledError:
             raise
 
-# ═══════════════════════════════════════════════════════════════════
-# 🆕 v5.7.17 FIX-23: كشف تلقائي شامل من 12 مصدراً (يشمل KEEP_ALIVE_URL)
-# ═══════════════════════════════════════════════════════════════════
 def _resolve_hostname() -> Optional[str]:
     sources = (
         ("RENDER_EXTERNAL_HOSTNAME", "auto (Render)"),
         ("RENDER_EXTERNAL_URL",      "auto (Render)"),
-        ("KEEP_ALIVE_URL",           "manual keep-alive ← المفتاح"),
+        ("KEEP_ALIVE_URL",           "manual keep-alive"),
         ("RAILWAY_PUBLIC_DOMAIN",    "auto (Railway)"),
         ("RAILWAY_STATIC_URL",       "auto (Railway)"),
         ("FLY_APP_NAME",             "auto (Fly.io)"),
@@ -2038,6 +2074,50 @@ async def _stop_polling_mode(app: Application) -> None:
             except Exception:
                 pass
 
+# ═══════════════════════════════════════════════════════════════════
+# 🆕 v5.7.18 FIX-25: تحرير Telegram token فوراً عند SIGTERM
+# ═══════════════════════════════════════════════════════════════════
+async def _release_telegram_token_gracefully(app: Application, hostname: Optional[str]) -> None:
+    """
+    يحاول تحرير Telegram token بسرعة عند استلام SIGTERM:
+      - polling: أوقف polling فوراً (أهم شيء — يوقف getUpdates)
+      - webhook: delete_webhook
+    يضمن أن النسخة الجديدة تجد التوكن حراً.
+    """
+    if app is None:
+        return
+    _t_start = time.monotonic()
+
+    # 1) إيقاف polling أولاً (الأهم إذا كنا في polling mode)
+    if _polling_state.get("running"):
+        try:
+            logger.info("🕊️ FIX-25: إيقاف polling فوراً لتحرير getUpdates...")
+            await asyncio.wait_for(_stop_polling_mode(app), timeout=5.0)
+            logger.info(
+                "✅ FIX-25: polling أُوقف خلال %.1fs",
+                time.monotonic() - _t_start,
+            )
+        except asyncio.TimeoutError:
+            logger.warning("⚠️ FIX-25: stop_polling timeout 5s")
+        except Exception as _e:
+            logger.warning("⚠️ FIX-25: stop_polling failed: %s", _e)
+
+    # 2) حذف webhook (يحرر التوكن أيضاً)
+    try:
+        if hostname:
+            await asyncio.wait_for(
+                app.bot.delete_webhook(drop_pending_updates=False),
+                timeout=3.0,
+            )
+            logger.info(
+                "✅ FIX-25: delete_webhook() — Telegram token محرر للنسخة الجديدة (%.1fs)",
+                time.monotonic() - _t_start,
+            )
+    except asyncio.TimeoutError:
+        logger.debug("FIX-25: delete_webhook timeout 3s")
+    except Exception as _e:
+        logger.debug("FIX-25: delete_webhook failed: %s", _e)
+
 async def _diag_incoming(update, context):
     try:
         msg = update.effective_message
@@ -2217,7 +2297,7 @@ async def main():
     _shutdown_event = asyncio.Event()
 
     def _on_shutdown_signal(sig_name: str):
-        logger.info("🛑 تلقّيت %s", sig_name)
+        logger.info("🛑 تلقّيت %s — بدء الإغلاق الآمن", sig_name)
         _shutdown_event.set()
 
     try:
@@ -2241,7 +2321,7 @@ async def main():
     try:
         _killed = await _force_kill_previous_instance()
         if _killed > 0:
-            logger.warning("🔪 قتلت %d نسخة قديمة", _killed)
+            logger.warning("🔪 أغلقنا %d نسخة قديمة (graceful)", _killed)
     except Exception as _e:
         logger.warning("⚠️ فشل قتل النسخة القديمة: %s", _e)
 
@@ -2267,10 +2347,12 @@ async def main():
     logger.info("👨‍💼 المالك: %s", CONFIG.PRIMARY_OWNER_ID)
 
     logger.info(
-        "📦 bot.py: v5.7.17 | kill_prev=on | init_retry=on | webhook_force=on | "
-        "webhook_verify=on | diag_incoming=%r | "
+        "📦 bot.py: v5.7.18 | graceful=%.0fs | telegram_release=%.0fs | "
+        "webhook_force=on | webhook_verify=on | diag_incoming=%r | "
         "detectors=%s | layers=%d | fallback_hostname=%r | "
         "keep_alive_url=%r | allow_polling_env=%r | faulthandler=%s",
+        _GRACEFUL_SHUTDOWN_TIMEOUT,
+        _TELEGRAM_RELEASE_TIMEOUT_SEC,
         _DIAG_INCOMING,
         _SPAM_DETECTOR_VERSION or "N/A",
         _SPAM_DETECTOR_LAYERS_COUNT,
@@ -2373,7 +2455,8 @@ async def main():
     app.bot_data['start_time'] = time.monotonic()
 
     if hostname:
-        logger.info("⏳ انتظار Telegram release (webhook mode)...")
+        logger.info("⏳ انتظار Telegram release (webhook mode) — حتى %.0fs...",
+                    _TELEGRAM_RELEASE_TIMEOUT_SEC)
         _rel_ok = await _wait_for_telegram_release()
         if not _rel_ok:
             logger.warning("⚠️ Telegram release timeout — app.initialize سيعيد المحاولة")
@@ -2837,8 +2920,14 @@ async def main():
                     _watch_runner(runner, _shutdown_event, port)
                 )
                 await _shutdown_event.wait()
-                logger.info("📴 إغلاق...")
+                logger.info("📴 إغلاق (webhook mode)...")
             finally:
+                # 🆕 v5.7.18 FIX-25: تحرير Telegram token فوراً قبل إغلاق التطبيق
+                try:
+                    await _release_telegram_token_gracefully(app, hostname)
+                except Exception as _rt_e:
+                    logger.debug("release_token: %s", _rt_e)
+
                 if watcher_task is not None:
                     watcher_task.cancel()
                     try:
@@ -2868,8 +2957,14 @@ async def main():
                 logger.warning("⚠️ POLLING STARTED")
                 await _run_post_init_hooks(app)
                 await _shutdown_event.wait()
-                logger.info("📴 إغلاق...")
+                logger.info("📴 إغلاق (polling mode)...")
             finally:
+                # 🆕 v5.7.18 FIX-25: إيقاف polling فوراً لتحرير التوكن
+                try:
+                    await _release_telegram_token_gracefully(app, hostname)
+                except Exception as _rt_e:
+                    logger.debug("release_token (polling): %s", _rt_e)
+
                 try:
                     await _stop_polling_mode(app)
                 except Exception:
