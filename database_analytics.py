@@ -1,13 +1,37 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-database_analytics.py - دوال التحليلات المتقدمة (v1.1.1)
+database_analytics.py - دوال التحليلات المتقدمة (v1.1.2)
 ================================================================================
-🆕 v1.1.1 (MRO-CLARIFICATION):
-  🟡 توضيح تعليقي في get_slow_queries: Database.get_slow_queries (class attr)
-     يفوز في MRO على AnalyticsMixin.get_slow_queries — لذا هذا الأخير
-     قابل للاستدعاء مباشرة عبر DB.get_slowest_queries().
-     لا تغيير في السلوك، فقط توثيق.
+🆕 v1.1.2 (SCHEMA-CONSISTENCY-AUDIT):
+
+  🟠 FIX-AN-1 (IMPORTANT): get_indexes_info — استخدام current_schema()
+      بدلاً من 'public' الثابت.
+      السبب: database_tables.py v7.9.14 يستخدم current_schema() في
+      كل مكان. لكن get_indexes_info كان مُثبّتاً على 'public'. على
+      schemas غير public (نادرة لكن ممكنة)، كان يُرجع {} بصمت →
+      get_db_diagnostics لا يعرض الفهارس → التوصيات تُصبح ناقصة.
+      الآن: current_schema() ديناميكياً — يطابق السلوك الموحّد.
+
+  🟠 FIX-AN-2 (IMPORTANT): get_dead_tuples — WHERE schemaname =
+      current_schema().
+      السبب: pg_stat_user_tables يشمل كل schemas. بدون WHERE، كان
+      يُرجع جداول من schemas أخرى → get_db_diagnostics يعرض جداول
+      ليست ملك البوت (مثلاً extensions، pg_toast).
+      الآن: WHERE schemaname = current_schema() يطابق
+      database_tables.py v7.9.14.
+
+  🟠 FIX-AN-3 (IMPORTANT): get_table_sizes — WHERE schemaname =
+      current_schema().
+      نفس السبب. الآن: توافق كامل مع database.py + database_tables.py.
+
+  ✅ محفوظ من v1.1.1:
+      - MRO clarification: get_slow_queries vs get_slowest_queries
+  ✅ محفوظ من v1.1.0:
+      - كل الـ 16 دالة تحليلات
+      - Multi-DB support (PG/MySQL/SQLite)
+      - Defensive programming
+      - Helper functions (color_emoji, _dead_tuple_color, ...)
 ================================================================================
 """
 
@@ -648,6 +672,7 @@ class AnalyticsMixin:
 
     # ═══════════════════════════════════════════════════════════════════
     # 9) الصفوف الميتة (dead tuples)
+    # 🟠 v1.1.2 FIX-AN-2: WHERE schemaname = current_schema()
     # ═══════════════════════════════════════════════════════════════════
 
     async def get_dead_tuples(
@@ -658,6 +683,12 @@ class AnalyticsMixin:
 
         Args:
             limit: العدد المطلوب (1-100)
+
+        🟠 v1.1.2 FIX-AN-2: يُفلتر schemaname = current_schema() —
+            يطابق database_tables.py v7.9.14 الذي يستخدم
+            current_schema() في كل مكان. بدون هذا الفلتر،
+            pg_stat_user_tables يُرجع جداول من schemas أخرى
+            (extensions، custom) — يربك get_db_diagnostics.
         """
         if not getattr(self, "USE_POSTGRES", False):
             return []
@@ -672,6 +703,7 @@ class AnalyticsMixin:
                 "last_vacuum, last_autovacuum, "
                 "last_analyze, last_autoanalyze "
                 "FROM pg_stat_user_tables "
+                "WHERE schemaname = current_schema() "
                 "ORDER BY n_dead_tup DESC LIMIT $1",
                 (limit,))
 
@@ -712,6 +744,7 @@ class AnalyticsMixin:
 
     # ═══════════════════════════════════════════════════════════════════
     # 10) أحجام الجداول
+    # 🟠 v1.1.2 FIX-AN-3: WHERE schemaname = current_schema()
     # ═══════════════════════════════════════════════════════════════════
 
     async def get_table_sizes(
@@ -719,6 +752,9 @@ class AnalyticsMixin:
     ) -> List[Dict[str, Any]]:
         """
         أحجام الجداول (PostgreSQL).
+
+        🟠 v1.1.2 FIX-AN-3: يُفلتر schemaname = current_schema() —
+            نفس سبب FIX-AN-2. يطابق database_tables.py v7.9.14.
         """
         if not getattr(self, "USE_POSTGRES", False):
             return []
@@ -731,6 +767,7 @@ class AnalyticsMixin:
                 "pg_relation_size(relid) AS table_bytes, "
                 "pg_indexes_size(relid) AS index_bytes "
                 "FROM pg_stat_user_tables "
+                "WHERE schemaname = current_schema() "
                 "ORDER BY pg_total_relation_size(relid) DESC "
                 "LIMIT $1",
                 (limit,))
@@ -766,6 +803,7 @@ class AnalyticsMixin:
 
     # ═══════════════════════════════════════════════════════════════════
     # 11) معلومات الفهارس
+    # 🟠 v1.1.2 FIX-AN-1: current_schema() بدل 'public'
     # ═══════════════════════════════════════════════════════════════════
 
     async def get_indexes_info(
@@ -776,6 +814,12 @@ class AnalyticsMixin:
 
         Args:
             tables: قائمة جداول (None = كل الجداول)
+
+        🟠 v1.1.2 FIX-AN-1: يُستخدم current_schema() بدلاً من
+            'public' الثابت. السبب: database_tables.py v7.9.14
+            يستخدم current_schema() في كل مكان. كان مُثبّتاً على
+            'public'، وعلى schemas غير public (نادرة) كان يُرجع {}
+            بصمت → get_db_diagnostics لا يعرض الفهارس.
         """
         if not getattr(self, "USE_POSTGRES", False):
             return {}
@@ -794,7 +838,7 @@ class AnalyticsMixin:
                     "JOIN pg_class i ON i.oid = idx.indexrelid "
                     "JOIN pg_class t ON t.oid = idx.indrelid "
                     "JOIN pg_namespace n ON n.oid = t.relnamespace "
-                    "WHERE n.nspname = 'public' "
+                    "WHERE n.nspname = current_schema() "
                     f"AND t.relname IN ({placeholders}) "
                     "ORDER BY t.relname, i.relname"
                 )
@@ -810,7 +854,7 @@ class AnalyticsMixin:
                     "JOIN pg_class i ON i.oid = idx.indexrelid "
                     "JOIN pg_class t ON t.oid = idx.indrelid "
                     "JOIN pg_namespace n ON n.oid = t.relnamespace "
-                    "WHERE n.nspname = 'public' "
+                    "WHERE n.nspname = current_schema() "
                     "ORDER BY t.relname, i.relname")
 
             result: Dict[str, List[Dict[str, Any]]] = {}
@@ -1078,15 +1122,19 @@ __all__ = [
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# LOAD BEACON
+# LOAD BEACON — v1.1.2
 # ═══════════════════════════════════════════════════════════════════════════
 
 try:
     logger.info(
-        "✅ database_analytics.py v1.1.1 loaded | "
+        "✅ database_analytics.py v1.1.2 SCHEMA-CONSISTENCY-AUDIT loaded | "
+        "FIX-AN-1: indexes-info-current_schema ✅ | "
+        "FIX-AN-2: dead-tuples-schemaname-filter ✅ | "
+        "FIX-AN-3: table-sizes-schemaname-filter ✅ | "
+        "✅ v1.1.1 MRO-clarification preserved | "
+        "✅ v1.1.0 all 16 analytics methods preserved | "
         "AnalyticsMixin=%d methods | "
-        "MRO-clarification=get_slow_queries | "
-        "All 16 analytics methods available",
+        "Compatible with database_tables v7.9.14 + database v7.7.74",
         sum(
             1 for name in dir(AnalyticsMixin)
             if not name.startswith('_')
