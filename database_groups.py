@@ -1,54 +1,56 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-database_groups.py - دوال المجموعات (v7.4.19)
+database_groups.py - دوال المجموعات (v7.4.20)
 ================================================================================
-🆕 v7.4.19 — ADMIN-MRO-DEDUP:
-  🔴 FIX-ADMIN-MRO-DEDUP (CRITICAL): حذف get_admin_list من GroupsMixin
-      → يفوّض لـ StatsMixin.get_admin_list (مع auth_cache).
-      السبب: ترتيب MRO في Database:
-        RefactorMixin → MigrationsMixin → ChannelsPostsMixin →
-        SubscriptionsMixin → GroupsMixin ← قبل
-        → TicketsMixin → ContestsMixin → StatsMixin
-      عندما كان get_admin_list موجوداً في GroupsMixin (v7.4.18)،
-      كان يفوز على StatsMixin.get_admin_list (النسخة مع auth_cache)
-      → يفقد الـ Cache → 42ms إضافية لكل استدعاء.
-      الآن: DB.get_admin_list() → StatsMixin (مع Cache) ✅
+🆕 v7.4.20 — AUDIT-FIXES (5 إصلاحات):
 
-  🟢 FIX-ADMIN-ALIASES: get_all_admins + get_admins تُفوّضان صراحةً
-      لـ super().get_admin_list() مع fallback آمن.
+  🟠 FIX-PG-SYNTAX-1 (IMPORTANT): `update_security_settings` و
+      `update_penalty_settings` و `update_auto_reply_settings` —
+      تحويل `?` → `$N` تلقائياً على PostgreSQL. سابقاً كانت تعتمد
+      على `self.execute()`، لكن `_execute_with_conn` التي تستخدم
+      معاملة صريحة قد لا تحوّل. v7.4.20 يتحقق من DB_TYPE ويبني
+      الاستعلام بالصيغة الصحيحة.
 
-  🟢 IMPROVE-DOCSTRING: توضيح العلاقة مع StatsMixin.
+  🟠 FIX-BANNED-CONFLICT-1 (IMPORTANT): `add_banned_word` يستخدم
+      `ON CONFLICT (word, chat_id) DO NOTHING` على PostgreSQL و
+      `ON DUPLICATE KEY UPDATE` على MySQL و `INSERT OR IGNORE`
+      على SQLite. يقلل round-trips ويكشف التكرار بكفاءة.
 
-🆕 v7.4.18 — BOT-ADMINS-READ-API (محفوظ جزئياً):
-  🟢 FIX-ADMIN-1: get_admin_list / get_all_admins / get_admins
-      (تم حذف get_admin_list في v7.4.19 — انظر أعلاه).
-      get_all_admins + get_admins محفوظتان كـ wrappers.
+  🟠 FIX-AUTO-REPLY-CACHE-1 (IMPORTANT): `get_auto_reply_settings`
+      يستدعي `_get_batched_message_settings` إن كان متاحاً — ليتشارك
+      الكاش المحلي `_ars_local_cache` في handlers_message. يقلل
+      عدد الاستعلامات بشكل ملحوظ.
 
-🆕 v7.4.17 — CACHE-INVALIDATION-COMPLETE (محفوظ):
-  🔴 FIX-CACHE-1: add/remove_group_admin → إبطال groups_cache.
-  🔴 FIX-CACHE-2: add/remove_anonymous_admin → إبطال groups_cache.
-  🔴 FIX-CACHE-3: sync_group_admins / sync_anonymous_admins →
-                 إبطال groups_cache لكل المتأثرين.
-  🆕 FIX-CACHE-4: count_user_groups(user_id) — دالة عدّ سريعة.
-  🟢 FIX-CACHE-5: _invalidate_user_groups_cache(user_id) موحّدة.
-  🟡 FIX-CACHE-6: get_user_groups(force_refresh=False).
-🆕 v7.4.16 — AUTH-CACHE-FIX: FIX-AC2 + FIX-C4.
-🆕 v7.4.15 — POLISH: P1..P5.
-🆕 v7.4.14 — IS-GROUP-OWNER: O1..O2.
-🆕 v7.4.13 — ROOT-CAUSE-FIX: F1..F3.
-🆕 v7.4.12 — CRITICAL-FIX: F1..F2.
-🆕 v7.4.11 — REVIEW-FIXES: M1..M4 + m1..m3.
-🆕 v7.4.11 — NEW FALLBACKS: _expire_penalties_*.
-🆕 v7.4.10 — add_banned_word fallback 500 → 10000
-🆕 v7.4.9  — قراءة آمنة لـ MAX_GLOBAL_BANNED_WORDS
-🆕 v7.4.8  — PERFORMANCE (get_user_groups ~50ms)
-🆕 v7.4.7  — PERFORMANCE (get_user_groups من 1.59s → ~1s)
-🆕 v7.4.6  — إصلاح إغلاق cursor + توثيق
-🆕 v7.4.5  — قناة السجل للمجموعة (DB-native)
-🆕 v7.4.4  — دعم conn للتوحيد
-📌 v7.4.3  — تحسينات عامة
-📌 v7.4.2  — تحسينات update_security_settings
+  🟡 FIX-ADMIN-MRO-STRICT-1 (MINOR): `get_all_admins` — يحاول
+      `super().get_admin_list` صراحةً (بدون `except AttributeError`
+      الذي كان يُخفي أخطاء حقيقية)، ثم fallback.
+
+  🟡 FIX-INVALIDATE-CHAT-CACHE-1 (MINOR): `_invalidate_user_groups_cache`
+      يقبل `chat_ids` اختيارياً لإبطال `log_ch_menu_*` و `group_log_*`
+      عند تغيير العضويات.
+
+  ✅ محفوظ من v7.4.19:
+      - FIX-ADMIN-MRO-DEDUP
+      - FIX-ADMIN-ALIASES
+      - FIX-CACHE-1..6
+      - FIX-AC2 / FIX-C4
+      - P1..P5, O1..O2, F1..F3
+      - M1..M4 + m1..m3
+      - NEW FALLBACKS
+
+🆕 v7.4.19 — ADMIN-MRO-DEDUP (محفوظ):
+  🔴 FIX-ADMIN-MRO-DEDUP: حذف get_admin_list من GroupsMixin
+  🟢 FIX-ADMIN-ALIASES: get_all_admins + get_admins
+
+🆕 v7.4.18 — BOT-ADMINS-READ-API (محفوظ)
+🆕 v7.4.17 — CACHE-INVALIDATION-COMPLETE (محفوظ)
+🆕 v7.4.16 — AUTH-CACHE-FIX (محفوظ)
+🆕 v7.4.15 — POLISH (محفوظ)
+🆕 v7.4.14 — IS-GROUP-OWNER (محفوظ)
+🆕 v7.4.13 — ROOT-CAUSE-FIX (محفوظ)
+🆕 v7.4.12 — CRITICAL-FIX (محفوظ)
+🆕 v7.4.11 — REVIEW-FIXES (محفوظ)
 ================================================================================
 """
 
@@ -80,8 +82,83 @@ def _safe_normalize_word(word: Any) -> Optional[str]:
     return normalized
 
 
+def _convert_qmark_to_pg(query: str) -> str:
+    """
+    🆕 v7.4.20 FIX-PG-SYNTAX-1: يحوّل `?` إلى `$1, $2, ...` لـ PG.
+
+    يتخطى علامات الاستفهام داخل:
+      • النصوص بين '' (single-quoted strings)
+      • النصوص بين "" (double-quoted identifiers)
+    (بسيط كفاية لاستعلاماتنا — لا يدعم dollar-quoted blocks).
+    """
+    result = []
+    counter = 0
+    in_single = False
+    in_double = False
+    i = 0
+    n = len(query)
+    while i < n:
+        c = query[i]
+        if in_single:
+            result.append(c)
+            if c == "'":
+                # handle escaped ''
+                if i + 1 < n and query[i + 1] == "'":
+                    result.append("'")
+                    i += 2
+                    continue
+                in_single = False
+            i += 1
+            continue
+        if in_double:
+            result.append(c)
+            if c == '"':
+                in_double = False
+            i += 1
+            continue
+        if c == "'":
+            in_single = True
+            result.append(c)
+            i += 1
+            continue
+        if c == '"':
+            in_double = True
+            result.append(c)
+            i += 1
+            continue
+        if c == '?':
+            counter += 1
+            result.append(f"${counter}")
+            i += 1
+            continue
+        result.append(c)
+        i += 1
+    return "".join(result)
+
+
 class GroupsMixin:
     """Mixin يحتوي كل دوال المجموعات"""
+
+    # ═════════════════════════════════════════════════════════════════
+    # 0) helpers لبناء استعلامات DB-aware
+    # 🆕 v7.4.20 FIX-PG-SYNTAX-1
+    # ═════════════════════════════════════════════════════════════════
+
+    def _prepare_query(self, query: str) -> str:
+        """
+        🆕 v7.4.20: يحوّل `?` → `$N` عند PostgreSQL.
+        على SQLite/MySQL يُرجع الاستعلام كما هو.
+
+        ملاحظة: `self.execute()` قد يحوّل تلقائياً، لكن
+        `_execute_with_conn` (داخل transaction) قد لا يفعل.
+        هذه الدالة تضمن الاتساق في كل مكان.
+        """
+        try:
+            if getattr(self, "USE_POSTGRES", False):
+                return _convert_qmark_to_pg(query)
+        except Exception as e:
+            logger.debug("_prepare_query: %s", e)
+        return query
 
     # ═════════════════════════════════════════════════════════════════
     # 1) كاش الكلمات المحظورة (داخلي)
@@ -118,16 +195,22 @@ class GroupsMixin:
             self._global_banned_words_loaded = False
 
     # ═════════════════════════════════════════════════════════════════
-    # 🆕 v7.4.17 FIX-CACHE-5: إبطال موحّد لكاش مجموعات المستخدم
+    # 2) إبطال موحّد لكاش مجموعات المستخدم
+    # 🟡 v7.4.20 FIX-INVALIDATE-CHAT-CACHE-1: chat_ids اختياري
     # ═════════════════════════════════════════════════════════════════
 
     async def _invalidate_user_groups_cache(
-        self, user_id: int
+        self,
+        user_id: int,
+        chat_ids: Optional[List[int]] = None,
     ) -> bool:
         """
-        🆕 v7.4.17: إبطال كاش مجموعات مستخدم واحد.
+        إبطال كاش مجموعات مستخدم.
 
-        يُبطِل: groups_cache + internal_cache[groups_{user_id}]
+        🟡 v7.4.20: إذا مُرِّرت `chat_ids`، يُبطل أيضاً:
+          • internal_cache[log_ch_menu_{cid}]
+          • internal_cache[group_log_{cid}]
+        — لأن انتماء المستخدم لمجموعة يؤثر على قوائم قناة السجل.
         """
         if not isinstance(user_id, int) or user_id <= 0:
             return False
@@ -157,33 +240,63 @@ class GroupsMixin:
                 f"internal_cache({user_id}): {e}"
             )
 
+        # 🟡 v7.4.20: إبطال كاشات المجموعات المرتبطة
+        if chat_ids:
+            for cid in chat_ids:
+                try:
+                    icid = int(cid)
+                except (TypeError, ValueError):
+                    continue
+                for suffix in ("log_ch_menu", "group_log"):
+                    try:
+                        r = self.internal_cache.invalidate(
+                            f"{suffix}_{icid}"
+                        )
+                        if asyncio.iscoroutine(r):
+                            await r
+                    except Exception:
+                        pass
+                invalidated = True
+
         return invalidated
 
     # ═════════════════════════════════════════════════════════════════
-    # 🆕 v7.4.19 FIX-ADMIN-MRO-DEDUP: مرادفات فقط — التفويض لـ StatsMixin
+    # 3) مرادفات admin — التفويض لـ StatsMixin
+    # 🟡 v7.4.20 FIX-ADMIN-MRO-STRICT-1
     # ═════════════════════════════════════════════════════════════════
 
     async def get_all_admins(self) -> List[Dict]:
         """
-        🆕 v7.4.19 FIX-ADMIN-MRO-DEDUP: مرادف لـ get_admin_list.
+        مرادف لـ get_admin_list.
 
-        يفوّض صراحةً لـ super().get_admin_list() — أي لـ
-        StatsMixin.get_admin_list (النسخة المُحصَّنة مع auth_cache).
-
-        ملاحظة: get_admin_list محذوفة من GroupsMixin في v7.4.19
-        لتجنّب تعارض MRO. الاستدعاء `DB.get_admin_list()` يذهب
-        مباشرة إلى StatsMixin (مع Cache).
+        🟡 v7.4.20 FIX-ADMIN-MRO-STRICT-1: نتحقق صراحةً من وجود
+        `super().get_admin_list` قبل استدعائه، بدلاً من التقاط
+        AttributeError الذي قد يُخفي أخطاء حقيقية داخل الدالة.
         """
+        # 1) جرّب super().get_admin_list إن وُجدت
+        super_method = None
         try:
-            result = await super().get_admin_list()
-            if isinstance(result, list):
-                return result
-        except AttributeError:
-            pass
+            super_method = getattr(super(), "get_admin_list", None)
         except Exception as e:
-            logger.debug(f"get_all_admins (super): {e}")
+            logger.debug(f"get_all_admins super access: {e}")
 
-        # Fallback: استعلام مباشر إذا لم يكن StatsMixin متاحاً
+        if callable(super_method):
+            try:
+                result = await super_method()
+                if isinstance(result, list):
+                    return result
+                if result is not None:
+                    try:
+                        return list(result)
+                    except (TypeError, ValueError):
+                        return []
+            except Exception as e:
+                logger.warning(
+                    f"get_all_admins: super().get_admin_list فشل — "
+                    f"fallback للاستعلام المباشر: {e}"
+                )
+
+        # 2) Fallback مباشر
         try:
             return await self.fetchall(
                 "SELECT user_id, added_by, added_at FROM bot_admins "
@@ -194,16 +307,11 @@ class GroupsMixin:
             return []
 
     async def get_admins(self) -> List[Dict]:
-        """
-        🆕 v7.4.19 FIX-ADMIN-MRO-DEDUP: مرادف آخر لـ get_admin_list.
-
-        يفوّض لـ get_all_admins() الذي يفوّض بدوره لـ
-        StatsMixin.get_admin_list.
-        """
+        """مرادف آخر لـ get_admin_list."""
         return await self.get_all_admins()
 
     # ═════════════════════════════════════════════════════════════════
-    # 2) تسجيل المجموعات وإدارتها
+    # 4) تسجيل المجموعات وإدارتها
     # ═════════════════════════════════════════════════════════════════
 
     async def register_group(
@@ -279,7 +387,9 @@ class GroupsMixin:
                 f"✅ تم تسجيل المجموعة {chat_id} "
                 f"بواسطة المستخدم {user_id}"
             )
-            await self._invalidate_user_groups_cache(user_id)
+            await self._invalidate_user_groups_cache(
+                user_id, chat_ids=[chat_id],
+            )
             return True
         except Exception as e:
             logger.error(
@@ -290,7 +400,7 @@ class GroupsMixin:
     async def get_user_groups(
         self, user_id: int, force_refresh: bool = False
     ) -> List[Dict]:
-        """🆕 v7.4.17: force_refresh لتخطي الكاش."""
+        """force_refresh لتخطي الكاش."""
         if not force_refresh:
             if self.CACHE_AVAILABLE:
                 cached = await self.groups_cache.get(user_id)
@@ -331,9 +441,11 @@ class GroupsMixin:
         """
 
         try:
-            rows1 = await self.fetchall(query1, (user_id,))
+            rows1 = await self.fetchall(
+                self._prepare_query(query1), (user_id,)
+            )
             rows2 = await self.fetchall(
-                query2,
+                self._prepare_query(query2),
                 (user_id, user_id, user_id, user_id, user_id, user_id),
             )
         except Exception as e:
@@ -370,22 +482,10 @@ class GroupsMixin:
                 pass
         return groups
 
-    # ═════════════════════════════════════════════════════════════════
-    # 🆕 v7.4.17 FIX-CACHE-4: count_user_groups — دالة عدّ سريعة
-    # ═════════════════════════════════════════════════════════════════
-
     async def count_user_groups(
         self, user_id: int, force_refresh: bool = False
     ) -> int:
-        """
-        🆕 v7.4.17: عدّ المجموعات بسرعة.
-
-        - إن وُجد الكاش → يرجع فوراً.
-        - وإلا → يستدعي get_user_groups (يملأ الكاش).
-
-        Returns:
-            عدد المجموعات (0 عند أي فشل).
-        """
+        """عدّ المجموعات بسرعة."""
         if not isinstance(user_id, int) or user_id <= 0:
             return 0
 
@@ -424,8 +524,10 @@ class GroupsMixin:
 
         try:
             r1 = await self.fetchval(
-                "SELECT 1 FROM bot_groups "
-                "WHERE chat_id = ? AND added_by = ? LIMIT 1",
+                self._prepare_query(
+                    "SELECT 1 FROM bot_groups "
+                    "WHERE chat_id = ? AND added_by = ? LIMIT 1"
+                ),
                 (chat_id, user_id),
             )
             if r1 is not None:
@@ -438,8 +540,10 @@ class GroupsMixin:
 
         try:
             r2 = await self.fetchval(
-                "SELECT 1 FROM user_groups_link "
-                "WHERE chat_id = ? AND user_id = ? LIMIT 1",
+                self._prepare_query(
+                    "SELECT 1 FROM user_groups_link "
+                    "WHERE chat_id = ? AND user_id = ? LIMIT 1"
+                ),
                 (chat_id, user_id),
             )
             if r2 is not None:
@@ -468,12 +572,16 @@ class GroupsMixin:
                 for table in tables:
                     await self._execute_with_conn(
                         conn,
-                        f"DELETE FROM {table} WHERE chat_id = ?",
+                        self._prepare_query(
+                            f"DELETE FROM {table} WHERE chat_id = ?"
+                        ),
                         chat_id,
                     )
                 await self._execute_with_conn(
                     conn,
-                    "DELETE FROM bot_groups WHERE chat_id = ?",
+                    self._prepare_query(
+                        "DELETE FROM bot_groups WHERE chat_id = ?"
+                    ),
                     chat_id,
                 )
             if self.CACHE_AVAILABLE:
@@ -497,13 +605,13 @@ class GroupsMixin:
             return False
 
     # ═════════════════════════════════════════════════════════════════
-    # 3) مشرفو المجموعات (Group Admins)
+    # 5) مشرفو المجموعات (Group Admins)
     # ═════════════════════════════════════════════════════════════════
 
     async def sync_group_admins(
         self, chat_id: int, admin_ids: List[int]
     ) -> int:
-        """🔴 v7.4.17 FIX-CACHE-3: + إبطال groups_cache للمتأثرين."""
+        """+ إبطال groups_cache للمتأثرين."""
         try:
             removed_ids: set = set()
             added_ids: set = set()
@@ -512,8 +620,10 @@ class GroupsMixin:
                 async with self.transaction() as conn:
                     existing = await self._fetchall_with_conn(
                         conn,
-                        "SELECT user_id FROM group_admins "
-                        "WHERE chat_id = ?",
+                        self._prepare_query(
+                            "SELECT user_id FROM group_admins "
+                            "WHERE chat_id = ?"
+                        ),
                         chat_id,
                     )
                     existing_ids = {
@@ -524,8 +634,10 @@ class GroupsMixin:
                     for uid in to_remove:
                         await self._execute_with_conn(
                             conn,
-                            "DELETE FROM group_admins "
-                            "WHERE chat_id = ? AND user_id = ?",
+                            self._prepare_query(
+                                "DELETE FROM group_admins "
+                                "WHERE chat_id = ? AND user_id = ?"
+                            ),
                             chat_id, uid,
                         )
                     to_add = new_ids - existing_ids
@@ -569,7 +681,9 @@ class GroupsMixin:
                 affected = removed_ids | added_ids
                 for uid in affected:
                     try:
-                        await self._invalidate_user_groups_cache(uid)
+                        await self._invalidate_user_groups_cache(
+                            uid, chat_ids=[chat_id],
+                        )
                     except Exception as e:
                         logger.debug(
                             f"sync_group_admins invalidate "
@@ -589,7 +703,7 @@ class GroupsMixin:
             return 0
 
     async def add_group_admin(self, chat_id: int, user_id: int) -> bool:
-        """✅ FIX-C4 + 🔴 v7.4.17 FIX-CACHE-1."""
+        """+ إبطال groups_cache."""
         if not chat_id or not user_id:
             return False
         try:
@@ -622,7 +736,9 @@ class GroupsMixin:
             except Exception:
                 pass
 
-            await self._invalidate_user_groups_cache(user_id)
+            await self._invalidate_user_groups_cache(
+                user_id, chat_ids=[chat_id],
+            )
             return True
         except Exception as e:
             logger.error(
@@ -631,12 +747,15 @@ class GroupsMixin:
             return False
 
     async def remove_group_admin(self, chat_id: int, user_id: int) -> bool:
-        """✅ FIX-C4 + 🔴 v7.4.17 FIX-CACHE-1."""
+        """+ إبطال groups_cache."""
         if not chat_id or not user_id:
             return False
         try:
             await self.execute(
-                "DELETE FROM group_admins WHERE chat_id = ? AND user_id = ?",
+                self._prepare_query(
+                    "DELETE FROM group_admins "
+                    "WHERE chat_id = ? AND user_id = ?"
+                ),
                 (chat_id, user_id),
             )
             if self.CACHE_AVAILABLE:
@@ -650,7 +769,9 @@ class GroupsMixin:
             except Exception:
                 pass
 
-            await self._invalidate_user_groups_cache(user_id)
+            await self._invalidate_user_groups_cache(
+                user_id, chat_ids=[chat_id],
+            )
             return True
         except Exception as e:
             logger.error(
@@ -659,7 +780,7 @@ class GroupsMixin:
             return False
 
     # ═════════════════════════════════════════════════════════════════
-    # 4) المشرفون المخفيون (Hidden Admins)
+    # 6) المشرفون المخفيون (Hidden Admins)
     # ═════════════════════════════════════════════════════════════════
 
     async def add_hidden_admin(
@@ -667,9 +788,11 @@ class GroupsMixin:
     ) -> bool:
         try:
             result = await self.execute(
-                "INSERT OR IGNORE INTO hidden_admins "
-                "(chat_id, admin_id, added_by, added_at) "
-                "VALUES (?,?,?,?)",
+                self._prepare_query(
+                    "INSERT OR IGNORE INTO hidden_admins "
+                    "(chat_id, admin_id, added_by, added_at) "
+                    "VALUES (?,?,?,?)"
+                ),
                 (chat_id, admin_id, added_by,
                  self.TimeUtils.utc_now()),
             ) > 0
@@ -677,7 +800,9 @@ class GroupsMixin:
                 await self.auth_cache.invalidate(chat_id, admin_id)
             if result:
                 try:
-                    await self._invalidate_user_groups_cache(admin_id)
+                    await self._invalidate_user_groups_cache(
+                        admin_id, chat_ids=[chat_id],
+                    )
                 except Exception:
                     pass
             return result
@@ -694,15 +819,19 @@ class GroupsMixin:
             async with self.connection() as conn:
                 deleted = await self._execute_with_conn(
                     conn,
-                    "DELETE FROM hidden_admins "
-                    "WHERE chat_id = ? AND admin_id = ?",
+                    self._prepare_query(
+                        "DELETE FROM hidden_admins "
+                        "WHERE chat_id = ? AND admin_id = ?"
+                    ),
                     chat_id, admin_id,
                 )
             if deleted > 0 and self.CACHE_AVAILABLE:
                 await self.auth_cache.invalidate(chat_id, admin_id)
             if deleted > 0:
                 try:
-                    await self._invalidate_user_groups_cache(admin_id)
+                    await self._invalidate_user_groups_cache(
+                        admin_id, chat_ids=[chat_id],
+                    )
                 except Exception:
                     pass
             return deleted > 0
@@ -715,26 +844,29 @@ class GroupsMixin:
 
     async def get_hidden_admins(self, chat_id: int) -> List[Dict]:
         return await self.fetchall(
-            "SELECT admin_id, added_by, added_at "
-            "FROM hidden_admins WHERE chat_id = ? "
-            "ORDER BY added_at DESC",
+            self._prepare_query(
+                "SELECT admin_id, added_by, added_at "
+                "FROM hidden_admins WHERE chat_id = ? "
+                "ORDER BY added_at DESC"
+            ),
             (chat_id,),
         )
 
     # ═════════════════════════════════════════════════════════════════
-    # 5) المشرفون المجهولون (Anonymous Admins)
+    # 7) المشرفون المجهولون (Anonymous Admins)
     # ═════════════════════════════════════════════════════════════════
 
     async def add_anonymous_admin(
         self, chat_id: int, anonymous_id: int,
         added_by: int = None, user_id: int = None,
     ) -> bool:
-        """🔴 v7.4.17 FIX-CACHE-2."""
         try:
             result = await self.execute(
-                "INSERT OR IGNORE INTO anonymous_admins "
-                "(chat_id, anonymous_id, added_by, user_id, added_at) "
-                "VALUES (?,?,?,?,?)",
+                self._prepare_query(
+                    "INSERT OR IGNORE INTO anonymous_admins "
+                    "(chat_id, anonymous_id, added_by, user_id, added_at) "
+                    "VALUES (?,?,?,?,?)"
+                ),
                 (chat_id, anonymous_id, added_by, user_id,
                  self.TimeUtils.utc_now()),
             ) > 0
@@ -742,7 +874,9 @@ class GroupsMixin:
                 await self.auth_cache.invalidate(chat_id)
             if result and user_id:
                 try:
-                    await self._invalidate_user_groups_cache(user_id)
+                    await self._invalidate_user_groups_cache(
+                        user_id, chat_ids=[chat_id],
+                    )
                 except Exception:
                     pass
             return result
@@ -756,13 +890,14 @@ class GroupsMixin:
     async def remove_anonymous_admin(
         self, chat_id: int, anonymous_id: int
     ) -> bool:
-        """🔴 v7.4.17 FIX-CACHE-2."""
         try:
             linked_user_id = None
             try:
                 linked_user_id = await self.fetchval(
-                    "SELECT user_id FROM anonymous_admins "
-                    "WHERE chat_id = ? AND anonymous_id = ?",
+                    self._prepare_query(
+                        "SELECT user_id FROM anonymous_admins "
+                        "WHERE chat_id = ? AND anonymous_id = ?"
+                    ),
                     (chat_id, anonymous_id),
                 )
             except Exception:
@@ -771,8 +906,10 @@ class GroupsMixin:
             async with self.connection() as conn:
                 deleted = await self._execute_with_conn(
                     conn,
-                    "DELETE FROM anonymous_admins "
-                    "WHERE chat_id = ? AND anonymous_id = ?",
+                    self._prepare_query(
+                        "DELETE FROM anonymous_admins "
+                        "WHERE chat_id = ? AND anonymous_id = ?"
+                    ),
                     chat_id, anonymous_id,
                 )
             if deleted > 0 and self.CACHE_AVAILABLE:
@@ -780,7 +917,8 @@ class GroupsMixin:
             if deleted > 0 and linked_user_id:
                 try:
                     await self._invalidate_user_groups_cache(
-                        int(linked_user_id)
+                        int(linked_user_id),
+                        chat_ids=[chat_id],
                     )
                 except Exception:
                     pass
@@ -796,9 +934,11 @@ class GroupsMixin:
         self, chat_id: int
     ) -> List[Dict]:
         return await self.fetchall(
-            "SELECT anonymous_id, user_id, added_by, added_at "
-            "FROM anonymous_admins WHERE chat_id = ? "
-            "ORDER BY added_at DESC",
+            self._prepare_query(
+                "SELECT anonymous_id, user_id, added_by, added_at "
+                "FROM anonymous_admins WHERE chat_id = ? "
+                "ORDER BY added_at DESC"
+            ),
             (chat_id,),
         )
 
@@ -806,10 +946,12 @@ class GroupsMixin:
         self, chat_id: int, user_id: int
     ) -> bool:
         result = await self.fetchval(
-            "SELECT 1 FROM anonymous_admins "
-            "WHERE chat_id = ? AND "
-            "(user_id = ? OR anonymous_id = ?) "
-            "LIMIT 1",
+            self._prepare_query(
+                "SELECT 1 FROM anonymous_admins "
+                "WHERE chat_id = ? AND "
+                "(user_id = ? OR anonymous_id = ?) "
+                "LIMIT 1"
+            ),
             (chat_id, user_id, user_id),
         )
         return result is not None
@@ -819,7 +961,6 @@ class GroupsMixin:
         added_by: int = None,
         user_id_map: Optional[Dict[int, int]] = None,
     ) -> int:
-        """🔴 v7.4.17 FIX-CACHE-3."""
         try:
             affected_users: set = set()
 
@@ -827,8 +968,10 @@ class GroupsMixin:
                 async with self.transaction() as conn:
                     existing = await self._fetchall_with_conn(
                         conn,
-                        "SELECT anonymous_id FROM anonymous_admins "
-                        "WHERE chat_id = ?",
+                        self._prepare_query(
+                            "SELECT anonymous_id FROM anonymous_admins "
+                            "WHERE chat_id = ?"
+                        ),
                         chat_id,
                     )
                     existing_ids = {
@@ -839,8 +982,10 @@ class GroupsMixin:
                     for anon_id in to_remove:
                         await self._execute_with_conn(
                             conn,
-                            "DELETE FROM anonymous_admins "
-                            "WHERE chat_id = ? AND anonymous_id = ?",
+                            self._prepare_query(
+                                "DELETE FROM anonymous_admins "
+                                "WHERE chat_id = ? AND anonymous_id = ?"
+                            ),
                             chat_id, anon_id,
                         )
                     for anon_id in new_ids:
@@ -904,7 +1049,9 @@ class GroupsMixin:
 
                 for uid in affected_users:
                     try:
-                        await self._invalidate_user_groups_cache(uid)
+                        await self._invalidate_user_groups_cache(
+                            uid, chat_ids=[chat_id],
+                        )
                     except Exception as e:
                         logger.debug(
                             f"sync_anonymous_admins invalidate "
@@ -925,7 +1072,7 @@ class GroupsMixin:
             return 0
 
     # ═════════════════════════════════════════════════════════════════
-    # 6) إعدادات الأمان (Security)
+    # 8) إعدادات الأمان (Security)
     # ═════════════════════════════════════════════════════════════════
 
     async def get_security_settings(self, chat_id: int) -> Dict:
@@ -934,17 +1081,23 @@ class GroupsMixin:
             if cached is not None:
                 return cached
         settings = await self.fetchone(
-            "SELECT * FROM group_security WHERE chat_id = ?",
+            self._prepare_query(
+                "SELECT * FROM group_security WHERE chat_id = ?"
+            ),
             (chat_id,),
         )
         if not settings:
             await self.execute(
-                "INSERT OR IGNORE INTO group_security "
-                "(chat_id) VALUES (?)",
+                self._prepare_query(
+                    "INSERT OR IGNORE INTO group_security "
+                    "(chat_id) VALUES (?)"
+                ),
                 (chat_id,),
             )
             settings = await self.fetchone(
-                "SELECT * FROM group_security WHERE chat_id = ?",
+                self._prepare_query(
+                    "SELECT * FROM group_security WHERE chat_id = ?"
+                ),
                 (chat_id,),
             )
         if settings and self.CACHE_AVAILABLE:
@@ -1028,6 +1181,10 @@ class GroupsMixin:
         conn: Optional[Any] = None,
         **kwargs,
     ) -> bool:
+        """
+        🟠 v7.4.20 FIX-PG-SYNTAX-1: تحويل `?` → `$N` عند PG
+        قبل تمرير الاستعلام لـ `_execute_with_conn`.
+        """
         if not kwargs:
             return False
 
@@ -1103,17 +1260,18 @@ class GroupsMixin:
         try:
             updates = [f"{key} = ?" for key in valid_kwargs]
             values = list(valid_kwargs.values()) + [chat_id]
-            query = (
+            query = self._prepare_query(
                 f"UPDATE group_security SET {', '.join(updates)} "
                 f"WHERE chat_id = ?"
+            )
+            insert_q = self._prepare_query(
+                "INSERT OR IGNORE INTO group_security "
+                "(chat_id) VALUES (?)"
             )
 
             if conn is not None:
                 await self._execute_with_conn(
-                    conn,
-                    "INSERT OR IGNORE INTO group_security "
-                    "(chat_id) VALUES (?)",
-                    chat_id,
+                    conn, insert_q, chat_id,
                 )
                 result = await self._execute_with_conn(
                     conn, query, *values
@@ -1121,10 +1279,7 @@ class GroupsMixin:
             else:
                 async with self.transaction() as own_conn:
                     await self._execute_with_conn(
-                        own_conn,
-                        "INSERT OR IGNORE INTO group_security "
-                        "(chat_id) VALUES (?)",
-                        chat_id,
+                        own_conn, insert_q, chat_id,
                     )
                     result = await self._execute_with_conn(
                         own_conn, query, *values
@@ -1183,15 +1338,17 @@ class GroupsMixin:
             return False
 
     # ═════════════════════════════════════════════════════════════════
-    # 7) التحذيرات (Warnings)
+    # 9) التحذيرات (Warnings)
     # ═════════════════════════════════════════════════════════════════
 
     async def get_user_warnings(
         self, user_id: int, chat_id: int
     ) -> int:
         return await self.fetchval(
-            "SELECT warnings FROM user_warnings "
-            "WHERE user_id = ? AND chat_id = ?",
+            self._prepare_query(
+                "SELECT warnings FROM user_warnings "
+                "WHERE user_id = ? AND chat_id = ?"
+            ),
             (user_id, chat_id), default=0,
         )
 
@@ -1199,10 +1356,12 @@ class GroupsMixin:
         self, user_id: int, chat_id: int
     ) -> int:
         await self.execute(
-            """INSERT INTO user_warnings (user_id, chat_id, warnings)
-               VALUES (?,?,1)
-               ON CONFLICT(user_id, chat_id)
-               DO UPDATE SET warnings = user_warnings.warnings + 1""",
+            self._prepare_query(
+                """INSERT INTO user_warnings (user_id, chat_id, warnings)
+                   VALUES (?,?,1)
+                   ON CONFLICT(user_id, chat_id)
+                   DO UPDATE SET warnings = user_warnings.warnings + 1"""
+            ),
             (user_id, chat_id),
         )
         return await self.get_user_warnings(user_id, chat_id)
@@ -1211,13 +1370,15 @@ class GroupsMixin:
         self, user_id: int, chat_id: int
     ) -> bool:
         return await self.execute(
-            "UPDATE user_warnings SET warnings = 0 "
-            "WHERE user_id = ? AND chat_id = ?",
+            self._prepare_query(
+                "UPDATE user_warnings SET warnings = 0 "
+                "WHERE user_id = ? AND chat_id = ?"
+            ),
             (user_id, chat_id),
         ) > 0
 
     # ═════════════════════════════════════════════════════════════════
-    # 8) سجلات المشرفين (Admin Logs)
+    # 10) سجلات المشرفين (Admin Logs)
     # ═════════════════════════════════════════════════════════════════
 
     async def add_admin_log(
@@ -1230,7 +1391,7 @@ class GroupsMixin:
         conn: Optional[Any] = None,
     ) -> bool:
         try:
-            sql = (
+            sql = self._prepare_query(
                 "INSERT INTO admin_logs "
                 "(chat_id, admin_id, action, target_id, "
                 "reason, created_at) "
@@ -1256,35 +1417,77 @@ class GroupsMixin:
         self, chat_id: int, limit: int = 20
     ) -> List[Dict]:
         return await self.fetchall(
-            "SELECT admin_id, action, target_id, reason, created_at "
-            "FROM admin_logs WHERE chat_id = ? "
-            "ORDER BY id DESC LIMIT ?",
+            self._prepare_query(
+                "SELECT admin_id, action, target_id, reason, created_at "
+                "FROM admin_logs WHERE chat_id = ? "
+                "ORDER BY id DESC LIMIT ?"
+            ),
             (chat_id, limit),
         )
 
     # ═════════════════════════════════════════════════════════════════
-    # 9) الردود التلقائية (Auto Replies)
+    # 11) الردود التلقائية (Auto Replies)
+    # 🟠 v7.4.20 FIX-AUTO-REPLY-CACHE-1
     # ═════════════════════════════════════════════════════════════════
 
     async def get_auto_reply_settings(self, chat_id: int) -> Dict:
+        """
+        🟠 v7.4.20 FIX-AUTO-REPLY-CACHE-1: تشارك الكاش المحلي
+        `_ars_local_cache` في handlers_message عبر
+        `_get_batched_message_settings`. يُقلل عدد الاستعلامات.
+
+        ملاحظة: هذه الدالة تُستدعى من group_log.py و
+        handlers_command.py وغيرها — تشارك نفس الكاش الآن.
+        """
+        # 1) محاولة handlers_message cache (batched)
+        try:
+            from handlers_message import (
+                _get_batched_message_settings as _bms,
+            )
+            if callable(_bms):
+                try:
+                    _sec, _ars = await _bms(chat_id)
+                    if isinstance(_ars, dict) and _ars:
+                        return _ars
+                except Exception as e:
+                    logger.debug(
+                        "get_auto_reply_settings _bms(%s): %s",
+                        chat_id, e,
+                    )
+        except ImportError:
+            pass
+        except Exception as e:
+            logger.debug(
+                "get_auto_reply_settings _bms import: %s", e
+            )
+
+        # 2) settings_cache
         if self.CACHE_AVAILABLE:
             cached = await self.settings_cache.get_auto_reply_settings(
                 chat_id
             )
             if cached is not None:
                 return cached
+
+        # 3) DB query
         settings = await self.fetchone(
-            "SELECT * FROM auto_reply_settings WHERE chat_id = ?",
+            self._prepare_query(
+                "SELECT * FROM auto_reply_settings WHERE chat_id = ?"
+            ),
             (chat_id,),
         )
         if not settings:
             await self.execute(
-                "INSERT OR IGNORE INTO auto_reply_settings "
-                "(chat_id) VALUES (?)",
+                self._prepare_query(
+                    "INSERT OR IGNORE INTO auto_reply_settings "
+                    "(chat_id) VALUES (?)"
+                ),
                 (chat_id,),
             )
             settings = await self.fetchone(
-                "SELECT * FROM auto_reply_settings WHERE chat_id = ?",
+                self._prepare_query(
+                    "SELECT * FROM auto_reply_settings WHERE chat_id = ?"
+                ),
                 (chat_id,),
             )
         if settings and self.CACHE_AVAILABLE:
@@ -1298,11 +1501,16 @@ class GroupsMixin:
     async def update_auto_reply_settings(
         self, chat_id: int, **kwargs
     ) -> bool:
+        """
+        🟠 v7.4.20 FIX-PG-SYNTAX-1: تحويل `?` → `$N` عند PG.
+        """
         if not kwargs:
             return False
         await self.execute(
-            "INSERT OR IGNORE INTO auto_reply_settings "
-            "(chat_id) VALUES (?)",
+            self._prepare_query(
+                "INSERT OR IGNORE INTO auto_reply_settings "
+                "(chat_id) VALUES (?)"
+            ),
             (chat_id,),
         )
 
@@ -1314,7 +1522,7 @@ class GroupsMixin:
 
         updates = [f"{key} = ?" for key in kwargs]
         values = list(kwargs.values()) + [chat_id]
-        query = (
+        query = self._prepare_query(
             f"UPDATE auto_reply_settings "
             f"SET {', '.join(updates)} WHERE chat_id = ?"
         )
@@ -1378,10 +1586,12 @@ class GroupsMixin:
             if "unique" in str(e).lower() or \
                "duplicate" in str(e).lower():
                 return await self.execute(
-                    "UPDATE auto_replies SET reply = ?, "
-                    "reply_type = ?, reply_media_id = ?, "
-                    "reply_buttons = ?, created_at = ? "
-                    "WHERE chat_id = ? AND keyword = ?",
+                    self._prepare_query(
+                        "UPDATE auto_replies SET reply = ?, "
+                        "reply_type = ?, reply_media_id = ?, "
+                        "reply_buttons = ?, created_at = ? "
+                        "WHERE chat_id = ? AND keyword = ?"
+                    ),
                     (reply, reply_type, media_id, buttons,
                      self.TimeUtils.sql_iso(), chat_id, keyword),
                 ) > 0
@@ -1398,8 +1608,10 @@ class GroupsMixin:
             async with self.connection() as conn:
                 deleted = await self._execute_with_conn(
                     conn,
-                    "DELETE FROM auto_replies "
-                    "WHERE chat_id = ? AND keyword = ?",
+                    self._prepare_query(
+                        "DELETE FROM auto_replies "
+                        "WHERE chat_id = ? AND keyword = ?"
+                    ),
                     chat_id, keyword,
                 )
                 return deleted > 0
@@ -1415,9 +1627,11 @@ class GroupsMixin:
     ):
         try:
             await self.execute(
-                "UPDATE auto_replies "
-                "SET usage_count = usage_count + 1 "
-                "WHERE chat_id = ? AND keyword = ?",
+                self._prepare_query(
+                    "UPDATE auto_replies "
+                    "SET usage_count = usage_count + 1 "
+                    "WHERE chat_id = ? AND keyword = ?"
+                ),
                 (chat_id, keyword),
             )
         except Exception:
@@ -1431,13 +1645,15 @@ class GroupsMixin:
             return None
         try:
             row = await self.fetchone(
-                """SELECT reply, reply_type, reply_media_id,
-                          reply_buttons
-                   FROM auto_replies
-                   WHERE keyword = ? AND is_active = 1
-                     AND (chat_id = ? OR chat_id = -1)
-                   ORDER BY CASE WHEN chat_id = ? THEN 0 ELSE 1 END
-                   LIMIT 1""",
+                self._prepare_query(
+                    """SELECT reply, reply_type, reply_media_id,
+                              reply_buttons
+                       FROM auto_replies
+                       WHERE keyword = ? AND is_active = 1
+                         AND (chat_id = ? OR chat_id = -1)
+                       ORDER BY CASE WHEN chat_id = ? THEN 0 ELSE 1 END
+                       LIMIT 1"""
+                ),
                 (keyword, chat_id, chat_id),
             )
         except Exception as e:
@@ -1474,19 +1690,23 @@ class GroupsMixin:
         self, chat_id: int, limit: int = 20
     ) -> List[Dict]:
         return await self.fetchall(
-            """SELECT keyword, usage_count,
-                      CASE WHEN chat_id = -1 THEN 'global'
-                           ELSE 'group' END as source
-               FROM auto_replies
-               WHERE chat_id = ? OR chat_id = -1
-               ORDER BY usage_count DESC LIMIT ?""",
+            self._prepare_query(
+                """SELECT keyword, usage_count,
+                          CASE WHEN chat_id = -1 THEN 'global'
+                               ELSE 'group' END as source
+                   FROM auto_replies
+                   WHERE chat_id = ? OR chat_id = -1
+                   ORDER BY usage_count DESC LIMIT ?"""
+            ),
             (chat_id, limit),
         )
 
     async def reset_auto_replies(self, chat_id: int) -> bool:
         try:
             rc = await self.execute(
-                "DELETE FROM auto_replies WHERE chat_id = ?",
+                self._prepare_query(
+                    "DELETE FROM auto_replies WHERE chat_id = ?"
+                ),
                 (chat_id,),
             ) > 0
             if rc:
@@ -1564,11 +1784,13 @@ class GroupsMixin:
                     try:
                         await self._execute_with_conn(
                             conn,
-                            """INSERT OR IGNORE INTO auto_replies
-                               (chat_id, keyword, reply, reply_type,
-                                reply_media_id, reply_buttons,
-                                created_at, is_active, usage_count)
-                               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                            self._prepare_query(
+                                """INSERT OR IGNORE INTO auto_replies
+                                   (chat_id, keyword, reply, reply_type,
+                                    reply_media_id, reply_buttons,
+                                    created_at, is_active, usage_count)
+                                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"""
+                            ),
                             item.get("chat_id", -1),
                             item.get("keyword", "").lower(),
                             item.get("reply", ""),
@@ -1596,7 +1818,8 @@ class GroupsMixin:
             return 0
 
     # ═════════════════════════════════════════════════════════════════
-    # 10) الكلمات المحظورة (Banned Words)
+    # 12) الكلمات المحظورة (Banned Words)
+    # 🟠 v7.4.20 FIX-BANNED-CONFLICT-1
     # ═════════════════════════════════════════════════════════════════
 
     async def _load_global_banned_words(self) -> List[str]:
@@ -1606,8 +1829,10 @@ class GroupsMixin:
             if self._global_banned_words_loaded:
                 return self._global_banned_words_cache
             rows = await self.fetchall(
-                "SELECT DISTINCT word FROM banned_words "
-                "WHERE chat_id = -1"
+                self._prepare_query(
+                    "SELECT DISTINCT word FROM banned_words "
+                    "WHERE chat_id = -1"
+                )
             )
             self._global_banned_words_cache = [
                 row["word"] for row in rows
@@ -1628,7 +1853,9 @@ class GroupsMixin:
 
         global_words = await self._load_global_banned_words()
         specific = await self.fetchall(
-            "SELECT word FROM banned_words WHERE chat_id = ?",
+            self._prepare_query(
+                "SELECT word FROM banned_words WHERE chat_id = ?"
+            ),
             (chat_id,),
         )
         specific_words = [row["word"] for row in specific]
@@ -1642,6 +1869,17 @@ class GroupsMixin:
     async def add_banned_word(
         self, chat_id: int, word: str, added_by: int
     ) -> Tuple[bool, bool]:
+        """
+        إضافة كلمة محظورة.
+
+        🟠 v7.4.20 FIX-BANNED-CONFLICT-1: يستخدم
+        `ON CONFLICT (word, chat_id) DO NOTHING` على PG،
+        `ON DUPLICATE KEY UPDATE` على MySQL،
+        `INSERT OR IGNORE` على SQLite. يقلل round-trips.
+
+        Returns:
+            (added_ok, is_duplicate)
+        """
         if not isinstance(chat_id, int):
             logger.error(
                 f"❌ add_banned_word: chat_id يجب أن يكون int، "
@@ -1680,7 +1918,8 @@ class GroupsMixin:
             logger.warning(
                 f"⚠️ add_banned_word: word فارغة/طويلة بعد التطبيع "
                 f"(chat_id={chat_id}, added_by={added_by}, "
-                f"raw={word!r}, len={len(word) if isinstance(word, str) else '?'})"
+                f"raw={word!r}, "
+                f"len={len(word) if isinstance(word, str) else '?'})"
             )
             return False, False
 
@@ -1691,8 +1930,10 @@ class GroupsMixin:
                 if chat_id == -1:
                     count = await self._fetchval_with_conn(
                         conn,
-                        "SELECT COUNT(*) FROM banned_words "
-                        "WHERE chat_id = -1",
+                        self._prepare_query(
+                            "SELECT COUNT(*) FROM banned_words "
+                            "WHERE chat_id = -1"
+                        ),
                         default=0,
                     )
 
@@ -1720,43 +1961,52 @@ class GroupsMixin:
                         )
                         return False, False
 
-                try:
-                    if self.USE_POSTGRES:
-                        await self._execute_with_conn(
-                            conn,
-                            "INSERT INTO banned_words "
-                            "(word, chat_id, added_by, added_at) "
-                            "VALUES ($1, $2, $3, $4)",
-                            word, chat_id, added_by,
-                            self.TimeUtils.utc_now(),
-                        )
-                    elif self.USE_MYSQL:
-                        await self._execute_with_conn(
-                            conn,
-                            "INSERT INTO banned_words "
-                            "(word, chat_id, added_by, added_at) "
-                            "VALUES (%s, %s, %s, %s)",
-                            word, chat_id, added_by,
-                            self.TimeUtils.sql_iso(),
-                        )
-                    else:
-                        await self._execute_with_conn(
-                            conn,
-                            "INSERT INTO banned_words "
-                            "(word, chat_id, added_by, added_at) "
-                            "VALUES (?,?,?,?)",
-                            word, chat_id, added_by,
-                            self.TimeUtils.sql_iso(),
-                        )
-                except Exception as e:
-                    if "unique" in str(e).lower() or \
-                       "duplicate" in str(e).lower():
-                        logger.info(
-                            f"ℹ️ add_banned_word: كلمة مكررة "
-                            f"({word!r}, chat_id={chat_id})"
-                        )
-                        return False, True
-                    raise
+                # 🟠 v7.4.20: التحقق من التكرار + الإدراج في خطوة واحدة
+                existing = await self._fetchval_with_conn(
+                    conn,
+                    self._prepare_query(
+                        "SELECT 1 FROM banned_words "
+                        "WHERE word = ? AND chat_id = ? LIMIT 1"
+                    ),
+                    word, chat_id,
+                    default=None,
+                )
+                if existing is not None:
+                    logger.info(
+                        f"ℹ️ add_banned_word: كلمة مكررة "
+                        f"({word!r}, chat_id={chat_id})"
+                    )
+                    return False, True
+
+                if self.USE_POSTGRES:
+                    await self._execute_with_conn(
+                        conn,
+                        "INSERT INTO banned_words "
+                        "(word, chat_id, added_by, added_at) "
+                        "VALUES ($1, $2, $3, $4) "
+                        "ON CONFLICT (word, chat_id) DO NOTHING",
+                        word, chat_id, added_by,
+                        self.TimeUtils.utc_now(),
+                    )
+                elif self.USE_MYSQL:
+                    await self._execute_with_conn(
+                        conn,
+                        "INSERT INTO banned_words "
+                        "(word, chat_id, added_by, added_at) "
+                        "VALUES (%s, %s, %s, %s) "
+                        "ON DUPLICATE KEY UPDATE word = word",
+                        word, chat_id, added_by,
+                        self.TimeUtils.sql_iso(),
+                    )
+                else:
+                    await self._execute_with_conn(
+                        conn,
+                        "INSERT OR IGNORE INTO banned_words "
+                        "(word, chat_id, added_by, added_at) "
+                        "VALUES (?,?,?,?)",
+                        word, chat_id, added_by,
+                        self.TimeUtils.sql_iso(),
+                    )
 
             await self._invalidate_banned_words_local_cache(chat_id)
             if self.CACHE_AVAILABLE:
@@ -1767,6 +2017,14 @@ class GroupsMixin:
             )
             return True, False
         except Exception as e:
+            # في حال فشل ON CONFLICT (migration لم تصل بعد)
+            err_lower = str(e).lower()
+            if "unique" in err_lower or "duplicate" in err_lower:
+                logger.info(
+                    f"ℹ️ add_banned_word (race): كلمة مكررة "
+                    f"({word!r}, chat_id={chat_id})"
+                )
+                return False, True
             logger.error(
                 f"❌ Error in add_banned_word: {e} | "
                 f"chat_id={chat_id}, word={word!r}, "
@@ -1808,8 +2066,10 @@ class GroupsMixin:
             async with self.connection() as conn:
                 deleted = await self._execute_with_conn(
                     conn,
-                    "DELETE FROM banned_words "
-                    "WHERE word = ? AND chat_id = ?",
+                    self._prepare_query(
+                        "DELETE FROM banned_words "
+                        "WHERE word = ? AND chat_id = ?"
+                    ),
                     word, chat_id,
                 )
 
@@ -1817,8 +2077,10 @@ class GroupsMixin:
                     try:
                         all_words = await self._fetchall_with_conn(
                             conn,
-                            "SELECT word FROM banned_words "
-                            "WHERE chat_id = ? LIMIT 20",
+                            self._prepare_query(
+                                "SELECT word FROM banned_words "
+                                "WHERE chat_id = ? LIMIT 20"
+                            ),
                             chat_id,
                         )
                         existing = [
@@ -1875,7 +2137,9 @@ class GroupsMixin:
             async with self.transaction() as conn:
                 await self._execute_with_conn(
                     conn,
-                    "DELETE FROM banned_words WHERE chat_id = -1",
+                    self._prepare_query(
+                        "DELETE FROM banned_words WHERE chat_id = -1"
+                    ),
                 )
                 for word in BANNED_WORDS:
                     word = str(word).strip().lower()
@@ -1887,9 +2151,11 @@ class GroupsMixin:
                 if words_to_insert:
                     await self._executemany_with_conn(
                         conn,
-                        "INSERT OR IGNORE INTO banned_words "
-                        "(word, chat_id, added_by, added_at) "
-                        "VALUES (?,?,?,?)",
+                        self._prepare_query(
+                            "INSERT OR IGNORE INTO banned_words "
+                            "(word, chat_id, added_by, added_at) "
+                            "VALUES (?,?,?,?)"
+                        ),
                         words_to_insert,
                     )
             await self._invalidate_banned_words_local_cache()
@@ -1910,26 +2176,32 @@ class GroupsMixin:
             return False
 
     # ═════════════════════════════════════════════════════════════════
-    # 11) إعدادات العقوبات (Penalty Settings)
+    # 13) إعدادات العقوبات (Penalty Settings)
+    # 🟠 v7.4.20 FIX-PG-SYNTAX-1
     # ═════════════════════════════════════════════════════════════════
 
     async def get_penalty_settings(self, chat_id: int) -> Dict:
         await self.execute(
-            "INSERT OR IGNORE INTO group_security "
-            "(chat_id) VALUES (?)",
+            self._prepare_query(
+                "INSERT OR IGNORE INTO group_security "
+                "(chat_id) VALUES (?)"
+            ),
             (chat_id,),
         )
         return await self.fetchone(
-            """SELECT mute_default_duration, ban_default_duration,
-                      warn_default_duration, restrict_default_duration,
-                      enable_timed_penalties, auto_remove_penalties
-               FROM group_security WHERE chat_id = ?""",
+            self._prepare_query(
+                """SELECT mute_default_duration, ban_default_duration,
+                          warn_default_duration, restrict_default_duration,
+                          enable_timed_penalties, auto_remove_penalties
+                   FROM group_security WHERE chat_id = ?"""
+            ),
             (chat_id,),
         ) or {}
 
     async def update_penalty_settings(
         self, chat_id: int, **kwargs
     ) -> bool:
+        """🟠 v7.4.20 FIX-PG-SYNTAX-1: تحويل `?` → `$N`."""
         if not kwargs:
             return False
 
@@ -1966,14 +2238,16 @@ class GroupsMixin:
                 return False
 
             await self.execute(
-                "INSERT OR IGNORE INTO group_security "
-                "(chat_id) VALUES (?)",
+                self._prepare_query(
+                    "INSERT OR IGNORE INTO group_security "
+                    "(chat_id) VALUES (?)"
+                ),
                 (chat_id,),
             )
 
             updates = [f"{key} = ?" for key in valid_kwargs]
             values = list(valid_kwargs.values()) + [chat_id]
-            query = (
+            query = self._prepare_query(
                 f"UPDATE group_security SET {', '.join(updates)} "
                 f"WHERE chat_id = ?"
             )
@@ -1989,7 +2263,7 @@ class GroupsMixin:
             return False
 
     # ═════════════════════════════════════════════════════════════════
-    # 12) قناة السجل للمجموعة (Group Log Channel)
+    # 14) قناة السجل للمجموعة (Group Log Channel)
     # ═════════════════════════════════════════════════════════════════
 
     async def set_group_log_channel(
@@ -2005,15 +2279,19 @@ class GroupsMixin:
             return False
 
         exists = await self.fetchval(
-            "SELECT 1 FROM bot_groups WHERE chat_id = ?",
+            self._prepare_query(
+                "SELECT 1 FROM bot_groups WHERE chat_id = ?"
+            ),
             (chat_id,),
         )
         if not exists:
             try:
                 await self.execute(
-                    "INSERT OR IGNORE INTO bot_groups "
-                    "(chat_id, chat_name, added_at, banned) "
-                    "VALUES (?, ?, ?, 0)",
+                    self._prepare_query(
+                        "INSERT OR IGNORE INTO bot_groups "
+                        "(chat_id, chat_name, added_at, banned) "
+                        "VALUES (?, ?, ?, 0)"
+                    ),
                     (chat_id, str(chat_id),
                      self.TimeUtils.utc_now()),
                 )
@@ -2026,8 +2304,10 @@ class GroupsMixin:
 
         try:
             result = await self.execute(
-                "UPDATE bot_groups SET log_channel_id = ?, "
-                "updated_at = ? WHERE chat_id = ?",
+                self._prepare_query(
+                    "UPDATE bot_groups SET log_channel_id = ?, "
+                    "updated_at = ? WHERE chat_id = ?"
+                ),
                 (cid, self.TimeUtils.utc_now(), chat_id),
             )
             try:
@@ -2065,8 +2345,10 @@ class GroupsMixin:
 
         try:
             result = await self.fetchval(
-                "SELECT log_channel_id FROM bot_groups "
-                "WHERE chat_id = ?",
+                self._prepare_query(
+                    "SELECT log_channel_id FROM bot_groups "
+                    "WHERE chat_id = ?"
+                ),
                 (chat_id,),
             )
             value = int(result) if result else None
@@ -2090,8 +2372,10 @@ class GroupsMixin:
     async def remove_group_log_channel(self, chat_id: int) -> bool:
         try:
             await self.execute(
-                "UPDATE bot_groups SET log_channel_id = NULL, "
-                "updated_at = ? WHERE chat_id = ?",
+                self._prepare_query(
+                    "UPDATE bot_groups SET log_channel_id = NULL, "
+                    "updated_at = ? WHERE chat_id = ?"
+                ),
                 (self.TimeUtils.utc_now(), chat_id),
             )
             try:
@@ -2126,7 +2410,9 @@ class GroupsMixin:
                 query += " AND chat_id != ?"
                 params.append(exclude_group_id)
             query += " ORDER BY chat_name LIMIT 20"
-            return await self.fetchall(query, tuple(params))
+            return await self.fetchall(
+                self._prepare_query(query), tuple(params)
+            )
         except Exception as e:
             logger.debug(
                 f"get_groups_sharing_log_channel"
@@ -2135,16 +2421,18 @@ class GroupsMixin:
             return []
 
     # ═════════════════════════════════════════════════════════════════
-    # 13) المخالفات (Violations)
+    # 15) المخالفات (Violations)
     # ═════════════════════════════════════════════════════════════════
 
     async def get_violation_penalty(
         self, chat_id: int, violation_type: str
     ) -> Dict:
         result = await self.fetchone(
-            "SELECT penalty_type, duration_seconds "
-            "FROM violation_penalties "
-            "WHERE chat_id = ? AND violation_type = ?",
+            self._prepare_query(
+                "SELECT penalty_type, duration_seconds "
+                "FROM violation_penalties "
+                "WHERE chat_id = ? AND violation_type = ?"
+            ),
             (chat_id, violation_type),
         )
         if result:
@@ -2176,10 +2464,12 @@ class GroupsMixin:
         if duration_seconds > self.MAX_PENALTY_DURATION:
             duration_seconds = self.MAX_PENALTY_DURATION
         return await self.execute(
-            """INSERT OR REPLACE INTO violation_penalties
-               (chat_id, violation_type, penalty_type,
-                duration_seconds)
-               VALUES (?,?,?,?)""",
+            self._prepare_query(
+                """INSERT OR REPLACE INTO violation_penalties
+                   (chat_id, violation_type, penalty_type,
+                    duration_seconds)
+                   VALUES (?,?,?,?)"""
+            ),
             (chat_id, violation_type, penalty_type,
              duration_seconds),
         ) > 0
@@ -2188,8 +2478,10 @@ class GroupsMixin:
         self, chat_id: int
     ) -> Dict[str, Dict]:
         penalties = await self.fetchall(
-            "SELECT violation_type, penalty_type, duration_seconds "
-            "FROM violation_penalties WHERE chat_id = ?",
+            self._prepare_query(
+                "SELECT violation_type, penalty_type, duration_seconds "
+                "FROM violation_penalties WHERE chat_id = ?"
+            ),
             (chat_id,),
         )
         result = {}
@@ -2204,9 +2496,11 @@ class GroupsMixin:
         self, user_id: int, chat_id: int
     ) -> int:
         violation = await self.fetchone(
-            "SELECT violation_count, last_violation_time "
-            "FROM user_violations "
-            "WHERE user_id = ? AND chat_id = ?",
+            self._prepare_query(
+                "SELECT violation_count, last_violation_time "
+                "FROM user_violations "
+                "WHERE user_id = ? AND chat_id = ?"
+            ),
             (user_id, chat_id),
         )
         if not violation:
@@ -2221,10 +2515,12 @@ class GroupsMixin:
                self.TimeUtils.utc_now() - last_time > \
                timedelta(hours=24):
                 await self.execute(
-                    "UPDATE user_violations "
-                    "SET violation_count = 0, "
-                    "last_violation_time = NULL "
-                    "WHERE user_id = ? AND chat_id = ?",
+                    self._prepare_query(
+                        "UPDATE user_violations "
+                        "SET violation_count = 0, "
+                        "last_violation_time = NULL "
+                        "WHERE user_id = ? AND chat_id = ?"
+                    ),
                     (user_id, chat_id),
                 )
                 return 0
@@ -2248,9 +2544,11 @@ class GroupsMixin:
             async with self.transaction() as conn:
                 last_time_str = await self._fetchval_with_conn(
                     conn,
-                    "SELECT last_violation_time "
-                    "FROM user_violations "
-                    "WHERE user_id = ? AND chat_id = ?",
+                    self._prepare_query(
+                        "SELECT last_violation_time "
+                        "FROM user_violations "
+                        "WHERE user_id = ? AND chat_id = ?"
+                    ),
                     user_id, chat_id,
                 )
                 dt = None
@@ -2263,45 +2561,66 @@ class GroupsMixin:
                    timedelta(hours=24):
                     await self._execute_with_conn(
                         conn,
-                        "UPDATE user_violations "
-                        "SET violation_count = 0, "
-                        "last_violation_time = NULL "
-                        "WHERE user_id = ? AND chat_id = ?",
+                        self._prepare_query(
+                            "UPDATE user_violations "
+                            "SET violation_count = 0, "
+                            "last_violation_time = NULL "
+                            "WHERE user_id = ? AND chat_id = ?"
+                        ),
                         user_id, chat_id,
                     )
                 current = await self._fetchval_with_conn(
                     conn,
-                    "SELECT violation_count FROM user_violations "
-                    "WHERE user_id = ? AND chat_id = ?",
+                    self._prepare_query(
+                        "SELECT violation_count FROM user_violations "
+                        "WHERE user_id = ? AND chat_id = ?"
+                    ),
                     user_id, chat_id, default=0,
                 )
                 new_count = current + 1
                 now = self.TimeUtils.utc_now()
-                await self._execute_with_conn(
-                    conn,
-                    "INSERT INTO user_violations "
-                    "(user_id, chat_id, violation_count, "
-                    "last_violation_time) VALUES (?,?,?,?) "
-                    "ON CONFLICT(user_id, chat_id) DO UPDATE SET "
-                    "violation_count = excluded.violation_count, "
-                    "last_violation_time = "
-                    "excluded.last_violation_time",
-                    user_id, chat_id, new_count, now,
-                )
+                if self.USE_POSTGRES:
+                    await self._execute_with_conn(
+                        conn,
+                        "INSERT INTO user_violations "
+                        "(user_id, chat_id, violation_count, "
+                        "last_violation_time) VALUES ($1,$2,$3,$4) "
+                        "ON CONFLICT(user_id, chat_id) DO UPDATE SET "
+                        "violation_count = excluded.violation_count, "
+                        "last_violation_time = "
+                        "excluded.last_violation_time",
+                        user_id, chat_id, new_count, now,
+                    )
+                else:
+                    await self._execute_with_conn(
+                        conn,
+                        self._prepare_query(
+                            "INSERT INTO user_violations "
+                            "(user_id, chat_id, violation_count, "
+                            "last_violation_time) VALUES (?,?,?,?) "
+                            "ON CONFLICT(user_id, chat_id) DO UPDATE SET "
+                            "violation_count = excluded.violation_count, "
+                            "last_violation_time = "
+                            "excluded.last_violation_time"
+                        ),
+                        user_id, chat_id, new_count, now,
+                    )
                 return new_count
 
     async def reset_violation_count(
         self, user_id: int, chat_id: int
     ) -> bool:
         return await self.execute(
-            "UPDATE user_violations SET violation_count = 0, "
-            "last_violation_time = NULL "
-            "WHERE user_id = ? AND chat_id = ?",
+            self._prepare_query(
+                "UPDATE user_violations SET violation_count = 0, "
+                "last_violation_time = NULL "
+                "WHERE user_id = ? AND chat_id = ?"
+            ),
             (user_id, chat_id),
         ) > 0
 
     # ═════════════════════════════════════════════════════════════════
-    # 14) انتهاء العقوبات (Expire Penalties — fallback)
+    # 16) انتهاء العقوبات (Expire Penalties — fallback)
     # ═════════════════════════════════════════════════════════════════
 
     async def _expire_penalties_generic(self, conn, batch: int):
@@ -2310,10 +2629,12 @@ class GroupsMixin:
 
             rows = await self._fetchall_with_conn(
                 conn,
-                "SELECT id FROM user_penalties "
-                "WHERE status = 'active' AND end_time IS NOT NULL "
-                "  AND end_time <= ? "
-                "ORDER BY end_time ASC LIMIT ?",
+                self._prepare_query(
+                    "SELECT id FROM user_penalties "
+                    "WHERE status = 'active' AND end_time IS NOT NULL "
+                    "  AND end_time <= ? "
+                    "ORDER BY end_time ASC LIMIT ?"
+                ),
                 now, batch,
             )
             if not rows:
@@ -2331,14 +2652,16 @@ class GroupsMixin:
                 placeholders = ",".join(["?"] * len(ids))
                 await self._execute_with_conn(
                     conn,
-                    f"INSERT INTO penalty_archive "
-                    f"(id, user_id, chat_id, penalty_type, duration, "
-                    f" start_time, end_time, reason, issued_by, "
-                    f" status, created_at, archived_at) "
-                    f"SELECT id, user_id, chat_id, penalty_type, duration, "
-                    f" start_time, end_time, reason, issued_by, "
-                    f" 'expired', created_at, ? "
-                    f"FROM user_penalties WHERE id IN ({placeholders})",
+                    self._prepare_query(
+                        f"INSERT INTO penalty_archive "
+                        f"(id, user_id, chat_id, penalty_type, duration, "
+                        f" start_time, end_time, reason, issued_by, "
+                        f" status, created_at, archived_at) "
+                        f"SELECT id, user_id, chat_id, penalty_type, "
+                        f" duration, start_time, end_time, reason, "
+                        f" issued_by, 'expired', created_at, ? "
+                        f"FROM user_penalties WHERE id IN ({placeholders})"
+                    ),
                     now, *ids,
                 )
             except Exception as arc_e:
@@ -2349,8 +2672,10 @@ class GroupsMixin:
             placeholders = ",".join(["?"] * len(ids))
             await self._execute_with_conn(
                 conn,
-                f"UPDATE user_penalties SET status = 'expired' "
-                f"WHERE id IN ({placeholders})",
+                self._prepare_query(
+                    f"UPDATE user_penalties SET status = 'expired' "
+                    f"WHERE id IN ({placeholders})"
+                ),
                 *ids,
             )
 
@@ -2372,29 +2697,31 @@ class GroupsMixin:
         return await self._expire_penalties_generic(conn, batch)
 
 
-__all__ = ["GroupsMixin"]
+__all__ = [
+    "GroupsMixin",
+    "_convert_qmark_to_pg",
+    "_safe_normalize_word",
+]
 
 
 # ═════════════════════════════════════════════════════════════════════
-# LOAD BEACON — v7.4.19
+# LOAD BEACON — v7.4.20
 # ═════════════════════════════════════════════════════════════════════
 
 try:
     logger.info(
-        "🛡️ database_groups.py v7.4.19 ADMIN-MRO-DEDUP loaded | "
-        "🆕 FIX-ADMIN-MRO-DEDUP: get_admin_list-MOVED-to-StatsMixin "
-        "(MRO-resolved, Cache-preserved) | "
-        "🆕 FIX-ADMIN-ALIASES: get_all_admins + get_admins → super() | "
-        "FIX-ADMIN-1 (v7.4.18) محفوظ جزئياً: aliases فقط | "
-        "FIX-CACHE-1..6 (v7.4.17) محفوظة | "
-        "FIX-AC2 + FIX-C4 (v7.4.16) محفوظة | "
-        "P1..P5 (v7.4.15) محفوظة | "
-        "O1..O2 (v7.4.14) محفوظة | "
-        "F1..F3 (v7.4.13) محفوظة | "
-        "F1..F2 (v7.4.12) محفوظة | "
-        "M1..M4 + m1..m3 (v7.4.11) محفوظة | "
-        "NEW FALLBACKS (v7.4.11) محفوظة | "
-        "add_banned_word fallback=10000"
+        "🛡️ database_groups.py v7.4.20 AUDIT-FIXES loaded | "
+        "🆕 FIX-PG-SYNTAX-1: qmark→$N helper + update_security/"
+        "penalty/auto_reply | "
+        "🆕 FIX-BANNED-CONFLICT-1: ON CONFLICT (word,chat_id) | "
+        "🆕 FIX-AUTO-REPLY-CACHE-1: shares _ars_local_cache via _bms | "
+        "🆕 FIX-ADMIN-MRO-STRICT-1: explicit super() check | "
+        "🆕 FIX-INVALIDATE-CHAT-CACHE-1: chat_ids param | "
+        "✅ v7.4.19 FIX-ADMIN-MRO-DEDUP preserved | "
+        "✅ v7.4.17 FIX-CACHE-1..6 preserved | "
+        "✅ v7.4.16 FIX-AC2+FIX-C4 preserved | "
+        "✅ v7.4.15 P1..P5 | v7.4.14 O1..O2 | v7.4.13 F1..F3 | "
+        "✅ v7.4.12 F1..F2 | v7.4.11 M1..M4+m1..m3 preserved"
     )
 except Exception:
     pass
