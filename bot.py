@@ -1,38 +1,37 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-🌿 Relax Manager – البوت الرئيسي (bot.py v5.7.13-FULL-AUDIT-FIXED)
+🌿 Relax Manager – البوت الرئيسي (bot.py v5.7.14-FULL-AUDIT-ALIASES-FIXED)
 ================================================================================
-🆕 v5.7.13 (تصحيحات الفحص الدقيق — فوق v5.7.12):
-    🔴 P0-FIX-1: `_run_post_init_hooks` — إزالة الاستدعاء اليدوي الخاطئ.
-        PTB 20.x يستدعي post_init تلقائياً داخل initialize()؛ الأعلام
-        `_post_init_ran`/`_post_init_executed`/`_post_init_done` غير موجودة
-        في PTB، لذا كان الاستدعاء اليدوي يُنفّذ post_init مرتين.
-        الحل: فحص `app._post_init` وإذا كان مضبوطاً نفترض أن PTB استدعاه.
-    🔴 P0-FIX-2: `_run_post_stop_hooks` — إبطال `_post_stop` (الخاصية الداخلية)
-        بدل `post_stop` (قد تكون read-only property في PTB).
-    🔴 P0-FIX-3: `_watch_runner` — التصفير فقط عند `2xx/3xx`، وعدّ `5xx`
-        كفشل (كان يُصفّر قبل الفحص → خادم ميت 502 لا يُغلق البوت).
-    🟠 P1-FIX-4: `_collect_admin_ids` — `break` فقط إذا كانت القائمة غير فارغة
-        (كان `[]` يمنع تجربة `get_all_admins`).
-    🟠 P1-FIX-5: `pre_checkout` — إغلاق ثغرة تخطي التحقق من المبلغ عندما
-        يكون `float(plan['price'])` فاشلاً (كان `expected_f=0.0` يُقبل أي مبلغ).
-    🟠 P1-FIX-6: `successful_payment` — إشعار المطور عند فشل `create_gift_code`
-        بعد دفع ناجح (كان فشلاً صامتاً).
-    🟠 P1-FIX-7: `_pid_is_bot_process` — مقارنة cwd لتفادي قتل managed bots.
-    🟡 P2-FIX-8: `_get_bot_token` — تحقق من صيغة التوكن بـ regex.
-    🟡 P2-FIX-9: `cleanup_admin_logs_periodically` — دعم `DB.connection()`
-        إذا كانت ترجع coroutine.
-    🟡 P2-FIX-10: `run_task_with_retry` — عدم التقاط SystemExit/KeyboardInterrupt.
-    🟢 P3-FIX-11: `_verify_command_handlers` — نقل grant/broadcast/backup/restore
-        إلى CRITICAL.
-    🟢 P3-FIX-12: `_init_group_log_instance` — idempotency check.
-    🟢 P3-FIX-13: `_write_pid_file` — إنشاء المجلد الأب.
-    🟢 P3-FIX-14: `pool_health_monitor` — PG_MAX_CONNECTIONS configurable.
-    🟢 P3-FIX-15: `cmd_ping` — تسجيل مقاييس ping.
-    🟢 P3-FIX-16: `keep_alive` — تسجيل سبب عدم التشغيل.
-    🟢 محفوظ: كل إصلاحات v5.7.11 / v5.7.12 (init_retry, pools, kill_prev,
-        webhook_force, init idempotency, ...).
+🆕 v5.7.14 (فوق v5.7.13):
+    🔴 FIX-ALIAS-1: حذف aliases المتعارضة (`/databases`, `/files`, `/versions`)
+        من bot.py — `handlers_analytics.register_handlers()` يسجّلها بأوامرها
+        الحقيقية. كان هناك تعارض: alias يُسجَّل أولاً فيمنع الأمر الحقيقي.
+
+    🟠 FIX-CMDS-2: تحديث `ADMIN_COMMANDS` لتشمل أوامر analytics v1.3.6:
+        `/analytics`, `/versions`, `/analytics_reset`, `/files`,
+        `/audit`, `/audit_full`, `/audit_critical` — لتظهر في قائمة
+        أوامر تيليجرام (زر /) للمطور.
+
+    🟡 CLEAN-3: حذف `_cmd_analytics_alias` غير المستخدمة (تنظيف).
+
+v5.7.13 — محفوظ بالكامل (16 إصلاحاً):
+    🔴 P0-FIX-1: _run_post_init_hooks — idempotency فقط
+    🔴 P0-FIX-2: _run_post_stop_hooks — إبطال _post_stop
+    🔴 P0-FIX-3: _watch_runner — تصفير 2xx/3xx فقط
+    🟠 P1-FIX-4: _collect_admin_ids — continue على قائمة فارغة
+    🟠 P1-FIX-5: pre_checkout — تحقق price صارم
+    🟠 P1-FIX-6: successful_payment — إشعار مطور
+    🟠 P1-FIX-7: _pid_is_bot_process — cwd check
+    🟡 P2-FIX-8: _get_bot_token — regex
+    🟡 P2-FIX-9: cleanup_admin_logs — coroutine support
+    🟡 P2-FIX-10: run_task_with_retry — لا SystemExit
+    🟢 P3-FIX-11: _verify_command_handlers — CRITICAL
+    🟢 P3-FIX-12: _init_group_log — idempotency
+    🟢 P3-FIX-13: _write_pid_file — mkdir
+    🟢 P3-FIX-14: pool_health — PG_MAX_CONNECTIONS
+    🟢 P3-FIX-15: cmd_ping — metrics
+    🟢 P3-FIX-16: keep_alive — log reason
 ================================================================================
 """
 
@@ -449,7 +448,6 @@ logging.basicConfig(
 for _noisy in ("httpx", "httpcore", "telegram.request", "telegram.ext.ExtBot", "aiohttp.access"):
     logging.getLogger(_noisy).setLevel(logging.WARNING)
 
-# 🟢 v5.7.12: logger باسم ثابت لتفادي ازدواج عند إعادة الاستيراد
 logger = logging.getLogger("relax_bot")
 
 # ═══════════════════════════════════════════════════════════════════
@@ -463,12 +461,12 @@ _FALLBACK_HOSTNAME = (
     os.getenv("FALLBACK_HOSTNAME", "") or "relaxbo-78m4.onrender.com"
 ).strip()
 
-logger.info("🔧 v5.7.13 init: _FALLBACK_HOSTNAME=%r", _FALLBACK_HOSTNAME)
-logger.info("🔧 v5.7.13 init: RENDER_EXTERNAL_HOSTNAME=%r",
+logger.info("🔧 v5.7.14 init: _FALLBACK_HOSTNAME=%r", _FALLBACK_HOSTNAME)
+logger.info("🔧 v5.7.14 init: RENDER_EXTERNAL_HOSTNAME=%r",
             os.getenv("RENDER_EXTERNAL_HOSTNAME", ""))
-logger.info("🔧 v5.7.13 init: RENDER_EXTERNAL_URL=%r",
+logger.info("🔧 v5.7.14 init: RENDER_EXTERNAL_URL=%r",
             os.getenv("RENDER_EXTERNAL_URL", ""))
-logger.info("🔧 v5.7.13 init: ALLOW_POLLING=%r",
+logger.info("🔧 v5.7.14 init: ALLOW_POLLING=%r",
             os.getenv("ALLOW_POLLING", ""))
 
 def _read_pid_file() -> Optional[int]:
@@ -484,7 +482,6 @@ def _read_pid_file() -> Optional[int]:
     return None
 
 def _write_pid_file() -> None:
-    # 🩹 FIX-13: إنشاء المجلد الأب
     try:
         os.makedirs(os.path.dirname(_PID_FILE_PATH), exist_ok=True)
         with open(_PID_FILE_PATH, "w") as f:
@@ -512,10 +509,6 @@ def _is_process_alive(pid: int) -> bool:
         return True
 
 def _pid_is_bot_process(pid: int) -> bool:
-    """
-    التحقق من cmdline وcwd لتفادي قتل managed bots التي تشغّل bot.py
-    من مجلد آخر.
-    """
     try:
         with open(f"/proc/{pid}/cmdline", "rb") as f:
             cmdline = f.read().replace(b"\x00", b" ").decode("utf-8", errors="ignore")
@@ -529,7 +522,6 @@ def _pid_is_bot_process(pid: int) -> bool:
                 break
         if not _has_bot_py:
             return False
-        # 🩹 FIX-7: مقارنة cwd — لا تقتل bot.py من مجلد آخر (managed bots)
         try:
             _pid_cwd = os.readlink(f"/proc/{pid}/cwd")
             _my_cwd = os.getcwd()
@@ -540,7 +532,6 @@ def _pid_is_bot_process(pid: int) -> bool:
                 )
                 return False
         except (IOError, OSError):
-            # /proc/{pid}/cwd قد لا يكون مقروءاً — نرفض القتل للأمان
             return False
         return True
     except (IOError, PermissionError, OSError):
@@ -795,7 +786,6 @@ _ACTIVE_HANDLER: Dict[str, Any] = {"name": None, "start": 0.0, "chat_id": None}
 
 _GROUP_CHAT_FILTER = filters.ChatType.GROUP | filters.ChatType.SUPERGROUP
 
-# 🩹 FIX-8: تحقق من صيغة توكن تيليجرام
 _TG_TOKEN_RE = re.compile(r"^\d{8,10}:[A-Za-z0-9_-]{35}$")
 
 def _amounts_match(expected: Any, actual: Any) -> bool:
@@ -1102,45 +1092,100 @@ ALLOWED_UPDATES = [
 ]
 _GROUP_LOG_INSTANCE = None
 
+# ═══════════════════════════════════════════════════════════════════
+# 🆕 v5.7.14 — قوائم الأوامر مرتبة ومكتملة
+# ═══════════════════════════════════════════════════════════════════
+
 PUBLIC_COMMANDS = [
-    ("start", "🏠 القائمة الرئيسية"), ("help", "📚 المساعدة"),
-    ("trial", "🎁 تجربة مجانية"), ("subscribe", "💎 اشتراك"),
-    ("support", "📞 دعم فني"), ("language", "🌐 اللغة"),
-    ("developer", "👨‍💻 المطور"), ("contests", "🏆 المسابقات"),
-    ("replies", "💬 الردود التلقائية"), ("gift_plans", "🎁 خطط الهدايا"),
-    ("redeem_gift", "🎟️ استرداد كود هدية"), ("mood", "🎭 تحليل المشاعر"),
-    ("channels", "📡 قنواتي"), ("posts", "📋 منشوراتي"),
-    ("auto_publish", "📤 تبديل النشر"), ("auto_recycle", "♻️ تبديل التدوير"),
+    ("start", "🏠 القائمة الرئيسية"),
+    ("help", "📚 المساعدة"),
+    ("trial", "🎁 تجربة مجانية"),
+    ("subscribe", "💎 اشتراك"),
+    ("support", "📞 دعم فني"),
+    ("language", "🌐 اللغة"),
+    ("developer", "👨‍💻 المطور"),
+    ("contests", "🏆 المسابقات"),
+    ("replies", "💬 الردود التلقائية"),
+    ("gift_plans", "🎁 خطط الهدايا"),
+    ("redeem_gift", "🎟️ استرداد كود هدية"),
+    ("mood", "🎭 تحليل المشاعر"),
+    ("channels", "📡 قنواتي"),
+    ("posts", "📋 منشوراتي"),
+    ("auto_publish", "📤 تبديل النشر"),
+    ("auto_recycle", "♻️ تبديل التدوير"),
 ]
 
+# 🆕 v5.7.14 — ADMIN_COMMANDS مرتبة في مجموعات منطقية
 ADMIN_COMMANDS = [
-    ("stats", "📊 الإحصائيات"), ("grant", "🎁 منح اشتراك"),
-    ("set_min_interval", "⏱️ تعيين الفاصل"), ("admin", "👑 لوحة الأدمن"),
-    ("broadcast", "📨 بث جماعي"), ("set_force", "🔒 اشتراك إجباري"),
-    ("set_update_ch", "📢 قناة التحديثات"), ("set_log_ch", "📋 قناة السجلات"),
-    ("add_admin", "👑 إضافة مشرف"), ("remove_admin", "🗑️ إزالة مشرف"),
-    ("export_replies", "📤 تصدير الردود"), ("import_replies", "📥 استيراد الردود"),
-    ("backup", "💾 نسخ احتياطي"), ("restore", "🔄 عرض النسخ"),
-    ("db_diag", "🔬 تشخيص DB"), ("db_vacuum", "🧹 تنظيف DB"),
-    ("db_diag_quick", "🔬 تقرير مختصر"), ("db_maintenance", "🧹 صيانة DB"),
-    ("db_weekly", "📅 التقرير الأسبوعي"), ("autoblocked", "🚫 المحجوبة تلقائياً"),
-    ("db_idle", "🔍 idle-in-transaction"), ("cache_stats", "📊 إحصائيات الكاش"),
-    ("fullhealth", "🏥 التشخيص الشامل"), ("latency", "🔬 اختبار الكمون"),
-    ("databases", "🗂️ قواعد البيانات"), ("ping", "🏓 قياس الكمون"),
-    ("posts_stats", "📊 إحصائيات النشر"), ("autotune", "⚙️ ضبط autovacuum"),
-    ("db_tune", "⚙️ ضبط (اختصار)"), ("analytics", "📊 التحليلات"),
-    ("versions", "📦 الإصدارات"), ("analytics_reset", "🗑️ إبطال كاش"),
+    # ─── 1) إحصائيات وأدوات ───
+    ("stats", "📊 الإحصائيات"),
+    ("admin", "👑 لوحة الأدمن"),
+    ("ping", "🏓 قياس الكمون"),
+    ("posts_stats", "📊 إحصائيات النشر"),
+    ("versions", "📦 الإصدارات"),
+
+    # ─── 2) إدارة المستخدمين والاشتراكات ───
+    ("grant", "🎁 منح اشتراك"),
+    ("add_admin", "👑 إضافة مشرف"),
+    ("remove_admin", "🗑️ إزالة مشرف"),
+
+    # ─── 3) البث والقنوات ───
+    ("broadcast", "📨 بث جماعي"),
+    ("set_min_interval", "⏱️ تعيين الفاصل"),
+    ("set_force", "🔒 اشتراك إجباري"),
+    ("set_update_ch", "📢 قناة التحديثات"),
+    ("set_log_ch", "📋 قناة السجلات"),
+
+    # ─── 4) الردود والنسخ ───
+    ("export_replies", "📤 تصدير الردود"),
+    ("import_replies", "📥 استيراد الردود"),
+    ("backup", "💾 نسخ احتياطي"),
+    ("restore", "🔄 عرض النسخ"),
+
+    # ─── 5) صيانة DB ───
+    ("db_diag", "🔬 تشخيص DB"),
+    ("db_diag_quick", "🔬 تقرير مختصر"),
+    ("db_vacuum", "🧹 تنظيف DB"),
+    ("db_maintenance", "🧹 صيانة DB"),
+    ("db_weekly", "📅 التقرير الأسبوعي"),
+    ("db_tune", "⚙️ ضبط autovacuum"),
+    ("autotune", "⚙️ ضبط autovacuum"),
+    ("autoblocked", "🚫 المحجوبة تلقائياً"),
+    ("db_idle", "🔍 idle-in-transaction"),
+    ("cache_stats", "📊 إحصائيات الكاش"),
+
+    # ─── 6) التحليلات المتقدمة ───
+    ("analytics", "📊 التحليلات"),
+    ("analytics_reset", "🗑️ إبطال كاش"),
+    ("fullhealth", "🏥 التشخيص الشامل"),
+    ("latency", "🔬 اختبار الكمون"),
+    ("databases", "🗂️ قواعد البيانات"),
+
+    # ─── 7) فحص الملفات (v1.3.5 / v1.3.6) ───
     ("files", "📂 ملفات المشروع"),
+    ("audit", "🔍 فحص شامل"),
+    ("audit_full", "🔍 فحص مفصل"),
+    ("audit_critical", "🔴 فحص CRITICAL"),
 ]
 
 GROUP_COMMANDS = [
-    ("syncgroup", "🔗 تفعيل"), ("security", "🛡️ الأمان"),
-    ("panel", "📋 اللوحة"), ("lock", "🔒 قفل"),
-    ("unlock", "🔓 فتح"), ("ban", "🚫 حظر"),
-    ("mute", "🔇 كتم"), ("warn", "⚠️ تحذير"),
-    ("kick", "👢 طرد"), ("restrict", "🔒 تقييد"),
-    ("unban", "🔓 إلغاء حظر"), ("pin", "📌 تثبيت"),
+    ("syncgroup", "🔗 تفعيل"),
+    ("security", "🛡️ الأمان"),
+    ("panel", "📋 اللوحة"),
+    ("lock", "🔒 قفل"),
+    ("unlock", "🔓 فتح"),
+    ("ban", "🚫 حظر"),
+    ("mute", "🔇 كتم"),
+    ("warn", "⚠️ تحذير"),
+    ("kick", "👢 طرد"),
+    ("restrict", "🔒 تقييد"),
+    ("unban", "🔓 إلغاء حظر"),
+    ("pin", "📌 تثبيت"),
 ]
+
+# ═══════════════════════════════════════════════════════════════════
+# Helpers
+# ═══════════════════════════════════════════════════════════════════
 
 async def _shutdown_detector_tasks(timeout: float = 3.0) -> None:
     if not _SPAM_DETECTOR_AVAILABLE or _detectors_module is None:
@@ -1183,9 +1228,6 @@ async def _shutdown_db_pool(timeout: float = 5.0) -> None:
         pass
 
 async def _collect_admin_ids() -> List[int]:
-    """
-    🟠 FIX-4: break فقط عند وجود عناصر فعلية — القائمة الفارغة تُجرّب الدالة التالية.
-    """
     admin_ids: Set[int] = set()
     try:
         owner = int(getattr(CONFIG, "PRIMARY_OWNER_ID", 0) or 0)
@@ -1215,7 +1257,6 @@ async def _collect_admin_ids() -> List[int]:
             if isinstance(result, dict):
                 result = [result]
             if not result:
-                # 🩹 FIX-4: قائمة فارغة — جرّب الدالة التالية بدل break
                 continue
             for a in result:
                 uid = a.get("user_id") if isinstance(a, dict) else a
@@ -1230,7 +1271,6 @@ async def _collect_admin_ids() -> List[int]:
     return sorted(admin_ids)
 
 def _get_bot_token() -> str:
-    """🩹 FIX-8: تحقق من صيغة توكن تيليجرام قبل القبول."""
     env_token = os.getenv("BOT_TOKEN", "").strip()
     if env_token and _TG_TOKEN_RE.match(env_token):
         return env_token
@@ -1243,7 +1283,6 @@ def _get_bot_token() -> str:
                     return val_stripped
         except Exception:
             continue
-    # fallback: قبول أي توكن غير فارغ (مع تحذير) — لتفادي كسر إعدادات قديمة
     if env_token:
         logger.warning("⚠️ BOT_TOKEN لا يطابق الصيغة القياسية — سيُستخدم كما هو")
         return env_token
@@ -1272,7 +1311,6 @@ def _redact_token(text: str, token: str = None) -> str:
 def _safe_url(url: str) -> str:
     return _redact_token(url)
 
-# 🟢 FIX-11: دوال حرجة إضافية
 _CRITICAL_COMMANDS = (
     "start", "help_command", "subscribe", "stats", "admin",
     "db_diag", "db_vacuum", "broadcast", "grant", "backup", "restore",
@@ -1322,7 +1360,6 @@ def _verify_db_config() -> bool:
         return True
 
 def _init_group_log_instance(app) -> bool:
-    # 🩹 FIX-12: idempotency
     global _GROUP_LOG_INSTANCE
     if _GROUP_LOG_INSTANCE is not None:
         logger.debug("group_log already initialized — skip")
@@ -1370,7 +1407,6 @@ async def cleanup_admin_logs_periodically() -> None:
         try:
             db_type = str(getattr(DB, "DB_TYPE", "sqlite")).lower().strip()
             deleted = 0
-            # 🩹 FIX-9: دعم DB.connection() التي ترجع coroutine
             _conn_cm = DB.connection()
             if asyncio.iscoroutine(_conn_cm):
                 _conn_cm = await _conn_cm
@@ -1414,9 +1450,6 @@ async def cleanup_removed_channels_periodically() -> None:
         except asyncio.CancelledError:
             raise
 
-# ═══════════════════════════════════════════════════════════════════
-# _validate_invoice_for_payment
-# ═══════════════════════════════════════════════════════════════════
 async def _validate_invoice_for_payment(user_id: int, payload: str):
     try:
         data = json.loads(payload)
@@ -1473,7 +1506,6 @@ async def pre_checkout(update, context):
             return
     except Exception:
         pass
-    # 🩹 FIX-5: إغلاق ثغرة تخطي التحقق من المبلغ
     if hasattr(query, 'total_amount'):
         try:
             _price_raw = plan.get('price')
@@ -1532,6 +1564,9 @@ async def successful_payment(update, context):
             pass
         await safe_send(context.bot, user_id, "❌ خطأ في معالجة الدفع.")
         return
+    if not isinstance(data, dict):
+        await safe_send(context.bot, user_id, "❌ بيانات الدفع غير صالحة.")
+        return
     payment_id = payment.telegram_payment_charge_id or payment.provider_payment_charge_id
     if not payment_id:
         await safe_send(context.bot, user_id, "❌ بيانات الدفع غير صالحة.")
@@ -1562,7 +1597,6 @@ async def successful_payment(update, context):
             try:
                 code = await DB.create_gift_code(plan_id=plan['id'], creator_id=user_id)
             except Exception as _e:
-                # 🩹 FIX-6: إشعار المطور عند استثناء
                 logger.error("create_gift_code(%s) exception: %s", plan['id'], _e)
                 try:
                     await _notify_dev_log(
@@ -1587,7 +1621,6 @@ async def successful_payment(update, context):
                     parse_mode='HTML',
                 )
             else:
-                # 🩹 FIX-6: فشل صامت سابقاً — إشعار المطور والمستخدم
                 logger.error(
                     "create_gift_code(%s) returned None — invoice=%s",
                     plan['id'], invoice['number'],
@@ -1615,7 +1648,6 @@ async def keep_alive():
         raise
     url = (os.getenv("KEEP_ALIVE_URL") or os.getenv("RENDER_EXTERNAL_URL"))
     if not url:
-        # 🩹 FIX-16: تسجيل سبب عدم التشغيل
         logger.info("ℹ️ keep_alive: معطّل (لا KEEP_ALIVE_URL / RENDER_EXTERNAL_URL)")
         await asyncio.Event().wait()
         return
@@ -1653,7 +1685,6 @@ async def _fetch_pg_activity_cached() -> Dict[str, Any]:
         return {}
 
 async def pool_health_monitor() -> None:
-    # 🩹 FIX-14: PG_MAX_CONNECTIONS configurable
     try:
         _max_conn = int(os.getenv("PG_MAX_CONNECTIONS", "20"))
         if _max_conn <= 0:
@@ -1743,7 +1774,6 @@ def _resolve_port() -> int:
         pass
     return default_port
 
-# 🩹 FIX-3: التصفير فقط عند 2xx/3xx
 async def _watch_runner(runner, shutdown_event: asyncio.Event, port: int) -> None:
     try:
         await asyncio.sleep(3.0)
@@ -1797,7 +1827,6 @@ async def run_task_with_retry(task_func, *args, task_name=""):
         except asyncio.CancelledError:
             raise
         except (KeyboardInterrupt, SystemExit):
-            # 🩹 FIX-10: عدم التقاط SystemExit/KeyboardInterrupt
             raise
         except Exception as e:
             consecutive_failures += 1
@@ -1846,18 +1875,7 @@ async def contest_cleanup(app: Application):
         except asyncio.CancelledError:
             raise
 
-# ═══════════════════════════════════════════════════════════════════
-# 🔴 FIX-1/FIX-2: post_init / post_stop idempotency (correct)
-# ═══════════════════════════════════════════════════════════════════
 async def _run_post_init_hooks(app: Application) -> None:
-    """
-    🔴 FIX-1: PTB 20.x يستدعي post_init تلقائياً داخل initialize() إذا كان
-    مضبوطاً. الأعلام `_post_init_ran`/`_post_init_executed`/`_post_init_done`
-    غير موجودة في PTB. لذلك:
-    - إذا كان `app._post_init` مضبوطاً → PTB استدعاه (أو سيستدعيه) → لا نتدخل.
-    - إذا لم يكن مضبوطاً → لا شيء لندعوه.
-    - نستخدم bot_data[..] للـ idempotency فقط.
-    """
     if app.bot_data.get("_post_init_executed"):
         logger.debug("post_init already executed — skip")
         return
@@ -1866,14 +1884,9 @@ async def _run_post_init_hooks(app: Application) -> None:
     if not callable(_post_init):
         logger.debug("post_init غير مضبوط — skip")
         return
-    # إذا كان PTB سيتكفل به (post_init مضبوط على app)
     logger.info("✅ post_init مُدار من PTB.initialize() — لا استدعاء يدوي")
 
 async def _run_post_stop_hooks(app: Application) -> None:
-    """
-    🔴 FIX-2: إبطال `_post_stop` (الخاصية الداخلية) بدل `post_stop` (قد تكون
-    read-only property في PTB).
-    """
     if app.bot_data.get("_post_stop_executed"):
         logger.debug("post_stop already executed — skip")
         return
@@ -1887,7 +1900,6 @@ async def _run_post_stop_hooks(app: Application) -> None:
     except Exception as _e:
         logger.warning("post_stop hook failed: %s", _e)
     finally:
-        # منع PTB من استدعائه مجدداً
         try:
             if hasattr(app, "_post_stop"):
                 app._post_stop = None
@@ -1921,7 +1933,6 @@ async def _stop_polling_mode(app: Application) -> None:
                 pass
 
 async def _diag_incoming(update, context):
-    """DIAG_INCOMING=1 → تسجيل كل رسالة واردة للمجموعة (info level)."""
     try:
         msg = update.effective_message
         chat = update.effective_chat
@@ -2009,7 +2020,6 @@ async def cmd_ping(update, context):
         except TypeError:
             sent = await msg.reply_text("🏓 قياس...")
         send_rtt_ms = int((time.monotonic() - t0) * 1000)
-        # 🩹 FIX-15: تسجيل مقاييس ping
         try:
             record_bot_metric("pings_total", 1)
             record_bot_metric("ping_sum_ms", send_rtt_ms)
@@ -2083,19 +2093,6 @@ async def cmd_posts_stats(update, context):
     except Exception:
         pass
 
-async def _cmd_analytics_alias(update, context):
-    try:
-        if _show_analytics_menu is not None:
-            return await _show_analytics_menu(update, context)
-    except Exception as _e:
-        logger.debug("_cmd_analytics_alias menu: %s", _e)
-    try:
-        msg = update.effective_message
-        if msg:
-            await msg.reply_text("📊 استخدم /analytics للوصول إلى هذه الميزة.")
-    except Exception:
-        pass
-
 # ═══════════════════════════════════════════════════════════════════
 # Main
 # ═══════════════════════════════════════════════════════════════════
@@ -2153,10 +2150,10 @@ async def main():
     logger.info("👨‍💼 المالك: %s", CONFIG.PRIMARY_OWNER_ID)
 
     logger.info(
-        "📦 bot.py: v5.7.13 | kill_prev=on | init_retry=on | webhook_force=on | "
+        "📦 bot.py: v5.7.14 | kill_prev=on | init_retry=on | webhook_force=on | "
         "webhook_verify=on | diag_incoming=%r | "
         "detectors=%s | layers=%d | fallback_hostname=%r | "
-        "allow_polling_env=%r",
+        "allow_polling_env=%r | alias_fix=on | cmds_reordered=on",
         _DIAG_INCOMING,
         _SPAM_DETECTOR_VERSION or "N/A",
         _SPAM_DETECTOR_LAYERS_COUNT,
@@ -2350,6 +2347,7 @@ async def main():
     _admin_ids = await _collect_admin_ids()
     _admin_full_list = PUBLIC_COMMANDS + ADMIN_COMMANDS
     logger.info("👥 الأدمن: %d", len(_admin_ids))
+    logger.info("📋 إجمالي أوامر الأدمن: %d", len(ADMIN_COMMANDS))
     app.bot_data["admin_ids"] = set(_admin_ids)
 
     for _admin_id in _admin_ids:
@@ -2459,12 +2457,11 @@ async def main():
         except Exception as _e:
             logger.warning("⚠️ /%s: %s", _name, _e)
 
-    for _alias_cmd in ("databases", "files", "versions"):
-        try:
-            app.add_handler(CommandHandler(_alias_cmd, _cmd_analytics_alias))
-            logger.info("✅ /%s → _cmd_analytics_alias", _alias_cmd)
-        except Exception as _e:
-            logger.warning("⚠️ /%s alias: %s", _alias_cmd, _e)
+    # ═══════════════════════════════════════════════════════════════
+    # 🆕 v5.7.14 — تم حذف aliases المتعارضة
+    # /databases, /files, /versions تُسجَّل الآن من register_handlers
+    # في handlers_analytics (أوامر حقيقية لا aliases)
+    # ═══════════════════════════════════════════════════════════════
 
     if _admin_ids:
         try:
@@ -2574,6 +2571,7 @@ async def main():
                         r"slow_queries_btn|export_excel_btn|"
                         r"full_health_btn|latency_btn|"
                         r"databases_btn|autotune_btn|files_btn|"
+                        r"audit_btn|audit_md_btn|audit_json_btn|"
                         r"refresh_btn)$"
                     ),
                 ))
@@ -2582,8 +2580,8 @@ async def main():
 
     if not _analytics_registered:
         try:
-            app.add_handler(CommandHandler("analytics", _cmd_analytics_alias))
-            logger.info("✅ /analytics → _cmd_analytics_alias (fallback)")
+            app.add_handler(CommandHandler("analytics", _show_analytics_menu))
+            logger.info("✅ /analytics → show_analytics_menu (fallback)")
         except Exception as _e:
             logger.warning("⚠️ /analytics fallback: %s", _e)
 
