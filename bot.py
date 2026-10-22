@@ -442,7 +442,8 @@ logger = logging.getLogger("relax_bot")
 # ═══════════════════════════════════════════════════════════════════
 # PID / KILL-PREVIOUS
 # ═══════════════════════════════════════════════════════════════════
-_PID_FILE_PATH = "/app/.bot.pid"
+# 🟢 تم التعديل إلى /tmp لضمان الصلاحيات على Render
+_PID_FILE_PATH = "/tmp/.bot.pid"
 _KILL_TIMEOUT_SEC = 5.0
 _TELEGRAM_RELEASE_TIMEOUT_SEC = 15.0
 
