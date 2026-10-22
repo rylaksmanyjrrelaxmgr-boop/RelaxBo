@@ -1,37 +1,26 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-🌿 Relax Manager – البوت الرئيسي (bot.py v5.7.14-FULL-AUDIT-ALIASES-FIXED)
+🌿 Relax Manager – البوت الرئيسي (bot.py v5.7.16-SAFE-ADMIN-GUARD)
 ================================================================================
-🆕 v5.7.14 (فوق v5.7.13):
-    🔴 FIX-ALIAS-1: حذف aliases المتعارضة (`/databases`, `/files`, `/versions`)
-        من bot.py — `handlers_analytics.register_handlers()` يسجّلها بأوامرها
-        الحقيقية. كان هناك تعارض: alias يُسجَّل أولاً فيمنع الأمر الحقيقي.
+🆕 v5.7.16 (فوق v5.7.15):
+    🟢 FIX-ADMIN-SAFE: `ADMIN_IDS_EMPTY` — استبدال `SystemExit(1)` بـ:
+        • إعادة محاولة `_collect_admin_ids()` 3 مرات (2s بين كل محاولة)
+        • عند الفشل النهائي: `logger.critical` فقط (بدون رفض البدء)
+        السبب: تجنّب boot loop على Render إذا كانت DB معطّلة مؤقتاً.
+        البوت يعمل بلا إدارة لكن مع تحذير صارخ في السجل.
 
-    🟠 FIX-CMDS-2: تحديث `ADMIN_COMMANDS` لتشمل أوامر analytics v1.3.6:
-        `/analytics`, `/versions`, `/analytics_reset`, `/files`,
-        `/audit`, `/audit_full`, `/audit_critical` — لتظهر في قائمة
-        أوامر تيليجرام (زر /) للمطور.
+v5.7.15 — محفوظ:
+    🔴 FIX-POST-STOP: `_run_post_stop_hooks` — لا استدعاء يدوي
+    🟢 (v5.7.16 يحل محل FIX-ADMIN-EMPTY من v5.7.15)
 
-    🟡 CLEAN-3: حذف `_cmd_analytics_alias` غير المستخدمة (تنظيف).
+v5.7.14 — محفوظ:
+    🔴 FIX-ALIAS-1: حذف aliases /databases /files /versions
+    🟠 FIX-CMDS-2: ADMIN_COMMANDS = 32 أمر (7 مجموعات)
+    🟡 CLEAN-3: حذف _cmd_analytics_alias
 
-v5.7.13 — محفوظ بالكامل (16 إصلاحاً):
-    🔴 P0-FIX-1: _run_post_init_hooks — idempotency فقط
-    🔴 P0-FIX-2: _run_post_stop_hooks — إبطال _post_stop
-    🔴 P0-FIX-3: _watch_runner — تصفير 2xx/3xx فقط
-    🟠 P1-FIX-4: _collect_admin_ids — continue على قائمة فارغة
-    🟠 P1-FIX-5: pre_checkout — تحقق price صارم
-    🟠 P1-FIX-6: successful_payment — إشعار مطور
-    🟠 P1-FIX-7: _pid_is_bot_process — cwd check
-    🟡 P2-FIX-8: _get_bot_token — regex
-    🟡 P2-FIX-9: cleanup_admin_logs — coroutine support
-    🟡 P2-FIX-10: run_task_with_retry — لا SystemExit
-    🟢 P3-FIX-11: _verify_command_handlers — CRITICAL
-    🟢 P3-FIX-12: _init_group_log — idempotency
-    🟢 P3-FIX-13: _write_pid_file — mkdir
-    🟢 P3-FIX-14: pool_health — PG_MAX_CONNECTIONS
-    🟢 P3-FIX-15: cmd_ping — metrics
-    🟢 P3-FIX-16: keep_alive — log reason
+v5.7.13 — محفوظ (16 إصلاح):
+    P0-FIX-1..3، P1-FIX-4..7، P2-FIX-8..10، P3-FIX-11..16
 ================================================================================
 """
 
@@ -461,12 +450,12 @@ _FALLBACK_HOSTNAME = (
     os.getenv("FALLBACK_HOSTNAME", "") or "relaxbo-78m4.onrender.com"
 ).strip()
 
-logger.info("🔧 v5.7.14 init: _FALLBACK_HOSTNAME=%r", _FALLBACK_HOSTNAME)
-logger.info("🔧 v5.7.14 init: RENDER_EXTERNAL_HOSTNAME=%r",
+logger.info("🔧 v5.7.16 init: _FALLBACK_HOSTNAME=%r", _FALLBACK_HOSTNAME)
+logger.info("🔧 v5.7.16 init: RENDER_EXTERNAL_HOSTNAME=%r",
             os.getenv("RENDER_EXTERNAL_HOSTNAME", ""))
-logger.info("🔧 v5.7.14 init: RENDER_EXTERNAL_URL=%r",
+logger.info("🔧 v5.7.16 init: RENDER_EXTERNAL_URL=%r",
             os.getenv("RENDER_EXTERNAL_URL", ""))
-logger.info("🔧 v5.7.14 init: ALLOW_POLLING=%r",
+logger.info("🔧 v5.7.16 init: ALLOW_POLLING=%r",
             os.getenv("ALLOW_POLLING", ""))
 
 def _read_pid_file() -> Optional[int]:
@@ -788,6 +777,12 @@ _GROUP_CHAT_FILTER = filters.ChatType.GROUP | filters.ChatType.SUPERGROUP
 
 _TG_TOKEN_RE = re.compile(r"^\d{8,10}:[A-Za-z0-9_-]{35}$")
 
+# ═══════════════════════════════════════════════════════════════════
+# 🆕 v5.7.16 — إعدادات جمع الأدمن (safe retry)
+# ═══════════════════════════════════════════════════════════════════
+_ADMIN_COLLECT_MAX_ATTEMPTS = 3
+_ADMIN_COLLECT_RETRY_DELAY_SEC = 2.0
+
 def _amounts_match(expected: Any, actual: Any) -> bool:
     try:
         e = float(expected or 0)
@@ -1093,7 +1088,7 @@ ALLOWED_UPDATES = [
 _GROUP_LOG_INSTANCE = None
 
 # ═══════════════════════════════════════════════════════════════════
-# 🆕 v5.7.14 — قوائم الأوامر مرتبة ومكتملة
+# v5.7.14 — قوائم الأوامر مرتبة ومكتملة
 # ═══════════════════════════════════════════════════════════════════
 
 PUBLIC_COMMANDS = [
@@ -1115,7 +1110,6 @@ PUBLIC_COMMANDS = [
     ("auto_recycle", "♻️ تبديل التدوير"),
 ]
 
-# 🆕 v5.7.14 — ADMIN_COMMANDS مرتبة في مجموعات منطقية
 ADMIN_COMMANDS = [
     # ─── 1) إحصائيات وأدوات ───
     ("stats", "📊 الإحصائيات"),
@@ -1161,7 +1155,7 @@ ADMIN_COMMANDS = [
     ("latency", "🔬 اختبار الكمون"),
     ("databases", "🗂️ قواعد البيانات"),
 
-    # ─── 7) فحص الملفات (v1.3.5 / v1.3.6) ───
+    # ─── 7) فحص الملفات (v1.3.6) ───
     ("files", "📂 ملفات المشروع"),
     ("audit", "🔍 فحص شامل"),
     ("audit_full", "🔍 فحص مفصل"),
@@ -1269,6 +1263,54 @@ async def _collect_admin_ids() -> List[int]:
         except Exception:
             continue
     return sorted(admin_ids)
+
+# ═══════════════════════════════════════════════════════════════════
+# 🆕 v5.7.16 — جمع الأدمن مع retry (بدل SystemExit)
+# ═══════════════════════════════════════════════════════════════════
+async def _collect_admin_ids_with_retry(
+    max_attempts: int = _ADMIN_COLLECT_MAX_ATTEMPTS,
+    delay_sec: float = _ADMIN_COLLECT_RETRY_DELAY_SEC,
+) -> Tuple[List[int], bool]:
+    """
+    جمع الأدمن مع إعادة محاولة.
+
+    Returns:
+        (admin_ids, is_critical_empty)
+        - admin_ids: القائمة (قد تكون فارغة)
+        - is_critical_empty: True إذا فشلت كل المحاولات (يحتاج تحذير صارخ)
+    """
+    last_ids: List[int] = []
+    for attempt in range(1, max_attempts + 1):
+        try:
+            last_ids = await _collect_admin_ids()
+        except Exception as _e:
+            logger.warning(
+                "⚠️ _collect_admin_ids() attempt %d/%d failed: %s: %s",
+                attempt, max_attempts, type(_e).__name__, str(_e)[:100],
+            )
+            last_ids = []
+        if last_ids:
+            if attempt > 1:
+                logger.info(
+                    "✅ _collect_admin_ids() نجحت في المحاولة %d/%d (%d أدمن)",
+                    attempt, max_attempts, len(last_ids),
+                )
+            return last_ids, False
+        if attempt < max_attempts:
+            logger.warning(
+                "⚠️ _collect_admin_ids() فارغة (محاولة %d/%d) — retry in %.1fs",
+                attempt, max_attempts, delay_sec,
+            )
+            try:
+                await asyncio.sleep(delay_sec)
+            except asyncio.CancelledError:
+                raise
+    logger.critical(
+        "🔴 _collect_admin_ids() فارغة بعد %d محاولات — PRIMARY_OWNER_ID و DEVELOPER_IDS فارغة، "
+        "ولا توجد سجلات في DB. البوت سيعمل لكن كل الأوامر الإدارية ستُرفض.",
+        max_attempts,
+    )
+    return last_ids, True
 
 def _get_bot_token() -> str:
     env_token = os.getenv("BOT_TOKEN", "").strip()
@@ -1875,7 +1917,15 @@ async def contest_cleanup(app: Application):
         except asyncio.CancelledError:
             raise
 
+# ═══════════════════════════════════════════════════════════════════
+# post_init / post_stop hooks
+# ═══════════════════════════════════════════════════════════════════
+
 async def _run_post_init_hooks(app: Application) -> None:
+    """
+    PTB 20.x يستدعي post_init تلقائياً داخل initialize() إذا كان مضبوطاً.
+    نستخدم bot_data للـ idempotency.
+    """
     if app.bot_data.get("_post_init_executed"):
         logger.debug("post_init already executed — skip")
         return
@@ -1886,30 +1936,24 @@ async def _run_post_init_hooks(app: Application) -> None:
         return
     logger.info("✅ post_init مُدار من PTB.initialize() — لا استدعاء يدوي")
 
+
 async def _run_post_stop_hooks(app: Application) -> None:
+    """
+    🔴 v5.7.15 FIX-POST-STOP: PTB 20.x يستدعي post_stop تلقائياً داخل
+    app.stop(). لا نستدعيه يدوياً (double-call).
+    نضع علامة idempotency فقط.
+    """
     if app.bot_data.get("_post_stop_executed"):
         logger.debug("post_stop already executed — skip")
         return
     app.bot_data["_post_stop_executed"] = True
+
     _post_stop = getattr(app, "_post_stop", None) or getattr(app, "post_stop", None)
-    if not callable(_post_stop):
-        return
-    try:
-        await _post_stop(app)
-        logger.info("✅ post_stop executed")
-    except Exception as _e:
-        logger.warning("post_stop hook failed: %s", _e)
-    finally:
-        try:
-            if hasattr(app, "_post_stop"):
-                app._post_stop = None
-            elif hasattr(app, "post_stop"):
-                try:
-                    app.post_stop = None
-                except (AttributeError, TypeError):
-                    logger.debug("app.post_stop is read-only — relying on _post_stop_executed flag")
-        except Exception as _e:
-            logger.debug("post_stop unbind: %s", _e)
+    if callable(_post_stop):
+        logger.info("✅ post_stop: managed by PTB (no manual call)")
+    else:
+        logger.debug("post_stop غير مضبوط — skip")
+
 
 _polling_state = {"running": False}
 
@@ -2150,15 +2194,18 @@ async def main():
     logger.info("👨‍💼 المالك: %s", CONFIG.PRIMARY_OWNER_ID)
 
     logger.info(
-        "📦 bot.py: v5.7.14 | kill_prev=on | init_retry=on | webhook_force=on | "
+        "📦 bot.py: v5.7.16 | kill_prev=on | init_retry=on | webhook_force=on | "
         "webhook_verify=on | diag_incoming=%r | "
         "detectors=%s | layers=%d | fallback_hostname=%r | "
-        "allow_polling_env=%r | alias_fix=on | cmds_reordered=on",
+        "allow_polling_env=%r | alias_fix=on | cmds_reordered=on | "
+        "post_stop_fix=on | admin_safe_retry=on(%dx,%.1fs)",
         _DIAG_INCOMING,
         _SPAM_DETECTOR_VERSION or "N/A",
         _SPAM_DETECTOR_LAYERS_COUNT,
         _FALLBACK_HOSTNAME,
         os.getenv("ALLOW_POLLING", ""),
+        _ADMIN_COLLECT_MAX_ATTEMPTS,
+        _ADMIN_COLLECT_RETRY_DELAY_SEC,
     )
 
     if not _verify_command_handlers():
@@ -2344,9 +2391,24 @@ async def main():
     except Exception as _e:
         logger.error("❌ أوامر المجموعات: %s", _e)
 
-    _admin_ids = await _collect_admin_ids()
+    # ═══════════════════════════════════════════════════════════════
+    # 🟢 v5.7.16 FIX-ADMIN-SAFE:
+    # جمع الأدمن مع 3 محاولات. عند الفشل: logger.critical فقط
+    # (بدون SystemExit) لتجنّب boot loop على Render.
+    # ═══════════════════════════════════════════════════════════════
+    _admin_ids, _admin_critical_empty = await _collect_admin_ids_with_retry()
+
+    if _admin_critical_empty:
+        logger.critical(
+            "🔴 ADMIN EMPTY: البوت يعمل لكن كل الأوامر الإدارية ستُرفض.\n"
+            "   ✅ الحل: أضف PRIMARY_OWNER_ID أو DEVELOPER_IDS في config.py\n"
+            "   أو سجّل مشرفاً في جدول admins عبر DB مباشرة.\n"
+            "   البوت لن يتوقف (تجنّب boot loop) — أصلح الإعدادات فوراً."
+        )
+    else:
+        logger.info("👥 الأدمن: %d (%s)", len(_admin_ids), _admin_ids)
+
     _admin_full_list = PUBLIC_COMMANDS + ADMIN_COMMANDS
-    logger.info("👥 الأدمن: %d", len(_admin_ids))
     logger.info("📋 إجمالي أوامر الأدمن: %d", len(ADMIN_COMMANDS))
     app.bot_data["admin_ids"] = set(_admin_ids)
 
@@ -2457,11 +2519,8 @@ async def main():
         except Exception as _e:
             logger.warning("⚠️ /%s: %s", _name, _e)
 
-    # ═══════════════════════════════════════════════════════════════
-    # 🆕 v5.7.14 — تم حذف aliases المتعارضة
-    # /databases, /files, /versions تُسجَّل الآن من register_handlers
-    # في handlers_analytics (أوامر حقيقية لا aliases)
-    # ═══════════════════════════════════════════════════════════════
+    # v5.7.14: /databases, /files, /versions مسجّلة من handlers_analytics
+    # (كانت aliases هنا — تم حذفها لتجنّب التعارض)
 
     if _admin_ids:
         try:
