@@ -35,6 +35,8 @@ v7.18.48 — محفوظ.
 import asyncio
 import logging
 import time
+import sys
+print(f"██████ HANDLERS_MESSAGE LOADED FROM: {__file__} | v7.18.53-PROOF ██████", file=sys.stderr, flush=True)
 import os
 import re
 import inspect
