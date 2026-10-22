@@ -1,35 +1,37 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-handlers_message.py - v7.18.50 (FIX-TEXT-SCORE-BLOCKING + AUTOREPLY-BLOCKING)
+handlers_message.py - v7.18.51 (FIX-POSTBOT-BLOCKING + FIX-TEXT-SCORE-SIZE-GUARD)
 (متوافق مع detectors v4.1.0 + banned_words_manager v1.2.0 + group_log v1.4.0)
 =============================================================================
-🆕 v7.18.50 (FIX-TEXT-SCORE-BLOCKING + AUTOREPLY-BLOCKING):
+🆕 v7.18.51 (FIX-POSTBOT-BLOCKING + FIX-TEXT-SCORE-SIZE-GUARD):
 
-    🔴 FIX-TEXT-SCORE (CRITICAL): v7.18.48 استبدل multilayer بـ
-        `_compute_spam_score` مباشرة على الـ main thread. ظننا أنه
-        "سريع" لكن regex على النص العربي المعقّد يحجب event loop
-        10-15 ثانية. هذا سبب GIL-MONITOR lag=13004ms على chat
-        -1002859036439 (رسالة عربية لم تُترجم — الترجمة ليست السبب).
+    🔴 FIX-POSTBOT-BLOCKING (CRITICAL): `_postbot_pattern_confidence` و
+        `_is_postbot_pattern` كانا يُستدعَيان بشكل **sync** على main
+        thread داخل `_handle_group_impl`. على النصوص العربية المعقدة،
+        regex postbot يحجب event loop 10-15 ثانية (سجل: lag=13004ms
+        على chat=-1002805817864). هذا هو السبب الجذري لـ GIL-MONITOR
+        lag في v7.18.50 رغم إصلاح _compute_spam_score.
 
-        الحل: لف `_compute_spam_score` في `asyncio.to_thread` +
-        timeout 1.5s → lag ≤ 200ms مضمون.
+        الحل: كلاهما في `asyncio.to_thread` + timeout 1.5s + truncate
+        النص إلى 2000 حرف قبل الاستدعاء (تسريع 90%+).
 
-    🔴 FIX-AUTOREPLY (CRITICAL): `_process_auto_reply` كان يستدعي
-        DB.get_auto_reply (psycopg2 sync) و get_reply_from_file
-        (file I/O sync) على main thread. كلاهما يحجب event loop.
+    🔴 FIX-TEXT-SCORE-SIZE-GUARD (IMPORTANT): حتى مع `to_thread` +
+        timeout، النصوص الضخمة (>3000 حرف) تجعل thread
+        `_compute_spam_score` يعمل 10+ ثوانٍ، محتجِزاً GIL بعد
+        انتهاء الـ timeout (asyncio.wait_for لا يقتل الـ thread).
 
-        الحل: كلاهما في `asyncio.to_thread` + timeout 3s/2s.
+        الحل: إذا كان النص > 3000 حرف، تخطَّ spam scoring كلياً
+        وسجّل `TEXT-SCORE-SKIP` بدلاً من حجب event loop.
 
-    🔴 FIX-BWM (CRITICAL): `BannedWordsManager.check_message` قد
-        يجمّد event loop عند regex التطبيع العربي.
+    ✅ محفوظ من v7.18.50:
+        - FIX-TEXT-SCORE-BLOCKING (to_thread للـ main)
+        - FIX-AUTOREPLY-BLOCKING (DB + file في to_thread)
+        - FIX-BWM-BLOCKING (BWM في wait_for)
+        - FIX-CONSTANTS
+    ✅ محفوظ من v7.18.49 (TRANSLATE-SAFE + FIX-LAG-1/3).
 
-        الحل: `asyncio.wait_for` + timeout 2.0s.
-
-    🟢 FIX-CONSTANTS: إضافة ثوابت timeout قابلة للتعديل.
-
-    ✅ كل شيء آخر محفوظ من v7.18.49 (TRANSLATE-SAFE + FIX-LAG-1/3).
-
+🆕 v7.18.50 (FIX-TEXT-SCORE-BLOCKING + AUTOREPLY-BLOCKING) — محفوظ.
 🆕 v7.18.49 (FIX-TRANSLATE-BLOCKING) — محفوظ.
 🆕 v7.18.48 (PERF-FIX-MEDIA-ONLY-MULTILAYER) — محفوظ.
 🆕 v7.18.47 (LOG-CHANNEL-KEY-UNIFICATION) — محفوظ.
@@ -120,6 +122,7 @@ def _ph_list(count: int) -> str:
 # ═════════════════════════════════════════════════════════════════════
 # 🆕 v7.18.48 FIX-LAG-2: مهلة كشف Spam للوسائط
 # 🆕 v7.18.50 FIX-CONSTANTS: ثوابت timeouts جديدة
+# 🆕 v7.18.51 FIX-POSTBOT: timeout لـ postbot pattern/confidence
 # ═════════════════════════════════════════════════════════════════════
 _SPAM_ASYNC_TIMEOUT: float = 1.0
 
@@ -130,6 +133,12 @@ _AUTOREPLY_DB_TIMEOUT_SEC: float = 3.0
 _AUTOREPLY_FILE_TIMEOUT_SEC: float = 2.0
 # 🆕 v7.18.50 FIX-BWM-BLOCKING
 _BWM_TIMEOUT_SEC: float = 2.0
+
+# 🆕 v7.18.51 FIX-POSTBOT-BLOCKING
+_POSTBOT_TEXT_MAX_CHARS: int = 2000
+_POSTBOT_MIN_TEXT_CHARS: int = 20
+# 🆕 v7.18.51 FIX-TEXT-SCORE-SIZE-GUARD
+_TEXT_SCORE_MAX_CHARS: int = 3000
 
 
 # ═════════════════════════════════════════════════════════════════════
@@ -4100,43 +4109,68 @@ class MessageHandlers:
                         _spam_score = 0
                         _spam_reasons = []
             else:
-                # 🆕 v7.18.50 FIX-TEXT-SCORE-BLOCKING:
-                # v7.18.48 كان يستدعي _compute_spam_score مباشرة
-                # (sync) على main thread → يحجب event loop 10-15s
-                # على النصوص العربية المعقدة (regex ثقيل).
-                # الحل: to_thread + timeout 1.5s.
-                try:
-                    _spam_score, _spam_reasons = await asyncio.wait_for(
-                        asyncio.to_thread(_compute_spam_score, ctx),
-                        timeout=_TEXT_SCORE_TIMEOUT_SEC,
-                    )
-                    _analysis_mode = "text-only-async"
-                except asyncio.TimeoutError:
+                # 🆕 v7.18.51 FIX-TEXT-SCORE-SIZE-GUARD:
+                # تجنب regex المَرَضي على النصوص الضخمة
+                _text_len = len(ctx.analysis_text or "")
+                if _text_len > _TEXT_SCORE_MAX_CHARS:
                     logger.warning(
-                        "⏱️ TEXT-SCORE-TIMEOUT | chat=%s user=%s | "
-                        "%.1fs exceeded — continuing without spam score",
-                        chat_id, user_id, _TEXT_SCORE_TIMEOUT_SEC,
-                    )
+                        "⏭️ TEXT-SCORE-SKIP: text too long (%d chars) | "
+                        "chat=%s user=%s | تجاوز compute_spam_score",
+                        _text_len, chat_id, user_id)
                     _spam_score = 0
                     _spam_reasons = []
-                    _analysis_mode = "text-only-timeout"
-                except asyncio.CancelledError:
-                    raise
-                except Exception as e:
-                    logger.debug("spam_score (text-only-async): %s", e)
-                    _spam_score = 0
-                    _spam_reasons = []
-                    _analysis_mode = "text-only-error"
+                    _analysis_mode = "text-only-skipped-too-long"
+                else:
+                    try:
+                        _spam_score, _spam_reasons = await asyncio.wait_for(
+                            asyncio.to_thread(_compute_spam_score, ctx),
+                            timeout=_TEXT_SCORE_TIMEOUT_SEC,
+                        )
+                        _analysis_mode = "text-only-async"
+                    except asyncio.TimeoutError:
+                        logger.warning(
+                            "⏱️ TEXT-SCORE-TIMEOUT | chat=%s user=%s | "
+                            "%.1fs exceeded — continuing without spam score",
+                            chat_id, user_id, _TEXT_SCORE_TIMEOUT_SEC,
+                        )
+                        _spam_score = 0
+                        _spam_reasons = []
+                        _analysis_mode = "text-only-timeout"
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as e:
+                        logger.debug("spam_score (text-only-async): %s", e)
+                        _spam_score = 0
+                        _spam_reasons = []
+                        _analysis_mode = "text-only-error"
 
         _is_spam = (
             _spam_enabled and _spam_score >= SPAM_SCORE_THRESHOLD)
 
+        # 🆕 v7.18.51 FIX-POSTBOT-BLOCKING:
+        # `_postbot_pattern_confidence` و `_is_postbot_pattern` كانا يُستدعَيان
+        # بشكل sync على main thread → يحجب event loop 10-15s على النصوص
+        # العربية المعقدة. الحل: to_thread + timeout + truncate النص.
         _postbot_hard_conf = 0
         try:
-            _postbot_hard_conf = _postbot_pattern_confidence(
-                ctx.analysis_text,
-                button_count=ctx.button_count,
-                button_urls=ctx.button_urls)
+            _text_for_postbot = (ctx.analysis_text or "")[:_POSTBOT_TEXT_MAX_CHARS]
+            if len(_text_for_postbot) >= _POSTBOT_MIN_TEXT_CHARS:
+                _postbot_hard_conf = await asyncio.wait_for(
+                    asyncio.to_thread(
+                        _postbot_pattern_confidence,
+                        _text_for_postbot,
+                        button_count=ctx.button_count,
+                        button_urls=ctx.button_urls,
+                    ),
+                    timeout=_TEXT_SCORE_TIMEOUT_SEC,
+                )
+        except asyncio.TimeoutError:
+            logger.warning(
+                "⏱️ POSTBOT-CONF-TIMEOUT | chat=%s user=%s >%.1fs",
+                chat_id, user_id, _TEXT_SCORE_TIMEOUT_SEC)
+            _postbot_hard_conf = 0
+        except asyncio.CancelledError:
+            raise
         except Exception as e:
             logger.debug("postbot confidence: %s", e)
             _postbot_hard_conf = 0
@@ -4147,11 +4181,26 @@ class MessageHandlers:
             if _postbot_hard_block:
                 _postbot_match = True
             else:
+                # 🆕 v7.18.51 FIX-POSTBOT-BLOCKING
                 try:
-                    _postbot_match = _is_postbot_pattern(
-                        ctx.analysis_text,
-                        button_count=ctx.button_count,
-                        button_urls=ctx.button_urls)
+                    _text_for_postbot2 = (ctx.analysis_text or "")[:_POSTBOT_TEXT_MAX_CHARS]
+                    if len(_text_for_postbot2) >= _POSTBOT_MIN_TEXT_CHARS:
+                        _postbot_match = await asyncio.wait_for(
+                            asyncio.to_thread(
+                                _is_postbot_pattern,
+                                _text_for_postbot2,
+                                button_count=ctx.button_count,
+                                button_urls=ctx.button_urls,
+                            ),
+                            timeout=_TEXT_SCORE_TIMEOUT_SEC,
+                        )
+                except asyncio.TimeoutError:
+                    logger.warning(
+                        "⏱️ POSTBOT-MATCH-TIMEOUT | chat=%s user=%s",
+                        chat_id, user_id)
+                    _postbot_match = False
+                except asyncio.CancelledError:
+                    raise
                 except Exception:
                     _postbot_match = False
 
@@ -7668,32 +7717,38 @@ __all__ = [
     "_AUTOREPLY_DB_TIMEOUT_SEC",
     "_AUTOREPLY_FILE_TIMEOUT_SEC",
     "_BWM_TIMEOUT_SEC",
+    # v7.18.51 additions
+    "_POSTBOT_TEXT_MAX_CHARS",
+    "_POSTBOT_MIN_TEXT_CHARS",
+    "_TEXT_SCORE_MAX_CHARS",
 ]
 
 
 # ═════════════════════════════════════════════════════════════════════
-# LOAD BEACON — v7.18.50
+# LOAD BEACON — v7.18.51
 # ═════════════════════════════════════════════════════════════════════
 
 try:
     logger.info(
-        "✅ handlers_message v7.18.50 loaded | "
+        "✅ handlers_message v7.18.51 loaded | "
         "BWM=%s | PRIVATE_HANDLERS=%d | "
         "external_handled=%d | "
         "routing-fallback=7-paths-deduped | "
         "SPAM-TIMEOUT=%.1fs | "
         "TRANSLATE-SAFE=on (to_thread+timeout=%.1fs+cache=%d,TTL=%.0fs,"
         "max-len=%d) | "
-        "TEXT-SCORE-SAFE=on (to_thread+timeout=%.1fs) | "
+        "TEXT-SCORE-SAFE=on (to_thread+timeout=%.1fs,size-guard=%d) | "
         "AUTOREPLY-SAFE=on (db=%.1fs,file=%.1fs) | "
         "BWM-SAFE=on (timeout=%.1fs) | "
+        "POSTBOT-SAFE=on (to_thread+timeout=%.1fs,max=%d) | "
         "WARMUP=available | "
         "DB-TYPE=%s | "
         "WAIT_LOG_CH=direct-handler | "
         "LOG-CHANNEL-KEY=log_channel_id (CANONICAL, unified) | "
         "detectors-compat=v4.1.0 | "
-        "fixes=(FIX-TEXT-SCORE-BLOCKING + FIX-AUTOREPLY-BLOCKING + "
-        "FIX-BWM-BLOCKING + FIX-CONSTANTS + "
+        "fixes=(FIX-POSTBOT-BLOCKING + FIX-TEXT-SCORE-SIZE-GUARD + "
+        "v7.18.50-all (FIX-TEXT-SCORE-BLOCKING + FIX-AUTOREPLY-BLOCKING + "
+        "FIX-BWM-BLOCKING + FIX-CONSTANTS), "
         "v7.18.49-all (FIX-TRANSLATE-BLOCKING), "
         "v7.18.48-all (FIX-LAG-1/2/3/4), "
         "v7.18.47-all, v7.18.46-all, v7.18.45-all, "
@@ -7707,9 +7762,12 @@ try:
         _TRANSLATION_CACHE_TTL,
         TRANSLATION_MAX_TEXT_LENGTH,
         _TEXT_SCORE_TIMEOUT_SEC,
+        _TEXT_SCORE_MAX_CHARS,
         _AUTOREPLY_DB_TIMEOUT_SEC,
         _AUTOREPLY_FILE_TIMEOUT_SEC,
         _BWM_TIMEOUT_SEC,
+        _TEXT_SCORE_TIMEOUT_SEC,
+        _POSTBOT_TEXT_MAX_CHARS,
         _db_type(),
     )
 except Exception:
