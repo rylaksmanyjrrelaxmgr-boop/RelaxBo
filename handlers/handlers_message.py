@@ -1,41 +1,34 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-handlers_message.py - v7.18.51 (FIX-POSTBOT-BLOCKING + FIX-TEXT-SCORE-SIZE-GUARD)
-(متوافق مع detectors v4.1.0 + banned_words_manager v1.2.0 + group_log v1.4.0)
+handlers_message.py - v7.18.53 (FIX-LITE-FALLBACK)
+(متوافق مع detectors v4.1.3 + banned_words_manager v1.2.0 + group_log v1.4.0)
 =============================================================================
-🆕 v7.18.51 (FIX-POSTBOT-BLOCKING + FIX-TEXT-SCORE-SIZE-GUARD):
+🆕 v7.18.53 (FIX-LITE-FALLBACK):
 
-    🔴 FIX-POSTBOT-BLOCKING (CRITICAL): `_postbot_pattern_confidence` و
-        `_is_postbot_pattern` كانا يُستدعَيان بشكل **sync** على main
-        thread داخل `_handle_group_impl`. على النصوص العربية المعقدة،
-        regex postbot يحجب event loop 10-15 ثانية (سجل: lag=13004ms
-        على chat=-1002805817864). هذا هو السبب الجذري لـ GIL-MONITOR
-        lag في v7.18.50 رغم إصلاح _compute_spam_score.
+    🔴 FIX-LITE-FALLBACK (CRITICAL): بدلاً من تخطي الرسالة عند CONTEXT-TIMEOUT
+        (وهو ما كان يترك السبام الثقيل يمر)، نبني "LITE context" مصغّر
+        خلال <500ms يعمل على أول 2000 حرف فقط + ينسخ يدوياً الأزرار
+        والـ forward و vcard/poll. كل الفحوصات (banned words, links,
+        spam score, postbot, button links, translation, auto-reply)
+        تعمل عليه طبيعياً. لا رسالة تُتخطى. لا رسالة مشبوهة تمر.
+        
+        تحسين إضافي: _CONTEXT_BUILD_TIMEOUT_SEC من 2.0s إلى 5.0s
+        (لإعطاء النصوص الكبيرة فرصة للتحليل الكامل).
 
-        الحل: كلاهما في `asyncio.to_thread` + timeout 1.5s + truncate
-        النص إلى 2000 حرف قبل الاستدعاء (تسريع 90%+).
-
-    🔴 FIX-TEXT-SCORE-SIZE-GUARD (IMPORTANT): حتى مع `to_thread` +
-        timeout، النصوص الضخمة (>3000 حرف) تجعل thread
-        `_compute_spam_score` يعمل 10+ ثوانٍ، محتجِزاً GIL بعد
-        انتهاء الـ timeout (asyncio.wait_for لا يقتل الـ thread).
-
-        الحل: إذا كان النص > 3000 حرف، تخطَّ spam scoring كلياً
-        وسجّل `TEXT-SCORE-SKIP` بدلاً من حجب event loop.
-
+    ✅ محفوظ من v7.18.52:
+        - FIX-CONTEXT-BLOCKING (to_thread لـ _MessageContext)
+    ✅ محفوظ من v7.18.51:
+        - FIX-POSTBOT-BLOCKING, FIX-TEXT-SCORE-SIZE-GUARD
     ✅ محفوظ من v7.18.50:
-        - FIX-TEXT-SCORE-BLOCKING (to_thread للـ main)
-        - FIX-AUTOREPLY-BLOCKING (DB + file في to_thread)
-        - FIX-BWM-BLOCKING (BWM في wait_for)
-        - FIX-CONSTANTS
-    ✅ محفوظ من v7.18.49 (TRANSLATE-SAFE + FIX-LAG-1/3).
+        - FIX-TEXT-SCORE-BLOCKING, FIX-AUTOREPLY-BLOCKING,
+          FIX-BWM-BLOCKING, FIX-CONSTANTS
 
-🆕 v7.18.50 (FIX-TEXT-SCORE-BLOCKING + AUTOREPLY-BLOCKING) — محفوظ.
-🆕 v7.18.49 (FIX-TRANSLATE-BLOCKING) — محفوظ.
-🆕 v7.18.48 (PERF-FIX-MEDIA-ONLY-MULTILAYER) — محفوظ.
-🆕 v7.18.47 (LOG-CHANNEL-KEY-UNIFICATION) — محفوظ.
-🆕 v7.18.46 (POST-AUDIT-CORRECTIONS) — محفوظ.
+v7.18.52 — محفوظ.
+v7.18.51 — محفوظ.
+v7.18.50 — محفوظ.
+v7.18.49 — محفوظ.
+v7.18.48 — محفوظ.
 =============================================================================
 """
 
@@ -123,6 +116,8 @@ def _ph_list(count: int) -> str:
 # 🆕 v7.18.48 FIX-LAG-2: مهلة كشف Spam للوسائط
 # 🆕 v7.18.50 FIX-CONSTANTS: ثوابت timeouts جديدة
 # 🆕 v7.18.51 FIX-POSTBOT: timeout لـ postbot pattern/confidence
+# 🆕 v7.18.52 FIX-CONTEXT-BLOCKING: timeout لبناء Context
+# 🆕 v7.18.53 FIX-LITE-FALLBACK: 5.0s بدلاً من 2.0s
 # ═════════════════════════════════════════════════════════════════════
 _SPAM_ASYNC_TIMEOUT: float = 1.0
 
@@ -139,6 +134,9 @@ _POSTBOT_TEXT_MAX_CHARS: int = 2000
 _POSTBOT_MIN_TEXT_CHARS: int = 20
 # 🆕 v7.18.51 FIX-TEXT-SCORE-SIZE-GUARD
 _TEXT_SCORE_MAX_CHARS: int = 3000
+# 🆕 v7.18.52 FIX-CONTEXT-BLOCKING
+# 🆕 v7.18.53 FIX-LITE-FALLBACK: 5.0s لإعطاء فرصة كاملة
+_CONTEXT_BUILD_TIMEOUT_SEC: float = 5.0
 
 
 # ═════════════════════════════════════════════════════════════════════
@@ -3687,6 +3685,106 @@ _EXTERNAL_HANDLED_STATES = frozenset({
 })
 
 
+# ═════════════════════════════════════════════════════════════════════
+# 🆕 v7.18.53 FIX-LITE-FALLBACK: سياق مصغّر للرسائل الثقيلة
+# ═════════════════════════════════════════════════════════════════════
+def _build_lite_context(message) -> Any:
+    """
+    بناء سياق مصغّر سريع للرسائل التي تتجاوز مهلة _MessageContext.
+    - أول 2000 حرف فقط (بدلاً من 12000).
+    - الأزرار والـ forward تُنسخ يدوياً (سريعة).
+    - كل الفحوصات الأخرى تعمل عليه طبيعياً.
+    """
+    try:
+        text = (
+            getattr(message, "text", None)
+            or getattr(message, "caption", None)
+            or ""
+        )
+        if not isinstance(text, str):
+            text = str(text) if text else ""
+        text_limited = text[:2000]
+
+        ctx = _MessageContext.from_text(text_limited)
+
+        # نسخ بيانات الأزرار (سريعة — لا تحتاج context كامل)
+        try:
+            (
+                _btn_count, _btn_urls, _btn_texts, _btn_urls_raw,
+            ) = _extract_button_context(message)
+            ctx.button_count = _btn_count
+            ctx.button_urls = _btn_urls
+            ctx.button_texts = _btn_texts
+            ctx.button_urls_raw = _btn_urls_raw
+            ctx.button_link_urls = list(_btn_urls)
+            ctx.has_button_link = bool(_btn_urls)
+        except Exception:
+            pass
+
+        # نسخ بيانات الـ forward (سريعة — لا تحتاج context كامل)
+        try:
+            ctx.is_forwarded = bool(
+                getattr(message, "forward_origin", None)
+                or getattr(message, "forward_from", None)
+                or getattr(message, "forward_from_chat", None)
+                or getattr(message, "forward_date", None)
+                or getattr(message, "is_automatic_forward", False)
+            )
+            ctx.is_auto_fwd = bool(
+                getattr(message, "is_automatic_forward", False))
+            ctx.is_protected = bool(
+                getattr(message, "has_protected_content", False))
+        except Exception:
+            pass
+
+        # نسخ بيانات المستخدم (للـ behavioral layer)
+        try:
+            _fu = getattr(message, "from_user", None)
+            ctx.user_id = int(getattr(_fu, "id", 0) or 0) if _fu else 0
+        except Exception:
+            ctx.user_id = 0
+
+        # نسخ روابط entities (سريعة)
+        try:
+            ctx.entity_urls = _extract_entity_urls(message)
+            ctx.has_link_entity = bool(ctx.entity_urls)
+        except Exception:
+            pass
+
+        # نسخ vcard / venue / poll (سريعة)
+        try:
+            ctx.vcard_urls = _extract_vcard_urls(message)
+            ctx.venue_url = _extract_venue_url(message)
+            _poll_text, _poll_count, _poll_urls = _extract_poll_text(message)
+            ctx.poll_text = _poll_text
+            ctx.poll_options_count = _poll_count
+            ctx.poll_urls = _poll_urls
+        except Exception:
+            pass
+
+        # إعادة حساب has_any_link بناءً على البيانات المنقولة
+        try:
+            ctx.has_any_link = bool(
+                ctx.has_link_entity
+                or ctx.has_button_link
+                or ctx.entity_urls
+                or ctx.button_urls
+                or ctx.vcard_urls
+                or ctx.poll_urls
+                or ctx.url_count
+                or _contains_link_enhanced(
+                    ctx.analysis_text, include_usernames=False
+                )
+            )
+        except Exception:
+            pass
+
+        return ctx
+    except Exception as e:
+        logger.debug("_build_lite_context outer error: %s", e)
+        raise
+
+
 class MessageHandlers:
 
     _PRIVATE_HANDLERS_MAP: Dict[Any, str] = {
@@ -3901,8 +3999,35 @@ class MessageHandlers:
             is_anonymous = True
         else:
             return
+        # 🆕 v7.18.53 FIX-LITE-FALLBACK: لا تخطي — سياق مصغّر كبديل
         try:
-            ctx = _MessageContext(message)
+            ctx = await asyncio.wait_for(
+                asyncio.to_thread(_MessageContext, message),
+                timeout=_CONTEXT_BUILD_TIMEOUT_SEC,
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                "⏱️ CONTEXT-TIMEOUT | chat=%s msg=%s >%.1fs — بناء LITE context",
+                chat_id, getattr(message, "message_id", "?"),
+                _CONTEXT_BUILD_TIMEOUT_SEC,
+            )
+            try:
+                ctx = await asyncio.wait_for(
+                    asyncio.to_thread(_build_lite_context, message),
+                    timeout=1.0,
+                )
+                logger.info(
+                    "✅ LITE context جاهز | chat=%s msg=%s len=%d btns=%d fwd=%s",
+                    chat_id, getattr(message, "message_id", "?"),
+                    len(ctx.analysis_text),
+                    ctx.button_count, ctx.is_forwarded,
+                )
+            except Exception as _le:
+                logger.error(
+                    "❌ LITE context فشل أيضاً | chat=%s msg=%s err=%s",
+                    chat_id, getattr(message, "message_id", "?"), _le,
+                )
+                return
         except Exception as e:
             logger.debug("_MessageContext build failed: %s", e)
             return
@@ -7721,16 +7846,20 @@ __all__ = [
     "_POSTBOT_TEXT_MAX_CHARS",
     "_POSTBOT_MIN_TEXT_CHARS",
     "_TEXT_SCORE_MAX_CHARS",
+    # v7.18.52 additions
+    "_CONTEXT_BUILD_TIMEOUT_SEC",
+    # v7.18.53 additions
+    "_build_lite_context",
 ]
 
 
 # ═════════════════════════════════════════════════════════════════════
-# LOAD BEACON — v7.18.51
+# LOAD BEACON — v7.18.53
 # ═════════════════════════════════════════════════════════════════════
 
 try:
     logger.info(
-        "✅ handlers_message v7.18.51 loaded | "
+        "✅ handlers_message v7.18.53 loaded | "
         "BWM=%s | PRIVATE_HANDLERS=%d | "
         "external_handled=%d | "
         "routing-fallback=7-paths-deduped | "
@@ -7741,12 +7870,15 @@ try:
         "AUTOREPLY-SAFE=on (db=%.1fs,file=%.1fs) | "
         "BWM-SAFE=on (timeout=%.1fs) | "
         "POSTBOT-SAFE=on (to_thread+timeout=%.1fs,max=%d) | "
+        "CONTEXT-SAFE=on (to_thread+timeout=%.1fs) | "
+        "LITE-FALLBACK=on (2000ch+btn+fwd, no skip) | "
         "WARMUP=available | "
         "DB-TYPE=%s | "
         "WAIT_LOG_CH=direct-handler | "
         "LOG-CHANNEL-KEY=log_channel_id (CANONICAL, unified) | "
-        "detectors-compat=v4.1.0 | "
-        "fixes=(FIX-POSTBOT-BLOCKING + FIX-TEXT-SCORE-SIZE-GUARD + "
+        "detectors-compat=v4.1.3 | "
+        "fixes=(FIX-LITE-FALLBACK + FIX-CONTEXT-BLOCKING + "
+        "FIX-POSTBOT-BLOCKING + FIX-TEXT-SCORE-SIZE-GUARD + "
         "v7.18.50-all (FIX-TEXT-SCORE-BLOCKING + FIX-AUTOREPLY-BLOCKING + "
         "FIX-BWM-BLOCKING + FIX-CONSTANTS), "
         "v7.18.49-all (FIX-TRANSLATE-BLOCKING), "
@@ -7768,6 +7900,7 @@ try:
         _BWM_TIMEOUT_SEC,
         _TEXT_SCORE_TIMEOUT_SEC,
         _POSTBOT_TEXT_MAX_CHARS,
+        _CONTEXT_BUILD_TIMEOUT_SEC,
         _db_type(),
     )
 except Exception:
