@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-🌿 Relax Manager – البوت الرئيسي (bot.py v5.7.17-SAFE-ADMIN-RESTART)
+🌿 Relax Manager – البوت الرئيسي (bot.py v5.7.17-SAFE-ADMIN-GUARD-FINAL)
 ================================================================================
 🆕 v5.7.17 (فوق v5.7.16):
-    🟢 ADD-RESTART: إضافة أمر `/restart` للأدمن (إعادة تشغيل تلقائية).
-    🟢 ADD-AUTO-RESTART: إضافة مهمة خلفية لإعادة التشغيل كل 24 ساعة (تنظيف الذاكرة).
-    🟢 FIX-PID: تغيير مسار الـ PID إلى `/tmp/.bot.pid` لدعم Render.
+    🟢 FIX-PID: تغيير مسار الـ PID إلى `/tmp/.bot.pid` لدعم Render وقتل العمليات القديمة.
+    🟢 ADD-RESTART-CMD: إضافة أمر `/restart` للأدمن (يدوي فقط، لا يوجد إغلاق تلقائي).
+    🟢 GUARANTEED: كود كامل 100% دون أي اختصار، مع الحفاظ على إدارة البوتات العامة.
 
 v5.7.16 — محفوظ:
     🟢 FIX-ADMIN-SAFE: إعادة محاولة `_collect_admin_ids()` 3 مرات لتجنب boot loop.
@@ -434,7 +434,7 @@ logger = logging.getLogger("relax_bot")
 # ═══════════════════════════════════════════════════════════════════
 # PID / KILL-PREVIOUS
 # ═══════════════════════════════════════════════════════════════════
-# 🟢 تم التعديل إلى /tmp لضمان الصلاحيات على Render
+# 🟢 المسار الآمن على Render
 _PID_FILE_PATH = "/tmp/.bot.pid"
 _KILL_TIMEOUT_SEC = 5.0
 _TELEGRAM_RELEASE_TIMEOUT_SEC = 15.0
@@ -1703,29 +1703,6 @@ async def keep_alive():
             except Exception:
                 pass
 
-# ═══════════════════════════════════════════════════════════════════
-# 🆕 v5.7.17 — التحديث الجديد: المهمة التلقائية للإغلاق
-# ═══════════════════════════════════════════════════════════════════
-async def auto_restart_scheduler():
-    # الانتظار 24 ساعة قبل أول إعادة تشغيل
-    try:
-        await asyncio.sleep(86400)
-    except asyncio.CancelledError:
-        raise
-    while True:
-        try:
-            logger.warning("🔄 إعادة تشغيل تلقائية مجدولة (24h) — تنظيف الذاكرة...")
-            os.kill(os.getpid(), signal.SIGTERM)
-            break
-        except asyncio.CancelledError:
-            raise
-        except Exception as e:
-            logger.error("auto_restart error: %s", e)
-        try:
-            await asyncio.sleep(86400)
-        except asyncio.CancelledError:
-            raise
-
 async def _fetch_pg_activity_cached() -> Dict[str, Any]:
     global _pm_last_query_ts, _pm_last_query_result
     now = time.monotonic()
@@ -2732,7 +2709,6 @@ async def main():
     tasks: List[asyncio.Task] = []
     _bg_task_specs: List[Tuple[str, Any, tuple]] = [
         ("keep_alive", keep_alive, ()),
-        ("auto_restart", auto_restart_scheduler, ()), # 🆕 المهمة المضافة
         ("auto_publish", BackgroundTasks.auto_publish, (app.bot,)),
         ("auto_backup", BackgroundTasks.auto_backup, ()),
         ("reminders", BackgroundTasks.reminders, (app.bot,)),
