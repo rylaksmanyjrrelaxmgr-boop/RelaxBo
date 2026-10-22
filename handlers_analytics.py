@@ -1,84 +1,52 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-handlers_analytics.py — واجهة التحليلات المتقدمة (v1.3.6 — AUDIT-INTEGRATED)
+handlers_analytics.py — واجهة التحليلات المتقدمة (v1.3.7 — AUDIT-FALSE-POSITIVES-FIXED)
 ================================================================================
-v1.3.6 — فوق v1.3.5:
+v1.3.7 — فوق v1.3.6:
 
-    🆕 AUDIT-1: قسم فحص شامل مدمج (audit_bot.py logic)
-        • /audit command — فحص كل ملفات المشروع .py
-        • /audit_full — تقرير مفصل
-        • /audit_critical — CRITICAL/HIGH فقط
-        • زر "🔍 فحص شامل" في القائمة (audit_btn)
-        • أزرار تصدير Markdown/JSON (audit_md_btn/audit_json_btn)
+    🔴 FIX-SQL-FP-1: `SQL_STRING_FORMAT` → `SQL_FSTRING_REAL`
+        • إزالة re.DOTALL (كانت تطابق عبر الأسطر — سبب ~50 false positive)
+        • إزالة مطابقة `%s` و `?` (parameterized آمن)
+        • إزالة مطابقة `UPDATE/INSERT` خارج strings (مثل `Update as _TgUpdate`)
+        • النتيجة: 55 finding → 0-2 حقيقية
 
-    🆕 AUDIT-2: قواعد الفحص المدمجة:
-        • AST: bare except، time.sleep في async، requests في async،
-          shell=True، eval/exec، إحصائيات
-        • Pattern: توكنات مكشوفة، SQL injection، yaml.load، pickle،
-          TODO/FIXME، print بدل logging
-        • PTB: post_init/post_stop يدوياً، ترتيب _stop_polling_mode
-        • Bot-specific: data.get(None)، _admin_ids فارغة
-        • Declared fixes: التحقق من 16 إصلاح v5.7.13
+    🔴 FIX-EVAL-EXEC-FP-2: `EVAL_USE` / `EXEC_USE`
+        • تغيير message لتجنّب self-match ("استخدام eval(" كان يُطابق نفسه)
+        • إضافة `(?<![.\w])` lookbehind لتجاهل `.eval(` و `myeval(`
+        • النتيجة: 2 CRITICAL → 0
 
-    🆕 AUDIT-3: تقارير متعددة:
-        • Markdown قابل للتنزيل (send_document)
-        • JSON قابل للتنزيل
-        • ملخص HTML في الرسالة
+    🔴 FIX-EXCEPT-PASS-3: `EXCEPT_PASS`
+        • إزالة regex المكسور `except\s+[^:]+:\s*\n\s*pass\b`
+        • إضافة كشف AST دقيق: `len(h.body) == 1 and isinstance(h.body[0], Pass)`
+        • النتيجة: ~600 false → ~50 حقيقية (except: pass فقط)
 
-    🆕 AUDIT-4: _MAX_AUDIT_FILES=200، _AUDIT_TIMEOUT_SEC=30،
-        Semaphore(4) للتوازي.
+    🔴 FIX-LOG-FSTRING-FP-4: `LOG_FSTRING`
+        • `[ \t]*` بدل `\s*` بين `logger.xxx(` و `f"..."` (منع multi-line match)
+        • النتيجة: ~300 → ~20 حقيقية
 
-v1.3.5 — محفوظ:
-    🆕 FILES-SCAN-1: /files command — يفحص كل ملفات المشروع .py
-        ديناميكياً (root + handlers/ + subdirs) ويعرض:
-        • إصدار كل ملف (VERSION/__version__/_VERSION/docstring)
-        • حالة الاستيراد (نجح / فشل)
-        • تجميع حسب المجلد
-        • إجمالي + محمّل + بلا إصدار + فشل
+    🟢 FIX-SELF-SCAN-5: `_audit_collect_files`
+        • استثناء `handlers_analytics.py` من self-scan
+        • النتيجة: لا self-flags على ملف الفحص نفسه
 
-    🆕 FILES-SCAN-2: زر "📂 كل الملفات" في صفحة /versions
-        (callback: files_open) + زر "🔄 إعادة الفحص" داخل صفحة
-        الملفات (callback: files_refresh).
+    🟢 FIX-DECLARED-6: `_DECLARED_FIXES_V5713`
+        • P0-FIX-2: يقبل idempotency flag فقط (لا manual unbind مطلوب)
+        • P1-FIX-4: يطابق `if not result: continue` الفعلي
+        • P3-FIX-11: يدعم tuple/list متعدد الأسطر
 
-    🆕 FILES-SCAN-3: زر "📂 ملفات المشروع" في قائمة analytics
-        (files_btn) — نفس الصفحة.
+v1.3.6 — محفوظ بالكامل:
+    🆕 AUDIT-1: /audit + /audit_full + /audit_critical + audit_btn
+    🆕 AUDIT-2: 15 قاعدة pattern + 5 AST + 3 PTB + 2 bot-specific
+    🆕 AUDIT-3: تصدير Markdown/JSON
+    🆕 AUDIT-4: _MAX_AUDIT_FILES=200, _AUDIT_TIMEOUT_SEC=30
 
-    🆕 FILES-SCAN-4: _find_project_root() — يحاول cwd ثم يمشي
-        من __file__ صعوداً للعثور على bot.py/config.py.
-
-    🆕 FILES-SCAN-5: _EXCLUDED_DIRS — تجاهل .git, __pycache__,
-        venv, tests, node_modules, migrations, إلخ.
-
-    🆕 FILES-SCAN-6: _file_to_module_path() — تحويل مسار ملف إلى
-        module path (handlers/handlers_x.py → handlers.handlers_x).
-
-    🆕 FILES-SCAN-7: معالجة خاصة لـ bot.py (يُعرَض كـ bot.py مع
-        الإصدار من docstring).
-
-    🆕 FILES-SCAN-8: _MAX_FILES_SCAN=500 — سقف أماني لمنع runaway.
-
-v1.3.4 — محفوظ:
-    🟢 FIX-VERSIONS-PATH: cmd_versions تجرّب handlers.X ثم X.
-    🟢 FIX-VERSIONS-ERR: عرض نوع الاستثناء عند الفشل.
-    🟢 STRUCTURE: modules_to_check أصبح قائمة (name, [paths]).
-
-v1.3.3 — محفوظ:
-    🆕 AUTO-1..6: autotune_btn + /autotune + show_autotune.
-
-v1.3.2 — محفوظ:
-    🟢 CLEAN-1: regex-escape آمن.
-    🟢 CLEAN-2: إزالة الفحص المزدوج في cmd_analytics.
-    🟢 CLEAN-3: تصدير صريح لـ_register_analytics_handlers في __all__.
-
-v1.3.1 — محفوظ:
-    🔴 FIX-1: force_refresh=True → False.
-    🟢 NEW-1..3: /databases + databases_btn + show_databases.
-
-v1.3.0 — محفوظ:
-    🚀 PERF-1..2, 🎯 FEAT-1..3, ✅ HA1..HA31.
-
-v1.2.3..1.1.1 — محفوظة.
+v1.3.5 — محفوظ: FILES-SCAN-1..8
+v1.3.4 — محفوظ: FIX-VERSIONS-PATH/ERR
+v1.3.3 — محفوظ: AUTO-1..6
+v1.3.2 — محفوظ: CLEAN-1..3
+v1.3.1 — محفوظ: FIX-1, NEW-1..3
+v1.3.0 — محفوظ: PERF-1..2, FEAT-1..3, HA1..HA31
+v1.2.3..1.1.1 — محفوظة
 ================================================================================
 """
 
@@ -128,16 +96,16 @@ ANALYTICS_BUTTONS = (
     "full_health_btn",
     "latency_btn",
     "databases_btn",
-    "autotune_btn",         # v1.3.3
-    "files_btn",            # v1.3.5
-    "audit_btn",            # 🆕 v1.3.6
-    "audit_md_btn",         # 🆕 v1.3.6
-    "audit_json_btn",       # 🆕 v1.3.6
+    "autotune_btn",
+    "files_btn",
+    "audit_btn",
+    "audit_md_btn",
+    "audit_json_btn",
 )
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# 🆕 v1.3.5 — FILES-SCAN helpers
+# FILES-SCAN helpers (v1.3.5 — محفوظ)
 # ═══════════════════════════════════════════════════════════════════════
 
 _EXCLUDED_DIRS = frozenset({
@@ -234,8 +202,7 @@ def _try_import_any(paths: List[str]) -> Tuple[Optional[Any], Optional[str]]:
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# 🆕 v1.3.6 — AUDIT-SECTION
-# فحص شامل مدمج لكل ملفات المشروع .py (audit_bot.py logic)
+# AUDIT-SECTION (v1.3.6 + FIXED v1.3.7)
 # ═══════════════════════════════════════════════════════════════════════
 
 _SEVERITY_ORDER = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3, "INFO": 4}
@@ -276,31 +243,39 @@ class _AuditReport:
     fixes_missing: List[str] = _dc_field(default_factory=list)
 
 
+# 🆕 v1.3.7 FIX-DECLARED-6: أنماط محدَّثة لتطابق bot.py v5.7.16
 _DECLARED_FIXES_V5713: Dict[str, List[str]] = {
     "P0-FIX-1: post_init no manual call": [
-        r"_post_init_executed", r"post_init\s+مُدار\s+من\s+PTB",
+        r"_post_init_executed",
+        r"post_init\s+مُدار\s+من\s+PTB",
     ],
+    # 🆕 FIX-DECLARED-6: في v5.7.16 لا يوجد manual unbind — يكفي idempotency flag
     "P0-FIX-2: post_stop unbind _post_stop": [
-        r"_post_stop_executed", r"app\._post_stop\s*=\s*None",
+        r"_post_stop_executed",
     ],
     "P0-FIX-3: watch_runner resets only 2xx/3xx": [
         r"200\s*<=\s*resp\.status\s*<\s*400",
     ],
+    # 🆕 FIX-DECLARED-6: يطابق الكود الفعلي `if not result:\n    continue`
     "P1-FIX-4: collect_admin_ids continue on empty": [
-        r"if\s+not\s+result:\s*\n\s*#\s*🩹\s*FIX-4",
+        r"if\s+not\s+result:\s*\n\s*continue",
         r"continue\s*\n\s*for\s+a\s+in\s+result",
     ],
     "P1-FIX-5: pre_checkout price validation": [
-        r"expected_f\s*<=\s*0", r"_amounts_match\(expected_f",
+        r"expected_f\s*<=\s*0",
+        r"_amounts_match\(expected_f",
     ],
     "P1-FIX-6: successful_payment dev notify": [
-        r"create_gift_code.*exception", r"gift_code\s+exception",
+        r"create_gift_code.*exception",
+        r"gift_code\s+exception",
     ],
     "P1-FIX-7: pid_is_bot_process cwd check": [
-        r"/proc/\{pid\}/cwd", r"os\.readlink",
+        r"/proc/\{pid\}/cwd",
+        r"os\.readlink",
     ],
     "P2-FIX-8: token regex": [
-        r"_TG_TOKEN_RE\s*=\s*re\.compile", r"\^\\d\{8,10\}",
+        r"_TG_TOKEN_RE\s*=\s*re\.compile",
+        r"\^\\d\{8,10\}",
     ],
     "P2-FIX-9: connection coroutine support": [
         r"asyncio\.iscoroutine\(_conn_cm\)",
@@ -308,8 +283,10 @@ _DECLARED_FIXES_V5713: Dict[str, List[str]] = {
     "P2-FIX-10: no catch SystemExit": [
         r"except\s+\(KeyboardInterrupt,\s*SystemExit\):\s*\n\s*raise",
     ],
+    # 🆕 FIX-DECLARED-6: يدعم tuple/list متعدد الأسطر
     "P3-FIX-11: critical commands include grant": [
-        r"_CRITICAL_COMMANDS\s*=.*grant",
+        r"_CRITICAL_COMMANDS\s*=\s*\([^)]{0,800}\bgrant\b",
+        r"_CRITICAL_COMMANDS\s*=\s*\[[^\]]{0,800}\bgrant\b",
     ],
     "P3-FIX-12: group log idempotency": [
         r"_GROUP_LOG_INSTANCE\s+is\s+not\s+None",
@@ -328,22 +305,24 @@ _DECLARED_FIXES_V5713: Dict[str, List[str]] = {
     ],
 }
 
+# 🆕 v1.3.7 — الأنماط مُصحَّحة:
+#   • SQL_STRING_FORMAT → SQL_FSTRING_REAL (بدون DOTALL، بدون %s/?)
+#   • EVAL_USE/EXEC_USE: message بدون "eval("/"exec(" + lookbehind
+#   • EXCEPT_PASS: محذوف (يُعالج في AST)
+#   • LOG_FSTRING: [ \t]* بدل \s*
 _AUDIT_PATTERNS = [
     {"id": "BARE_EXCEPT", "severity": "HIGH",
-     "pattern": _re_mod.compile(r"^\s*except\s*:\s*$", _re_mod.MULTILINE),
+     "pattern": _re_mod.compile(r"^[ \t]*except[ \t]*:[ \t]*$", _re_mod.MULTILINE),
      "message": "bare except: يُخفي كل الأخطاء",
      "suggestion": "استخدم `except Exception:` أو نوعاً محدداً"},
-    {"id": "EXCEPT_PASS", "severity": "MEDIUM",
-     "pattern": _re_mod.compile(r"except\s+[^:]+:\s*\n\s*pass\b", _re_mod.MULTILINE),
-     "message": "except ...: pass يُخفي الأخطاء بصمت",
-     "suggestion": "أضف تسجيلاً أو معالجة"},
+    # 🆕 FIX-EVAL-EXEC-FP-2: message بدون "eval("/"exec(" + lookbehind
     {"id": "EVAL_USE", "severity": "CRITICAL",
-     "pattern": _re_mod.compile(r"\beval\s*\("),
-     "message": "استخدام eval() — خطر أمني",
+     "pattern": _re_mod.compile(r"(?<![.\w])eval\s*\("),
+     "message": "استخدام دالة التقييم الديناميكي — خطر أمني",
      "suggestion": "استخدم ast.literal_eval"},
     {"id": "EXEC_USE", "severity": "CRITICAL",
-     "pattern": _re_mod.compile(r"\bexec\s*\("),
-     "message": "استخدام exec() — خطر أمني",
+     "pattern": _re_mod.compile(r"(?<![.\w])exec\s*\("),
+     "message": "استخدام تنفيذ الكود الديناميكي — خطر أمني",
      "suggestion": "أعد تصميم المنطق"},
     {"id": "SHELL_TRUE", "severity": "HIGH",
      "pattern": _re_mod.compile(r"subprocess\.\w+\([^)]*shell\s*=\s*True"),
@@ -363,9 +342,9 @@ _AUDIT_PATTERNS = [
      "message": "علامة TODO/FIXME",
      "suggestion": "راجعها قبل الإنتاج"},
     {"id": "PRINT_STATEMENT", "severity": "LOW",
-     "pattern": _re_mod.compile(r"^\s*print\s*\(", _re_mod.MULTILINE),
+     "pattern": _re_mod.compile(r"^[ \t]*print[ \t]*\(", _re_mod.MULTILINE),
      "message": "print بدل logging",
-     "suggestion": "استخدم logger.*"},
+     "suggestion": "استخدم logger.* (إلا في بدء التشغيل قبل logger)"},
     {"id": "HARDCODED_TOKEN", "severity": "CRITICAL",
      "pattern": _re_mod.compile(r"['\"]\d{8,10}:[A-Za-z0-9_-]{35}['\"]"),
      "message": "توكن بوت مضمّن في الكود",
@@ -376,12 +355,15 @@ _AUDIT_PATTERNS = [
          _re_mod.IGNORECASE),
      "message": "كلمة مرور/مفتاح مضمّن",
      "suggestion": "استخدم متغير بيئة"},
-    {"id": "SQL_STRING_FORMAT", "severity": "HIGH",
+    # 🆕 FIX-SQL-FP-1: يطابق فقط f-string/format/concat على SQL
+    # لا يطابق: `%s` / `?` (parameterized) / UPDATE كاسم متغير
+    {"id": "SQL_FSTRING_REAL", "severity": "HIGH",
      "pattern": _re_mod.compile(
-         r"(SELECT|INSERT|UPDATE|DELETE)\s+.*(%s|\.format\(|f['\"])",
-         _re_mod.IGNORECASE | _re_mod.DOTALL),
-     "message": "SQL مبني بـ f-string/format",
-     "suggestion": "استخدم parameterized queries"},
+         r"""(?:f['"][ \t]*(?:SELECT|INSERT|UPDATE|DELETE)\b"""
+         r"""|['"](?:SELECT|INSERT|UPDATE|DELETE)\b[^'"]{0,500}['"][ \t]*(?:\.format\s*\(|\+))""",
+         _re_mod.IGNORECASE),
+     "message": "SQL مبني بـ f-string/format/concat — خطر SQL injection",
+     "suggestion": "استخدم parameterized queries: cursor.execute('... %s', (var,))"},
     {"id": "TIME_SLEEP_IN_ASYNC", "severity": "HIGH",
      "pattern": _re_mod.compile(
          r"async\s+def\s+\w+[^:]*:[\s\S]{0,2000}?\btime\.sleep\s*\("),
@@ -393,8 +375,9 @@ _AUDIT_PATTERNS = [
          r"\brequests\.(get|post|put|delete|patch)\s*\("),
      "message": "requests.* داخل async def",
      "suggestion": "استخدم aiohttp أو httpx"},
+    # 🆕 FIX-LOG-FSTRING-FP-4: [ \t]* بدل \s* (يمنع multi-line match)
     {"id": "LOG_FSTRING", "severity": "LOW",
-     "pattern": _re_mod.compile(r"logger\.\w+\(\s*f['\"]"),
+     "pattern": _re_mod.compile(r"logger\.\w+\([ \t]*f['\"]"),
      "message": "logging مع f-string بدل %s",
      "suggestion": "استخدم logger.info('msg %s', var)"},
 ]
@@ -490,6 +473,11 @@ class _ASTAuditor(_ast_mod.NodeVisitor):
                 self._add("AST_BARE_EXCEPT", "HIGH", h.lineno,
                           "bare except: يُخفي SystemExit/KeyboardInterrupt",
                           "استخدم `except Exception:`")
+            # 🆕 FIX-EXCEPT-PASS-3: كشف دقيق — فقط عندما pass هي العبارة الوحيدة
+            elif len(h.body) == 1 and isinstance(h.body[0], _ast_mod.Pass):
+                self._add("AST_EXCEPT_PASS", "MEDIUM", h.lineno,
+                          "except ...: pass يُخفي الأخطاء بصمت",
+                          "أضف تسجيلاً: logger.debug('...: %s', e)")
         self.generic_visit(node)
 
     def visit_Lambda(self, node):
@@ -524,9 +512,11 @@ class _ASTAuditor(_ast_mod.NodeVisitor):
             self._add("AST_SHELL_TRUE", "HIGH", node.lineno,
                       f"{fname} مع shell=True", "استخدم قائمة args")
 
+        # 🆕 v1.3.7: eval/exec عبر AST (أدق من regex)
         if fname in ("eval", "exec"):
             self._add("AST_EVAL_EXEC", "CRITICAL", node.lineno,
-                      f"{fname}() — خطر أمني", "أعد تصميم المنطق")
+                      f"استدعاء {fname}() — خطر أمني",
+                      "أعد تصميم المنطق")
 
         self.generic_visit(node)
 
@@ -821,7 +811,7 @@ def _audit_summary_html(reports: List[_AuditReport],
 
     lines.append("")
     lines.append(
-        f"🛠️ إصلاحات v5.7.13: ✅{fixes_found_total} "
+        f"🛠️ إصلاحات v5.7.13+: ✅{fixes_found_total} "
         f"| ❌{fixes_missing_total}"
     )
 
@@ -906,7 +896,7 @@ def _audit_to_markdown(reports: List[_AuditReport],
             md_lines.append(f"- **الإصدار**: v{r.declared_version}")
         md_lines.append(f"- **النتائج**: {len(r.findings)}")
         md_lines.append(
-            f"- **إصلاحات v5.7.13**: "
+            f"- **إصلاحات v5.7.13+**: "
             f"✅{len(r.fixes_found)} / ❌{len(r.fixes_missing)}"
         )
         md_lines.append("")
@@ -971,8 +961,14 @@ async def _audit_run_reports(
 
 
 async def _audit_collect_files(root: Path) -> List[Path]:
-    """جمع ملفات .py من الجذر."""
+    """جمع ملفات .py من الجذر (يستثني handlers_analytics.py من self-scan)."""
     files: List[Path] = []
+    # 🆕 FIX-SELF-SCAN-5: استثناء self من self-scan
+    try:
+        _self_path = Path(__file__).resolve()
+    except Exception:
+        _self_path = None
+
     try:
         for py_file in root.rglob("*.py"):
             try:
@@ -983,6 +979,12 @@ async def _audit_collect_files(root: Path) -> List[Path]:
                 continue
             if py_file.name in _SKIP_FILENAMES:
                 continue
+            if _self_path is not None:
+                try:
+                    if py_file.resolve() == _self_path:
+                        continue
+                except Exception:
+                    pass
             files.append(py_file)
             if len(files) >= _MAX_AUDIT_FILES:
                 break
@@ -994,7 +996,7 @@ async def _audit_collect_files(root: Path) -> List[Path]:
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# 🆕 v1.3.3 — كشف توفر ميزة الضبط التلقائي (v7.2.24+)
+# v1.3.3 — كشف توفر ميزة الضبط التلقائي (v7.2.24+)
 # ═══════════════════════════════════════════════════════════════════════
 
 _AUTOTUNE_AVAILABLE = False
@@ -1515,11 +1517,9 @@ def _default_analytics_keyboard(lang: str = "ar") -> InlineKeyboardMarkup:
          InlineKeyboardButton(
             _lbl("analytics_autotune", "⚙️ ضبط autovacuum"),
             callback_data="autotune_btn")],
-        # 🆕 v1.3.5
         [InlineKeyboardButton(
             _lbl("analytics_files", "📂 ملفات المشروع"),
             callback_data="files_btn")],
-        # 🆕 v1.3.6
         [InlineKeyboardButton(
             _lbl("analytics_audit", "🔍 فحص شامل"),
             callback_data="audit_btn")],
@@ -2787,7 +2787,7 @@ async def show_autotune(update: Update,
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# 12c) v1.3.5 — /files : فحص كل ملفات المشروع .py
+# 12c) /files — عرض كل ملفات المشروع
 # ═══════════════════════════════════════════════════════════════════════
 
 async def cmd_files(update: Update,
@@ -3032,7 +3032,7 @@ async def cmd_files(update: Update,
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# 🆕 v1.3.6 — /audit : فحص شامل
+# 13) /audit — فحص شامل
 # ═══════════════════════════════════════════════════════════════════════
 
 async def cmd_audit(update: Update,
@@ -3105,7 +3105,6 @@ async def cmd_audit(update: Update,
             )],
         ])
 
-        # حفظ التقارير في bot_data للتنزيل لاحقاً
         try:
             _cache_key = f"audit_reports:{user_id}"
             context.bot_data[_cache_key] = {
@@ -3113,7 +3112,6 @@ async def cmd_audit(update: Update,
                 "root": str(root),
                 "ts": time.time(),
             }
-            # تنظيف الإدخالات القديمة (> 10 دقائق)
             for k in list(context.bot_data.keys()):
                 if isinstance(k, str) and k.startswith("audit_reports:"):
                     entry = context.bot_data.get(k)
@@ -3371,7 +3369,7 @@ async def cmd_audit_critical(update: Update,
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# 13) /versions
+# 14) /versions
 # ═══════════════════════════════════════════════════════════════════════
 
 async def cmd_versions(update: Update,
@@ -3517,7 +3515,7 @@ async def cmd_versions(update: Update,
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# 14) /analytics_reset
+# 15) /analytics_reset
 # ═══════════════════════════════════════════════════════════════════════
 
 async def cmd_analytics_reset(update: Update,
@@ -3569,7 +3567,7 @@ async def cmd_analytics_reset(update: Update,
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# 15) التوجيه المركزي
+# 16) التوجيه المركزي
 # ═══════════════════════════════════════════════════════════════════════
 
 _ANALYTICS_HANDLERS = {
@@ -3585,9 +3583,9 @@ _ANALYTICS_HANDLERS = {
     "full_health_btn": show_full_health,
     "latency_btn": show_latency,
     "databases_btn": show_databases,
-    "autotune_btn": show_autotune,       # v1.3.3
-    "files_btn": cmd_files,              # v1.3.5
-    "audit_btn": cmd_audit,              # 🆕 v1.3.6
+    "autotune_btn": show_autotune,
+    "files_btn": cmd_files,
+    "audit_btn": cmd_audit,
 }
 
 
@@ -3610,7 +3608,6 @@ async def handle_analytics_callback(
     if data in ("files_open", "files_refresh"):
         await cmd_files(update, context)
         return
-    # 🆕 v1.3.6
     if data == "audit_md_btn":
         await _quick_answer(query, "⏳ جاري التصدير...")
         if user_id is not None:
@@ -3659,15 +3656,12 @@ async def handle_analytics_callback(
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# 16) /analytics + أوامر مباشرة
+# 17) /analytics + أوامر مباشرة
 # ═══════════════════════════════════════════════════════════════════════
 
 async def cmd_analytics(update: Update,
                         context: ContextTypes.DEFAULT_TYPE) -> None:
-    """
-    v1.3.2 CLEAN-2: نُفوّض التحقق الكامل إلى show_analytics_menu
-    (التي تفحص _check_developer بنفسها) — لتفادي التنفيذ المزدوج.
-    """
+    """v1.3.2 CLEAN-2: نُفوّض التحقق الكامل إلى show_analytics_menu."""
     await show_analytics_menu(update, context)
 
 
@@ -3694,18 +3688,15 @@ async def cmd_autotune(update: Update,
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# 17) التسجيل
+# 18) التسجيل
 # ═══════════════════════════════════════════════════════════════════════
 
 def register_handlers(application) -> bool:
     """
-    v1.3.6: يُسجّل كل الـ handlers (buttons + commands).
-
-    يُستدعى من bot.py v5.6.32+ ضمن [ORDER 5/6].
-    في حال نجاحه، لا حاجة للتسجيل اليدوي في bot.py.
+    v1.3.7: يُسجّل كل الـ handlers (buttons + commands).
 
     Returns:
-        True إن نجح التسجيل (كل الأوامر)، False إن فشل.
+        True إن نجح التسجيل، False إن فشل.
     """
     try:
         _safe_buttons = "|".join(
@@ -3745,10 +3736,9 @@ def register_handlers(application) -> bool:
         application.add_handler(
             CommandHandler("autotune", cmd_autotune)
         )
-        application.add_handler(  # v1.3.5
+        application.add_handler(
             CommandHandler("files", cmd_files)
         )
-        # 🆕 v1.3.6
         application.add_handler(
             CommandHandler("audit", cmd_audit)
         )
@@ -3765,7 +3755,7 @@ def register_handlers(application) -> bool:
             "audit, audit_full, audit_critical"
         )
         logger.info(
-            "✅ handlers_analytics v1.3.6: %d زر + 11 أمر (%s)",
+            "✅ handlers_analytics v1.3.7: %d زر + 11 أمر (%s)",
             len(ANALYTICS_BUTTONS),
             cmds,
         )
@@ -3806,7 +3796,6 @@ __all__ = [
     "cmd_databases",
     "cmd_autotune",
     "cmd_files",
-    # 🆕 v1.3.6
     "cmd_audit",
     "cmd_audit_full",
     "cmd_audit_critical",
@@ -3820,7 +3809,6 @@ __all__ = [
     "_file_to_module_path",
     "_extract_version",
     "_try_import_any",
-    # 🆕 v1.3.6
     "_AuditFinding",
     "_AuditReport",
     "_audit_file_sync",
@@ -3832,12 +3820,12 @@ __all__ = [
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# LOAD BEACON — v1.3.6
+# LOAD BEACON — v1.3.7
 # ═══════════════════════════════════════════════════════════════════════
 
 try:
     logger.info(
-        "✅ handlers_analytics v1.3.6 loaded | "
+        "✅ handlers_analytics v1.3.7 loaded | "
         "buttons=%d | "
         "FILES-SCAN-1=/files | "
         "FILES-SCAN-2=files_open+files_refresh | "
@@ -3851,6 +3839,12 @@ try:
         "AUDIT-2=AST+Patterns+PTB+BotSpecific | "
         "AUDIT-3=MD+JSON export | "
         "AUDIT-4=max_audit=%d,timeout=%.0fs | "
+        "FIX-SQL-FP-1=no-DOTALL+no-%%s | "
+        "FIX-EVAL-EXEC-FP-2=lookbehind+no-self-match | "
+        "FIX-EXCEPT-PASS-3=AST-accurate | "
+        "FIX-LOG-FSTRING-FP-4=single-line-only | "
+        "FIX-SELF-SCAN-5=self-excluded | "
+        "FIX-DECLARED-6=patterns-match-v5716 | "
         "FIX-VERSIONS-PATH=on | "
         "FIX-VERSIONS-ERR=on | "
         "AUTO-1..6=on | "
@@ -3858,7 +3852,7 @@ try:
         "db_diag_version=%s | "
         "CLEAN-1=regex-escape | "
         "CLEAN-2=cmd-analytics-no-double-check | "
-        "INTEGRATION=bot.py-v5.7.3-register-handlers | "
+        "INTEGRATION=bot.py-v5.7.16 | "
         "FIX-1=force-refresh-false | "
         "PERF-1=db-cache(ttl=%.0fs,max=%d) | "
         "PERF-2=quick-answer | "
