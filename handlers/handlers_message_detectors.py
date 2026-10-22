@@ -5,42 +5,22 @@
 handlers_message_detectors.py
 ===============================================================================
 🛡️ Relax Manager — Advanced Spam / Anti-Evasion Detection Engine
-Version: 4.1.2 (DEEP-REVIEW-FIXES)
+Version: 4.1.3 (FIX-CRIT-3: analyze_message_full_async Sync-Layer Blocking)
 
-🆕 v4.1.2 — إصلاحات المراجعة العميقة:
-    🔴 FIX-CRIT-1: analyze_message_full (sync) — تحذير صريح عند تمرير
-        bot + media (لأن 6 طبقات معطّلة فعلياً في المسار sync).
-    🔴 FIX-CRIT-2: analyze_urls_async — task tracking + timeout
-        محكم لكل URL (لمنع تسريب pool threads عند whois/requests
-        hanging). metrics: _pending_url_task_count.
-    🟠 FIX-MED-3: _transcribe_with_google — تقليص اللغات إلى لغتين
-        أساسيتين + constant قابل للضبط.
-    🟠 FIX-MED-4: _lsb_extract_text — uint16 بدل uint8 لمنع overflow
-        صامت عند تغييرات مستقبلية.
-    🟠 FIX-MED-5: _TG_INVITE_RE — بادئة إلزامية (t.me/telegram.me/...)
-        لتفادي مطابقة أرقام الهواتف كـ URLs.
-    🟠 FIX-MED-6: _check_nsfw_via_sightengine — طلب nudity-2.0 فقط
-        (بدل 3 نماذج مع استخدام واحد) لتقليل latency.
-    🟠 FIX-MED-7: _run_url_layer (sync) — _SYNC_URL_LIMIT=2 لتقليل
-        الحجب المتسلسل.
-    🟡 FIX-MIN-8: _version_semver — تُستخدم الآن في check_safe_browsing
-        (clientVersion).
-    🟡 FIX-MIN-9: _record_and_analyze_behavior — توحيد 3 أقفال في قفل
-        واحد (تقليل contention).
-    🟡 FIX-MIN-10: _extract_metadata_text — إزالة bio/description غير
-        الموجودة في Telegram Bot API.
-    🟡 FIX-MIN-11: _is_random_domain — دعم TLD بصيغة Punycode
-        (xn--p1ai).
-    🟡 FIX-MIN-12: _MessageContext.user_id — تخزين user_id في الـ ctx
-        (بدل استخراجه في _run_text_layer).
+🆕 v4.1.3 — إصلاح حاسم:
+    🔴 FIX-CRIT-3 (CRITICAL): `analyze_message_full_async` كانت تُنفّذ
+        8 طبقات sync على الـ main thread قبل `asyncio.gather`:
+            _run_text_layer, _run_metadata_layer, _run_obfuscation_layer,
+            _run_behavioral_layer, _run_reactions_layer, _run_context_layer,
+            _run_cipher_layer, _run_domain_rep_layer.
+        على رسائل الوسائط، هذا حجب event loop 10-15s رغم وجود timeout
+        في `handlers_message.py` (لأن wait_for لا يستطيع مقاطعة sync).
+        الحل: تغليف كل الطبقات sync في `asyncio.to_thread` واحد.
 
-🆕 v4.1.1 (محفوظ):
-    FIX-SYNC-1، FIX-NSFW-1، FIX-WARN-1، FIX-URLS-1، FIX-EXPORTS-1،
-    FIX-BEACON-1.
-
-🆕 v4.1.0 (محفوظ):
-    FIX-AR-8..10، FIX-DL-1، FIX-BEHAV-1، FIX-POOL-1، FIX-EMOJI-1،
-    FIX-VENUE-1.
+🆕 v4.1.2 — محفوظ:
+    FIX-CRIT-1, FIX-CRIT-2, FIX-MED-3..7, FIX-MIN-8..12.
+🆕 v4.1.1 — محفوظ: FIX-SYNC-1, FIX-NSFW-1, FIX-WARN-1, FIX-URLS-1.
+🆕 v4.1.0 — محفوظ: FIX-AR-8..10, FIX-DL-1, FIX-BEHAV-1, FIX-POOL-1.
 ===============================================================================
 """
 
@@ -81,13 +61,11 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
-_DETECTORS_VERSION = "4.1.2 DEEP-REVIEW-FIXES"
-_DETECTORS_VERSION_CLEAN = "4.1.2"
+_DETECTORS_VERSION = "4.1.3 FIX-CRIT-3"
+_DETECTORS_VERSION_CLEAN = "4.1.3"
 
-# 🆕 v4.1.1 FIX-SYNC-1: flag لتحذير واحد عند sync download
 _sync_download_warned = False
 
-# 🆕 v4.1.2 FIX-CRIT-2: عدّاد مراقبة مهام URL المعلّقة
 _pending_url_task_count = 0
 _pending_url_task_lock = threading.Lock()
 
@@ -208,16 +186,13 @@ SE_CIRCUIT_OPEN_SEC = _env_float("SE_CIRCUIT_OPEN_SEC", 60.0)
 
 POOL_TASK_TIMEOUT = _env_float("POOL_TASK_TIMEOUT", 60.0)
 
-# 🆕 v4.1.2 FIX-MED-7: حد URLs في مسار sync (لتقليل الحجب)
 _SYNC_URL_LIMIT = _env_int("SYNC_URL_LIMIT", 2)
 
-# 🆕 v4.1.2 FIX-CRIT-2: timeout محكم لمهام URL في async
 _URL_ASYNC_TASK_TIMEOUT = _env_float(
     "URL_ASYNC_TASK_TIMEOUT",
     min(POOL_TASK_TIMEOUT, 20.0),
 )
 
-# 🆕 v4.1.2 FIX-MED-3: لغات STT الأساسية
 _PRIMARY_STT_LANGS = tuple(
     s.strip() for s in os.getenv(
         "PRIMARY_STT_LANGS", "ar-SA,en-US"
@@ -280,9 +255,6 @@ async def _run_in_pool(
     الـ thread يستمر بالعمل (قيود Python — لا يمكن إيقاف thread قسرياً).
     العمليّة محصورة بـ _POOL_MAX_WORKERS، لذا الذاكرة محكمة، لكن
     thread عالق واحد يستهلك slot.
-
-    🆕 v4.1.2 FIX-CRIT-2: أنصح باستخدام timeouts محكمة
-    (_URL_ASYNC_TASK_TIMEOUT) للعمليات التي قد تُعلَّق (whois, requests).
     """
     if kwargs:
         fn = functools.partial(fn, **kwargs)
@@ -974,7 +946,6 @@ _TG_URL_RE = re.compile(
     r"(?i)(?:https?://)?(?:www\.)?(?:t\.me|telegram\.me|telegram\.dog)(?:/[^\s<>()]+)?"
 )
 
-# 🆕 v4.1.2 FIX-MED-5: بادئة إلزامية — لا تلتقط +966512345678 (رقم هاتف)
 _TG_INVITE_RE = re.compile(
     r"(?i)(?:t\.me/|telegram\.me/|telegram\.dog/)"
     r"(?:joinchat/|\+)[A-Za-z0-9_-]{4,}"
@@ -1270,9 +1241,6 @@ def _shannon_entropy(text: str) -> float:
 
 
 def _is_random_domain(domain: str) -> bool:
-    """
-    🆕 v4.1.2 FIX-MIN-11: دعم TLD بصيغة Punycode (xn--p1ai).
-    """
     if not domain or not ANTIEVASION_RANDOM_DOMAIN:
         return False
     try:
@@ -1283,7 +1251,6 @@ def _is_random_domain(domain: str) -> bool:
         if len(parts) < 2:
             return False
         tld = parts[-1]
-        # 🆕 FIX-MIN-11: يسمح بـ xn-- (punycode) مع أرقام/شرطات
         if not re.match(r"^[a-z][a-z0-9-]{1,24}$", tld):
             return False
         label = parts[-2]
@@ -1418,7 +1385,6 @@ def _count_word_matches(
 
 
 def _count_emojis(text: str) -> int:
-    """FIX-EMOJI-1: regex يحسب ZWJ sequences كوحدة واحدة."""
     if not text:
         return 0
     try:
@@ -1730,13 +1696,6 @@ def _merge_split_urls(text: str) -> str:
 # =============================================================================
 
 def _extract_possible_urls(text: str) -> List[str]:
-    """
-    استخراج URLs محتملة من النص.
-
-    🟠 FIX-URLS-1: IPv4 الخام مستبعد من هذه القائمة.
-    يُكتشَف IPv4 في _has_domain_pattern و _contains_link_enhanced
-    و _detect_url_obfuscation (كـ reason) لكن لا يظهر في possible_urls.
-    """
     if not text:
         return []
     merged = _merge_split_urls(str(text))
@@ -1744,7 +1703,6 @@ def _extract_possible_urls(text: str) -> List[str]:
     candidates.extend(_URL_RE.findall(merged))
     if ANTIEVASION_SCHEMELESS_URL:
         candidates.extend(_DOMAIN_HTTP_RE.findall(merged))
-    # FIX-URLS-1: IPv4 لا يُدرج كـ possible URL
     if ANTIEVASION_PUNYCODE:
         candidates.extend(_PUNYCODE_RE.findall(merged))
     if ANTIEVASION_TG_SCHEME:
@@ -2055,7 +2013,6 @@ def _extract_vcard_urls(message: Any) -> List[str]:
 
 
 def _extract_venue_url(message: Any) -> Optional[str]:
-    """FIX-VENUE-1: استخراج URL الفعلي فقط."""
     if message is None or not ANTIEVASION_VENUE_VCARD:
         return None
     try:
@@ -2171,7 +2128,6 @@ class _MessageContext:
         "has_video", "has_nsfw_media", "has_sticker",
         "sticker_emoji", "reactions_count", "message_id", "chat_id",
         "is_arabic_short_whitelisted",
-        # 🆕 v4.1.2 FIX-MIN-12
         "user_id",
     )
 
@@ -2233,7 +2189,6 @@ class _MessageContext:
         self.message_id = 0
         self.chat_id = 0
         self.is_arabic_short_whitelisted = False
-        # 🆕 v4.1.2 FIX-MIN-12
         self.user_id = 0
 
         for key, value in kwargs.items():
@@ -2411,7 +2366,6 @@ class _MessageContext:
                 self.normalized_text
             )
 
-            # 🆕 v4.1.2 FIX-MIN-12: استخراج user_id مسبقاً
             try:
                 _fu = getattr(message, "from_user", None)
                 self.user_id = int(getattr(_fu, "id", 0) or 0) if _fu else 0
@@ -3783,11 +3737,6 @@ async def _download_telegram_file_async(
 
 
 def _download_telegram_file(file_id: str, bot: Any = None) -> Optional[bytes]:
-    """
-    FIX-DL-1: sync download مُعطَّل بأمان.
-    FIX-SYNC-1: تحذير مرة واحدة (بدل الصمت) — يُوضّح أن المسار sync
-    لن يجلب وسائط، ويُوجِّه نحو analyze_message_full_async.
-    """
     global _sync_download_warned
     if not file_id:
         return None
@@ -3977,11 +3926,6 @@ def _transcribe_with_whisper(wav_bytes: bytes) -> str:
 
 
 def _transcribe_with_google(wav_bytes: bytes) -> str:
-    """
-    🆕 v4.1.2 FIX-MED-3: تقليص اللغات الأساسية إلى _PRIMARY_STT_LANGS
-    لتقليل الزمن الأقصى عند فشل متكرر (كل محاولة قد تُعلّق). يمكن
-    ضبطها عبر PRIMARY_STT_LANGS env.
-    """
     if not _AUDIO_AVAILABLE:
         return ""
     try:
@@ -4133,11 +4077,6 @@ def is_shortener(url: str) -> bool:
 
 
 def check_safe_browsing(url: str) -> Dict[str, Any]:
-    """
-    FIX-NSFW-1: User-Agent header.
-    🆕 v4.1.2 FIX-MIN-8: clientVersion يُمرَّر عبر _version_semver
-    (معالجة نظيفة لو كان _DETECTORS_VERSION_CLEAN "4.1.2 extras").
-    """
     if not SAFE_BROWSING_API_KEY or not _REQUESTS_AVAILABLE:
         return {"safe": True, "checked": False, "reason": "no_api_key"}
     try:
@@ -4254,17 +4193,12 @@ def analyze_urls(urls: List[str]) -> List[Dict[str, Any]]:
 async def analyze_urls_async(
     urls: List[str],
 ) -> List[Dict[str, Any]]:
-    """
-    🆕 v4.1.2 FIX-CRIT-2: task tracking + timeout محكم لكل URL
-    لمنع تسريب pool threads عند تعليق whois/requests.
-    """
     global _pending_url_task_count
     if not urls or not ASYNC_NETWORK_ENABLED:
         return []
     selected = urls[:URL_ENRICH_MAX_URLS]
 
     async def _one(u: str) -> Dict[str, Any]:
-        # timeout محكم على مستوى task الواحدة
         try:
             return await asyncio.wait_for(
                 _run_in_pool(
@@ -4326,11 +4260,6 @@ async def analyze_urls_async(
 # =============================================================================
 
 def extract_metadata_text(message: Any) -> str:
-    """
-    🆕 v4.1.2 FIX-MIN-10: إزالة "bio" (User) و "description" (Chat) —
-    لا وجود لهما في Telegram Bot API القياسي. تُجلب عبر bot.get_chat()
-    بشكل منفصل ولا تُضمن في هذا الاستخراج السريع.
-    """
     parts: List[str] = []
     try:
         from_user = getattr(message, "from_user", None)
@@ -4567,26 +4496,18 @@ def _record_and_analyze_behavior(
     text: str,
     has_url: bool,
 ) -> Tuple[Optional[str], Optional[str]]:
-    """
-    🆕 v4.1.2 FIX-MIN-9: توحيد 3 عمليات (record + rate + split) في قفل
-    واحد لتقليل contention. يُستخدم داخلياً في _run_behavioral_layer.
-    Public API (record_message/check_rate_limit/check_split_url_pattern)
-    محفوظ للتوافق.
-    """
     now = time.time()
 
     rate_hit: Optional[str] = None
     split_hit: Optional[str] = None
 
     with _BEHAVIOR_LOCK:
-        # 1. record
         _user_message_times[user_id].append(now)
         if len(text) < 20:
             _user_short_messages[user_id].append((now, text))
         if has_url:
             _user_url_count[user_id].append(now)
 
-        # 2. rate limit
         rate_cutoff = now - RATE_WINDOW_SECONDS
         recent_msgs = [
             t for t in _user_message_times[user_id] if t > rate_cutoff
@@ -4599,7 +4520,6 @@ def _record_and_analyze_behavior(
         elif len(recent_urls) > RATE_MAX_URLS:
             rate_hit = f"url_flood:{len(recent_urls)}/min"
 
-        # 3. split-url check
         split_cutoff = now - CROSS_MSG_WINDOW
         recent_short = [
             t for (ts, t) in _user_short_messages[user_id]
@@ -4926,10 +4846,6 @@ def _se_reset_circuit() -> None:
 def _check_nsfw_via_sightengine(
     image_bytes: bytes,
 ) -> Tuple[bool, float, List[str]]:
-    """
-    🆕 v4.1.2 FIX-MED-6: نطلب nudity-2.0 فقط (لا gore/offensive)
-    لتقليل latency + bandwidth.
-    """
     if not _REQUESTS_AVAILABLE or not image_bytes:
         return False, 0.0, []
 
@@ -5425,10 +5341,6 @@ def _find_encoded_payloads(text: str) -> List[Tuple[str, str]]:
 # =============================================================================
 
 def _lsb_extract_text(image_bytes: bytes, max_bytes: int = 500) -> str:
-    """
-    🆕 v4.1.2 FIX-MED-4: استخدام uint16 في bits/weights لمنع overflow
-    صامت (uint8.dot قد يفيض عند إضافة بت توقيع مستقبلاً).
-    """
     if not _NUMPY_AVAILABLE or not _PIL_AVAILABLE:
         return ""
 
@@ -5440,7 +5352,6 @@ def _lsb_extract_text(image_bytes: bytes, max_bytes: int = 500) -> str:
         arr = _np.array(image, dtype=_np.uint8)
         flat = arr.flatten()
 
-        # 🆕 FIX-MED-4: ترقية إلى uint16 قبل dot
         bits = (flat & 1).astype(_np.uint16)
 
         n_bytes = min(len(bits) // 8, max_bytes)
@@ -5451,7 +5362,7 @@ def _lsb_extract_text(image_bytes: bytes, max_bytes: int = 500) -> str:
         weights = _np.array(
             [128, 64, 32, 16, 8, 4, 2, 1], dtype=_np.uint16
         )
-        byte_values = bits.dot(weights)  # max 255 في uint16
+        byte_values = bits.dot(weights)
         raw = bytes(byte_values.astype(_np.uint8))
 
         try:
@@ -5711,7 +5622,6 @@ def _run_text_layer(message: Any, verdict: SpamVerdict) -> Dict[str, Any]:
         ctx = _MessageContext(message)
         score_info = _compute_spam_score(ctx, return_diagnostics=True)
 
-        # 🆕 v4.1.2 FIX-MIN-12: ctx.user_id بدل الاستخراج المكرر
         text_result: Dict[str, Any] = {
             **score_info,
             "text": ctx.analysis_text,
@@ -5795,7 +5705,6 @@ def _run_behavioral_layer(
     text_result: Dict[str, Any],
     verdict: SpamVerdict,
 ) -> None:
-    """FIX-BEHAV-1: استخدام text_result["text"]."""
     if not BEHAVIORAL_LAYER_ENABLED:
         return
     try:
@@ -5816,7 +5725,6 @@ def _run_behavioral_layer(
 
         has_url = bool(text_result.get("has_link", False))
 
-        # 🆕 v4.1.2 FIX-MIN-9: توحيد 3 أقفال في قفل واحد
         rate_hit, split_hit = _record_and_analyze_behavior(
             user_id, text, has_url
         )
@@ -6134,11 +6042,6 @@ def _run_audio_layer(message: Any, bot: Any, verdict: SpamVerdict) -> None:
 
 
 def _run_url_layer(text_result: Dict[str, Any], verdict: SpamVerdict) -> None:
-    """
-    🆕 v4.1.2 FIX-MED-7: قصر عدد URLs في المسار sync (افتراضياً 2)
-    لتقليل الحجب المتسلسل (كل URL يشغّل requests.head + safe_browsing
-    + whois بالتتابع).
-    """
     if not URL_LAYER_ENABLED or not URL_ENRICH_ENABLED:
         return
     try:
@@ -6157,7 +6060,6 @@ def _run_url_layer(text_result: Dict[str, Any], verdict: SpamVerdict) -> None:
         if not all_urls:
             return
 
-        # 🆕 FIX-MED-7
         url_analysis = analyze_urls(all_urls[:_SYNC_URL_LIMIT])
         verdict.url_analysis = url_analysis
         url_score = 0
@@ -6296,11 +6198,7 @@ def analyze_message_full(message: Any, bot: Any = None) -> SpamVerdict:
         OCR, audio, video, NSFW, sticker-OCR, stego.
 
     ➜ استخدم `analyze_message_full_async` للتحليل الكامل.
-
-    عند تمرير `bot` + رسالة تحتوي media، يُسجَّل تحذير واضح لتفادي
-    الاعتماد على نتيجة ناقصة بصمت.
     """
-    # 🆕 FIX-CRIT-1: تحذير صريح عند محاولة استخدام sync مع media
     if bot is not None and _message_has_media(message):
         try:
             logger.warning(
@@ -6353,23 +6251,35 @@ async def analyze_message_full_async(
     message: Any, bot: Any = None
 ) -> SpamVerdict:
     """
+    🆕 v4.1.3 FIX-CRIT-3: الطبقات الـ sync تُشغَّل في thread منفصل
+    عبر asyncio.to_thread لمنع حجب event loop. كان هذا يسبب lag
+    ~10-15s على رسائل الوسائط (رغم وجود timeout في handlers_message).
+
     FIX-WARN-1: log debug عند bot=None مع رسالة تحتوي وسائط.
-    الطبقات المعتمدة على التنزيل (OCR/صوت/فيديو/NSFW/ستيكر/ستيغو)
-    ستُتخطّى صامتةً لولا هذا التنبيه.
     """
     verdict = SpamVerdict(
         is_spam=False, total_score=0.0, confidence="none"
     )
 
-    text_result = _run_text_layer(message, verdict)
+    # 🆕 FIX-CRIT-3: تشغيل الطبقات الـ sync في thread
+    def _run_sync_layers() -> Dict[str, Any]:
+        tr = _run_text_layer(message, verdict)
+        _run_metadata_layer(message, verdict)
+        _run_obfuscation_layer(message, verdict)
+        _run_behavioral_layer(message, tr, verdict)
+        _run_reactions_layer(message, verdict)
+        _run_context_layer(tr, verdict)
+        _run_cipher_layer(message, verdict)
+        _run_domain_rep_layer(tr, verdict)
+        return tr
 
-    _run_metadata_layer(message, verdict)
-    _run_obfuscation_layer(message, verdict)
-    _run_behavioral_layer(message, text_result, verdict)
-    _run_reactions_layer(message, verdict)
-    _run_context_layer(text_result, verdict)
-    _run_cipher_layer(message, verdict)
-    _run_domain_rep_layer(text_result, verdict)
+    try:
+        text_result = await asyncio.to_thread(_run_sync_layers)
+    except Exception as exc:
+        logger.warning(
+            "analyze_message_full_async: sync layers failed: %r", exc
+        )
+        text_result = _empty_text_result()
 
     # FIX-WARN-1
     if bot is None and _message_has_media(message):
@@ -6600,7 +6510,6 @@ def get_spam_diagnostics(message: Any) -> Dict[str, Any]:
 # =============================================================================
 
 __all__ = [
-    # ─── Core config ──────────────────────────────────────────────────
     "DEBUG_DIAG", "DEBUG_SPAM",
     "TEXT_LAYER_ENABLED", "OCR_LAYER_ENABLED", "AUDIO_LAYER_ENABLED",
     "URL_LAYER_ENABLED", "METADATA_LAYER_ENABLED",
@@ -6625,14 +6534,11 @@ __all__ = [
     "RATE_WINDOW_SECONDS", "RATE_MAX_MESSAGES", "RATE_MAX_URLS",
     "CROSS_MSG_WINDOW", "MAX_ANALYSIS_TEXT_LENGTH", "MAX_REASON_COUNT",
     "MAX_SPAM_SCORE", "CLEANUP_INTERVAL",
-    # 🆕 v4.1.2
     "_SYNC_URL_LIMIT", "_URL_ASYNC_TASK_TIMEOUT", "_PRIMARY_STT_LANGS",
     "_pending_url_task_count", "_pending_url_task_lock",
 
-    # ─── env helpers ──────────────────────────────────────────────────
     "_env_bool", "_env_int", "_env_float",
 
-    # ─── Arabic whitelist ─────────────────────────────────────────────
     "ARABIC_SHORT_WHITELIST_ENABLED", "ARABIC_SHORT_MAX_CHARS",
     "ARABIC_SHORT_MAX_WORDS", "ARABIC_DOMINANCE_RATIO",
     "_ARABIC_GREETINGS", "_ARABIC_NEUTRAL_WORDS", "_ARABIC_SPAM_OVERRIDE",
@@ -6642,7 +6548,6 @@ __all__ = [
     "_arabic_char_ratio", "_normalize_arabic_for_compare",
     "_strip_arabic_diacritics", "_ARABIC_KEEP_AL_WORDS",
 
-    # ─── Anti-evasion flags ───────────────────────────────────────────
     "ANTIEVASION_ENTITY_LINK", "ANTIEVASION_BUTTON_LINK",
     "ANTIEVASION_SCHEMELESS_URL", "ANTIEVASION_HOMOGLYPH",
     "ANTIEVASION_COMBINING", "ANTIEVASION_COMPACT_WORDS",
@@ -6656,7 +6561,6 @@ __all__ = [
     "ANTIEVASION_EXTENDED_COMBINING", "ANTIEVASION_EXTRA_SCRIPTS",
     "ANTIEVASION_ALT_SCHEMES", "ANTIEVASION_RANDOM_DOMAIN",
 
-    # ─── Thresholds & caps ────────────────────────────────────────────
     "SPAM_SCORE_THRESHOLD", "POSTBOT_AUTO_BLOCK_CONFIDENCE",
     "SPAM_HARD_THRESHOLD", "SPAM_CRITICAL_THRESHOLD",
     "RANDOM_DOMAIN_MIN_LENGTH", "RANDOM_DOMAIN_MAX_VOWEL_RATIO",
@@ -6665,10 +6569,8 @@ __all__ = [
     "_SCORE_CAP_LINK", "_SCORE_CAP_CONTENT", "_SCORE_CAP_CTA",
     "_SCORE_CAP_EVASION", "_SCORE_CAP_STRUCTURE", "_SCORE_CAP_CONTEXT",
 
-    # ─── Dataclasses / context ────────────────────────────────────────
     "SpamVerdict", "_MessageContext",
 
-    # ─── Normalization ────────────────────────────────────────────────
     "_strip_combining_marks", "_deleet", "_apply_homoglyphs_safe",
     "_normalize_text", "_do_normalize", "_normalize_text_cached",
     "_strip_emoji_for_domain", "_has_hidden_chars", "_merge_split_urls",
@@ -6678,7 +6580,6 @@ __all__ = [
     "_scheme_replacement", "_tld_aware_dot_repl",
     "_tld_aware_dot_word_repl", "_tld_aware_multiline_repl",
 
-    # ─── Constants (regex/vocab) ──────────────────────────────────────
     "_COMMON_TLDS", "_TLD_PATTERN",
     "_HIDDEN_CHARS", "_BIDI_CHARS", "_COMBINING_RANGES",
     "_HOMOGLYPH_MAP", "_LEET_MAP", "_LEET_TARGETS",
@@ -6706,13 +6607,11 @@ __all__ = [
     "_NATURAL_VOWEL_SEQUENCES", "_COMMON_BRAND_PATTERNS",
     "_ALLOWED_URL_SCHEMES", "_REQ_TIMEOUT_TUPLE",
 
-    # ─── Generic helpers ──────────────────────────────────────────────
     "_unique_strings", "_extract_words", "_vocab_regex",
     "_count_word_matches", "_count_emojis", "_count_spam_emojis",
     "_count_separators", "_cap_score", "_cap_layer_score",
     "_script_counts", "_has_mixed_suspicious_scripts",
 
-    # ─── Entity / button ──────────────────────────────────────────────
     "_entity_type_str",
     "_extract_entity_urls", "_has_link_entity",
     "_extract_url_from_button", "_button_is_external",
@@ -6722,12 +6621,10 @@ __all__ = [
     "_get_message_analysis_text",
     "_has_button_link", "_extract_button_link_urls",
 
-    # ─── Link detection ───────────────────────────────────────────────
     "_has_domain_pattern", "_contains_link_enhanced",
     "_contains_email", "_contains_at_channel", "_contains_tg_scheme",
     "_extract_possible_urls",
 
-    # ─── Scoring ──────────────────────────────────────────────────────
     "_extract_spam_words", "_count_unique_matches",
     "_count_text_urls", "_compute_spam_score",
     "_looks_like_normal_conversation",
@@ -6738,12 +6635,10 @@ __all__ = [
     "_compact_evasion_variants", "_compact_target_present",
     "_message_has_media",
 
-    # ─── Random domain ────────────────────────────────────────────────
     "_is_random_domain", "_has_random_domain",
     "_extract_random_domains", "_extract_random_domains_from_merged",
     "_shannon_entropy",
 
-    # ─── OCR / audio / video layers ───────────────────────────────────
     "extract_text_from_image", "extract_qr_codes",
     "extract_image_content", "extract_image_content_async",
     "_preprocess_image",
@@ -6754,12 +6649,10 @@ __all__ = [
     "_extract_video_frames", "extract_video_content",
     "extract_video_content_async",
 
-    # ─── URL enrichment ───────────────────────────────────────────────
     "expand_url", "is_shortener", "check_safe_browsing",
     "get_domain_age_days", "analyze_url", "analyze_urls",
     "analyze_urls_async",
 
-    # ─── Metadata / obfuscation ───────────────────────────────────────
     "extract_metadata_text", "metadata_has_suspicious_content",
     "extract_metadata_urls",
     "_looks_like_text", "_has_url_signature", "_b64_pad",
@@ -6767,17 +6660,14 @@ __all__ = [
     "try_decode_url", "try_decode_reverse",
     "find_obfuscated_payloads", "has_any_obfuscation",
 
-    # ─── Behavioral ───────────────────────────────────────────────────
     "_BEHAVIOR_LOCK",
     "_user_message_times", "_user_short_messages",
     "_user_url_count", "_user_edit_times", "_edited_messages",
     "_context_buffers", "_last_cleanup", "_last_cleanup_lock",
     "record_message", "check_rate_limit",
     "check_split_url_pattern", "track_edit", "cleanup_old_data",
-    # 🆕 v4.1.2
     "_record_and_analyze_behavior",
 
-    # ─── NSFW ─────────────────────────────────────────────────────────
     "_check_nsfw_via_sightengine", "_analyze_nsfw_image",
     "_load_nsfw_classifier", "_has_any_nsfw_provider",
     "_detect_image_mime",
@@ -6785,25 +6675,21 @@ __all__ = [
     "_se_failure_count", "_se_last_failure_ts", "_se_circuit_lock",
     "extract_nsfw_from_message", "extract_nsfw_from_message_async",
 
-    # ─── Sticker / reactions / context ────────────────────────────────
     "_extract_sticker_text", "_extract_sticker_text_async",
     "_extract_sticker_text_sync",
     "analyze_reactions",
     "record_context_message", "analyze_context_window",
 
-    # ─── Cipher / stego ───────────────────────────────────────────────
     "try_decode_multi_base64", "try_decode_caesar", "try_decode_xor",
     "_find_encoded_payloads",
     "_lsb_extract_text", "extract_stego_content",
     "extract_stego_content_async",
 
-    # ─── Domain reputation ────────────────────────────────────────────
     "_domain_heuristic_analysis", "analyze_domain_reputation",
     "_domain_rep_cache_set", "_domain_rep_cache_get",
     "_domain_reputation_cache", "_DOMAIN_REP_CACHE_MAX",
     "_DOMAIN_REP_LOCK",
 
-    # ─── Orchestrator (sync) ──────────────────────────────────────────
     "_empty_text_result",
     "_run_text_layer", "_run_metadata_layer", "_run_obfuscation_layer",
     "_run_behavioral_layer", "_run_reactions_layer", "_run_context_layer",
@@ -6813,26 +6699,21 @@ __all__ = [
     "_run_stego_layer",
     "_aggregate_verdict", "_post_analysis_cleanup",
 
-    # ─── Orchestrator (async) ─────────────────────────────────────────
     "_run_ocr_layer_async", "_run_audio_layer_async",
     "_run_url_layer_async", "_run_video_layer_async",
     "_run_nsfw_layer_async", "_run_sticker_layer_async",
     "_run_stego_layer_async",
 
-    # ─── Public API ───────────────────────────────────────────────────
     "analyze_message_full", "analyze_message_full_async",
     "analyze_message", "get_spam_diagnostics",
     "is_spam", "is_high_confidence_spam", "is_critical_spam",
     "should_ignore_as_low_signal",
 
-    # ─── Version helper ───────────────────────────────────────────────
     "_version_semver",
 
-    # ─── Telegram download ────────────────────────────────────────────
     "_do_download_telegram_file",
     "_download_telegram_file", "_download_telegram_file_async",
 
-    # ─── Thread pool ──────────────────────────────────────────────────
     "_get_shared_pool", "_shutdown_shared_pool",
     "_run_in_pool", "install_default_executor",
     "shutdown_default_executor",
@@ -6860,7 +6741,8 @@ try:
         "SE_CIRCUIT=%d/%ds TIMEOUT=%.1fs URL_TIMEOUT=%.1fs SYNC_URLS=%d | "
         "AR_SHORT_WHITELIST=%s (max=%d chars/%d words, ratio=%.2f) | "
         "AR_GREETINGS=%d NEUTRAL=%d STT_LANGS=%s | "
-        "sync_download=disabled(FIX-DL-1)",
+        "sync_download=disabled(FIX-DL-1) | "
+        "FIX-CRIT-3=sync_layers_in_thread",
         _DETECTORS_VERSION,
         TEXT_LAYER_ENABLED,
         OCR_LAYER_ENABLED, _PIL_AVAILABLE,
