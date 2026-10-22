@@ -1,10 +1,35 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-handlers_analytics.py — واجهة التحليلات المتقدمة (v1.3.5 — DYNAMIC-FILES-SCAN)
+handlers_analytics.py — واجهة التحليلات المتقدمة (v1.3.6 — AUDIT-INTEGRATED)
 ================================================================================
-v1.3.5 — فوق v1.3.4:
+v1.3.6 — فوق v1.3.5:
 
+    🆕 AUDIT-1: قسم فحص شامل مدمج (audit_bot.py logic)
+        • /audit command — فحص كل ملفات المشروع .py
+        • /audit_full — تقرير مفصل
+        • /audit_critical — CRITICAL/HIGH فقط
+        • زر "🔍 فحص شامل" في القائمة (audit_btn)
+        • أزرار تصدير Markdown/JSON (audit_md_btn/audit_json_btn)
+
+    🆕 AUDIT-2: قواعد الفحص المدمجة:
+        • AST: bare except، time.sleep في async، requests في async،
+          shell=True، eval/exec، إحصائيات
+        • Pattern: توكنات مكشوفة، SQL injection، yaml.load، pickle،
+          TODO/FIXME، print بدل logging
+        • PTB: post_init/post_stop يدوياً، ترتيب _stop_polling_mode
+        • Bot-specific: data.get(None)، _admin_ids فارغة
+        • Declared fixes: التحقق من 16 إصلاح v5.7.13
+
+    🆕 AUDIT-3: تقارير متعددة:
+        • Markdown قابل للتنزيل (send_document)
+        • JSON قابل للتنزيل
+        • ملخص HTML في الرسالة
+
+    🆕 AUDIT-4: _MAX_AUDIT_FILES=200، _AUDIT_TIMEOUT_SEC=30،
+        Semaphore(4) للتوازي.
+
+v1.3.5 — محفوظ:
     🆕 FILES-SCAN-1: /files command — يفحص كل ملفات المشروع .py
         ديناميكياً (root + handlers/ + subdirs) ويعرض:
         • إصدار كل ملف (VERSION/__version__/_VERSION/docstring)
@@ -64,8 +89,13 @@ import time
 import html as _html_mod
 import traceback as _tb
 import importlib
+import asyncio
+import ast as _ast_mod
+import json as _json_mod
+import sys as _sys_mod
 from datetime import datetime, timedelta
-from pathlib import Path  # 🆕 v1.3.5
+from pathlib import Path
+from dataclasses import dataclass as _dataclass, field as _dc_field, asdict as _dc_asdict
 from typing import Optional, Dict, Any, List, Tuple, Callable, Awaitable, Union
 
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
@@ -98,8 +128,11 @@ ANALYTICS_BUTTONS = (
     "full_health_btn",
     "latency_btn",
     "databases_btn",
-    "autotune_btn",         # 🆕 v1.3.3
-    "files_btn",            # 🆕 v1.3.5
+    "autotune_btn",         # v1.3.3
+    "files_btn",            # v1.3.5
+    "audit_btn",            # 🆕 v1.3.6
+    "audit_md_btn",         # 🆕 v1.3.6
+    "audit_json_btn",       # 🆕 v1.3.6
 )
 
 
@@ -198,6 +231,766 @@ def _try_import_any(paths: List[str]) -> Tuple[Optional[Any], Optional[str]]:
             last_err = f"{type(ex).__name__}: {str(ex)[:80]}"
             continue
     return None, last_err
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# 🆕 v1.3.6 — AUDIT-SECTION
+# فحص شامل مدمج لكل ملفات المشروع .py (audit_bot.py logic)
+# ═══════════════════════════════════════════════════════════════════════
+
+_SEVERITY_ORDER = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3, "INFO": 4}
+_SEVERITY_ICONS = {
+    "CRITICAL": "🔴", "HIGH": "🟠", "MEDIUM": "🟡",
+    "LOW": "🔵", "INFO": "⚪",
+}
+_MAX_AUDIT_FILES = 200
+_AUDIT_TIMEOUT_SEC = 30
+
+
+@_dataclass
+class _AuditFinding:
+    rule_id: str
+    severity: str
+    line: int
+    message: str
+    snippet: str = ""
+    suggestion: str = ""
+    category: str = "general"
+
+
+@_dataclass
+class _AuditReport:
+    file: str = ""
+    file_size_bytes: int = 0
+    total_lines: int = 0
+    code_lines: int = 0
+    comment_lines: int = 0
+    blank_lines: int = 0
+    timestamp: str = ""
+    findings: List[_AuditFinding] = _dc_field(default_factory=list)
+    stats: Dict[str, Any] = _dc_field(default_factory=dict)
+    parse_error: Optional[str] = None
+    imports: List[str] = _dc_field(default_factory=list)
+    declared_version: Optional[str] = None
+    fixes_found: List[str] = _dc_field(default_factory=list)
+    fixes_missing: List[str] = _dc_field(default_factory=list)
+
+
+_DECLARED_FIXES_V5713: Dict[str, List[str]] = {
+    "P0-FIX-1: post_init no manual call": [
+        r"_post_init_executed", r"post_init\s+مُدار\s+من\s+PTB",
+    ],
+    "P0-FIX-2: post_stop unbind _post_stop": [
+        r"_post_stop_executed", r"app\._post_stop\s*=\s*None",
+    ],
+    "P0-FIX-3: watch_runner resets only 2xx/3xx": [
+        r"200\s*<=\s*resp\.status\s*<\s*400",
+    ],
+    "P1-FIX-4: collect_admin_ids continue on empty": [
+        r"if\s+not\s+result:\s*\n\s*#\s*🩹\s*FIX-4",
+        r"continue\s*\n\s*for\s+a\s+in\s+result",
+    ],
+    "P1-FIX-5: pre_checkout price validation": [
+        r"expected_f\s*<=\s*0", r"_amounts_match\(expected_f",
+    ],
+    "P1-FIX-6: successful_payment dev notify": [
+        r"create_gift_code.*exception", r"gift_code\s+exception",
+    ],
+    "P1-FIX-7: pid_is_bot_process cwd check": [
+        r"/proc/\{pid\}/cwd", r"os\.readlink",
+    ],
+    "P2-FIX-8: token regex": [
+        r"_TG_TOKEN_RE\s*=\s*re\.compile", r"\^\\d\{8,10\}",
+    ],
+    "P2-FIX-9: connection coroutine support": [
+        r"asyncio\.iscoroutine\(_conn_cm\)",
+    ],
+    "P2-FIX-10: no catch SystemExit": [
+        r"except\s+\(KeyboardInterrupt,\s*SystemExit\):\s*\n\s*raise",
+    ],
+    "P3-FIX-11: critical commands include grant": [
+        r"_CRITICAL_COMMANDS\s*=.*grant",
+    ],
+    "P3-FIX-12: group log idempotency": [
+        r"_GROUP_LOG_INSTANCE\s+is\s+not\s+None",
+    ],
+    "P3-FIX-13: pid file parent dir": [
+        r"os\.makedirs\(os\.path\.dirname\(_PID_FILE_PATH\)",
+    ],
+    "P3-FIX-14: pg max connections configurable": [
+        r"PG_MAX_CONNECTIONS",
+    ],
+    "P3-FIX-15: cmd_ping metrics": [
+        r"record_bot_metric\(\"pings_total\"",
+    ],
+    "P3-FIX-16: keep_alive log reason": [
+        r"keep_alive:\s*معطّل",
+    ],
+}
+
+_AUDIT_PATTERNS = [
+    {"id": "BARE_EXCEPT", "severity": "HIGH",
+     "pattern": _re_mod.compile(r"^\s*except\s*:\s*$", _re_mod.MULTILINE),
+     "message": "bare except: يُخفي كل الأخطاء",
+     "suggestion": "استخدم `except Exception:` أو نوعاً محدداً"},
+    {"id": "EXCEPT_PASS", "severity": "MEDIUM",
+     "pattern": _re_mod.compile(r"except\s+[^:]+:\s*\n\s*pass\b", _re_mod.MULTILINE),
+     "message": "except ...: pass يُخفي الأخطاء بصمت",
+     "suggestion": "أضف تسجيلاً أو معالجة"},
+    {"id": "EVAL_USE", "severity": "CRITICAL",
+     "pattern": _re_mod.compile(r"\beval\s*\("),
+     "message": "استخدام eval() — خطر أمني",
+     "suggestion": "استخدم ast.literal_eval"},
+    {"id": "EXEC_USE", "severity": "CRITICAL",
+     "pattern": _re_mod.compile(r"\bexec\s*\("),
+     "message": "استخدام exec() — خطر أمني",
+     "suggestion": "أعد تصميم المنطق"},
+    {"id": "SHELL_TRUE", "severity": "HIGH",
+     "pattern": _re_mod.compile(r"subprocess\.\w+\([^)]*shell\s*=\s*True"),
+     "message": "subprocess مع shell=True",
+     "suggestion": "استخدم قائمة args"},
+    {"id": "PICKLE_LOAD", "severity": "HIGH",
+     "pattern": _re_mod.compile(r"\bpickle\.loads?\s*\("),
+     "message": "pickle.load على بيانات غير موثوقة",
+     "suggestion": "استخدم json"},
+    {"id": "YAML_LOAD_UNSAFE", "severity": "HIGH",
+     "pattern": _re_mod.compile(
+         r"\byaml\.load\s*\([^)]*\)(?!\s*,\s*Loader\s*=\s*yaml\.SafeLoader)"),
+     "message": "yaml.load بدون SafeLoader",
+     "suggestion": "استخدم yaml.safe_load"},
+    {"id": "TODO_FIXME", "severity": "INFO",
+     "pattern": _re_mod.compile(r"#\s*(TODO|FIXME|XXX|HACK)\b"),
+     "message": "علامة TODO/FIXME",
+     "suggestion": "راجعها قبل الإنتاج"},
+    {"id": "PRINT_STATEMENT", "severity": "LOW",
+     "pattern": _re_mod.compile(r"^\s*print\s*\(", _re_mod.MULTILINE),
+     "message": "print بدل logging",
+     "suggestion": "استخدم logger.*"},
+    {"id": "HARDCODED_TOKEN", "severity": "CRITICAL",
+     "pattern": _re_mod.compile(r"['\"]\d{8,10}:[A-Za-z0-9_-]{35}['\"]"),
+     "message": "توكن بوت مضمّن في الكود",
+     "suggestion": "استخدم متغير بيئة"},
+    {"id": "HARDCODED_PASSWORD", "severity": "CRITICAL",
+     "pattern": _re_mod.compile(
+         r"(password|passwd|pwd|secret|api_key)\s*=\s*['\"][^'\"]{6,}['\"]",
+         _re_mod.IGNORECASE),
+     "message": "كلمة مرور/مفتاح مضمّن",
+     "suggestion": "استخدم متغير بيئة"},
+    {"id": "SQL_STRING_FORMAT", "severity": "HIGH",
+     "pattern": _re_mod.compile(
+         r"(SELECT|INSERT|UPDATE|DELETE)\s+.*(%s|\.format\(|f['\"])",
+         _re_mod.IGNORECASE | _re_mod.DOTALL),
+     "message": "SQL مبني بـ f-string/format",
+     "suggestion": "استخدم parameterized queries"},
+    {"id": "TIME_SLEEP_IN_ASYNC", "severity": "HIGH",
+     "pattern": _re_mod.compile(
+         r"async\s+def\s+\w+[^:]*:[\s\S]{0,2000}?\btime\.sleep\s*\("),
+     "message": "time.sleep داخل async def",
+     "suggestion": "استخدم await asyncio.sleep"},
+    {"id": "REQUESTS_IN_ASYNC", "severity": "HIGH",
+     "pattern": _re_mod.compile(
+         r"async\s+def\s+\w+[^:]*:[\s\S]{0,3000}?"
+         r"\brequests\.(get|post|put|delete|patch)\s*\("),
+     "message": "requests.* داخل async def",
+     "suggestion": "استخدم aiohttp أو httpx"},
+    {"id": "LOG_FSTRING", "severity": "LOW",
+     "pattern": _re_mod.compile(r"logger\.\w+\(\s*f['\"]"),
+     "message": "logging مع f-string بدل %s",
+     "suggestion": "استخدم logger.info('msg %s', var)"},
+]
+
+
+def _audit_get_line_snippet(source_lines: List[str], line_no: int,
+                             context: int = 0) -> str:
+    if not (1 <= line_no <= len(source_lines)):
+        return ""
+    start = max(0, line_no - 1 - context)
+    end = min(len(source_lines), line_no + context)
+    return "\n".join(
+        f"{i+1:5d}| {source_lines[i]}" for i in range(start, end)
+    )
+
+
+def _audit_count_lines(text: str) -> Tuple[int, int, int, int]:
+    lines = text.splitlines()
+    total = len(lines)
+    blank = sum(1 for ln in lines if not ln.strip())
+    comment = sum(1 for ln in lines if ln.strip().startswith("#"))
+    code = total - blank - comment
+    return total, code, comment, blank
+
+
+def _audit_extract_version(text: str) -> Optional[str]:
+    m = _re_mod.search(r"v(\d+\.\d+\.\d+(?:-[A-Za-z0-9-]+)?)", text[:3000])
+    return m.group(1) if m else None
+
+
+class _ASTAuditor(_ast_mod.NodeVisitor):
+    def __init__(self, source_lines: List[str],
+                 findings: List[_AuditFinding]):
+        self.source_lines = source_lines
+        self.findings = findings
+        self.async_depth = 0
+        self.imports: set = set()
+        self.stats = {
+            "classes": 0, "functions": 0, "async_functions": 0,
+            "awaits": 0, "create_tasks": 0, "bare_excepts": 0,
+            "try_blocks": 0, "comprehensions": 0, "lambdas": 0,
+        }
+
+    def _add(self, rule_id: str, severity: str, line: int,
+             message: str, suggestion: str = "", category: str = "ast"):
+        self.findings.append(_AuditFinding(
+            rule_id=rule_id, severity=severity, line=line,
+            message=message,
+            snippet=_audit_get_line_snippet(self.source_lines, line),
+            suggestion=suggestion, category=category,
+        ))
+
+    def visit_Import(self, node):
+        for alias in node.names:
+            self.imports.add(alias.name.split(".")[0])
+        self.generic_visit(node)
+
+    def visit_ImportFrom(self, node):
+        if node.module:
+            self.imports.add(node.module.split(".")[0])
+        self.generic_visit(node)
+
+    def visit_ClassDef(self, node):
+        self.stats["classes"] += 1
+        self.generic_visit(node)
+
+    def _visit_func(self, node, is_async: bool):
+        self.stats["functions"] += 1
+        if is_async:
+            self.stats["async_functions"] += 1
+            self.async_depth += 1
+        try:
+            self.generic_visit(node)
+        finally:
+            if is_async:
+                self.async_depth -= 1
+
+    def visit_FunctionDef(self, node):
+        self._visit_func(node, False)
+
+    def visit_AsyncFunctionDef(self, node):
+        self._visit_func(node, True)
+
+    def visit_Await(self, node):
+        self.stats["awaits"] += 1
+        self.generic_visit(node)
+
+    def visit_Try(self, node):
+        self.stats["try_blocks"] += 1
+        for h in node.handlers:
+            if h.type is None:
+                self.stats["bare_excepts"] += 1
+                self._add("AST_BARE_EXCEPT", "HIGH", h.lineno,
+                          "bare except: يُخفي SystemExit/KeyboardInterrupt",
+                          "استخدم `except Exception:`")
+        self.generic_visit(node)
+
+    def visit_Lambda(self, node):
+        self.stats["lambdas"] += 1
+        self.generic_visit(node)
+
+    def visit_ListComp(self, node):
+        self.stats["comprehensions"] += 1
+        self.generic_visit(node)
+
+    visit_SetComp = visit_ListComp
+    visit_DictComp = visit_ListComp
+    visit_GeneratorExp = visit_ListComp
+
+    def visit_Call(self, node):
+        fname = self._func_name(node.func)
+
+        if fname in ("asyncio.create_task", "create_task"):
+            self.stats["create_tasks"] += 1
+
+        if fname == "time.sleep" and self.async_depth > 0:
+            self._add("AST_TIME_SLEEP_IN_ASYNC", "HIGH", node.lineno,
+                      "time.sleep داخل async def — يحجب event loop",
+                      "استخدم await asyncio.sleep(...)")
+
+        if fname.startswith("requests.") and self.async_depth > 0:
+            self._add("AST_REQUESTS_IN_ASYNC", "HIGH", node.lineno,
+                      f"{fname} داخل async def", "استخدم httpx.AsyncClient")
+
+        if fname.startswith("subprocess.") and self._has_kwarg(
+                node, "shell", True):
+            self._add("AST_SHELL_TRUE", "HIGH", node.lineno,
+                      f"{fname} مع shell=True", "استخدم قائمة args")
+
+        if fname in ("eval", "exec"):
+            self._add("AST_EVAL_EXEC", "CRITICAL", node.lineno,
+                      f"{fname}() — خطر أمني", "أعد تصميم المنطق")
+
+        self.generic_visit(node)
+
+    def _has_kwarg(self, node, name, value):
+        for kw in node.keywords:
+            if kw.arg == name:
+                if isinstance(kw.value, _ast_mod.Constant) and \
+                        kw.value.value == value:
+                    return True
+        return False
+
+    def _func_name(self, node) -> str:
+        try:
+            if isinstance(node, _ast_mod.Name):
+                return node.id
+            if isinstance(node, _ast_mod.Attribute):
+                base = self._func_name(node.value)
+                return f"{base}.{node.attr}" if base else node.attr
+        except Exception:
+            pass
+        return ""
+
+
+def _audit_check_ptb_lifecycle(tree, source_lines, findings):
+    functions = {
+        n.name: n for n in _ast_mod.walk(tree)
+        if isinstance(n, (_ast_mod.FunctionDef, _ast_mod.AsyncFunctionDef))
+    }
+
+    fn = functions.get("_run_post_init_hooks")
+    if fn:
+        for node in _ast_mod.walk(fn):
+            if isinstance(node, _ast_mod.Await) and \
+                    isinstance(node.value, _ast_mod.Call):
+                fname = _ASTAuditor(source_lines, [])._func_name(
+                    node.value.func)
+                if "post_init" in fname:
+                    findings.append(_AuditFinding(
+                        rule_id="PTB_POST_INIT_MANUAL", severity="CRITICAL",
+                        line=node.lineno,
+                        message="استدعاء يدوي لـ post_init — PTB يستدعيه تلقائياً",
+                        suggestion="احذف الاستدعاء اليدوي",
+                        category="ptb",
+                    ))
+
+    fn = functions.get("_run_post_stop_hooks")
+    if fn:
+        for node in _ast_mod.walk(fn):
+            if isinstance(node, _ast_mod.Await) and \
+                    isinstance(node.value, _ast_mod.Call):
+                fname = _ASTAuditor(source_lines, [])._func_name(
+                    node.value.func)
+                if "post_stop" in fname:
+                    findings.append(_AuditFinding(
+                        rule_id="PTB_POST_STOP_MANUAL", severity="CRITICAL",
+                        line=node.lineno,
+                        message="استدعاء يدوي لـ post_stop — double-call",
+                        suggestion="احذف الاستدعاء اليدوي",
+                        category="ptb",
+                    ))
+
+    fn = functions.get("_stop_polling_mode")
+    if fn:
+        lines_in_fn = sorted(
+            {n.lineno for n in _ast_mod.walk(fn) if hasattr(n, "lineno")})
+        if lines_in_fn:
+            fn_start, fn_end = min(lines_in_fn), max(lines_in_fn)
+            updater_stop_line = post_stop_line = None
+            for i in range(fn_start, min(fn_end, len(source_lines)) + 1):
+                line = source_lines[i - 1]
+                if "updater.stop()" in line and updater_stop_line is None:
+                    updater_stop_line = i
+                if "_run_post_stop_hooks" in line and post_stop_line is None:
+                    post_stop_line = i
+            if updater_stop_line and post_stop_line and \
+                    post_stop_line < updater_stop_line:
+                findings.append(_AuditFinding(
+                    rule_id="PTB_POST_STOP_ORDER", severity="CRITICAL",
+                    line=post_stop_line,
+                    message="_run_post_stop_hooks قبل updater.stop() — ترتيب خاطئ",
+                    suggestion="استدعِ updater.stop() أولاً",
+                    category="ptb",
+                ))
+
+
+def _audit_check_data_none(tree, source_lines, findings):
+    functions = {
+        n.name: n for n in _ast_mod.walk(tree)
+        if isinstance(n, (_ast_mod.FunctionDef, _ast_mod.AsyncFunctionDef))
+    }
+    fn = functions.get("successful_payment")
+    if not fn:
+        return
+    body_src = "\n".join(
+        source_lines[n.lineno - 1] for n in _ast_mod.walk(fn)
+        if hasattr(n, "lineno")
+    )
+    has_validation = _re_mod.search(
+        r"not\s+isinstance\(\s*data\s*,\s*dict\s*\)", body_src
+    ) or _re_mod.search(r"if\s+data\s+is\s+None", body_src)
+    if "data.get(" in body_src and not has_validation:
+        for node in _ast_mod.walk(fn):
+            if isinstance(node, _ast_mod.Call) and \
+                    isinstance(node.func, _ast_mod.Attribute) and \
+                    node.func.attr == "get" and \
+                    isinstance(node.func.value, _ast_mod.Name) and \
+                    node.func.value.id == "data":
+                findings.append(_AuditFinding(
+                    rule_id="RUNTIME_DATA_NONE", severity="HIGH",
+                    line=node.lineno,
+                    message="data.get(...) بدون التحقق من None",
+                    suggestion="أضف `if not isinstance(data, dict): return`",
+                    category="runtime",
+                ))
+                break
+
+
+def _audit_check_admin_ids(tree, source_lines, findings):
+    main_fn = None
+    for node in _ast_mod.walk(tree):
+        if isinstance(node, _ast_mod.AsyncFunctionDef) and node.name == "main":
+            main_fn = node
+            break
+    if not main_fn:
+        return
+    body_src = "\n".join(
+        source_lines[n.lineno - 1] for n in _ast_mod.walk(main_fn)
+        if hasattr(n, "lineno") and n.lineno <= len(source_lines)
+    )
+    if "_admin_ids = await _collect_admin_ids()" in body_src:
+        if "if not _admin_ids" not in body_src:
+            for node in _ast_mod.walk(main_fn):
+                if isinstance(node, _ast_mod.Call) and \
+                        isinstance(node.func, _ast_mod.Name) and \
+                        node.func.id == "_collect_admin_ids":
+                    findings.append(_AuditFinding(
+                        rule_id="ADMIN_IDS_EMPTY", severity="HIGH",
+                        line=node.lineno,
+                        message="_admin_ids قد تكون فارغة → كل الأوامر الإدارية تُرفض",
+                        suggestion="أضف `if not _admin_ids: raise SystemExit(1)`",
+                        category="runtime",
+                    ))
+                    break
+
+
+def _audit_file_sync(path: Path) -> _AuditReport:
+    """فحص ملف واحد — نسخة متزامنة (تُستدعى من to_thread)."""
+    report = _AuditReport(
+        timestamp=datetime.now().isoformat(timespec="seconds"))
+    if not path.exists():
+        report.parse_error = f"الملف غير موجود: {path}"
+        return report
+
+    report.file = str(path)
+    try:
+        report.file_size_bytes = path.stat().st_size
+    except Exception:
+        pass
+
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            text = f.read()
+    except UnicodeDecodeError:
+        try:
+            with open(path, "r", encoding="latin-1") as f:
+                text = f.read()
+        except Exception as e:
+            report.parse_error = f"تعذّر القراءة: {e}"
+            return report
+    except Exception as e:
+        report.parse_error = f"تعذّر القراءة: {e}"
+        return report
+
+    source_lines = text.splitlines()
+    (report.total_lines, report.code_lines,
+     report.comment_lines, report.blank_lines) = _audit_count_lines(text)
+    report.declared_version = _audit_extract_version(text)
+
+    try:
+        tree = _ast_mod.parse(text, filename=str(path))
+    except SyntaxError as e:
+        report.parse_error = f"SyntaxError at line {e.lineno}: {e.msg}"
+        report.findings.append(_AuditFinding(
+            rule_id="SYNTAX_ERROR", severity="CRITICAL",
+            line=e.lineno or 0,
+            message=f"خطأ صياغة: {e.msg}",
+            snippet=_audit_get_line_snippet(
+                source_lines, e.lineno or 0, 1),
+            category="syntax",
+        ))
+        return report
+
+    auditor = _ASTAuditor(source_lines, report.findings)
+    try:
+        auditor.visit(tree)
+    except Exception as e:
+        report.findings.append(_AuditFinding(
+            rule_id="AST_VISIT_ERROR", severity="MEDIUM", line=0,
+            message=f"فشل AST walk: {type(e).__name__}",
+            category="ast",
+        ))
+    report.stats = dict(auditor.stats)
+    report.imports = sorted(auditor.imports)
+
+    for rule in _AUDIT_PATTERNS:
+        try:
+            for m in rule["pattern"].finditer(text):
+                line_no = text.count("\n", 0, m.start()) + 1
+                report.findings.append(_AuditFinding(
+                    rule_id=rule["id"], severity=rule["severity"],
+                    line=line_no, message=rule["message"],
+                    snippet=_audit_get_line_snippet(source_lines, line_no),
+                    suggestion=rule.get("suggestion", ""),
+                    category="pattern",
+                ))
+        except Exception:
+            pass
+
+    try:
+        _audit_check_ptb_lifecycle(tree, source_lines, report.findings)
+    except Exception:
+        pass
+    try:
+        _audit_check_data_none(tree, source_lines, report.findings)
+    except Exception:
+        pass
+    try:
+        _audit_check_admin_ids(tree, source_lines, report.findings)
+    except Exception:
+        pass
+
+    for fix_name, patterns in _DECLARED_FIXES_V5713.items():
+        try:
+            found = all(
+                _re_mod.search(p, text, _re_mod.MULTILINE)
+                for p in patterns
+            )
+            if found:
+                report.fixes_found.append(fix_name)
+            else:
+                report.fixes_missing.append(fix_name)
+        except Exception:
+            report.fixes_missing.append(fix_name)
+
+    report.findings.sort(key=lambda f: (
+        _SEVERITY_ORDER.get(f.severity, 99), f.line))
+    return report
+
+
+def _audit_summary_html(reports: List[_AuditReport],
+                        root: Optional[Path] = None) -> str:
+    """بناء ملخص HTML من عدة تقارير."""
+    by_sev_total = {s: 0 for s in _SEVERITY_ORDER}
+    total_findings = 0
+    total_files = len(reports)
+    ok_files = 0
+    err_files = 0
+    total_lines = 0
+    fixes_found_total = 0
+    fixes_missing_total = 0
+    parse_errors: List[Tuple[str, str]] = []
+
+    for r in reports:
+        if r.parse_error:
+            err_files += 1
+            parse_errors.append((Path(r.file).name, r.parse_error))
+            continue
+        ok_files += 1
+        total_lines += r.total_lines
+        fixes_found_total += len(r.fixes_found)
+        fixes_missing_total += len(r.fixes_missing)
+        total_findings += len(r.findings)
+        for f in r.findings:
+            if f.severity in by_sev_total:
+                by_sev_total[f.severity] += 1
+
+    lines = [
+        "🔍 <b>تقرير الفحص الشامل</b>",
+        "━━━━━━━━━━━━━━━━━━━━━━",
+        "",
+        f"📂 الملفات المفحوصة: <b>{total_files}</b>",
+        f"✅ سليمة: <b>{ok_files}</b> | ❌ أخطاء: <b>{err_files}</b>",
+        f"📏 إجمالي الأسطر: <b>{total_lines:,}</b>",
+        "",
+        f"🔎 إجمالي النتائج: <b>{total_findings}</b>",
+    ]
+
+    for sev in ("CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"):
+        n = by_sev_total[sev]
+        if n:
+            lines.append(f"{_SEVERITY_ICONS[sev]} {sev}: <b>{n}</b>")
+
+    lines.append("")
+    lines.append(
+        f"🛠️ إصلاحات v5.7.13: ✅{fixes_found_total} "
+        f"| ❌{fixes_missing_total}"
+    )
+
+    if root:
+        lines.append("")
+        lines.append(
+            f"📂 المسح من: <code>{_html_mod.escape(str(root))}</code>")
+
+    lines.append("")
+    lines.append("<b>━━━━━━━━━━━━━━━━━━━━━━</b>")
+    lines.append("<b>أبرز المشاكل:</b>")
+    lines.append("")
+
+    critical_files: List[Tuple[str, List[_AuditFinding]]] = []
+    for r in reports:
+        if r.parse_error:
+            continue
+        crits = [f for f in r.findings if f.severity == "CRITICAL"]
+        if crits:
+            critical_files.append((Path(r.file).name, crits))
+
+    if not critical_files:
+        lines.append("✅ <i>لا توجد مشاكل CRITICAL في الملفات المفحوصة.</i>")
+    else:
+        for fname, crits in critical_files[:5]:
+            lines.append(
+                f"\n📄 <b>{_html_mod.escape(fname)}</b> "
+                f"({len(crits)} CRITICAL)"
+            )
+            for c in crits[:3]:
+                lines.append(
+                    f"  🔴 L{c.line} <code>{c.rule_id}</code>: "
+                    f"{_html_mod.escape(c.message[:80])}"
+                )
+            if len(crits) > 3:
+                lines.append(f"  … و{len(crits) - 3} آخر")
+
+    if parse_errors:
+        lines.append("")
+        lines.append("<b>❌ أخطاء صياغة:</b>")
+        for fname, err in parse_errors[:5]:
+            lines.append(
+                f"  ❌ <code>{_html_mod.escape(fname)}</code>\n"
+                f"     <i>{_html_mod.escape(err[:100])}</i>"
+            )
+
+    lines.append("")
+    lines.append(f"🕐 <i>{TimeUtils.mecca_iso()[:19]}</i>")
+
+    return "\n".join(lines)
+
+
+def _audit_to_markdown(reports: List[_AuditReport],
+                       root: Optional[Path] = None) -> str:
+    """بناء تقرير Markdown من عدة تقارير."""
+    md_lines = [
+        "# 🔍 تقرير الفحص الشامل",
+        "",
+        f"**التاريخ**: {datetime.now().isoformat(timespec='seconds')}",
+    ]
+    if root:
+        md_lines.append(f"**المسح من**: `{root}`")
+    md_lines.append(f"**عدد الملفات**: {len(reports)}")
+    md_lines.append("")
+
+    for r in reports:
+        try:
+            name = Path(r.file).name
+        except Exception:
+            name = r.file
+        md_lines.append(f"## 📄 `{name}`")
+        md_lines.append("")
+        if r.parse_error:
+            md_lines.append(f"❌ **خطأ صياغة**: {r.parse_error}")
+            md_lines.append("")
+            continue
+
+        md_lines.append(f"- **الحجم**: {r.file_size_bytes:,} bytes")
+        md_lines.append(f"- **الأسطر**: {r.total_lines:,} "
+                        f"(كود={r.code_lines}, تعليقات={r.comment_lines})")
+        if r.declared_version:
+            md_lines.append(f"- **الإصدار**: v{r.declared_version}")
+        md_lines.append(f"- **النتائج**: {len(r.findings)}")
+        md_lines.append(
+            f"- **إصلاحات v5.7.13**: "
+            f"✅{len(r.fixes_found)} / ❌{len(r.fixes_missing)}"
+        )
+        md_lines.append("")
+
+        if r.findings:
+            md_lines.append("| الشدة | السطر | القاعدة | الرسالة |")
+            md_lines.append("|-------|-------|---------|---------|")
+            for f in r.findings[:30]:
+                msg = f.message.replace("|", "\\|")[:80]
+                md_lines.append(
+                    f"| {_SEVERITY_ICONS[f.severity]} {f.severity} "
+                    f"| {f.line} | `{f.rule_id}` | {msg} |"
+                )
+            if len(r.findings) > 30:
+                md_lines.append(
+                    f"\n_… و{len(r.findings) - 30} نتيجة أخرى_")
+        else:
+            md_lines.append("✅ لا توجد مشاكل.")
+        md_lines.append("")
+
+    return "\n".join(md_lines)
+
+
+async def _audit_run_reports(
+    files: List[Path],
+    timeout: float = _AUDIT_TIMEOUT_SEC,
+) -> List[_AuditReport]:
+    """تشغيل الفحص على قائمة ملفات (بالتوازي مع حد أقصى)."""
+    reports: List[_AuditReport] = []
+    sem = asyncio.Semaphore(4)
+
+    async def _one(p: Path) -> Optional[_AuditReport]:
+        async with sem:
+            try:
+                return await asyncio.wait_for(
+                    asyncio.to_thread(_audit_file_sync, p),
+                    timeout=timeout,
+                )
+            except asyncio.TimeoutError:
+                return _AuditReport(
+                    file=str(p),
+                    parse_error=f"timeout بعد {timeout}s",
+                )
+            except Exception as e:
+                return _AuditReport(
+                    file=str(p),
+                    parse_error=f"{type(e).__name__}: {str(e)[:100]}",
+                )
+
+    try:
+        tasks = [asyncio.create_task(_one(p)) for p in files]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        for r in results:
+            if isinstance(r, _AuditReport):
+                reports.append(r)
+            elif isinstance(r, Exception):
+                logger.debug(f"_audit_run_reports: {r}")
+    except Exception as e:
+        logger.error(f"_audit_run_reports: {e}")
+
+    return reports
+
+
+async def _audit_collect_files(root: Path) -> List[Path]:
+    """جمع ملفات .py من الجذر."""
+    files: List[Path] = []
+    try:
+        for py_file in root.rglob("*.py"):
+            try:
+                parts = py_file.relative_to(root).parts
+            except ValueError:
+                continue
+            if any(p in _EXCLUDED_DIRS for p in parts[:-1]):
+                continue
+            if py_file.name in _SKIP_FILENAMES:
+                continue
+            files.append(py_file)
+            if len(files) >= _MAX_AUDIT_FILES:
+                break
+    except Exception as e:
+        logger.warning(f"_audit_collect_files: {e}")
+
+    files.sort(key=lambda p: str(p).lower())
+    return files
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -726,6 +1519,10 @@ def _default_analytics_keyboard(lang: str = "ar") -> InlineKeyboardMarkup:
         [InlineKeyboardButton(
             _lbl("analytics_files", "📂 ملفات المشروع"),
             callback_data="files_btn")],
+        # 🆕 v1.3.6
+        [InlineKeyboardButton(
+            _lbl("analytics_audit", "🔍 فحص شامل"),
+            callback_data="audit_btn")],
         [InlineKeyboardButton(
             _lbl("refresh_btn", "🔄 تحديث"),
             callback_data="refresh_btn")],
@@ -1990,7 +2787,7 @@ async def show_autotune(update: Update,
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# 12c) 🆕 v1.3.5 — /files : فحص كل ملفات المشروع .py
+# 12c) v1.3.5 — /files : فحص كل ملفات المشروع .py
 # ═══════════════════════════════════════════════════════════════════════
 
 async def cmd_files(update: Update,
@@ -2235,6 +3032,345 @@ async def cmd_files(update: Update,
 
 
 # ═══════════════════════════════════════════════════════════════════════
+# 🆕 v1.3.6 — /audit : فحص شامل
+# ═══════════════════════════════════════════════════════════════════════
+
+async def cmd_audit(update: Update,
+                    context: ContextTypes.DEFAULT_TYPE) -> None:
+    """🔍 فحص شامل لكل ملفات المشروع .py."""
+    user_id = _get_safe_user_id(update)
+    chat_id = _safe_get_chat_id(update, None)
+    query = update.callback_query
+
+    if query:
+        await _quick_answer(query, "⏳ جاري الفحص...")
+
+    if not _check_developer(user_id):
+        await _reject_non_dev(context.bot, chat_id, query)
+        return
+
+    waiting_text = (
+        "🔍 <b>جاري الفحص الشامل...</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"📂 حتى {_MAX_AUDIT_FILES} ملف\n"
+        "🔬 AST + Patterns + PTB + Bot-specific\n"
+        "⏳ 10-30 ثانية..."
+    )
+
+    waiting_msg = None
+    if query:
+        try:
+            await _safe_edit(query, waiting_text, None)
+        except Exception as e:
+            logger.debug(f"cmd_audit waiting (edit): {e}")
+    else:
+        try:
+            waiting_msg = await context.bot.send_message(
+                chat_id, waiting_text, parse_mode="HTML",
+                disable_web_page_preview=True,
+            )
+        except Exception as e:
+            logger.debug(f"cmd_audit waiting (send): {e}")
+
+    try:
+        root = _find_project_root()
+        files = await _audit_collect_files(root)
+        if not files:
+            err = "⚠️ لم يتم العثور على ملفات .py للفحص."
+            if query:
+                await _safe_edit(query, err, _back_keyboard("admin_analytics"))
+            elif chat_id is not None:
+                await safe_send(context.bot, chat_id, err)
+            return
+
+        reports = await _audit_run_reports(files)
+        summary = _audit_summary_html(reports, root)
+
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton(
+                "📄 تقرير Markdown",
+                callback_data="audit_md_btn",
+            ),
+             InlineKeyboardButton(
+                "💾 تقرير JSON",
+                callback_data="audit_json_btn",
+            )],
+            [InlineKeyboardButton(
+                "🔄 إعادة الفحص",
+                callback_data="audit_btn",
+            )],
+            [InlineKeyboardButton(
+                "🔙 رجوع",
+                callback_data="admin_analytics",
+            )],
+        ])
+
+        # حفظ التقارير في bot_data للتنزيل لاحقاً
+        try:
+            _cache_key = f"audit_reports:{user_id}"
+            context.bot_data[_cache_key] = {
+                "reports": reports,
+                "root": str(root),
+                "ts": time.time(),
+            }
+            # تنظيف الإدخالات القديمة (> 10 دقائق)
+            for k in list(context.bot_data.keys()):
+                if isinstance(k, str) and k.startswith("audit_reports:"):
+                    entry = context.bot_data.get(k)
+                    if isinstance(entry, dict):
+                        try:
+                            if time.time() - entry.get("ts", 0) > 600:
+                                context.bot_data.pop(k, None)
+                        except Exception:
+                            pass
+        except Exception as e:
+            logger.debug(f"cmd_audit cache store: {e}")
+
+        MAX_SINGLE = 3800
+        if query:
+            if len(summary) <= MAX_SINGLE:
+                ok = await _safe_edit(query, summary, kb)
+                if ok:
+                    return
+            try:
+                if waiting_msg is not None:
+                    await waiting_msg.delete()
+            except Exception:
+                pass
+            if chat_id is not None:
+                await _safe_send_long(
+                    context.bot, chat_id, summary, reply_markup=kb)
+        elif chat_id is not None:
+            try:
+                if waiting_msg is not None:
+                    await waiting_msg.delete()
+            except Exception:
+                pass
+            await _safe_send_long(
+                context.bot, chat_id, summary, reply_markup=kb)
+
+    except Exception as e:
+        logger.error("cmd_audit: %s", e, exc_info=True)
+        try:
+            if waiting_msg is not None:
+                await waiting_msg.delete()
+        except Exception:
+            pass
+        err_text = (
+            f"❌ <b>فشل الفحص الشامل</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━\n{_err_detail(e)}"
+        )
+        if query:
+            await _safe_edit(
+                query, err_text, _back_keyboard("admin_analytics"))
+        elif chat_id is not None:
+            await safe_send(context.bot, chat_id, err_text)
+
+
+async def _audit_send_markdown(update: Update,
+                                context: ContextTypes.DEFAULT_TYPE,
+                                user_id: int) -> None:
+    query = update.callback_query
+    chat_id = _safe_get_chat_id(update, query)
+    if not _check_developer(user_id):
+        await _reject_non_dev(context.bot, chat_id, query)
+        return
+
+    cache_key = f"audit_reports:{user_id}"
+    entry = context.bot_data.get(cache_key)
+    if not entry:
+        err = (
+            "⚠️ لا توجد تقارير محفوظة.\n"
+            "شغّل /audit أولاً."
+        )
+        if query:
+            await query.answer(err, show_alert=True)
+        elif chat_id is not None:
+            await safe_send(context.bot, chat_id, err)
+        return
+
+    reports = entry.get("reports") or []
+    root_str = entry.get("root")
+    root = Path(root_str) if root_str else None
+
+    try:
+        md = _audit_to_markdown(reports, root)
+        buf = io.BytesIO(md.encode("utf-8"))
+        buf.seek(0)
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"audit_report_{ts}.md"
+        await context.bot.send_document(
+            chat_id=chat_id,
+            document=buf,
+            filename=filename,
+            caption=(
+                f"📄 <b>تقرير Markdown</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"📂 الملفات: <b>{len(reports)}</b>\n"
+                f"📏 الحجم: <b>{len(md):,} حرف</b>"
+            ),
+            parse_mode="HTML",
+        )
+    except Exception as e:
+        logger.error(f"_audit_send_markdown: {e}", exc_info=True)
+        if chat_id is not None:
+            await safe_send(
+                context.bot, chat_id,
+                f"❌ فشل إرسال Markdown: {_err_detail(e)}",
+            )
+
+
+async def _audit_send_json(update: Update,
+                            context: ContextTypes.DEFAULT_TYPE,
+                            user_id: int) -> None:
+    query = update.callback_query
+    chat_id = _safe_get_chat_id(update, query)
+    if not _check_developer(user_id):
+        await _reject_non_dev(context.bot, chat_id, query)
+        return
+
+    cache_key = f"audit_reports:{user_id}"
+    entry = context.bot_data.get(cache_key)
+    if not entry:
+        err = (
+            "⚠️ لا توجد تقارير محفوظة.\n"
+            "شغّل /audit أولاً."
+        )
+        if query:
+            await query.answer(err, show_alert=True)
+        elif chat_id is not None:
+            await safe_send(context.bot, chat_id, err)
+        return
+
+    reports = entry.get("reports") or []
+    try:
+        data = {
+            "timestamp": datetime.now().isoformat(timespec="seconds"),
+            "root": entry.get("root"),
+            "total_files": len(reports),
+            "reports": [_dc_asdict(r) for r in reports],
+        }
+        js = _json_mod.dumps(data, ensure_ascii=False, indent=2)
+        buf = io.BytesIO(js.encode("utf-8"))
+        buf.seek(0)
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"audit_report_{ts}.json"
+        await context.bot.send_document(
+            chat_id=chat_id,
+            document=buf,
+            filename=filename,
+            caption=(
+                f"💾 <b>تقرير JSON</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"📂 الملفات: <b>{len(reports)}</b>"
+            ),
+            parse_mode="HTML",
+        )
+    except Exception as e:
+        logger.error(f"_audit_send_json: {e}", exc_info=True)
+        if chat_id is not None:
+            await safe_send(
+                context.bot, chat_id,
+                f"❌ فشل إرسال JSON: {_err_detail(e)}",
+            )
+
+
+async def cmd_audit_full(update: Update,
+                         context: ContextTypes.DEFAULT_TYPE) -> None:
+    """🔍 فحص كل الملفات + تقرير مفصل."""
+    await cmd_audit(update, context)
+
+
+async def cmd_audit_critical(update: Update,
+                             context: ContextTypes.DEFAULT_TYPE) -> None:
+    """🔴 فحص CRITICAL/HIGH فقط."""
+    user_id = _get_safe_user_id(update)
+    chat_id = _safe_get_chat_id(update, None)
+    query = update.callback_query
+
+    if query:
+        await _quick_answer(query, "⏳ جاري الفحص...")
+
+    if not _check_developer(user_id):
+        await _reject_non_dev(context.bot, chat_id, query)
+        return
+
+    try:
+        root = _find_project_root()
+        files = await _audit_collect_files(root)
+        reports = await _audit_run_reports(files)
+
+        critical_only = []
+        for r in reports:
+            if r.parse_error:
+                continue
+            crits = [f for f in r.findings
+                     if f.severity in ("CRITICAL", "HIGH")]
+            if crits:
+                critical_only.append((Path(r.file).name, crits))
+
+        if not critical_only:
+            text = (
+                "✅ <b>لا توجد مشاكل CRITICAL/HIGH</b>\n"
+                "━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                f"📂 فُحص {len(reports)} ملف"
+            )
+        else:
+            lines = [
+                "🔴 <b>مشاكل CRITICAL/HIGH فقط</b>",
+                "━━━━━━━━━━━━━━━━━━━━━━",
+                "",
+            ]
+            total = sum(len(c) for _, c in critical_only)
+            lines.append(f"📊 الإجمالي: <b>{total}</b>")
+            lines.append("")
+            for fname, crits in critical_only[:10]:
+                lines.append(
+                    f"\n📄 <b>{_html_mod.escape(fname)}</b> ({len(crits)})")
+                for c in crits[:5]:
+                    icon = _SEVERITY_ICONS[c.severity]
+                    lines.append(
+                        f"  {icon} L{c.line} <code>{c.rule_id}</code>\n"
+                        f"     <i>{_html_mod.escape(c.message[:100])}</i>"
+                    )
+                if len(crits) > 5:
+                    lines.append(f"  … و{len(crits) - 5} آخر")
+            text = "\n".join(lines)
+
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton(
+                "🔄 إعادة الفحص",
+                callback_data="audit_btn",
+            )],
+            [InlineKeyboardButton(
+                "🔙 رجوع",
+                callback_data="admin_analytics",
+            )],
+        ])
+
+        if query:
+            ok = await _safe_edit(query, text, kb)
+            if not ok and chat_id is not None:
+                await _safe_send_long(
+                    context.bot, chat_id, text, reply_markup=kb)
+        elif chat_id is not None:
+            await _safe_send_long(
+                context.bot, chat_id, text, reply_markup=kb)
+
+    except Exception as e:
+        logger.error("cmd_audit_critical: %s", e, exc_info=True)
+        err_text = (
+            f"❌ <b>فشل الفحص</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━\n{_err_detail(e)}"
+        )
+        if query:
+            await _safe_edit(
+                query, err_text, _back_keyboard("admin_analytics"))
+        elif chat_id is not None:
+            await safe_send(context.bot, chat_id, err_text)
+
+
+# ═══════════════════════════════════════════════════════════════════════
 # 13) /versions
 # ═══════════════════════════════════════════════════════════════════════
 
@@ -2357,7 +3493,6 @@ async def cmd_versions(update: Update,
             "🔄 تحديث",
             callback_data="versions_refresh",
         )],
-        # 🆕 v1.3.5
         [InlineKeyboardButton(
             "📂 كل الملفات",
             callback_data="files_open",
@@ -2451,7 +3586,8 @@ _ANALYTICS_HANDLERS = {
     "latency_btn": show_latency,
     "databases_btn": show_databases,
     "autotune_btn": show_autotune,       # v1.3.3
-    "files_btn": cmd_files,              # 🆕 v1.3.5
+    "files_btn": cmd_files,              # v1.3.5
+    "audit_btn": cmd_audit,              # 🆕 v1.3.6
 }
 
 
@@ -2463,6 +3599,7 @@ async def handle_analytics_callback(
         return
 
     data = (query.data or "").split(":")[0]
+    user_id = _get_safe_user_id(update)
 
     if data == "versions_refresh":
         await cmd_versions(update, context)
@@ -2470,9 +3607,19 @@ async def handle_analytics_callback(
     if data == "analytics_reset_cache":
         await cmd_analytics_reset(update, context)
         return
-    # 🆕 v1.3.5
     if data in ("files_open", "files_refresh"):
         await cmd_files(update, context)
+        return
+    # 🆕 v1.3.6
+    if data == "audit_md_btn":
+        await _quick_answer(query, "⏳ جاري التصدير...")
+        if user_id is not None:
+            await _audit_send_markdown(update, context, user_id)
+        return
+    if data == "audit_json_btn":
+        await _quick_answer(query, "⏳ جاري التصدير...")
+        if user_id is not None:
+            await _audit_send_json(update, context, user_id)
         return
 
     if data not in ANALYTICS_BUTTONS:
@@ -2552,7 +3699,7 @@ async def cmd_autotune(update: Update,
 
 def register_handlers(application) -> bool:
     """
-    v1.3.5: يُسجّل كل الـ handlers (buttons + commands).
+    v1.3.6: يُسجّل كل الـ handlers (buttons + commands).
 
     يُستدعى من bot.py v5.6.32+ ضمن [ORDER 5/6].
     في حال نجاحه، لا حاجة للتسجيل اليدوي في bot.py.
@@ -2567,7 +3714,8 @@ def register_handlers(application) -> bool:
         pattern = (
             r"^(?:" + _safe_buttons + r"|"
             r"versions_refresh|analytics_reset_cache|"
-            r"files_open|files_refresh"
+            r"files_open|files_refresh|"
+            r"audit_md_btn|audit_json_btn"
             r")(?::\d+)?$"
         )
         application.add_handler(
@@ -2597,16 +3745,27 @@ def register_handlers(application) -> bool:
         application.add_handler(
             CommandHandler("autotune", cmd_autotune)
         )
-        application.add_handler(  # 🆕 v1.3.5
+        application.add_handler(  # v1.3.5
             CommandHandler("files", cmd_files)
+        )
+        # 🆕 v1.3.6
+        application.add_handler(
+            CommandHandler("audit", cmd_audit)
+        )
+        application.add_handler(
+            CommandHandler("audit_full", cmd_audit_full)
+        )
+        application.add_handler(
+            CommandHandler("audit_critical", cmd_audit_critical)
         )
 
         cmds = (
             "analytics, fullhealth, latency, versions, "
-            "analytics_reset, databases, autotune, files"
+            "analytics_reset, databases, autotune, files, "
+            "audit, audit_full, audit_critical"
         )
         logger.info(
-            "✅ handlers_analytics v1.3.5: %d زر + 8 أوامر (%s)",
+            "✅ handlers_analytics v1.3.6: %d زر + 11 أمر (%s)",
             len(ANALYTICS_BUTTONS),
             cmds,
         )
@@ -2646,27 +3805,39 @@ __all__ = [
     "cmd_analytics_reset",
     "cmd_databases",
     "cmd_autotune",
-    "cmd_files",                # 🆕 v1.3.5
+    "cmd_files",
+    # 🆕 v1.3.6
+    "cmd_audit",
+    "cmd_audit_full",
+    "cmd_audit_critical",
     "register_handlers",
     "register",
     "_cached_db_call",
     "_invalidate_analytics_cache",
     "_get_cache_stats",
     "_quick_answer",
-    "_find_project_root",       # 🆕 v1.3.5
-    "_file_to_module_path",     # 🆕 v1.3.5
-    "_extract_version",         # 🆕 v1.3.5
-    "_try_import_any",          # 🆕 v1.3.5
+    "_find_project_root",
+    "_file_to_module_path",
+    "_extract_version",
+    "_try_import_any",
+    # 🆕 v1.3.6
+    "_AuditFinding",
+    "_AuditReport",
+    "_audit_file_sync",
+    "_audit_run_reports",
+    "_audit_collect_files",
+    "_audit_summary_html",
+    "_audit_to_markdown",
 ]
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# LOAD BEACON — v1.3.5
+# LOAD BEACON — v1.3.6
 # ═══════════════════════════════════════════════════════════════════════
 
 try:
     logger.info(
-        "✅ handlers_analytics v1.3.5 loaded | "
+        "✅ handlers_analytics v1.3.6 loaded | "
         "buttons=%d | "
         "FILES-SCAN-1=/files | "
         "FILES-SCAN-2=files_open+files_refresh | "
@@ -2676,6 +3847,10 @@ try:
         "FILES-SCAN-6=_file_to_module_path | "
         "FILES-SCAN-7=bot.py-special | "
         "FILES-SCAN-8=max_scan=%d | "
+        "AUDIT-1=/audit+/audit_full+/audit_critical | "
+        "AUDIT-2=AST+Patterns+PTB+BotSpecific | "
+        "AUDIT-3=MD+JSON export | "
+        "AUDIT-4=max_audit=%d,timeout=%.0fs | "
         "FIX-VERSIONS-PATH=on | "
         "FIX-VERSIONS-ERR=on | "
         "AUTO-1..6=on | "
@@ -2693,6 +3868,8 @@ try:
         "KEPT: HA1..HA31",
         len(ANALYTICS_BUTTONS),
         _MAX_FILES_SCAN,
+        _MAX_AUDIT_FILES,
+        _AUDIT_TIMEOUT_SEC,
         _AUTOTUNE_AVAILABLE,
         _DB_DIAG_VERSION_AT,
         _DB_CACHE_TTL_DEFAULT,
