@@ -1,26 +1,18 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-🌿 Relax Manager – البوت الرئيسي (bot.py v5.7.16-SAFE-ADMIN-GUARD)
+🌿 Relax Manager – البوت الرئيسي (bot.py v5.7.17-SAFE-ADMIN-RESTART)
 ================================================================================
-🆕 v5.7.16 (فوق v5.7.15):
-    🟢 FIX-ADMIN-SAFE: `ADMIN_IDS_EMPTY` — استبدال `SystemExit(1)` بـ:
-        • إعادة محاولة `_collect_admin_ids()` 3 مرات (2s بين كل محاولة)
-        • عند الفشل النهائي: `logger.critical` فقط (بدون رفض البدء)
-        السبب: تجنّب boot loop على Render إذا كانت DB معطّلة مؤقتاً.
-        البوت يعمل بلا إدارة لكن مع تحذير صارخ في السجل.
+🆕 v5.7.17 (فوق v5.7.16):
+    🟢 ADD-RESTART: إضافة أمر `/restart` للأدمن (إعادة تشغيل تلقائية).
+    🟢 ADD-AUTO-RESTART: إضافة مهمة خلفية لإعادة التشغيل كل 24 ساعة (تنظيف الذاكرة).
+    🟢 FIX-PID: تغيير مسار الـ PID إلى `/tmp/.bot.pid` لدعم Render.
+
+v5.7.16 — محفوظ:
+    🟢 FIX-ADMIN-SAFE: إعادة محاولة `_collect_admin_ids()` 3 مرات لتجنب boot loop.
 
 v5.7.15 — محفوظ:
     🔴 FIX-POST-STOP: `_run_post_stop_hooks` — لا استدعاء يدوي
-    🟢 (v5.7.16 يحل محل FIX-ADMIN-EMPTY من v5.7.15)
-
-v5.7.14 — محفوظ:
-    🔴 FIX-ALIAS-1: حذف aliases /databases /files /versions
-    🟠 FIX-CMDS-2: ADMIN_COMMANDS = 32 أمر (7 مجموعات)
-    🟡 CLEAN-3: حذف _cmd_analytics_alias
-
-v5.7.13 — محفوظ (16 إصلاح):
-    P0-FIX-1..3، P1-FIX-4..7، P2-FIX-8..10، P3-FIX-11..16
 ================================================================================
 """
 
@@ -451,12 +443,12 @@ _FALLBACK_HOSTNAME = (
     os.getenv("FALLBACK_HOSTNAME", "") or "relaxbo-78m4.onrender.com"
 ).strip()
 
-logger.info("🔧 v5.7.16 init: _FALLBACK_HOSTNAME=%r", _FALLBACK_HOSTNAME)
-logger.info("🔧 v5.7.16 init: RENDER_EXTERNAL_HOSTNAME=%r",
+logger.info("🔧 v5.7.17 init: _FALLBACK_HOSTNAME=%r", _FALLBACK_HOSTNAME)
+logger.info("🔧 v5.7.17 init: RENDER_EXTERNAL_HOSTNAME=%r",
             os.getenv("RENDER_EXTERNAL_HOSTNAME", ""))
-logger.info("🔧 v5.7.16 init: RENDER_EXTERNAL_URL=%r",
+logger.info("🔧 v5.7.17 init: RENDER_EXTERNAL_URL=%r",
             os.getenv("RENDER_EXTERNAL_URL", ""))
-logger.info("🔧 v5.7.16 init: ALLOW_POLLING=%r",
+logger.info("🔧 v5.7.17 init: ALLOW_POLLING=%r",
             os.getenv("ALLOW_POLLING", ""))
 
 def _read_pid_file() -> Optional[int]:
@@ -1116,6 +1108,7 @@ ADMIN_COMMANDS = [
     ("stats", "📊 الإحصائيات"),
     ("admin", "👑 لوحة الأدمن"),
     ("ping", "🏓 قياس الكمون"),
+    ("restart", "🔄 إعادة تشغيل البوت"),
     ("posts_stats", "📊 إحصائيات النشر"),
     ("versions", "📦 الإصدارات"),
 
@@ -1710,6 +1703,29 @@ async def keep_alive():
             except Exception:
                 pass
 
+# ═══════════════════════════════════════════════════════════════════
+# 🆕 v5.7.17 — التحديث الجديد: المهمة التلقائية للإغلاق
+# ═══════════════════════════════════════════════════════════════════
+async def auto_restart_scheduler():
+    # الانتظار 24 ساعة قبل أول إعادة تشغيل
+    try:
+        await asyncio.sleep(86400)
+    except asyncio.CancelledError:
+        raise
+    while True:
+        try:
+            logger.warning("🔄 إعادة تشغيل تلقائية مجدولة (24h) — تنظيف الذاكرة...")
+            os.kill(os.getpid(), signal.SIGTERM)
+            break
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.error("auto_restart error: %s", e)
+        try:
+            await asyncio.sleep(86400)
+        except asyncio.CancelledError:
+            raise
+
 async def _fetch_pg_activity_cached() -> Dict[str, Any]:
     global _pm_last_query_ts, _pm_last_query_result
     now = time.monotonic()
@@ -2084,6 +2100,26 @@ async def cmd_ping(update, context):
     except Exception as e:
         logger.error("❌ /ping error: %s", e)
 
+async def cmd_restart(update, context):
+    user = update.effective_user
+    if user is None:
+        return
+    allowed = _resolve_admin_guard(context)
+    if not allowed or user.id not in allowed:
+        return
+    msg = update.effective_message
+    if msg is None:
+        return
+
+    await msg.reply_text(
+        "🔄 <b>تم استلام الأمر</b>\n\n"
+        "⏳ جاري إغلاق البوت بالكامل لتنظيف الذاكرة...\n"
+        "🚀 سيتم تشغيله تلقائياً من جديد خلال 30-60 ثانية.",
+        parse_mode="HTML"
+    )
+    logger.warning("🛑 إعادة تشغيل يدوية (تلقائية) بواسطة الأدمن: %s", user.id)
+    os.kill(os.getpid(), signal.SIGTERM)
+
 async def cmd_posts_stats(update, context):
     user = update.effective_user
     if user is None:
@@ -2195,11 +2231,11 @@ async def main():
     logger.info("👨‍💼 المالك: %s", CONFIG.PRIMARY_OWNER_ID)
 
     logger.info(
-        "📦 bot.py: v5.7.16 | kill_prev=on | init_retry=on | webhook_force=on | "
+        "📦 bot.py: v5.7.17 | kill_prev=on | init_retry=on | webhook_force=on | "
         "webhook_verify=on | diag_incoming=%r | "
         "detectors=%s | layers=%d | fallback_hostname=%r | "
         "allow_polling_env=%r | alias_fix=on | cmds_reordered=on | "
-        "post_stop_fix=on | admin_safe_retry=on(%dx,%.1fs)",
+        "post_stop_fix=on | admin_safe_retry=on(%dx,%.1fs) | admin_restart=on",
         _DIAG_INCOMING,
         _SPAM_DETECTOR_VERSION or "N/A",
         _SPAM_DETECTOR_LAYERS_COUNT,
@@ -2533,6 +2569,14 @@ async def main():
 
     if _admin_ids:
         try:
+            app.add_handler(CommandHandler("restart", cmd_restart, filters=filters.User(_admin_ids)))
+        except Exception:
+            app.add_handler(CommandHandler("restart", cmd_restart))
+    else:
+        app.add_handler(CommandHandler("restart", cmd_restart))
+
+    if _admin_ids:
+        try:
             app.add_handler(CommandHandler("posts_stats", cmd_posts_stats, filters=filters.User(_admin_ids)))
         except Exception:
             app.add_handler(CommandHandler("posts_stats", cmd_posts_stats))
@@ -2688,6 +2732,7 @@ async def main():
     tasks: List[asyncio.Task] = []
     _bg_task_specs: List[Tuple[str, Any, tuple]] = [
         ("keep_alive", keep_alive, ()),
+        ("auto_restart", auto_restart_scheduler, ()), # 🆕 المهمة المضافة
         ("auto_publish", BackgroundTasks.auto_publish, (app.bot,)),
         ("auto_backup", BackgroundTasks.auto_backup, ()),
         ("reminders", BackgroundTasks.reminders, (app.bot,)),
