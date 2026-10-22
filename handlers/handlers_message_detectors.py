@@ -29,6 +29,8 @@ from __future__ import annotations
 import asyncio
 import base64
 import codecs
+import sys
+print(f"██████ DETECTORS LOADED FROM: {__file__} | v4.1.3-PROOF ██████", file=sys.stderr, flush=True)
 import concurrent.futures
 import datetime
 import functools
