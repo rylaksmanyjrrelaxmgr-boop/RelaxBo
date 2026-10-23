@@ -5,22 +5,34 @@
 handlers_message_detectors.py
 ===============================================================================
 🛡️ Relax Manager — Advanced Spam / Anti-Evasion Detection Engine
-Version: 4.1.3 (FIX-CRIT-3: analyze_message_full_async Sync-Layer Blocking)
+Version: 4.1.4 (FIX-CRIT-4: Global Detector Concurrency + Non-Blocking Cleanup)
 
-🆕 v4.1.3 — إصلاح حاسم:
-    🔴 FIX-CRIT-3 (CRITICAL): `analyze_message_full_async` كانت تُنفّذ
-        8 طبقات sync على الـ main thread قبل `asyncio.gather`:
-            _run_text_layer, _run_metadata_layer, _run_obfuscation_layer,
-            _run_behavioral_layer, _run_reactions_layer, _run_context_layer,
-            _run_cipher_layer, _run_domain_rep_layer.
-        على رسائل الوسائط، هذا حجب event loop 10-15s رغم وجود timeout
-        في `handlers_message.py` (لأن wait_for لا يستطيع مقاطعة sync).
-        الحل: تغليف كل الطبقات sync في `asyncio.to_thread` واحد.
+🆕 v4.1.4 — إصلاحات الجيل الجديد (بدون إضعاف الكشف):
+    🔴 FIX-CRIT-4-A: Global Detector Semaphore
+        - كان `analyze_message_full_async` ينشئ `asyncio.Semaphore(6)`
+          لكل رسالة → لا يوجد حد عالمي حقيقي للتوازي.
+        - مع 8 Managed Bots، تتراكم طبقات OCR/Audio/URL/Video/NSFW/
+          Sticker/Stego → GIL lag 12+s.
+        - الحل: `_get_detector_async_semaphore()` عالمي (concurrency=3
+          افتراضياً، قابل للتعديل عبر DETECTOR_ASYNC_CONCURRENCY).
+        - كل طبقات async الثقيلة تشترك في نفس الـ semaphore.
+        - `_run_sync_layers` و `_aggregate_verdict` **لا يمران** عبره.
 
-🆕 v4.1.2 — محفوظ:
-    FIX-CRIT-1, FIX-CRIT-2, FIX-MED-3..7, FIX-MIN-8..12.
-🆕 v4.1.1 — محفوظ: FIX-SYNC-1, FIX-NSFW-1, FIX-WARN-1, FIX-URLS-1.
-🆕 v4.1.0 — محفوظ: FIX-AR-8..10, FIX-DL-1, FIX-BEHAV-1, FIX-POOL-1.
+    🔴 FIX-CRIT-4-B: Non-Blocking Cleanup
+        - `analyze_message_full_async` كان يستدعي
+          `_post_analysis_cleanup()` مباشرة على الـ event loop.
+        - الحل: `_schedule_detector_cleanup()` ينشئ task واحد فقط
+          (single-flight) ويشغّل `cleanup_old_data` في الـ pool.
+        - المسار sync (`analyze_message_full`) يبقى كما هو.
+
+    🟠 FIX-CRIT-4-C: Thread Pool Default
+        - `_POOL_MAX_WORKERS` 16 → 8 (أخف على Render Free).
+        - لا يزال قابلاً للتعديل عبر DETECTOR_POOL_WORKERS.
+
+    ✅ محفوظ من v4.1.3: FIX-CRIT-3 (sync layers in to_thread).
+    ✅ محفوظ من v4.1.2: FIX-CRIT-1, FIX-CRIT-2, FIX-MED-3..7, FIX-MIN-8..12.
+    ✅ محفوظ من v4.1.1: FIX-SYNC-1, FIX-NSFW-1, FIX-WARN-1, FIX-URLS-1.
+    ✅ محفوظ من v4.1.0: FIX-AR-8..10, FIX-DL-1, FIX-BEHAV-1, FIX-POOL-1.
 ===============================================================================
 """
 
@@ -29,8 +41,6 @@ from __future__ import annotations
 import asyncio
 import base64
 import codecs
-import sys
-print(f"██████ DETECTORS LOADED FROM: {__file__} | v4.1.3-PROOF ██████", file=sys.stderr, flush=True)
 import concurrent.futures
 import datetime
 import functools
@@ -40,6 +50,7 @@ import logging
 import math
 import os
 import re
+import sys
 import tempfile
 import threading
 import time
@@ -57,14 +68,20 @@ except ImportError:
     from urlparse import urlparse  # type: ignore
 
 
+print(
+    f"██████ DETECTORS LOADED FROM: {__file__} | v4.1.4-PROOF ██████",
+    file=sys.stderr, flush=True,
+)
+
+
 # =============================================================================
 # LOAD BEACON
 # =============================================================================
 
 logger = logging.getLogger(__name__)
 
-_DETECTORS_VERSION = "4.1.3 FIX-CRIT-3"
-_DETECTORS_VERSION_CLEAN = "4.1.3"
+_DETECTORS_VERSION = "4.1.4 FIX-CRIT-4"
+_DETECTORS_VERSION_CLEAN = "4.1.4"
 
 _sync_download_warned = False
 
@@ -203,12 +220,55 @@ _PRIMARY_STT_LANGS = tuple(
 
 
 # =============================================================================
-# SHARED THREAD POOL
+# SHARED THREAD POOL + GLOBAL ASYNC SEMAPHORE
 # =============================================================================
 
 _THREAD_POOL_EXECUTOR: Optional[concurrent.futures.ThreadPoolExecutor] = None
 _THREAD_POOL_LOCK = threading.Lock()
-_POOL_MAX_WORKERS = _env_int("DETECTOR_POOL_WORKERS", 16)
+
+# 🆕 v4.1.4 FIX-CRIT-4-C: default 8 بدلاً من 16 لتقليل الضغط على Render Free
+_POOL_MAX_WORKERS = _env_int("DETECTOR_POOL_WORKERS", 8)
+
+# 🆕 v4.1.4 FIX-CRIT-4-A: Global detector concurrency
+DETECTOR_ASYNC_CONCURRENCY = max(
+    1, _env_int("DETECTOR_ASYNC_CONCURRENCY", 3),
+)
+
+_DETECTOR_ASYNC_SEMAPHORE: Optional[asyncio.Semaphore] = None
+_DETECTOR_ASYNC_LOOP: Optional[asyncio.AbstractEventLoop] = None
+_DETECTOR_ASYNC_SEMAPHORE_LOCK = threading.Lock()
+
+
+def _get_detector_async_semaphore() -> asyncio.Semaphore:
+    """
+    🆕 v4.1.4 FIX-CRIT-4-A: Semaphore عالمي واحد لجميع عمليات
+    detector الثقيلة (OCR/Audio/URL/Video/NSFW/Sticker/Stego).
+
+    يُنشأ مرة واحدة لكل event loop، ويُعاد استخدامه لكل الرسائل.
+    هذا يمنع تراكم العمليات المتزامنة عبر Managed Bots المتعددة.
+    """
+    global _DETECTOR_ASYNC_SEMAPHORE
+    global _DETECTOR_ASYNC_LOOP
+    loop = asyncio.get_running_loop()
+    if (
+        _DETECTOR_ASYNC_SEMAPHORE is None
+        or _DETECTOR_ASYNC_LOOP is not loop
+    ):
+        with _DETECTOR_ASYNC_SEMAPHORE_LOCK:
+            if (
+                _DETECTOR_ASYNC_SEMAPHORE is None
+                or _DETECTOR_ASYNC_LOOP is not loop
+            ):
+                _DETECTOR_ASYNC_SEMAPHORE = asyncio.Semaphore(
+                    DETECTOR_ASYNC_CONCURRENCY
+                )
+                _DETECTOR_ASYNC_LOOP = loop
+                logger.info(
+                    "✅ Detector global async limiter initialized "
+                    "(concurrency=%d)",
+                    DETECTOR_ASYNC_CONCURRENCY,
+                )
+    return _DETECTOR_ASYNC_SEMAPHORE
 
 
 def _get_shared_pool() -> concurrent.futures.ThreadPoolExecutor:
@@ -220,8 +280,8 @@ def _get_shared_pool() -> concurrent.futures.ThreadPoolExecutor:
                     max_workers=_POOL_MAX_WORKERS,
                     thread_name_prefix="detector-io",
                 )
-                logger.debug(
-                    "✅ detectors shared pool created (workers=%d)",
+                logger.info(
+                    "detectors shared pool created (workers=%d)",
                     _POOL_MAX_WORKERS,
                 )
     return _THREAD_POOL_EXECUTOR
@@ -250,14 +310,6 @@ async def _run_in_pool(
     timeout: Optional[float] = None,
     **kwargs: Any,
 ) -> Any:
-    """
-    يُنفِّذ fn في pool.
-
-    ⚠️ ملاحظة: عند انتهاء الـ timeout، يُلغى الـ asyncio future لكن
-    الـ thread يستمر بالعمل (قيود Python — لا يمكن إيقاف thread قسرياً).
-    العمليّة محصورة بـ _POOL_MAX_WORKERS، لذا الذاكرة محكمة، لكن
-    thread عالق واحد يستهلك slot.
-    """
     if kwargs:
         fn = functools.partial(fn, **kwargs)
 
@@ -6192,6 +6244,50 @@ def _post_analysis_cleanup() -> None:
         pass
 
 
+# 🆕 v4.1.4 FIX-CRIT-4-B: Non-blocking cleanup for async path
+_cleanup_task: Optional[asyncio.Task] = None
+_cleanup_task_lock = threading.Lock()
+
+
+async def _detector_cleanup_worker() -> None:
+    try:
+        await _run_in_pool(
+            cleanup_old_data,
+            timeout=5.0,
+        )
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        logger.debug(
+            "detector cleanup failed: %r",
+            exc,
+        )
+
+
+def _schedule_detector_cleanup() -> None:
+    global _cleanup_task
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return
+    with _cleanup_task_lock:
+        if (
+            _cleanup_task is not None
+            and not _cleanup_task.done()
+        ):
+            return
+        try:
+            _cleanup_task = loop.create_task(
+                _detector_cleanup_worker(),
+                name="detector-cleanup",
+            )
+        except Exception as exc:
+            logger.debug(
+                "detector cleanup scheduling failed: %r",
+                exc,
+            )
+
+
 def analyze_message_full(message: Any, bot: Any = None) -> SpamVerdict:
     """
     ⚠️ v4.1.2 FIX-CRIT-1: المسار sync لا يدعم تنزيل ملفات Telegram.
@@ -6254,16 +6350,17 @@ async def analyze_message_full_async(
 ) -> SpamVerdict:
     """
     🆕 v4.1.3 FIX-CRIT-3: الطبقات الـ sync تُشغَّل في thread منفصل
-    عبر asyncio.to_thread لمنع حجب event loop. كان هذا يسبب lag
-    ~10-15s على رسائل الوسائط (رغم وجود timeout في handlers_message).
+    عبر asyncio.to_thread لمنع حجب event loop.
 
-    FIX-WARN-1: log debug عند bot=None مع رسالة تحتوي وسائط.
+    🆕 v4.1.4 FIX-CRIT-4-A: الـ Semaphore أصبح عالمياً (وليس لكل رسالة)
+    لمنع تراكم العمليات عبر Managed Bots المتعددة.
+
+    🆕 v4.1.4 FIX-CRIT-4-B: cleanup غير محجوب (single-flight task).
     """
     verdict = SpamVerdict(
         is_spam=False, total_score=0.0, confidence="none"
     )
 
-    # 🆕 FIX-CRIT-3: تشغيل الطبقات الـ sync في thread
     def _run_sync_layers() -> Dict[str, Any]:
         tr = _run_text_layer(message, verdict)
         _run_metadata_layer(message, verdict)
@@ -6283,7 +6380,6 @@ async def analyze_message_full_async(
         )
         text_result = _empty_text_result()
 
-    # FIX-WARN-1
     if bot is None and _message_has_media(message):
         try:
             logger.debug(
@@ -6294,7 +6390,8 @@ async def analyze_message_full_async(
         except Exception:
             pass
 
-    sem = asyncio.Semaphore(6)
+    # 🆕 v4.1.4 FIX-CRIT-4-A: global semaphore
+    sem = _get_detector_async_semaphore()
 
     async def _guarded(coro_fn, *args):
         async with sem:
@@ -6316,7 +6413,8 @@ async def analyze_message_full_async(
     )
 
     _aggregate_verdict(verdict)
-    _post_analysis_cleanup()
+    # 🆕 v4.1.4 FIX-CRIT-4-B: غير محجوب
+    _schedule_detector_cleanup()
 
     if DEBUG_SPAM:
         try:
@@ -6512,6 +6610,7 @@ def get_spam_diagnostics(message: Any) -> Dict[str, Any]:
 # =============================================================================
 
 __all__ = [
+    # ─── Core config ──────────────────────────────────────────────────
     "DEBUG_DIAG", "DEBUG_SPAM",
     "TEXT_LAYER_ENABLED", "OCR_LAYER_ENABLED", "AUDIO_LAYER_ENABLED",
     "URL_LAYER_ENABLED", "METADATA_LAYER_ENABLED",
@@ -6528,6 +6627,7 @@ __all__ = [
     "URL_EXPAND_CONNECT_TIMEOUT", "URL_EXPAND_READ_TIMEOUT",
     "URL_EXPAND_TIMEOUT", "URL_EXPAND_MAX_HOPS", "URL_ENRICH_MAX_URLS",
     "_POOL_MAX_WORKERS", "POOL_TASK_TIMEOUT",
+    "DETECTOR_ASYNC_CONCURRENCY",
     "_DETECTORS_VERSION", "_DETECTORS_VERSION_CLEAN",
     "_sync_download_warned",
     "WHOIS_ENABLED", "WHOIS_NEW_DOMAIN_DAYS",
@@ -6539,8 +6639,10 @@ __all__ = [
     "_SYNC_URL_LIMIT", "_URL_ASYNC_TASK_TIMEOUT", "_PRIMARY_STT_LANGS",
     "_pending_url_task_count", "_pending_url_task_lock",
 
+    # ─── env helpers ──────────────────────────────────────────────────
     "_env_bool", "_env_int", "_env_float",
 
+    # ─── Arabic whitelist ─────────────────────────────────────────────
     "ARABIC_SHORT_WHITELIST_ENABLED", "ARABIC_SHORT_MAX_CHARS",
     "ARABIC_SHORT_MAX_WORDS", "ARABIC_DOMINANCE_RATIO",
     "_ARABIC_GREETINGS", "_ARABIC_NEUTRAL_WORDS", "_ARABIC_SPAM_OVERRIDE",
@@ -6550,6 +6652,7 @@ __all__ = [
     "_arabic_char_ratio", "_normalize_arabic_for_compare",
     "_strip_arabic_diacritics", "_ARABIC_KEEP_AL_WORDS",
 
+    # ─── Anti-evasion flags ───────────────────────────────────────────
     "ANTIEVASION_ENTITY_LINK", "ANTIEVASION_BUTTON_LINK",
     "ANTIEVASION_SCHEMELESS_URL", "ANTIEVASION_HOMOGLYPH",
     "ANTIEVASION_COMBINING", "ANTIEVASION_COMPACT_WORDS",
@@ -6563,6 +6666,7 @@ __all__ = [
     "ANTIEVASION_EXTENDED_COMBINING", "ANTIEVASION_EXTRA_SCRIPTS",
     "ANTIEVASION_ALT_SCHEMES", "ANTIEVASION_RANDOM_DOMAIN",
 
+    # ─── Thresholds & caps ────────────────────────────────────────────
     "SPAM_SCORE_THRESHOLD", "POSTBOT_AUTO_BLOCK_CONFIDENCE",
     "SPAM_HARD_THRESHOLD", "SPAM_CRITICAL_THRESHOLD",
     "RANDOM_DOMAIN_MIN_LENGTH", "RANDOM_DOMAIN_MAX_VOWEL_RATIO",
@@ -6571,8 +6675,10 @@ __all__ = [
     "_SCORE_CAP_LINK", "_SCORE_CAP_CONTENT", "_SCORE_CAP_CTA",
     "_SCORE_CAP_EVASION", "_SCORE_CAP_STRUCTURE", "_SCORE_CAP_CONTEXT",
 
+    # ─── Dataclasses / context ────────────────────────────────────────
     "SpamVerdict", "_MessageContext",
 
+    # ─── Normalization ────────────────────────────────────────────────
     "_strip_combining_marks", "_deleet", "_apply_homoglyphs_safe",
     "_normalize_text", "_do_normalize", "_normalize_text_cached",
     "_strip_emoji_for_domain", "_has_hidden_chars", "_merge_split_urls",
@@ -6582,6 +6688,7 @@ __all__ = [
     "_scheme_replacement", "_tld_aware_dot_repl",
     "_tld_aware_dot_word_repl", "_tld_aware_multiline_repl",
 
+    # ─── Constants (regex/vocab) ──────────────────────────────────────
     "_COMMON_TLDS", "_TLD_PATTERN",
     "_HIDDEN_CHARS", "_BIDI_CHARS", "_COMBINING_RANGES",
     "_HOMOGLYPH_MAP", "_LEET_MAP", "_LEET_TARGETS",
@@ -6609,11 +6716,13 @@ __all__ = [
     "_NATURAL_VOWEL_SEQUENCES", "_COMMON_BRAND_PATTERNS",
     "_ALLOWED_URL_SCHEMES", "_REQ_TIMEOUT_TUPLE",
 
+    # ─── Generic helpers ──────────────────────────────────────────────
     "_unique_strings", "_extract_words", "_vocab_regex",
     "_count_word_matches", "_count_emojis", "_count_spam_emojis",
     "_count_separators", "_cap_score", "_cap_layer_score",
     "_script_counts", "_has_mixed_suspicious_scripts",
 
+    # ─── Entity / button ──────────────────────────────────────────────
     "_entity_type_str",
     "_extract_entity_urls", "_has_link_entity",
     "_extract_url_from_button", "_button_is_external",
@@ -6623,10 +6732,12 @@ __all__ = [
     "_get_message_analysis_text",
     "_has_button_link", "_extract_button_link_urls",
 
+    # ─── Link detection ───────────────────────────────────────────────
     "_has_domain_pattern", "_contains_link_enhanced",
     "_contains_email", "_contains_at_channel", "_contains_tg_scheme",
     "_extract_possible_urls",
 
+    # ─── Scoring ──────────────────────────────────────────────────────
     "_extract_spam_words", "_count_unique_matches",
     "_count_text_urls", "_compute_spam_score",
     "_looks_like_normal_conversation",
@@ -6637,10 +6748,12 @@ __all__ = [
     "_compact_evasion_variants", "_compact_target_present",
     "_message_has_media",
 
+    # ─── Random domain ────────────────────────────────────────────────
     "_is_random_domain", "_has_random_domain",
     "_extract_random_domains", "_extract_random_domains_from_merged",
     "_shannon_entropy",
 
+    # ─── OCR / audio / video layers ───────────────────────────────────
     "extract_text_from_image", "extract_qr_codes",
     "extract_image_content", "extract_image_content_async",
     "_preprocess_image",
@@ -6651,10 +6764,12 @@ __all__ = [
     "_extract_video_frames", "extract_video_content",
     "extract_video_content_async",
 
+    # ─── URL enrichment ───────────────────────────────────────────────
     "expand_url", "is_shortener", "check_safe_browsing",
     "get_domain_age_days", "analyze_url", "analyze_urls",
     "analyze_urls_async",
 
+    # ─── Metadata / obfuscation ───────────────────────────────────────
     "extract_metadata_text", "metadata_has_suspicious_content",
     "extract_metadata_urls",
     "_looks_like_text", "_has_url_signature", "_b64_pad",
@@ -6662,6 +6777,7 @@ __all__ = [
     "try_decode_url", "try_decode_reverse",
     "find_obfuscated_payloads", "has_any_obfuscation",
 
+    # ─── Behavioral ───────────────────────────────────────────────────
     "_BEHAVIOR_LOCK",
     "_user_message_times", "_user_short_messages",
     "_user_url_count", "_user_edit_times", "_edited_messages",
@@ -6670,6 +6786,7 @@ __all__ = [
     "check_split_url_pattern", "track_edit", "cleanup_old_data",
     "_record_and_analyze_behavior",
 
+    # ─── NSFW ─────────────────────────────────────────────────────────
     "_check_nsfw_via_sightengine", "_analyze_nsfw_image",
     "_load_nsfw_classifier", "_has_any_nsfw_provider",
     "_detect_image_mime",
@@ -6677,21 +6794,25 @@ __all__ = [
     "_se_failure_count", "_se_last_failure_ts", "_se_circuit_lock",
     "extract_nsfw_from_message", "extract_nsfw_from_message_async",
 
+    # ─── Sticker / reactions / context ────────────────────────────────
     "_extract_sticker_text", "_extract_sticker_text_async",
     "_extract_sticker_text_sync",
     "analyze_reactions",
     "record_context_message", "analyze_context_window",
 
+    # ─── Cipher / stego ───────────────────────────────────────────────
     "try_decode_multi_base64", "try_decode_caesar", "try_decode_xor",
     "_find_encoded_payloads",
     "_lsb_extract_text", "extract_stego_content",
     "extract_stego_content_async",
 
+    # ─── Domain reputation ────────────────────────────────────────────
     "_domain_heuristic_analysis", "analyze_domain_reputation",
     "_domain_rep_cache_set", "_domain_rep_cache_get",
     "_domain_reputation_cache", "_DOMAIN_REP_CACHE_MAX",
     "_DOMAIN_REP_LOCK",
 
+    # ─── Orchestrator (sync) ──────────────────────────────────────────
     "_empty_text_result",
     "_run_text_layer", "_run_metadata_layer", "_run_obfuscation_layer",
     "_run_behavioral_layer", "_run_reactions_layer", "_run_context_layer",
@@ -6701,29 +6822,41 @@ __all__ = [
     "_run_stego_layer",
     "_aggregate_verdict", "_post_analysis_cleanup",
 
+    # ─── Orchestrator (async) ─────────────────────────────────────────
     "_run_ocr_layer_async", "_run_audio_layer_async",
     "_run_url_layer_async", "_run_video_layer_async",
     "_run_nsfw_layer_async", "_run_sticker_layer_async",
     "_run_stego_layer_async",
 
+    # ─── Public API ───────────────────────────────────────────────────
     "analyze_message_full", "analyze_message_full_async",
     "analyze_message", "get_spam_diagnostics",
     "is_spam", "is_high_confidence_spam", "is_critical_spam",
     "should_ignore_as_low_signal",
 
+    # ─── Version helper ───────────────────────────────────────────────
     "_version_semver",
 
+    # ─── Telegram download ────────────────────────────────────────────
     "_do_download_telegram_file",
     "_download_telegram_file", "_download_telegram_file_async",
 
+    # ─── Thread pool + global async limiter (v4.1.4) ──────────────────
     "_get_shared_pool", "_shutdown_shared_pool",
     "_run_in_pool", "install_default_executor",
     "shutdown_default_executor",
+    "_get_detector_async_semaphore",
+    "_DETECTOR_ASYNC_SEMAPHORE", "_DETECTOR_ASYNC_LOOP",
+    "_DETECTOR_ASYNC_SEMAPHORE_LOCK",
+
+    # ─── Cleanup task (v4.1.4) ────────────────────────────────────────
+    "_detector_cleanup_worker", "_schedule_detector_cleanup",
+    "_cleanup_task", "_cleanup_task_lock",
 ]
 
 
 # =============================================================================
-# LOAD BEACON
+# LOAD BEACON — v4.1.4
 # =============================================================================
 
 try:
@@ -6734,18 +6867,22 @@ try:
     logger.info(
         "🛡️ handlers_message_detectors %s loaded | "
         "15 Layers ASYNC-NATIVE | "
+        "GlobalLimiter=%d PoolWorkers=%d | "
         "Text=%s OCR=%s(PIL=%s) Audio=%s(%s) URL=%s(%s) "
         "Meta=%s Obf=%s Behav=%s Video=%s(%s) NSFW=%s(local_cfg=%s,se=%s) "
         "Sticker=%s Reactions=%s Context=%s Cipher=%s "
         "Stego=%s(numpy=%s,pil=%s) DomainRep=%s | "
         "SPAM_THRESHOLD=%d HARD=%d CRITICAL=%d | "
-        "TLDs=%d RANDOM_DOMAIN=%s ASYNC_NET=%s POOL=%d "
+        "TLDs=%d RANDOM_DOMAIN=%s ASYNC_NET=%s "
         "SE_CIRCUIT=%d/%ds TIMEOUT=%.1fs URL_TIMEOUT=%.1fs SYNC_URLS=%d | "
         "AR_SHORT_WHITELIST=%s (max=%d chars/%d words, ratio=%.2f) | "
         "AR_GREETINGS=%d NEUTRAL=%d STT_LANGS=%s | "
         "sync_download=disabled(FIX-DL-1) | "
-        "FIX-CRIT-3=sync_layers_in_thread",
+        "FIX-CRIT-3=sync_layers_in_thread | "
+        "FIX-CRIT-4=global_semaphore+nonblocking_cleanup",
         _DETECTORS_VERSION,
+        DETECTOR_ASYNC_CONCURRENCY,
+        _POOL_MAX_WORKERS,
         TEXT_LAYER_ENABLED,
         OCR_LAYER_ENABLED, _PIL_AVAILABLE,
         AUDIO_LAYER_ENABLED, _AUDIO_AVAILABLE,
@@ -6767,7 +6904,6 @@ try:
         len(_COMMON_TLDS),
         ANTIEVASION_RANDOM_DOMAIN,
         ASYNC_NETWORK_ENABLED,
-        _POOL_MAX_WORKERS,
         SE_CIRCUIT_FAILURE_THRESHOLD,
         int(SE_CIRCUIT_OPEN_SEC),
         POOL_TASK_TIMEOUT,
