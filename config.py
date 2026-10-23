@@ -2,8 +2,15 @@
 # -*- coding: utf-8 -*-
 
 """
-config.py - إعدادات البوت الأساسية (v7.0.9 — LOAD-TUNE-WARN)
+config.py - إعدادات البوت الأساسية (v7.0.10 — LOAD-TUNE-WARN)
 ================================================================================
+🆕 v7.0.10 (POOL-RECOMMENDED-FIX):
+    🟢 FIX-LT-2-UPDATE: رفع _POOL_WORKERS_RECOMMENDED من 4 إلى 16.
+        السبب: القياسات الإنتاجية مع 8 managed bots + OCR/NSFW/URL
+        أظهرت أن 4 workers غير كافية، وتسببت في GIL lag ~14s سابقاً.
+        16 worker هو الحد الأدنى لخدمة 8 bots + الطبقات المتوازية
+        على Render Standard. التحذير الآن يُطلق فقط عند >16.
+
 🆕 v7.0.9 (LOAD-TUNE-WARN):
     🟢 FIX-LT-1: تشديد تحذير MAX_CHANNELS_PER_CYCLE من >10 إلى >5.
         السبب: قياسات production أظهرت Load=7.12/6.35/5.99 على 8 CPUs
@@ -11,9 +18,8 @@ config.py - إعدادات البوت الأساسية (v7.0.9 — LOAD-TUNE-WAR
         يأتي من مصادر خلفية (detectors pool + DB pool + auto-publish)،
         لا من الـevent loop. تقليل MAX_CHANNELS_PER_CYCLE يُخفّض الحمل.
 
-    🟢 FIX-LT-2: تحذير جديد DETECTOR_POOL_WORKERS > 4.
-        السبب: 8 workers (الافتراضي) يُسهمون في Load مرتفع على
-        خطط Render المتوسطة. الموصى به: 4.
+    🟢 FIX-LT-2: تحذير جديد DETECTOR_POOL_WORKERS > _POOL_WORKERS_RECOMMENDED.
+        (v7.0.10: الحد الآن 16 بدلاً من 4 — انظر أعلاه)
 
     🟢 FIX-LT-3: تحذير جديد DB_POOL_SIZE > 15.
         السبب: كل اتصال = thread/async task على الـevent loop.
@@ -67,9 +73,10 @@ _PG_STMT_TIMEOUT_MIN_MS = 30000
 # 🟢 الافتراضي الآمن: 60s (يكشف الاستعلامات المتعثرة الحقيقية).
 _PG_STMT_TIMEOUT_DEFAULT_MS = 60000
 
-# 🆕 FIX-LT-1/2/3 (v7.0.9): حدود التوصية لخفض Load
+# 🆕 FIX-LT-1/2/3 (v7.0.9/v7.0.10): حدود التوصية لخفض Load
 _MAX_CHANNELS_RECOMMENDED = 5      # FIX-LT-1
-_POOL_WORKERS_RECOMMENDED = 4      # FIX-LT-2
+# 🆕 v7.0.10 FIX-LT-2-UPDATE: 16 بدلاً من 4 (8 managed bots تحتاج ≥16)
+_POOL_WORKERS_RECOMMENDED = 16     # FIX-LT-2 (updated)
 _DB_POOL_RECOMMENDED = 15          # FIX-LT-3
 
 
@@ -847,7 +854,7 @@ class AppConfig:
 
     @property
     def DETECTOR_POOL_HIGH(self) -> bool:
-        """🆕 FIX-LT-2: هل DETECTOR_POOL_WORKERS مرتفع؟"""
+        """🆕 FIX-LT-2: هل DETECTOR_POOL_WORKERS مرتفع؟ (v7.0.10: >16)"""
         return self.DETECTOR_POOL_WORKERS > _POOL_WORKERS_RECOMMENDED
 
     @property
@@ -1225,14 +1232,16 @@ class AppConfig:
                 f"{self.DETECTOR_POOL_WORKERS}"
             )
 
-        # 🟢 FIX-LT-2 (v7.0.9): تحذير جديد عند DETECTOR_POOL_WORKERS > 4
-        # السبب: 8 workers (الافتراضي) يُسهمون في Load مرتفع.
+        # 🟢 FIX-LT-2 (v7.0.9، v7.0.10: حد 16): تحذير عند > 16
+        # السبب: 8 managed bots + طبقات متوازية يحتاجون ≥16.
+        # v7.0.10: رُفع الحد من 4 إلى 16 لأن 4 تسبب GIL lag سابقاً.
         if self.DETECTOR_POOL_WORKERS > _POOL_WORKERS_RECOMMENDED:
             warnings.append(
                 f"🟡 DETECTOR_POOL_WORKERS={self.DETECTOR_POOL_WORKERS} > "
                 f"{_POOL_WORKERS_RECOMMENDED} — workers إضافيون يرفعون "
-                f"Load على خطط متوسطة. الموصى به: 4. "
-                f"الحل: DETECTOR_POOL_WORKERS=4 في .env."
+                f"Load على خطط متوسطة. الموصى به: {_POOL_WORKERS_RECOMMENDED}. "
+                f"الحل: DETECTOR_POOL_WORKERS={_POOL_WORKERS_RECOMMENDED} "
+                f"في .env."
             )
 
         if self.POOL_TASK_TIMEOUT < 1.0 or self.POOL_TASK_TIMEOUT > 600.0:
