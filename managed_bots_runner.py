@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-managed_bots_runner.py — دورة حياة البوتات المُدارة (v5.7.10)
+managed_bots_runner.py — دورة حياة البوتات المُدارة (v5.7.11)
 =================================================================================
 📌 المسؤولية:
     • تشغيل/إيقاف كل بوت مُدار كـ Application مستقل (polling).
@@ -11,10 +11,17 @@ managed_bots_runner.py — دورة حياة البوتات المُدارة (v5
     • منع تعارض التوكن مع Relax Manager.
     • إعادة تحميل الرسائل والكلمات بدون restart.
 
+🆕 v5.7.11 (RETRY-WINDOW-EXTENDED):
+    • توسيع نافذة retry لتغطية Render Zero-Downtime overlap بالكامل:
+      - `_RETRY_DELAYS = (30, 60)` بدلاً من `(10, 20, 30)`.
+      - التغطية الفعلية: 30 + 60 = 90s لكل بوت (كانت 10 + 20 = 30s).
+      - Render overlap عادة 60s، فتغطية 90s تمنح 30s margin.
+      - `max_retries` بقي 3 (بدون تغيير).
+      - `_error_handler` كما هو (v5.7.10).
+
 🆕 v5.7.10 (DEPLOY-CONFLICT-HANDLING):
     • معالجة أفضل لـ Conflict أثناء النشر (Render Zero-Downtime):
       - `_error_handler` يتعامل مع Conflict بلطف (بدون traceback مخيف).
-      - `_RETRY_DELAYS` أطول: (10, 20, 30) بدلاً من (2, 4, 6).
       - يقلل من نافذة تعارض التوكن أثناء النشر.
 
 🆕 v5.7.7 (KEYWORDS):
@@ -71,8 +78,10 @@ _TIMEOUTS: Dict[str, float] = {
     "pool_timeout": 20.0,
 }
 
-# 🆕 v5.7.10: تأخير أطول لتفادي Conflict أثناء النشر
-_RETRY_DELAYS: Tuple[int, ...] = (10, 20, 30)
+# 🆕 v5.7.11: تأخير كافٍ لتغطية Render overlap (60s) + margin (30s)
+# attempt 1 fail → wait 30s → attempt 2 fail → wait 60s → attempt 3
+# التغطية الكلية: 90 ثانية لكل بوت.
+_RETRY_DELAYS: Tuple[int, ...] = (30, 60)
 
 _INTER_START_DELAY = 0.3
 
@@ -132,14 +141,14 @@ async def _safe_cleanup(app: Optional[Application]) -> None:
 async def _error_handler(update: Any, context: Any) -> None:
     """
     معالج أخطاء محلي للبوت المُدار.
-    
-    🆕 v5.7.10: يتعامل مع Conflict بلطف (لا traceback مخيف).
+
+    v5.7.10: يتعامل مع Conflict بلطف (لا traceback مخيف).
     Conflict طبيعي أثناء النشر (Render Zero-Downtime).
     PTB يعيد المحاولة تلقائياً.
     """
     err = context.error
 
-    # 🆕 v5.7.10: Conflict — أثناء النشر فقط، لا traceback
+    # v5.7.10: Conflict — أثناء النشر فقط، لا traceback
     if isinstance(err, Conflict):
         logger.debug(
             "managed bot: Conflict (deploy in progress) — "
@@ -237,7 +246,7 @@ async def start_one(
             app.bot_data["managed_messages"] = dict(messages)
             app.bot_data["managed_name"] = name
             app.bot_data["managed_keywords"] = dict(keywords)
-            
+
             app.post_init = post_init_managed
 
             on_start, on_text = make_managed_handlers(bid)
@@ -273,7 +282,7 @@ async def start_one(
             return False
 
         except Conflict as _e:
-            # 🆕 v5.7.10: Conflict أثناء النشر — إعادة محاولة بعد تأخير
+            # v5.7.11: تأخير أطول يغطي Render overlap (60s)
             last_err = _e
             logger.warning(
                 "⚠️ managed_bot #%s: Conflict (deploy) — "
@@ -512,11 +521,18 @@ __all__ = [
 # ═══════════════════════════════════════════════════════════════════════════
 
 try:
+    _total_coverage = sum(
+        _RETRY_DELAYS[i]
+        if i < len(_RETRY_DELAYS)
+        else _RETRY_DELAYS[-1]
+        for i in range(2)
+    )
     logger.debug(
-        "🛡️ managed_bots_runner v5.7.10 (DEPLOY-CONFLICT-HANDLING) loaded | "
-        "timeouts=%s | retries=%s | keywords_enabled=True | "
-        "conflict_handling=graceful",
-        _TIMEOUTS, _RETRY_DELAYS,
+        "🛡️ managed_bots_runner v5.7.11 "
+        "(RETRY-WINDOW-EXTENDED) loaded | "
+        "timeouts=%s | retry_delays=%s (coverage=%ds) | "
+        "keywords_enabled=True | conflict_handling=graceful",
+        _TIMEOUTS, _RETRY_DELAYS, _total_coverage,
     )
 except Exception:
     pass
