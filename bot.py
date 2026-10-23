@@ -1,9 +1,16 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-🌿 Relax Manager – البوت الرئيسي (bot.py v5.7.17-SAFE-ADMIN-GUARD-FINAL)
+🌿 Relax Manager – البوت الرئيسي (bot.py v5.7.18-SAFE-ADMIN-GUARD-FINAL)
 ================================================================================
-🆕 v5.7.17 (فوق v5.7.16):
+🆕 v5.7.18 (فوق v5.7.17):
+    🟢 FIX-RESTART-EXITCODE: بعد os.kill(SIGTERM) نضيف raise SystemExit(1)
+       لضمان أن Render يرى exit code غير صفري ويُعيد التشغيل بقوة 100%.
+       السبب: مع exit 0، Render قد لا يُعيد التشغيل إذا كانت سياسة الخدمة
+       "on-failure". مع exit 1، الإعادة مضمونة.
+    🟢 COSMETIC: توحيد سجلات init إلى v5.7.18 (كانت v5.7.17).
+
+v5.7.17 — محفوظ:
     🟢 FIX-PID: تغيير مسار الـ PID إلى `/tmp/.bot.pid` لدعم Render وقتل العمليات القديمة.
     🟢 ADD-RESTART-CMD: إضافة أمر `/restart` للأدمن (يدوي فقط، لا يوجد إغلاق تلقائي).
     🟢 GUARANTEED: كود كامل 100% دون أي اختصار، مع الحفاظ على إدارة البوتات العامة.
@@ -443,12 +450,12 @@ _FALLBACK_HOSTNAME = (
     os.getenv("FALLBACK_HOSTNAME", "") or "relaxbo-78m4.onrender.com"
 ).strip()
 
-logger.info("🔧 v5.7.17 init: _FALLBACK_HOSTNAME=%r", _FALLBACK_HOSTNAME)
-logger.info("🔧 v5.7.17 init: RENDER_EXTERNAL_HOSTNAME=%r",
+logger.info("🔧 v5.7.18 init: _FALLBACK_HOSTNAME=%r", _FALLBACK_HOSTNAME)
+logger.info("🔧 v5.7.18 init: RENDER_EXTERNAL_HOSTNAME=%r",
             os.getenv("RENDER_EXTERNAL_HOSTNAME", ""))
-logger.info("🔧 v5.7.17 init: RENDER_EXTERNAL_URL=%r",
+logger.info("🔧 v5.7.18 init: RENDER_EXTERNAL_URL=%r",
             os.getenv("RENDER_EXTERNAL_URL", ""))
-logger.info("🔧 v5.7.17 init: ALLOW_POLLING=%r",
+logger.info("🔧 v5.7.18 init: ALLOW_POLLING=%r",
             os.getenv("ALLOW_POLLING", ""))
 
 def _read_pid_file() -> Optional[int]:
@@ -2078,6 +2085,12 @@ async def cmd_ping(update, context):
         logger.error("❌ /ping error: %s", e)
 
 async def cmd_restart(update, context):
+    """
+    🆕 v5.7.18 FIX-RESTART-EXITCODE:
+    - SIGTERM لإغلاق نظيف (post_stop hooks، تنظيف، إلخ)
+    - SystemExit(1) لضمان exit code غير صفري
+    - Render سياسة "on-failure" ستُعيد التشغيل بقوة
+    """
     user = update.effective_user
     if user is None:
         return
@@ -2095,7 +2108,15 @@ async def cmd_restart(update, context):
         parse_mode="HTML"
     )
     logger.warning("🛑 إعادة تشغيل يدوية (تلقائية) بواسطة الأدمن: %s", user.id)
+    # 1) SIGTERM → _shutdown_event.set() → main() ينظّف ويعود
     os.kill(os.getpid(), signal.SIGTERM)
+    # 2) انتظار قصير لضمان بدء الإغلاق النظيف
+    try:
+        await asyncio.sleep(0.5)
+    except asyncio.CancelledError:
+        pass
+    # 3) SystemExit(1) → exit code غير صفري → Render يُعيد التشغيل بقوة
+    raise SystemExit(1)
 
 async def cmd_posts_stats(update, context):
     user = update.effective_user
@@ -2150,7 +2171,6 @@ async def cmd_posts_stats(update, context):
         await msg.reply_text("\n".join(lines), parse_mode='HTML')
     except Exception:
         pass
-
 # ═══════════════════════════════════════════════════════════════════
 # Main
 # ═══════════════════════════════════════════════════════════════════
@@ -2208,11 +2228,12 @@ async def main():
     logger.info("👨‍💼 المالك: %s", CONFIG.PRIMARY_OWNER_ID)
 
     logger.info(
-        "📦 bot.py: v5.7.17 | kill_prev=on | init_retry=on | webhook_force=on | "
+        "📦 bot.py: v5.7.18 | kill_prev=on | init_retry=on | webhook_force=on | "
         "webhook_verify=on | diag_incoming=%r | "
         "detectors=%s | layers=%d | fallback_hostname=%r | "
         "allow_polling_env=%r | alias_fix=on | cmds_reordered=on | "
-        "post_stop_fix=on | admin_safe_retry=on(%dx,%.1fs) | admin_restart=on",
+        "post_stop_fix=on | admin_safe_retry=on(%dx,%.1fs) | admin_restart=on | "
+        "restart_exitcode=on",
         _DIAG_INCOMING,
         _SPAM_DETECTOR_VERSION or "N/A",
         _SPAM_DETECTOR_LAYERS_COUNT,
@@ -2949,6 +2970,7 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         logger.info("\n👋 تم الإيقاف")
     except SystemExit:
+        # 🆕 v5.7.18: نُمرّر SystemExit كما هو (يحتوي exit code 1 من /restart)
         raise
     except Exception as e:
         logger.error("❌ خطأ: %s", e, exc_info=True)
