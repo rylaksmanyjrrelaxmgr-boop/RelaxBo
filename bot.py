@@ -1,25 +1,29 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-🌿 Relax Manager – البوت الرئيسي (bot.py v5.7.18-SAFE-ADMIN-GUARD-FINAL)
+🌿 Relax Manager – البوت الرئيسي (bot.py v5.7.19-DB-ERRORS-INTEGRATION)
 ================================================================================
-🆕 v5.7.18 (فوق v5.7.17):
-    🟢 FIX-RESTART-EXITCODE: بعد os.kill(SIGTERM) نضيف raise SystemExit(1)
-       لضمان أن Render يرى exit code غير صفري ويُعيد التشغيل بقوة 100%.
-       السبب: مع exit 0، Render قد لا يُعيد التشغيل إذا كانت سياسة الخدمة
-       "on-failure". مع exit 1، الإعادة مضمونة.
-    🟢 COSMETIC: توحيد سجلات init إلى v5.7.18 (كانت v5.7.17).
+🆕 v5.7.19 (فوق v5.7.18):
+    🟢 ADD-DB-ERRORS-CMD: أمر `/db_errors` — كشف أخطاء DB الشامل (سريع).
+    🟢 ADD-DB-FULL-CHECK-CMD: أمر `/db_full_check` — تشخيص + أخطاء (شامل).
+    🟢 ADD-SEND-LONG-TEXT: helper لإرسال نصوص طويلة (تقسيم تلقائي 4000 حرف).
+    🟢 IMPORT-NEW-FNS: `diagnose_with_errors` + `diagnose_findings_only`
+       من `db_diagnostics.py v7.3.0` (مع fallback آمن).
+
+v5.7.18 — محفوظ:
+    🟢 FIX-RESTART-EXITCODE: SystemExit(1) بعد SIGTERM.
+    🟢 COSMETIC: توحيد سجلات init.
 
 v5.7.17 — محفوظ:
-    🟢 FIX-PID: تغيير مسار الـ PID إلى `/tmp/.bot.pid` لدعم Render وقتل العمليات القديمة.
-    🟢 ADD-RESTART-CMD: إضافة أمر `/restart` للأدمن (يدوي فقط، لا يوجد إغلاق تلقائي).
-    🟢 GUARANTEED: كود كامل 100% دون أي اختصار، مع الحفاظ على إدارة البوتات العامة.
+    🟢 FIX-PID: PID في `/tmp/.bot.pid`.
+    🟢 ADD-RESTART-CMD: `/restart` للأدمن.
+    🟢 GUARANTEED: كود كامل 100% بلا اختصار.
 
 v5.7.16 — محفوظ:
-    🟢 FIX-ADMIN-SAFE: إعادة محاولة `_collect_admin_ids()` 3 مرات لتجنب boot loop.
+    🟢 FIX-ADMIN-SAFE: `_collect_admin_ids()` 3 محاولات.
 
 v5.7.15 — محفوظ:
-    🔴 FIX-POST-STOP: `_run_post_stop_hooks` — لا استدعاء يدوي
+    🔴 FIX-POST-STOP: لا استدعاء يدوي لـ post_stop.
 ================================================================================
 """
 
@@ -110,6 +114,29 @@ except ImportError:
 except Exception:
     _fn_autotune = None
     _AUTOTUNE_AVAILABLE = False
+
+# 🆕 v5.7.19: دوال كشف الأخطاء (من db_diagnostics v7.3.0)
+_DB_ERRORS_AVAILABLE = False
+_fn_diagnose_with_errors = None
+_fn_diagnose_findings_only = None
+
+try:
+    from db_diagnostics import (
+        diagnose_with_errors as _fn_diagnose_with_errors,
+        diagnose_findings_only as _fn_diagnose_findings_only,
+    )
+    _DB_ERRORS_AVAILABLE = (
+        callable(_fn_diagnose_with_errors)
+        and callable(_fn_diagnose_findings_only)
+    )
+except ImportError:
+    _fn_diagnose_with_errors = None
+    _fn_diagnose_findings_only = None
+    _DB_ERRORS_AVAILABLE = False
+except Exception:
+    _fn_diagnose_with_errors = None
+    _fn_diagnose_findings_only = None
+    _DB_ERRORS_AVAILABLE = False
 
 from config import CONFIG
 from database import DB, initialize_db, TimeUtils
@@ -441,7 +468,6 @@ logger = logging.getLogger("relax_bot")
 # ═══════════════════════════════════════════════════════════════════
 # PID / KILL-PREVIOUS
 # ═══════════════════════════════════════════════════════════════════
-# 🟢 المسار الآمن على Render
 _PID_FILE_PATH = "/tmp/.bot.pid"
 _KILL_TIMEOUT_SEC = 5.0
 _TELEGRAM_RELEASE_TIMEOUT_SEC = 15.0
@@ -450,12 +476,12 @@ _FALLBACK_HOSTNAME = (
     os.getenv("FALLBACK_HOSTNAME", "") or "relaxbo-78m4.onrender.com"
 ).strip()
 
-logger.info("🔧 v5.7.18 init: _FALLBACK_HOSTNAME=%r", _FALLBACK_HOSTNAME)
-logger.info("🔧 v5.7.18 init: RENDER_EXTERNAL_HOSTNAME=%r",
+logger.info("🔧 v5.7.19 init: _FALLBACK_HOSTNAME=%r", _FALLBACK_HOSTNAME)
+logger.info("🔧 v5.7.19 init: RENDER_EXTERNAL_HOSTNAME=%r",
             os.getenv("RENDER_EXTERNAL_HOSTNAME", ""))
-logger.info("🔧 v5.7.18 init: RENDER_EXTERNAL_URL=%r",
+logger.info("🔧 v5.7.19 init: RENDER_EXTERNAL_URL=%r",
             os.getenv("RENDER_EXTERNAL_URL", ""))
-logger.info("🔧 v5.7.18 init: ALLOW_POLLING=%r",
+logger.info("🔧 v5.7.19 init: ALLOW_POLLING=%r",
             os.getenv("ALLOW_POLLING", ""))
 
 def _read_pid_file() -> Optional[int]:
@@ -740,6 +766,11 @@ def _log_db_diagnostics_status() -> None:
         logger.warning("⚠️ db_diagnostics: v%s محمّل بلا mark_process_start", _DB_DIAG_VERSION)
     if _AUTOTUNE_AVAILABLE:
         logger.info("⚙️ auto-tuning: ✅ متاح")
+    # 🆕 v5.7.19
+    if _DB_ERRORS_AVAILABLE:
+        logger.info("🔴 db_errors: ✅ متاح (diagnose_with_errors + diagnose_findings_only)")
+    else:
+        logger.info("ℹ️ db_errors: غير متاح (v7.3.0 مطلوب)")
 
 _NOTIFY_SHUTDOWN_TIMEOUT = 5.0
 _BG_TASKS_SHUTDOWN_TIMEOUT = 10.0
@@ -777,9 +808,6 @@ _GROUP_CHAT_FILTER = filters.ChatType.GROUP | filters.ChatType.SUPERGROUP
 
 _TG_TOKEN_RE = re.compile(r"^\d{8,10}:[A-Za-z0-9_-]{35}$")
 
-# ═══════════════════════════════════════════════════════════════════
-# 🆕 v5.7.16 — إعدادات جمع الأدمن (safe retry)
-# ═══════════════════════════════════════════════════════════════════
 _ADMIN_COLLECT_MAX_ATTEMPTS = 3
 _ADMIN_COLLECT_RETRY_DELAY_SEC = 2.0
 
@@ -1087,10 +1115,6 @@ ALLOWED_UPDATES = [
 ]
 _GROUP_LOG_INSTANCE = None
 
-# ═══════════════════════════════════════════════════════════════════
-# v5.7.14 — قوائم الأوامر مرتبة ومكتملة
-# ═══════════════════════════════════════════════════════════════════
-
 PUBLIC_COMMANDS = [
     ("start", "🏠 القائمة الرئيسية"),
     ("help", "📚 المساعدة"),
@@ -1145,6 +1169,8 @@ ADMIN_COMMANDS = [
     ("db_weekly", "📅 التقرير الأسبوعي"),
     ("db_tune", "⚙️ ضبط autovacuum"),
     ("autotune", "⚙️ ضبط autovacuum"),
+    ("db_errors", "🔴 كشف الأخطاء الشامل"),         # 🆕 v5.7.19
+    ("db_full_check", "🔍 تشخيص كامل + أخطاء"),      # 🆕 v5.7.19
     ("autoblocked", "🚫 المحجوبة تلقائياً"),
     ("db_idle", "🔍 idle-in-transaction"),
     ("cache_stats", "📊 إحصائيات الكاش"),
@@ -1156,7 +1182,7 @@ ADMIN_COMMANDS = [
     ("latency", "🔬 اختبار الكمون"),
     ("databases", "🗂️ قواعد البيانات"),
 
-    # ─── 7) فحص الملفات (v1.3.6) ───
+    # ─── 7) فحص الملفات ───
     ("files", "📂 ملفات المشروع"),
     ("audit", "🔍 فحص شامل"),
     ("audit_full", "🔍 فحص مفصل"),
@@ -1265,21 +1291,10 @@ async def _collect_admin_ids() -> List[int]:
             continue
     return sorted(admin_ids)
 
-# ═══════════════════════════════════════════════════════════════════
-# 🆕 v5.7.16 — جمع الأدمن مع retry (بدل SystemExit)
-# ═══════════════════════════════════════════════════════════════════
 async def _collect_admin_ids_with_retry(
     max_attempts: int = _ADMIN_COLLECT_MAX_ATTEMPTS,
     delay_sec: float = _ADMIN_COLLECT_RETRY_DELAY_SEC,
 ) -> Tuple[List[int], bool]:
-    """
-    جمع الأدمن مع إعادة محاولة.
-
-    Returns:
-        (admin_ids, is_critical_empty)
-        - admin_ids: القائمة (قد تكون فارغة)
-        - is_critical_empty: True إذا فشلت كل المحاولات (يحتاج تحذير صارخ)
-    """
     last_ids: List[int] = []
     for attempt in range(1, max_attempts + 1):
         try:
@@ -1923,10 +1938,6 @@ async def contest_cleanup(app: Application):
 # ═══════════════════════════════════════════════════════════════════
 
 async def _run_post_init_hooks(app: Application) -> None:
-    """
-    PTB 20.x يستدعي post_init تلقائياً داخل initialize() إذا كان مضبوطاً.
-    نستخدم bot_data للـ idempotency.
-    """
     if app.bot_data.get("_post_init_executed"):
         logger.debug("post_init already executed — skip")
         return
@@ -1937,13 +1948,7 @@ async def _run_post_init_hooks(app: Application) -> None:
         return
     logger.info("✅ post_init مُدار من PTB.initialize() — لا استدعاء يدوي")
 
-
 async def _run_post_stop_hooks(app: Application) -> None:
-    """
-    🔴 v5.7.15 FIX-POST-STOP: PTB 20.x يستدعي post_stop تلقائياً داخل
-    app.stop(). لا نستدعيه يدوياً (double-call).
-    نضع علامة idempotency فقط.
-    """
     if app.bot_data.get("_post_stop_executed"):
         logger.debug("post_stop already executed — skip")
         return
@@ -1954,7 +1959,6 @@ async def _run_post_stop_hooks(app: Application) -> None:
         logger.info("✅ post_stop: managed by PTB (no manual call)")
     else:
         logger.debug("post_stop غير مضبوط — skip")
-
 
 _polling_state = {"running": False}
 
@@ -2042,6 +2046,44 @@ def _resolve_admin_guard(context) -> Set[int]:
     except Exception:
         return set()
 
+# 🆕 v5.7.19: helper لإرسال النصوص الطويلة
+async def _send_long_text(msg, text: str, chunk_size: int = 4000) -> None:
+    """
+    إرسال نص طويل مقسّم تلقائياً إلى رسائل (حد تلجرام 4096).
+    يدعم HTML بشكل آمن مع fallback لنص عادي.
+    """
+    if not text:
+        try:
+            await msg.reply_text("(لا توجد نتائج)")
+        except Exception:
+            pass
+        return
+    if len(text) <= chunk_size:
+        try:
+            await msg.reply_text(text, parse_mode='HTML')
+            return
+        except Exception:
+            try:
+                await msg.reply_text(text)
+            except Exception:
+                pass
+            return
+    chunks = [text[i:i+chunk_size] for i in range(0, len(text), chunk_size)]
+    total = len(chunks)
+    for i, chunk in enumerate(chunks, 1):
+        header = f"<i>({i}/{total})</i>\n\n" if total > 1 else ""
+        try:
+            await msg.reply_text(header + chunk, parse_mode='HTML')
+        except Exception:
+            try:
+                await msg.reply_text(header + chunk)
+            except Exception:
+                pass
+        try:
+            await asyncio.sleep(0.3)
+        except asyncio.CancelledError:
+            raise
+
 async def cmd_ping(update, context):
     user = update.effective_user
     if user is None:
@@ -2085,12 +2127,6 @@ async def cmd_ping(update, context):
         logger.error("❌ /ping error: %s", e)
 
 async def cmd_restart(update, context):
-    """
-    🆕 v5.7.18 FIX-RESTART-EXITCODE:
-    - SIGTERM لإغلاق نظيف (post_stop hooks، تنظيف، إلخ)
-    - SystemExit(1) لضمان exit code غير صفري
-    - Render سياسة "on-failure" ستُعيد التشغيل بقوة
-    """
     user = update.effective_user
     if user is None:
         return
@@ -2108,14 +2144,11 @@ async def cmd_restart(update, context):
         parse_mode="HTML"
     )
     logger.warning("🛑 إعادة تشغيل يدوية (تلقائية) بواسطة الأدمن: %s", user.id)
-    # 1) SIGTERM → _shutdown_event.set() → main() ينظّف ويعود
     os.kill(os.getpid(), signal.SIGTERM)
-    # 2) انتظار قصير لضمان بدء الإغلاق النظيف
     try:
         await asyncio.sleep(0.5)
     except asyncio.CancelledError:
         pass
-    # 3) SystemExit(1) → exit code غير صفري → Render يُعيد التشغيل بقوة
     raise SystemExit(1)
 
 async def cmd_posts_stats(update, context):
@@ -2171,6 +2204,113 @@ async def cmd_posts_stats(update, context):
         await msg.reply_text("\n".join(lines), parse_mode='HTML')
     except Exception:
         pass
+
+# ═══════════════════════════════════════════════════════════════════
+# 🆕 v5.7.19: دوال كشف الأخطاء
+# ═══════════════════════════════════════════════════════════════════
+
+async def cmd_db_errors(update, context):
+    """
+    🆕 v5.7.19: كشف الأخطاء الشامل لقاعدة البيانات (سريع جداً).
+
+    يستخدم `diagnose_findings_only()` من db_diagnostics v7.3.0.
+    يُرجع تقريراً مرتّباً (🔴/🟡) عن الشذوذ في:
+    - البنية (جداول مفقودة)
+    - المستخدمين (NULL IDs، تناقضات)
+    - الباقات (أسعار/مدد غير صالحة، تعارضات)
+    - الاشتراكات (orphan FK، تواريخ متناقضة)
+    - القنوات (orphan FK)
+    - البوتات المُدارة (كلمات قصيرة/مكررة)
+    - الفواتير (paid بـ 0)
+    - الإعدادات (tables_hash/bootstrap_hash)
+    """
+    user = update.effective_user
+    if user is None:
+        return
+    allowed = _resolve_admin_guard(context)
+    if not allowed or user.id not in allowed:
+        return
+    msg = update.effective_message
+    if msg is None:
+        return
+
+    if _fn_diagnose_findings_only is None:
+        try:
+            await msg.reply_text(
+                "❌ <b>غير متاح</b>\n\n"
+                "`diagnose_findings_only()` غير موجود.\n"
+                "تأكد من نشر `db_diagnostics.py v7.3.0` أو أحدث.",
+                parse_mode='HTML',
+            )
+        except Exception:
+            pass
+        return
+
+    try:
+        await msg.reply_text("⏳ جاري فحص قاعدة البيانات...")
+        text = await _fn_diagnose_findings_only()
+        await _send_long_text(msg, text)
+    except Exception as e:
+        logger.error("❌ /db_errors: %s", e, exc_info=True)
+        try:
+            await msg.reply_text(
+                f"❌ <b>خطأ في الفحص:</b>\n"
+                f"<code>{_html_escape(str(e)[:200])}</code>",
+                parse_mode='HTML',
+            )
+        except Exception:
+            pass
+
+async def cmd_db_full_check(update, context):
+    """
+    🆕 v5.7.19: تشخيص كامل + كشف أخطاء شامل.
+
+    يستخدم `diagnose_with_errors()` من db_diagnostics v7.3.0.
+    أبطأ من /db_errors (يستغرق 10-30s) لأنه يشمل:
+    - كل ميزات `diagnose_findings_only()`
+    - تشخيص الأداء (latency probe، full health)
+    - dead tuples، idle-tx، autovacuum، إلخ
+    """
+    user = update.effective_user
+    if user is None:
+        return
+    allowed = _resolve_admin_guard(context)
+    if not allowed or user.id not in allowed:
+        return
+    msg = update.effective_message
+    if msg is None:
+        return
+
+    if _fn_diagnose_with_errors is None:
+        try:
+            await msg.reply_text(
+                "❌ <b>غير متاح</b>\n\n"
+                "`diagnose_with_errors()` غير موجود.\n"
+                "تأكد من نشر `db_diagnostics.py v7.3.0` أو أحدث.",
+                parse_mode='HTML',
+            )
+        except Exception:
+            pass
+        return
+
+    try:
+        await msg.reply_text(
+            "⏳ جاري التشخيص الكامل + كشف الأخطاء\n"
+            "⏱️ (قد يستغرق 10-30 ثانية — يرجى الانتظار...)"
+        )
+        text = await _fn_diagnose_with_errors()
+        await _send_long_text(msg, text)
+    except Exception as e:
+        logger.error("❌ /db_full_check: %s", e, exc_info=True)
+        try:
+            await msg.reply_text(
+                f"❌ <b>خطأ في التشخيص:</b>\n"
+                f"<code>{_html_escape(str(e)[:200])}</code>",
+                parse_mode='HTML',
+            )
+        except Exception:
+            pass
+
 # ═══════════════════════════════════════════════════════════════════
 # Main
 # ═══════════════════════════════════════════════════════════════════
@@ -2228,12 +2368,12 @@ async def main():
     logger.info("👨‍💼 المالك: %s", CONFIG.PRIMARY_OWNER_ID)
 
     logger.info(
-        "📦 bot.py: v5.7.18 | kill_prev=on | init_retry=on | webhook_force=on | "
+        "📦 bot.py: v5.7.19 | kill_prev=on | init_retry=on | webhook_force=on | "
         "webhook_verify=on | diag_incoming=%r | "
         "detectors=%s | layers=%d | fallback_hostname=%r | "
         "allow_polling_env=%r | alias_fix=on | cmds_reordered=on | "
         "post_stop_fix=on | admin_safe_retry=on(%dx,%.1fs) | admin_restart=on | "
-        "restart_exitcode=on",
+        "restart_exitcode=on | db_errors_cmd=on",
         _DIAG_INCOMING,
         _SPAM_DETECTOR_VERSION or "N/A",
         _SPAM_DETECTOR_LAYERS_COUNT,
@@ -2426,11 +2566,6 @@ async def main():
     except Exception as _e:
         logger.error("❌ أوامر المجموعات: %s", _e)
 
-    # ═══════════════════════════════════════════════════════════════
-    # 🟢 v5.7.16 FIX-ADMIN-SAFE:
-    # جمع الأدمن مع 3 محاولات. عند الفشل: logger.critical فقط
-    # (بدون SystemExit) لتجنّب boot loop على Render.
-    # ═══════════════════════════════════════════════════════════════
     _admin_ids, _admin_critical_empty = await _collect_admin_ids_with_retry()
 
     if _admin_critical_empty:
@@ -2554,9 +2689,6 @@ async def main():
         except Exception as _e:
             logger.warning("⚠️ /%s: %s", _name, _e)
 
-    # v5.7.14: /databases, /files, /versions مسجّلة من handlers_analytics
-    # (كانت aliases هنا — تم حذفها لتجنّب التعارض)
-
     if _admin_ids:
         try:
             app.add_handler(CommandHandler("ping", cmd_ping, filters=filters.User(_admin_ids)))
@@ -2580,6 +2712,23 @@ async def main():
             app.add_handler(CommandHandler("posts_stats", cmd_posts_stats))
     else:
         app.add_handler(CommandHandler("posts_stats", cmd_posts_stats))
+
+    # 🆕 v5.7.19: تسجيل أوامر كشف الأخطاء
+    if _admin_ids:
+        try:
+            app.add_handler(CommandHandler("db_errors", cmd_db_errors, filters=filters.User(_admin_ids)))
+        except Exception:
+            app.add_handler(CommandHandler("db_errors", cmd_db_errors))
+    else:
+        app.add_handler(CommandHandler("db_errors", cmd_db_errors))
+
+    if _admin_ids:
+        try:
+            app.add_handler(CommandHandler("db_full_check", cmd_db_full_check, filters=filters.User(_admin_ids)))
+        except Exception:
+            app.add_handler(CommandHandler("db_full_check", cmd_db_full_check))
+    else:
+        app.add_handler(CommandHandler("db_full_check", cmd_db_full_check))
 
     try:
         app.add_handler(CommandHandler("autoblocked", _handle_autoblocked_command))
@@ -2970,7 +3119,6 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         logger.info("\n👋 تم الإيقاف")
     except SystemExit:
-        # 🆕 v5.7.18: نُمرّر SystemExit كما هو (يحتوي exit code 1 من /restart)
         raise
     except Exception as e:
         logger.error("❌ خطأ: %s", e, exc_info=True)
