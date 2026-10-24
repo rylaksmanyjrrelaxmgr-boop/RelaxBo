@@ -24,6 +24,11 @@ handlers_callback.py - معالج الأزرار (v9.7.31-BOT-METRICS-AWARE)
     🔴 FIX-CB-1..5.
 
 🆕 v9.7.28-CONTEST-JOIN-FIX — محفوظ.
+
+🛠️ FIX (Plans Collision):
+    - _handle_buy_subscription: إضافة شرط `AND price > 0` لتجاهل
+      الباقات المجانية (مثل باقة التجربة 30 يوم) عند اختيار باقة مدفوعة
+      بنفس عدد الأيام، لمنع خطأ "Total price must be positive".
 =====================================================================
 """
 import asyncio, importlib, logging, json, time, shutil, os, re
@@ -2419,14 +2424,17 @@ class CallbackHandlers:
             await safe_edit(query,
                 await _trans('invalid_data', lang, "❌"),
                 bot=context.bot); return
+        
         plan_d = None
         try:
+            # FIX: إضافة AND price > 0 لتجاهل باقة "التجربة" المجانية
             plan = await DB.fetchone(
                 "SELECT * FROM plans WHERE duration_days = ? "
-                "AND is_active = 1 AND is_gift = 0 "
+                "AND is_active = 1 AND is_gift = 0 AND price > 0 "
                 "ORDER BY id ASC LIMIT 1", (days,))
             plan_d = _row_to_dict(plan)
         except Exception: plan_d = None
+
         if not plan_d:
             plan_names = {1: "يوم", 7: "أسبوع", 30: "شهر",
                           90: "3 أشهر", 365: "سنة"}
