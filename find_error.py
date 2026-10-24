@@ -1,27 +1,24 @@
-import os
 
-search_text = "Total price must be positive"
-found = False
+import asyncio
+from database import DB
 
-print("🔍 جاري البحث في ملفات المشروع...")
-for root, dirs, files in os.walk("."):
-    # تجاهل مجلدات النظام
-    if ".git" in root or "__pycache__" in root or "venv" in root:
-        continue
-        
-    for file in files:
-        if file.endswith(".py"):
-            path = os.path.join(root, file)
-            try:
-                with open(path, "r", encoding="utf-8") as f:
-                    for i, line in enumerate(f, 1):
-                        if search_text in line:
-                            print(f"\n✅ تم العثور عليه في الملف: {path}")
-                            print(f"📍 رقم السطر: {i}")
-                            print(f"💻 الكود: {line.strip()}")
-                            found = True
-            except Exception:
-                pass
+async def fix_month_plan():
+    await DB.initialize()
+    
+    # 1. فحص الباقات
+    plans = await DB.fetchall("SELECT id, name, price, is_active FROM plans WHERE name LIKE '%شهر%'")
+    print("\n📋 الباقات التي تحتوي على كلمة 'شهر':")
+    for p in plans:
+        print(f"ID: {p['id']} | الاسم: '{p['name']}' | السعر: {p['price']} | نشط: {p['is_active']}")
 
-if not found:
-    print("❌ لم يتم العثور على النص. تأكد من تشغيل السكربت في المجلد الرئيسي.")
+    # 2. إصلاح السعر فوراً إذا كان 0
+    updated = await DB.execute(
+        "UPDATE plans SET price = 75, currency = 'XTR', is_active = 1 WHERE name LIKE '%شهر%'"
+    )
+    if updated > 0:
+        print("\n✅ تم إصلاح الباقة! السعر الآن 75 نجمة.")
+        print("🔄 جرب الآن الضغط على زر 'شهر' في البوت.")
+    else:
+        print("\n❌ لم يتم العثور على الباقة لتحديثها.")
+
+asyncio.run(fix_month_plan())
