@@ -1,12 +1,26 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-handlers/handlers_managed_public.py — معالجات البوتات المُدارة (v5.7.15)
+handlers/handlers_managed_public.py — معالجات البوتات المُدارة (v5.7.16)
 =================================================================================
-🆕 v5.7.15 (SEQUENCE-DELAY-5S):
-    🟡 FIX-FLOW-3: زيادة التأخير بين رد الكلمة والرسالة التالية إلى 5 ثوانٍ.
-        • _SEQUENCE_DELAY_SEC = 5.0 (كان 2.0).
+🆕 v5.7.16 (TARGETED-PERSIST-FIX) — CRITICAL:
+    🔴 FIX-CHURN-1: استخدام `update_managed_user_state()` بدلاً من
+       `save_managed_state()`.
+    
+    المشكلة:
+        `_persist()` القديمة كانت تستدعي `save_managed_state()` التي
+        تُنفّذ UPSERT على **كل** صفوف المستخدمين في كل مرة.
+        مع 8 بوتات × 130 مستخدم = 1,040 UPSERT **لكل رسالة**.
+        النتيجة: churn كارثي على `managed_bot_users` (~1,040 dead tuple/رسالة).
 
+    الحل:
+        `_persist_user()` الجديدة تستدعي `update_managed_user_state()`
+        التي تُحدّث **صفاً واحداً فقط** عبر UPSERT مباشر.
+        تقليل الـ churn بنسبة ~1,000×.
+
+    `_persist()` القديمة محفوظة (deprecated) للتوافق فقط.
+
+🆕 v5.7.15 (SEQUENCE-DELAY-5S) — محفوظ.
 🆕 v5.7.14 (SEQUENCE-DELAY-AFTER-KEYWORD) — محفوظ.
 🆕 v5.7.13 (KEYWORD-THEN-SEQUENCE) — محفوظ.
 🆕 v5.7.12 (SMART-ARABIC-MATCH) — محفوظ.
@@ -34,6 +48,8 @@ from managed_bots_storage import (
     load_managed_state,
     mark_keyword_as_replied,
     save_managed_state,
+    # 🆕 v5.7.16 FIX-CHURN-1
+    update_managed_user_state,
 )
 
 logger = logging.getLogger(__name__)
@@ -159,11 +175,50 @@ def _get_keywords(app: Application) -> Dict[str, str]:
     return kws
 
 
+# ═══════════════════════════════════════════════════════════════════════════
+# 🆕 v5.7.16 FIX-CHURN-1: تحديث صف واحد فقط (بدل UPSERT كل الجداول)
+# ═══════════════════════════════════════════════════════════════════════════
+
+async def _persist_user(
+    app: Application,
+    bid: int,
+    user_id: int,
+    user_state: Dict[str, bool],
+) -> None:
+    """
+    🆕 v5.7.16 FIX-CHURN-1: يحفظ صف مستخدم واحد فقط (churn fix).
+
+    بدل `_persist()` القديمة التي كانت تُنفّذ ~1,040 UPSERT لكل رسالة،
+    هذه الدالة تُنفّذ UPSERT واحدة فقط على `managed_bot_users`.
+
+    Args:
+        app: Application (غير مستخدم — للتوافق مع _persist القديمة)
+        bid: bot_id
+        user_id: Telegram user_id
+        user_state: dict بحالة المستخدم {"start", "reply", "third", "fourth"}
+    """
+    try:
+        await update_managed_user_state(bid, user_id, user_state)
+    except Exception as e:
+        logger.warning(
+            "managed_bot #%s: persist user %s: %s",
+            bid, user_id, e,
+        )
+
+
 async def _persist(
     app: Application,
     bid: int,
     state: Dict[int, Dict[str, bool]],
 ) -> None:
+    """
+    ⚠️ DEPRECATED (v5.7.16): استخدم `_persist_user()` بدلاً منها.
+
+    محفوظة للتوافق مع أي كود قديم. في المسارات الحالية لم تعد
+    تُستدعى — استُبدلت بـ `_persist_user()`.
+
+    ❌ لا تستخدمها في معالجة الرسائل — تُنفّذ UPSERT على كل المستخدمين.
+    """
     try:
         async with get_lock():
             full = await load_managed_state()
@@ -234,7 +289,8 @@ def make_managed_handlers(bid: int) -> Tuple[Callable, Callable]:
                 user_state = state.setdefault(user.id, {})
                 _ensure_fields(user_state)
                 user_state["start"] = True
-                await _persist(app, bid, state)
+                # 🆕 v5.7.16 FIX-CHURN-1: صف واحد فقط
+                await _persist_user(app, bid, user.id, user_state)
 
         except Exception as e:
             logger.exception("managed_bot #%s on_start: %s", bid, e)
@@ -329,7 +385,8 @@ def make_managed_handlers(bid: int) -> Tuple[Callable, Callable]:
                     user_state = state.setdefault(user.id, {})
                     _ensure_fields(user_state)
                     user_state[field] = True
-                    await _persist(app, bid, state)
+                    # 🆕 v5.7.16 FIX-CHURN-1: صف واحد فقط
+                    await _persist_user(app, bid, user.id, user_state)
                     return
 
         except Exception as e:
@@ -359,12 +416,13 @@ __all__ = ["make_managed_handlers", "post_init_managed"]
 
 try:
     logger.debug(
-        "🛡️ handlers_managed_public v5.7.15 "
-        "(SEQUENCE-DELAY-5S) loaded | "
+        "🛡️ handlers_managed_public v5.7.16 "
+        "(TARGETED-PERSIST-FIX) loaded | "
         "keyword_delay=%.1fs | sequence_delay=%.1fs | "
         "flow=keywords(once,smart)→sleep→reply→third→fourth | "
         "locks=striped(%d) | private_only=True | "
-        "match=word_boundary+arabic_norm",
+        "match=word_boundary+arabic_norm | "
+        "churn_fix=persist_user(targeted)",
         _KEYWORD_REPLY_DELAY_SEC,
         _SEQUENCE_DELAY_SEC,
         _NUM_LOCK_STRIPES,
