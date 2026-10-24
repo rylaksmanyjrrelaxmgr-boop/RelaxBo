@@ -1,15 +1,27 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-handlers/handlers_managed_public.py — معالجات البوتات المُدارة (v5.7.9)
+handlers/handlers_managed_public.py — معالجات البوتات المُدارة (v5.7.13)
 =================================================================================
+🆕 v5.7.13 (KEYWORD-THEN-SEQUENCE):
+    🔴 FIX-FLOW-1: بعد رد الكلمة المفتاحية، يكمل البوت إلى التسلسل الأربع.
+        • السلوك الجديد: 
+            المستخدم يرسل "الرياض" → رد "متوفر في الرياض"
+              → ثم يستمر إلى قسم التسلسل → يُرسل "reply" (الرسالة 2).
+              → إذا أرسل رسالة أخرى → "third" (الرسالة 3).
+              → إذا أرسل رسالة أخرى → "fourth" (الرسالة 4).
+
+🆕 v5.7.12 (SMART-ARABIC-MATCH):
+    🔴 FIX-MATCH-1: مطابقة ذكية للكلمات العربية.
+        • لا تُطابق "أب" داخل "أبها"، "أبوك"، "أبشر".
+        • تدعم البادئات: "وأبي"، "ياأبي".
+        • تتجاهل التشكيل والهمزات.
+
 🆕 v5.7.9 (KEYWORD-DELAY-5S):
     • تأخير 5 ثوانٍ قبل إرسال رد الكلمة المفتاحية.
-    • لا تغيير في أي سلوك آخر (صمت التكرار، التسلسل، الخاص فقط).
 
 🆕 v5.7.8 (ONE-TIME-KEYWORD):
     • كل مستخدم يستلم رد الكلمة المفتاحية مرة واحدة فقط.
-    • إذا كرر نفس الكلمة → صمت.
 =================================================================================
 """
 
@@ -17,6 +29,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from typing import Any, Callable, Dict, List, Tuple
 
 from telegram import BotCommandScopeDefault
@@ -41,6 +54,60 @@ _NUM_LOCK_STRIPES = 64
 # 🆕 v5.7.9: تأخير رد الكلمة المفتاحية (بالثواني)
 _KEYWORD_REPLY_DELAY_SEC = 5.0
 
+
+# ═══════════════════════════════════════════════════════════════════════════
+# 🆕 v5.7.12: مطابقة عربية ذكية (FIX-MATCH-1)
+# ═══════════════════════════════════════════════════════════════════════════
+
+_ARABIC_DIACRITICS_RE = re.compile(r'[\u064B-\u065F\u0670\u06D6-\u06ED]')
+_ARABIC_HAMZA_RE = re.compile(r'[إأآٱ]')
+_ARABIC_BOUNDARY_BEFORE = r'(?:^|[\s،.!?؟؛:()\[\]"\'«»\-])'
+_ARABIC_BOUNDARY_AFTER = r'(?=[\s،.!?؟؛:()\[\]"\'«»\-]|$)'
+_ARABIC_PREFIX = r'(?:يا\s?)?(?:[وفبلك]?(?:ال)?)?'
+
+
+def _normalize_arabic(text: str) -> str:
+    """تطبيع النص العربي: إزالة التشكيل، توحيد الهمزات والتاء المربوطة."""
+    if not text:
+        return ""
+    text = _ARABIC_DIACRITICS_RE.sub('', text)
+    text = _ARABIC_HAMZA_RE.sub('ا', text)
+    text = text.replace('ة', 'ه')
+    return text.strip().lower()
+
+
+def _smart_match_arabic(keyword: str, text: str) -> bool:
+    """مطابقة كلمة عربية كاملة داخل نص (مع دعم البادئات الشائعة)."""
+    if not keyword or not text:
+        return False
+
+    norm_kw = _normalize_arabic(keyword.strip())
+    norm_text = _normalize_arabic(text.strip())
+
+    if not norm_kw or not norm_text:
+        return False
+
+    kw_escaped = re.escape(norm_kw)
+    pattern = (
+        f'{_ARABIC_BOUNDARY_BEFORE}'
+        f'{_ARABIC_PREFIX}'
+        f'{kw_escaped}'
+        f'{_ARABIC_BOUNDARY_AFTER}'
+    )
+
+    try:
+        return bool(re.search(pattern, norm_text, re.UNICODE))
+    except re.error as _re_err:
+        logger.warning(
+            "_smart_match_arabic: regex error for %r: %s",
+            keyword, _re_err,
+        )
+        return False
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# أدوات داخلية
+# ═══════════════════════════════════════════════════════════════════════════
 
 def _is_privileged(user_id: int) -> bool:
     try:
@@ -118,27 +185,16 @@ def _ensure_fields(user_state: Dict[str, bool]) -> None:
         user_state.setdefault(f, False)
 
 
-def _normalize_for_match(text: str) -> str:
-    if not text:
-        return ""
-    return text.strip().lower()
-
-
 def _find_keyword_match(
     user_text: str, keywords: Dict[str, str],
 ) -> Tuple[str, str]:
-    """يبحث عن أول كلمة مفتاحية موجودة في نص المستخدم (الأطول أولاً)."""
+    """مطابقة ذكية: يبحث عن أول كلمة مفتاحية (الأطول أولاً)."""
     if not user_text or not keywords:
-        return "", ""
-
-    text_norm = _normalize_for_match(user_text)
-    if not text_norm:
         return "", ""
 
     sorted_kws = sorted(keywords.items(), key=lambda x: -len(x[0]))
     for kw, reply in sorted_kws:
-        kw_norm = _normalize_for_match(kw)
-        if kw_norm and kw_norm in text_norm:
+        if _smart_match_arabic(kw, user_text):
             return kw, reply
 
     return "", ""
@@ -213,7 +269,7 @@ def make_managed_handlers(bid: int) -> Tuple[Callable, Callable]:
                         msg.text, keywords
                     )
                     if kw_matched and reply:
-                        # هل سبق الرد على هذا المستخدم؟
+                        # هل سبق الرد على هذا المستخدم بهذه الكلمة؟
                         already = await is_keyword_already_replied(
                             bid, user.id, kw_matched
                         )
@@ -223,7 +279,7 @@ def make_managed_handlers(bid: int) -> Tuple[Callable, Callable]:
                                 "already replied to user %s — silent",
                                 bid, kw_matched[:30], user.id,
                             )
-                            return
+                            return  # صمت تام للكلمة المكررة
 
                         # 🆕 v5.7.9: تأخير 5 ثوانٍ قبل الرد
                         logger.debug(
@@ -243,10 +299,15 @@ def make_managed_handlers(bid: int) -> Tuple[Callable, Callable]:
                             )
                             logger.debug(
                                 "managed_bot #%s: keyword '%s' "
-                                "replied once (delayed) for user %s",
+                                "replied once (delayed) for user %s — "
+                                "continuing to sequence",
                                 bid, kw_matched[:30], user.id,
                             )
-                        return  # لا يتقدم التسلسل
+                        else:
+                            return  # فشل الإرسال، لا نكمل
+
+                        # 🆕 v5.7.13 FIX-FLOW-1: 
+                        # لا يوجد return هنا! نكمل للأسفل لإرسال الرسالة 2.
 
                 # ═══ 2. التسلسل الأربع ═══
                 state = await _get_state(app, bid)
@@ -300,9 +361,12 @@ __all__ = ["make_managed_handlers", "post_init_managed"]
 
 try:
     logger.debug(
-        "🛡️ handlers_managed_public v5.7.9 (KEYWORD-DELAY) loaded | "
-        "flow=keywords(once,delay=%.1fs)→reply→third→fourth | "
-        "locks=striped(%d) | private_only=True",
+        "🛡️ handlers_managed_public v5.7.13 "
+        "(KEYWORD-THEN-SEQUENCE) loaded | "
+        "flow=keywords(once,delay=%.1fs,smart,then_sequence)→"
+        "reply→third→fourth | "
+        "locks=striped(%d) | private_only=True | "
+        "match=word_boundary+arabic_norm",
         _KEYWORD_REPLY_DELAY_SEC,
         _NUM_LOCK_STRIPES,
     )
