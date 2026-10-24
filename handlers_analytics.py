@@ -1,45 +1,27 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-handlers_analytics.py — واجهة التحليلات المتقدمة (v1.3.7 — AUDIT-FALSE-POSITIVES-FIXED)
+handlers_analytics.py — واجهة التحليلات المتقدمة (v1.3.8 — PgStatStatements-Truth)
 ================================================================================
-v1.3.7 — فوق v1.3.6:
+v1.3.8 — فوق v1.3.7:
+
+    🆕 FIX-SLOW-QUERIES-TRUTH: كشف الحقيقة
+        • إضافة `_query_pg_stat_statements` (نسخة دفاعية)
+        • إضافة `show_slow_queries_real` — مقارنة حقيقية vs مضللة
+        • زر `slow_queries_real_btn` + أمر `/slow_real`
+        • تلميح في `show_slow_queries` القديمة يقود للفحص الحقيقي
+        • يعتمد على pg_stat_statements داخل DB (لا يتأثر بـ event loop)
+
+v1.3.7 — محفوظ بالكامل:
 
     🔴 FIX-SQL-FP-1: `SQL_STRING_FORMAT` → `SQL_FSTRING_REAL`
-        • إزالة re.DOTALL (كانت تطابق عبر الأسطر — سبب ~50 false positive)
-        • إزالة مطابقة `%s` و `?` (parameterized آمن)
-        • إزالة مطابقة `UPDATE/INSERT` خارج strings (مثل `Update as _TgUpdate`)
-        • النتيجة: 55 finding → 0-2 حقيقية
+    🔴 FIX-EVAL-EXEC-FP-2: `EVAL_USE` / `EXEC_USE` lookbehind
+    🔴 FIX-EXCEPT-PASS-3: كشف AST دقيق
+    🔴 FIX-LOG-FSTRING-FP-4: `[ \t]*` بدل `\s*`
+    🟢 FIX-SELF-SCAN-5: `_audit_collect_files` يستثني نفسه
+    🟢 FIX-DECLARED-6: `_DECLARED_FIXES_V5713` أنماط محدَّثة
 
-    🔴 FIX-EVAL-EXEC-FP-2: `EVAL_USE` / `EXEC_USE`
-        • تغيير message لتجنّب self-match ("استخدام eval(" كان يُطابق نفسه)
-        • إضافة `(?<![.\w])` lookbehind لتجاهل `.eval(` و `myeval(`
-        • النتيجة: 2 CRITICAL → 0
-
-    🔴 FIX-EXCEPT-PASS-3: `EXCEPT_PASS`
-        • إزالة regex المكسور `except\s+[^:]+:\s*\n\s*pass\b`
-        • إضافة كشف AST دقيق: `len(h.body) == 1 and isinstance(h.body[0], Pass)`
-        • النتيجة: ~600 false → ~50 حقيقية (except: pass فقط)
-
-    🔴 FIX-LOG-FSTRING-FP-4: `LOG_FSTRING`
-        • `[ \t]*` بدل `\s*` بين `logger.xxx(` و `f"..."` (منع multi-line match)
-        • النتيجة: ~300 → ~20 حقيقية
-
-    🟢 FIX-SELF-SCAN-5: `_audit_collect_files`
-        • استثناء `handlers_analytics.py` من self-scan
-        • النتيجة: لا self-flags على ملف الفحص نفسه
-
-    🟢 FIX-DECLARED-6: `_DECLARED_FIXES_V5713`
-        • P0-FIX-2: يقبل idempotency flag فقط (لا manual unbind مطلوب)
-        • P1-FIX-4: يطابق `if not result: continue` الفعلي
-        • P3-FIX-11: يدعم tuple/list متعدد الأسطر
-
-v1.3.6 — محفوظ بالكامل:
-    🆕 AUDIT-1: /audit + /audit_full + /audit_critical + audit_btn
-    🆕 AUDIT-2: 15 قاعدة pattern + 5 AST + 3 PTB + 2 bot-specific
-    🆕 AUDIT-3: تصدير Markdown/JSON
-    🆕 AUDIT-4: _MAX_AUDIT_FILES=200, _AUDIT_TIMEOUT_SEC=30
-
+v1.3.6 — محفوظ: AUDIT-1..4
 v1.3.5 — محفوظ: FILES-SCAN-1..8
 v1.3.4 — محفوظ: FIX-VERSIONS-PATH/ERR
 v1.3.3 — محفوظ: AUTO-1..6
@@ -91,6 +73,7 @@ ANALYTICS_BUTTONS = (
     "subscriptions_btn",
     "pool_live_btn",
     "slow_queries_btn",
+    "slow_queries_real_btn",     # 🆕 v1.3.8
     "export_excel_btn",
     "refresh_btn",
     "full_health_btn",
@@ -249,14 +232,12 @@ _DECLARED_FIXES_V5713: Dict[str, List[str]] = {
         r"_post_init_executed",
         r"post_init\s+مُدار\s+من\s+PTB",
     ],
-    # 🆕 FIX-DECLARED-6: في v5.7.16 لا يوجد manual unbind — يكفي idempotency flag
     "P0-FIX-2: post_stop unbind _post_stop": [
         r"_post_stop_executed",
     ],
     "P0-FIX-3: watch_runner resets only 2xx/3xx": [
         r"200\s*<=\s*resp\.status\s*<\s*400",
     ],
-    # 🆕 FIX-DECLARED-6: يطابق الكود الفعلي `if not result:\n    continue`
     "P1-FIX-4: collect_admin_ids continue on empty": [
         r"if\s+not\s+result:\s*\n\s*continue",
         r"continue\s*\n\s*for\s+a\s+in\s+result",
@@ -283,7 +264,6 @@ _DECLARED_FIXES_V5713: Dict[str, List[str]] = {
     "P2-FIX-10: no catch SystemExit": [
         r"except\s+\(KeyboardInterrupt,\s*SystemExit\):\s*\n\s*raise",
     ],
-    # 🆕 FIX-DECLARED-6: يدعم tuple/list متعدد الأسطر
     "P3-FIX-11: critical commands include grant": [
         r"_CRITICAL_COMMANDS\s*=\s*\([^)]{0,800}\bgrant\b",
         r"_CRITICAL_COMMANDS\s*=\s*\[[^\]]{0,800}\bgrant\b",
@@ -305,17 +285,11 @@ _DECLARED_FIXES_V5713: Dict[str, List[str]] = {
     ],
 }
 
-# 🆕 v1.3.7 — الأنماط مُصحَّحة:
-#   • SQL_STRING_FORMAT → SQL_FSTRING_REAL (بدون DOTALL، بدون %s/?)
-#   • EVAL_USE/EXEC_USE: message بدون "eval("/"exec(" + lookbehind
-#   • EXCEPT_PASS: محذوف (يُعالج في AST)
-#   • LOG_FSTRING: [ \t]* بدل \s*
 _AUDIT_PATTERNS = [
     {"id": "BARE_EXCEPT", "severity": "HIGH",
      "pattern": _re_mod.compile(r"^[ \t]*except[ \t]*:[ \t]*$", _re_mod.MULTILINE),
      "message": "bare except: يُخفي كل الأخطاء",
      "suggestion": "استخدم `except Exception:` أو نوعاً محدداً"},
-    # 🆕 FIX-EVAL-EXEC-FP-2: message بدون "eval("/"exec(" + lookbehind
     {"id": "EVAL_USE", "severity": "CRITICAL",
      "pattern": _re_mod.compile(r"(?<![.\w])eval\s*\("),
      "message": "استخدام دالة التقييم الديناميكي — خطر أمني",
@@ -355,8 +329,6 @@ _AUDIT_PATTERNS = [
          _re_mod.IGNORECASE),
      "message": "كلمة مرور/مفتاح مضمّن",
      "suggestion": "استخدم متغير بيئة"},
-    # 🆕 FIX-SQL-FP-1: يطابق فقط f-string/format/concat على SQL
-    # لا يطابق: `%s` / `?` (parameterized) / UPDATE كاسم متغير
     {"id": "SQL_FSTRING_REAL", "severity": "HIGH",
      "pattern": _re_mod.compile(
          r"""(?:f['"][ \t]*(?:SELECT|INSERT|UPDATE|DELETE)\b"""
@@ -375,7 +347,6 @@ _AUDIT_PATTERNS = [
          r"\brequests\.(get|post|put|delete|patch)\s*\("),
      "message": "requests.* داخل async def",
      "suggestion": "استخدم aiohttp أو httpx"},
-    # 🆕 FIX-LOG-FSTRING-FP-4: [ \t]* بدل \s* (يمنع multi-line match)
     {"id": "LOG_FSTRING", "severity": "LOW",
      "pattern": _re_mod.compile(r"logger\.\w+\([ \t]*f['\"]"),
      "message": "logging مع f-string بدل %s",
@@ -473,7 +444,6 @@ class _ASTAuditor(_ast_mod.NodeVisitor):
                 self._add("AST_BARE_EXCEPT", "HIGH", h.lineno,
                           "bare except: يُخفي SystemExit/KeyboardInterrupt",
                           "استخدم `except Exception:`")
-            # 🆕 FIX-EXCEPT-PASS-3: كشف دقيق — فقط عندما pass هي العبارة الوحيدة
             elif len(h.body) == 1 and isinstance(h.body[0], _ast_mod.Pass):
                 self._add("AST_EXCEPT_PASS", "MEDIUM", h.lineno,
                           "except ...: pass يُخفي الأخطاء بصمت",
@@ -512,7 +482,6 @@ class _ASTAuditor(_ast_mod.NodeVisitor):
             self._add("AST_SHELL_TRUE", "HIGH", node.lineno,
                       f"{fname} مع shell=True", "استخدم قائمة args")
 
-        # 🆕 v1.3.7: eval/exec عبر AST (أدق من regex)
         if fname in ("eval", "exec"):
             self._add("AST_EVAL_EXEC", "CRITICAL", node.lineno,
                       f"استدعاء {fname}() — خطر أمني",
@@ -963,7 +932,6 @@ async def _audit_run_reports(
 async def _audit_collect_files(root: Path) -> List[Path]:
     """جمع ملفات .py من الجذر (يستثني handlers_analytics.py من self-scan)."""
     files: List[Path] = []
-    # 🆕 FIX-SELF-SCAN-5: استثناء self من self-scan
     try:
         _self_path = Path(__file__).resolve()
     except Exception:
@@ -2079,7 +2047,328 @@ async def show_pool_live(update: Update,
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# 8) أبطأ الاستعلامات
+# 🆕 v1.3.8 FIX-SLOW-QUERIES-TRUTH
+# فحص الاستعلامات البطيئة الحقيقية عبر pg_stat_statements
+# ═══════════════════════════════════════════════════════════════════════
+
+async def _query_pg_stat_statements(limit: int = 20) -> Dict[str, Any]:
+    """
+    🆕 v1.3.8: يستعلم pg_stat_statements للحصول على أزمنة تنفيذ حقيقية
+    داخل DB — منفصلة تماماً عن وقت الشبكة أو حجب event loop.
+
+    نسخة دفاعية: تتحقق من توفّر DB.fetchval/fetchall قبل الاستخدام.
+
+    المقارنة:
+      - DB.get_slowest_queries() → يقيس من داخل Python (مضلل عند حجب loop)
+      - pg_stat_statements         → يقيس على خادم DB نفسه (حقيقة مطلقة)
+
+    Returns:
+        {
+            'available': bool,           # الاستعلام نجح
+            'extension_installed': bool, # pg_stat_statements مثبت
+            'rows': [...],
+            'error': str|None,
+            'db_type': str,
+        }
+    """
+    result: Dict[str, Any] = {
+        'available': False,
+        'extension_installed': False,
+        'rows': [],
+        'error': None,
+        'db_type': str(getattr(DB, "DB_TYPE", "?")).upper(),
+    }
+
+    if not bool(getattr(DB, "USE_POSTGRES", False)):
+        result['error'] = (
+            f"pg_stat_statements يتطلب PostgreSQL "
+            f"(الحالي: {result['db_type']})"
+        )
+        return result
+
+    # 🔴 تحقق من توفّر دوال الاستعلام الخام
+    _fetchval = getattr(DB, "fetchval", None)
+    _fetchall = getattr(DB, "fetchall", None)
+    if not callable(_fetchval) or not callable(_fetchall):
+        result['error'] = (
+            "DB.fetchval/fetchall غير متاحين على database.py — "
+            "أضف الدالتين أو استخدم get_slowest_queries."
+        )
+        return result
+
+    # 1) فحص وجود الـ extension
+    try:
+        ext_check = await _fetchval(
+            "SELECT 1 FROM pg_extension "
+            "WHERE extname = 'pg_stat_statements'"
+        )
+        result['extension_installed'] = ext_check is not None
+    except Exception as e:
+        result['error'] = f"ext check: {type(e).__name__}: {str(e)[:80]}"
+        return result
+
+    if not result['extension_installed']:
+        result['error'] = (
+            "pg_stat_statements غير مثبّت في DB.\n"
+            "💡 <b>الحل:</b> شغّل:\n"
+            "  <code>CREATE EXTENSION pg_stat_statements;</code>\n\n"
+            "ثم أضف في <code>postgresql.conf</code>:\n"
+            "  <code>shared_preload_libraries = 'pg_stat_statements'</code>\n"
+            "وأعد تشغيل DB."
+        )
+        return result
+
+    # 2) قراءة الأزمنة الحقيقية
+    try:
+        _safe_limit = max(1, min(int(limit), 100))
+        rows = await _fetchall(f"""
+            SELECT query,
+                   calls,
+                   ROUND(total_exec_time::numeric, 2) AS total_ms,
+                   ROUND(mean_exec_time::numeric, 2) AS mean_ms,
+                   ROUND(max_exec_time::numeric, 2) AS max_ms,
+                   ROUND(stddev_exec_time::numeric, 2) AS stddev_ms,
+                   rows
+            FROM pg_stat_statements
+            WHERE query NOT LIKE '%pg_stat_statements%'
+              AND query NOT LIKE '%pg_stat_activity%'
+              AND query NOT LIKE '%pg_settings%'
+              AND query NOT LIKE '%information_schema%'
+              AND query NOT LIKE 'BEGIN%'
+              AND query NOT LIKE 'COMMIT%'
+              AND query NOT LIKE 'ROLLBACK%'
+              AND query NOT LIKE 'SET %'
+              AND query NOT LIKE 'SHOW %'
+              AND mean_exec_time > 50
+            ORDER BY mean_exec_time DESC
+            LIMIT {_safe_limit}
+        """)
+        result['available'] = True
+        result['rows'] = rows or []
+    except Exception as e:
+        result['error'] = f"query: {type(e).__name__}: {str(e)[:100]}"
+
+    return result
+
+
+async def show_slow_queries_real(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """
+    🆕 v1.3.8 FIX-SLOW-QUERIES-TRUTH
+
+    يكشف الحقيقة: هل الاستعلامات بطيئة فعلاً في DB، أم أن
+    get_slowest_queries() مضللة بسبب حجب event loop؟
+
+    عرض مزدوج:
+      1. أزمنة pg_stat_statements (حقيقية داخل DB)
+      2. get_slowest_queries() (من داخل Python — قد تكون مضللة)
+      3. مقارنة تلقائية + استنتاج
+    """
+    query = update.callback_query
+    await _quick_answer(query, "⏳ جاري الفحص الحقيقي...")
+
+    chat_id = _safe_get_chat_id(update, query)
+    user_id = _get_safe_user_id(update)
+    if not _check_developer(user_id):
+        await _reject_non_dev(context.bot, chat_id, query)
+        return
+
+    try:
+        # 1) الاستعلام عن pg_stat_statements
+        pg_stats = await _query_pg_stat_statements(limit=15)
+
+        # 2) قراءة get_slowest_queries للمقارنة
+        internal: List[Dict[str, Any]] = []
+        try:
+            if hasattr(DB, "get_slowest_queries"):
+                internal = await DB.get_slowest_queries(limit=10) or []
+        except Exception as e:
+            logger.debug(
+                f"show_slow_queries_real: get_slowest_queries: {e}")
+
+        # 3) بناء التقرير
+        lines: List[str] = [
+            "🔬 <b>الاستعلامات البطيئة — حقيقي vs مضلل</b>",
+            "━━━━━━━━━━━━━━━━━━━━━━",
+            "",
+            f"🗄️ DB: <code>{_html_mod.escape(pg_stats['db_type'])}</code>",
+            f"📊 pg_stat_statements: "
+            f"{'✅ مثبّت' if pg_stats['extension_installed'] else '❌ غير مثبّت'}",
+            "",
+        ]
+
+        # ─── حالة 1: extension غير مثبت ───
+        if not pg_stats['extension_installed']:
+            lines.append("⚠️ <b>لا يمكن قياس الحقيقة</b>")
+            lines.append("")
+            lines.append("🔴 <b>السبب:</b>")
+            lines.append(
+                f"  <code>{_html_mod.escape(pg_stats.get('error') or '?')}</code>"
+            )
+            lines.append("")
+            if internal:
+                lines.append(
+                    f"📊 <b>get_slowest_queries() (مضللة محتملة):</b>"
+                )
+                lines.append(f"  عدد: <b>{len(internal)}</b>")
+                for r in internal[:5]:
+                    q = _html_mod.escape(str(r.get('query', '?'))[:60])
+                    el = r.get('elapsed', 0)
+                    lines.append(
+                        f"  ⚠️ {_fmt_elapsed(el)}: <code>{q}</code>"
+                    )
+                lines.append("")
+                lines.append(
+                    "💡 <b>ملاحظة:</b> هذه قد لا تكون بطيئة فعلاً في DB — "
+                    "التسجيل يقيس من داخل Python (يتأثر بحجب loop)."
+                )
+
+        # ─── حالة 2: فشل الاستعلام ───
+        elif not pg_stats['available']:
+            lines.append("❌ <b>فشل قراءة pg_stat_statements</b>")
+            lines.append(
+                f"<code>{_html_mod.escape(pg_stats.get('error') or '?')}</code>"
+            )
+
+        # ─── حالة 3: نجح — لا استعلامات بطيئة ───
+        elif not pg_stats['rows']:
+            lines.append("✅ <b>لا استعلامات > 50ms في DB</b>")
+            lines.append("")
+            if internal:
+                max_internal = max(
+                    (float(r.get('elapsed', 0)) for r in internal),
+                    default=0.0
+                )
+                lines.append(
+                    f"⚠️ <b>لكن get_slowest_queries() "
+                    f"يُظهر {len(internal)} استعلام:</b>"
+                )
+                lines.append(
+                    f"  أبطأ واحد: <b>{_fmt_elapsed(max_internal)}</b>"
+                )
+                lines.append("")
+                lines.append("🔴 <b>الاستنتاج الحاسم:</b>")
+                lines.append(
+                    "  ✅ <b>قاعدة البيانات سليمة تماماً</b> "
+                    "(كل الاستعلامات < 50ms)"
+                )
+                lines.append(
+                    "  🔴 <b>المشكلة في الكود</b> — "
+                    "event loop كان محجوباً"
+                )
+                lines.append("")
+                lines.append("💡 <b>الأسباب المحتملة:</b>")
+                lines.append(
+                    "  • استدعاء sync داخل async "
+                    "(psycopg2, requests, time.sleep)"
+                )
+                lines.append(
+                    "  • <code>DB.get_auto_reply</code> مباشرة "
+                    "(v7.18.54 أصلحها)"
+                )
+                lines.append(
+                    "  • regex ثقيل على نصوص طويلة"
+                )
+                lines.append("")
+                lines.append("🔍 <b>كيف تتحقق:</b>")
+                lines.append(
+                    "  راقب <code>GIL-MONITOR</code> + "
+                    "<code>SLOW handler</code> في السجل"
+                )
+            else:
+                lines.append(
+                    "🎉 <b>كل شيء ممتاز</b> — لا استعلامات بطيئة.")
+
+        # ─── حالة 4: نجح — استعلامات بطيئة حقيقية ───
+        else:
+            pg_rows = pg_stats['rows']
+            lines.append(
+                f"🔴 <b>استعلامات بطيئة حقيقية ({len(pg_rows)}):</b>"
+            )
+            lines.append("")
+            for i, r in enumerate(pg_rows[:10], 1):
+                rd = dict(r) if not isinstance(r, dict) else r
+                q = _html_mod.escape(str(rd.get('query', '?'))[:70])
+                mean = rd.get('mean_ms', 0)
+                mx = rd.get('max_ms', 0)
+                calls = rd.get('calls', 0)
+                lines.append(f"{i}. <code>{q}</code>")
+                lines.append(
+                    f"   mean=<b>{mean}ms</b> "
+                    f"max=<b>{mx}ms</b> "
+                    f"calls=<b>{calls}</b>"
+                )
+            lines.append("")
+            lines.append("🔴 <b>هذه مشكلة DB حقيقية</b>")
+            lines.append("💡 <b>الحل:</b>")
+            lines.append("  • راجع الفهارس (EXPLAIN ANALYZE)")
+            lines.append("  • شغّل <code>VACUUM ANALYZE</code>")
+            lines.append("  • راجع N+1 queries")
+
+            # مقارنة مع internal
+            if internal:
+                max_internal = max(
+                    (float(x.get('elapsed', 0)) for x in internal),
+                    default=0.0
+                )
+                max_pg = max(
+                    (float(rd.get('mean_ms', 0)) / 1000.0
+                     for rd in pg_rows),
+                    default=0.0
+                )
+                lines.append("")
+                lines.append("━━━━━━━━━━━━━━━━━━━━━━")
+                lines.append("📊 <b>مقارنة:</b>")
+                lines.append(
+                    f"  get_slowest_queries: "
+                    f"<b>{_fmt_elapsed(max_internal)}</b>"
+                )
+                lines.append(
+                    f"  pg_stat_statements: <b>{_fmt_elapsed(max_pg)}</b>"
+                )
+                if max_internal > max_pg * 3 and max_pg > 0.1:
+                    ratio = max_internal / max_pg
+                    lines.append("")
+                    lines.append(
+                        f"⚠️ <b>فرق {ratio:.1f}×</b> — "
+                        f"جزء من البطء من event loop"
+                    )
+
+        lines.append("")
+        lines.append(f"🕐 <i>{TimeUtils.mecca_iso()[:19]}</i>")
+
+        text = "\n".join(lines)
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton(
+                "🔄 إعادة الفحص",
+                callback_data="slow_queries_real_btn",
+            )],
+            [InlineKeyboardButton(
+                "🐌 عرض التسجيل الداخلي",
+                callback_data="slow_queries_btn",
+            )],
+            [InlineKeyboardButton(
+                "🔙 رجوع",
+                callback_data="admin_analytics",
+            )],
+        ])
+        await _safe_edit(query, text, kb)
+
+    except Exception as e:
+        logger.error(
+            "show_slow_queries_real: %s", e, exc_info=True)
+        err_html = _err_detail(e)
+        await _safe_edit(
+            query,
+            f"❌ <b>فشل الفحص الحقيقي</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━\n{err_html}",
+            _back_keyboard("admin_analytics"),
+        )
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# 8) أبطأ الاستعلامات (تسجيل داخلي — قد يُضلل)
 # ═══════════════════════════════════════════════════════════════════════
 
 async def show_slow_queries(update: Update,
@@ -2148,9 +2437,32 @@ async def show_slow_queries(update: Update,
                         pass
                 lines.append("")
 
+        # 🆕 v1.3.8: تلميح للفحص الحقيقي
+        lines.append("")
+        lines.append("━━━━━━━━━━━━━━━━━━━━━━")
+        lines.append(
+            "⚠️ <b>ملاحظة:</b> هذه القائمة تقيس الوقت "
+            "<b>من داخل Python</b> — قد تتأثر بحجب event loop."
+        )
+        lines.append(
+            "🔬 <b>للفحص الحقيقي (داخل DB):</b> اضغط الزر أدناه."
+        )
+
         text = "\n".join(lines)
-        kb = _back_refresh_keyboard(
-            target="admin_analytics", refresh="slow_queries_btn")
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton(
+                "🔬 فحص حقيقي (pg_stat_statements)",
+                callback_data="slow_queries_real_btn",
+            )],
+            [InlineKeyboardButton(
+                "🔄 تحديث",
+                callback_data="slow_queries_btn",
+            )],
+            [InlineKeyboardButton(
+                "🔙 رجوع",
+                callback_data="admin_analytics",
+            )],
+        ])
         await _safe_edit(query, text, kb)
     except Exception as e:
         logger.error("show_slow_queries: %s", e, exc_info=True)
@@ -3579,6 +3891,7 @@ _ANALYTICS_HANDLERS = {
     "subscriptions_btn": show_subscriptions,
     "pool_live_btn": show_pool_live,
     "slow_queries_btn": show_slow_queries,
+    "slow_queries_real_btn": show_slow_queries_real,   # 🆕 v1.3.8
     "export_excel_btn": export_excel,
     "full_health_btn": show_full_health,
     "latency_btn": show_latency,
@@ -3675,6 +3988,12 @@ async def cmd_latency(update: Update,
     await show_latency(update, context)
 
 
+async def cmd_slow_real(update: Update,
+                        context: ContextTypes.DEFAULT_TYPE) -> None:
+    """🔬 v1.3.8: فحص الاستعلامات البطيئة الحقيقية."""
+    await show_slow_queries_real(update, context)
+
+
 async def cmd_databases(update: Update,
                         context: ContextTypes.DEFAULT_TYPE) -> None:
     """🗂️ v1.3.1: أمر مباشر لقواعد البيانات."""
@@ -3693,7 +4012,7 @@ async def cmd_autotune(update: Update,
 
 def register_handlers(application) -> bool:
     """
-    v1.3.7: يُسجّل كل الـ handlers (buttons + commands).
+    v1.3.8: يُسجّل كل الـ handlers (buttons + commands).
 
     Returns:
         True إن نجح التسجيل، False إن فشل.
@@ -3724,6 +4043,9 @@ def register_handlers(application) -> bool:
         application.add_handler(
             CommandHandler("latency", cmd_latency)
         )
+        application.add_handler(               # 🆕 v1.3.8
+            CommandHandler("slow_real", cmd_slow_real)
+        )
         application.add_handler(
             CommandHandler("versions", cmd_versions)
         )
@@ -3750,12 +4072,12 @@ def register_handlers(application) -> bool:
         )
 
         cmds = (
-            "analytics, fullhealth, latency, versions, "
+            "analytics, fullhealth, latency, slow_real, versions, "
             "analytics_reset, databases, autotune, files, "
             "audit, audit_full, audit_critical"
         )
         logger.info(
-            "✅ handlers_analytics v1.3.7: %d زر + 11 أمر (%s)",
+            "✅ handlers_analytics v1.3.8: %d زر + 12 أمر (%s)",
             len(ANALYTICS_BUTTONS),
             cmds,
         )
@@ -3783,6 +4105,7 @@ __all__ = [
     "show_subscriptions",
     "show_pool_live",
     "show_slow_queries",
+    "show_slow_queries_real",     # 🆕 v1.3.8
     "export_excel",
     "show_full_health",
     "show_latency",
@@ -3791,6 +4114,7 @@ __all__ = [
     "cmd_analytics",
     "cmd_fullhealth",
     "cmd_latency",
+    "cmd_slow_real",              # 🆕 v1.3.8
     "cmd_versions",
     "cmd_analytics_reset",
     "cmd_databases",
@@ -3809,6 +4133,7 @@ __all__ = [
     "_file_to_module_path",
     "_extract_version",
     "_try_import_any",
+    "_query_pg_stat_statements",  # 🆕 v1.3.8
     "_AuditFinding",
     "_AuditReport",
     "_audit_file_sync",
@@ -3820,13 +4145,14 @@ __all__ = [
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# LOAD BEACON — v1.3.7
+# LOAD BEACON — v1.3.8
 # ═══════════════════════════════════════════════════════════════════════
 
 try:
     logger.info(
-        "✅ handlers_analytics v1.3.7 loaded | "
+        "✅ handlers_analytics v1.3.8 loaded | "
         "buttons=%d | "
+        "FIX-SLOW-QUERIES-TRUTH=on | "
         "FILES-SCAN-1=/files | "
         "FILES-SCAN-2=files_open+files_refresh | "
         "FILES-SCAN-3=files_btn | "
