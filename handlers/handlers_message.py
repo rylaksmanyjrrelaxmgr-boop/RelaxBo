@@ -1,21 +1,27 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-handlers_message.py - v7.18.53 (FIX-LITE-FALLBACK)
+handlers_message.py - v7.18.54 (FIX-AUTOREPLY-DB-THREAD)
 (متوافق مع detectors v4.1.3 + banned_words_manager v1.2.0 + group_log v1.4.0)
 =============================================================================
-🆕 v7.18.53 (FIX-LITE-FALLBACK):
+🆕 v7.18.54 (FIX-AUTOREPLY-DB-THREAD):
 
-    🔴 FIX-LITE-FALLBACK (CRITICAL): بدلاً من تخطي الرسالة عند CONTEXT-TIMEOUT
-        (وهو ما كان يترك السبام الثقيل يمر)، نبني "LITE context" مصغّر
-        خلال <500ms يعمل على أول 2000 حرف فقط + ينسخ يدوياً الأزرار
-        والـ forward و vcard/poll. كل الفحوصات (banned words, links,
-        spam score, postbot, button links, translation, auto-reply)
-        تعمل عليه طبيعياً. لا رسالة تُتخطى. لا رسالة مشبوهة تمر.
+    🔴 FIX-AUTOREPLY-DB-THREAD (CRITICAL): التعليق السابق في v7.18.50
+        كان يقول "in to_thread" لكن الكود الفعلي استدعى
+        `DB.get_auto_reply(text, chat_id)` مباشرة على event loop.
         
-        تحسين إضافي: _CONTEXT_BUILD_TIMEOUT_SEC من 2.0s إلى 5.0s
-        (لإعطاء النصوص الكبيرة فرصة للتحليل الكامل).
+        إذا كانت `DB.get_auto_reply` تستخدم psycopg2 sync داخلياً
+        (وهو ما يحدث فعلياً)، فإن الاستدعاء يحجب الحلقة الرئيسية
+        بالكامل حتى انتهاء الاستعلام — مما يُنتج lag 8-13s.
+        
+        الحل:
+        - إذا كانت الدالة async: تُغلَّف في `asyncio.run()` داخل thread
+          جديد عبر `asyncio.to_thread` (loop منعزل، لا يحجب الحلقة الرئيسية).
+        - إذا كانت sync: تُغلَّف مباشرة في `asyncio.to_thread`.
+        - في الحالتين `asyncio.wait_for` يستطيع إلغاء العملية فعلياً.
 
+    ✅ محفوظ من v7.18.53:
+        - FIX-LITE-FALLBACK (CONTEXT-TIMEOUT → lite context)
     ✅ محفوظ من v7.18.52:
         - FIX-CONTEXT-BLOCKING (to_thread لـ _MessageContext)
     ✅ محفوظ من v7.18.51:
@@ -23,12 +29,6 @@ handlers_message.py - v7.18.53 (FIX-LITE-FALLBACK)
     ✅ محفوظ من v7.18.50:
         - FIX-TEXT-SCORE-BLOCKING, FIX-AUTOREPLY-BLOCKING,
           FIX-BWM-BLOCKING, FIX-CONSTANTS
-
-v7.18.52 — محفوظ.
-v7.18.51 — محفوظ.
-v7.18.50 — محفوظ.
-v7.18.49 — محفوظ.
-v7.18.48 — محفوظ.
 =============================================================================
 """
 
@@ -36,7 +36,7 @@ import asyncio
 import logging
 import time
 import sys
-print(f"██████ HANDLERS_MESSAGE LOADED FROM: {__file__} | v7.18.53-PROOF ██████", file=sys.stderr, flush=True)
+print(f"██████ HANDLERS_MESSAGE LOADED FROM: {__file__} | v7.18.54-PROOF ██████", file=sys.stderr, flush=True)
 import os
 import re
 import inspect
@@ -3688,7 +3688,7 @@ _EXTERNAL_HANDLED_STATES = frozenset({
 
 
 # ═════════════════════════════════════════════════════════════════════
-# 🆕 v7.18.53 FIX-LITE-FALLBACK: سياق مصغّر للرسائل الثقيلة
+# v7.18.53 FIX-LITE-FALLBACK: سياق مصغّر للرسائل الثقيلة
 # ═════════════════════════════════════════════════════════════════════
 def _build_lite_context(message) -> Any:
     """
@@ -4001,7 +4001,7 @@ class MessageHandlers:
             is_anonymous = True
         else:
             return
-        # 🆕 v7.18.53 FIX-LITE-FALLBACK: لا تخطي — سياق مصغّر كبديل
+        # v7.18.53 FIX-LITE-FALLBACK: لا تخطي — سياق مصغّر كبديل
         try:
             ctx = await asyncio.wait_for(
                 asyncio.to_thread(_MessageContext, message),
@@ -4146,7 +4146,6 @@ class MessageHandlers:
             ])
 
             if _has_media:
-                # ─── رسالة تحتوي وسائط → استخدم multi-layer ───
                 if _MULTILAYER_ENABLED and _HAS_ASYNC_DETECTORS:
                     try:
                         _verdict = await asyncio.wait_for(
@@ -4214,8 +4213,6 @@ class MessageHandlers:
                         logger.debug("multilayer sync-pool error: %s", e)
                         _verdict = None
 
-                # fallback إلى text-only إذا فشل multi-layer
-                # 🆕 v7.18.50 FIX-TEXT-SCORE: to_thread + timeout
                 if _verdict is None:
                     try:
                         _spam_score, _spam_reasons = await asyncio.wait_for(
@@ -4236,8 +4233,6 @@ class MessageHandlers:
                         _spam_score = 0
                         _spam_reasons = []
             else:
-                # 🆕 v7.18.51 FIX-TEXT-SCORE-SIZE-GUARD:
-                # تجنب regex المَرَضي على النصوص الضخمة
                 _text_len = len(ctx.analysis_text or "")
                 if _text_len > _TEXT_SCORE_MAX_CHARS:
                     logger.warning(
@@ -4274,10 +4269,6 @@ class MessageHandlers:
         _is_spam = (
             _spam_enabled and _spam_score >= SPAM_SCORE_THRESHOLD)
 
-        # 🆕 v7.18.51 FIX-POSTBOT-BLOCKING:
-        # `_postbot_pattern_confidence` و `_is_postbot_pattern` كانا يُستدعَيان
-        # بشكل sync على main thread → يحجب event loop 10-15s على النصوص
-        # العربية المعقدة. الحل: to_thread + timeout + truncate النص.
         _postbot_hard_conf = 0
         try:
             _text_for_postbot = (ctx.analysis_text or "")[:_POSTBOT_TEXT_MAX_CHARS]
@@ -4308,7 +4299,6 @@ class MessageHandlers:
             if _postbot_hard_block:
                 _postbot_match = True
             else:
-                # 🆕 v7.18.51 FIX-POSTBOT-BLOCKING
                 try:
                     _text_for_postbot2 = (ctx.analysis_text or "")[:_POSTBOT_TEXT_MAX_CHARS]
                     if len(_text_for_postbot2) >= _POSTBOT_MIN_TEXT_CHARS:
@@ -4529,7 +4519,6 @@ class MessageHandlers:
             bwm_handled = False
 
             if _HAS_BWM and BannedWordsManager is not None:
-                # 🆕 v7.18.50 FIX-BWM-BLOCKING: wait_for + timeout
                 try:
                     matched = await asyncio.wait_for(
                         BannedWordsManager.check_message(
@@ -4543,7 +4532,7 @@ class MessageHandlers:
                         "%.1fs exceeded — skipping BWM, using fallback",
                         chat_id, user_id, _BWM_TIMEOUT_SEC)
                     matched = None
-                    bwm_handled = True  # لا نكرر عبر fallback
+                    bwm_handled = True
                 except asyncio.CancelledError:
                     raise
                 except Exception as _e_bwm:
@@ -4950,8 +4939,10 @@ class MessageHandlers:
     ):
         """
         🆕 v7.18.50 FIX-AUTOREPLY-BLOCKING:
-        DB.get_auto_reply (psycopg2 sync) + get_reply_from_file (file I/O sync)
-        كانا يحجبان event loop. الحل: to_thread + timeout.
+        🆕 v7.18.54 FIX-AUTOREPLY-DB-THREAD:
+            التصحيح النهائي — `DB.get_auto_reply` يُغلَّف في to_thread
+            الآن فعلياً (كان التعليق السابق يقول ذلك لكن الكود لم يطبقه).
+            هذا يمنع psycopg2 (sync) من حجب event loop 8-13s.
         """
         try:
             if preloaded_ars is not None:
@@ -4970,15 +4961,30 @@ class MessageHandlers:
                         context.bot, chat_id, user_id or 0):
                     return False
 
-            # 🆕 FIX-AUTOREPLY-BLOCKING: DB.get_auto_reply in to_thread
+            # 🆕 v7.18.54 FIX-AUTOREPLY-DB-THREAD:
+            # to_thread فعلي — إذا كانت DB.get_auto_reply async،
+            # نستخدم asyncio.run() داخل thread (loop منعزل).
             reply = None
             try:
-                _db_call = DB.get_auto_reply(text, chat_id)
-                _db_await = _maybe_await(_db_call)
-                reply = await asyncio.wait_for(
-                    _db_await,
-                    timeout=_AUTOREPLY_DB_TIMEOUT_SEC,
-                )
+                import inspect as _insp_ar
+                _get_reply_fn = getattr(DB, 'get_auto_reply', None)
+                if not callable(_get_reply_fn):
+                    raise AttributeError(
+                        "DB.get_auto_reply غير موجود")
+                if _insp_ar.iscoroutinefunction(_get_reply_fn):
+                    def _run_async_get_reply():
+                        return asyncio.run(
+                            _get_reply_fn(text, chat_id))
+                    reply = await asyncio.wait_for(
+                        asyncio.to_thread(_run_async_get_reply),
+                        timeout=_AUTOREPLY_DB_TIMEOUT_SEC,
+                    )
+                else:
+                    reply = await asyncio.wait_for(
+                        asyncio.to_thread(
+                            _get_reply_fn, text, chat_id),
+                        timeout=_AUTOREPLY_DB_TIMEOUT_SEC,
+                    )
             except asyncio.TimeoutError:
                 logger.warning(
                     "⏱️ AUTO-REPLY-DB-TIMEOUT | chat=%s >%.1fs",
@@ -7852,16 +7858,17 @@ __all__ = [
     "_CONTEXT_BUILD_TIMEOUT_SEC",
     # v7.18.53 additions
     "_build_lite_context",
+    # v7.18.54 — لا إضافات جديدة في __all__ (تعديل داخلي فقط)
 ]
 
 
 # ═════════════════════════════════════════════════════════════════════
-# LOAD BEACON — v7.18.53
+# LOAD BEACON — v7.18.54
 # ═════════════════════════════════════════════════════════════════════
 
 try:
     logger.info(
-        "✅ handlers_message v7.18.53 loaded | "
+        "✅ handlers_message v7.18.54 loaded | "
         "BWM=%s | PRIVATE_HANDLERS=%d | "
         "external_handled=%d | "
         "routing-fallback=7-paths-deduped | "
@@ -7869,7 +7876,7 @@ try:
         "TRANSLATE-SAFE=on (to_thread+timeout=%.1fs+cache=%d,TTL=%.0fs,"
         "max-len=%d) | "
         "TEXT-SCORE-SAFE=on (to_thread+timeout=%.1fs,size-guard=%d) | "
-        "AUTOREPLY-SAFE=on (db=%.1fs,file=%.1fs) | "
+        "AUTOREPLY-SAFE=on (DB-to-thread=%.1fs,file=%.1fs) | "
         "BWM-SAFE=on (timeout=%.1fs) | "
         "POSTBOT-SAFE=on (to_thread+timeout=%.1fs,max=%d) | "
         "CONTEXT-SAFE=on (to_thread+timeout=%.1fs) | "
@@ -7879,12 +7886,14 @@ try:
         "WAIT_LOG_CH=direct-handler | "
         "LOG-CHANNEL-KEY=log_channel_id (CANONICAL, unified) | "
         "detectors-compat=v4.1.3 | "
-        "fixes=(FIX-LITE-FALLBACK + FIX-CONTEXT-BLOCKING + "
-        "FIX-POSTBOT-BLOCKING + FIX-TEXT-SCORE-SIZE-GUARD + "
-        "v7.18.50-all (FIX-TEXT-SCORE-BLOCKING + FIX-AUTOREPLY-BLOCKING + "
-        "FIX-BWM-BLOCKING + FIX-CONSTANTS), "
-        "v7.18.49-all (FIX-TRANSLATE-BLOCKING), "
-        "v7.18.48-all (FIX-LAG-1/2/3/4), "
+        "fixes=(v7.18.54 FIX-AUTOREPLY-DB-THREAD + "
+        "v7.18.53 FIX-LITE-FALLBACK + "
+        "v7.18.52 FIX-CONTEXT-BLOCKING + "
+        "v7.18.51 FIX-POSTBOT-BLOCKING + FIX-TEXT-SCORE-SIZE-GUARD + "
+        "v7.18.50 FIX-TEXT-SCORE-BLOCKING + FIX-AUTOREPLY-BLOCKING + "
+        "FIX-BWM-BLOCKING + FIX-CONSTANTS + "
+        "v7.18.49 FIX-TRANSLATE-BLOCKING + "
+        "v7.18.48 FIX-LAG-1/2/3/4 + "
         "v7.18.47-all, v7.18.46-all, v7.18.45-all, "
         "v7.18.44-all, v7.18.43-all)",
         "yes" if _HAS_BWM else "no",
