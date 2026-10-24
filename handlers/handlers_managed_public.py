@@ -1,27 +1,17 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-handlers/handlers_managed_public.py — معالجات البوتات المُدارة (v5.7.13)
+handlers/handlers_managed_public.py — معالجات البوتات المُدارة (v5.7.15)
 =================================================================================
-🆕 v5.7.13 (KEYWORD-THEN-SEQUENCE):
-    🔴 FIX-FLOW-1: بعد رد الكلمة المفتاحية، يكمل البوت إلى التسلسل الأربع.
-        • السلوك الجديد: 
-            المستخدم يرسل "الرياض" → رد "متوفر في الرياض"
-              → ثم يستمر إلى قسم التسلسل → يُرسل "reply" (الرسالة 2).
-              → إذا أرسل رسالة أخرى → "third" (الرسالة 3).
-              → إذا أرسل رسالة أخرى → "fourth" (الرسالة 4).
+🆕 v5.7.15 (SEQUENCE-DELAY-5S):
+    🟡 FIX-FLOW-3: زيادة التأخير بين رد الكلمة والرسالة التالية إلى 5 ثوانٍ.
+        • _SEQUENCE_DELAY_SEC = 5.0 (كان 2.0).
 
-🆕 v5.7.12 (SMART-ARABIC-MATCH):
-    🔴 FIX-MATCH-1: مطابقة ذكية للكلمات العربية.
-        • لا تُطابق "أب" داخل "أبها"، "أبوك"، "أبشر".
-        • تدعم البادئات: "وأبي"، "ياأبي".
-        • تتجاهل التشكيل والهمزات.
-
-🆕 v5.7.9 (KEYWORD-DELAY-5S):
-    • تأخير 5 ثوانٍ قبل إرسال رد الكلمة المفتاحية.
-
-🆕 v5.7.8 (ONE-TIME-KEYWORD):
-    • كل مستخدم يستلم رد الكلمة المفتاحية مرة واحدة فقط.
+🆕 v5.7.14 (SEQUENCE-DELAY-AFTER-KEYWORD) — محفوظ.
+🆕 v5.7.13 (KEYWORD-THEN-SEQUENCE) — محفوظ.
+🆕 v5.7.12 (SMART-ARABIC-MATCH) — محفوظ.
+🆕 v5.7.9 (KEYWORD-DELAY-5S) — محفوظ.
+🆕 v5.7.8 (ONE-TIME-KEYWORD) — محفوظ.
 =================================================================================
 """
 
@@ -53,6 +43,9 @@ _NUM_LOCK_STRIPES = 64
 
 # 🆕 v5.7.9: تأخير رد الكلمة المفتاحية (بالثواني)
 _KEYWORD_REPLY_DELAY_SEC = 5.0
+
+# 🆕 v5.7.15: تأخير بين رد الكلمة والرسالة التالية (بالثواني)
+_SEQUENCE_DELAY_SEC = 5.0
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -262,6 +255,8 @@ def make_managed_handlers(bid: int) -> Tuple[Callable, Callable]:
             lock = _lock_for_user(app, user.id)
 
             async with lock:
+                keyword_sent = False
+
                 # ═══ 1. الكلمات المفتاحية ═══
                 keywords = _get_keywords(app)
                 if keywords:
@@ -269,7 +264,6 @@ def make_managed_handlers(bid: int) -> Tuple[Callable, Callable]:
                         msg.text, keywords
                     )
                     if kw_matched and reply:
-                        # هل سبق الرد على هذا المستخدم بهذه الكلمة؟
                         already = await is_keyword_already_replied(
                             bid, user.id, kw_matched
                         )
@@ -279,9 +273,8 @@ def make_managed_handlers(bid: int) -> Tuple[Callable, Callable]:
                                 "already replied to user %s — silent",
                                 bid, kw_matched[:30], user.id,
                             )
-                            return  # صمت تام للكلمة المكررة
+                            return
 
-                        # 🆕 v5.7.9: تأخير 5 ثوانٍ قبل الرد
                         logger.debug(
                             "managed_bot #%s: delaying keyword reply "
                             "%.1fs for user %s",
@@ -289,25 +282,30 @@ def make_managed_handlers(bid: int) -> Tuple[Callable, Callable]:
                         )
                         await asyncio.sleep(_KEYWORD_REPLY_DELAY_SEC)
 
-                        # إرسال الرد + تسجيل
                         sent = await safe_send(
                             context.bot, chat.id, reply
                         )
-                        if sent is not None:
-                            await mark_keyword_as_replied(
-                                bid, user.id, kw_matched
-                            )
-                            logger.debug(
-                                "managed_bot #%s: keyword '%s' "
-                                "replied once (delayed) for user %s — "
-                                "continuing to sequence",
-                                bid, kw_matched[:30], user.id,
-                            )
-                        else:
-                            return  # فشل الإرسال، لا نكمل
+                        if sent is None:
+                            return
 
-                        # 🆕 v5.7.13 FIX-FLOW-1: 
-                        # لا يوجد return هنا! نكمل للأسفل لإرسال الرسالة 2.
+                        await mark_keyword_as_replied(
+                            bid, user.id, kw_matched
+                        )
+                        keyword_sent = True
+                        logger.debug(
+                            "managed_bot #%s: keyword '%s' "
+                            "replied once (delayed) for user %s",
+                            bid, kw_matched[:30], user.id,
+                        )
+
+                # 🆕 v5.7.15 FIX-FLOW-3: تأخير 5s قبل التسلسل
+                if keyword_sent:
+                    logger.debug(
+                        "managed_bot #%s: delaying %.1fs before "
+                        "sequence for user %s",
+                        bid, _SEQUENCE_DELAY_SEC, user.id,
+                    )
+                    await asyncio.sleep(_SEQUENCE_DELAY_SEC)
 
                 # ═══ 2. التسلسل الأربع ═══
                 state = await _get_state(app, bid)
@@ -361,13 +359,14 @@ __all__ = ["make_managed_handlers", "post_init_managed"]
 
 try:
     logger.debug(
-        "🛡️ handlers_managed_public v5.7.13 "
-        "(KEYWORD-THEN-SEQUENCE) loaded | "
-        "flow=keywords(once,delay=%.1fs,smart,then_sequence)→"
-        "reply→third→fourth | "
+        "🛡️ handlers_managed_public v5.7.15 "
+        "(SEQUENCE-DELAY-5S) loaded | "
+        "keyword_delay=%.1fs | sequence_delay=%.1fs | "
+        "flow=keywords(once,smart)→sleep→reply→third→fourth | "
         "locks=striped(%d) | private_only=True | "
         "match=word_boundary+arabic_norm",
         _KEYWORD_REPLY_DELAY_SEC,
+        _SEQUENCE_DELAY_SEC,
         _NUM_LOCK_STRIPES,
     )
 except Exception:
