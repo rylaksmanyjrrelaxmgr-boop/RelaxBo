@@ -1,23 +1,26 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-🌿 Relax Manager – البوت الرئيسي (bot.py v5.7.19-DB-ERRORS-INTEGRATION)
+🌿 Relax Manager – البوت الرئيسي (bot.py v5.7.20-HTML-CHUNKING-FIX)
 ================================================================================
-🆕 v5.7.19 (فوق v5.7.18):
-    🟢 ADD-DB-ERRORS-CMD: أمر `/db_errors` — كشف أخطاء DB الشامل (سريع).
-    🟢 ADD-DB-FULL-CHECK-CMD: أمر `/db_full_check` — تشخيص + أخطاء (شامل).
-    🟢 ADD-SEND-LONG-TEXT: helper لإرسال نصوص طويلة (تقسيم تلقائي 4000 حرف).
-    🟢 IMPORT-NEW-FNS: `diagnose_with_errors` + `diagnose_findings_only`
-       من `db_diagnostics.py v7.3.0` (مع fallback آمن).
+🆕 v5.7.20 (فوق v5.7.19):
+    🟢 FIX-HTML-CHUNKING: `_send_long_text` يقسم النص الطويل بأمان:
+        • يقسم عند حدود الفقرات (\n\n) → الأسطر (\n) → المسافات.
+        • يتحقق من توازن وسوم HTML (<b>, <i>, <code>) في كل chunk.
+        • يُغلق أي tags مفتوحة في نهاية chunk ويعيد فتحها في التالي.
+        • Fallback إلى نص عادي عند فشل HTML.
+
+v5.7.19 — محفوظ:
+    🟢 ADD-DB-ERRORS-CMD: `/db_errors` — كشف أخطاء DB الشامل.
+    🟢 ADD-DB-FULL-CHECK-CMD: `/db_full_check` — تشخيص + أخطاء.
+    🟢 ADD-SEND-LONG-TEXT: helper لإرسال نصوص طويلة.
 
 v5.7.18 — محفوظ:
     🟢 FIX-RESTART-EXITCODE: SystemExit(1) بعد SIGTERM.
-    🟢 COSMETIC: توحيد سجلات init.
 
 v5.7.17 — محفوظ:
     🟢 FIX-PID: PID في `/tmp/.bot.pid`.
     🟢 ADD-RESTART-CMD: `/restart` للأدمن.
-    🟢 GUARANTEED: كود كامل 100% بلا اختصار.
 
 v5.7.16 — محفوظ:
     🟢 FIX-ADMIN-SAFE: `_collect_admin_ids()` 3 محاولات.
@@ -115,7 +118,6 @@ except Exception:
     _fn_autotune = None
     _AUTOTUNE_AVAILABLE = False
 
-# 🆕 v5.7.19: دوال كشف الأخطاء (من db_diagnostics v7.3.0)
 _DB_ERRORS_AVAILABLE = False
 _fn_diagnose_with_errors = None
 _fn_diagnose_findings_only = None
@@ -476,12 +478,12 @@ _FALLBACK_HOSTNAME = (
     os.getenv("FALLBACK_HOSTNAME", "") or "relaxbo-78m4.onrender.com"
 ).strip()
 
-logger.info("🔧 v5.7.19 init: _FALLBACK_HOSTNAME=%r", _FALLBACK_HOSTNAME)
-logger.info("🔧 v5.7.19 init: RENDER_EXTERNAL_HOSTNAME=%r",
+logger.info("🔧 v5.7.20 init: _FALLBACK_HOSTNAME=%r", _FALLBACK_HOSTNAME)
+logger.info("🔧 v5.7.20 init: RENDER_EXTERNAL_HOSTNAME=%r",
             os.getenv("RENDER_EXTERNAL_HOSTNAME", ""))
-logger.info("🔧 v5.7.19 init: RENDER_EXTERNAL_URL=%r",
+logger.info("🔧 v5.7.20 init: RENDER_EXTERNAL_URL=%r",
             os.getenv("RENDER_EXTERNAL_URL", ""))
-logger.info("🔧 v5.7.19 init: ALLOW_POLLING=%r",
+logger.info("🔧 v5.7.20 init: ALLOW_POLLING=%r",
             os.getenv("ALLOW_POLLING", ""))
 
 def _read_pid_file() -> Optional[int]:
@@ -766,7 +768,6 @@ def _log_db_diagnostics_status() -> None:
         logger.warning("⚠️ db_diagnostics: v%s محمّل بلا mark_process_start", _DB_DIAG_VERSION)
     if _AUTOTUNE_AVAILABLE:
         logger.info("⚙️ auto-tuning: ✅ متاح")
-    # 🆕 v5.7.19
     if _DB_ERRORS_AVAILABLE:
         logger.info("🔴 db_errors: ✅ متاح (diagnose_with_errors + diagnose_findings_only)")
     else:
@@ -1135,33 +1136,24 @@ PUBLIC_COMMANDS = [
 ]
 
 ADMIN_COMMANDS = [
-    # ─── 1) إحصائيات وأدوات ───
     ("stats", "📊 الإحصائيات"),
     ("admin", "👑 لوحة الأدمن"),
     ("ping", "🏓 قياس الكمون"),
     ("restart", "🔄 إعادة تشغيل البوت"),
     ("posts_stats", "📊 إحصائيات النشر"),
     ("versions", "📦 الإصدارات"),
-
-    # ─── 2) إدارة المستخدمين والاشتراكات ───
     ("grant", "🎁 منح اشتراك"),
     ("add_admin", "👑 إضافة مشرف"),
     ("remove_admin", "🗑️ إزالة مشرف"),
-
-    # ─── 3) البث والقنوات ───
     ("broadcast", "📨 بث جماعي"),
     ("set_min_interval", "⏱️ تعيين الفاصل"),
     ("set_force", "🔒 اشتراك إجباري"),
     ("set_update_ch", "📢 قناة التحديثات"),
     ("set_log_ch", "📋 قناة السجلات"),
-
-    # ─── 4) الردود والنسخ ───
     ("export_replies", "📤 تصدير الردود"),
     ("import_replies", "📥 استيراد الردود"),
     ("backup", "💾 نسخ احتياطي"),
     ("restore", "🔄 عرض النسخ"),
-
-    # ─── 5) صيانة DB ───
     ("db_diag", "🔬 تشخيص DB"),
     ("db_diag_quick", "🔬 تقرير مختصر"),
     ("db_vacuum", "🧹 تنظيف DB"),
@@ -1169,20 +1161,16 @@ ADMIN_COMMANDS = [
     ("db_weekly", "📅 التقرير الأسبوعي"),
     ("db_tune", "⚙️ ضبط autovacuum"),
     ("autotune", "⚙️ ضبط autovacuum"),
-    ("db_errors", "🔴 كشف الأخطاء الشامل"),         # 🆕 v5.7.19
-    ("db_full_check", "🔍 تشخيص كامل + أخطاء"),      # 🆕 v5.7.19
+    ("db_errors", "🔴 كشف الأخطاء الشامل"),
+    ("db_full_check", "🔍 تشخيص كامل + أخطاء"),
     ("autoblocked", "🚫 المحجوبة تلقائياً"),
     ("db_idle", "🔍 idle-in-transaction"),
     ("cache_stats", "📊 إحصائيات الكاش"),
-
-    # ─── 6) التحليلات المتقدمة ───
     ("analytics", "📊 التحليلات"),
     ("analytics_reset", "🗑️ إبطال كاش"),
     ("fullhealth", "🏥 التشخيص الشامل"),
     ("latency", "🔬 اختبار الكمون"),
     ("databases", "🗂️ قواعد البيانات"),
-
-    # ─── 7) فحص الملفات ───
     ("files", "📂 ملفات المشروع"),
     ("audit", "🔍 فحص شامل"),
     ("audit_full", "🔍 فحص مفصل"),
@@ -2046,11 +2034,65 @@ def _resolve_admin_guard(context) -> Set[int]:
     except Exception:
         return set()
 
-# 🆕 v5.7.19: helper لإرسال النصوص الطويلة
+# ═══════════════════════════════════════════════════════════════════
+# 🆕 v5.7.20: `_send_long_text` الآمن (يقسم عند حدود الكلمات ويحافظ على HTML)
+# ═══════════════════════════════════════════════════════════════════
+
+_HTML_TAG_RE = re.compile(r"</?([a-zA-Z][a-zA-Z0-9]*)[^>]*?(/?)>")
+
+
+def _safe_split_text(text: str, max_len: int) -> List[str]:
+    """
+    تقسيم آمن عند حدود الفقرات (\n\n) → الأسطر (\n) → الجمل → المسافات.
+    يضمن ألا يتجاوز أي جزء max_len.
+    """
+    chunks: List[str] = []
+    while len(text) > max_len:
+        split_at = -1
+        for sep in ("\n\n", "\n", "، ", ". ", "،", " "):
+            pos = text.rfind(sep, 0, max_len)
+            if pos > max_len // 2:
+                split_at = pos + len(sep)
+                break
+        if split_at <= 0:
+            split_at = max_len  # قطع قسري إذا لم نجد فاصل
+        chunks.append(text[:split_at].rstrip())
+        text = text[split_at:].lstrip()
+    if text:
+        chunks.append(text)
+    return chunks
+
+
+def _balance_html_tags(chunk: str) -> Tuple[str, str]:
+    """
+    يُغلق أي tags HTML مفتوحة في نهاية chunk، ويُرجع:
+    - (chunk_مغلق_بأمان, tags_لإعادة_فتحها_في_التالي)
+    """
+    stack: List[str] = []
+    for m in _HTML_TAG_RE.finditer(chunk):
+        is_close = m.group(0).startswith("</")
+        is_selfclose = m.group(2) == "/"
+        tag_name = m.group(1).lower()
+        if is_selfclose:
+            continue
+        if is_close:
+            if stack and stack[-1] == tag_name:
+                stack.pop()
+        else:
+            stack.append(tag_name)
+    closing = "".join(f"</{t}>" for t in reversed(stack))
+    reopening = "".join(f"<{t}>" for t in stack)
+    return chunk + closing, reopening
+
+
 async def _send_long_text(msg, text: str, chunk_size: int = 4000) -> None:
     """
-    إرسال نص طويل مقسّم تلقائياً إلى رسائل (حد تلجرام 4096).
-    يدعم HTML بشكل آمن مع fallback لنص عادي.
+    إرسال نص طويل مقسّم بأمان (بدون كسر HTML أو كلمات).
+
+    🆕 v5.7.20 FIX-HTML-CHUNKING:
+    - يقسم عند حدود الفقرات/الأسطر/المسافات.
+    - يُغلق ويُعيد فتح وسوم HTML (b, i, code) عبر chunks.
+    - Fallback إلى نص عادي عند فشل HTML.
     """
     if not text:
         try:
@@ -2058,6 +2100,8 @@ async def _send_long_text(msg, text: str, chunk_size: int = 4000) -> None:
         except Exception:
             pass
         return
+
+    # نص قصير — أرسل مباشرة
     if len(text) <= chunk_size:
         try:
             await msg.reply_text(text, parse_mode='HTML')
@@ -2068,17 +2112,28 @@ async def _send_long_text(msg, text: str, chunk_size: int = 4000) -> None:
             except Exception:
                 pass
             return
-    chunks = [text[i:i+chunk_size] for i in range(0, len(text), chunk_size)]
-    total = len(chunks)
-    for i, chunk in enumerate(chunks, 1):
+
+    # هامش 100 حرف للإغلاق الآمن
+    raw_chunks = _safe_split_text(text, chunk_size - 100)
+    total = len(raw_chunks)
+
+    carryover = ""  # tags يجب إعادة فتحها من chunk السابق
+    for i, raw in enumerate(raw_chunks, 1):
+        full = carryover + raw
+        balanced, carryover = _balance_html_tags(full)
         header = f"<i>({i}/{total})</i>\n\n" if total > 1 else ""
+
         try:
-            await msg.reply_text(header + chunk, parse_mode='HTML')
-        except Exception:
+            await msg.reply_text(header + balanced, parse_mode='HTML')
+        except Exception as _e:
+            # Fallback: نص عادي بدون وسوم
+            logger.debug(f"_send_long_text chunk {i} HTML failed: {_e}")
             try:
-                await msg.reply_text(header + chunk)
+                plain = re.sub(r"<[^>]+>", "", header + balanced)
+                await msg.reply_text(plain)
             except Exception:
                 pass
+
         try:
             await asyncio.sleep(0.3)
         except asyncio.CancelledError:
@@ -2205,25 +2260,7 @@ async def cmd_posts_stats(update, context):
     except Exception:
         pass
 
-# ═══════════════════════════════════════════════════════════════════
-# 🆕 v5.7.19: دوال كشف الأخطاء
-# ═══════════════════════════════════════════════════════════════════
-
 async def cmd_db_errors(update, context):
-    """
-    🆕 v5.7.19: كشف الأخطاء الشامل لقاعدة البيانات (سريع جداً).
-
-    يستخدم `diagnose_findings_only()` من db_diagnostics v7.3.0.
-    يُرجع تقريراً مرتّباً (🔴/🟡) عن الشذوذ في:
-    - البنية (جداول مفقودة)
-    - المستخدمين (NULL IDs، تناقضات)
-    - الباقات (أسعار/مدد غير صالحة، تعارضات)
-    - الاشتراكات (orphan FK، تواريخ متناقضة)
-    - القنوات (orphan FK)
-    - البوتات المُدارة (كلمات قصيرة/مكررة)
-    - الفواتير (paid بـ 0)
-    - الإعدادات (tables_hash/bootstrap_hash)
-    """
     user = update.effective_user
     if user is None:
         return
@@ -2262,15 +2299,6 @@ async def cmd_db_errors(update, context):
             pass
 
 async def cmd_db_full_check(update, context):
-    """
-    🆕 v5.7.19: تشخيص كامل + كشف أخطاء شامل.
-
-    يستخدم `diagnose_with_errors()` من db_diagnostics v7.3.0.
-    أبطأ من /db_errors (يستغرق 10-30s) لأنه يشمل:
-    - كل ميزات `diagnose_findings_only()`
-    - تشخيص الأداء (latency probe، full health)
-    - dead tuples، idle-tx، autovacuum، إلخ
-    """
     user = update.effective_user
     if user is None:
         return
@@ -2368,12 +2396,12 @@ async def main():
     logger.info("👨‍💼 المالك: %s", CONFIG.PRIMARY_OWNER_ID)
 
     logger.info(
-        "📦 bot.py: v5.7.19 | kill_prev=on | init_retry=on | webhook_force=on | "
+        "📦 bot.py: v5.7.20 | kill_prev=on | init_retry=on | webhook_force=on | "
         "webhook_verify=on | diag_incoming=%r | "
         "detectors=%s | layers=%d | fallback_hostname=%r | "
         "allow_polling_env=%r | alias_fix=on | cmds_reordered=on | "
         "post_stop_fix=on | admin_safe_retry=on(%dx,%.1fs) | admin_restart=on | "
-        "restart_exitcode=on | db_errors_cmd=on",
+        "restart_exitcode=on | db_errors_cmd=on | html_chunking_fix=on",
         _DIAG_INCOMING,
         _SPAM_DETECTOR_VERSION or "N/A",
         _SPAM_DETECTOR_LAYERS_COUNT,
@@ -2713,7 +2741,6 @@ async def main():
     else:
         app.add_handler(CommandHandler("posts_stats", cmd_posts_stats))
 
-    # 🆕 v5.7.19: تسجيل أوامر كشف الأخطاء
     if _admin_ids:
         try:
             app.add_handler(CommandHandler("db_errors", cmd_db_errors, filters=filters.User(_admin_ids)))
