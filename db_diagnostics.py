@@ -1,44 +1,30 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-db_diagnostics.py — واجهة تشخيص وصيانة قاعدة البيانات (v7.2.25 — SAFETY-FIXES-AUDIT)
+db_diagnostics.py — واجهة تشخيص وصيانة قاعدة البيانات 
+(v7.3.0 — DIAGNOSTICS-WITH-FINDINGS)
 ================================================================================
-🆕 v7.2.25 — SAFETY-FIXES-AUDIT (7 إصلاحات):
+🆕 v7.3.0 — DIAGNOSTICS-WITH-FINDINGS (تحديث رئيسي):
 
-    🔴 FIX-25-1 (IMPORTANT): لا اتصال مباشر إذا pool موجود وفشل acquire
-        السبب: عند pool موجود لكن acquire فشل (مثلاً pool exhausted
-        أو اتصالات ميتة)، كان الكود يحاول asyncpg.connect مباشرة —
-        مما يُضيف 5-8 ثوانٍ (connect_timeout + TLS + auth) ثم
-        يفشل غالباً. الآن نتوقف فوراً مع تشخيص دقيق.
+    ✨ MERGE-1: دمج كشف الأخطاء الشامل من db_inspect.py:
+        • نظام تجميع النتائج (ERRORS/WARNINGS/INFOS)
+        • فحص بنية الجداول (حرجة مفقودة)
+        • فحص شذوذ المستخدمين (NULL IDs، محظور+اشتراك، تناقضات)
+        • فحص تعارضات الباقات (نفس المدة، أسعار غير صالحة)
+        • فحص شذوذ الاشتراكات (orphan FK، تواريخ متناقضة)
+        • فحص شذوذ البوتات المُدارة (كلمات قصيرة/مكررة، ردود فارغة)
+        • فحص شذوذ الفواتير (paid بـ 0، معلّقة قديمة)
+        • فحص الإعدادات (tables_hash/bootstrap_hash)
+        • تقرير نهائي مرتّب (🔴/🟡/🟢)
 
-    🟠 FIX-25-2 (IMPORTANT): _get_activity_stats يقبل force=True
-        السبب: TTL=5s يعني أن استدعاء /db_diag ثم /db_diag_quick
-        خلال 5 ثوانٍ قد يعطي بيانات قديمة. force=True يقرأ مباشرة.
+    ✨ MERGE-2: وظائف API جديدة:
+        • diagnose_with_errors() — تشخيص كامل + تقرير أخطاء
+        • diagnose_findings_only() — الأخطاء فقط
+        • get_findings() — بيانات الأخطاء الخام
 
-    🟠 FIX-25-3 (IMPORTANT): ensure_autovacuum_tuning يتجاهل جداول
-        database.py
-        السبب: database.py _tune_heavy_tables_autovacuum يضبط
-        HEAVY (0.02) و SMALL (0.0) بقيم أدق. db_diagnostics كان
-        يُعيد ضبطها بقيمه العامة (0.05) مما يُفسد الإعدادات.
-        الآن نتجاهل هذه الجداول مع سبب واضح.
-
-    🟡 FIX-25-4 (MINOR): _LONG_TX_THRESHOLD_SECONDS قابل للتعديل
-        عبر env var (LONG_TX_THRESHOLD_SECONDS).
-
-    🟡 FIX-25-5 (MINOR): _get_cleanup_status يظهر خطأ عند الفشل
-        بدلاً من قائمة فارغة صامتة.
-
-    🟡 FIX-25-6 (MINOR): _build_cleanup_where لـ SQLite —
-        توثيق هشاشة المقارنة النصية.
-
-    🟡 FIX-25-7 (MINOR): format_autovacuum_tuning — رسالة نجاح
-        واضحة عند "لا حاجة لتغييرات".
-
-    ✅ محفوظ من v7.2.24:
-        - AUTO-TUNE-1..5
-    ✅ محفوظ من v7.2.23:
-        - CLEANUP-VISIBILITY (FIX-CLEANUP-1/2/3)
-    ✅ محفوظ من v7.2.22..v7.1.0 (كل التحسينات السابقة).
+    ✅ محفوظ من v7.2.25:
+        FIX-25-1..7 + AUTO-TUNING + CLEANUP-VISIBILITY
+        + كل التحسينات السابقة (v7.2.24 → v7.1.0)
 ================================================================================
 """
 
@@ -63,7 +49,7 @@ logger = logging.getLogger(__name__)
 # الإصدار + Startup grace
 # ═══════════════════════════════════════════════════════════════════════
 
-VERSION = "7.2.25"
+VERSION = "7.3.0"
 
 
 def _compute_process_start_monotonic() -> float:
@@ -99,6 +85,46 @@ def _uptime_sec() -> float:
     return max(0.0, time.monotonic() - base)
 
 
+# ═══════════════════════════════════════════════════════════════════════
+# 🆕 v7.3.0: نظام كشف الأخطاء (من db_inspect.py)
+# ═══════════════════════════════════════════════════════════════════════
+
+_ERRORS: List[Tuple[str, str]] = []
+_WARNINGS: List[Tuple[str, str]] = []
+_INFOS: List[Tuple[str, str]] = []
+
+
+def _err(msg: str) -> None:
+    """تسجيل خطأ حرج."""
+    _ERRORS.append(("ERROR", msg))
+
+
+def _warn(msg: str) -> None:
+    """تسجيل تحذير."""
+    _WARNINGS.append(("WARN", msg))
+
+
+def _info(msg: str) -> None:
+    """تسجيل معلومة."""
+    _INFOS.append(("INFO", msg))
+
+
+def _clear_findings() -> None:
+    """مسح كل النتائج (قبل كل تشخيص جديد)."""
+    _ERRORS.clear()
+    _WARNINGS.clear()
+    _INFOS.clear()
+
+
+def _get_findings() -> Dict[str, List[Tuple[str, str]]]:
+    """إرجاع النتائج الحالية."""
+    return {
+        "errors": list(_ERRORS),
+        "warnings": list(_WARNINGS),
+        "infos": list(_INFOS),
+    }
+
+
 _MIN_DEAD_FOR_CRITICAL = 50
 _MIN_DEAD_FOR_COLOR = 10
 
@@ -126,11 +152,8 @@ _INTERNAL_DB_MEDIUM = 20.0
 _INTERNAL_DB_HIGH = 100.0
 
 # 🟠 v7.2.25 FIX-25-3: جداول database.py _tune_heavy_tables_autovacuum
-# db_diagnostics يجب أن يتجنبها لتفادي تعارض الإعدادات.
 _DB_OWNED_TABLES: frozenset = frozenset({
-    # HEAVY (0.02 vacuum / 0.01 analyze / delay=2 / limit=2000)
     "posts", "subscriptions", "user_penalties", "users",
-    # SMALL (0.0 / threshold=5 / delay=2 / limit=2000)
     "plans", "settings", "user_reminder_settings",
     "group_security", "user_points", "user_violations",
     "auto_replies", "bot_groups", "anonymous_admins",
@@ -139,6 +162,25 @@ _DB_OWNED_TABLES: frozenset = frozenset({
     "auto_reply_settings", "last_publish", "schedule",
     "support_tickets", "bot_admins", "chat_locks", "group_rules",
 })
+
+# 🆕 v7.3.0: قوائم الجداول (للتحقق من البنية)
+_REQUIRED_TABLES = (
+    "users", "user_channels", "posts", "plans", "subscriptions",
+    "invoices", "payment_logs", "settings", "bot_groups",
+    "banned_words", "auto_replies", "user_penalties",
+    "schedule", "last_publish",
+)
+
+_OPTIONAL_TABLES = (
+    "bot_admins", "group_admins", "user_warnings", "user_violations",
+    "user_points", "referrals", "referral_rewards",
+    "contests", "contest_participants", "contest_winners",
+    "gift_codes", "support_tickets", "admin_logs",
+    "user_reminder_settings", "user_groups_link",
+    "keywords", "bots", "keyword_replied", "user_messages",
+    "group_security", "chat_locks", "group_rules",
+)
+
 
 # ═══════════════════════════════════════════════════════════════════════
 # Multi-DB Discovery
@@ -458,6 +500,458 @@ def _percentile(sorted_vals: List[float], pct: float) -> float:
         return float(sorted_vals[idx])
     except Exception:
         return float(sorted_vals[0])
+
+
+# 🆕 v7.3.0: helpers لفحص البنية
+def _ph(n: int = 1) -> str:
+    if _is_postgres():
+        return f"${n}"
+    if _is_mysql():
+        return "%s"
+    return "?"
+
+
+async def _check_table_exists(db, table: str) -> bool:
+    """فحص وجود جدول."""
+    if db is None:
+        return False
+    try:
+        db_type = _get_db_type()
+        if db_type == "POSTGRES":
+            return bool(await db.fetchval(
+                "SELECT 1 FROM information_schema.tables "
+                "WHERE table_schema = 'public' AND table_name = $1",
+                (table,)))
+        elif db_type == "MYSQL":
+            return bool(await db.fetchval(
+                "SELECT 1 FROM information_schema.tables "
+                "WHERE table_schema = DATABASE() AND table_name = %s",
+                (table,)))
+        else:
+            return bool(await db.fetchval(
+                "SELECT 1 FROM sqlite_master "
+                "WHERE type='table' AND name=?",
+                (table,)))
+    except Exception:
+        return False
+
+
+async def _check_column_exists(db, table: str, column: str) -> bool:
+    """فحص وجود عمود."""
+    if db is None:
+        return False
+    try:
+        db_type = _get_db_type()
+        if db_type == "POSTGRES":
+            return bool(await db.fetchval(
+                "SELECT 1 FROM information_schema.columns "
+                "WHERE table_name = $1 AND column_name = $2",
+                (table, column)))
+        elif db_type == "MYSQL":
+            return bool(await db.fetchval(
+                "SELECT 1 FROM information_schema.columns "
+                "WHERE table_name = %s AND column_name = %s "
+                "AND table_schema = DATABASE()",
+                (table, column)))
+        else:
+            rows = await db.fetchall(f"PRAGMA table_info({table})")
+            return any(r.get("name") == column for r in (rows or []))
+    except Exception:
+        return False
+
+
+async def _safe_count(db, sql: str, params: tuple = ()) -> int:
+    """عدّ آمن (يرجع 0 عند الفشل)."""
+    if db is None:
+        return 0
+    try:
+        val = await db.fetchval(sql, params)
+        return int(val or 0)
+    except Exception:
+        return 0
+
+
+async def _safe_fetch(db, sql: str, params: tuple = ()) -> List[dict]:
+    """fetchall آمن."""
+    if db is None:
+        return []
+    try:
+        return await db.fetchall(sql, params) or []
+    except Exception:
+        return []
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# 🆕 v7.3.0: دوال الفحص الشامل (من db_inspect.py)
+# ═══════════════════════════════════════════════════════════════════════
+
+async def _inspect_schema_integrity(db) -> None:
+    """فحص بنية الجداول الحرجة."""
+    for t in _REQUIRED_TABLES:
+        if not await _check_table_exists(db, t):
+            _err(f"جدول حرج مفقود: {t}")
+    # الجداول الاختيارية: تحذير فقط
+    missing_opt = []
+    for t in _OPTIONAL_TABLES:
+        if not await _check_table_exists(db, t):
+            missing_opt.append(t)
+    if missing_opt:
+        _warn(
+            f"جداول اختيارية مفقودة ({len(missing_opt)}): "
+            f"{', '.join(missing_opt[:6])}"
+            f"{'...' if len(missing_opt) > 6 else ''}"
+        )
+
+
+async def _inspect_users_anomalies(db) -> None:
+    """فحص شذوذ المستخدمين."""
+    if not await _check_table_exists(db, "users"):
+        return
+
+    # user_id NULL أو 0
+    bad_ids = await _safe_count(
+        db, "SELECT COUNT(*) FROM users "
+            "WHERE user_id IS NULL OR user_id = 0")
+    if bad_ids > 0:
+        _err(f"{bad_ids} مستخدم بـ user_id غير صالح (NULL أو 0)")
+
+    # محظور + اشتراك نشط
+    if await _check_table_exists(db, "subscriptions"):
+        if _is_postgres():
+            banned_active = await _safe_count(
+                db,
+                "SELECT COUNT(DISTINCT u.user_id) FROM users u "
+                "JOIN subscriptions s ON u.user_id = s.user_id "
+                "WHERE u.banned = 1 AND s.status = 'active' "
+                "AND s.end_date > NOW()")
+        else:
+            banned_active = await _safe_count(
+                db,
+                "SELECT COUNT(DISTINCT u.user_id) FROM users u "
+                "JOIN subscriptions s ON u.user_id = s.user_id "
+                "WHERE u.banned = 1 AND s.status = 'active' "
+                "AND s.end_date > datetime('now')")
+        if banned_active > 0:
+            _warn(
+                f"{banned_active} مستخدم محظور لديه اشتراك نشط "
+                f"(تناقض منطقي)")
+
+    # subscription_end متناقض
+    if await _check_column_exists(db, "users", "subscription_end"):
+        if _is_postgres():
+            inconsistent = await _safe_count(
+                db,
+                "SELECT COUNT(*) FROM users u "
+                "WHERE u.subscription_end IS NOT NULL "
+                "AND u.subscription_end > NOW() "
+                "AND NOT EXISTS ("
+                "  SELECT 1 FROM subscriptions s "
+                "  WHERE s.user_id = u.user_id "
+                "  AND s.status = 'active' "
+                "  AND s.end_date > NOW()"
+                ")")
+        else:
+            inconsistent = await _safe_count(
+                db,
+                "SELECT COUNT(*) FROM users u "
+                "WHERE u.subscription_end IS NOT NULL "
+                "AND u.subscription_end > datetime('now') "
+                "AND NOT EXISTS ("
+                "  SELECT 1 FROM subscriptions s "
+                "  WHERE s.user_id = u.user_id "
+                "  AND s.status = 'active' "
+                "  AND s.end_date > datetime('now')"
+                ")")
+        if inconsistent > 0:
+            _warn(
+                f"{inconsistent} مستخدم subscription_end في المستقبل "
+                f"لكن لا اشتراك نشط (تناقض)")
+
+    # username مكرر
+    if await _check_column_exists(db, "users", "username"):
+        dups = await _safe_fetch(
+            db,
+            "SELECT username, COUNT(*) as cnt FROM users "
+            "WHERE username IS NOT NULL AND username != '' "
+            "GROUP BY username HAVING COUNT(*) > 1 LIMIT 5")
+        if dups:
+            _warn(
+                f"يوجد {len(dups)} username مكرر "
+                f"(قد يكون طبيعياً إذا تغيّر أصحابها)")
+
+
+async def _inspect_plans_anomalies(db) -> None:
+    """فحص شذوذ الباقات."""
+    if not await _check_table_exists(db, "plans"):
+        return
+
+    # أسعار غير صالحة
+    bad_price = await _safe_count(
+        db,
+        "SELECT COUNT(*) FROM plans "
+        "WHERE price IS NULL OR price < 0")
+    if bad_price > 0:
+        _err(f"{bad_price} باقة بسعر NULL أو سالب")
+
+    # مدة غير صالحة
+    bad_dur = await _safe_count(
+        db,
+        "SELECT COUNT(*) FROM plans "
+        "WHERE duration_days IS NULL OR duration_days <= 0")
+    if bad_dur > 0:
+        _err(f"{bad_dur} باقة بمدة غير صالحة")
+
+    # لا باقات نشطة (غير هدية)
+    active_count = await _safe_count(
+        db,
+        "SELECT COUNT(*) FROM plans "
+        "WHERE is_active = 1 AND is_gift = 0")
+    if active_count == 0:
+        _err("لا توجد باقات نشطة (غير هدية) — "
+             "المستخدمون لن يستطيعوا الشراء!")
+
+    # تعارض المدة
+    conflicts = await _safe_fetch(
+        db,
+        "SELECT duration_days, COUNT(*) as cnt "
+        "FROM plans WHERE is_active = 1 AND is_gift = 0 "
+        "GROUP BY duration_days HAVING COUNT(*) > 1")
+    if conflicts:
+        for c in conflicts:
+            dur = c.get("duration_days")
+            cnt = c.get("cnt")
+            _warn(
+                f"تعارض: {cnt} باقات بنفس المدة ({dur} يوم) — "
+                f"قد يسبب اختيار باقة خاطئة")
+
+    # باقات تجريبية مكررة
+    zero_trial = await _safe_fetch(
+        db,
+        "SELECT id, name FROM plans "
+        "WHERE duration_days = 30 AND price = 0 AND is_active = 1 "
+        "AND is_gift = 0")
+    if len(zero_trial) > 1:
+        _warn(
+            f"{len(zero_trial)} باقات تجريبية (30 يوم بسعر 0) — "
+            f"قد تسبب اختيار خاطئ")
+
+
+async def _inspect_subscriptions_anomalies(db) -> None:
+    """فحص شذوذ الاشتراكات."""
+    if not await _check_table_exists(db, "subscriptions"):
+        return
+
+    # active لكن end_date في الماضي
+    if _is_postgres():
+        past_active = await _safe_count(
+            db,
+            "SELECT COUNT(*) FROM subscriptions "
+            "WHERE status = 'active' AND end_date < NOW()")
+    else:
+        past_active = await _safe_count(
+            db,
+            "SELECT COUNT(*) FROM subscriptions "
+            "WHERE status = 'active' AND end_date < datetime('now')")
+    if past_active > 0:
+        _err(
+            f"{past_active} اشتراك 'active' لكن end_date في الماضي "
+            f"(تناقض — يحتاج expire_expired_subscriptions)")
+
+    # end_date NULL
+    null_end = await _safe_count(
+        db,
+        "SELECT COUNT(*) FROM subscriptions WHERE end_date IS NULL")
+    if null_end > 0:
+        _err(f"{null_end} اشتراك بـ end_date = NULL")
+
+    # start_date > end_date
+    bad_dates = await _safe_count(
+        db,
+        "SELECT COUNT(*) FROM subscriptions "
+        "WHERE start_date IS NOT NULL AND end_date IS NOT NULL "
+        "AND start_date > end_date")
+    if bad_dates > 0:
+        _err(f"{bad_dates} اشتراك تاريخ بدايته بعد نهايته (تناقض)")
+
+    # orphan user
+    orphan_user = await _safe_count(
+        db,
+        "SELECT COUNT(*) FROM subscriptions s "
+        "WHERE NOT EXISTS (SELECT 1 FROM users u "
+        "WHERE u.user_id = s.user_id)")
+    if orphan_user > 0:
+        _err(f"{orphan_user} اشتراك لمستخدم غير موجود (orphan FK)")
+
+    # orphan plan
+    orphan_plan = await _safe_count(
+        db,
+        "SELECT COUNT(*) FROM subscriptions s "
+        "WHERE NOT EXISTS (SELECT 1 FROM plans p "
+        "WHERE p.id = s.plan_id)")
+    if orphan_plan > 0:
+        _err(f"{orphan_plan} اشتراك لباقة غير موجودة (orphan FK)")
+
+
+async def _inspect_channels_anomalies(db) -> None:
+    """فحص شذوذ القنوات."""
+    if not await _check_table_exists(db, "user_channels"):
+        return
+
+    # orphan user
+    orphan = await _safe_count(
+        db,
+        "SELECT COUNT(*) FROM user_channels uc "
+        "WHERE NOT EXISTS (SELECT 1 FROM users u "
+        "WHERE u.user_id = uc.user_id)")
+    if orphan > 0:
+        _err(f"{orphan} قناة لمستخدم غير موجود (orphan FK)")
+
+    # active_channel يشير لقناة محظورة
+    if await _check_column_exists(db, "users", "active_channel"):
+        bad_active = await _safe_count(
+            db,
+            "SELECT COUNT(*) FROM users u "
+            "JOIN user_channels uc ON u.active_channel = uc.id "
+            "WHERE uc.banned = 1")
+        if bad_active > 0:
+            _warn(
+                f"{bad_active} مستخدم active_channel يشير لقناة محظورة")
+
+    # posts orphan
+    if await _check_table_exists(db, "posts"):
+        orphan_posts = await _safe_count(
+            db,
+            "SELECT COUNT(*) FROM posts p "
+            "WHERE NOT EXISTS (SELECT 1 FROM user_channels uc "
+            "WHERE uc.id = p.channel_db_id)")
+        if orphan_posts > 0:
+            _err(
+                f"{orphan_posts} منشور لقناة غير موجودة (orphan FK)")
+
+        # منشورات فشلت كثيراً
+        fail_high = await _safe_count(
+            db,
+            "SELECT COUNT(*) FROM posts "
+            "WHERE fail_count >= 3 AND published = 0")
+        if fail_high > 0:
+            _warn(
+                f"{fail_high} منشور فشل 3 مرات+ (لن يُنشر تلقائياً)")
+
+
+async def _inspect_managed_bots_anomalies(db) -> None:
+    """فحص شذوذ البوتات المُدارة."""
+    if not await _check_table_exists(db, "bots"):
+        return
+
+    if not await _check_table_exists(db, "keywords"):
+        return
+
+    # orphan keywords
+    orphan = await _safe_count(
+        db,
+        "SELECT COUNT(*) FROM keywords k "
+        "WHERE NOT EXISTS (SELECT 1 FROM bots b WHERE b.id = k.bot_id)")
+    if orphan > 0:
+        _err(f"{orphan} كلمة لبوت غير موجود (orphan FK)")
+
+    # كلمات فارغة
+    empty_kw = await _safe_count(
+        db,
+        "SELECT COUNT(*) FROM keywords "
+        "WHERE keyword IS NULL OR TRIM(keyword) = ''")
+    if empty_kw > 0:
+        _err(f"{empty_kw} كلمة مفتاحية فارغة")
+
+    # ردود فارغة
+    empty_reply = await _safe_count(
+        db,
+        "SELECT COUNT(*) FROM keywords "
+        "WHERE reply IS NULL OR TRIM(reply) = ''")
+    if empty_reply > 0:
+        _warn(f"{empty_reply} كلمة مفتاحية برد فارغ")
+
+    # كلمات قصيرة + تكرار بعد التطبيع (per bot)
+    bots = await _safe_fetch(
+        db, "SELECT id, username FROM bots ORDER BY id ASC")
+    for b in bots:
+        bid = b.get("id")
+        if bid is None:
+            continue
+        kws = await _safe_fetch(
+            db,
+            f"SELECT keyword FROM keywords WHERE bot_id = {_ph(1)}",
+            (bid,))
+        kw_list = [str(k.get("keyword") or "") for k in kws]
+
+        short = [k for k in kw_list if len(k) <= 2]
+        if short:
+            _warn(
+                f"بوت #{bid}: {len(short)} كلمة قصيرة (≤2 حرف) — "
+                f"قد تسبب مطابقة خاطئة: {short[:5]}")
+
+        # كلمات متطابقة بعد التطبيع
+        normalized = {}
+        for k in kw_list:
+            norm = k.strip().lower().replace("ة", "ه")
+            norm = norm.replace("أ", "ا").replace("إ", "ا").replace("آ", "ا")
+            if norm in normalized and normalized[norm] != k:
+                _warn(
+                    f"بوت #{bid}: كلمات متطابقة بعد التطبيع: "
+                    f"'{normalized[norm]}' و '{k}'")
+            else:
+                normalized[norm] = k
+
+
+async def _inspect_invoices_anomalies(db) -> None:
+    """فحص شذوذ الفواتير."""
+    if not await _check_table_exists(db, "invoices"):
+        return
+
+    # paid بـ 0 أو سالب
+    bad_amount = await _safe_count(
+        db,
+        "SELECT COUNT(*) FROM invoices "
+        "WHERE status = 'paid' AND (amount <= 0 OR amount IS NULL)")
+    if bad_amount > 0:
+        _err(
+            f"{bad_amount} فاتورة مدفوعة بمبلغ صفر أو سالب "
+            f"(مشكلة محاسبية!)")
+
+    # معلّقة قديمة (>7 أيام)
+    if _is_postgres():
+        stale = await _safe_count(
+            db,
+            "SELECT COUNT(*) FROM invoices "
+            "WHERE status = 'pending' "
+            "AND created_at < NOW() - INTERVAL '7 days'")
+    else:
+        stale = await _safe_count(
+            db,
+            "SELECT COUNT(*) FROM invoices "
+            "WHERE status = 'pending' "
+            "AND created_at < datetime('now', '-7 days')")
+    if stale > 0:
+        _warn(
+            f"{stale} فاتورة معلّقة > 7 أيام (قد تحتاج cleanup)")
+
+
+async def _inspect_settings_anomalies(db) -> None:
+    """فحص شذوذ الإعدادات."""
+    if not await _check_table_exists(db, "settings"):
+        _err("جدول settings غير موجود — البوت سيواجه مشاكل!")
+        return
+
+    # الإعدادات الأساسية
+    for key in ("tables_hash", "bootstrap_hash"):
+        try:
+            val = await db.fetchval(
+                f"SELECT value FROM settings WHERE key = {_ph(1)}",
+                (key,))
+            if not val or not str(val).strip():
+                _warn(
+                    f"{key} غير مضبوط — قد يُعاد bootstrap")
+        except Exception:
+            pass
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -1182,9 +1676,7 @@ async def _probe_db_latency(*, force: bool = False, socket_timeout: float = 5.0)
     cross = _detect_cross_region(bot_region, db_region, tcp_ms=tcp_ms)
     result["cross_region"] = cross
 
-    # ═══════════════════════════════════════════════════════════════
     # 🔴 v7.2.25 FIX-25-1: لا اتصال مباشر إذا pool موجود لكن acquire فشل
-    # ═══════════════════════════════════════════════════════════════
     conn = None
     from_pool = False
     pool = getattr(db, "_pool", None)
@@ -1206,7 +1698,6 @@ async def _probe_db_latency(*, force: bool = False, socket_timeout: float = 5.0)
             from_pool = False
 
     if conn is None and pool_acquire_failed:
-        # pool موجود لكن acquire فشل — مشكلة حقيقية، لا تحاول اتصالاً مباشراً
         result["error"] = f"pool موجود لكن acquire فشل: {pool_acquire_error}"
         result["verdict"] = "critical"
         result["diagnosis"] = (
@@ -3101,23 +3592,12 @@ async def vacuum_analyze_tables() -> str:
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# 11b) Auto-vacuum  ✅ v7.2.23 — مع التفاصيل الكاملة
+# 11b) Auto-vacuum
 # ═══════════════════════════════════════════════════════════════════════
 
 async def auto_vacuum_dirty_mvs(min_dead: int = 10) -> Dict[str, Any]:
     """
     🧹 تنظيف تلقائي للجداول التي فيها dead tuples ≥ min_dead.
-
-    Returns dict with:
-      'vacuumed'            : list of {name, dead_before, dead_after, is_mv}
-      'failed'              : list of {name, error}
-      'skipped'             : list of {name, dead, is_mv, reason}
-      'remaining'           : list of {name, dead, ratio_pct, is_mv}
-      'total_dead_before'   : int
-      'total_dead_after'    : int
-      'cleaned'             : int
-      'duration_sec'        : float
-      'error'               : str|None
     """
     db = _get_db()
     result: Dict[str, Any] = {
@@ -3238,12 +3718,10 @@ async def auto_vacuum_dirty_mvs(min_dead: int = 10) -> Dict[str, Any]:
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# 11c) AUTO-TUNING — ضبط autovacuum تلقائيًا لكل جدول
-# 🟠 v7.2.25 FIX-25-3: يتجاهل جداول database.py
+# 11c) AUTO-TUNING
 # ═══════════════════════════════════════════════════════════════════════
 
 _AUTOVACUUM_TUNING_RULES: Dict[str, Optional[Dict[str, float]]] = {
-    # جداول صغيرة عالية التغيير (churn) → عتبات منخفضة
     "managed_bot_users": {
         "vacuum_scale_factor": 0.02,
         "vacuum_threshold": 20,
@@ -3268,7 +3746,6 @@ _AUTOVACUUM_TUNING_RULES: Dict[str, Optional[Dict[str, float]]] = {
         "analyze_scale_factor": 0.02,
         "analyze_threshold": 10,
     },
-    # جداول نظامية شبه ثابتة → اتركها افتراضية
     "schema_version": None,
     "_dual_sync_state": None,
     "mv_active_user_limits": None,
@@ -3329,11 +3806,6 @@ def _build_alter_sql(table: str, rules: Dict[str, float]) -> Optional[str]:
 async def ensure_autovacuum_tuning(*, force: bool = False) -> Dict[str, Any]:
     """
     يضبط autovacuum لكل جدول حسب القواعد + الاكتشاف التلقائي.
-
-    🟠 v7.2.25 FIX-25-3:
-      يتجاهل الجداول التي يديرها database.py _tune_heavy_tables_autovacuum
-      (HEAVY/SMALL) لأن قيمها أدق وأكثر تخصصاً. بلا هذا التجاهل،
-      db_diagnostics قد يُعيد ضبطها بقيم عامة أسوأ.
     """
     result: Dict[str, Any] = {
         'ok': False, 'tuned': [], 'skipped': [], 'failed': [],
@@ -3353,14 +3825,12 @@ async def ensure_autovacuum_tuning(*, force: bool = False) -> Dict[str, Any]:
     start = time.monotonic()
     targets: Dict[str, Dict[str, float]] = {}
 
-    # 1) الجداول المعروفة
     for name, rules in _AUTOVACUUM_TUNING_RULES.items():
         if rules is None:
             result['skipped'].append({'name': name, 'reason': 'system_default'})
             continue
         targets[name] = rules
 
-    # 2) الاكتشاف التلقائي — جداول عالية churn
     if _AUTOVACUUM_AUTO_DISCOVER:
         try:
             dirty, _ = await _get_all_tables_health()
@@ -3369,8 +3839,7 @@ async def ensure_autovacuum_tuning(*, force: bool = False) -> Dict[str, Any]:
                 if name in targets or name in _AUTOVACUUM_TUNING_RULES:
                     continue
                 if t.get('is_matview'):
-                    continue  # MVs لا تدعم autovacuum options
-                # 🟠 v7.2.25 FIX-25-3: تجاهل جداول database.py
+                    continue
                 if name in _DB_OWNED_TABLES:
                     result['skipped'].append({
                         'name': name,
@@ -3393,7 +3862,6 @@ async def ensure_autovacuum_tuning(*, force: bool = False) -> Dict[str, Any]:
         except Exception as e:
             logger.debug(f"ensure_autovacuum_tuning discovery: {e}")
 
-    # 3) تحقق + تطبيق
     keymap = {
         'vacuum_scale_factor':   'autovacuum_vacuum_scale_factor',
         'vacuum_threshold':      'autovacuum_vacuum_threshold',
@@ -3441,10 +3909,7 @@ async def ensure_autovacuum_tuning(*, force: bool = False) -> Dict[str, Any]:
 
 
 async def init_autovacuum_tuning() -> Dict[str, Any]:
-    """
-    يُستدعى مرة عند بدء البوت — يضبط autovacuum لكل الجداول.
-    آمن للاستدعاء المتكرر.
-    """
+    """يُستدعى مرة عند بدء البوت."""
     try:
         result = await ensure_autovacuum_tuning()
         tuned = len(result.get('tuned', []))
@@ -3462,21 +3927,17 @@ async def init_autovacuum_tuning() -> Dict[str, Any]:
 
 
 def format_autovacuum_tuning(result: Dict[str, Any]) -> str:
-    """
-    🟡 v7.2.25 FIX-25-7: رسالة نجاح واضحة عند عدم الحاجة لتغييرات.
-    """
+    """🟡 v7.2.25 FIX-25-7: رسالة نجاح واضحة عند عدم الحاجة لتغييرات."""
     lines = ["⚙️ <b>ضبط autovacuum تلقائيًا</b>", "━━━━━━━━━━━━━━━━━━━━━━", ""]
     tuned = result.get('tuned', [])
     skipped = result.get('skipped', [])
     failed = result.get('failed', [])
 
-    # 🟡 v7.2.25 FIX-25-7: حالة "لا حاجة لتغييرات"
     if not tuned and not failed:
         lines.append(f"✅ <b>كل الجداول مضبوطة مسبقاً ({len(skipped)})</b>")
         lines.append("")
         lines.append("💡 لا حاجة لأي تغيير — autovacuum يعمل بكفاءة.")
         lines.append("")
-        # اعرض أسباب التخطي (مختصر)
         if skipped:
             by_reason: Dict[str, int] = {}
             for s in skipped:
@@ -3516,6 +3977,153 @@ async def diagnose_autovacuum_tuning(*, force: bool = False) -> str:
     """واجهة تشخيص + ضبط يدوي عبر أمر /db_tune."""
     result = await ensure_autovacuum_tuning(force=force)
     return format_autovacuum_tuning(result)
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# 🆕 v7.3.0: تقرير الأخطاء الشامل (Findings Report)
+# ═══════════════════════════════════════════════════════════════════════
+
+def format_findings_report() -> str:
+    """تقرير نهائي مرتّب بالأخطاء (مثل db_inspect.py)."""
+    lines: List[str] = []
+    lines.append("🔍 <b>تقرير كشف الأخطاء الشامل</b>")
+    lines.append("━━━━━━━━━━━━━━━━━━━━━━")
+
+    if not _ERRORS and not _WARNINGS:
+        lines.append("")
+        lines.append("🎉 <b>لا توجد أخطاء أو تحذيرات!</b>")
+        lines.append("")
+        lines.append("✅ قاعدة البيانات بصحة ممتازة")
+        return "\n".join(lines)
+
+    if _ERRORS:
+        lines.append("")
+        lines.append(f"🔴 <b>أخطاء حرجة ({len(_ERRORS)}):</b>")
+        lines.append("")
+        for i, (_, msg) in enumerate(_ERRORS, 1):
+            lines.append(f"  {i}. {_esc(msg)}")
+
+    if _WARNINGS:
+        lines.append("")
+        lines.append(f"🟡 <b>تحذيرات ({len(_WARNINGS)}):</b>")
+        lines.append("")
+        for i, (_, msg) in enumerate(_WARNINGS, 1):
+            lines.append(f"  {i}. {_esc(msg)}")
+
+    lines.append("")
+    lines.append("━━━━━━━━━━━━━━━━━━━━━━")
+    lines.append(
+        f"📊 <b>الخلاصة:</b> {len(_ERRORS)} خطأ، {len(_WARNINGS)} تحذير")
+    if _ERRORS:
+        lines.append("")
+        lines.append("🔴 <b>يُنصح بمعالجة الأخطاء الحرجة فوراً!</b>")
+    elif _WARNINGS:
+        lines.append("")
+        lines.append("🟡 <b>يُنصح بمراجعة التحذيرات لاحقاً</b>")
+
+    return "\n".join(lines)
+
+
+async def _run_all_findings_checks() -> None:
+    """يشغّل كل دوال الفحص (يجمع النتائج في _ERRORS/_WARNINGS)."""
+    _clear_findings()
+    db = _get_db()
+    if db is None:
+        _err("DB غير مستورد — لا يمكن الفحص")
+        return
+
+    try:
+        await _inspect_schema_integrity(db)
+    except Exception as e:
+        _warn(f"فحص البنية فشل: {str(e)[:80]}")
+
+    try:
+        await _inspect_users_anomalies(db)
+    except Exception as e:
+        _warn(f"فحص المستخدمين فشل: {str(e)[:80]}")
+
+    try:
+        await _inspect_plans_anomalies(db)
+    except Exception as e:
+        _warn(f"فحص الباقات فشل: {str(e)[:80]}")
+
+    try:
+        await _inspect_subscriptions_anomalies(db)
+    except Exception as e:
+        _warn(f"فحص الاشتراكات فشل: {str(e)[:80]}")
+
+    try:
+        await _inspect_channels_anomalies(db)
+    except Exception as e:
+        _warn(f"فحص القنوات فشل: {str(e)[:80]}")
+
+    try:
+        await _inspect_managed_bots_anomalies(db)
+    except Exception as e:
+        _warn(f"فحص البوتات المُدارة فشل: {str(e)[:80]}")
+
+    try:
+        await _inspect_invoices_anomalies(db)
+    except Exception as e:
+        _warn(f"فحص الفواتير فشل: {str(e)[:80]}")
+
+    try:
+        await _inspect_settings_anomalies(db)
+    except Exception as e:
+        _warn(f"فحص الإعدادات فشل: {str(e)[:80]}")
+
+
+async def diagnose_findings_only() -> str:
+    """
+    🆕 v7.3.0: كشف الأخطاء فقط (بدون تشخيص الأداء).
+    سريع جداً — مناسب للأوامر /db_check أو /db_errors.
+    """
+    await _run_all_findings_checks()
+    return format_findings_report()
+
+
+async def diagnose_with_errors(*, include_probes: bool = True) -> str:
+    """
+    🆕 v7.3.0: تشخيص كامل + كشف الأخطاء.
+
+    يدمج:
+    1. تشخيص الأداء الكامل (من v7.2.25)
+    2. كشف الأخطاء الشامل (من db_inspect.py)
+
+    Returns:
+        نص HTML جاهز لـ Telegram، مقسّم إلى عدة أجزاء إذا طال.
+    """
+    # 1. كشف الأخطاء أولاً
+    await _run_all_findings_checks()
+    findings_text = format_findings_report()
+
+    # 2. تشخيص الأداء (من _build_sections)
+    try:
+        parts = await _build_sections(include_probes=include_probes)
+    except Exception as e:
+        logger.warning(f"diagnose_with_errors: _build_sections فشل: {e}")
+        parts = [f"⚠️ فشل تشخيص الأداء: {_esc(str(e)[:100])}"]
+
+    # 3. دمج: الأخطاء أولاً (الأهم) ثم الأداء
+    all_parts = [findings_text] + parts
+    return "\n\n".join(all_parts)
+
+
+async def get_findings() -> Dict[str, List[Tuple[str, str]]]:
+    """
+    🆕 v7.3.0: إرجاع النتائج الخام (بدون تشغيل الفحص).
+
+    للاستخدام من كود آخر يريد قراءة الأخطاء فقط.
+    """
+    return _get_findings()
+
+
+async def run_findings_checks() -> Dict[str, List[Tuple[str, str]]]:
+    """
+    🆕 v7.3.0: تشغيل الفحص وإرجاع النتائج.
+    """
+    await _run_all_findings_checks()
+    return _get_findings()
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -3886,6 +4494,13 @@ async def diagnose_db_quick() -> str:
     if len(configured_dbs) > 1:
         lines.append(f"⚠️ <b>{len(configured_dbs)} قواعد بيانات مُعدّة</b> — "
                      f"استخدم /db_diag للتفاصيل")
+    # 🆕 v7.3.0: إضافة ملخص الأخطاء السريع
+    if _ERRORS or _WARNINGS:
+        lines.append("")
+        lines.append(
+            f"🔴 أخطاء: <b>{len(_ERRORS)}</b> | "
+            f"🟡 تحذيرات: <b>{len(_WARNINGS)}</b>")
+        lines.append("  <i>استخدم /db_errors للتفاصيل</i>")
     return "\n".join(lines)
 
 
@@ -4031,14 +4646,19 @@ __all__ = [
     "diagnose_databases", "get_all_databases_info", "format_multi_db_report",
     "format_active_db_line", "databases_report", "list_databases",
     "multi_db_report", "show_databases", "get_active_db",
-    # v7.2.25 additions
+    # 🆕 v7.3.0
+    "diagnose_with_errors",
+    "diagnose_findings_only",
+    "format_findings_report",
+    "get_findings",
+    "run_findings_checks",
     "_DB_OWNED_TABLES",
     "_LONG_TX_THRESHOLD_SECONDS",
 ]
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# LOAD BEACON — v7.2.25
+# LOAD BEACON — v7.3.0
 # ═══════════════════════════════════════════════════════════════════════
 
 try:
@@ -4046,18 +4666,15 @@ try:
     _uptime_at_import = time.monotonic() - _PROCESS_IMPORT_TS
     logger.info(
         "🛡️ db_diagnostics.py v%s loaded | "
-        "SAFETY-FIXES-AUDIT ✅ | "
-        "FIX-25-1=no-direct-connect-on-pool-fail ✅ | "
-        "FIX-25-2=activity-force-param ✅ | "
-        "FIX-25-3=skip-db-owned-tables ✅ | "
-        "FIX-25-4=long-tx-env-configurable ✅ | "
-        "FIX-25-5=cleanup-show-errors ✅ | "
-        "FIX-25-6=sqlite-fragility-doc ✅ | "
-        "FIX-25-7=success-message-clear ✅ | "
-        "AUTO-TUNING ✅ (v7.2.24 preserved) | "
-        "CLEANUP-VISIBILITY ✅ (v7.2.23 preserved) | "
+        "DIAGNOSTICS-WITH-FINDINGS ✅ | "
+        "MERGE-1=error-detection-from-db-inspect ✅ | "
+        "MERGE-2=new-api (diagnose_with_errors / get_findings) ✅ | "
+        "KEPT v7.2.25 SAFETY-FIXES-AUDIT ✅ | "
+        "KEPT AUTO-TUNING ✅ | "
+        "KEPT CLEANUP-VISIBILITY ✅ | "
         "DB-owned-tables=%d | long_tx_threshold=%ds | "
         "grace_sec=%d | cache_keys=%d | exports=%d | "
+        "required_tables=%d | optional_tables=%d | "
         "mark_state=%s | process_age_at_import=%.1fs",
         VERSION,
         len(_DB_OWNED_TABLES),
@@ -4065,6 +4682,8 @@ try:
         int(_STARTUP_GRACE_SEC),
         len(_CACHE_TTL),
         len(__all__),
+        len(_REQUIRED_TABLES),
+        len(_OPTIONAL_TABLES),
         _mark_state,
         _uptime_at_import,
     )
