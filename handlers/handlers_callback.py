@@ -1,22 +1,27 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-handlers_callback.py - معالج الأزرار (v9.7.32-DELETE-ON-FORBIDDEN)
+handlers_callback.py - معالج الأزرار (v9.7.32-BOT-KICKED-CLEANUP)
 =====================================================================
-🆕 v9.7.32-DELETE-ON-FORBIDDEN:
-    🔴 FIX-DELETE-1 (IMPORTANT): حذف المنشورات تلقائياً عند طرد البوت.
-        • عند Forbidden (طرد من قناة):
-          - حظر القناة (banned=1)
-          - 🆕 حذف كل المنشورات غير المنشورة (لن تُنشر أبداً)
-          - إعلام المالك بالعدد المحذوف
-        • يمنع تراكم منشورات يتيمة + يقلّل dead tuples في posts.
+🆕 v9.7.32-BOT-KICKED-CLEANUP:
+    🟢 FIX-KICK-CLEANUP-1: حذف تلقائي لمنشورات القناة عند طرد البوت.
+        • عند Forbidden → القناة تُحظر (banned=1) كما هو
+        • 🆕 حذف فوري لكل posts WHERE channel_db_id=? AND published=0
+        • _notify_channel_owner_kicked يُخبر المالك بعدد المنشورات المحذوفة
+        • السبب: منشورات قناة مطرود منها لا تُنشر أبداً — حذفها يمنع
+          تراكم dead tuples + يمنع ظهور تحذير "منشورات فشلت 3 مرات+"
 
-    🟢 FIX-DELETE-2: _notify_channel_owner_kicked يقبل deleted_count
-       ويعرضه في رسالة الإعلام.
+🆕 v9.7.31-BOT-METRICS-AWARE — محفوظ:
+    🟢 NEW-1: _show_metrics_dashboard يقرأ من 3 مصادر.
+    🟢 NEW-2: _read_bot_metrics() — lazy import.
+    🟢 NEW-3: _read_posts_count_from_db().
 
-🆕 v9.7.31-BOT-METRICS-AWARE — محفوظ.
 🆕 v9.7.30-FREE-PLAN-BYPASS — محفوظ.
-🆕 FIX (Plans Collision): price > 0 — محفوظ.
+🆕 v9.7.29-BACKUP-BLOCKING-FIX — محفوظ.
+🆕 v9.7.28-CONTEST-JOIN-FIX — محفوظ.
+
+🛠️ FIX (Plans Collision) — محفوظ:
+    - _handle_buy_subscription: شرط AND price > 0.
 =====================================================================
 """
 import asyncio, importlib, logging, json, time, shutil, os, re
@@ -807,8 +812,7 @@ _metrics = {
     'top_callbacks': {}, 'auth_cache_hits': 0, 'auth_cache_misses': 0,
     'auth_neg_cache_hits': 0, 'auth_api_failures': 0,
     'publishes_success': 0, 'publishes_failed': 0, 'publishes_forbidden': 0,
-    'publishes_rate_limited': 0, 'circuit_opened': 0, 'circuit_blocked': 0,
-    'posts_deleted_on_forbidden': 0}
+    'publishes_rate_limited': 0, 'circuit_opened': 0, 'circuit_blocked': 0}
 _TOP_CALLBACKS_MAX = 100
 
 
@@ -856,7 +860,7 @@ def _metrics_reset():
                   'auth_api_failures', 'publishes_success',
                   'publishes_failed', 'publishes_forbidden',
                   'publishes_rate_limited', 'circuit_opened',
-                  'circuit_blocked', 'posts_deleted_on_forbidden'):
+                  'circuit_blocked'):
             _metrics[k] = 0
         _metrics['callbacks_latency'] = {'<100ms': 0,
                                           '100ms-1s': 0, '>1s': 0}
@@ -865,7 +869,10 @@ def _metrics_reset():
     except Exception: pass
 
 
+# 🆕 v9.7.31: قراءة _BOT_METRICS من bot.py + DB fallback
+
 def _read_bot_metrics() -> Dict:
+    """🆕 v9.7.31: قراءة _BOT_METRICS من bot.py v5.6.37+."""
     try:
         import bot as _bot_mod
         m = getattr(_bot_mod, "_BOT_METRICS", None)
@@ -877,6 +884,7 @@ def _read_bot_metrics() -> Dict:
 
 
 async def _read_posts_count_from_db(hours: int = 24) -> Optional[int]:
+    """🆕 v9.7.31: قراءة عدد المنشورات من DB (مصدر الحقيقة)."""
     db_type = str(getattr(DB, "DB_TYPE", "sqlite")).lower()
     h = int(max(1, hours))
     if db_type == "postgres":
@@ -1122,19 +1130,15 @@ async def _render_auto_reply_menu(query, context, chat_id, lang):
         except Exception: pass
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-# 🆕 v9.7.32 FIX-DELETE-2: يقبل deleted_count ويعرضه
-# ═══════════════════════════════════════════════════════════════════════════
-
-async def _notify_channel_owner_kicked(
-    context, ch_db_id, deleted_count: int = 0,
-):
+# 🆕 v9.7.32 FIX-KICK-CLEANUP-1: deleted_count param
+async def _notify_channel_owner_kicked(context, ch_db_id, deleted_count: int = 0):
     """
-    🆕 v9.7.32 FIX-DELETE-2: يخبر المالك بأن البوت طُرد من قناته.
+    🆕 v9.7.32: يُخبر المالك بأن البوت طُرد من قناته.
 
     Args:
-        deleted_count: عدد المنشورات غير المنشورة التي حُذفت
-                       (0 = لا شيء، -1 = فشل الحذف)
+        context: PTB context
+        ch_db_id: channel_db_id (id في user_channels)
+        deleted_count: عدد المنشورات المحذوفة تلقائياً (posts unpublished)
     """
     notify_key = f"_kicked_notify_{ch_db_id}"
     try:
@@ -1151,28 +1155,21 @@ async def _notify_channel_owner_kicked(
         owner_id = rd.get('user_id'); ch_name = rd.get('channel_name') or '?'
         if not owner_id: return
 
-        text = ("⚠️ <b>تنبيه مهم: البوت طُرد من قناتك</b>\n"
+        text = ("⚠️ <b>تنبيه: البوت طُرد من قناتك</b>\n"
                 "━━━━━━━━━━━━━━━━━━━━━━\n\n"
                 f"📡 <b>{_html.escape(str(ch_name))}</b>\n\n")
         if deleted_count > 0:
             text += (
                 f"🗑️ <b>حُذف {deleted_count} منشور</b> غير منشور\n"
-                f"<i>(لن تُنشر أبداً — البوت مطرود من القناة)</i>\n\n"
-            )
-        elif deleted_count == -1:
-            text += (
-                "⚠️ <b>فشل حذف المنشورات المعلّقة</b>\n"
-                "<i>ستبقى في قاعدة البيانات (يمكن حذفها يدوياً)</i>\n\n"
-            )
+                f"<i>(لن تُنشر أبداً — البوت مطرود من القناة)</i>\n\n")
         else:
-            text += "ℹ️ لا توجد منشورات معلّقة لحذفها.\n\n"
+            text += "ℹ️ لا توجد منشورات معلّقة.\n\n"
         text += (
             "🔄 <b>لإعادة التفعيل:</b>\n"
             "1️⃣ أضف البوت للقناة مجدداً\n"
             "2️⃣ امنحه صلاحية النشر\n"
             "3️⃣ أضف منشوراتك مرة أخرى\n\n"
-            "ℹ️ لن يحاول البوت النشر حتى تُعيد تفعيلها."
-        )
+            "ℹ️ لن يحاول البوت النشر حتى تُعيد تفعيلها.")
         try:
             await safe_send(context.bot, owner_id, text, parse_mode='HTML')
             try: context.bot_data[notify_key] = now
@@ -3075,48 +3072,37 @@ class CallbackHandlers:
                 except Exception: pass
             return False
         except Forbidden:
-            # ═══════════════════════════════════════════════════════
-            # 🆕 v9.7.32 FIX-DELETE-1: حذف المنشورات فوراً عند Forbidden
-            # ═══════════════════════════════════════════════════════
-            # 1) احظر القناة
+            # 1) احظر القناة (البوت مطرود)
             try:
                 await DB.execute(
                     "UPDATE user_channels SET banned=1 WHERE id=?",
                     (ch_db_id,))
             except Exception: pass
 
-            # 2) احذف كل المنشورات غير المنشورة (لن تُنشر أبداً)
+            # 2) 🆕 v9.7.32 FIX-KICK-CLEANUP-1: حذف كل المنشورات غير المنشورة
             deleted_count = 0
             try:
-                row = await DB.fetchone(
+                _row = await DB.fetchone(
                     "SELECT COUNT(*) AS cnt FROM posts "
                     "WHERE channel_db_id = ? AND published = 0",
                     (ch_db_id,))
-                cnt = int(
-                    (row.get("cnt") if isinstance(row, dict) else 0) or 0)
-                if cnt > 0:
+                deleted_count = int(
+                    (_row.get("cnt") if isinstance(_row, dict) else 0) or 0)
+                if deleted_count > 0:
                     await DB.execute(
                         "DELETE FROM posts "
                         "WHERE channel_db_id = ? AND published = 0",
                         (ch_db_id,))
-                    deleted_count = cnt
-                    _metrics_inc('posts_deleted_on_forbidden', cnt)
                     logger.info(
                         "🗑️ Forbidden: حذف %d منشور من قناة #%d "
                         "(البوت مطرود — لن تُنشر أبداً)",
-                        cnt, ch_db_id)
-                    # أَبْطِل كاشات العدّ
-                    try: await _invalidate_post_count_cache(ch_db_id)
-                    except Exception: pass
-                    try: await posts_cache.invalidate(ch_db_id)
-                    except Exception: pass
+                        deleted_count, ch_db_id)
             except Exception as _del_e:
                 logger.warning(
                     "حذف منشورات قناة #%d فشل: %s",
                     ch_db_id, _del_e)
-                deleted_count = -1
 
-            # 3) Circuit breaker
+            # 3) Circuit breaker (permanent)
             circuit.record_permanent_failure()
             _metrics_inc('publishes_forbidden')
             _metrics_inc('publishes_failed')
@@ -3125,8 +3111,7 @@ class CallbackHandlers:
             try:
                 _task = asyncio.create_task(
                     _notify_channel_owner_kicked(
-                        context, ch_db_id,
-                        deleted_count=deleted_count))
+                        context, ch_db_id, deleted_count=deleted_count))
                 ACTIVE_TASKS.add(_task)
                 _task.add_done_callback(ACTIVE_TASKS.discard)
             except Exception: pass
@@ -3555,6 +3540,7 @@ class CallbackHandlers:
                     bot=context.bot)
             except Exception: pass
 
+    # 🆕 v9.7.31: لوحة المقاييس الحية — 3 طبقات (DB + bot.py + CB)
     @staticmethod
     async def _show_metrics_dashboard(query, context, user_id, lang):
         try:
@@ -3587,7 +3573,6 @@ class CallbackHandlers:
                 "—" if db_posts_1h is None else str(db_posts_1h))
 
             bot_avail_str = "✅" if bot_available else "❌"
-            deleted_forbidden = snap.get('posts_deleted_on_forbidden', 0)
 
             text = (
                 "📊 <b>لوحة المقاييس الحية</b>\n"
@@ -3616,7 +3601,6 @@ class CallbackHandlers:
                 f"failed=<b>{snap.get('publishes_failed', 0)}</b>\n"
                 f"   ⛔ Forbidden: "
                 f"<b>{snap.get('publishes_forbidden', 0)}</b>\n"
-                f"   🗑️ محذوف عند Forbidden: <b>{deleted_forbidden}</b>\n"
                 f"   ⚠️ Rate-limited: "
                 f"<b>{snap.get('publishes_rate_limited', 0)}</b>\n\n"
                 "🏓 <b>Ping (bot.py):</b>\n"
@@ -5373,12 +5357,14 @@ try:
             f"🚨 v9.7.32: دوال مفقودة: {_missing_check}")
     else:
         logger.info(
-            "🛡️ handlers_callback.py v9.7.32-DELETE-ON-FORBIDDEN | "
-            "🆕 FIX-DELETE-1: حذف المنشورات عند Forbidden | "
-            "🆕 FIX-DELETE-2: _notify يقبل deleted_count | "
-            "KEPT v9.7.31: BOT-METRICS-AWARE | "
+            "🛡️ handlers_callback.py v9.7.32-BOT-KICKED-CLEANUP | "
+            "🆕 FIX-KICK-CLEANUP-1: auto-delete posts on Forbidden ✅ | "
+            "🆕 _notify_channel_owner_kicked accepts deleted_count | "
+            "KEPT v9.7.31: metrics dashboard (3 sources) | "
             "KEPT v9.7.30: FREE-PLAN-BYPASS | "
-            "KEPT: price > 0 fix | "
+            "KEPT v9.7.29: backup timeouts | "
+            "KEPT v9.7.28: contest_join fix | "
+            "KEPT: plan collision fix (price>0) | "
             "max_tasks_per_user=%d",
             _MAX_TASKS_PER_USER)
 except Exception as _be:
