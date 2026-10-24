@@ -1,14 +1,25 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-managed_bots_storage.py — طبقة I/O (v5.7.8 - ONE-TIME-KEYWORD)
+managed_bots_storage.py — طبقة I/O (v5.7.9 - TARGETED-UPDATE-FIX)
 =================================================================================
-🆕 v5.7.8 (ONE-TIME-KEYWORD):
-    • جدول managed_bot_keyword_replied لتتبع من رد عليهم.
-    • كل مستخدم يستلم الرد مرة واحدة فقط لكل كلمة.
-    • عند حذف الكلمة/البوت: يُحذف سجل الردود (يسمح بإعادة التفعيل).
+🆕 v5.7.9 (TARGETED-UPDATE-FIX) — CRITICAL:
+    🔴 FIX-CHURN-1: إضافة `update_managed_user_state(bid, user_id, state)`.
+    
+    المشكلة:
+        `save_managed_state()` كانت تُنفّذ UPSERT على **كل** صفوف المستخدمين
+        في كل مرة. مع 8 بوتات × 130 مستخدم = 1,040 UPSERT **لكل رسالة**.
+        النتيجة: churn كارثي على `managed_bot_users` (~1,040 dead tuple/رسالة).
+        AV لم يستطع اللحاق → 312 dead tuple متراكمة.
 
-باقي الميزات من v5.7.7 (KEYWORDS) محفوظة كما هي.
+    الحل:
+        دالة جديدة `update_managed_user_state()` تُحدّث **صفاً واحداً فقط**
+        عبر UPSERT مباشر. تُقلّل الـ churn بنسبة 99.9%.
+        `save_managed_state()` محفوظة للاستخدام الإداري (حذف بوت/إعادة تعيين).
+
+🆕 v5.7.8 (ONE-TIME-KEYWORD) — محفوظ:
+    • جدول managed_bot_keyword_replied.
+    • كل مستخدم يستلم الرد مرة واحدة فقط لكل كلمة.
 =================================================================================
 """
 
@@ -134,7 +145,6 @@ async def _ensure_tables():
                 PRIMARY KEY (bot_id, keyword)
             )
         """)
-        # 🆕 v5.7.8: جدول تتبع الردود
         await DB.execute("""
             CREATE TABLE IF NOT EXISTS managed_bot_keyword_replied (
                 bot_id INTEGER NOT NULL,
@@ -236,9 +246,68 @@ async def load_managed_state() -> Dict[int, Dict[int, Dict[str, bool]]]:
     return result
 
 
+# ═══════════════════════════════════════════════════════════════════════════
+# 🆕 v5.7.9 FIX-CHURN-1: تحديث صف واحد فقط (بدل UPSERT كل الجداول)
+# ═══════════════════════════════════════════════════════════════════════════
+
+async def update_managed_user_state(
+    bid: int, user_id: int, user_state: Dict[str, bool],
+) -> bool:
+    """
+    🆕 v5.7.9 FIX-CHURN-1: تحديث/إدراج صف مستخدم واحد فقط.
+
+    بدل `save_managed_state()` التي تُنفّذ ~1,040 UPSERT لكل رسالة،
+    هذه الدالة تُنفّذ UPSERT واحدة فقط → تقليل churn بـ 1000×.
+
+    الاستخدام:
+        await update_managed_user_state(bid, user_id, {
+            "start": True, "reply": False, "third": False, "fourth": False
+        })
+
+    Returns:
+        True: نجح التحديث
+        False: خطأ في DB
+    """
+    await _ensure_tables()
+    try:
+        now = datetime.now(timezone.utc)
+        await DB.execute(
+            """INSERT INTO managed_bot_users 
+               (bot_id, user_id, started, replied, third, fourth, updated_at) 
+               VALUES (?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT (bot_id, user_id) DO UPDATE SET
+               started = EXCLUDED.started,
+               replied = EXCLUDED.replied,
+               third = EXCLUDED.third,
+               fourth = EXCLUDED.fourth,
+               updated_at = EXCLUDED.updated_at""",
+            (
+                int(bid), int(user_id),
+                bool(user_state.get("start", False)),
+                bool(user_state.get("reply", False)),
+                bool(user_state.get("third", False)),
+                bool(user_state.get("fourth", False)),
+                now
+            )
+        )
+        return True
+    except Exception as e:
+        logger.error(
+            "❌ update_managed_user_state(#%s, %s): %s",
+            bid, user_id, e, exc_info=True
+        )
+        return False
+
+
 async def save_managed_state(
     state: Dict[int, Dict[int, Dict[str, bool]]],
 ) -> bool:
+    """
+    ⚠️ للاستخدام الإداري فقط (حذف بوت/إعادة تعيين كاملة).
+
+    ❌ لا تستخدمها في معالجة الرسائل — استخدم `update_managed_user_state`
+       بدلاً منها لتجنّب churn كارثي (1,040 UPSERT/رسالة).
+    """
     await _ensure_tables()
     try:
         async with get_lock():
@@ -388,7 +457,6 @@ async def add_managed_keyword(
 
 
 async def delete_managed_keyword(bid: int, keyword: str) -> bool:
-    """يحذف كلمة + سجل ردودها (يسمح بإعادة التفعيل)."""
     await _ensure_tables()
     kw_clean = (keyword or "").strip()
     if not kw_clean:
@@ -400,7 +468,6 @@ async def delete_managed_keyword(bid: int, keyword: str) -> bool:
                 "WHERE bot_id = ? AND keyword = ?",
                 (int(bid), kw_clean)
             )
-            # 🆕 v5.7.8
             await DB.execute(
                 "DELETE FROM managed_bot_keyword_replied "
                 "WHERE bot_id = ? AND keyword = ?",
@@ -415,14 +482,12 @@ async def delete_managed_keyword(bid: int, keyword: str) -> bool:
 
 
 async def delete_all_keywords_for_bot(bid: int) -> bool:
-    """يحذف كل كلمات بوت + كل سجل ردودها."""
     await _ensure_tables()
     try:
         await DB.execute(
             "DELETE FROM managed_bot_keywords WHERE bot_id = ?",
             (int(bid),)
         )
-        # 🆕 v5.7.8
         await DB.execute(
             "DELETE FROM managed_bot_keyword_replied WHERE bot_id = ?",
             (int(bid),)
@@ -448,13 +513,12 @@ async def get_keyword_count(bid: int) -> int:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# 7. 🆕 v5.7.8: تتبع الردود (منع التكرار)
+# 7. تتبع الردود (منع التكرار)
 # ═══════════════════════════════════════════════════════════════════════════
 
 async def is_keyword_already_replied(
     bid: int, user_id: int, keyword: str,
 ) -> bool:
-    """هل سبق أن رد البوت على هذا المستخدم بهذه الكلمة؟"""
     await _ensure_tables()
     kw_clean = (keyword or "").strip()
     if not kw_clean:
@@ -474,7 +538,6 @@ async def is_keyword_already_replied(
 async def mark_keyword_as_replied(
     bid: int, user_id: int, keyword: str,
 ) -> bool:
-    """يسجل أن البوت رد على هذا المستخدم بهذه الكلمة."""
     await _ensure_tables()
     kw_clean = (keyword or "").strip()
     if not kw_clean:
@@ -548,6 +611,8 @@ __all__ = [
     "save_managed_bots",
     "load_managed_state",
     "save_managed_state",
+    # 🆕 v5.7.9
+    "update_managed_user_state",
     "load_managed_keywords",
     "load_all_keywords",
     "save_managed_keywords",
@@ -567,8 +632,9 @@ __all__ = [
 
 try:
     logger.debug(
-        "🛡️ managed_bots_storage v5.7.8 (ONE-TIME-KEYWORD) loaded | "
-        "tables=bots,users,keywords,keyword_replied | lock=reentrant"
+        "🛡️ managed_bots_storage v5.7.9 (TARGETED-UPDATE-FIX) loaded | "
+        "tables=bots,users,keywords,keyword_replied | lock=reentrant | "
+        "churn_fix=update_managed_user_state"
     )
 except Exception:
     pass
