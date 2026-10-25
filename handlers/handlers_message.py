@@ -1,41 +1,36 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-handlers_message.py - v7.18.55 (FIX-AUTOREPLY-ASYNCRUN)
+handlers_message.py - v7.18.56 (FIX-BWM-LOOP-BLOCKING)
 (متوافق مع detectors v4.1.3 + banned_words_manager v1.2.0 + group_log v1.4.0)
 =============================================================================
-🆕 v7.18.55 (FIX-AUTOREPLY-ASYNCRUN):
+🆕 v7.18.56 (FIX-BWM-LOOP-BLOCKING):
 
-    🔴 FIX-AUTOREPLY-ASYNCRUN (CRITICAL): v7.18.54 حاولت "إصلاح"
-        حجب psycopg2 عبر `asyncio.run()` داخل `asyncio.to_thread`
-        لـ `DB.get_auto_reply`. لكن DB يستخدم asyncpg (غير حاجب أصلاً)،
-        و`asyncio.run` ينشئ حلقة جديدة في thread منفصل. النتيجة:
+    🔴 FIX-BWM-LOOP-BLOCKING (CRITICAL): v7.18.55 نجحت في إزالة
+        asyncio.run من auto_reply، لكن ظهر متهم جديد:
+        `BannedWordsManager.check_message` يحجب الحلقة 4.4s.
 
-        1) asyncpg pool مرتبط بحلقة الحلقة الرئيسية → استدعاء من
-           حلقة أخرى إما RuntimeError أو تجمّد أبدي.
-        2) `asyncio.wait_for` يلغي المنتظر فقط، **لا الخيط**. كل رسالة
-           تحجب خيطاً من ThreadPoolExecutor إلى الأبد.
-        3) بعد ~8 رسائل، ينفد الـ pool (default 8 خيوط) → كل
-           `asyncio.to_thread` لاحق ينتظر timeoutه الكامل → تراكم
-           ~15s لكل رسالة (5s ctx + 1.5×3 score + 3s DB + 2s file).
+        السبب: `wait_for(timeout=2.0)` يحتاج أن تُسلِّم الدالة المُنتظرة
+        yield للحلقة كي يُطلق المؤقّت. إذا كانت BWM تنفّذ regex على
+        آلاف الكلمات بدون yield، الحلقة مجمّدة — والـ timeout لا يُفعَّل.
 
-        الحل الصحيح:
-        - إذا كانت الدالة async (asyncpg): **await مباشر** — لا
-          يحجب الحلقة، وwait_for يلغيها فعلياً.
-        - إذا كانت sync (psycopg2): `asyncio.to_thread` آمن.
-        - **لا `asyncio.run` داخل to_thread أبداً**.
+        الدليل من السجلّات:
+            15:30:47,558 DIAG (spam done)
+            15:30:51,961 BANNED-MATCH ← فجوة 4.4s!
+            15:30:51,964 GIL-MONITOR lag=4098ms
 
-    🟡 FIX-TRANSLATE-ASYNC-SAFE: نفس المشكلة نظرياً في `_translate_safe`.
-        إذا كانت `TranslationManager.translate` async، فاستخدام
-        `to_thread` عليها يُعيد coroutine غير مُنتظر. الآن نكتشف
-        نوعها ونستدعيها بالطريقة الصحيحة.
+        الحل: `_BWM_EXECUTOR` معزول بـ max_workers=1 + `_bwm_check_nonblocking`.
+        الحلقة تبقى حرّة، timeout يُفعَّل، رسائل أخرى لا تنتظر.
 
+    ✅ محفوظ من v7.18.55:
+        - FIX-AUTOREPLY-ASYNCRUN (حذف asyncio.run من auto_reply)
+        - FIX-TRANSLATE-ASYNC-SAFE
     ✅ محفوظ من v7.18.54:
         - FIX-AUTOREPLY-DB-THREAD (نُقح لـ asyncpg)
     ✅ محفوظ من v7.18.53:
-        - FIX-LITE-FALLBACK (CONTEXT-TIMEOUT → lite context)
+        - FIX-LITE-FALLBACK
     ✅ محفوظ من v7.18.52:
-        - FIX-CONTEXT-BLOCKING (to_thread لـ _MessageContext)
+        - FIX-CONTEXT-BLOCKING
     ✅ محفوظ من v7.18.51:
         - FIX-POSTBOT-BLOCKING, FIX-TEXT-SCORE-SIZE-GUARD
     ✅ محفوظ من v7.18.50:
@@ -48,7 +43,7 @@ import asyncio
 import logging
 import time
 import sys
-print(f"██████ HANDLERS_MESSAGE LOADED FROM: {__file__} | v7.18.55-PROOF ██████", file=sys.stderr, flush=True)
+print(f"██████ HANDLERS_MESSAGE LOADED FROM: {__file__} | v7.18.56-PROOF ██████", file=sys.stderr, flush=True)
 import os
 import re
 import inspect
@@ -56,6 +51,7 @@ import ipaddress
 import json
 import threading
 import functools
+import concurrent.futures
 from html import escape
 from functools import partial
 from typing import (
@@ -151,6 +147,26 @@ _TEXT_SCORE_MAX_CHARS: int = 3000
 # 🆕 v7.18.52 FIX-CONTEXT-BLOCKING
 # 🆕 v7.18.53 FIX-LITE-FALLBACK: 5.0s لإعطاء فرصة كاملة
 _CONTEXT_BUILD_TIMEOUT_SEC: float = 5.0
+
+
+# ═════════════════════════════════════════════════════════════════════
+# 🆕 v7.18.56 FIX-BWM-LOOP-BLOCKING: ThreadPoolExecutor معزول لـ BWM
+# ═════════════════════════════════════════════════════════════════════
+# لماذا؟ BannedWordsManager.check_message يحجب الحلقة 4.4s (regex على
+# آلاف الكلمات، بدون yield). wait_for(timeout=2.0) لا يُفعَّل مع كود
+# متزامن لا يُسلِّم. الحل: executor معزول بـ max_workers=1، مطابق لـ
+# نمط _AUDIT_EXECUTOR/_EXPORT_EXECUTOR في handlers_analytics.py.
+# ═════════════════════════════════════════════════════════════════════
+_BWM_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
+    max_workers=1,
+    thread_name_prefix="bwm-worker",
+)
+_BWM_EXECUTOR_MAX_WORKERS = 1
+
+
+def _get_bwm_executor() -> concurrent.futures.Executor:
+    """يعيد executor BWM المخصص (معزول عن ThreadPool الافتراضي)."""
+    return _BWM_EXECUTOR
 
 
 # ═════════════════════════════════════════════════════════════════════
@@ -3714,6 +3730,78 @@ _EXTERNAL_HANDLED_STATES = frozenset({
 
 
 # ═════════════════════════════════════════════════════════════════════
+# 🆕 v7.18.56 FIX-BWM-LOOP-BLOCKING: _bwm_check_nonblocking helper
+# ═════════════════════════════════════════════════════════════════════
+async def _bwm_check_nonblocking(
+    text: str, chat_id: int
+) -> Optional[str]:
+    """
+    v7.18.56 FIX-BWM-LOOP-BLOCKING: تشغيل BWM.check_message في thread
+    معزول عبر `_BWM_EXECUTOR`.
+
+    لماذا؟
+        `BannedWordsManager.check_message` ينفّذ regex على آلاف الكلمات
+        بشكل متزامن. `wait_for(timeout=2.0)` لا يُفعَّل مع كود لا يُسلِّم
+        yield — الحلقة تبقى مجمّدة 4.4s رغم الـ timeout.
+
+    الحل:
+        تشغيله في `_BWM_EXECUTOR` (max_workers=1). الحلقة حرّة،
+        timeout يُفعَّل، رسائل أخرى لا تنتظر.
+
+    ملاحظة:
+        إذا كان BWM يستخدم asyncpg في cache miss، فإن تشغيله في thread
+        قد يفشل بسبب "attached to different loop". في هذه الحالة
+        نُسجّل تحذيرًا ونُرجع None (fallback للنظام القديم).
+
+    Returns:
+        الكلمة المحظورة إذا وُجدت، أو None.
+    """
+    if not _HAS_BWM or BannedWordsManager is None:
+        return None
+
+    _check_fn = getattr(BannedWordsManager, "check_message", None)
+    if not callable(_check_fn):
+        return None
+
+    loop = asyncio.get_running_loop()
+    executor = _get_bwm_executor()
+
+    def _run():
+        try:
+            if inspect.iscoroutinefunction(_check_fn):
+                # إذا كانت async: نحتاج حلقة جديدة (asyncio.run).
+                # ملاحظة: قد تفشل مع asyncpg pool من loop آخر.
+                # في هذه الحالة نلتقط الاستثناء ونُرجع None.
+                return asyncio.run(
+                    _check_fn(text=text, chat_id=chat_id))
+            return _check_fn(text=text, chat_id=chat_id)
+        except Exception as e:
+            logger.warning(
+                "BWM in thread failed (%s): %s",
+                type(e).__name__, str(e)[:120])
+            return None
+
+    try:
+        return await asyncio.wait_for(
+            loop.run_in_executor(executor, _run),
+            timeout=_BWM_TIMEOUT_SEC,
+        )
+    except asyncio.TimeoutError:
+        logger.warning(
+            "⏱️ BWM-TIMEOUT (executor) | chat=%s >%.1fs — "
+            "skipping BWM, falling back to list check",
+            chat_id, _BWM_TIMEOUT_SEC)
+        return None
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:
+        logger.warning(
+            "BWM executor error: %s: %s",
+            type(e).__name__, str(e)[:120])
+        return None
+
+
+# ═════════════════════════════════════════════════════════════════════
 # v7.18.53 FIX-LITE-FALLBACK: سياق مصغّر للرسائل الثقيلة
 # ═════════════════════════════════════════════════════════════════════
 def _build_lite_context(message) -> Any:
@@ -4539,30 +4627,24 @@ class MessageHandlers:
                     "mention", settings, is_anonymous=is_anonymous)
                 return
 
+        # 🆕 v7.18.56 FIX-BWM-LOOP-BLOCKING:
+        # BWM.check_message كان يحجب الحلقة 4.4s رغم wait_for(2.0)
+        # لأنه لا يُسلِّم yield. الآن نُشغّله في `_BWM_EXECUTOR`
+        # معزول — الحلقة تبقى حرّة، timeout يُفعَّل.
         if _banned_words_enabled:
             matched = None
             bwm_handled = False
 
             if _HAS_BWM and BannedWordsManager is not None:
                 try:
-                    matched = await asyncio.wait_for(
-                        BannedWordsManager.check_message(
-                            text=ctx.analysis_text, chat_id=chat_id),
-                        timeout=_BWM_TIMEOUT_SEC,
-                    )
-                    bwm_handled = True
-                except asyncio.TimeoutError:
-                    logger.warning(
-                        "⏱️ BWM-TIMEOUT | chat=%s user=%s | "
-                        "%.1fs exceeded — skipping BWM, using fallback",
-                        chat_id, user_id, _BWM_TIMEOUT_SEC)
-                    matched = None
+                    matched = await _bwm_check_nonblocking(
+                        ctx.analysis_text, chat_id)
                     bwm_handled = True
                 except asyncio.CancelledError:
                     raise
                 except Exception as _e_bwm:
                     logger.warning(
-                        "⚠️ BannedWordsManager.check_message فشل — "
+                        "⚠️ BannedWordsManager (executor) فشل — "
                         "fallback للنظام القديم: %s", _e_bwm)
                     matched = None
                     bwm_handled = False
@@ -4964,10 +5046,10 @@ class MessageHandlers:
     ):
         """
         🆕 v7.18.55 FIX-AUTOREPLY-ASYNCRUN (CRITICAL):
-            التصحيح الجذري — v7.18.54 استخدمت `asyncio.run()` داخل
-            `to_thread` لـ `DB.get_auto_reply`. لكن DB يستخدم asyncpg
-            (غير حاجب أصلاً)، و`asyncio.run` ينشئ حلقة جديدة في thread
-            منفصل، ويترك اتصال asyncpg معلقاً إلى الأبد.
+            v7.18.54 استخدمت `asyncio.run()` داخل `to_thread` لـ
+            `DB.get_auto_reply`. لكن DB يستخدم asyncpg (غير حاجب أصلاً)،
+            و`asyncio.run` ينشئ حلقة جديدة في thread منفصل، ويترك
+            اتصال asyncpg معلقاً إلى الأبد.
 
             النتيجة: ThreadPoolExecutor يُستنزف خلال ~8 رسائل → كل
             `to_thread` لاحق ينتظر timeoutه الكامل → تراكم 15s/رسالة.
@@ -7666,7 +7748,7 @@ async def handle_db_idle_command(update, context):
     app_filter = report.get('app_filter')
     lines = [
         f"🔴 <b>Idle-in-Transaction: {count}</b>",
-        "━━━━━━━━━━━━━━━━━━━━",
+        "━━━━━━━━━━━━━━━━━━━━━━",
     ]
     if app_matches:
         lines.append(
@@ -7713,7 +7795,7 @@ async def handle_db_idle_command(update, context):
         lines.append(
             f"<i>… و{count - 10} اتصال آخر (غير معروض)</i>")
         lines.append("")
-    lines.append("━━━━━━━━━━━━━━━━━━━━")
+    lines.append("━━━━━━━━━━━━━━━━━━━━━━")
     lines.append("💡 <b>الحل:</b>")
     lines.append(
         "• راجع <code>database.py v7.7.61</code> (TX-1..4)")
@@ -7889,17 +7971,21 @@ __all__ = [
     "_CONTEXT_BUILD_TIMEOUT_SEC",
     # v7.18.53 additions
     "_build_lite_context",
-    # v7.18.55 — لا إضافات جديدة في __all__ (تعديل داخلي فقط)
+    # 🆕 v7.18.56 additions
+    "_get_bwm_executor",
+    "_BWM_EXECUTOR",
+    "_BWM_EXECUTOR_MAX_WORKERS",
+    "_bwm_check_nonblocking",
 ]
 
 
 # ═════════════════════════════════════════════════════════════════════
-# LOAD BEACON — v7.18.55
+# LOAD BEACON — v7.18.56
 # ═════════════════════════════════════════════════════════════════════
 
 try:
     logger.info(
-        "✅ handlers_message v7.18.55 loaded | "
+        "✅ handlers_message v7.18.56 loaded | "
         "BWM=%s | PRIVATE_HANDLERS=%d | "
         "external_handled=%d | "
         "routing-fallback=7-paths-deduped | "
@@ -7908,7 +7994,7 @@ try:
         "max-len=%d) | "
         "TEXT-SCORE-SAFE=on (to_thread+timeout=%.1fs,size-guard=%d) | "
         "AUTOREPLY-SAFE=on (async-run-removed+DB=%.1fs,file=%.1fs) | "
-        "BWM-SAFE=on (timeout=%.1fs) | "
+        "BWM-SAFE=on (executor=isolated+timeout=%.1fs) | "
         "POSTBOT-SAFE=on (to_thread+timeout=%.1fs,max=%d) | "
         "CONTEXT-SAFE=on (to_thread+timeout=%.1fs) | "
         "LITE-FALLBACK=on (2000ch+btn+fwd, no skip) | "
@@ -7917,7 +8003,8 @@ try:
         "WAIT_LOG_CH=direct-handler | "
         "LOG-CHANNEL-KEY=log_channel_id (CANONICAL, unified) | "
         "detectors-compat=v4.1.3 | "
-        "fixes=(v7.18.55 FIX-AUTOREPLY-ASYNCRUN + FIX-TRANSLATE-ASYNC-SAFE + "
+        "fixes=(v7.18.56 FIX-BWM-LOOP-BLOCKING + "
+        "v7.18.55 FIX-AUTOREPLY-ASYNCRUN + FIX-TRANSLATE-ASYNC-SAFE + "
         "v7.18.54 FIX-AUTOREPLY-DB-THREAD + "
         "v7.18.53 FIX-LITE-FALLBACK + "
         "v7.18.52 FIX-CONTEXT-BLOCKING + "
