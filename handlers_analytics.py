@@ -1,39 +1,38 @@
-
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-handlers_analytics.py — واجهة التحليلات المتقدمة (v1.3.7 — AUDIT-FALSE-POSITIVES-FIXED)
+handlers_analytics.py — واجهة التحليلات المتقدمة (v1.3.8 — AUDIT-EXECUTOR-ISOLATION)
 ================================================================================
-v1.3.7 — فوق v1.3.6:
+v1.3.8 — فوق v1.3.7:
 
+    🔴 FIX-AUDIT-EXECUTOR (CRITICAL):
+        `_audit_run_reports` كانت تستخدم `asyncio.to_thread` الذي
+        يستنزف `ThreadPoolExecutor` الافتراضي المشترك مع `handle_group`
+        و`_process_auto_reply` في `handlers_message.py`.
+
+        النتيجة: أثناء /audit (10-30s)، كل رسالة جديدة تنتظر timeoutها
+        الكامل (5s ctx + 1.5×3 score + 3s DB + 2s file = ~15s).
+
+        الحل: `_AUDIT_EXECUTOR` مخصص بـ max_workers=2 معزول تماماً.
+        `Semaphore(2)` داخل `_audit_run_reports` يطابقه.
+
+    🔴 FIX-COLLECT-FILES-SYNC (HIGH):
+        `_audit_collect_files` كانت `async` لكنها تعمل بالكامل
+        متزامنة (rglob + resolve على 200 ملف) = 2-5s حجب للحلقة.
+        الحل: `_audit_collect_files_sync` في `_AUDIT_EXECUTOR`.
+
+    🔴 FIX-CMD-FILES-SYNC (HIGH):
+        `cmd_files` تستورد 200 وحدة (importlib متزامن) على الحلقة
+        الرئيسية = 10-30s حجب.
+        الحل: `_cmd_files_scan_sync` في `_AUDIT_EXECUTOR`.
+
+v1.3.7 — محفوظ بالكامل:
     🔴 FIX-SQL-FP-1: `SQL_STRING_FORMAT` → `SQL_FSTRING_REAL`
-        • إزالة re.DOTALL (كانت تطابق عبر الأسطر — سبب ~50 false positive)
-        • إزالة مطابقة `%s` و `?` (parameterized آمن)
-        • إزالة مطابقة `UPDATE/INSERT` خارج strings (مثل `Update as _TgUpdate`)
-        • النتيجة: 55 finding → 0-2 حقيقية
-
     🔴 FIX-EVAL-EXEC-FP-2: `EVAL_USE` / `EXEC_USE`
-        • تغيير message لتجنّب self-match ("استخدام eval(" كان يُطابق نفسه)
-        • إضافة `(?<![.\w])` lookbehind لتجاهل `.eval(` و `myeval(`
-        • النتيجة: 2 CRITICAL → 0
-
-    🔴 FIX-EXCEPT-PASS-3: `EXCEPT_PASS`
-        • إزالة regex المكسور `except\s+[^:]+:\s*\n\s*pass\b`
-        • إضافة كشف AST دقيق: `len(h.body) == 1 and isinstance(h.body[0], Pass)`
-        • النتيجة: ~600 false → ~50 حقيقية (except: pass فقط)
-
+    🔴 FIX-EXCEPT-PASS-3: `EXCEPT_PASS` → AST دقيق
     🔴 FIX-LOG-FSTRING-FP-4: `LOG_FSTRING`
-        • `[ \t]*` بدل `\s*` بين `logger.xxx(` و `f"..."` (منع multi-line match)
-        • النتيجة: ~300 → ~20 حقيقية
-
     🟢 FIX-SELF-SCAN-5: `_audit_collect_files`
-        • استثناء `handlers_analytics.py` من self-scan
-        • النتيجة: لا self-flags على ملف الفحص نفسه
-
     🟢 FIX-DECLARED-6: `_DECLARED_FIXES_V5713`
-        • P0-FIX-2: يقبل idempotency flag فقط (لا manual unbind مطلوب)
-        • P1-FIX-4: يطابق `if not result: continue` الفعلي
-        • P3-FIX-11: يدعم tuple/list متعدد الأسطر
 
 v1.3.6 — محفوظ بالكامل:
     🆕 AUDIT-1: /audit + /audit_full + /audit_critical + audit_btn
@@ -62,6 +61,7 @@ import asyncio
 import ast as _ast_mod
 import json as _json_mod
 import sys as _sys_mod
+import concurrent.futures
 from datetime import datetime, timedelta
 from pathlib import Path
 from dataclasses import dataclass as _dataclass, field as _dc_field, asdict as _dc_asdict
@@ -103,6 +103,27 @@ ANALYTICS_BUTTONS = (
     "audit_md_btn",
     "audit_json_btn",
 )
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# 🆕 v1.3.8 FIX-AUDIT-EXECUTOR: ThreadPoolExecutor مخصص ومعزول
+# ═══════════════════════════════════════════════════════════════════════
+# لماذا؟ `asyncio.to_thread` يستخدم ThreadPoolExecutor الافتراضي المشترك
+# مع `handle_group` و`_process_auto_reply` في handlers_message.py. أثناء
+# /audit (10-30s)، ينفد الـ pool → كل رسالة جديدة تنتظر timeoutها الكامل.
+# الحل: executor مخصص بـ max_workers=2 معزول تماماً عن الحلقة الرئيسية.
+# ═══════════════════════════════════════════════════════════════════════
+_AUDIT_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
+    max_workers=2,
+    thread_name_prefix="audit-worker",
+)
+_AUDIT_EXECUTOR_MAX_WORKERS = 2
+_AUDIT_SEMAPHORE_LIMIT = 2
+
+
+def _get_audit_executor() -> concurrent.futures.Executor:
+    """يعيد executor audit المخصص (معزول عن ThreadPool الافتراضي)."""
+    return _AUDIT_EXECUTOR
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -925,15 +946,29 @@ async def _audit_run_reports(
     files: List[Path],
     timeout: float = _AUDIT_TIMEOUT_SEC,
 ) -> List[_AuditReport]:
-    """تشغيل الفحص على قائمة ملفات (بالتوازي مع حد أقصى)."""
+    """
+    تشغيل الفحص على قائمة ملفات.
+
+    🆕 v1.3.8 FIX-AUDIT-EXECUTOR:
+        - يستخدم `_AUDIT_EXECUTOR` المخصص (معزول عن ThreadPool المشترك
+          مع handle_group في handlers_message.py).
+        - `Semaphore(2)` مطابق لـ max_workers=2.
+        - النتيجة: `handle_group` لا ينتظر انتهاء /audit.
+    """
     reports: List[_AuditReport] = []
-    sem = asyncio.Semaphore(4)
+    sem = asyncio.Semaphore(_AUDIT_SEMAPHORE_LIMIT)
+    loop = asyncio.get_running_loop()
+    audit_executor = _get_audit_executor()
 
     async def _one(p: Path) -> Optional[_AuditReport]:
         async with sem:
             try:
                 return await asyncio.wait_for(
-                    asyncio.to_thread(_audit_file_sync, p),
+                    loop.run_in_executor(
+                        audit_executor,
+                        _audit_file_sync,
+                        p,
+                    ),
                     timeout=timeout,
                 )
             except asyncio.TimeoutError:
@@ -961,8 +996,11 @@ async def _audit_run_reports(
     return reports
 
 
-async def _audit_collect_files(root: Path) -> List[Path]:
-    """جمع ملفات .py من الجذر (يستثني handlers_analytics.py من self-scan)."""
+def _audit_collect_files_sync(root: Path) -> List[Path]:
+    """
+    🆕 v1.3.8 FIX-COLLECT-FILES-SYNC: نسخة متزامنة.
+    تُنفَّذ في `_AUDIT_EXECUTOR` بدلاً من الحلقة الرئيسية.
+    """
     files: List[Path] = []
     # 🆕 FIX-SELF-SCAN-5: استثناء self من self-scan
     try:
@@ -990,10 +1028,37 @@ async def _audit_collect_files(root: Path) -> List[Path]:
             if len(files) >= _MAX_AUDIT_FILES:
                 break
     except Exception as e:
-        logger.warning(f"_audit_collect_files: {e}")
+        logger.warning(f"_audit_collect_files_sync: {e}")
 
     files.sort(key=lambda p: str(p).lower())
     return files
+
+
+async def _audit_collect_files(root: Path) -> List[Path]:
+    """
+    جمع ملفات .py من الجذر.
+
+    🆕 v1.3.8 FIX-COLLECT-FILES-SYNC:
+        - التنفيذ الفعلي في `_AUDIT_EXECUTOR` (لا يحجب الحلقة).
+        - timeout 15s.
+        - يستثني handlers_analytics.py من self-scan.
+    """
+    loop = asyncio.get_running_loop()
+    try:
+        return await asyncio.wait_for(
+            loop.run_in_executor(
+                _get_audit_executor(),
+                _audit_collect_files_sync,
+                root,
+            ),
+            timeout=15.0,
+        )
+    except asyncio.TimeoutError:
+        logger.warning("_audit_collect_files: timeout 15s")
+        return []
+    except Exception as e:
+        logger.warning(f"_audit_collect_files: {e}")
+        return []
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -2791,6 +2856,81 @@ async def show_autotune(update: Update,
 # 12c) /files — عرض كل ملفات المشروع
 # ═══════════════════════════════════════════════════════════════════════
 
+def _cmd_files_scan_sync(root: Path) -> Tuple[List, List, List, int]:
+    """
+    🆕 v1.3.8 FIX-CMD-FILES-SYNC: نسخة متزامنة.
+    تُنفَّذ في `_AUDIT_EXECUTOR` — لا تحجب الحلقة الرئيسية أثناء استيراد
+    الوحدات (importlib متزامن = 10-30s على 200 وحدة).
+    """
+    py_files: List[Path] = []
+    try:
+        for py_file in root.rglob("*.py"):
+            try:
+                parts = py_file.relative_to(root).parts
+            except ValueError:
+                continue
+            if any(p in _EXCLUDED_DIRS for p in parts[:-1]):
+                continue
+            if py_file.name in _SKIP_FILENAMES:
+                continue
+            py_files.append(py_file)
+            if len(py_files) >= _MAX_FILES_SCAN:
+                logger.warning(
+                    "cmd_files: reached %d files, truncating",
+                    _MAX_FILES_SCAN,
+                )
+                break
+    except Exception as e:
+        logger.warning(f"_cmd_files_scan_sync rglob: {e}")
+
+    py_files.sort(key=lambda p: str(p.relative_to(root)).lower())
+
+    loaded: List[Dict[str, Any]] = []
+    no_version: List[Dict[str, Any]] = []
+    failed: List[Dict[str, Any]] = []
+
+    for py_file in py_files:
+        try:
+            rel = py_file.relative_to(root)
+            mod_path = _file_to_module_path(rel)
+            if not mod_path:
+                continue
+
+            if rel.parent == Path("."):
+                candidates = [mod_path]
+                if rel.name == "bot.py":
+                    candidates = ["bot", "__main__"]
+            else:
+                candidates = [mod_path]
+                if len(rel.parts) >= 2:
+                    candidates.append(rel.stem)
+
+            mod, err = _try_import_any(candidates)
+
+            if mod is None:
+                failed.append({
+                    "name": str(rel),
+                    "reason": err or "unknown",
+                })
+                continue
+
+            ver = _extract_version(mod)
+            if ver:
+                loaded.append({
+                    "name": str(rel),
+                    "version": str(ver),
+                })
+            else:
+                no_version.append({"name": str(rel)})
+        except Exception as e:
+            failed.append({
+                "name": str(py_file),
+                "reason": f"{type(e).__name__}: {str(e)[:80]}",
+            })
+
+    return loaded, no_version, failed, len(py_files)
+
+
 async def cmd_files(update: Update,
                     context: ContextTypes.DEFAULT_TYPE) -> None:
     """📂 v1.3.5 — عرض كل ملفات المشروع .py ديناميكياً."""
@@ -2830,73 +2970,31 @@ async def cmd_files(update: Update,
     try:
         root = _find_project_root()
 
-        py_files: List[Path] = []
+        # 🆕 v1.3.8 FIX-CMD-FILES-SYNC: المسح والاستيراد في thread منفصل
+        loop = asyncio.get_running_loop()
         try:
-            for py_file in root.rglob("*.py"):
-                try:
-                    parts = py_file.relative_to(root).parts
-                except ValueError:
-                    continue
-                if any(p in _EXCLUDED_DIRS for p in parts[:-1]):
-                    continue
-                if py_file.name in _SKIP_FILENAMES:
-                    continue
-                py_files.append(py_file)
-                if len(py_files) >= _MAX_FILES_SCAN:
-                    logger.warning(
-                        "cmd_files: reached %d files, truncating",
-                        _MAX_FILES_SCAN,
-                    )
-                    break
-        except Exception as e:
-            logger.warning(f"cmd_files rglob: {e}")
+            loaded, no_version, failed, total = await asyncio.wait_for(
+                loop.run_in_executor(
+                    _get_audit_executor(),
+                    _cmd_files_scan_sync,
+                    root,
+                ),
+                timeout=60.0,
+            )
+        except asyncio.TimeoutError:
+            logger.warning("cmd_files: timeout 60s")
+            await _cleanup_waiting_msg(waiting_msg)
+            err = (
+                "❌ <b>فحص الملفات تجاوز المهلة (60s)</b>\n"
+                "━━━━━━━━━━━━━━━━━━━━━━\n"
+                "💡 عدد الملفات كبير — قلّل _MAX_FILES_SCAN."
+            )
+            if query:
+                await _safe_edit(query, err, _back_keyboard("admin_analytics"))
+            elif chat_id is not None:
+                await safe_send(context.bot, chat_id, err)
+            return
 
-        py_files.sort(key=lambda p: str(p.relative_to(root)).lower())
-
-        loaded: List[Dict[str, Any]] = []
-        no_version: List[Dict[str, Any]] = []
-        failed: List[Dict[str, Any]] = []
-
-        for py_file in py_files:
-            try:
-                rel = py_file.relative_to(root)
-                mod_path = _file_to_module_path(rel)
-                if not mod_path:
-                    continue
-
-                if rel.parent == Path("."):
-                    candidates = [mod_path]
-                    if rel.name == "bot.py":
-                        candidates = ["bot", "__main__"]
-                else:
-                    candidates = [mod_path]
-                    if len(rel.parts) >= 2:
-                        candidates.append(rel.stem)
-
-                mod, err = _try_import_any(candidates)
-
-                if mod is None:
-                    failed.append({
-                        "name": str(rel),
-                        "reason": err or "unknown",
-                    })
-                    continue
-
-                ver = _extract_version(mod)
-                if ver:
-                    loaded.append({
-                        "name": str(rel),
-                        "version": str(ver),
-                    })
-                else:
-                    no_version.append({"name": str(rel)})
-            except Exception as e:
-                failed.append({
-                    "name": str(py_file),
-                    "reason": f"{type(e).__name__}: {str(e)[:80]}",
-                })
-
-        total = len(py_files)
         lines: List[str] = []
         lines.append("📂 <b>ملفات المشروع (.py)</b>")
         lines.append("━━━━━━━━━━━━━━━━━━━━━━")
@@ -3030,6 +3128,16 @@ async def cmd_files(update: Update,
                 query, err_text, _back_keyboard("admin_analytics"))
         elif chat_id is not None:
             await safe_send(context.bot, chat_id, err_text)
+
+
+async def _cleanup_waiting_msg(waiting_msg):
+    """v1.3.8: مساعد — يحذف رسالة الانتظار."""
+    if waiting_msg is None:
+        return
+    try:
+        await waiting_msg.delete()
+    except Exception as e:
+        logger.debug(f"_cleanup_waiting_msg: {e}")
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -3694,7 +3802,7 @@ async def cmd_autotune(update: Update,
 
 def register_handlers(application) -> bool:
     """
-    v1.3.7: يُسجّل كل الـ handlers (buttons + commands).
+    v1.3.8: يُسجّل كل الـ handlers (buttons + commands).
 
     Returns:
         True إن نجح التسجيل، False إن فشل.
@@ -3756,7 +3864,7 @@ def register_handlers(application) -> bool:
             "audit, audit_full, audit_critical"
         )
         logger.info(
-            "✅ handlers_analytics v1.3.7: %d زر + 11 أمر (%s)",
+            "✅ handlers_analytics v1.3.8: %d زر + 11 أمر (%s)",
             len(ANALYTICS_BUTTONS),
             cmds,
         )
@@ -3815,19 +3923,28 @@ __all__ = [
     "_audit_file_sync",
     "_audit_run_reports",
     "_audit_collect_files",
+    "_audit_collect_files_sync",
     "_audit_summary_html",
     "_audit_to_markdown",
+    "_cmd_files_scan_sync",
+    "_get_audit_executor",
+    "_AUDIT_EXECUTOR",
+    "_AUDIT_EXECUTOR_MAX_WORKERS",
+    "_AUDIT_SEMAPHORE_LIMIT",
 ]
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# LOAD BEACON — v1.3.7
+# LOAD BEACON — v1.3.8
 # ═══════════════════════════════════════════════════════════════════════
 
 try:
     logger.info(
-        "✅ handlers_analytics v1.3.7 loaded | "
+        "✅ handlers_analytics v1.3.8 loaded | "
         "buttons=%d | "
+        "FIX-AUDIT-EXECUTOR=on(max_workers=%d,sem=%d) | "
+        "FIX-COLLECT-FILES-SYNC=on | "
+        "FIX-CMD-FILES-SYNC=on | "
         "FILES-SCAN-1=/files | "
         "FILES-SCAN-2=files_open+files_refresh | "
         "FILES-SCAN-3=files_btn | "
@@ -3862,6 +3979,8 @@ try:
         "FEAT-3=/analytics_reset | "
         "KEPT: HA1..HA31",
         len(ANALYTICS_BUTTONS),
+        _AUDIT_EXECUTOR_MAX_WORKERS,
+        _AUDIT_SEMAPHORE_LIMIT,
         _MAX_FILES_SCAN,
         _MAX_AUDIT_FILES,
         _AUDIT_TIMEOUT_SEC,
