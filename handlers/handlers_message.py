@@ -1,27 +1,35 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-handlers_message.py - v7.18.56 (FIX-BWM-LOOP-BLOCKING)
+handlers_message.py - v7.18.57 (FIX-BWM-ASYNC-DB-SPLIT)
 (متوافق مع detectors v4.1.3 + banned_words_manager v1.2.0 + group_log v1.4.0)
 =============================================================================
-🆕 v7.18.56 (FIX-BWM-LOOP-BLOCKING):
+🆕 v7.18.57 (FIX-BWM-ASYNC-DB-SPLIT):
 
-    🔴 FIX-BWM-LOOP-BLOCKING (CRITICAL): v7.18.55 نجحت في إزالة
-        asyncio.run من auto_reply، لكن ظهر متهم جديد:
-        `BannedWordsManager.check_message` يحجب الحلقة 4.4s.
+    🔴 FIX-BWM-ASYNC-DB-SPLIT (CRITICAL):
+        v7.18.56 حاول تشغيل `BannedWordsManager.check_message` (async,
+        يستخدم asyncpg) في thread عبر `asyncio.run()`. لكن asyncpg pool
+        مربوط بحلقة الأحداث الرئيسية → "attached to a different loop"
+        → destroy connections → تجويع pool → cascade failure:
 
-        السبب: `wait_for(timeout=2.0)` يحتاج أن تُسلِّم الدالة المُنتظرة
-        yield للحلقة كي يُطلق المؤقّت. إذا كانت BWM تنفّذ regex على
-        آلاف الكلمات بدون yield، الحلقة مجمّدة — والـ timeout لا يُفعَّل.
+            ❌ SELECT word FROM banned_words ... different loop
+            ⚠️ release فشل ... — destroy
+            ⏱️ AUTO-REPLY-DB-TIMEOUT 3.0s
+            🐌 BATCH-SETTINGS 2.80s
+            🐌 mv_active_user_limits 2.31s
+            handle_group: 9174ms
 
-        الدليل من السجلّات:
-            15:30:47,558 DIAG (spam done)
-            15:30:51,961 BANNED-MATCH ← فجوة 4.4s!
-            15:30:51,964 GIL-MONITOR lag=4098ms
+        الحل: تقسيم BWM إلى مرحلتين:
+          Phase 1 (main loop, asyncpg سليم): جلب الكلمات من cache/DB
+          Phase 2 (executor, CPU فقط): مطابقة regex (لا DB, لا async)
 
-        الحل: `_BWM_EXECUTOR` معزول بـ max_workers=1 + `_bwm_check_nonblocking`.
-        الحلقة تبقى حرّة، timeout يُفعَّل، رسائل أخرى لا تنتظر.
+        النتيجة:
+          - asyncpg pool سليم — لا cross-loop
+          - CPU-heavy regex في thread — الحلقة حرّة
+          - timeout يُفعَّل فعلياً
 
+    ✅ محفوظ من v7.18.56:
+        - _BWM_EXECUTOR معزول (max_workers=1)
     ✅ محفوظ من v7.18.55:
         - FIX-AUTOREPLY-ASYNCRUN (حذف asyncio.run من auto_reply)
         - FIX-TRANSLATE-ASYNC-SAFE
@@ -43,7 +51,7 @@ import asyncio
 import logging
 import time
 import sys
-print(f"██████ HANDLERS_MESSAGE LOADED FROM: {__file__} | v7.18.56-PROOF ██████", file=sys.stderr, flush=True)
+print(f"██████ HANDLERS_MESSAGE LOADED FROM: {__file__} | v7.18.57-PROOF ██████", file=sys.stderr, flush=True)
 import os
 import re
 import inspect
@@ -151,11 +159,7 @@ _CONTEXT_BUILD_TIMEOUT_SEC: float = 5.0
 
 # ═════════════════════════════════════════════════════════════════════
 # 🆕 v7.18.56 FIX-BWM-LOOP-BLOCKING: ThreadPoolExecutor معزول لـ BWM
-# ═════════════════════════════════════════════════════════════════════
-# لماذا؟ BannedWordsManager.check_message يحجب الحلقة 4.4s (regex على
-# آلاف الكلمات، بدون yield). wait_for(timeout=2.0) لا يُفعَّل مع كود
-# متزامن لا يُسلِّم. الحل: executor معزول بـ max_workers=1، مطابق لـ
-# نمط _AUDIT_EXECUTOR/_EXPORT_EXECUTOR في handlers_analytics.py.
+# 🆕 v7.18.57 FIX-BWM-ASYNC-DB-SPLIT: يُستخدم للمطابقة CPU فقط (Phase 2)
 # ═════════════════════════════════════════════════════════════════════
 _BWM_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
     max_workers=1,
@@ -3730,74 +3734,82 @@ _EXTERNAL_HANDLED_STATES = frozenset({
 
 
 # ═════════════════════════════════════════════════════════════════════
-# 🆕 v7.18.56 FIX-BWM-LOOP-BLOCKING: _bwm_check_nonblocking helper
+# 🆕 v7.18.57 FIX-BWM-ASYNC-DB-SPLIT: _bwm_check_nonblocking
 # ═════════════════════════════════════════════════════════════════════
 async def _bwm_check_nonblocking(
     text: str, chat_id: int
 ) -> Optional[str]:
     """
-    v7.18.56 FIX-BWM-LOOP-BLOCKING: تشغيل BWM.check_message في thread
-    معزول عبر `_BWM_EXECUTOR`.
+    v7.18.57 FIX-BWM-ASYNC-DB-SPLIT (CRITICAL):
+    v7.18.56 حاول تشغيل BannedWordsManager.check_message (async) في
+    thread عبر asyncio.run. لكن asyncpg pool مربوط بالحلقة الرئيسية
+    → "attached to a different loop" → destroy connections
+    → تجويع pool → cascade failure.
 
-    لماذا؟
-        `BannedWordsManager.check_message` ينفّذ regex على آلاف الكلمات
-        بشكل متزامن. `wait_for(timeout=2.0)` لا يُفعَّل مع كود لا يُسلِّم
-        yield — الحلقة تبقى مجمّدة 4.4s رغم الـ timeout.
+    الحل: تقسيم العمل:
+      Phase 1 (main loop): جلب قائمة الكلمات (async, yields)
+      Phase 2 (executor):   مطابقة CPU-bound فقط (لا DB, لا async)
 
-    الحل:
-        تشغيله في `_BWM_EXECUTOR` (max_workers=1). الحلقة حرّة،
-        timeout يُفعَّل، رسائل أخرى لا تنتظر.
-
-    ملاحظة:
-        إذا كان BWM يستخدم asyncpg في cache miss، فإن تشغيله في thread
-        قد يفشل بسبب "attached to different loop". في هذه الحالة
-        نُسجّل تحذيرًا ونُرجع None (fallback للنظام القديم).
-
-    Returns:
-        الكلمة المحظورة إذا وُجدت، أو None.
+    النتيجة:
+      - asyncpg pool سليم (لا cross-loop calls)
+      - الحلقة تبقى حرّة (CPU part في thread)
+      - timeout يُفعَّل فعلياً
     """
-    if not _HAS_BWM or BannedWordsManager is None:
+    if not _HAS_BWM or _bwm_contains is None:
         return None
 
-    _check_fn = getattr(BannedWordsManager, "check_message", None)
-    if not callable(_check_fn):
+    # ─── Phase 1: جلب الكلمات (main loop, yields) ───
+    banned_words: Optional[List[str]] = None
+    try:
+        banned_words = await asyncio.wait_for(
+            get_banned_words_cached(chat_id),
+            timeout=1.0,
+        )
+    except asyncio.TimeoutError:
+        logger.warning(
+            "⏱️ BWM-CACHE-TIMEOUT | chat=%s >1.0s — skip",
+            chat_id)
+        return None
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:
+        logger.warning(
+            "BWM cache fetch failed (%s): %s",
+            type(e).__name__, str(e)[:100])
         return None
 
+    if not banned_words:
+        return None
+
+    # ─── Phase 2: مطابقة CPU في executor (لا DB, لا async) ───
     loop = asyncio.get_running_loop()
     executor = _get_bwm_executor()
 
-    def _run():
+    def _run_match():
         try:
-            if inspect.iscoroutinefunction(_check_fn):
-                # إذا كانت async: نحتاج حلقة جديدة (asyncio.run).
-                # ملاحظة: قد تفشل مع asyncpg pool من loop آخر.
-                # في هذه الحالة نلتقط الاستثناء ونُرجع None.
-                return asyncio.run(
-                    _check_fn(text=text, chat_id=chat_id))
-            return _check_fn(text=text, chat_id=chat_id)
+            for bw in banned_words:
+                if _bwm_contains(text, bw):
+                    return bw
         except Exception as e:
-            logger.warning(
-                "BWM in thread failed (%s): %s",
-                type(e).__name__, str(e)[:120])
-            return None
+            logger.debug("BWM match error: %s", e)
+        return None
 
     try:
         return await asyncio.wait_for(
-            loop.run_in_executor(executor, _run),
+            loop.run_in_executor(executor, _run_match),
             timeout=_BWM_TIMEOUT_SEC,
         )
     except asyncio.TimeoutError:
         logger.warning(
-            "⏱️ BWM-TIMEOUT (executor) | chat=%s >%.1fs — "
-            "skipping BWM, falling back to list check",
+            "⏱️ BWM-MATCH-TIMEOUT | chat=%s >%.1fs",
             chat_id, _BWM_TIMEOUT_SEC)
         return None
     except asyncio.CancelledError:
         raise
     except Exception as e:
         logger.warning(
-            "BWM executor error: %s: %s",
-            type(e).__name__, str(e)[:120])
+            "BWM match executor error: %s: %s",
+            type(e).__name__, str(e)[:100])
         return None
 
 
@@ -4627,10 +4639,8 @@ class MessageHandlers:
                     "mention", settings, is_anonymous=is_anonymous)
                 return
 
-        # 🆕 v7.18.56 FIX-BWM-LOOP-BLOCKING:
-        # BWM.check_message كان يحجب الحلقة 4.4s رغم wait_for(2.0)
-        # لأنه لا يُسلِّم yield. الآن نُشغّله في `_BWM_EXECUTOR`
-        # معزول — الحلقة تبقى حرّة، timeout يُفعَّل.
+        # 🆕 v7.18.57 FIX-BWM-ASYNC-DB-SPLIT:
+        # _bwm_check_nonblocking تقسم العمل: cache (main loop) + match (thread)
         if _banned_words_enabled:
             matched = None
             bwm_handled = False
@@ -7971,7 +7981,7 @@ __all__ = [
     "_CONTEXT_BUILD_TIMEOUT_SEC",
     # v7.18.53 additions
     "_build_lite_context",
-    # 🆕 v7.18.56 additions
+    # 🆕 v7.18.57 additions
     "_get_bwm_executor",
     "_BWM_EXECUTOR",
     "_BWM_EXECUTOR_MAX_WORKERS",
@@ -7980,12 +7990,12 @@ __all__ = [
 
 
 # ═════════════════════════════════════════════════════════════════════
-# LOAD BEACON — v7.18.56
+# LOAD BEACON — v7.18.57
 # ═════════════════════════════════════════════════════════════════════
 
 try:
     logger.info(
-        "✅ handlers_message v7.18.56 loaded | "
+        "✅ handlers_message v7.18.57 loaded | "
         "BWM=%s | PRIVATE_HANDLERS=%d | "
         "external_handled=%d | "
         "routing-fallback=7-paths-deduped | "
@@ -7994,7 +8004,7 @@ try:
         "max-len=%d) | "
         "TEXT-SCORE-SAFE=on (to_thread+timeout=%.1fs,size-guard=%d) | "
         "AUTOREPLY-SAFE=on (async-run-removed+DB=%.1fs,file=%.1fs) | "
-        "BWM-SAFE=on (executor=isolated+timeout=%.1fs) | "
+        "BWM-SAFE=on (split: cache-main+match-executor,timeout=%.1fs) | "
         "POSTBOT-SAFE=on (to_thread+timeout=%.1fs,max=%d) | "
         "CONTEXT-SAFE=on (to_thread+timeout=%.1fs) | "
         "LITE-FALLBACK=on (2000ch+btn+fwd, no skip) | "
@@ -8003,7 +8013,8 @@ try:
         "WAIT_LOG_CH=direct-handler | "
         "LOG-CHANNEL-KEY=log_channel_id (CANONICAL, unified) | "
         "detectors-compat=v4.1.3 | "
-        "fixes=(v7.18.56 FIX-BWM-LOOP-BLOCKING + "
+        "fixes=(v7.18.57 FIX-BWM-ASYNC-DB-SPLIT + "
+        "v7.18.56 FIX-BWM-LOOP-BLOCKING + "
         "v7.18.55 FIX-AUTOREPLY-ASYNCRUN + FIX-TRANSLATE-ASYNC-SAFE + "
         "v7.18.54 FIX-AUTOREPLY-DB-THREAD + "
         "v7.18.53 FIX-LITE-FALLBACK + "
