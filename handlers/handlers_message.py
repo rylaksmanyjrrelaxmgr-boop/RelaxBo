@@ -1,40 +1,30 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-handlers_message.py - v7.18.57 (FIX-BWM-ASYNC-DB-SPLIT)
+handlers_message.py - v7.18.58 (FIX-BWM-COLD-CACHE)
 (متوافق مع detectors v4.1.3 + banned_words_manager v1.2.0 + group_log v1.4.0)
 =============================================================================
-🆕 v7.18.57 (FIX-BWM-ASYNC-DB-SPLIT):
+🆕 v7.18.58 (FIX-BWM-COLD-CACHE):
 
-    🔴 FIX-BWM-ASYNC-DB-SPLIT (CRITICAL):
-        v7.18.56 حاول تشغيل `BannedWordsManager.check_message` (async,
-        يستخدم asyncpg) في thread عبر `asyncio.run()`. لكن asyncpg pool
-        مربوط بحلقة الأحداث الرئيسية → "attached to a different loop"
-        → destroy connections → تجويع pool → cascade failure:
+    🟡 FIX-BWM-COLD-CACHE (MEDIUM):
+        في v7.18.57، أول رسالة في كل مجموعة تحتوي كلمة محظورة كانت
+        تُنشئ مئات regex patterns من الصفر داخل Phase 2 → BWM-MATCH-
+        TIMEOUT 2.0s في السجل، ثم `handle_group: 5120ms`.
 
-            ❌ SELECT word FROM banned_words ... different loop
-            ⚠️ release فشل ... — destroy
-            ⏱️ AUTO-REPLY-DB-TIMEOUT 3.0s
-            🐌 BATCH-SETTINGS 2.80s
-            🐌 mv_active_user_limits 2.31s
-            handle_group: 9174ms
+        الحل:
+          - _BWM_TIMEOUT_SEC: 2.0 → 5.0s (يسمح ببناء cache بارد)
+          - _BWM_EXECUTOR: max_workers=1 → 4 (عدة مجموعات بالتوازي)
+          - Phase 1.5 جديدة: pre-compile patterns في thread منفصل
+            قبل بدء التطابق الفعلي
 
-        الحل: تقسيم BWM إلى مرحلتين:
-          Phase 1 (main loop, asyncpg سليم): جلب الكلمات من cache/DB
-          Phase 2 (executor, CPU فقط): مطابقة regex (لا DB, لا async)
-
-        النتيجة:
-          - asyncpg pool سليم — لا cross-loop
-          - CPU-heavy regex في thread — الحلقة حرّة
-          - timeout يُفعَّل فعلياً
-
+    ✅ محفوظ من v7.18.57:
+        - FIX-BWM-ASYNC-DB-SPLIT (Phase 1 cache + Phase 2 CPU)
     ✅ محفوظ من v7.18.56:
-        - _BWM_EXECUTOR معزول (max_workers=1)
+        - _BWM_EXECUTOR معزول
     ✅ محفوظ من v7.18.55:
-        - FIX-AUTOREPLY-ASYNCRUN (حذف asyncio.run من auto_reply)
-        - FIX-TRANSLATE-ASYNC-SAFE
+        - FIX-AUTOREPLY-ASYNCRUN + FIX-TRANSLATE-ASYNC-SAFE
     ✅ محفوظ من v7.18.54:
-        - FIX-AUTOREPLY-DB-THREAD (نُقح لـ asyncpg)
+        - FIX-AUTOREPLY-DB-THREAD
     ✅ محفوظ من v7.18.53:
         - FIX-LITE-FALLBACK
     ✅ محفوظ من v7.18.52:
@@ -51,7 +41,7 @@ import asyncio
 import logging
 import time
 import sys
-print(f"██████ HANDLERS_MESSAGE LOADED FROM: {__file__} | v7.18.57-PROOF ██████", file=sys.stderr, flush=True)
+print(f"██████ HANDLERS_MESSAGE LOADED FROM: {__file__} | v7.18.58-PROOF ██████", file=sys.stderr, flush=True)
 import os
 import re
 import inspect
@@ -131,41 +121,41 @@ def _ph_list(count: int) -> str:
 
 
 # ═════════════════════════════════════════════════════════════════════
-# 🆕 v7.18.48 FIX-LAG-2: مهلة كشف Spam للوسائط
-# 🆕 v7.18.50 FIX-CONSTANTS: ثوابت timeouts جديدة
-# 🆕 v7.18.51 FIX-POSTBOT: timeout لـ postbot pattern/confidence
-# 🆕 v7.18.52 FIX-CONTEXT-BLOCKING: timeout لبناء Context
-# 🆕 v7.18.53 FIX-LITE-FALLBACK: 5.0s بدلاً من 2.0s
+# v7.18.48 FIX-LAG-2: مهلة كشف Spam للوسائط
+# v7.18.50 FIX-CONSTANTS: ثوابت timeouts جديدة
+# v7.18.51 FIX-POSTBOT: timeout لـ postbot pattern/confidence
+# v7.18.52 FIX-CONTEXT-BLOCKING: timeout لبناء Context
+# v7.18.53 FIX-LITE-FALLBACK: 5.0s بدلاً من 2.0s
 # ═════════════════════════════════════════════════════════════════════
 _SPAM_ASYNC_TIMEOUT: float = 1.0
 
-# 🆕 v7.18.50 FIX-TEXT-SCORE-BLOCKING
+# v7.18.50 FIX-TEXT-SCORE-BLOCKING
 _TEXT_SCORE_TIMEOUT_SEC: float = 1.5
-# 🆕 v7.18.50 FIX-AUTOREPLY-BLOCKING
+# v7.18.50 FIX-AUTOREPLY-BLOCKING
 _AUTOREPLY_DB_TIMEOUT_SEC: float = 3.0
 _AUTOREPLY_FILE_TIMEOUT_SEC: float = 2.0
-# 🆕 v7.18.50 FIX-BWM-BLOCKING
-_BWM_TIMEOUT_SEC: float = 2.0
+# 🆕 v7.18.58 FIX-BWM-COLD-CACHE: 5.0s للسماح ببناء pattern cache بارد
+_BWM_TIMEOUT_SEC: float = 5.0
 
-# 🆕 v7.18.51 FIX-POSTBOT-BLOCKING
+# v7.18.51 FIX-POSTBOT-BLOCKING
 _POSTBOT_TEXT_MAX_CHARS: int = 2000
 _POSTBOT_MIN_TEXT_CHARS: int = 20
-# 🆕 v7.18.51 FIX-TEXT-SCORE-SIZE-GUARD
+# v7.18.51 FIX-TEXT-SCORE-SIZE-GUARD
 _TEXT_SCORE_MAX_CHARS: int = 3000
-# 🆕 v7.18.52 FIX-CONTEXT-BLOCKING
-# 🆕 v7.18.53 FIX-LITE-FALLBACK: 5.0s لإعطاء فرصة كاملة
+# v7.18.52 FIX-CONTEXT-BLOCKING
+# v7.18.53 FIX-LITE-FALLBACK: 5.0s
 _CONTEXT_BUILD_TIMEOUT_SEC: float = 5.0
 
 
 # ═════════════════════════════════════════════════════════════════════
 # 🆕 v7.18.56 FIX-BWM-LOOP-BLOCKING: ThreadPoolExecutor معزول لـ BWM
-# 🆕 v7.18.57 FIX-BWM-ASYNC-DB-SPLIT: يُستخدم للمطابقة CPU فقط (Phase 2)
+# 🆕 v7.18.58 FIX-BWM-COLD-CACHE: max_workers=4 (بدل 1)
 # ═════════════════════════════════════════════════════════════════════
 _BWM_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
-    max_workers=1,
+    max_workers=4,
     thread_name_prefix="bwm-worker",
 )
-_BWM_EXECUTOR_MAX_WORKERS = 1
+_BWM_EXECUTOR_MAX_WORKERS = 4
 
 
 def _get_bwm_executor() -> concurrent.futures.Executor:
@@ -209,7 +199,7 @@ except ImportError:
 
 
 # ═════════════════════════════════════════════════════════════════════
-# 🆕 v7.18.45 FIX-DETECTORS-IMPORT: استيراد موحّد بحلقة واحدة
+# v7.18.45 FIX-DETECTORS-IMPORT
 # ═════════════════════════════════════════════════════════════════════
 
 _detectors_module = None
@@ -496,7 +486,6 @@ def _as_bool(value, default=False) -> bool:
     return default
 
 
-# 🆕 v7.18.50 FIX-AUTOREPLY-BLOCKING helper
 async def _maybe_await(value):
     """إذا كانت value coroutine، انتظرها. وإلا أعِدها كما هي."""
     if asyncio.iscoroutine(value):
@@ -766,7 +755,6 @@ FEATURE_LOG_ADMIN_CHANGES = _env_flag("LOG_ADMIN_CHANGES", True)
 _DEBUG_DIAG = DEBUG_DIAG
 _DEBUG_SPAM = DEBUG_SPAM
 
-# v7.18.49 FIX-TRANSLATE-BLOCKING
 _TRANSLATION_CACHE: Dict[Tuple[str, str], Tuple[str, float]] = {}
 _TRANSLATION_CACHE_TTL = 300.0
 _TRANSLATION_CACHE_MAX = 500
@@ -1230,14 +1218,8 @@ async def _notify_dev_about_idle_tx(
         return None
 
 
-# ═════════════════════════════════════════════════════════════════════
-# v7.18.48 FIX-LAG-3: _lazy_init_columns غير محجوب
-# ═════════════════════════════════════════════════════════════════════
-
 async def _do_lazy_init_columns_migration(bot=None) -> None:
-    """
-    v7.18.48 FIX-LAG-3: التنفيذ الفعلي لـ migration في background.
-    """
+    """v7.18.48 FIX-LAG-3: التنفيذ الفعلي لـ migration في background."""
     global _columns_initialized, _columns_last_error_log_ts
 
     db_type = _db_type()
@@ -1385,9 +1367,7 @@ async def _do_lazy_init_columns_migration(bot=None) -> None:
 
 
 async def _lazy_init_columns(bot=None):
-    """
-    v7.18.48 FIX-LAG-3: fire-and-forget.
-    """
+    """v7.18.48 FIX-LAG-3: fire-and-forget."""
     global _columns_initialized, _columns_last_attempt_ts
     global _columns_bg_task
 
@@ -3173,21 +3153,17 @@ async def invalidate_auto_reply_cache(chat_id=None):
 
 # ═════════════════════════════════════════════════════════════════════
 # v7.18.49 FIX-TRANSLATE-BLOCKING
-# 🆕 v7.18.55 FIX-TRANSLATE-ASYNC-SAFE
+# v7.18.55 FIX-TRANSLATE-ASYNC-SAFE
 # ═════════════════════════════════════════════════════════════════════
 
 async def _translate_safe(text: str, lang: str) -> Optional[str]:
     """
     v7.18.49: wraps TranslationManager.translate() — async safe + cache + timeout.
-    v7.18.55 FIX-TRANSLATE-ASYNC-SAFE:
-        - إذا كانت translate() async: استدعاء مباشر + wait_for
-        - إذا كانت sync: to_thread آمن
-        (لا asyncio.run داخل thread — يُسبب تجويع ThreadPool)
+    v7.18.55 FIX-TRANSLATE-ASYNC-SAFE.
     """
     if not text or not lang or lang == 'off':
         return None
 
-    # cache hit
     now = time.monotonic()
     cache_key = (text[:200], lang)
     entry = _TRANSLATION_CACHE.get(cache_key)
@@ -3201,13 +3177,11 @@ async def _translate_safe(text: str, lang: str) -> Optional[str]:
         _is_async_translate = inspect.iscoroutinefunction(_translate_fn)
 
         if _is_async_translate:
-            # 🆕 v7.18.55: async → استدعاء مباشر (لا يحجب، wait_for يلغي فعلياً)
             translated = await asyncio.wait_for(
                 _translate_fn(text, lang),
                 timeout=_TRANSLATION_TIMEOUT_SEC,
             )
         else:
-            # sync → to_thread آمن
             translated = await asyncio.wait_for(
                 asyncio.to_thread(_translate_fn, text, lang),
                 timeout=_TRANSLATION_TIMEOUT_SEC,
@@ -3243,7 +3217,6 @@ async def _translate_safe(text: str, lang: str) -> Optional[str]:
 async def _detect_and_translate(update, context, chat_id, user_id, text):
     if not text or len(text.strip()) < TRANSLATION_MIN_TEXT_LENGTH:
         return None
-    # v7.18.49 FIX-TRANSLATE-3: تجاوز الطول الأقصى
     if len(text.strip()) > TRANSLATION_MAX_TEXT_LENGTH:
         return None
     try:
@@ -3261,7 +3234,6 @@ async def _detect_and_translate(update, context, chat_id, user_id, text):
         if lang != 'ar' and not is_arabic:
             return None
 
-        # v7.18.49 FIX-TRANSLATE-BLOCKING: async safe
         translated = await _translate_safe(text, lang)
 
         if translated and translated != text:
@@ -3663,7 +3635,6 @@ def _get_spaced_banned_pattern(banned_word: str) -> Optional[re.Pattern]:
 
 
 def _contains_banned_word(text, banned_word) -> bool:
-    """v7.18.19: للتوافق القديم فقط."""
     if not text or not banned_word:
         return False
     if len(text) > 4000:
@@ -3734,26 +3705,18 @@ _EXTERNAL_HANDLED_STATES = frozenset({
 
 
 # ═════════════════════════════════════════════════════════════════════
-# 🆕 v7.18.57 FIX-BWM-ASYNC-DB-SPLIT: _bwm_check_nonblocking
+# 🆕 v7.18.58 FIX-BWM-COLD-CACHE: _bwm_check_nonblocking (Phase 1.5)
 # ═════════════════════════════════════════════════════════════════════
 async def _bwm_check_nonblocking(
     text: str, chat_id: int
 ) -> Optional[str]:
     """
-    v7.18.57 FIX-BWM-ASYNC-DB-SPLIT (CRITICAL):
-    v7.18.56 حاول تشغيل BannedWordsManager.check_message (async) في
-    thread عبر asyncio.run. لكن asyncpg pool مربوط بالحلقة الرئيسية
-    → "attached to a different loop" → destroy connections
-    → تجويع pool → cascade failure.
+    v7.18.58 FIX-BWM-COLD-CACHE: تقسيم 3 مراحل
+      Phase 1 (main loop): جلب قائمة الكلمات (asyncpg سليم)
+      Phase 1.5 (executor): pre-compile regex patterns → يملأ cache
+      Phase 2 (executor): مطابقة CPU فقط
 
-    الحل: تقسيم العمل:
-      Phase 1 (main loop): جلب قائمة الكلمات (async, yields)
-      Phase 2 (executor):   مطابقة CPU-bound فقط (لا DB, لا async)
-
-    النتيجة:
-      - asyncpg pool سليم (لا cross-loop calls)
-      - الحلقة تبقى حرّة (CPU part في thread)
-      - timeout يُفعَّل فعلياً
+    v7.18.57 FIX-BWM-ASYNC-DB-SPLIT: الفصل يمنع attached to different loop.
     """
     if not _HAS_BWM or _bwm_contains is None:
         return None
@@ -3781,10 +3744,30 @@ async def _bwm_check_nonblocking(
     if not banned_words:
         return None
 
-    # ─── Phase 2: مطابقة CPU في executor (لا DB, لا async) ───
+    # ─── Phase 1.5: pre-compile patterns في executor ───
     loop = asyncio.get_running_loop()
     executor = _get_bwm_executor()
 
+    def _precompile():
+        try:
+            for bw in banned_words:
+                _get_banned_pattern(bw)
+        except Exception:
+            pass
+
+    try:
+        await asyncio.wait_for(
+            loop.run_in_executor(executor, _precompile),
+            timeout=3.0,
+        )
+    except asyncio.TimeoutError:
+        logger.debug(
+            "BWM precompile timeout 3s | chat=%s — continuing",
+            chat_id)
+    except Exception:
+        pass
+
+    # ─── Phase 2: مطابقة CPU في executor ───
     def _run_match():
         try:
             for bw in banned_words:
@@ -3814,15 +3797,9 @@ async def _bwm_check_nonblocking(
 
 
 # ═════════════════════════════════════════════════════════════════════
-# v7.18.53 FIX-LITE-FALLBACK: سياق مصغّر للرسائل الثقيلة
+# v7.18.53 FIX-LITE-FALLBACK: سياق مصغّر
 # ═════════════════════════════════════════════════════════════════════
 def _build_lite_context(message) -> Any:
-    """
-    بناء سياق مصغّر سريع للرسائل التي تتجاوز مهلة _MessageContext.
-    - أول 2000 حرف فقط (بدلاً من 12000).
-    - الأزرار والـ forward تُنسخ يدوياً (سريعة).
-    - كل الفحوصات الأخرى تعمل عليه طبيعياً.
-    """
     try:
         text = (
             getattr(message, "text", None)
@@ -3835,7 +3812,6 @@ def _build_lite_context(message) -> Any:
 
         ctx = _MessageContext.from_text(text_limited)
 
-        # نسخ بيانات الأزرار (سريعة — لا تحتاج context كامل)
         try:
             (
                 _btn_count, _btn_urls, _btn_texts, _btn_urls_raw,
@@ -3849,7 +3825,6 @@ def _build_lite_context(message) -> Any:
         except Exception:
             pass
 
-        # نسخ بيانات الـ forward (سريعة — لا تحتاج context كامل)
         try:
             ctx.is_forwarded = bool(
                 getattr(message, "forward_origin", None)
@@ -3865,21 +3840,18 @@ def _build_lite_context(message) -> Any:
         except Exception:
             pass
 
-        # نسخ بيانات المستخدم (للـ behavioral layer)
         try:
             _fu = getattr(message, "from_user", None)
             ctx.user_id = int(getattr(_fu, "id", 0) or 0) if _fu else 0
         except Exception:
             ctx.user_id = 0
 
-        # نسخ روابط entities (سريعة)
         try:
             ctx.entity_urls = _extract_entity_urls(message)
             ctx.has_link_entity = bool(ctx.entity_urls)
         except Exception:
             pass
 
-        # نسخ vcard / venue / poll (سريعة)
         try:
             ctx.vcard_urls = _extract_vcard_urls(message)
             ctx.venue_url = _extract_venue_url(message)
@@ -3890,7 +3862,6 @@ def _build_lite_context(message) -> Any:
         except Exception:
             pass
 
-        # إعادة حساب has_any_link بناءً على البيانات المنقولة
         try:
             ctx.has_any_link = bool(
                 ctx.has_link_entity
@@ -3914,7 +3885,6 @@ def _build_lite_context(message) -> Any:
 
 
 class MessageHandlers:
-
     _PRIVATE_HANDLERS_MAP: Dict[Any, str] = {
         "WAIT_GROUP_BAN": "handle_add_banned_word",
         "WAIT_GLOBAL_BAN": "handle_add_global_banned_word",
@@ -4127,7 +4097,6 @@ class MessageHandlers:
             is_anonymous = True
         else:
             return
-        # v7.18.53 FIX-LITE-FALLBACK: لا تخطي — سياق مصغّر كبديل
         try:
             ctx = await asyncio.wait_for(
                 asyncio.to_thread(_MessageContext, message),
@@ -4639,8 +4608,6 @@ class MessageHandlers:
                     "mention", settings, is_anonymous=is_anonymous)
                 return
 
-        # 🆕 v7.18.57 FIX-BWM-ASYNC-DB-SPLIT:
-        # _bwm_check_nonblocking تقسم العمل: cache (main loop) + match (thread)
         if _banned_words_enabled:
             matched = None
             bwm_handled = False
@@ -4722,7 +4689,6 @@ class MessageHandlers:
             await MessageHandlers._process_auto_reply(
                 update, context, chat_id, _reply_source, user_id,
                 preloaded_ars=_preloaded_ars)
-
     @staticmethod
     def _get_penalty_duration(settings, violation_type):
         try:
@@ -7981,7 +7947,7 @@ __all__ = [
     "_CONTEXT_BUILD_TIMEOUT_SEC",
     # v7.18.53 additions
     "_build_lite_context",
-    # 🆕 v7.18.57 additions
+    # 🆕 v7.18.58 additions
     "_get_bwm_executor",
     "_BWM_EXECUTOR",
     "_BWM_EXECUTOR_MAX_WORKERS",
@@ -7990,12 +7956,12 @@ __all__ = [
 
 
 # ═════════════════════════════════════════════════════════════════════
-# LOAD BEACON — v7.18.57
+# LOAD BEACON — v7.18.58
 # ═════════════════════════════════════════════════════════════════════
 
 try:
     logger.info(
-        "✅ handlers_message v7.18.57 loaded | "
+        "✅ handlers_message v7.18.58 loaded | "
         "BWM=%s | PRIVATE_HANDLERS=%d | "
         "external_handled=%d | "
         "routing-fallback=7-paths-deduped | "
@@ -8004,7 +7970,8 @@ try:
         "max-len=%d) | "
         "TEXT-SCORE-SAFE=on (to_thread+timeout=%.1fs,size-guard=%d) | "
         "AUTOREPLY-SAFE=on (async-run-removed+DB=%.1fs,file=%.1fs) | "
-        "BWM-SAFE=on (split: cache-main+match-executor,timeout=%.1fs) | "
+        "BWM-SAFE=on (split:cache+precompile+match,workers=%d,"
+        "timeout=%.1fs) | "
         "POSTBOT-SAFE=on (to_thread+timeout=%.1fs,max=%d) | "
         "CONTEXT-SAFE=on (to_thread+timeout=%.1fs) | "
         "LITE-FALLBACK=on (2000ch+btn+fwd, no skip) | "
@@ -8013,7 +7980,8 @@ try:
         "WAIT_LOG_CH=direct-handler | "
         "LOG-CHANNEL-KEY=log_channel_id (CANONICAL, unified) | "
         "detectors-compat=v4.1.3 | "
-        "fixes=(v7.18.57 FIX-BWM-ASYNC-DB-SPLIT + "
+        "fixes=(v7.18.58 FIX-BWM-COLD-CACHE + "
+        "v7.18.57 FIX-BWM-ASYNC-DB-SPLIT + "
         "v7.18.56 FIX-BWM-LOOP-BLOCKING + "
         "v7.18.55 FIX-AUTOREPLY-ASYNCRUN + FIX-TRANSLATE-ASYNC-SAFE + "
         "v7.18.54 FIX-AUTOREPLY-DB-THREAD + "
@@ -8038,6 +8006,7 @@ try:
         _TEXT_SCORE_MAX_CHARS,
         _AUTOREPLY_DB_TIMEOUT_SEC,
         _AUTOREPLY_FILE_TIMEOUT_SEC,
+        _BWM_EXECUTOR_MAX_WORKERS,
         _BWM_TIMEOUT_SEC,
         _TEXT_SCORE_TIMEOUT_SEC,
         _POSTBOT_TEXT_MAX_CHARS,
