@@ -1,44 +1,31 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-handlers_analytics.py — واجهة التحليلات المتقدمة (v1.3.8 — AUDIT-EXECUTOR-ISOLATION)
+handlers_analytics.py — واجهة التحليلات المتقدمة (v1.3.9 — EXPORT-CPU-ISOLATION)
 ================================================================================
-v1.3.8 — فوق v1.3.7:
+v1.3.9 — فوق v1.3.8:
 
-    🔴 FIX-AUDIT-EXECUTOR (CRITICAL):
-        `_audit_run_reports` كانت تستخدم `asyncio.to_thread` الذي
-        يستنزف `ThreadPoolExecutor` الافتراضي المشترك مع `handle_group`
-        و`_process_auto_reply` في `handlers_message.py`.
+    🔴 FIX-EXPORT-CPU-ISOLATION (HIGH):
+        `openpyxl.wb.save(buf)` في `export_excel` عملية CPU-bound
+        تستغرق 1-5 ثوانٍ على 4 أوراق × آلاف الصفوف، وتحجب الحلقة.
+        الحل: `_EXPORT_EXECUTOR` مخصص (max_workers=1) + `run_in_executor`.
 
-        النتيجة: أثناء /audit (10-30s)، كل رسالة جديدة تنتظر timeoutها
-        الكامل (5s ctx + 1.5×3 score + 3s DB + 2s file = ~15s).
+    🔴 FIX-JSON-DUMPS-ISOLATION (MEDIUM):
+        `json.dumps(data, indent=2)` في `_audit_send_json` مع 200 تقرير
+        يستهلك 0.3-2s على الحلقة الرئيسية.
+        الحل: نفس `_EXPORT_EXECUTOR` عبر `functools.partial`.
 
-        الحل: `_AUDIT_EXECUTOR` مخصص بـ max_workers=2 معزول تماماً.
-        `Semaphore(2)` داخل `_audit_run_reports` يطابقه.
-
-    🔴 FIX-COLLECT-FILES-SYNC (HIGH):
-        `_audit_collect_files` كانت `async` لكنها تعمل بالكامل
-        متزامنة (rglob + resolve على 200 ملف) = 2-5s حجب للحلقة.
-        الحل: `_audit_collect_files_sync` في `_AUDIT_EXECUTOR`.
-
-    🔴 FIX-CMD-FILES-SYNC (HIGH):
-        `cmd_files` تستورد 200 وحدة (importlib متزامن) على الحلقة
-        الرئيسية = 10-30s حجب.
-        الحل: `_cmd_files_scan_sync` في `_AUDIT_EXECUTOR`.
+v1.3.8 — محفوظ بالكامل:
+    🔴 FIX-AUDIT-EXECUTOR: `_AUDIT_EXECUTOR` معزول
+    🔴 FIX-COLLECT-FILES-SYNC
+    🔴 FIX-CMD-FILES-SYNC
 
 v1.3.7 — محفوظ بالكامل:
-    🔴 FIX-SQL-FP-1: `SQL_STRING_FORMAT` → `SQL_FSTRING_REAL`
-    🔴 FIX-EVAL-EXEC-FP-2: `EVAL_USE` / `EXEC_USE`
-    🔴 FIX-EXCEPT-PASS-3: `EXCEPT_PASS` → AST دقيق
-    🔴 FIX-LOG-FSTRING-FP-4: `LOG_FSTRING`
-    🟢 FIX-SELF-SCAN-5: `_audit_collect_files`
-    🟢 FIX-DECLARED-6: `_DECLARED_FIXES_V5713`
+    🔴 FIX-SQL-FP-1, FIX-EVAL-EXEC-FP-2, FIX-EXCEPT-PASS-3
+    🔴 FIX-LOG-FSTRING-FP-4, FIX-SELF-SCAN-5, FIX-DECLARED-6
 
 v1.3.6 — محفوظ بالكامل:
-    🆕 AUDIT-1: /audit + /audit_full + /audit_critical + audit_btn
-    🆕 AUDIT-2: 15 قاعدة pattern + 5 AST + 3 PTB + 2 bot-specific
-    🆕 AUDIT-3: تصدير Markdown/JSON
-    🆕 AUDIT-4: _MAX_AUDIT_FILES=200, _AUDIT_TIMEOUT_SEC=30
+    🆕 AUDIT-1..4
 
 v1.3.5 — محفوظ: FILES-SCAN-1..8
 v1.3.4 — محفوظ: FIX-VERSIONS-PATH/ERR
@@ -62,6 +49,7 @@ import ast as _ast_mod
 import json as _json_mod
 import sys as _sys_mod
 import concurrent.futures
+import functools
 from datetime import datetime, timedelta
 from pathlib import Path
 from dataclasses import dataclass as _dataclass, field as _dc_field, asdict as _dc_asdict
@@ -124,6 +112,25 @@ _AUDIT_SEMAPHORE_LIMIT = 2
 def _get_audit_executor() -> concurrent.futures.Executor:
     """يعيد executor audit المخصص (معزول عن ThreadPool الافتراضي)."""
     return _AUDIT_EXECUTOR
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# 🆕 v1.3.9 FIX-EXPORT-CPU-ISOLATION: ThreadPoolExecutor للعمليات CPU-bound
+# ═══════════════════════════════════════════════════════════════════════
+# لماذا؟ openpyxl.wb.save() و json.dumps(indent=2) عمليات CPU-bound
+# (1-5s للـ Excel، 0.3-2s للـ JSON) تحجب الحلقة الرئيسية.
+# الحل: executor مخصص بـ max_workers=1 (مهام متسلسلة، لا تزاحم).
+# ═══════════════════════════════════════════════════════════════════════
+_EXPORT_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
+    max_workers=1,
+    thread_name_prefix="export-worker",
+)
+_EXPORT_EXECUTOR_MAX_WORKERS = 1
+
+
+def _get_export_executor() -> concurrent.futures.Executor:
+    """يعيد executor التصدير المخصص (معزول عن ThreadPool الافتراضي)."""
+    return _EXPORT_EXECUTOR
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -2318,8 +2325,42 @@ async def export_excel(update: Update,
         for r in rows4:
             ws4.append([r.get("month"), r.get("count")])
 
+        # 🆕 v1.3.9 FIX-EXPORT-CPU-ISOLATION:
+        # openpyxl.wb.save() يستغرق 1-5s (XML generation + ZIP) ويحجب
+        # الحلقة الرئيسية. نُغلّفه في `_EXPORT_EXECUTOR` (max_workers=1).
         buf = io.BytesIO()
-        wb.save(buf)
+        loop = asyncio.get_running_loop()
+        try:
+            await asyncio.wait_for(
+                loop.run_in_executor(
+                    _get_export_executor(),
+                    wb.save,
+                    buf,
+                ),
+                timeout=30.0,
+            )
+        except asyncio.TimeoutError:
+            logger.warning("export_excel: wb.save timeout 30s")
+            await _safe_edit(
+                query,
+                "❌ <b>تصدير Excel تجاوز المهلة (30s)</b>\n"
+                "━━━━━━━━━━━━━━━━━━━━━━\n"
+                "💡 قلّل البيانات أو أعد المحاولة.",
+                _back_keyboard("admin_analytics"),
+            )
+            return
+        except Exception as _wbs_e:
+            logger.error(
+                "export_excel: wb.save فشل: %s", _wbs_e, exc_info=True
+            )
+            await _safe_edit(
+                query,
+                f"❌ <b>فشل حفظ Excel</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"{_err_detail(_wbs_e)}",
+                _back_keyboard("admin_analytics"),
+            )
+            return
         buf.seek(0)
 
         MAX_BYTES = 20 * 1024 * 1024
@@ -3357,7 +3398,42 @@ async def _audit_send_json(update: Update,
             "total_files": len(reports),
             "reports": [_dc_asdict(r) for r in reports],
         }
-        js = _json_mod.dumps(data, ensure_ascii=False, indent=2)
+
+        # 🆕 v1.3.9 FIX-JSON-DUMPS-ISOLATION:
+        # json.dumps(data, indent=2) مع 200 تقرير = 0.3-2s على الحلقة.
+        # نستخدم functools.partial في `_EXPORT_EXECUTOR`.
+        loop = asyncio.get_running_loop()
+        _dumps_fn = functools.partial(
+            _json_mod.dumps, ensure_ascii=False, indent=2
+        )
+        try:
+            js = await asyncio.wait_for(
+                loop.run_in_executor(
+                    _get_export_executor(),
+                    _dumps_fn,
+                    data,
+                ),
+                timeout=15.0,
+            )
+        except asyncio.TimeoutError:
+            logger.warning("_audit_send_json: json.dumps timeout 15s")
+            if chat_id is not None:
+                await safe_send(
+                    context.bot, chat_id,
+                    "❌ تقرير JSON كبير جدًا (timeout 15s).",
+                )
+            return
+        except Exception as _je:
+            logger.error(
+                f"_audit_send_json dumps: {_je}", exc_info=True
+            )
+            if chat_id is not None:
+                await safe_send(
+                    context.bot, chat_id,
+                    f"❌ فشل تسلسل JSON: {_err_detail(_je)}",
+                )
+            return
+
         buf = io.BytesIO(js.encode("utf-8"))
         buf.seek(0)
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -3802,7 +3878,7 @@ async def cmd_autotune(update: Update,
 
 def register_handlers(application) -> bool:
     """
-    v1.3.8: يُسجّل كل الـ handlers (buttons + commands).
+    v1.3.9: يُسجّل كل الـ handlers (buttons + commands).
 
     Returns:
         True إن نجح التسجيل، False إن فشل.
@@ -3864,7 +3940,7 @@ def register_handlers(application) -> bool:
             "audit, audit_full, audit_critical"
         )
         logger.info(
-            "✅ handlers_analytics v1.3.8: %d زر + 11 أمر (%s)",
+            "✅ handlers_analytics v1.3.9: %d زر + 11 أمر (%s)",
             len(ANALYTICS_BUTTONS),
             cmds,
         )
@@ -3931,17 +4007,23 @@ __all__ = [
     "_AUDIT_EXECUTOR",
     "_AUDIT_EXECUTOR_MAX_WORKERS",
     "_AUDIT_SEMAPHORE_LIMIT",
+    # 🆕 v1.3.9
+    "_get_export_executor",
+    "_EXPORT_EXECUTOR",
+    "_EXPORT_EXECUTOR_MAX_WORKERS",
 ]
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# LOAD BEACON — v1.3.8
+# LOAD BEACON — v1.3.9
 # ═══════════════════════════════════════════════════════════════════════
 
 try:
     logger.info(
-        "✅ handlers_analytics v1.3.8 loaded | "
+        "✅ handlers_analytics v1.3.9 loaded | "
         "buttons=%d | "
+        "FIX-EXPORT-CPU-ISOLATION=on(export_workers=%d) | "
+        "FIX-JSON-DUMPS-ISOLATION=on | "
         "FIX-AUDIT-EXECUTOR=on(max_workers=%d,sem=%d) | "
         "FIX-COLLECT-FILES-SYNC=on | "
         "FIX-CMD-FILES-SYNC=on | "
@@ -3979,6 +4061,7 @@ try:
         "FEAT-3=/analytics_reset | "
         "KEPT: HA1..HA31",
         len(ANALYTICS_BUTTONS),
+        _EXPORT_EXECUTOR_MAX_WORKERS,
         _AUDIT_EXECUTOR_MAX_WORKERS,
         _AUDIT_SEMAPHORE_LIMIT,
         _MAX_FILES_SCAN,
