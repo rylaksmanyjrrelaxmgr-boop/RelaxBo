@@ -1,25 +1,37 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-handlers_message.py - v7.18.54 (FIX-AUTOREPLY-DB-THREAD)
+handlers_message.py - v7.18.55 (FIX-AUTOREPLY-ASYNCRUN)
 (متوافق مع detectors v4.1.3 + banned_words_manager v1.2.0 + group_log v1.4.0)
 =============================================================================
-🆕 v7.18.54 (FIX-AUTOREPLY-DB-THREAD):
+🆕 v7.18.55 (FIX-AUTOREPLY-ASYNCRUN):
 
-    🔴 FIX-AUTOREPLY-DB-THREAD (CRITICAL): التعليق السابق في v7.18.50
-        كان يقول "in to_thread" لكن الكود الفعلي استدعى
-        `DB.get_auto_reply(text, chat_id)` مباشرة على event loop.
-        
-        إذا كانت `DB.get_auto_reply` تستخدم psycopg2 sync داخلياً
-        (وهو ما يحدث فعلياً)، فإن الاستدعاء يحجب الحلقة الرئيسية
-        بالكامل حتى انتهاء الاستعلام — مما يُنتج lag 8-13s.
-        
-        الحل:
-        - إذا كانت الدالة async: تُغلَّف في `asyncio.run()` داخل thread
-          جديد عبر `asyncio.to_thread` (loop منعزل، لا يحجب الحلقة الرئيسية).
-        - إذا كانت sync: تُغلَّف مباشرة في `asyncio.to_thread`.
-        - في الحالتين `asyncio.wait_for` يستطيع إلغاء العملية فعلياً.
+    🔴 FIX-AUTOREPLY-ASYNCRUN (CRITICAL): v7.18.54 حاولت "إصلاح"
+        حجب psycopg2 عبر `asyncio.run()` داخل `asyncio.to_thread`
+        لـ `DB.get_auto_reply`. لكن DB يستخدم asyncpg (غير حاجب أصلاً)،
+        و`asyncio.run` ينشئ حلقة جديدة في thread منفصل. النتيجة:
 
+        1) asyncpg pool مرتبط بحلقة الحلقة الرئيسية → استدعاء من
+           حلقة أخرى إما RuntimeError أو تجمّد أبدي.
+        2) `asyncio.wait_for` يلغي المنتظر فقط، **لا الخيط**. كل رسالة
+           تحجب خيطاً من ThreadPoolExecutor إلى الأبد.
+        3) بعد ~8 رسائل، ينفد الـ pool (default 8 خيوط) → كل
+           `asyncio.to_thread` لاحق ينتظر timeoutه الكامل → تراكم
+           ~15s لكل رسالة (5s ctx + 1.5×3 score + 3s DB + 2s file).
+
+        الحل الصحيح:
+        - إذا كانت الدالة async (asyncpg): **await مباشر** — لا
+          يحجب الحلقة، وwait_for يلغيها فعلياً.
+        - إذا كانت sync (psycopg2): `asyncio.to_thread` آمن.
+        - **لا `asyncio.run` داخل to_thread أبداً**.
+
+    🟡 FIX-TRANSLATE-ASYNC-SAFE: نفس المشكلة نظرياً في `_translate_safe`.
+        إذا كانت `TranslationManager.translate` async، فاستخدام
+        `to_thread` عليها يُعيد coroutine غير مُنتظر. الآن نكتشف
+        نوعها ونستدعيها بالطريقة الصحيحة.
+
+    ✅ محفوظ من v7.18.54:
+        - FIX-AUTOREPLY-DB-THREAD (نُقح لـ asyncpg)
     ✅ محفوظ من v7.18.53:
         - FIX-LITE-FALLBACK (CONTEXT-TIMEOUT → lite context)
     ✅ محفوظ من v7.18.52:
@@ -36,7 +48,7 @@ import asyncio
 import logging
 import time
 import sys
-print(f"██████ HANDLERS_MESSAGE LOADED FROM: {__file__} | v7.18.54-PROOF ██████", file=sys.stderr, flush=True)
+print(f"██████ HANDLERS_MESSAGE LOADED FROM: {__file__} | v7.18.55-PROOF ██████", file=sys.stderr, flush=True)
 import os
 import re
 import inspect
@@ -3140,13 +3152,17 @@ async def invalidate_auto_reply_cache(chat_id=None):
 
 
 # ═════════════════════════════════════════════════════════════════════
-# v7.18.49 FIX-TRANSLATE-BLOCKING: _translate_safe
+# v7.18.49 FIX-TRANSLATE-BLOCKING
+# 🆕 v7.18.55 FIX-TRANSLATE-ASYNC-SAFE
 # ═════════════════════════════════════════════════════════════════════
 
 async def _translate_safe(text: str, lang: str) -> Optional[str]:
     """
-    v7.18.49 FIX-TRANSLATE-BLOCKING: wraps TranslationManager.translate()
-    — async safe + cache + timeout.
+    v7.18.49: wraps TranslationManager.translate() — async safe + cache + timeout.
+    v7.18.55 FIX-TRANSLATE-ASYNC-SAFE:
+        - إذا كانت translate() async: استدعاء مباشر + wait_for
+        - إذا كانت sync: to_thread آمن
+        (لا asyncio.run داخل thread — يُسبب تجويع ThreadPool)
     """
     if not text or not lang or lang == 'off':
         return None
@@ -3161,11 +3177,21 @@ async def _translate_safe(text: str, lang: str) -> Optional[str]:
             return cached_text
 
     try:
-        translated = await asyncio.wait_for(
-            asyncio.to_thread(
-                TranslationManager.translate, text, lang),
-            timeout=_TRANSLATION_TIMEOUT_SEC,
-        )
+        _translate_fn = TranslationManager.translate
+        _is_async_translate = inspect.iscoroutinefunction(_translate_fn)
+
+        if _is_async_translate:
+            # 🆕 v7.18.55: async → استدعاء مباشر (لا يحجب، wait_for يلغي فعلياً)
+            translated = await asyncio.wait_for(
+                _translate_fn(text, lang),
+                timeout=_TRANSLATION_TIMEOUT_SEC,
+            )
+        else:
+            # sync → to_thread آمن
+            translated = await asyncio.wait_for(
+                asyncio.to_thread(_translate_fn, text, lang),
+                timeout=_TRANSLATION_TIMEOUT_SEC,
+            )
     except asyncio.TimeoutError:
         logger.warning(
             "⏱️ TRANSLATE-TIMEOUT | lang=%s len=%d >%.1fs",
@@ -4264,7 +4290,6 @@ class MessageHandlers:
                         logger.debug("spam_score (text-only-async): %s", e)
                         _spam_score = 0
                         _spam_reasons = []
-                        _analysis_mode = "text-only-error"
 
         _is_spam = (
             _spam_enabled and _spam_score >= SPAM_SCORE_THRESHOLD)
@@ -4938,11 +4963,19 @@ class MessageHandlers:
         preloaded_ars=None,
     ):
         """
-        🆕 v7.18.50 FIX-AUTOREPLY-BLOCKING:
-        🆕 v7.18.54 FIX-AUTOREPLY-DB-THREAD:
-            التصحيح النهائي — `DB.get_auto_reply` يُغلَّف في to_thread
-            الآن فعلياً (كان التعليق السابق يقول ذلك لكن الكود لم يطبقه).
-            هذا يمنع psycopg2 (sync) من حجب event loop 8-13s.
+        🆕 v7.18.55 FIX-AUTOREPLY-ASYNCRUN (CRITICAL):
+            التصحيح الجذري — v7.18.54 استخدمت `asyncio.run()` داخل
+            `to_thread` لـ `DB.get_auto_reply`. لكن DB يستخدم asyncpg
+            (غير حاجب أصلاً)، و`asyncio.run` ينشئ حلقة جديدة في thread
+            منفصل، ويترك اتصال asyncpg معلقاً إلى الأبد.
+
+            النتيجة: ThreadPoolExecutor يُستنزف خلال ~8 رسائل → كل
+            `to_thread` لاحق ينتظر timeoutه الكامل → تراكم 15s/رسالة.
+
+            الحل:
+            - asyncpg (async): `await` مباشر + wait_for (يلغي فعلياً).
+            - psycopg2 (sync): `asyncio.to_thread` آمن.
+            - لا `asyncio.run` داخل to_thread أبداً.
         """
         try:
             if preloaded_ars is not None:
@@ -4961,25 +4994,23 @@ class MessageHandlers:
                         context.bot, chat_id, user_id or 0):
                     return False
 
-            # 🆕 v7.18.54 FIX-AUTOREPLY-DB-THREAD:
-            # to_thread فعلي — إذا كانت DB.get_auto_reply async،
-            # نستخدم asyncio.run() داخل thread (loop منعزل).
+            # 🆕 v7.18.55 FIX-AUTOREPLY-ASYNCRUN:
+            # استدعاء صحيح حسب نوع الدالة — لا asyncio.run في thread.
             reply = None
             try:
-                import inspect as _insp_ar
                 _get_reply_fn = getattr(DB, 'get_auto_reply', None)
                 if not callable(_get_reply_fn):
                     raise AttributeError(
                         "DB.get_auto_reply غير موجود")
-                if _insp_ar.iscoroutinefunction(_get_reply_fn):
-                    def _run_async_get_reply():
-                        return asyncio.run(
-                            _get_reply_fn(text, chat_id))
+
+                if inspect.iscoroutinefunction(_get_reply_fn):
+                    # asyncpg (async) → await مباشر (wait_for يلغي فعلياً)
                     reply = await asyncio.wait_for(
-                        asyncio.to_thread(_run_async_get_reply),
+                        _get_reply_fn(text, chat_id),
                         timeout=_AUTOREPLY_DB_TIMEOUT_SEC,
                     )
                 else:
+                    # psycopg2 (sync) → to_thread آمن
                     reply = await asyncio.wait_for(
                         asyncio.to_thread(
                             _get_reply_fn, text, chat_id),
@@ -7858,25 +7889,25 @@ __all__ = [
     "_CONTEXT_BUILD_TIMEOUT_SEC",
     # v7.18.53 additions
     "_build_lite_context",
-    # v7.18.54 — لا إضافات جديدة في __all__ (تعديل داخلي فقط)
+    # v7.18.55 — لا إضافات جديدة في __all__ (تعديل داخلي فقط)
 ]
 
 
 # ═════════════════════════════════════════════════════════════════════
-# LOAD BEACON — v7.18.54
+# LOAD BEACON — v7.18.55
 # ═════════════════════════════════════════════════════════════════════
 
 try:
     logger.info(
-        "✅ handlers_message v7.18.54 loaded | "
+        "✅ handlers_message v7.18.55 loaded | "
         "BWM=%s | PRIVATE_HANDLERS=%d | "
         "external_handled=%d | "
         "routing-fallback=7-paths-deduped | "
         "SPAM-TIMEOUT=%.1fs | "
-        "TRANSLATE-SAFE=on (to_thread+timeout=%.1fs+cache=%d,TTL=%.0fs,"
+        "TRANSLATE-SAFE=on (type-aware+timeout=%.1fs+cache=%d,TTL=%.0fs,"
         "max-len=%d) | "
         "TEXT-SCORE-SAFE=on (to_thread+timeout=%.1fs,size-guard=%d) | "
-        "AUTOREPLY-SAFE=on (DB-to-thread=%.1fs,file=%.1fs) | "
+        "AUTOREPLY-SAFE=on (async-run-removed+DB=%.1fs,file=%.1fs) | "
         "BWM-SAFE=on (timeout=%.1fs) | "
         "POSTBOT-SAFE=on (to_thread+timeout=%.1fs,max=%d) | "
         "CONTEXT-SAFE=on (to_thread+timeout=%.1fs) | "
@@ -7886,7 +7917,8 @@ try:
         "WAIT_LOG_CH=direct-handler | "
         "LOG-CHANNEL-KEY=log_channel_id (CANONICAL, unified) | "
         "detectors-compat=v4.1.3 | "
-        "fixes=(v7.18.54 FIX-AUTOREPLY-DB-THREAD + "
+        "fixes=(v7.18.55 FIX-AUTOREPLY-ASYNCRUN + FIX-TRANSLATE-ASYNC-SAFE + "
+        "v7.18.54 FIX-AUTOREPLY-DB-THREAD + "
         "v7.18.53 FIX-LITE-FALLBACK + "
         "v7.18.52 FIX-CONTEXT-BLOCKING + "
         "v7.18.51 FIX-POSTBOT-BLOCKING + FIX-TEXT-SCORE-SIZE-GUARD + "
