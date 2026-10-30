@@ -1,19 +1,26 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-handlers/handlers_managed_bots.py — لوحة إدارة (v5.7.7 - KEYWORDS-UI)
+handlers/handlers_managed_bots.py — لوحة إدارة (v5.8.0 - HOT-TOGGLE)
 =================================================================================
-📌 المسؤولية:
-    • register_managed_bots_handlers(app) — تسجيل pattern="^mb_"
-    • لوحة إدارة كاملة: عرض/إضافة/تعديل/تشغيل/إيقاف/حذف
-    • 🆕 إدارة الكلمات المفتاحية (عرض/إضافة/حذف).
-    • استقبال النص المعلّق (توكن/رسالة/كلمة/رد).
+🆕 v5.8.0 (HOT-TOGGLE):
+    🟢 FEATURE-HOT-TOGGLE: زر 📢 يقلب الحالة فوراً بدون restart.
 
-🆕 v5.7.7 (KEYWORDS-UI):
-    • زر "🔑 الكلمات المفتاحية (N)" في تفاصيل كل بوت.
-    • لوحة إدارة الكلمات: عرض الكلمات المخزنة + أزرار حذف.
-    • إضافة كلمة = خطوتان (الكلمة، ثم الرد).
-    • حذف كل الكلمات تلقائياً عند حذف البوت.
+    الفرق عن v5.7.9:
+        • v5.7.9: الزر يستدعي stop_one + start_one → البوت يتوقف 2-5s
+          (حتى الخاص يتوقف).
+        • v5.8.0: الزر يحدّث bot_data في الذاكرة فقط → لا restart،
+          الخاص لم يتوقف إطلاقاً.
+
+    الآلية:
+        1. اقلب respond_in_groups في storage
+        2. استدعِ set_respond_in_groups(bid, new) من runner
+        3. أعد رسم اللوحة
+        → لا stop، لا start.
+
+✅ محفوظ من v5.7.9: SPLIT-REPLIES (لوحة الكلمات 3 خطوات).
+✅ محفوظ من v5.7.8: GROUPS-TOGGLE (الزر موجود).
+✅ محفوظ من v5.7.7: KEYWORDS-UI.
 =================================================================================
 """
 
@@ -42,6 +49,7 @@ from config import CONFIG
 from managed_bots_runner import (
     is_running,
     reload_messages,
+    set_respond_in_groups,   # 🆕 v5.8.0
     start_one,
     stop_one,
 )
@@ -59,6 +67,7 @@ from managed_bots_storage import (
     next_managed_bot_id,
     save_managed_bots,
     save_managed_state,
+    update_managed_keyword_reply,
 )
 
 logger = logging.getLogger(__name__)
@@ -86,6 +95,8 @@ _MAX_BOTS_IN_PANEL = 12
 _MAX_KW_DISPLAY = 15
 _VERIFY_TIMEOUT_SEC = 15.0
 _START_TIMEOUT_SEC = 30.0
+
+_SKIP_TOKEN = "/skip"
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -118,6 +129,18 @@ def _short(text: str, n: int = 40) -> str:
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
+
+
+def _normalize_keyword_entry(entry: Any) -> Dict[str, str]:
+    if isinstance(entry, dict):
+        return {
+            "private_reply": str(entry.get("private_reply", "") or ""),
+            "group_reply":   str(entry.get("group_reply",   "") or ""),
+        }
+    if entry is None:
+        return {"private_reply": "", "group_reply": ""}
+    s = str(entry)
+    return {"private_reply": s, "group_reply": s}
 
 
 async def _safe_edit(
@@ -167,7 +190,6 @@ def _kb_back() -> InlineKeyboardMarkup:
 
 
 async def _verify_token_via_api(raw_token: str) -> Optional[str]:
-    """التحقق من التوكن عبر Telegram Bot API (لا يعلّق)."""
     url = f"https://api.telegram.org/bot{raw_token}/getMe"
     try:
         timeout = aiohttp.ClientTimeout(total=_VERIFY_TIMEOUT_SEC, connect=5)
@@ -219,8 +241,9 @@ def _build_panel(bots, state) -> tuple:
         alive = "🟢" if is_running(bid) else "🔴"
         uname = info.get("name") or "?"
         n_users = len(state.get(bid, {}))
+        groups = "📢" if info.get("respond_in_groups", False) else ""
         rows.append([InlineKeyboardButton(
-            f"{alive} #{bid} @{uname} — {n_users}👤",
+            f"{alive} #{bid} @{uname} — {n_users}👤 {groups}",
             callback_data=f"mb_bot:{bid}",
         )])
 
@@ -251,6 +274,9 @@ def _build_bot_detail(
     )
     added = (info.get("added_at") or "—").replace("T", " ")[:16]
 
+    groups_on = bool(info.get("respond_in_groups", False))
+    groups_status = "🟢 مفعّل" if groups_on else "🔴 معطّل"
+
     text = (
         f"📋 <b>بوت #{bid} — @{uname}</b>\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
@@ -258,6 +284,7 @@ def _build_bot_detail(
         f"👥 المستخدمون: <b>{n_users}</b>\n"
         f"✅ أكملوا: <b>{n_completed}</b>\n"
         f"🔑 الكلمات المفتاحية: <b>{n_keywords}</b>\n"
+        f"📢 الردود في المجموعات: {groups_status}\n"
         f"📅 أُضيف: <code>{added}</code>\n\n"
         "📝 <b>الرسائل:</b>\n"
         f"1️⃣ <code>{_short(msgs.get('start',  ''), 60)}</code>\n"
@@ -272,6 +299,11 @@ def _build_bot_detail(
         else InlineKeyboardButton("▶️ تشغيل", callback_data=f"mb_toggle:{bid}")
     )
 
+    groups_toggle = InlineKeyboardButton(
+        f"📢 الردود في المجموعات: {'🟢' if groups_on else '🔴'}",
+        callback_data=f"mb_toggle_groups:{bid}",
+    )
+
     rows = [
         [toggle,
          InlineKeyboardButton("✏️ رسالة 1", callback_data=f"mb_set:{bid}:start")],
@@ -282,6 +314,7 @@ def _build_bot_detail(
             f"🔑 الكلمات المفتاحية ({n_keywords})",
             callback_data=f"mb_kw:{bid}",
         )],
+        [groups_toggle],
         [InlineKeyboardButton("🗑️ حذف البوت", callback_data=f"mb_del:{bid}")],
         [InlineKeyboardButton("🔙 رجوع", callback_data="mb_panel")],
     ]
@@ -289,18 +322,18 @@ def _build_bot_detail(
 
 
 def _build_keyword_panel(
-    bid: int, keywords: Dict[str, str],
+    bid: int, keywords: Dict[str, Any],
 ) -> tuple:
     if not keywords:
         text = (
             f"🔑 <b>الكلمات المفتاحية — بوت #{bid}</b>\n"
             "━━━━━━━━━━━━━━━━━━━━\n\n"
             "📭 لا توجد كلمات مفتاحية مضافة بعد.\n\n"
-            "💡 مثال:\n"
-            "  • الكلمة: <code>اليمن</code>\n"
-            "  • الرد: <code>🇾🇪 أهلاً بك يا يمني!</code>\n\n"
-            "عندما يكتب أي مستخدم كلمة 'اليمن' في رسالته،\n"
-            "سيرد البوت بهذا الرد فوراً."
+            "💡 عند الإضافة ستُطلب 3 خطوات:\n"
+            "  1. الكلمة (مثل: <code>اليمن</code>)\n"
+            "  2. رد الخاص    (مثل: <code>أهلاً يا يمني 🇾🇪</code>)\n"
+            "  3. رد المجموعات (مثل: <code>🇾🇪 صنعاء عاصمة اليمن</code>)\n\n"
+            "يمكنك كتابة <code>/skip</code> لتخطي أي خطوة."
         )
     else:
         lines = [
@@ -310,31 +343,36 @@ def _build_keyword_panel(
             "",
         ]
         sorted_kws = sorted(keywords.items())
-        for idx, (kw, rp) in enumerate(sorted_kws[:_MAX_KW_DISPLAY], 1):
+        for idx, (kw, entry) in enumerate(sorted_kws[:_MAX_KW_DISPLAY], 1):
+            norm = _normalize_keyword_entry(entry)
+            pv = _short(norm["private_reply"], 50) or "<i>(غير مضبوط)</i>"
+            gr = _short(norm["group_reply"],   50) or "<i>(غير مضبوط)</i>"
             lines.append(
-                f"{idx}. 🔹 <code>{_html_escape(_short(kw, 30))}</code>\n"
-                f"   ↪️ {_html_escape(_short(rp, 50))}"
+                f"<b>{idx}. 🔹 <code>{_html_escape(_short(kw, 30))}</code></b>\n"
+                f"   💬 خاص: {_html_escape(pv) if norm['private_reply'] else pv}\n"
+                f"   📢 مجموعات: {_html_escape(gr) if norm['group_reply'] else gr}"
             )
         if len(sorted_kws) > _MAX_KW_DISPLAY:
             lines.append(
-                f"\n⚠️ يُعرض {_MAX_KW_DISPLAY}/{len(sorted_kws)} — "
-                f"احذف بعضها لعرض الباقي"
+                f"\n⚠️ يُعرض {_MAX_KW_DISPLAY}/{len(sorted_kws)}"
             )
         text = "\n".join(lines)
 
     rows = []
     sorted_kws = sorted(keywords.items()) if keywords else []
-    # أزرار حذف (2 في كل صف)
-    for i in range(0, min(len(sorted_kws), _MAX_KW_DISPLAY), 2):
-        chunk = sorted_kws[i:i + 2]
-        row = []
-        for j, (kw, _) in enumerate(chunk):
-            idx = i + j
-            row.append(InlineKeyboardButton(
-                f"🗑️ {_short(kw, 12)}",
-                callback_data=f"mb_kw_del:{bid}:{idx}",
-            ))
-        rows.append(row)
+
+    for i, (kw, _) in enumerate(sorted_kws[:_MAX_KW_DISPLAY]):
+        rows.append([
+            InlineKeyboardButton(
+                f"💬 {i+1}", callback_data=f"mb_kw_pe:{bid}:{i}"
+            ),
+            InlineKeyboardButton(
+                f"📢 {i+1}", callback_data=f"mb_kw_ge:{bid}:{i}"
+            ),
+            InlineKeyboardButton(
+                f"🗑️ {i+1}", callback_data=f"mb_kw_del:{bid}:{i}"
+            ),
+        ])
 
     rows.append([InlineKeyboardButton(
         "➕ إضافة كلمة جديدة", callback_data=f"mb_kw_add:{bid}"
@@ -442,6 +480,7 @@ async def _cb_set(update, context) -> None:
 
 
 async def _cb_toggle(update, context) -> None:
+    """⏹️/▶️ إيقاف/تشغيل كامل — يُوقف الخاص والمجموعات."""
     query = update.callback_query
     await query.answer()
     if not _is_admin(query.from_user.id):
@@ -488,10 +527,90 @@ async def _cb_toggle(update, context) -> None:
         logger.error("_cb_toggle: %s", e, exc_info=True)
 
 
-# ═══ 🆕 v5.7.7: لوحة الكلمات المفتاحية ═══
+# ═══ 🆕 v5.8.0: HOT-TOGGLE — بدون restart ═══
+
+async def _cb_toggle_groups(update, context) -> None:
+    """
+    🆕 v5.8.0: تفعيل/تعطيل الردود في المجموعات — بدون إعادة تشغيل.
+
+    الآلية:
+        1. اقلب respond_in_groups في storage (للبقاء بعد restart)
+        2. حدّث bot_data في الذاكرة فوراً (hot-toggle)
+        3. أعد رسم اللوحة
+
+    ✅ الخاص لم يتوقف إطلاقاً — لا stop_one، لا start_one.
+    ✅ التغيير فوري (instant).
+    ✅ البقاء بعد restart السيرفر: نعم (من storage).
+    """
+    query = update.callback_query
+    await query.answer()
+    if not _is_admin(query.from_user.id):
+        return
+    m = re.match(r"^mb_toggle_groups:(\d+)$", query.data or "")
+    if not m:
+        return
+    bid = int(m.group(1))
+
+    try:
+        # 1. اقلب في storage
+        async with get_lock():
+            bots = await load_managed_bots()
+            info = bots.get(bid)
+            if info is None:
+                await _safe_edit(query, "⚠️ البوت غير موجود.", _kb_back())
+                return
+            current = bool(info.get("respond_in_groups", False))
+            new_state = not current
+            info["respond_in_groups"] = new_state
+            await save_managed_bots(bots)
+
+        # 2. 🆕 hot-toggle في الذاكرة — بدون restart
+        hot_ok = await set_respond_in_groups(bid, new_state)
+
+        logger.info(
+            "🎛️ mb_toggle_groups: bot #%d → respond_in_groups=%s "
+            "(storage_saved=True, hot_applied=%s)",
+            bid, new_state, hot_ok,
+        )
+
+        # 3. أعد رسم اللوحة
+        state = await load_managed_state()
+        n_kw = await get_keyword_count(bid)
+        text, kb = _build_bot_detail(bid, info, state.get(bid, {}), n_kw)
+
+        if new_state:
+            prefix = (
+                "🟢 <b>فُعّلت الردود في المجموعات.</b>\n\n"
+                "✅ الخاص لم يتأثر — يعمل كما هو.\n"
+                "✅ التغيير فوري — لا إعادة تشغيل.\n\n"
+                "⚠️ <b>مهم:</b> ليعمل البوت فعلياً في مجموعة:\n"
+                "1. عطّل Privacy من @BotFather لهذا البوت\n"
+                "   (<code>/setprivacy</code> → Disable)\n"
+                "2. أو ارفعه <b>مشرفاً</b> في كل مجموعة\n\n"
+                "📌 في المجموعات: يرد <b>كل مرة</b> تُذكر الكلمة.\n"
+                "📌 في الخاص: يرد <b>مرة واحدة</b> لكل مستخدم/كلمة.\n\n"
+            )
+        else:
+            prefix = (
+                "🔴 <b>أُوقفت الردود في المجموعات.</b>\n\n"
+                "✅ الخاص لم يتأثر — يعمل كما هو.\n"
+                "✅ التغيير فوري — لا إعادة تشغيل.\n\n"
+            )
+
+        if not hot_ok:
+            prefix += (
+                "⚠️ البوت غير مشغّل الآن — الحالة ستُطبَّق عند تشغيله.\n\n"
+            )
+
+        await _safe_edit(query, prefix + text, kb)
+
+    except Exception as e:
+        logger.error("_cb_toggle_groups: %s", e, exc_info=True)
+
+
+# ═══ لوحة الكلمات ═══
 
 async def _cb_kw_panel(update, context) -> None:
-    """عرض لوحة الكلمات المفتاحية."""
     query = update.callback_query
     await query.answer()
     if not _is_admin(query.from_user.id):
@@ -510,7 +629,6 @@ async def _cb_kw_panel(update, context) -> None:
 
 
 async def _cb_kw_add(update, context) -> None:
-    """بدء إضافة كلمة مفتاحية (خطوة 1: الكلمة)."""
     query = update.callback_query
     await query.answer()
     if not _is_admin(query.from_user.id):
@@ -526,17 +644,97 @@ async def _cb_kw_add(update, context) -> None:
         query,
         f"➕ <b>إضافة كلمة مفتاحية — بوت #{bid}</b>\n"
         "━━━━━━━━━━━━━━━━━━━━\n\n"
-        "<b>الخطوة 1 من 2: الكلمة</b>\n\n"
+        "<b>الخطوة 1 من 3: الكلمة</b>\n\n"
         "📩 أرسل الكلمة التي تريد أن يبحث عنها البوت.\n"
-        "مثل: <code>اليمن</code> أو <code>صنعاء</code> أو <code>عدن</code>\n\n"
-        "💡 المطابقة: إذا كانت الكلمة موجودة داخل رسالة المستخدم.\n"
+        "مثل: <code>اليمن</code> أو <code>صنعاء</code>\n\n"
         f"الحد الأقصى: {_KW_MAX_LEN} حرف.",
         _kb_cancel(),
     )
 
 
+async def _cb_kw_edit_private(update, context) -> None:
+    query = update.callback_query
+    await query.answer()
+    if not _is_admin(query.from_user.id):
+        return
+    m = re.match(r"^mb_kw_pe:(\d+):(\d+)$", query.data or "")
+    if not m:
+        return
+    bid = int(m.group(1))
+    idx = int(m.group(2))
+
+    try:
+        keywords = await load_managed_keywords(bid)
+        sorted_kws = sorted(keywords.items())
+        if not (0 <= idx < len(sorted_kws)):
+            await _safe_edit(query, "⚠️ الكلمة غير موجودة.",
+                             _kb_back())
+            return
+        kw, entry = sorted_kws[idx]
+        norm = _normalize_keyword_entry(entry)
+
+        context.user_data["managed_pending"] = {
+            "kind": "kw_edit_private",
+            "bid": bid,
+            "keyword": kw,
+        }
+        current_display = _short(norm["private_reply"], 200) or "<i>(فارغ)</i>"
+        await _safe_edit(
+            query,
+            f"💬 <b>تعديل رد الخاص — <code>{_html_escape(kw)}</code></b>\n"
+            f"بوت #{bid}\n"
+            "━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"<b>الحالي:</b>\n<code>{current_display}</code>\n\n"
+            "📩 أرسل النص الجديد الآن.\n"
+            "أو <code>/skip</code> للإبقاء على الحالي.",
+            _kb_cancel(),
+        )
+    except Exception as e:
+        logger.error("_cb_kw_edit_private: %s", e, exc_info=True)
+
+
+async def _cb_kw_edit_group(update, context) -> None:
+    query = update.callback_query
+    await query.answer()
+    if not _is_admin(query.from_user.id):
+        return
+    m = re.match(r"^mb_kw_ge:(\d+):(\d+)$", query.data or "")
+    if not m:
+        return
+    bid = int(m.group(1))
+    idx = int(m.group(2))
+
+    try:
+        keywords = await load_managed_keywords(bid)
+        sorted_kws = sorted(keywords.items())
+        if not (0 <= idx < len(sorted_kws)):
+            await _safe_edit(query, "⚠️ الكلمة غير موجودة.",
+                             _kb_back())
+            return
+        kw, entry = sorted_kws[idx]
+        norm = _normalize_keyword_entry(entry)
+
+        context.user_data["managed_pending"] = {
+            "kind": "kw_edit_group",
+            "bid": bid,
+            "keyword": kw,
+        }
+        current_display = _short(norm["group_reply"], 200) or "<i>(فارغ)</i>"
+        await _safe_edit(
+            query,
+            f"📢 <b>تعديل رد المجموعات — <code>{_html_escape(kw)}</code></b>\n"
+            f"بوت #{bid}\n"
+            "━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"<b>الحالي:</b>\n<code>{current_display}</code>\n\n"
+            "📩 أرسل النص الجديد الآن.\n"
+            "أو <code>/skip</code> للإبقاء على الحالي.",
+            _kb_cancel(),
+        )
+    except Exception as e:
+        logger.error("_cb_kw_edit_group: %s", e, exc_info=True)
+
+
 async def _cb_kw_del(update, context) -> None:
-    """حذف كلمة بالترتيب (index)."""
     query = update.callback_query
     await query.answer()
     if not _is_admin(query.from_user.id):
@@ -567,12 +765,10 @@ async def _cb_kw_del(update, context) -> None:
                 ]])
             )
             return
-        # إعادة تحميل الكلمات في البوت العامل
         try:
             await reload_messages(bid)
         except Exception:
             pass
-        # عرض اللوحة المحدثة
         keywords = await load_managed_keywords(bid)
         text, kb = _build_keyword_panel(bid, keywords)
         await _safe_edit(
@@ -653,7 +849,6 @@ async def _cb_del_do(update, context) -> None:
             if bid in state:
                 del state[bid]
                 await save_managed_state(state)
-        # 🆕 v5.7.7: حذف الكلمات المفتاحية
         await delete_all_keywords_for_bot(bid)
     except Exception as e:
         logger.error("del_bot: %s", e, exc_info=True)
@@ -695,8 +890,14 @@ async def _handle_pending_text(update, context) -> None:
         await _process_set(update, context, pending, raw)
     elif kind == "kw_keyword":
         await _process_kw_keyword(update, context, pending, raw)
-    elif kind == "kw_reply":
-        await _process_kw_reply(update, context, pending, raw)
+    elif kind == "kw_private":
+        await _process_kw_private(update, context, pending, raw)
+    elif kind == "kw_group":
+        await _process_kw_group(update, context, pending, raw)
+    elif kind == "kw_edit_private":
+        await _process_kw_edit_private(update, context, pending, raw)
+    elif kind == "kw_edit_group":
+        await _process_kw_edit_group(update, context, pending, raw)
     else:
         context.user_data.pop("managed_pending", None)
         return
@@ -741,8 +942,7 @@ async def _process_addbot(update, context, raw: str) -> None:
     if not username:
         try:
             await status_msg.edit_text(
-                "❌ فشل التحقق من التوكن.\n"
-                "تحقق من التوكن أو الشبكة."
+                "❌ فشل التحقق من التوكن.\nتحقق من التوكن أو الشبكة."
             )
         except Exception:
             pass
@@ -773,6 +973,7 @@ async def _process_addbot(update, context, raw: str) -> None:
                 "name": username,
                 "messages": get_default_messages(),
                 "added_at": _now_iso(),
+                "respond_in_groups": False,
             }
             await save_managed_bots(bots)
     except Exception as e:
@@ -866,10 +1067,9 @@ async def _process_set(update, context, pending, raw: str) -> None:
         pass
 
 
-# ═══ 🆕 v5.7.7: إضافة كلمة مفتاحية (خطوتان) ═══
+# ═══ إضافة كلمة (3 خطوات) ═══
 
 async def _process_kw_keyword(update, context, pending, raw: str) -> None:
-    """الخطوة 1: استلام الكلمة."""
     bid = int(pending.get("bid", 0))
     if not raw:
         await update.message.reply_text("⚠️ الكلمة فارغة.")
@@ -880,23 +1080,22 @@ async def _process_kw_keyword(update, context, pending, raw: str) -> None:
         )
         return
 
-    # حفظ الكلمة في pending، وطلب الرد
     context.user_data["managed_pending"] = {
-        "kind": "kw_reply",
+        "kind": "kw_private",
         "bid": bid,
         "keyword": raw,
     }
     await update.message.reply_text(
         f"✅ الكلمة: <code>{_html_escape(raw)}</code>\n\n"
-        "<b>الخطوة 2 من 2: الرد</b>\n\n"
-        "📩 الآن أرسل الرد الذي سيرسله البوت عند مطابقة هذه الكلمة.\n\n"
-        "💡 مثال: <code>🇾🇪 أهلاً بك يا يمني!</code>",
+        "<b>الخطوة 2 من 3: رد الخاص</b>\n\n"
+        "📩 أرسل الرد الذي سيُرسل في <b>الخاص</b> عند مطابقة الكلمة.\n"
+        "أو <code>/skip</code> لتخطي (لن يرد في الخاص).\n\n"
+        "💡 مثال: <code>أهلاً يا يمني 🇾🇪</code>",
         parse_mode="HTML",
     )
 
 
-async def _process_kw_reply(update, context, pending, raw: str) -> None:
-    """الخطوة 2: استلام الرد وحفظه."""
+async def _process_kw_private(update, context, pending, raw: str) -> None:
     bid = int(pending.get("bid", 0))
     keyword = (pending.get("keyword") or "").strip()
 
@@ -904,17 +1103,67 @@ async def _process_kw_reply(update, context, pending, raw: str) -> None:
         context.user_data.pop("managed_pending", None)
         await update.message.reply_text("⚠️ حدث خطأ، أعد المحاولة.")
         return
-    if not raw:
-        await update.message.reply_text("⚠️ الرد فارغ.")
+
+    if raw.lower() == _SKIP_TOKEN:
+        private_reply = ""
+    else:
+        if len(raw) > _MSG_MAX_LEN:
+            await update.message.reply_text(
+                f"⚠️ الرد طويل (الحد {_MSG_MAX_LEN} حرف)."
+            )
+            return
+        private_reply = raw
+
+    context.user_data["managed_pending"] = {
+        "kind": "kw_group",
+        "bid": bid,
+        "keyword": keyword,
+        "private_reply": private_reply,
+    }
+    private_display = _short(private_reply, 80) or "<i>(تخطي)</i>"
+    await update.message.reply_text(
+        f"✅ رد الخاص: <code>{_html_escape(private_display)}</code>\n\n"
+        "<b>الخطوة 3 من 3: رد المجموعات</b>\n\n"
+        "📩 أرسل الرد الذي سيُرسل في <b>المجموعات</b> عند مطابقة الكلمة.\n"
+        "أو <code>/skip</code> لتخطي (لن يرد في المجموعات).\n\n"
+        "💡 مثال: <code>🇾🇪 صنعاء عاصمة اليمن</code>",
+        parse_mode="HTML",
+    )
+
+
+async def _process_kw_group(update, context, pending, raw: str) -> None:
+    bid = int(pending.get("bid", 0))
+    keyword = (pending.get("keyword") or "").strip()
+    private_reply = (pending.get("private_reply") or "")
+
+    if not keyword:
+        context.user_data.pop("managed_pending", None)
+        await update.message.reply_text("⚠️ حدث خطأ، أعد المحاولة.")
         return
-    if len(raw) > _MSG_MAX_LEN:
+
+    if raw.lower() == _SKIP_TOKEN:
+        group_reply = ""
+    else:
+        if len(raw) > _MSG_MAX_LEN:
+            await update.message.reply_text(
+                f"⚠️ الرد طويل (الحد {_MSG_MAX_LEN} حرف)."
+            )
+            return
+        group_reply = raw
+
+    if not private_reply and not group_reply:
         await update.message.reply_text(
-            f"⚠️ الرد طويل (الحد {_MSG_MAX_LEN} حرف)."
+            "⚠️ لا يمكن حفظ كلمة بدون أي رد.\n"
+            "أرسل رداً واحداً على الأقل (خاص أو مجموعات)."
         )
         return
 
     try:
-        ok = await add_managed_keyword(bid, keyword, raw)
+        ok = await add_managed_keyword(
+            bid, keyword,
+            private_reply=private_reply,
+            group_reply=group_reply,
+        )
     except Exception as e:
         logger.error("add_keyword: %s", e)
         ok = False
@@ -924,7 +1173,74 @@ async def _process_kw_reply(update, context, pending, raw: str) -> None:
         context.user_data.pop("managed_pending", None)
         return
 
-    # إعادة تحميل الكلمات في البوت العامل
+    try:
+        await reload_messages(bid)
+    except Exception:
+        pass
+
+    context.user_data.pop("managed_pending", None)
+
+    pv = _short(private_reply, 100) or "<i>(بدون)</i>"
+    gr = _short(group_reply,   100) or "<i>(بدون)</i>"
+    await update.message.reply_text(
+        f"✅ <b>أُضيفت الكلمة المفتاحية</b>\n\n"
+        f"🔹 الكلمة: <code>{_html_escape(keyword)}</code>\n"
+        f"💬 رد الخاص: {_html_escape(pv)}\n"
+        f"📢 رد المجموعات: {_html_escape(gr)}",
+        parse_mode="HTML",
+    )
+
+    try:
+        keywords = await load_managed_keywords(bid)
+        text, kb = _build_keyword_panel(bid, keywords)
+        await update.message.reply_text(
+            text=text, reply_markup=kb, parse_mode="HTML",
+        )
+    except Exception:
+        pass
+
+
+async def _process_kw_edit_private(update, context, pending, raw: str) -> None:
+    bid = int(pending.get("bid", 0))
+    keyword = (pending.get("keyword") or "").strip()
+
+    if not keyword:
+        context.user_data.pop("managed_pending", None)
+        await update.message.reply_text("⚠️ حدث خطأ.")
+        return
+
+    if raw.lower() == _SKIP_TOKEN:
+        context.user_data.pop("managed_pending", None)
+        await update.message.reply_text("✅ لم يُغيَّر شيء.")
+        try:
+            keywords = await load_managed_keywords(bid)
+            text, kb = _build_keyword_panel(bid, keywords)
+            await update.message.reply_text(
+                text=text, reply_markup=kb, parse_mode="HTML",
+            )
+        except Exception:
+            pass
+        return
+
+    if len(raw) > _MSG_MAX_LEN:
+        await update.message.reply_text(
+            f"⚠️ الرد طويل (الحد {_MSG_MAX_LEN} حرف)."
+        )
+        return
+
+    try:
+        ok = await update_managed_keyword_reply(
+            bid, keyword, private_reply=raw,
+        )
+    except Exception as e:
+        logger.error("update kw private: %s", e)
+        ok = False
+
+    if not ok:
+        await update.message.reply_text("❌ فشل الحفظ.")
+        context.user_data.pop("managed_pending", None)
+        return
+
     try:
         await reload_messages(bid)
     except Exception:
@@ -932,13 +1248,70 @@ async def _process_kw_reply(update, context, pending, raw: str) -> None:
 
     context.user_data.pop("managed_pending", None)
     await update.message.reply_text(
-        f"✅ <b>أُضيفت الكلمة المفتاحية</b>\n\n"
-        f"🔹 الكلمة: <code>{_html_escape(keyword)}</code>\n"
-        f"↪️ الرد: {_html_escape(_short(raw, 100))}",
+        f"✅ تم تحديث رد الخاص لـ <code>{_html_escape(keyword)}</code>.",
         parse_mode="HTML",
     )
+    try:
+        keywords = await load_managed_keywords(bid)
+        text, kb = _build_keyword_panel(bid, keywords)
+        await update.message.reply_text(
+            text=text, reply_markup=kb, parse_mode="HTML",
+        )
+    except Exception:
+        pass
 
-    # عرض لوحة الكلمات المحدثة
+
+async def _process_kw_edit_group(update, context, pending, raw: str) -> None:
+    bid = int(pending.get("bid", 0))
+    keyword = (pending.get("keyword") or "").strip()
+
+    if not keyword:
+        context.user_data.pop("managed_pending", None)
+        await update.message.reply_text("⚠️ حدث خطأ.")
+        return
+
+    if raw.lower() == _SKIP_TOKEN:
+        context.user_data.pop("managed_pending", None)
+        await update.message.reply_text("✅ لم يُغيَّر شيء.")
+        try:
+            keywords = await load_managed_keywords(bid)
+            text, kb = _build_keyword_panel(bid, keywords)
+            await update.message.reply_text(
+                text=text, reply_markup=kb, parse_mode="HTML",
+            )
+        except Exception:
+            pass
+        return
+
+    if len(raw) > _MSG_MAX_LEN:
+        await update.message.reply_text(
+            f"⚠️ الرد طويل (الحد {_MSG_MAX_LEN} حرف)."
+        )
+        return
+
+    try:
+        ok = await update_managed_keyword_reply(
+            bid, keyword, group_reply=raw,
+        )
+    except Exception as e:
+        logger.error("update kw group: %s", e)
+        ok = False
+
+    if not ok:
+        await update.message.reply_text("❌ فشل الحفظ.")
+        context.user_data.pop("managed_pending", None)
+        return
+
+    try:
+        await reload_messages(bid)
+    except Exception:
+        pass
+
+    context.user_data.pop("managed_pending", None)
+    await update.message.reply_text(
+        f"✅ تم تحديث رد المجموعات لـ <code>{_html_escape(keyword)}</code>.",
+        parse_mode="HTML",
+    )
     try:
         keywords = await load_managed_keywords(bid)
         text, kb = _build_keyword_panel(bid, keywords)
@@ -962,10 +1335,12 @@ def register_managed_bots_handlers(app: Application) -> None:
         (r"^mb_toggle:\d+$", _cb_toggle),
         (r"^mb_del:\d+$", _cb_del_confirm),
         (r"^mb_dodel:\d+$", _cb_del_do),
-        # 🆕 v5.7.7: الكلمات المفتاحية
         (r"^mb_kw:\d+$", _cb_kw_panel),
         (r"^mb_kw_add:\d+$", _cb_kw_add),
         (r"^mb_kw_del:\d+:\d+$", _cb_kw_del),
+        (r"^mb_toggle_groups:\d+$", _cb_toggle_groups),
+        (r"^mb_kw_pe:\d+:\d+$", _cb_kw_edit_private),
+        (r"^mb_kw_ge:\d+:\d+$", _cb_kw_edit_group),
     ]
 
     for pattern, cb in handlers:
@@ -983,8 +1358,8 @@ def register_managed_bots_handlers(app: Application) -> None:
     )
 
     logger.info(
-        "✅ managed_bots v5.7.7: %d callbacks + 1 text handler | "
-        "keywords=enabled",
+        "✅ managed_bots v5.8.0: %d callbacks + 1 text handler | "
+        "keywords=splitted | groups-toggle=hot(no_restart)",
         len(handlers),
     )
 
@@ -994,7 +1369,7 @@ __all__ = ["register_managed_bots_handlers"]
 
 try:
     logger.debug(
-        "🛡️ handlers_managed_bots v5.7.7 (KEYWORDS-UI) loaded"
+        "🛡️ handlers_managed_bots v5.8.0 (HOT-TOGGLE) loaded"
     )
 except Exception:
     pass
