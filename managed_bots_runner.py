@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-managed_bots_runner.py — دورة حياة البوتات المُدارة (v5.7.11)
+managed_bots_runner.py — دورة حياة البوتات المُدارة (v5.7.18)
 =================================================================================
 📌 المسؤولية:
     • تشغيل/إيقاف كل بوت مُدار كـ Application مستقل (polling).
@@ -10,26 +10,33 @@ managed_bots_runner.py — دورة حياة البوتات المُدارة (v5
     • retry ذكي عند أخطاء الشبكة.
     • منع تعارض التوكن مع Relax Manager.
     • إعادة تحميل الرسائل والكلمات بدون restart.
+    • دعم الردود في المجموعات (Hot-Toggle — بدون restart).
 
-🆕 v5.7.11 (RETRY-WINDOW-EXTENDED):
-    • توسيع نافذة retry لتغطية Render Zero-Downtime overlap بالكامل:
-      - `_RETRY_DELAYS = (30, 60)` بدلاً من `(10, 20, 30)`.
-      - التغطية الفعلية: 30 + 60 = 90s لكل بوت (كانت 10 + 20 = 30s).
-      - Render overlap عادة 60s، فتغطية 90s تمنح 30s margin.
-      - `max_retries` بقي 3 (بدون تغيير).
-      - `_error_handler` كما هو (v5.7.10).
+🆕 v5.7.18 (HOT-TOGGLE):
+    🟢 FEATURE-HOT-TOGGLE: تفعيل/تعطيل المجموعات بدون restart.
 
-🆕 v5.7.10 (DEPLOY-CONFLICT-HANDLING):
-    • معالجة أفضل لـ Conflict أثناء النشر (Render Zero-Downtime):
-      - `_error_handler` يتعامل مع Conflict بلطف (بدون traceback مخيف).
-      - يقلل من نافذة تعارض التوكن أثناء النشر.
+    الفرق عن v5.7.17:
+        • v5.7.17: زر التفعيل يستدعي stop_one + start_one → الخاص
+          يتوقف 2-5 ثوانٍ أثناء إعادة التشغيل.
 
-🆕 v5.7.7 (KEYWORDS):
-    • تحميل الكلمات المفتاحية في bot_data عند التشغيل.
-    • reload_messages يعيد تحميل الكلمات أيضاً.
+        • v5.7.18: زر التفعيل يقلب bot_data["respond_in_groups"] في
+          الذاكرة فقط → لا restart، لا انقطاع للخاص إطلاقاً.
 
-🆕 v5.7.6 (ENV-TOKEN-FIX):
-    • _RELAX_TOKEN يقرأ من os.getenv("BOT_TOKEN") أولاً.
+    الآلية:
+        • handler المجموعات يُسجَّل دائماً (بدون شرط).
+        • on_text يفحص bot_data["respond_in_groups"] في أول سطر
+          للمجموعات → يعود فوراً إذا False (تكلفة ~0.1ms).
+        • الخاص لم يُمَس إطلاقاً — handler خاص يعمل كالسابق.
+
+    الدالة الجديدة:
+        • `set_respond_in_groups(bid, value)` — تحديث hot في الذاكرة.
+        • تُستدعى من زر 📢 في handlers_managed_bots.py.
+
+✅ محفوظ من v5.7.17: GROUPS-SUPPORT.
+✅ محفوظ من v5.7.11: RETRY-WINDOW-EXTENDED.
+✅ محفوظ من v5.7.10: DEPLOY-CONFLICT-HANDLING.
+✅ محفوظ من v5.7.7: KEYWORDS.
+✅ محفوظ من v5.7.6: ENV-TOKEN-FIX.
 =================================================================================
 """
 
@@ -78,9 +85,7 @@ _TIMEOUTS: Dict[str, float] = {
     "pool_timeout": 20.0,
 }
 
-# 🆕 v5.7.11: تأخير كافٍ لتغطية Render overlap (60s) + margin (30s)
-# attempt 1 fail → wait 30s → attempt 2 fail → wait 60s → attempt 3
-# التغطية الكلية: 90 ثانية لكل بوت.
+# v5.7.11: تأخير كافٍ لتغطية Render overlap (60s) + margin (30s)
 _RETRY_DELAYS: Tuple[int, ...] = (30, 60)
 
 _INTER_START_DELAY = 0.3
@@ -148,7 +153,6 @@ async def _error_handler(update: Any, context: Any) -> None:
     """
     err = context.error
 
-    # v5.7.10: Conflict — أثناء النشر فقط، لا traceback
     if isinstance(err, Conflict):
         logger.debug(
             "managed bot: Conflict (deploy in progress) — "
@@ -227,13 +231,16 @@ async def start_one(
         )
         return False
 
-    # تحميل الرسائل + الكلمات من قاعدة البيانات
+    # تحميل الرسائل + الكلمات + حالة المجموعات من قاعدة البيانات
     stored = await load_managed_bots()
+    stored_entry = stored.get(bid, {})
     messages = (
-        stored.get(bid, {}).get("messages")
+        stored_entry.get("messages")
         or get_default_messages()
     )
-    name = stored.get(bid, {}).get("name", "")
+    name = stored_entry.get("name", "")
+    # 🆕 v5.7.18: قراءة حالة الردود في المجموعات
+    respond_in_groups = bool(stored_entry.get("respond_in_groups", False))
     keywords = await load_managed_keywords(bid)
 
     last_err: Optional[BaseException] = None
@@ -246,15 +253,40 @@ async def start_one(
             app.bot_data["managed_messages"] = dict(messages)
             app.bot_data["managed_name"] = name
             app.bot_data["managed_keywords"] = dict(keywords)
+            # 🆕 v5.7.18: نقل حالة المجموعات إلى bot_data
+            app.bot_data["respond_in_groups"] = respond_in_groups
 
             app.post_init = post_init_managed
 
             on_start, on_text = make_managed_handlers(bid)
             private = filters.ChatType.PRIVATE
-            app.add_handler(CommandHandler("start", on_start, filters=private))
+            groups_filter = (
+                filters.ChatType.GROUPS
+                | filters.ChatType.SUPERGROUP
+            )
+
+            # استقبال الخاص دائماً
+            app.add_handler(CommandHandler(
+                "start", on_start, filters=private))
             app.add_handler(MessageHandler(
                 filters.TEXT & ~filters.COMMAND & private, on_text,
             ))
+
+            # 🆕 v5.7.18: استقبال المجموعات دائماً (Hot-toggle)
+            # الفحص الداخلي في on_text عبر _get_respond_in_groups()
+            # يعود فوراً إذا كانت الحالة False (تكلفة ~0.1ms).
+            app.add_handler(MessageHandler(
+                filters.TEXT & ~filters.COMMAND & groups_filter,
+                on_text,
+            ))
+
+            logger.info(
+                "✅ managed_bot #%s: handlers registered | "
+                "private=always | groups=conditional "
+                "(respond_in_groups=%s initial)",
+                bid, respond_in_groups,
+            )
+
             app.add_error_handler(_error_handler)
 
             await app.initialize()
@@ -266,8 +298,9 @@ async def start_one(
 
             RUNNING[bid] = app
             logger.info(
-                "✅ managed_bot #%s (@%s) started | keywords=%d",
-                bid, name or "?", len(keywords)
+                "✅ managed_bot #%s (@%s) started | keywords=%d | "
+                "respond_in_groups=%s",
+                bid, name or "?", len(keywords), respond_in_groups,
             )
             return True
 
@@ -282,7 +315,6 @@ async def start_one(
             return False
 
         except Conflict as _e:
-            # v5.7.11: تأخير أطول يغطي Render overlap (60s)
             last_err = _e
             logger.warning(
                 "⚠️ managed_bot #%s: Conflict (deploy) — "
@@ -343,7 +375,13 @@ async def start_one(
 # ═══════════════════════════════════════════════════════════════════════════
 
 async def stop_one(bid: int, timeout: float = 10.0) -> None:
-    """يوقف بوتاً مُداراً واحداً."""
+    """
+    يوقف بوتاً مُداراً واحداً (إيقاف كامل: خاص + مجموعات).
+
+    ⚠️ ملاحظة: هذه الدالة تُوقف كل شيء. لا يوجد stop جزئي.
+    زر "📢 الردود في المجموعات" في v5.7.18 لا يستدعيها —
+    يستخدم `set_respond_in_groups` (Hot-toggle) بدلاً منها.
+    """
     app = RUNNING.pop(bid, None)
     if app is None:
         return
@@ -397,8 +435,11 @@ async def restart_one(
 
 async def reload_messages(bid: int) -> bool:
     """
-    يعيد قراءة رسائل وكلمات بوت من DB إلى bot_data.
-    يُستخدم من اللوحة بعد تعديل الرسائل أو الكلمات.
+    يعيد قراءة رسائل وكلمات وحالة مجموعات بوت من DB إلى bot_data.
+
+    ⚠️ v5.7.18: إذا تغيّرت respond_in_groups، نحدّثها في bot_data
+    تلقائياً (hot-toggle). handlers المجموعات مسجّلة دائماً في v5.7.18
+    فلا حاجة لـ restart.
     """
     app = RUNNING.get(bid)
     if app is None:
@@ -414,19 +455,68 @@ async def reload_messages(bid: int) -> bool:
     )
     app.bot_data["managed_name"] = entry.get("name", "")
 
+    # v5.7.18: تحديث hot — بدون restart
+    new_respond = bool(entry.get("respond_in_groups", False))
+    app.bot_data["respond_in_groups"] = new_respond
+
     # إعادة تحميل الكلمات المفتاحية
     keywords = await load_managed_keywords(bid)
     app.bot_data["managed_keywords"] = dict(keywords)
 
     logger.debug(
-        "managed_bot #%s: reloaded (messages + keywords=%d)",
-        bid, len(keywords)
+        "managed_bot #%s: reloaded (messages + keywords=%d + groups=%s)",
+        bid, len(keywords), new_respond,
     )
     return True
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# 8. استعلامات الحالة
+# 8. set_respond_in_groups — 🆕 v5.7.18 (HOT-TOGGLE)
+# ═══════════════════════════════════════════════════════════════════════════
+
+async def set_respond_in_groups(bid: int, value: bool) -> bool:
+    """
+    🆕 v5.7.18: تفعيل/تعطيل الردود في المجموعات بدون إعادة تشغيل.
+
+    آلية:
+        • تحدّث `app.bot_data["respond_in_groups"]` في الذاكرة.
+        • الـ handler المسجّل للمجموعات يفحص هذه القيمة في أول سطر.
+        • إذا False → يعود فوراً (تكلفة ~0.1ms).
+        • إذا True → يمرر للكلمات المفتاحية.
+
+    ⚠️ ملاحظة: التخزين في DB منفصل (تقوم به اللوحة قبل استدعاء هذه
+    الدالة). هذه الدالة مسؤولة عن التحديث في الذاكرة فقط.
+
+    Args:
+        bid: bot id
+        value: True/False
+
+    Returns:
+        True إذا نجح التحديث، False إذا البوت غير مشغّل.
+    """
+    app = RUNNING.get(bid)
+    if app is None:
+        logger.debug(
+            "set_respond_in_groups(#%s): البوت غير مشغّل — "
+            "الحالة ستُطبَّق عند التشغيل التالي",
+            bid,
+        )
+        return False
+
+    old = bool(app.bot_data.get("respond_in_groups", False))
+    new = bool(value)
+    app.bot_data["respond_in_groups"] = new
+
+    logger.info(
+        "🎛️ managed_bot #%s: respond_in_groups %s → %s (hot-toggle, "
+        "no restart)",
+        bid, old, new,
+    )
+    return True
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# 9. استعلامات الحالة
 # ═══════════════════════════════════════════════════════════════════════════
 
 def is_running(bid: int) -> bool:
@@ -442,7 +532,7 @@ def running_count() -> int:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# 9. start_all_managed_bots
+# 10. start_all_managed_bots
 # ═══════════════════════════════════════════════════════════════════════════
 
 async def start_all_managed_bots() -> Dict[int, bool]:
@@ -475,7 +565,7 @@ async def start_all_managed_bots() -> Dict[int, bool]:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# 10. stop_all_managed_bots
+# 11. stop_all_managed_bots
 # ═══════════════════════════════════════════════════════════════════════════
 
 async def stop_all_managed_bots(timeout: float = 15.0) -> None:
@@ -499,7 +589,7 @@ async def stop_all_managed_bots(timeout: float = 15.0) -> None:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# 11. __all__
+# 12. __all__
 # ═══════════════════════════════════════════════════════════════════════════
 
 __all__ = [
@@ -508,6 +598,7 @@ __all__ = [
     "stop_one",
     "restart_one",
     "reload_messages",
+    "set_respond_in_groups",   # 🆕 v5.7.18
     "is_running",
     "running_bids",
     "running_count",
@@ -528,10 +619,12 @@ try:
         for i in range(2)
     )
     logger.debug(
-        "🛡️ managed_bots_runner v5.7.11 "
-        "(RETRY-WINDOW-EXTENDED) loaded | "
+        "🛡️ managed_bots_runner v5.7.18 "
+        "(HOT-TOGGLE) loaded | "
         "timeouts=%s | retry_delays=%s (coverage=%ds) | "
-        "keywords_enabled=True | conflict_handling=graceful",
+        "keywords_enabled=True | conflict_handling=graceful | "
+        "groups_support=always_registered | private_always=on | "
+        "toggle=hot(no_restart)",
         _TIMEOUTS, _RETRY_DELAYS, _total_coverage,
     )
 except Exception:
