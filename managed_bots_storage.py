@@ -1,31 +1,34 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-managed_bots_storage.py — طبقة I/O (v5.7.9 - TARGETED-UPDATE-FIX)
+managed_bots_storage.py — طبقة I/O (v5.7.10 - SPLIT-REPLIES + GROUPS-TOGGLE)
 =================================================================================
-🆕 v5.7.9 (TARGETED-UPDATE-FIX) — CRITICAL:
-    🔴 FIX-CHURN-1: إضافة `update_managed_user_state(bid, user_id, state)`.
-    
-    المشكلة:
-        `save_managed_state()` كانت تُنفّذ UPSERT على **كل** صفوف المستخدمين
-        في كل مرة. مع 8 بوتات × 130 مستخدم = 1,040 UPSERT **لكل رسالة**.
-        النتيجة: churn كارثي على `managed_bot_users` (~1,040 dead tuple/رسالة).
-        AV لم يستطع اللحاق → 312 dead tuple متراكمة.
+🆕 v5.7.10 (SPLIT-REPLIES + GROUPS-TOGGLE):
+    🟢 FEATURE-SPLIT-1: ردود منفصلة (خاص/مجموعات) مخزّنة كـ JSON.
+        • `add_managed_keyword` يقبل `private_reply` + `group_reply`.
+        • `load_managed_keywords` يقرأ JSON + str (توافق رجعي كامل).
+        • `update_managed_keyword_reply` لتحديث حقل واحد فقط.
+        • `_normalize_keyword_entry` لتوحيد الشكل.
 
-    الحل:
-        دالة جديدة `update_managed_user_state()` تُحدّث **صفاً واحداً فقط**
-        عبر UPSERT مباشر. تُقلّل الـ churn بنسبة 99.9%.
-        `save_managed_state()` محفوظة للاستخدام الإداري (حذف بوت/إعادة تعيين).
+    🟢 FEATURE-GROUPS-1: عمود `respond_in_groups` في `managed_bots`.
+        • يُقرأ ويُحفظ مع كل بوت.
+        • migration تلقائي لـ DBs القديمة (ALTER TABLE).
+        • يُستخدم من زر 📢 في اللوحة (hot-toggle).
 
-🆕 v5.7.8 (ONE-TIME-KEYWORD) — محفوظ:
-    • جدول managed_bot_keyword_replied.
-    • كل مستخدم يستلم الرد مرة واحدة فقط لكل كلمة.
+    🔒 توافق رجعي كامل:
+        • الكلمات القديمة (str) تعمل كما هي.
+        • `add_managed_keyword(bid, kw, "نص")` القديم يعمل → private=group="نص".
+        • `load_managed_bots` يُعيد `respond_in_groups=False` إن لم يكن موجوداً.
+
+✅ محفوظ من v5.7.9: FIX-CHURN-1 (targeted update).
+✅ محفوظ من v5.7.8: ONE-TIME-KEYWORD.
 =================================================================================
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Set
@@ -104,7 +107,71 @@ def get_default_messages() -> Dict[str, str]:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# 3. إنشاء الجداول
+# 3. أدوات داخلية للكلمات (v5.7.10)
+# ═══════════════════════════════════════════════════════════════════════════
+
+def _normalize_keyword_entry(entry: Any) -> Dict[str, str]:
+    """
+    🆕 v5.7.10: يحوّل أي شكل للشكل الجديد {"private_reply", "group_reply"}.
+
+    • dict جديد      → كما هو
+    • str قديم       → private=group=str (توافق رجعي)
+    • None/فارغ      → {"private_reply": "", "group_reply": ""}
+    """
+    if isinstance(entry, dict):
+        return {
+            "private_reply": str(entry.get("private_reply", "") or ""),
+            "group_reply":   str(entry.get("group_reply",   "") or ""),
+        }
+    if entry is None:
+        return {"private_reply": "", "group_reply": ""}
+    s = str(entry)
+    return {"private_reply": s, "group_reply": s}
+
+
+def _parse_keyword_reply(raw: Any) -> Optional[Any]:
+    """
+    🆕 v5.7.10: يحوّل قيمة عمود `reply` إلى الشكل المناسب.
+
+    Returns:
+        • dict {"private_reply", "group_reply"} إذا كان JSON
+        • str إذا كان نصاً عادياً (توافق رجعي)
+        • None إذا كان فارغاً تماماً
+    """
+    if raw is None:
+        return None
+    if isinstance(raw, dict):
+        # بعض الـ drivers تُعيد JSONB كـ dict مباشرة
+        norm = _normalize_keyword_entry(raw)
+        if not norm["private_reply"] and not norm["group_reply"]:
+            return None
+        return norm
+    if isinstance(raw, str):
+        s = raw.strip()
+        if not s:
+            return None
+        if s.startswith("{"):
+            try:
+                parsed = json.loads(s)
+                if isinstance(parsed, dict):
+                    norm = _normalize_keyword_entry(parsed)
+                    if not norm["private_reply"] and not norm["group_reply"]:
+                        return None
+                    return norm
+            except (json.JSONDecodeError, ValueError):
+                pass
+        # نص عادي (توافق رجعي)
+        return s
+    # أي نوع آخر — حاول التحويل إلى str
+    try:
+        s = str(raw).strip()
+        return s or None
+    except Exception:
+        return None
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# 4. إنشاء الجداول
 # ═══════════════════════════════════════════════════════════════════════════
 
 async def _ensure_tables():
@@ -112,6 +179,7 @@ async def _ensure_tables():
     if _tables_created:
         return
     try:
+        # ─── managed_bots: يشمل respond_in_groups من البداية ───
         await DB.execute("""
             CREATE TABLE IF NOT EXISTS managed_bots (
                 bot_id INTEGER PRIMARY KEY,
@@ -121,9 +189,34 @@ async def _ensure_tables():
                 msg_reply TEXT,
                 msg_third TEXT,
                 msg_fourth TEXT,
-                added_at TEXT
+                added_at TEXT,
+                respond_in_groups INTEGER DEFAULT 0
             )
         """)
+
+        # ─── migration: ALTER TABLE لـ DBs القديمة ───
+        try:
+            await DB.execute(
+                "ALTER TABLE managed_bots "
+                "ADD COLUMN respond_in_groups INTEGER DEFAULT 0"
+            )
+            logger.info(
+                "✅ managed_bots: أُضيف عمود respond_in_groups (migration)"
+            )
+        except Exception as _mig_e:
+            _mig_err = str(_mig_e).lower()
+            if ("duplicate" in _mig_err
+                    or "already exists" in _mig_err
+                    or "duplicate column" in _mig_err):
+                # طبيعي: العمود موجود (تثبيت جديد أو migration سابق)
+                pass
+            else:
+                logger.warning(
+                    "⚠️ ALTER TABLE managed_bots ADD respond_in_groups: %s",
+                    _mig_e,
+                )
+
+        # ─── managed_bot_users (بدون تغيير) ───
         await DB.execute("""
             CREATE TABLE IF NOT EXISTS managed_bot_users (
                 bot_id INTEGER,
@@ -136,6 +229,8 @@ async def _ensure_tables():
                 PRIMARY KEY (bot_id, user_id)
             )
         """)
+
+        # ─── managed_bot_keywords (بدون تغيير بنيوي — القيمة قد تكون JSON) ───
         await DB.execute("""
             CREATE TABLE IF NOT EXISTS managed_bot_keywords (
                 bot_id INTEGER NOT NULL,
@@ -145,6 +240,8 @@ async def _ensure_tables():
                 PRIMARY KEY (bot_id, keyword)
             )
         """)
+
+        # ─── managed_bot_keyword_replied (بدون تغيير) ───
         await DB.execute("""
             CREATE TABLE IF NOT EXISTS managed_bot_keyword_replied (
                 bot_id INTEGER NOT NULL,
@@ -154,10 +251,13 @@ async def _ensure_tables():
                 PRIMARY KEY (bot_id, user_id, keyword)
             )
         """)
+
         _tables_created = True
         logger.info(
             "✅ managed_bots: تم التأكد من إنشاء 4 جداول في DB "
-            "(bots, users, keywords, keyword_replied)"
+            "(bots, users, keywords, keyword_replied) | "
+            "respond_in_groups=✅ | "
+            "split_replies=✅(JSON-in-text)"
         )
     except Exception as e:
         logger.error(
@@ -166,10 +266,13 @@ async def _ensure_tables():
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# 4. البوتات
+# 5. البوتات
 # ═══════════════════════════════════════════════════════════════════════════
 
 async def load_managed_bots() -> Dict[int, Dict[str, Any]]:
+    """
+    🆕 v5.7.10: يقرأ `respond_in_groups` أيضاً.
+    """
     await _ensure_tables()
     result: Dict[int, Dict[str, Any]] = {}
     try:
@@ -177,6 +280,12 @@ async def load_managed_bots() -> Dict[int, Dict[str, Any]]:
         for r in rows:
             rd = dict(r) if not isinstance(r, dict) else r
             bid = int(rd.get("bot_id"))
+            # 🆕 v5.7.10: قراءة respond_in_groups بأمان
+            _rig_raw = rd.get("respond_in_groups", 0)
+            try:
+                _rig_val = bool(int(_rig_raw)) if _rig_raw is not None else False
+            except (TypeError, ValueError):
+                _rig_val = bool(_rig_raw)
             result[bid] = {
                 "token": str(rd.get("token")),
                 "name": str(rd.get("name") or ""),
@@ -187,6 +296,7 @@ async def load_managed_bots() -> Dict[int, Dict[str, Any]]:
                     "fourth": str(rd.get("msg_fourth") or _FALLBACK_MESSAGES["fourth"]),
                 },
                 "added_at": str(rd.get("added_at") or ""),
+                "respond_in_groups": _rig_val,   # 🆕 v5.7.10
             }
     except Exception as e:
         logger.error("❌ load_managed_bots: %s", e)
@@ -194,6 +304,9 @@ async def load_managed_bots() -> Dict[int, Dict[str, Any]]:
 
 
 async def save_managed_bots(bots: Dict[int, Dict[str, Any]]) -> bool:
+    """
+    🆕 v5.7.10: يحفظ `respond_in_groups` أيضاً.
+    """
     await _ensure_tables()
     try:
         async with get_lock():
@@ -202,16 +315,19 @@ async def save_managed_bots(bots: Dict[int, Dict[str, Any]]) -> bool:
                 if not isinstance(info, dict) or "token" not in info:
                     continue
                 msgs = info.get("messages") or get_default_messages()
+                # 🆕 v5.7.10: حفظ respond_in_groups كـ 0/1
+                _rig = 1 if info.get("respond_in_groups", False) else 0
                 await DB.execute(
                     """INSERT INTO managed_bots 
                        (bot_id, token, name, msg_start, msg_reply, 
-                        msg_third, msg_fourth, added_at) 
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                        msg_third, msg_fourth, added_at, respond_in_groups) 
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (
                         int(bid), info["token"], info.get("name", ""),
                         msgs["start"], msgs["reply"],
                         msgs["third"], msgs["fourth"],
-                        info.get("added_at", "")
+                        info.get("added_at", ""),
+                        _rig,   # 🆕 v5.7.10
                     )
                 )
         return True
@@ -221,7 +337,7 @@ async def save_managed_bots(bots: Dict[int, Dict[str, Any]]) -> bool:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# 5. المستخدمون
+# 6. المستخدمون
 # ═══════════════════════════════════════════════════════════════════════════
 
 async def load_managed_state() -> Dict[int, Dict[int, Dict[str, bool]]]:
@@ -246,27 +362,14 @@ async def load_managed_state() -> Dict[int, Dict[int, Dict[str, bool]]]:
     return result
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-# 🆕 v5.7.9 FIX-CHURN-1: تحديث صف واحد فقط (بدل UPSERT كل الجداول)
-# ═══════════════════════════════════════════════════════════════════════════
-
 async def update_managed_user_state(
     bid: int, user_id: int, user_state: Dict[str, bool],
 ) -> bool:
     """
-    🆕 v5.7.9 FIX-CHURN-1: تحديث/إدراج صف مستخدم واحد فقط.
+    v5.7.9 FIX-CHURN-1: تحديث/إدراج صف مستخدم واحد فقط.
 
     بدل `save_managed_state()` التي تُنفّذ ~1,040 UPSERT لكل رسالة،
     هذه الدالة تُنفّذ UPSERT واحدة فقط → تقليل churn بـ 1000×.
-
-    الاستخدام:
-        await update_managed_user_state(bid, user_id, {
-            "start": True, "reply": False, "third": False, "fourth": False
-        })
-
-    Returns:
-        True: نجح التحديث
-        False: خطأ في DB
     """
     await _ensure_tables()
     try:
@@ -355,12 +458,44 @@ async def save_managed_state(
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# 6. الكلمات المفتاحية
+# 7. الكلمات المفتاحية
 # ═══════════════════════════════════════════════════════════════════════════
 
-async def load_managed_keywords(bid: int) -> Dict[str, str]:
+async def _load_raw_keyword(
+    bid: int, keyword: str,
+) -> Optional[Any]:
+    """
+    🆕 v5.7.10: يقرأ قيمة reply الخام لكلمة واحدة (JSON أو str).
+    Returns: dict / str / None
+    """
     await _ensure_tables()
-    result: Dict[str, str] = {}
+    try:
+        row = await DB.fetchone(
+            "SELECT reply FROM managed_bot_keywords "
+            "WHERE bot_id = ? AND keyword = ?",
+            (int(bid), keyword),
+        )
+        if row is None:
+            return None
+        rd = dict(row) if not isinstance(row, dict) else row
+        return _parse_keyword_reply(rd.get("reply"))
+    except Exception as e:
+        logger.error("_load_raw_keyword(#%s): %s", bid, e)
+        return None
+
+
+async def load_managed_keywords(bid: int) -> Dict[str, Any]:
+    """
+    🆕 v5.7.10: يعيد dict بقيم قد تكون str (قديم) أو dict (جديد).
+
+    القيم:
+        • str  → كلمة قديمة (private=group=نفس النص)
+        • dict → {"private_reply": ..., "group_reply": ...}
+
+    المستهلك (`_normalize_keyword_entry` في public.py) يتعامل مع الاثنين.
+    """
+    await _ensure_tables()
+    result: Dict[str, Any] = {}
     try:
         rows = await DB.fetchall(
             "SELECT keyword, reply FROM managed_bot_keywords "
@@ -370,17 +505,23 @@ async def load_managed_keywords(bid: int) -> Dict[str, str]:
         for r in rows:
             rd = dict(r) if not isinstance(r, dict) else r
             kw = (rd.get("keyword") or "").strip()
-            rp = (rd.get("reply") or "").strip()
-            if kw and rp:
-                result[kw] = rp
+            if not kw:
+                continue
+            parsed = _parse_keyword_reply(rd.get("reply"))
+            if parsed is None:
+                continue
+            result[kw] = parsed
     except Exception as e:
         logger.error("❌ load_managed_keywords(#%s): %s", bid, e)
     return result
 
 
-async def load_all_keywords() -> Dict[int, Dict[str, str]]:
+async def load_all_keywords() -> Dict[int, Dict[str, Any]]:
+    """
+    🆕 v5.7.10: يقرأ JSON + str لكل البوتات.
+    """
     await _ensure_tables()
-    result: Dict[int, Dict[str, str]] = {}
+    result: Dict[int, Dict[str, Any]] = {}
     try:
         rows = await DB.fetchall(
             "SELECT bot_id, keyword, reply FROM managed_bot_keywords"
@@ -389,17 +530,27 @@ async def load_all_keywords() -> Dict[int, Dict[str, str]]:
             rd = dict(r) if not isinstance(r, dict) else r
             bid = int(rd.get("bot_id"))
             kw = (rd.get("keyword") or "").strip()
-            rp = (rd.get("reply") or "").strip()
-            if kw and rp:
-                result.setdefault(bid, {})[kw] = rp
+            if not kw:
+                continue
+            parsed = _parse_keyword_reply(rd.get("reply"))
+            if parsed is None:
+                continue
+            result.setdefault(bid, {})[kw] = parsed
     except Exception as e:
         logger.error("❌ load_all_keywords: %s", e)
     return result
 
 
 async def save_managed_keywords(
-    bid: int, keywords: Dict[str, str],
+    bid: int, keywords: Dict[str, Any],
 ) -> bool:
+    """
+    🆕 v5.7.10: يحفظ كلمات متعددة (bulk) بشكل JSON.
+
+    القيم:
+        • dict → private_reply + group_reply (JSON)
+        • str  → يُحفظ كما هو (توافق رجعي)
+    """
     await _ensure_tables()
     try:
         async with get_lock():
@@ -408,16 +559,27 @@ async def save_managed_keywords(
                 (int(bid),)
             )
             now = datetime.now(timezone.utc)
-            for kw, rp in keywords.items():
+            for kw, entry in keywords.items():
                 kw_clean = (kw or "").strip()
-                rp_clean = (rp or "").strip()
-                if not kw_clean or not rp_clean:
+                if not kw_clean:
                     continue
+
+                if isinstance(entry, dict):
+                    norm = _normalize_keyword_entry(entry)
+                    if not norm["private_reply"] and not norm["group_reply"]:
+                        continue
+                    payload = json.dumps(norm, ensure_ascii=False)
+                else:
+                    rp_clean = (entry or "").strip() if isinstance(entry, str) else ""
+                    if not rp_clean:
+                        continue
+                    payload = rp_clean
+
                 await DB.execute(
                     """INSERT INTO managed_bot_keywords 
                        (bot_id, keyword, reply, created_at) 
                        VALUES (?, ?, ?, ?)""",
-                    (int(bid), kw_clean, rp_clean, now)
+                    (int(bid), kw_clean, payload, now)
                 )
         return True
     except Exception as e:
@@ -428,13 +590,52 @@ async def save_managed_keywords(
 
 
 async def add_managed_keyword(
-    bid: int, keyword: str, reply: str,
+    bid: int,
+    keyword: str,
+    reply: Optional[str] = None,
+    *,
+    private_reply: Optional[str] = None,
+    group_reply: Optional[str] = None,
 ) -> bool:
+    """
+    🆕 v5.7.10: إضافة/تحديث كلمة مفتاحية.
+
+    أوضاع الاستدعاء:
+        # 1. قديم (توافق رجعي):
+        add_managed_keyword(bid, "اليمن", "نص")
+        → private=group="نص"
+
+        # 2. جديد:
+        add_managed_keyword(bid, "اليمن",
+                            private_reply="رد خاص",
+                            group_reply="رد مجموعات")
+        → JSON {"private_reply": ..., "group_reply": ...}
+    """
     await _ensure_tables()
     kw_clean = (keyword or "").strip()
-    rp_clean = (reply or "").strip()
-    if not kw_clean or not rp_clean:
+    if not kw_clean:
         return False
+
+    # تحديد الشكل
+    if private_reply is not None or group_reply is not None:
+        # الشكل الجديد (dict)
+        norm = {
+            "private_reply": str(private_reply or ""),
+            "group_reply":   str(group_reply   or ""),
+        }
+        if not norm["private_reply"] and not norm["group_reply"]:
+            return False
+        payload = json.dumps(norm, ensure_ascii=False)
+    elif reply is not None:
+        # الشكل القديم (str)
+        rp_clean = (reply or "").strip()
+        if not rp_clean:
+            return False
+        payload = rp_clean
+    else:
+        # لا شيء → رفض
+        return False
+
     try:
         async with get_lock():
             now = datetime.now(timezone.utc)
@@ -445,12 +646,67 @@ async def add_managed_keyword(
                    ON CONFLICT (bot_id, keyword) DO UPDATE SET
                    reply = EXCLUDED.reply,
                    created_at = EXCLUDED.created_at""",
-                (int(bid), kw_clean, rp_clean, now)
+                (int(bid), kw_clean, payload, now)
             )
         return True
     except Exception as e:
         logger.error(
             "❌ add_managed_keyword(#%s, %r): %s",
+            bid, kw_clean[:30], e, exc_info=True
+        )
+        return False
+
+
+async def update_managed_keyword_reply(
+    bid: int,
+    keyword: str,
+    private_reply: Optional[str] = None,
+    group_reply: Optional[str] = None,
+) -> bool:
+    """
+    🆕 v5.7.10: تحديث جزئي — None = لا تغيير.
+
+    مثال (تحديث رد المجموعات فقط):
+        update_managed_keyword_reply(bid, "اليمن", group_reply="جديد")
+    """
+    kw_clean = (keyword or "").strip()
+    if not kw_clean:
+        return False
+    if private_reply is None and group_reply is None:
+        return False
+
+    await _ensure_tables()
+    try:
+        current = await _load_raw_keyword(bid, kw_clean)
+        if current is None:
+            return False
+
+        norm = _normalize_keyword_entry(current)
+        if private_reply is not None:
+            norm["private_reply"] = str(private_reply)
+        if group_reply is not None:
+            norm["group_reply"] = str(group_reply)
+
+        if not norm["private_reply"] and not norm["group_reply"]:
+            return False
+
+        payload = json.dumps(norm, ensure_ascii=False)
+
+        async with get_lock():
+            now = datetime.now(timezone.utc)
+            await DB.execute(
+                """INSERT INTO managed_bot_keywords 
+                   (bot_id, keyword, reply, created_at) 
+                   VALUES (?, ?, ?, ?)
+                   ON CONFLICT (bot_id, keyword) DO UPDATE SET
+                   reply = EXCLUDED.reply,
+                   created_at = EXCLUDED.created_at""",
+                (int(bid), kw_clean, payload, now)
+            )
+        return True
+    except Exception as e:
+        logger.error(
+            "❌ update_managed_keyword_reply(#%s, %r): %s",
             bid, kw_clean[:30], e, exc_info=True
         )
         return False
@@ -513,12 +769,16 @@ async def get_keyword_count(bid: int) -> int:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# 7. تتبع الردود (منع التكرار)
+# 8. تتبع الردود (منع التكرار — للخاص فقط)
 # ═══════════════════════════════════════════════════════════════════════════
 
 async def is_keyword_already_replied(
     bid: int, user_id: int, keyword: str,
 ) -> bool:
+    """
+    ⚠️ يُستدعى فقط في الخاص (chat.type == "private").
+    في المجموعات (v5.7.18+): لا يُفحص — يرد كل مرة.
+    """
     await _ensure_tables()
     kw_clean = (keyword or "").strip()
     if not kw_clean:
@@ -538,6 +798,9 @@ async def is_keyword_already_replied(
 async def mark_keyword_as_replied(
     bid: int, user_id: int, keyword: str,
 ) -> bool:
+    """
+    ⚠️ يُستدعى فقط في الخاص (chat.type == "private").
+    """
     await _ensure_tables()
     kw_clean = (keyword or "").strip()
     if not kw_clean:
@@ -558,7 +821,7 @@ async def mark_keyword_as_replied(
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# 8. أدوات
+# 9. أدوات
 # ═══════════════════════════════════════════════════════════════════════════
 
 def next_managed_bot_id(existing: Dict[int, Any]) -> int:
@@ -601,7 +864,7 @@ def health_check() -> Dict[str, Any]:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# 9. __all__
+# 10. __all__
 # ═══════════════════════════════════════════════════════════════════════════
 
 __all__ = [
@@ -611,12 +874,12 @@ __all__ = [
     "save_managed_bots",
     "load_managed_state",
     "save_managed_state",
-    # 🆕 v5.7.9
     "update_managed_user_state",
     "load_managed_keywords",
     "load_all_keywords",
     "save_managed_keywords",
     "add_managed_keyword",
+    "update_managed_keyword_reply",   # 🆕 v5.7.10
     "delete_managed_keyword",
     "delete_all_keywords_for_bot",
     "get_keyword_count",
@@ -627,14 +890,19 @@ __all__ = [
     "get_stats",
     "health_check",
     "ReentrantLock",
+    "_normalize_keyword_entry",       # 🆕 v5.7.10
 ]
 
 
 try:
     logger.debug(
-        "🛡️ managed_bots_storage v5.7.9 (TARGETED-UPDATE-FIX) loaded | "
-        "tables=bots,users,keywords,keyword_replied | lock=reentrant | "
-        "churn_fix=update_managed_user_state"
+        "🛡️ managed_bots_storage v5.7.10 "
+        "(SPLIT-REPLIES + GROUPS-TOGGLE) loaded | "
+        "tables=bots,users,keywords,keyword_replied | "
+        "lock=reentrant | "
+        "churn_fix=update_managed_user_state | "
+        "split_replies=JSON-in-text(backward_compat) | "
+        "respond_in_groups=INTEGER(0/1, auto_migrated)"
     )
 except Exception:
     pass
