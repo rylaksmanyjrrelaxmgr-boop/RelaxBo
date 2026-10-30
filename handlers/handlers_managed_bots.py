@@ -1,26 +1,15 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-handlers/handlers_managed_bots.py — لوحة إدارة (v5.8.0 - HOT-TOGGLE)
+handlers/handlers_managed_bots.py — لوحة إدارة (v5.8.1 - PRIVATE-TOGGLE)
 =================================================================================
-🆕 v5.8.0 (HOT-TOGGLE):
-    🟢 FEATURE-HOT-TOGGLE: زر 📢 يقلب الحالة فوراً بدون restart.
+🆕 v5.8.1 (PRIVATE-TOGGLE):
+    🟢 FEATURE-PRIVATE-TOGGLE: زر 💬 للتحكم بالردود في الخاص (hot-toggle).
+    • يستدعي `set_respond_in_private` (بدون restart).
+    • تناظر كامل مع زر 📢.
 
-    الفرق عن v5.7.9:
-        • v5.7.9: الزر يستدعي stop_one + start_one → البوت يتوقف 2-5s
-          (حتى الخاص يتوقف).
-        • v5.8.0: الزر يحدّث bot_data في الذاكرة فقط → لا restart،
-          الخاص لم يتوقف إطلاقاً.
-
-    الآلية:
-        1. اقلب respond_in_groups في storage
-        2. استدعِ set_respond_in_groups(bid, new) من runner
-        3. أعد رسم اللوحة
-        → لا stop، لا start.
-
-✅ محفوظ من v5.7.9: SPLIT-REPLIES (لوحة الكلمات 3 خطوات).
-✅ محفوظ من v5.7.8: GROUPS-TOGGLE (الزر موجود).
-✅ محفوظ من v5.7.7: KEYWORDS-UI.
+✅ محفوظ من v5.8.0: HOT-TOGGLE (groups).
+✅ محفوظ من v5.7.9: SPLIT-REPLIES.
 =================================================================================
 """
 
@@ -49,7 +38,8 @@ from config import CONFIG
 from managed_bots_runner import (
     is_running,
     reload_messages,
-    set_respond_in_groups,   # 🆕 v5.8.0
+    set_respond_in_groups,
+    set_respond_in_private,   # 🆕 v5.8.1
     start_one,
     stop_one,
 )
@@ -73,10 +63,6 @@ from managed_bots_storage import (
 logger = logging.getLogger(__name__)
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-# 1. ثوابت
-# ═══════════════════════════════════════════════════════════════════════════
-
 _FIELD_LABEL: Dict[str, str] = {
     "start":  "1️⃣ /start",
     "reply":  "2️⃣ أول نص",
@@ -98,10 +84,6 @@ _START_TIMEOUT_SEC = 30.0
 
 _SKIP_TOKEN = "/skip"
 
-
-# ═══════════════════════════════════════════════════════════════════════════
-# 2. أدوات
-# ═══════════════════════════════════════════════════════════════════════════
 
 def _is_admin(user_id: Optional[int]) -> bool:
     if not user_id:
@@ -211,7 +193,7 @@ async def _verify_token_via_api(raw_token: str) -> Optional[str]:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# 3. بناء اللوحات
+# بناء اللوحات
 # ═══════════════════════════════════════════════════════════════════════════
 
 def _build_panel(bots, state) -> tuple:
@@ -242,8 +224,10 @@ def _build_panel(bots, state) -> tuple:
         uname = info.get("name") or "?"
         n_users = len(state.get(bid, {}))
         groups = "📢" if info.get("respond_in_groups", False) else ""
+        # 🆕 private indicator (يبقى فارغاً افتراضياً لأنه مفعّل)
+        private_off = "" if info.get("respond_in_private", True) else "💬"
         rows.append([InlineKeyboardButton(
-            f"{alive} #{bid} @{uname} — {n_users}👤 {groups}",
+            f"{alive} #{bid} @{uname} — {n_users}👤 {groups}{private_off}",
             callback_data=f"mb_bot:{bid}",
         )])
 
@@ -277,6 +261,10 @@ def _build_bot_detail(
     groups_on = bool(info.get("respond_in_groups", False))
     groups_status = "🟢 مفعّل" if groups_on else "🔴 معطّل"
 
+    # 🆕 v5.8.1
+    private_on = bool(info.get("respond_in_private", True))
+    private_status = "🟢 مفعّل" if private_on else "🔴 معطّل"
+
     text = (
         f"📋 <b>بوت #{bid} — @{uname}</b>\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
@@ -285,6 +273,7 @@ def _build_bot_detail(
         f"✅ أكملوا: <b>{n_completed}</b>\n"
         f"🔑 الكلمات المفتاحية: <b>{n_keywords}</b>\n"
         f"📢 الردود في المجموعات: {groups_status}\n"
+        f"💬 الردود في الخاص: {private_status}\n"
         f"📅 أُضيف: <code>{added}</code>\n\n"
         "📝 <b>الرسائل:</b>\n"
         f"1️⃣ <code>{_short(msgs.get('start',  ''), 60)}</code>\n"
@@ -304,6 +293,12 @@ def _build_bot_detail(
         callback_data=f"mb_toggle_groups:{bid}",
     )
 
+    # 🆕 v5.8.1
+    private_toggle = InlineKeyboardButton(
+        f"💬 الردود في الخاص: {'🟢' if private_on else '🔴'}",
+        callback_data=f"mb_toggle_private:{bid}",
+    )
+
     rows = [
         [toggle,
          InlineKeyboardButton("✏️ رسالة 1", callback_data=f"mb_set:{bid}:start")],
@@ -315,6 +310,7 @@ def _build_bot_detail(
             callback_data=f"mb_kw:{bid}",
         )],
         [groups_toggle],
+        [private_toggle],   # 🆕
         [InlineKeyboardButton("🗑️ حذف البوت", callback_data=f"mb_del:{bid}")],
         [InlineKeyboardButton("🔙 رجوع", callback_data="mb_panel")],
     ]
@@ -385,7 +381,7 @@ def _build_keyword_panel(
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# 4. Callbacks
+# Callbacks
 # ═══════════════════════════════════════════════════════════════════════════
 
 async def _cb_panel(update, context) -> None:
@@ -480,7 +476,6 @@ async def _cb_set(update, context) -> None:
 
 
 async def _cb_toggle(update, context) -> None:
-    """⏹️/▶️ إيقاف/تشغيل كامل — يُوقف الخاص والمجموعات."""
     query = update.callback_query
     await query.answer()
     if not _is_admin(query.from_user.id):
@@ -527,21 +522,8 @@ async def _cb_toggle(update, context) -> None:
         logger.error("_cb_toggle: %s", e, exc_info=True)
 
 
-# ═══ 🆕 v5.8.0: HOT-TOGGLE — بدون restart ═══
-
 async def _cb_toggle_groups(update, context) -> None:
-    """
-    🆕 v5.8.0: تفعيل/تعطيل الردود في المجموعات — بدون إعادة تشغيل.
-
-    الآلية:
-        1. اقلب respond_in_groups في storage (للبقاء بعد restart)
-        2. حدّث bot_data في الذاكرة فوراً (hot-toggle)
-        3. أعد رسم اللوحة
-
-    ✅ الخاص لم يتوقف إطلاقاً — لا stop_one، لا start_one.
-    ✅ التغيير فوري (instant).
-    ✅ البقاء بعد restart السيرفر: نعم (من storage).
-    """
+    """v5.8.0: hot-toggle للمجموعات."""
     query = update.callback_query
     await query.answer()
     if not _is_admin(query.from_user.id):
@@ -552,7 +534,6 @@ async def _cb_toggle_groups(update, context) -> None:
     bid = int(m.group(1))
 
     try:
-        # 1. اقلب في storage
         async with get_lock():
             bots = await load_managed_bots()
             info = bots.get(bid)
@@ -564,7 +545,6 @@ async def _cb_toggle_groups(update, context) -> None:
             info["respond_in_groups"] = new_state
             await save_managed_bots(bots)
 
-        # 2. 🆕 hot-toggle في الذاكرة — بدون restart
         hot_ok = await set_respond_in_groups(bid, new_state)
 
         logger.info(
@@ -573,7 +553,6 @@ async def _cb_toggle_groups(update, context) -> None:
             bid, new_state, hot_ok,
         )
 
-        # 3. أعد رسم اللوحة
         state = await load_managed_state()
         n_kw = await get_keyword_count(bid)
         text, kb = _build_bot_detail(bid, info, state.get(bid, {}), n_kw)
@@ -587,8 +566,6 @@ async def _cb_toggle_groups(update, context) -> None:
                 "1. عطّل Privacy من @BotFather لهذا البوت\n"
                 "   (<code>/setprivacy</code> → Disable)\n"
                 "2. أو ارفعه <b>مشرفاً</b> في كل مجموعة\n\n"
-                "📌 في المجموعات: يرد <b>كل مرة</b> تُذكر الكلمة.\n"
-                "📌 في الخاص: يرد <b>مرة واحدة</b> لكل مستخدم/كلمة.\n\n"
             )
         else:
             prefix = (
@@ -598,9 +575,7 @@ async def _cb_toggle_groups(update, context) -> None:
             )
 
         if not hot_ok:
-            prefix += (
-                "⚠️ البوت غير مشغّل الآن — الحالة ستُطبَّق عند تشغيله.\n\n"
-            )
+            prefix += "⚠️ البوت غير مشغّل — ستُطبَّق عند تشغيله.\n\n"
 
         await _safe_edit(query, prefix + text, kb)
 
@@ -608,7 +583,64 @@ async def _cb_toggle_groups(update, context) -> None:
         logger.error("_cb_toggle_groups: %s", e, exc_info=True)
 
 
-# ═══ لوحة الكلمات ═══
+# 🆕 v5.8.1
+async def _cb_toggle_private(update, context) -> None:
+    """v5.8.1: hot-toggle للخاص (تناظر مع 📢)."""
+    query = update.callback_query
+    await query.answer()
+    if not _is_admin(query.from_user.id):
+        return
+    m = re.match(r"^mb_toggle_private:(\d+)$", query.data or "")
+    if not m:
+        return
+    bid = int(m.group(1))
+
+    try:
+        async with get_lock():
+            bots = await load_managed_bots()
+            info = bots.get(bid)
+            if info is None:
+                await _safe_edit(query, "⚠️ البوت غير موجود.", _kb_back())
+                return
+            current = bool(info.get("respond_in_private", True))
+            new_state = not current
+            info["respond_in_private"] = new_state
+            await save_managed_bots(bots)
+
+        hot_ok = await set_respond_in_private(bid, new_state)
+
+        logger.info(
+            "🎛️ mb_toggle_private: bot #%d → respond_in_private=%s "
+            "(storage_saved=True, hot_applied=%s)",
+            bid, new_state, hot_ok,
+        )
+
+        state = await load_managed_state()
+        n_kw = await get_keyword_count(bid)
+        text, kb = _build_bot_detail(bid, info, state.get(bid, {}), n_kw)
+
+        if new_state:
+            prefix = (
+                "🟢 <b>فُعّلت الردود في الخاص.</b>\n\n"
+                "✅ التغيير فوري — لا إعادة تشغيل.\n"
+                "📌 /start + الكلمات المفتاحية + التسلسل: تعمل الآن.\n\n"
+            )
+        else:
+            prefix = (
+                "🔴 <b>أُوقفت الردود في الخاص.</b>\n\n"
+                "✅ التغيير فوري — لا إعادة تشغيل.\n"
+                "📌 المجموعات لم تتأثر — تعمل كما هي.\n"
+                "📌 في الخاص: /start + الكلمات + التسلسل: متوقفة.\n\n"
+            )
+
+        if not hot_ok:
+            prefix += "⚠️ البوت غير مشغّل — ستُطبَّق عند تشغيله.\n\n"
+
+        await _safe_edit(query, prefix + text, kb)
+
+    except Exception as e:
+        logger.error("_cb_toggle_private: %s", e, exc_info=True)
+
 
 async def _cb_kw_panel(update, context) -> None:
     query = update.callback_query
@@ -667,8 +699,7 @@ async def _cb_kw_edit_private(update, context) -> None:
         keywords = await load_managed_keywords(bid)
         sorted_kws = sorted(keywords.items())
         if not (0 <= idx < len(sorted_kws)):
-            await _safe_edit(query, "⚠️ الكلمة غير موجودة.",
-                             _kb_back())
+            await _safe_edit(query, "⚠️ الكلمة غير موجودة.", _kb_back())
             return
         kw, entry = sorted_kws[idx]
         norm = _normalize_keyword_entry(entry)
@@ -708,8 +739,7 @@ async def _cb_kw_edit_group(update, context) -> None:
         keywords = await load_managed_keywords(bid)
         sorted_kws = sorted(keywords.items())
         if not (0 <= idx < len(sorted_kws)):
-            await _safe_edit(query, "⚠️ الكلمة غير موجودة.",
-                             _kb_back())
+            await _safe_edit(query, "⚠️ الكلمة غير موجودة.", _kb_back())
             return
         kw, entry = sorted_kws[idx]
         norm = _normalize_keyword_entry(entry)
@@ -780,8 +810,6 @@ async def _cb_kw_del(update, context) -> None:
     except Exception as e:
         logger.error("_cb_kw_del: %s", e, exc_info=True)
 
-
-# ═══ حذف البوت ═══
 
 async def _cb_del_confirm(update, context) -> None:
     query = update.callback_query
@@ -865,7 +893,7 @@ async def _cb_del_do(update, context) -> None:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# 5. معالج النص المعلّق
+# معالج النص المعلّق
 # ═══════════════════════════════════════════════════════════════════════════
 
 async def _handle_pending_text(update, context) -> None:
@@ -974,6 +1002,7 @@ async def _process_addbot(update, context, raw: str) -> None:
                 "messages": get_default_messages(),
                 "added_at": _now_iso(),
                 "respond_in_groups": False,
+                "respond_in_private": True,  # 🆕 افتراضي مفعّل
             }
             await save_managed_bots(bots)
     except Exception as e:
@@ -1066,8 +1095,6 @@ async def _process_set(update, context, pending, raw: str) -> None:
     except Exception:
         pass
 
-
-# ═══ إضافة كلمة (3 خطوات) ═══
 
 async def _process_kw_keyword(update, context, pending, raw: str) -> None:
     bid = int(pending.get("bid", 0))
@@ -1323,7 +1350,7 @@ async def _process_kw_edit_group(update, context, pending, raw: str) -> None:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# 6. التسجيل
+# التسجيل
 # ═══════════════════════════════════════════════════════════════════════════
 
 def register_managed_bots_handlers(app: Application) -> None:
@@ -1339,6 +1366,7 @@ def register_managed_bots_handlers(app: Application) -> None:
         (r"^mb_kw_add:\d+$", _cb_kw_add),
         (r"^mb_kw_del:\d+:\d+$", _cb_kw_del),
         (r"^mb_toggle_groups:\d+$", _cb_toggle_groups),
+        (r"^mb_toggle_private:\d+$", _cb_toggle_private),   # 🆕 v5.8.1
         (r"^mb_kw_pe:\d+:\d+$", _cb_kw_edit_private),
         (r"^mb_kw_ge:\d+:\d+$", _cb_kw_edit_group),
     ]
@@ -1358,8 +1386,8 @@ def register_managed_bots_handlers(app: Application) -> None:
     )
 
     logger.info(
-        "✅ managed_bots v5.8.0: %d callbacks + 1 text handler | "
-        "keywords=splitted | groups-toggle=hot(no_restart)",
+        "✅ managed_bots v5.8.1: %d callbacks + 1 text handler | "
+        "keywords=splitted | groups-toggle=hot | private-toggle=hot",
         len(handlers),
     )
 
@@ -1369,7 +1397,7 @@ __all__ = ["register_managed_bots_handlers"]
 
 try:
     logger.debug(
-        "🛡️ handlers_managed_bots v5.8.0 (HOT-TOGGLE) loaded"
+        "🛡️ handlers_managed_bots v5.8.1 (PRIVATE-TOGGLE) loaded"
     )
 except Exception:
     pass
