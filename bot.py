@@ -1,32 +1,36 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-🌿 Relax Manager – البوت الرئيسي (bot.py v5.7.20-HTML-CHUNKING-FIX)
+🌿 Relax Manager – البوت الرئيسي (bot.py v5.7.21-EARLY-HEALTH-BG-MANAGED-BOTS)
 ================================================================================
-🆕 v5.7.20 (فوق v5.7.19):
-    🟢 FIX-HTML-CHUNKING: `_send_long_text` يقسم النص الطويل بأمان:
-        • يقسم عند حدود الفقرات (\n\n) → الأسطر (\n) → المسافات.
-        • يتحقق من توازن وسوم HTML (<b>, <i>, <code>) في كل chunk.
-        • يُغلق أي tags مفتوحة في نهاية chunk ويعيد فتحها في التالي.
-        • Fallback إلى نص عادي عند فشل HTML.
+🆕 v5.7.21 (فوق v5.7.20):
+    🚀 EARLY-HEALTH-SERVER: فتح منفذ Render فوراً بعد signal handlers
+       (مع retry لمدة 10s لتفادي race مع _force_kill_previous_instance).
+       القضاء على "No open ports detected" نهائياً.
+    🛡️ SAFE-CATCHALL: في وضع البوت، POST `/{TOKEN}` يُرَدّ 503 قبل
+       الجاهزية (Telegram يعيد الإرسال) ثم يُفوَّض لـ webhook_handler.
+       منع فقدان updates أثناء الإقلاع.
+    ⚡ BG-MANAGED-BOTS: `start_all_managed_bots` في background task
+       بدل الحجب ~15s. Webhook يفتح فوراً.
+    ⚡ BG-COMMANDS: `delete_my_commands` + `set_my_commands` (عام/مجموعة/
+       لكل أدمن) في background task. مع الحفاظ على `admin_ids` blocking
+       لأنها مستخدمة في `filters.User(...)`.
+    🔗 REUSE-RUNNER: `_early_runner` يُعاد استخدامه لكامل عمر العملية
+       (health + webhook + polling mode). صفر نافذة انقطاع بين إغلاق/فتح.
+    ✅ محفوظ من v5.7.20:
+        - FIX-HTML-CHUNKING
+        - ADD-DB-ERRORS-CMD / ADD-DB-FULL-CHECK-CMD
+        - FIX-RESTART-EXITCODE
+        - FIX-PID / ADD-RESTART-CMD
+        - FIX-ADMIN-SAFE
+        - FIX-POST-STOP
 
-v5.7.19 — محفوظ:
-    🟢 ADD-DB-ERRORS-CMD: `/db_errors` — كشف أخطاء DB الشامل.
-    🟢 ADD-DB-FULL-CHECK-CMD: `/db_full_check` — تشخيص + أخطاء.
-    🟢 ADD-SEND-LONG-TEXT: helper لإرسال نصوص طويلة.
-
-v5.7.18 — محفوظ:
-    🟢 FIX-RESTART-EXITCODE: SystemExit(1) بعد SIGTERM.
-
-v5.7.17 — محفوظ:
-    🟢 FIX-PID: PID في `/tmp/.bot.pid`.
-    🟢 ADD-RESTART-CMD: `/restart` للأدمن.
-
-v5.7.16 — محفوظ:
-    🟢 FIX-ADMIN-SAFE: `_collect_admin_ids()` 3 محاولات.
-
-v5.7.15 — محفوظ:
-    🔴 FIX-POST-STOP: لا استدعاء يدوي لـ post_stop.
+v5.7.20 — محفوظ.
+v5.7.19 — محفوظ.
+v5.7.18 — محفوظ.
+v5.7.17 — محفوظ.
+v5.7.16 — محفوظ.
+v5.7.15 — محفوظ.
 ================================================================================
 """
 
@@ -455,6 +459,10 @@ from utils import (
     ErrorHandler, setup_webhook, safe_send,
     warmup_all, get_min_publish_interval,
 )
+
+# 🆕 v5.7.21: استيراد وحدة utils لاستخدام webhook_handler و _telegram_app
+import utils as _utils_module
+
 from cache import cache_cleanup_task, user_cache, invalidate_user_cache
 
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
@@ -468,6 +476,96 @@ for _noisy in ("httpx", "httpcore", "telegram.request", "telegram.ext.ExtBot", "
 logger = logging.getLogger("relax_bot")
 
 # ═══════════════════════════════════════════════════════════════════
+# 🆕 v5.7.21: EARLY-HEALTH state
+# ═══════════════════════════════════════════════════════════════════
+
+_boot_state: Dict[str, Any] = {
+    "app": None,           # يُعيَّن بعد app.start()
+    "webhook_ready": False, # يُعيَّن True بعد تسجيل الـ handlers
+    "port": None,           # يُعيَّن في main()
+}
+
+
+async def _early_catchall(request: web.Request) -> web.Response:
+    """
+    🆕 v5.7.21: معالج موحّد للخادم المبكر.
+    - GET: يرد 200 فوراً (فحص Render).
+    - POST /{TOKEN}: قبل الجاهزية → 503 (Telegram يعيد)، بعدها → webhook.
+    - POST آخر: 200 (defensive، Telegram لا يرسل لغير TOKEN).
+    """
+    if request.method != "POST":
+        return web.Response(text="OK", status=200)
+    try:
+        token_suffix = f"/{CONFIG.TOKEN}"
+    except Exception:
+        token_suffix = None
+    if token_suffix and request.path == token_suffix:
+        if _boot_state["webhook_ready"] and _boot_state["app"] is not None:
+            try:
+                return await _utils_module.webhook_handler(request)
+            except Exception as _e:
+                logger.error("❌ webhook_handler (via catchall): %s", _e, exc_info=True)
+                return web.Response(status=500, text="Internal Error")
+        logger.debug("boot: 503 for POST %s (webhook not ready)", request.path)
+        return web.Response(status=503, text="Booting")
+    return web.Response(text="OK", status=200)
+
+
+async def _start_early_health_server(port: int, max_attempts: int = 20):
+    """
+    🆕 v5.7.21: فتح المنفذ فوراً مع retry لتفادي race مع _force_kill_previous_instance.
+    Returns: (web_app, runner, site) أو (None, None, None) عند الفشل.
+    """
+    web_app = web.Application()
+    web_app.router.add_route('*', '/health', lambda r: web.Response(text="OK"))
+    web_app.router.add_get('/', lambda r: web.Response(text="🌿 Relax Manager"))
+    web_app.router.add_route('*', '/{tail:.*}', _early_catchall)
+
+    runner = None
+    for attempt in range(1, max_attempts + 1):
+        try:
+            runner = web.AppRunner(web_app)
+            await runner.setup()
+            site = web.TCPSite(runner, "0.0.0.0", port)
+            await site.start()
+            logger.info(
+                "🚀 EARLY-HEALTH: listening on :%d (attempt %d/%d) — "
+                "Render port locked BEFORE DB/init/handlers",
+                port, attempt, max_attempts)
+            try:
+                runner.site = site
+                runner.tcp_site = site
+            except Exception:
+                pass
+            return web_app, runner, site
+        except OSError as _e:
+            errno_ = getattr(_e, "errno", None)
+            msg = str(_e).lower()
+            if errno_ == 98 or "address already in use" in msg:
+                if runner is not None:
+                    try:
+                        await runner.cleanup()
+                    except Exception:
+                        pass
+                    runner = None
+                if attempt < max_attempts:
+                    logger.debug(
+                        "EARLY-HEALTH: port %d busy (attempt %d/%d) — retry",
+                        port, attempt, max_attempts)
+                    await asyncio.sleep(0.5)
+                    continue
+                logger.error(
+                    "❌ EARLY-HEALTH: فشل فتح المنفذ %d بعد %d محاولات — EADDRINUSE",
+                    port, max_attempts)
+                return None, None, None
+            raise
+        except Exception as _e:
+            logger.error("❌ EARLY-HEALTH: خطأ غير متوقع: %s", _e, exc_info=True)
+            return None, None, None
+    return None, None, None
+
+
+# ═══════════════════════════════════════════════════════════════════
 # PID / KILL-PREVIOUS
 # ═══════════════════════════════════════════════════════════════════
 _PID_FILE_PATH = "/tmp/.bot.pid"
@@ -478,12 +576,12 @@ _FALLBACK_HOSTNAME = (
     os.getenv("FALLBACK_HOSTNAME", "") or "relaxbo-78m4.onrender.com"
 ).strip()
 
-logger.info("🔧 v5.7.20 init: _FALLBACK_HOSTNAME=%r", _FALLBACK_HOSTNAME)
-logger.info("🔧 v5.7.20 init: RENDER_EXTERNAL_HOSTNAME=%r",
+logger.info("🔧 v5.7.21 init: _FALLBACK_HOSTNAME=%r", _FALLBACK_HOSTNAME)
+logger.info("🔧 v5.7.21 init: RENDER_EXTERNAL_HOSTNAME=%r",
             os.getenv("RENDER_EXTERNAL_HOSTNAME", ""))
-logger.info("🔧 v5.7.20 init: RENDER_EXTERNAL_URL=%r",
+logger.info("🔧 v5.7.21 init: RENDER_EXTERNAL_URL=%r",
             os.getenv("RENDER_EXTERNAL_URL", ""))
-logger.info("🔧 v5.7.20 init: ALLOW_POLLING=%r",
+logger.info("🔧 v5.7.21 init: ALLOW_POLLING=%r",
             os.getenv("ALLOW_POLLING", ""))
 
 def _read_pid_file() -> Optional[int]:
@@ -2035,17 +2133,13 @@ def _resolve_admin_guard(context) -> Set[int]:
         return set()
 
 # ═══════════════════════════════════════════════════════════════════
-# 🆕 v5.7.20: `_send_long_text` الآمن (يقسم عند حدود الكلمات ويحافظ على HTML)
+# v5.7.20: `_send_long_text` الآمن
 # ═══════════════════════════════════════════════════════════════════
 
 _HTML_TAG_RE = re.compile(r"</?([a-zA-Z][a-zA-Z0-9]*)[^>]*?(/?)>")
 
 
 def _safe_split_text(text: str, max_len: int) -> List[str]:
-    """
-    تقسيم آمن عند حدود الفقرات (\n\n) → الأسطر (\n) → الجمل → المسافات.
-    يضمن ألا يتجاوز أي جزء max_len.
-    """
     chunks: List[str] = []
     while len(text) > max_len:
         split_at = -1
@@ -2055,7 +2149,7 @@ def _safe_split_text(text: str, max_len: int) -> List[str]:
                 split_at = pos + len(sep)
                 break
         if split_at <= 0:
-            split_at = max_len  # قطع قسري إذا لم نجد فاصل
+            split_at = max_len
         chunks.append(text[:split_at].rstrip())
         text = text[split_at:].lstrip()
     if text:
@@ -2064,10 +2158,6 @@ def _safe_split_text(text: str, max_len: int) -> List[str]:
 
 
 def _balance_html_tags(chunk: str) -> Tuple[str, str]:
-    """
-    يُغلق أي tags HTML مفتوحة في نهاية chunk، ويُرجع:
-    - (chunk_مغلق_بأمان, tags_لإعادة_فتحها_في_التالي)
-    """
     stack: List[str] = []
     for m in _HTML_TAG_RE.finditer(chunk):
         is_close = m.group(0).startswith("</")
@@ -2086,14 +2176,6 @@ def _balance_html_tags(chunk: str) -> Tuple[str, str]:
 
 
 async def _send_long_text(msg, text: str, chunk_size: int = 4000) -> None:
-    """
-    إرسال نص طويل مقسّم بأمان (بدون كسر HTML أو كلمات).
-
-    🆕 v5.7.20 FIX-HTML-CHUNKING:
-    - يقسم عند حدود الفقرات/الأسطر/المسافات.
-    - يُغلق ويُعيد فتح وسوم HTML (b, i, code) عبر chunks.
-    - Fallback إلى نص عادي عند فشل HTML.
-    """
     if not text:
         try:
             await msg.reply_text("(لا توجد نتائج)")
@@ -2101,7 +2183,6 @@ async def _send_long_text(msg, text: str, chunk_size: int = 4000) -> None:
             pass
         return
 
-    # نص قصير — أرسل مباشرة
     if len(text) <= chunk_size:
         try:
             await msg.reply_text(text, parse_mode='HTML')
@@ -2113,11 +2194,10 @@ async def _send_long_text(msg, text: str, chunk_size: int = 4000) -> None:
                 pass
             return
 
-    # هامش 100 حرف للإغلاق الآمن
     raw_chunks = _safe_split_text(text, chunk_size - 100)
     total = len(raw_chunks)
 
-    carryover = ""  # tags يجب إعادة فتحها من chunk السابق
+    carryover = ""
     for i, raw in enumerate(raw_chunks, 1):
         full = carryover + raw
         balanced, carryover = _balance_html_tags(full)
@@ -2126,7 +2206,6 @@ async def _send_long_text(msg, text: str, chunk_size: int = 4000) -> None:
         try:
             await msg.reply_text(header + balanced, parse_mode='HTML')
         except Exception as _e:
-            # Fallback: نص عادي بدون وسوم
             logger.debug(f"_send_long_text chunk {i} HTML failed: {_e}")
             try:
                 plain = re.sub(r"<[^>]+>", "", header + balanced)
@@ -2347,6 +2426,13 @@ async def main():
     t_start = time.monotonic()
     _shutdown_event = asyncio.Event()
 
+    # 🆕 v5.7.21: مراجع للـ background tasks للتنظيف الآمن
+    _early_web_app = None
+    _early_runner = None
+    _early_site = None
+    _managed_bots_task: Optional[asyncio.Task] = None
+    _commands_task: Optional[asyncio.Task] = None
+
     def _on_shutdown_signal(sig_name: str):
         logger.info("🛑 تلقّيت %s", sig_name)
         _shutdown_event.set()
@@ -2365,6 +2451,23 @@ async def main():
                 pass
     except Exception:
         pass
+
+    # ═════════════════════════════════════════════════════════════════
+    # 🆕 v5.7.21: EARLY HEALTH SERVER — يُفتح فوراً لـ Render
+    # ═════════════════════════════════════════════════════════════════
+    _early_port = _resolve_port()
+    _boot_state["port"] = _early_port
+    try:
+        _early_web_app, _early_runner, _early_site = await _start_early_health_server(_early_port)
+        if _early_runner is None:
+            logger.error(
+                "❌ EARLY-HEALTH: فشل تماماً — متابعة بدون خادم مبكر. "
+                "Render قد يقتل الخدمة عند أول فحص صحة.")
+    except Exception as _eh_e:
+        logger.error("❌ EARLY-HEALTH init: %s", _eh_e, exc_info=True)
+        _early_web_app = None
+        _early_runner = None
+        _early_site = None
 
     logger.info("🔪 FORCE-KILL-PREVIOUS: بدء الفحص...")
     try:
@@ -2396,12 +2499,13 @@ async def main():
     logger.info("👨‍💼 المالك: %s", CONFIG.PRIMARY_OWNER_ID)
 
     logger.info(
-        "📦 bot.py: v5.7.20 | kill_prev=on | init_retry=on | webhook_force=on | "
+        "📦 bot.py: v5.7.21 | kill_prev=on | init_retry=on | webhook_force=on | "
         "webhook_verify=on | diag_incoming=%r | "
         "detectors=%s | layers=%d | fallback_hostname=%r | "
         "allow_polling_env=%r | alias_fix=on | cmds_reordered=on | "
         "post_stop_fix=on | admin_safe_retry=on(%dx,%.1fs) | admin_restart=on | "
-        "restart_exitcode=on | db_errors_cmd=on | html_chunking_fix=on",
+        "restart_exitcode=on | db_errors_cmd=on | html_chunking_fix=on | "
+        "early_health=on | bg_managed_bots=on | bg_commands=on | early_port=%d",
         _DIAG_INCOMING,
         _SPAM_DETECTOR_VERSION or "N/A",
         _SPAM_DETECTOR_LAYERS_COUNT,
@@ -2409,6 +2513,7 @@ async def main():
         os.getenv("ALLOW_POLLING", ""),
         _ADMIN_COLLECT_MAX_ATTEMPTS,
         _ADMIN_COLLECT_RETRY_DELAY_SEC,
+        _early_port,
     )
 
     if not _verify_command_handlers():
@@ -2463,7 +2568,7 @@ async def main():
     except Exception as e:
         logger.warning("⚠️ Warmup: %s", e)
 
-    port = _resolve_port()
+    port = _early_port
     hostname = _resolve_hostname()
 
     _allow_polling = os.getenv("ALLOW_POLLING", "0").strip() == "1"
@@ -2496,6 +2601,9 @@ async def main():
 
     app = _app_builder.build()
     app.bot_data['start_time'] = time.monotonic()
+
+    # 🆕 v5.7.21: اربط app في _boot_state للـ catchall
+    _boot_state["app"] = app
 
     if hostname:
         logger.info("⏳ انتظار Telegram release (webhook mode)...")
@@ -2552,14 +2660,31 @@ async def main():
     except Exception:
         pass
 
+    # ═════════════════════════════════════════════════════════════════
+    # 🆕 v5.7.21: start_all_managed_bots في BACKGROUND (لا يحجب webhook)
+    # ═════════════════════════════════════════════════════════════════
+    async def _start_managed_bots_bg():
+        try:
+            from managed_bots_runner import start_all_managed_bots
+            _t_mb = time.monotonic()
+            _managed_apps = await start_all_managed_bots()
+            _ok = sum(1 for ok in _managed_apps.values() if ok)
+            logger.info(
+                "✅ managed_bots (bg): %d/%d في %.1fs",
+                _ok, len(_managed_apps), time.monotonic() - _t_mb)
+        except ImportError as _ie:
+            logger.warning("⚠️ managed_bots (bg): %s", _ie)
+        except Exception as _mb_e:
+            logger.error("❌ managed_bots (bg): %s", _mb_e, exc_info=True)
+
     try:
-        from managed_bots_runner import start_all_managed_bots
-        _managed_apps = await start_all_managed_bots()
-        logger.info("✅ managed_bots: %d/%d",
-                    sum(1 for ok in _managed_apps.values() if ok),
-                    len(_managed_apps))
-    except Exception as _mb_e:
-        logger.error("❌ managed_bots: %s", _mb_e)
+        _managed_bots_task = asyncio.create_task(
+            _start_managed_bots_bg(),
+            name="managed-bots-start-bg")
+        logger.info("🚀 managed_bots: spawned في background (لا يحجب)")
+    except Exception as _mb_spawn_e:
+        logger.error("❌ managed_bots: فشل create_task: %s", _mb_spawn_e)
+        _managed_bots_task = None
 
     _spawn_gil_lag_monitor()
 
@@ -2572,28 +2697,9 @@ async def main():
     if _GROUP_LOG_INIT_AVAILABLE and _GROUP_LOG_AVAILABLE:
         _init_group_log_instance(app)
 
-    for _scope in (
-        BotCommandScopeDefault(),
-        BotCommandScopeAllPrivateChats(),
-        BotCommandScopeAllGroupChats(),
-    ):
-        try:
-            await app.bot.delete_my_commands(scope=_scope)
-        except Exception:
-            pass
-
-    try:
-        await app.bot.set_my_commands(PUBLIC_COMMANDS, scope=BotCommandScopeAllPrivateChats())
-        logger.info("✅ %d أمراً عاماً", len(PUBLIC_COMMANDS))
-    except Exception as _e:
-        logger.error("❌ الأوامر العامة: %s", _e)
-
-    try:
-        await app.bot.set_my_commands(GROUP_COMMANDS, scope=BotCommandScopeAllGroupChats())
-        logger.info("✅ %d أمراً للمجموعات", len(GROUP_COMMANDS))
-    except Exception as _e:
-        logger.error("❌ أوامر المجموعات: %s", _e)
-
+    # ═════════════════════════════════════════════════════════════════
+    # 🆕 v5.7.21: جمع admin_ids blocking (مستخدمة في filters.User)
+    # ═════════════════════════════════════════════════════════════════
     _admin_ids, _admin_critical_empty = await _collect_admin_ids_with_retry()
 
     if _admin_critical_empty:
@@ -2605,16 +2711,65 @@ async def main():
         )
     else:
         logger.info("👥 الأدمن: %d (%s)", len(_admin_ids), _admin_ids)
-
-    _admin_full_list = PUBLIC_COMMANDS + ADMIN_COMMANDS
-    logger.info("📋 إجمالي أوامر الأدمن: %d", len(ADMIN_COMMANDS))
     app.bot_data["admin_ids"] = set(_admin_ids)
 
-    for _admin_id in _admin_ids:
+    # ═════════════════════════════════════════════════════════════════
+    # 🆕 v5.7.21: set_my_commands في BACKGROUND (لا يحجب webhook)
+    # ═════════════════════════════════════════════════════════════════
+    async def _register_commands_bg():
         try:
-            await app.bot.set_my_commands(_admin_full_list, scope=BotCommandScopeChat(chat_id=_admin_id))
-        except Exception:
-            pass
+            for _scope in (
+                BotCommandScopeDefault(),
+                BotCommandScopeAllPrivateChats(),
+                BotCommandScopeAllGroupChats(),
+            ):
+                try:
+                    await app.bot.delete_my_commands(scope=_scope)
+                except Exception:
+                    pass
+
+            try:
+                await app.bot.set_my_commands(
+                    PUBLIC_COMMANDS,
+                    scope=BotCommandScopeAllPrivateChats())
+                logger.info("✅ %d أمراً عاماً (bg)", len(PUBLIC_COMMANDS))
+            except Exception as _e:
+                logger.error("❌ الأوامر العامة (bg): %s", _e)
+
+            try:
+                await app.bot.set_my_commands(
+                    GROUP_COMMANDS,
+                    scope=BotCommandScopeAllGroupChats())
+                logger.info("✅ %d أمراً للمجموعات (bg)", len(GROUP_COMMANDS))
+            except Exception as _e:
+                logger.error("❌ أوامر المجموعات (bg): %s", _e)
+
+            _admin_full_list = PUBLIC_COMMANDS + ADMIN_COMMANDS
+            _ok_count = 0
+            for _admin_id in _admin_ids:
+                try:
+                    await app.bot.set_my_commands(
+                        _admin_full_list,
+                        scope=BotCommandScopeChat(chat_id=_admin_id))
+                    _ok_count += 1
+                except Exception:
+                    pass
+            logger.info(
+                "✅ أوامر الأدمن (bg): %d/%d | إجمالي ADMIN_COMMANDS=%d",
+                _ok_count, len(_admin_ids), len(ADMIN_COMMANDS))
+        except asyncio.CancelledError:
+            raise
+        except Exception as _e:
+            logger.error("❌ _register_commands_bg: %s", _e, exc_info=True)
+
+    try:
+        _commands_task = asyncio.create_task(
+            _register_commands_bg(),
+            name="register-commands-bg")
+        logger.info("🚀 set_my_commands: spawned في background (لا يحجب)")
+    except Exception as _cmd_spawn_e:
+        logger.error("❌ commands: فشل create_task: %s", _cmd_spawn_e)
+        _commands_task = None
 
     if _DIAG_INCOMING and _HAS_TYPE_HANDLER:
         try:
@@ -2974,7 +3129,25 @@ async def main():
             except Exception as _wbv_e:
                 logger.warning("⚠️ Webhook verification failed: %s", _wbv_e)
 
-            runner = await setup_webhook(app, port)
+            # ═════════════════════════════════════════════════════════════
+            # 🆕 v5.7.21: نستخدم _early_web_app المُشغّل مسبقاً
+            # ═════════════════════════════════════════════════════════════
+            if _early_runner is not None:
+                # فعّل webhook على الخادم المبكر (route موجود في _early_catchall)
+                _utils_module._telegram_app = app
+                _boot_state["webhook_ready"] = True
+                logger.info(
+                    "✅ Webhook route ACTIVE on early server :%d "
+                    "(صفر نافذة انقطاع)", port)
+                runner = _early_runner
+            else:
+                # Fallback: افتح الخادم متأخراً (سلوك v5.7.20 الأصلي)
+                logger.warning(
+                    "⚠️ early_runner غير متاح — فتح webhook عبر setup_webhook")
+                runner = await setup_webhook(app, port)
+                _utils_module._telegram_app = app
+                _boot_state["webhook_ready"] = True
+
             await _run_post_init_hooks(app)
 
             try:
@@ -3003,13 +3176,18 @@ async def main():
                     await _run_post_stop_hooks(app)
                 except Exception:
                     pass
-                try:
-                    await runner.cleanup()
-                except Exception:
-                    pass
+                if runner is not _early_runner:
+                    try:
+                        await runner.cleanup()
+                    except Exception:
+                        pass
         else:
             logger.warning("⚠️ POLLING mode (ALLOW_POLLING=1)")
-            runner = await setup_webhook(app, port)
+            # 🆕 v5.7.21: نستخدم _early_runner إن وُجد، وإلا fallback
+            runner = _early_runner if _early_runner is not None else None
+            if runner is None:
+                logger.warning("⚠️ early_runner غير متاح — setup_webhook fallback")
+                runner = await setup_webhook(app, port)
             try:
                 _app_running = (getattr(app, "running", False) or getattr(app, "_running", False))
                 if not _app_running:
@@ -3028,10 +3206,11 @@ async def main():
                     await _stop_polling_mode(app)
                 except Exception:
                     pass
-                try:
-                    await runner.cleanup()
-                except Exception:
-                    pass
+                if runner is not _early_runner:
+                    try:
+                        await runner.cleanup()
+                    except Exception:
+                        pass
     finally:
         try:
             await _shutdown_group_log()
@@ -3055,6 +3234,29 @@ async def main():
                 _GIL_LAG_MONITOR_TASK.cancel()
                 try:
                     await _GIL_LAG_MONITOR_TASK
+                except Exception:
+                    pass
+            except Exception:
+                pass
+
+        # 🆕 v5.7.21: أوقف _commands_task بأمان
+        if _commands_task is not None and not _commands_task.done():
+            try:
+                _commands_task.cancel()
+                try:
+                    await asyncio.wait_for(_commands_task, timeout=3.0)
+                except (asyncio.TimeoutError, asyncio.CancelledError, Exception):
+                    pass
+            except Exception:
+                pass
+
+        # 🆕 v5.7.21: انتظر _managed_bots_task قبل stop_all
+        if _managed_bots_task is not None and not _managed_bots_task.done():
+            try:
+                await asyncio.wait_for(_managed_bots_task, timeout=5.0)
+            except asyncio.TimeoutError:
+                try:
+                    _managed_bots_task.cancel()
                 except Exception:
                     pass
             except Exception:
@@ -3131,6 +3333,14 @@ async def main():
             await _shutdown_db_pool(timeout=5.0)
         except Exception:
             pass
+
+        # 🆕 v5.7.21: أغلق _early_runner في النهاية
+        if _early_runner is not None:
+            try:
+                await _early_runner.cleanup()
+                logger.info("🗑️ EARLY-HEALTH runner cleaned up")
+            except Exception as _ehc_e:
+                logger.debug("early_runner.cleanup: %s", _ehc_e)
 
         _remove_pid_file()
 
