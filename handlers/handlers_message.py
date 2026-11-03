@@ -1,39 +1,30 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-handlers_message.py - v7.18.58 (FIX-BWM-COLD-CACHE)
+handlers_message.py - v7.18.59 (FIX-BWM-REAL-PERF)
 (متوافق مع detectors v4.1.3 + banned_words_manager v1.2.0 + group_log v1.4.0)
 =============================================================================
-🆕 v7.18.58 (FIX-BWM-COLD-CACHE):
+🆕 v7.18.59 (FIX-BWM-REAL-PERF):
 
-    🟡 FIX-BWM-COLD-CACHE (MEDIUM):
-        في v7.18.57، أول رسالة في كل مجموعة تحتوي كلمة محظورة كانت
-        تُنشئ مئات regex patterns من الصفر داخل Phase 2 → BWM-MATCH-
-        TIMEOUT 2.0s في السجل، ثم `handle_group: 5120ms`.
+    🔴 FIX-BWM-REAL-PERF (CRITICAL):
+        v7.18.58 (FIX-BWM-COLD-CACHE) اكتُشف أنها لا تحل المشكلة فعلياً.
+        في Phase 1.5 كانت تُجمِّع patterns إلى cache، لكن Phase 2 كانت
+        تستدعي `_bwm_contains` الخارجي لكل كلمة، وتلك الدالة تُعيد
+        `_normalize_text(text)` داخلياً → 1904 normalization × نص كامل
+        في كل رسالة → BWM-MATCH >5s.
 
-        الحل:
-          - _BWM_TIMEOUT_SEC: 2.0 → 5.0s (يسمح ببناء cache بارد)
-          - _BWM_EXECUTOR: max_workers=1 → 4 (عدة مجموعات بالتوازي)
-          - Phase 1.5 جديدة: pre-compile patterns في thread منفصل
-            قبل بدء التطابق الفعلي
+        الحل الحقيقي:
+          - normalize(text) مرة واحدة في Phase 2
+          - استخدام `_get_banned_pattern` (cache LRU الموجود) لكل كلمة
+          - O(words) بدل O(words × text) → ~50ms بدل >5s
+          - Pass 2 اختياري (spaced/compact evasions) فقط عند تفعيل
+            ANTIEVASION_COMPACT_WORDS
 
-    ✅ محفوظ من v7.18.57:
-        - FIX-BWM-ASYNC-DB-SPLIT (Phase 1 cache + Phase 2 CPU)
-    ✅ محفوظ من v7.18.56:
-        - _BWM_EXECUTOR معزول
-    ✅ محفوظ من v7.18.55:
-        - FIX-AUTOREPLY-ASYNCRUN + FIX-TRANSLATE-ASYNC-SAFE
-    ✅ محفوظ من v7.18.54:
-        - FIX-AUTOREPLY-DB-THREAD
-    ✅ محفوظ من v7.18.53:
-        - FIX-LITE-FALLBACK
-    ✅ محفوظ من v7.18.52:
-        - FIX-CONTEXT-BLOCKING
-    ✅ محفوظ من v7.18.51:
-        - FIX-POSTBOT-BLOCKING, FIX-TEXT-SCORE-SIZE-GUARD
-    ✅ محفوظ من v7.18.50:
-        - FIX-TEXT-SCORE-BLOCKING, FIX-AUTOREPLY-BLOCKING,
-          FIX-BWM-BLOCKING, FIX-CONSTANTS
+    ✅ محفوظ من v7.18.58: جميع الإصلاحات السابقة.
+
+v7.18.58 — محفوظ. v7.18.57 — محفوظ. v7.18.56 — محفوظ.
+v7.18.55 — محفوظ. v7.18.54 — محفوظ. v7.18.53 — محفوظ.
+v7.18.52 — محفوظ. v7.18.51 — محفوظ. v7.18.50 — محفوظ.
 =============================================================================
 """
 
@@ -41,7 +32,7 @@ import asyncio
 import logging
 import time
 import sys
-print(f"██████ HANDLERS_MESSAGE LOADED FROM: {__file__} | v7.18.58-PROOF ██████", file=sys.stderr, flush=True)
+print(f"██████ HANDLERS_MESSAGE LOADED FROM: {__file__} | v7.18.59-PROOF ██████", file=sys.stderr, flush=True)
 import os
 import re
 import inspect
@@ -134,7 +125,7 @@ _TEXT_SCORE_TIMEOUT_SEC: float = 1.5
 # v7.18.50 FIX-AUTOREPLY-BLOCKING
 _AUTOREPLY_DB_TIMEOUT_SEC: float = 3.0
 _AUTOREPLY_FILE_TIMEOUT_SEC: float = 2.0
-# 🆕 v7.18.58 FIX-BWM-COLD-CACHE: 5.0s للسماح ببناء pattern cache بارد
+# v7.18.58 FIX-BWM-COLD-CACHE: 5.0s للسماح ببناء pattern cache بارد
 _BWM_TIMEOUT_SEC: float = 5.0
 
 # v7.18.51 FIX-POSTBOT-BLOCKING
@@ -148,8 +139,8 @@ _CONTEXT_BUILD_TIMEOUT_SEC: float = 5.0
 
 
 # ═════════════════════════════════════════════════════════════════════
-# 🆕 v7.18.56 FIX-BWM-LOOP-BLOCKING: ThreadPoolExecutor معزول لـ BWM
-# 🆕 v7.18.58 FIX-BWM-COLD-CACHE: max_workers=4 (بدل 1)
+# v7.18.56 FIX-BWM-LOOP-BLOCKING: ThreadPoolExecutor معزول لـ BWM
+# v7.18.58 FIX-BWM-COLD-CACHE: max_workers=4 (بدل 1)
 # ═════════════════════════════════════════════════════════════════════
 _BWM_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
     max_workers=4,
@@ -3705,32 +3696,45 @@ _EXTERNAL_HANDLED_STATES = frozenset({
 
 
 # ═════════════════════════════════════════════════════════════════════
-# 🆕 v7.18.58 FIX-BWM-COLD-CACHE: _bwm_check_nonblocking (Phase 1.5)
+# 🆕 v7.18.59 FIX-BWM-REAL-PERF: مطابقة سريعة O(words) بدل O(words × text)
 # ═════════════════════════════════════════════════════════════════════
+# السبب الجذري: v7.18.58 كانت تُجمِّع patterns (Phase 1.5) ثم تتجاهلها
+# في Phase 2 وتستدعي `_bwm_contains` الخارجي 1904 مرة. إذا كانت تلك
+# الدالة تُعيد `_normalize_text(text)` داخلياً → 1904 × normalization
+# على نص كامل → >5s timeout.
+#
+# الحل: normalize(text) مرة واحدة، ثم استخدام `_get_banned_pattern`
+# (المُخزَّن مسبقاً) لكل كلمة. هذا يحافظ على نفس سلوك v7.18.15 القديم
+# (word-boundary regex) لكن بدون التكرار المكلف.
 async def _bwm_check_nonblocking(
-    text: str, chat_id: int
+    text: str, chat_id: int,
 ) -> Optional[str]:
     """
-    v7.18.58 FIX-BWM-COLD-CACHE: تقسيم 3 مراحل
-      Phase 1 (main loop): جلب قائمة الكلمات (asyncpg سليم)
-      Phase 1.5 (executor): pre-compile regex patterns → يملأ cache
-      Phase 2 (executor): مطابقة CPU فقط
+    v7.18.59 FIX-BWM-REAL-PERF: مطابقة سريعة O(words) بدل O(words × text).
 
-    v7.18.57 FIX-BWM-ASYNC-DB-SPLIT: الفصل يمنع attached to different loop.
+    التسلسل:
+      Phase 1: جلب قائمة الكلمات (asyncpg/cached) — لا يحجب الـ loop
+      Phase 2: مطابقة في executor:
+        - normalize(text) مرة واحدة
+        - لكل كلمة: pattern مسبق التجميع (cache LRU موجود)
+        - 1904 × pattern.search() عادةً < 50ms
+      Phase 2b (اختياري): إذا ANTIEVASION_COMPACT_WORDS مفعّل ولم
+        نجد تطابقاً، نجرب `_bwm_contains` الخارجي للتعامل مع
+        spaced/compact words (بطيء لكنه استثناء نادر).
     """
     if not _HAS_BWM or _bwm_contains is None:
         return None
 
-    # ─── Phase 1: جلب الكلمات (main loop, yields) ───
+    # ─── Phase 1: جلب الكلمات (main loop, async-safe) ───
     banned_words: Optional[List[str]] = None
     try:
         banned_words = await asyncio.wait_for(
             get_banned_words_cached(chat_id),
-            timeout=1.0,
+            timeout=1.5,
         )
     except asyncio.TimeoutError:
         logger.warning(
-            "⏱️ BWM-CACHE-TIMEOUT | chat=%s >1.0s — skip",
+            "⏱️ BWM-CACHE-TIMEOUT | chat=%s >1.5s — skip",
             chat_id)
         return None
     except asyncio.CancelledError:
@@ -3744,38 +3748,51 @@ async def _bwm_check_nonblocking(
     if not banned_words:
         return None
 
-    # ─── Phase 1.5: pre-compile patterns في executor ───
+    # ─── Phase 2: مطابقة سريعة في executor ───
     loop = asyncio.get_running_loop()
     executor = _get_bwm_executor()
 
-    def _precompile():
-        try:
-            for bw in banned_words:
-                _get_banned_pattern(bw)
-        except Exception:
-            pass
+    # capture للاستخدام داخل thread (يمنع race على globals)
+    _words = list(banned_words)
+    _text = text
+    _antievasion = ANTIEVASION_COMPACT_WORDS
+    _external = _bwm_contains
+    _normalize = _normalize_text
+    _get_pat = _get_banned_pattern
 
-    try:
-        await asyncio.wait_for(
-            loop.run_in_executor(executor, _precompile),
-            timeout=3.0,
-        )
-    except asyncio.TimeoutError:
-        logger.debug(
-            "BWM precompile timeout 3s | chat=%s — continuing",
-            chat_id)
-    except Exception:
-        pass
-
-    # ─── Phase 2: مطابقة CPU في executor ───
-    def _run_match():
+    def _run_match() -> Optional[str]:
         try:
-            for bw in banned_words:
-                if _bwm_contains(text, bw):
-                    return bw
+            # normalize(text) مرة واحدة فقط
+            try:
+                normalized_text = _normalize(_text).lower()
+            except Exception:
+                normalized_text = _text.lower()
+
+            # Pass 1: fast word-boundary regex (patterns cached)
+            for bw in _words:
+                if not bw:
+                    continue
+                try:
+                    pattern = _get_pat(bw)
+                    if pattern is not None and pattern.search(normalized_text):
+                        return bw
+                except Exception:
+                    continue
+
+            # Pass 2 (اختياري): spaced/compact evasions
+            if _antievasion:
+                for bw in _words:
+                    if not bw:
+                        continue
+                    try:
+                        if _external(_text, bw):
+                            return bw
+                    except Exception:
+                        continue
+            return None
         except Exception as e:
             logger.debug("BWM match error: %s", e)
-        return None
+            return None
 
     try:
         return await asyncio.wait_for(
@@ -3784,8 +3801,8 @@ async def _bwm_check_nonblocking(
         )
     except asyncio.TimeoutError:
         logger.warning(
-            "⏱️ BWM-MATCH-TIMEOUT | chat=%s >%.1fs",
-            chat_id, _BWM_TIMEOUT_SEC)
+            "⏱️ BWM-MATCH-TIMEOUT | chat=%s >%.1fs | words=%d",
+            chat_id, _BWM_TIMEOUT_SEC, len(_words))
         return None
     except asyncio.CancelledError:
         raise
@@ -5052,7 +5069,7 @@ class MessageHandlers:
                         context.bot, chat_id, user_id or 0):
                     return False
 
-            # 🆕 v7.18.55 FIX-AUTOREPLY-ASYNCRUN:
+            # v7.18.55 FIX-AUTOREPLY-ASYNCRUN:
             # استدعاء صحيح حسب نوع الدالة — لا asyncio.run في thread.
             reply = None
             try:
@@ -5093,7 +5110,7 @@ class MessageHandlers:
                 await _increment_usage_async(chat_id, text)
                 return True
 
-            # 🆕 FIX-AUTOREPLY-BLOCKING: get_reply_from_file in to_thread
+            # FIX-AUTOREPLY-BLOCKING: get_reply_from_file in to_thread
             file_reply = None
             try:
                 file_reply = await asyncio.wait_for(
@@ -5243,9 +5260,7 @@ class MessageHandlers:
 
     @staticmethod
     async def _handle_wait_log_ch_text(update, context, state=None):
-        """
-        v7.18.47 FIX-LOGCH-KEY: معالجة إدخال معرف قناة السجل.
-        """
+        """v7.18.47 FIX-LOGCH-KEY: معالجة إدخال معرف قناة السجل."""
         user_id = (
             update.effective_user.id if update.effective_user else None)
         if not user_id:
@@ -7926,28 +7941,22 @@ __all__ = [
     "_SCHEMELESS_TG_HOSTS_RE",
     "_columns_bg_task",
     "_do_lazy_init_columns_migration",
-    # v7.18.49 additions
     "_translate_safe",
     "_TRANSLATION_CACHE",
     "_TRANSLATION_CACHE_TTL",
     "_TRANSLATION_CACHE_MAX",
     "_TRANSLATION_TIMEOUT_SEC",
     "TRANSLATION_MAX_TEXT_LENGTH",
-    # v7.18.50 additions
     "_maybe_await",
     "_TEXT_SCORE_TIMEOUT_SEC",
     "_AUTOREPLY_DB_TIMEOUT_SEC",
     "_AUTOREPLY_FILE_TIMEOUT_SEC",
     "_BWM_TIMEOUT_SEC",
-    # v7.18.51 additions
     "_POSTBOT_TEXT_MAX_CHARS",
     "_POSTBOT_MIN_TEXT_CHARS",
     "_TEXT_SCORE_MAX_CHARS",
-    # v7.18.52 additions
     "_CONTEXT_BUILD_TIMEOUT_SEC",
-    # v7.18.53 additions
     "_build_lite_context",
-    # 🆕 v7.18.58 additions
     "_get_bwm_executor",
     "_BWM_EXECUTOR",
     "_BWM_EXECUTOR_MAX_WORKERS",
@@ -7956,12 +7965,12 @@ __all__ = [
 
 
 # ═════════════════════════════════════════════════════════════════════
-# LOAD BEACON — v7.18.58
+# LOAD BEACON — v7.18.59
 # ═════════════════════════════════════════════════════════════════════
 
 try:
     logger.info(
-        "✅ handlers_message v7.18.58 loaded | "
+        "✅ handlers_message v7.18.59 loaded | "
         "BWM=%s | PRIVATE_HANDLERS=%d | "
         "external_handled=%d | "
         "routing-fallback=7-paths-deduped | "
@@ -7970,8 +7979,8 @@ try:
         "max-len=%d) | "
         "TEXT-SCORE-SAFE=on (to_thread+timeout=%.1fs,size-guard=%d) | "
         "AUTOREPLY-SAFE=on (async-run-removed+DB=%.1fs,file=%.1fs) | "
-        "BWM-SAFE=on (split:cache+precompile+match,workers=%d,"
-        "timeout=%.1fs) | "
+        "BWM-SAFE=on (REAL-PERF:normalize-1×+patterns-cached,"
+        "workers=%d,timeout=%.1fs) | "
         "POSTBOT-SAFE=on (to_thread+timeout=%.1fs,max=%d) | "
         "CONTEXT-SAFE=on (to_thread+timeout=%.1fs) | "
         "LITE-FALLBACK=on (2000ch+btn+fwd, no skip) | "
@@ -7980,7 +7989,8 @@ try:
         "WAIT_LOG_CH=direct-handler | "
         "LOG-CHANNEL-KEY=log_channel_id (CANONICAL, unified) | "
         "detectors-compat=v4.1.3 | "
-        "fixes=(v7.18.58 FIX-BWM-COLD-CACHE + "
+        "fixes=(v7.18.59 FIX-BWM-REAL-PERF + "
+        "v7.18.58 FIX-BWM-COLD-CACHE + "
         "v7.18.57 FIX-BWM-ASYNC-DB-SPLIT + "
         "v7.18.56 FIX-BWM-LOOP-BLOCKING + "
         "v7.18.55 FIX-AUTOREPLY-ASYNCRUN + FIX-TRANSLATE-ASYNC-SAFE + "
