@@ -1,17 +1,23 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-managed_bots_storage.py — طبقة I/O (v5.7.11 - PRIVATE-TOGGLE)
+managed_bots_storage.py — طبقة I/O (v5.7.12 - ALTER-NOISE-FIX)
 =================================================================================
-🆕 v5.7.11 (PRIVATE-TOGGLE):
-    🟢 FEATURE-PRIVATE-TOGGLE: عمود `respond_in_private` في `managed_bots`.
+🆕 v5.7.12 (ALTER-NOISE-FIX):
+    🟢 FIX-ALTER-NOISE: تجنّب ERROR في كل إقلاع من محاولات ALTER TABLE
+        المتكررة على respond_in_groups / respond_in_private.
+        على PostgreSQL نستخدم ADD COLUMN IF NOT EXISTS (PG 9.6+) — صفر
+        ضجيج إذا كان العمود موجوداً. على SQLite/MySQL نُبقي try/except
+        كما هو (لا IF NOT EXISTS مدعوم).
 
-    • الحالة الافتراضية: 1 (مفعّل) — توافق كامل مع الأصلي.
-    • migration تلقائي لـ DBs القديمة.
-    • يُستخدم من زر 💬 في اللوحة (hot-toggle بدون restart).
+    📝 ملاحظة تقنية:
+        في v5.7.11، كان try/except موجوداً لكن database.py يسجّل ERROR
+        قبل إعادة الرمي (في _execute_with_logging) → 2 ERROR في كل restart.
+        هذه النسخة تحلّ ذلك نهائياً على PostgreSQL.
 
-✅ محفوظ من v5.7.10: SPLIT-REPLIES + GROUPS-TOGGLE.
-✅ محفوظ من v5.7.9: FIX-CHURN-1.
+    🟢 FEATURE-PRIVATE-TOGGLE: عمود respond_in_private (محفوظ من v5.7.11).
+    ✅ محفوظ من v5.7.10: SPLIT-REPLIES + GROUPS-TOGGLE.
+    ✅ محفوظ من v5.7.9: FIX-CHURN-1.
 =================================================================================
 """
 
@@ -166,41 +172,40 @@ async def _ensure_tables():
             )
         """)
 
-        # Migration 1: respond_in_groups (v5.7.10)
-        try:
-            await DB.execute(
-                "ALTER TABLE managed_bots "
-                "ADD COLUMN respond_in_groups INTEGER DEFAULT 0"
-            )
-            logger.info(
-                "✅ managed_bots: أُضيف عمود respond_in_groups (migration)"
-            )
-        except Exception as _mig_e:
-            _mig_err = str(_mig_e).lower()
-            if not ("duplicate" in _mig_err
-                    or "already exists" in _mig_err
-                    or "duplicate column" in _mig_err):
-                logger.warning(
-                    "⚠️ ALTER respond_in_groups: %s", _mig_e,
-                )
+        # 🆕 v5.7.12 FIX-ALTER-NOISE: تجنّب ERROR كل إقلاع
+        _db_type = str(getattr(DB, "DB_TYPE", "sqlite")).lower()
+        _is_pg = "postgres" in _db_type
 
-        # 🆕 Migration 2: respond_in_private (v5.7.11)
-        try:
-            await DB.execute(
-                "ALTER TABLE managed_bots "
-                "ADD COLUMN respond_in_private INTEGER DEFAULT 1"
-            )
-            logger.info(
-                "✅ managed_bots: أُضيف عمود respond_in_private (migration)"
-            )
-        except Exception as _mig_e:
-            _mig_err = str(_mig_e).lower()
-            if not ("duplicate" in _mig_err
-                    or "already exists" in _mig_err
-                    or "duplicate column" in _mig_err):
-                logger.warning(
-                    "⚠️ ALTER respond_in_private: %s", _mig_e,
+        async def _safe_add_column(_t: str, _c: str, _ddl: str):
+            if _is_pg:
+                # PG 9.6+: IF NOT EXISTS — صفر ضجيج إذا كان العمود موجوداً
+                try:
+                    await DB.execute(
+                        f"ALTER TABLE {_t} ADD COLUMN "
+                        f"IF NOT EXISTS {_c} {_ddl}"
+                    )
+                except Exception as _e:
+                    logger.warning(f"⚠️ ALTER {_t}.{_c}: {_e}")
+                return
+            # SQLite / MySQL — لا IF NOT EXISTS مدعوم
+            try:
+                await DB.execute(
+                    f"ALTER TABLE {_t} ADD COLUMN {_c} {_ddl}"
                 )
+            except Exception as _e:
+                _err = str(_e).lower()
+                if not ("duplicate" in _err or "already exists" in _err):
+                    logger.warning(f"⚠️ ALTER {_t}.{_c}: {_e}")
+
+        # Migration 1: respond_in_groups (v5.7.10)
+        await _safe_add_column(
+            "managed_bots", "respond_in_groups", "INTEGER DEFAULT 0"
+        )
+
+        # Migration 2: respond_in_private (v5.7.11)
+        await _safe_add_column(
+            "managed_bots", "respond_in_private", "INTEGER DEFAULT 1"
+        )
 
         await DB.execute("""
             CREATE TABLE IF NOT EXISTS managed_bot_users (
@@ -237,9 +242,9 @@ async def _ensure_tables():
 
         _tables_created = True
         logger.info(
-            "✅ managed_bots v5.7.11: 4 جداول جاهزة | "
+            "✅ managed_bots v5.7.12: 4 جداول جاهزة | "
             "respond_in_groups=✅ | respond_in_private=✅ | "
-            "split_replies=✅"
+            "split_replies=✅ | alter_noise=✅"
         )
     except Exception as e:
         logger.error(
@@ -814,13 +819,13 @@ __all__ = [
 
 try:
     logger.debug(
-        "🛡️ managed_bots_storage v5.7.11 "
-        "(PRIVATE-TOGGLE) loaded | "
+        "🛡️ managed_bots_storage v5.7.12 (ALTER-NOISE-FIX) loaded | "
         "tables=bots,users,keywords,keyword_replied | "
         "lock=reentrant | churn_fix=targeted | "
         "split_replies=JSON-in-text(backward_compat) | "
         "respond_in_groups=INTEGER(0/1) | "
-        "respond_in_private=INTEGER(0/1, default=1)"
+        "respond_in_private=INTEGER(0/1, default=1) | "
+        "alter=IF-NOT-EXISTS-PG"
     )
 except Exception:
     pass
