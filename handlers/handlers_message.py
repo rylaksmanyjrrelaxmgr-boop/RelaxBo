@@ -1,30 +1,46 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-handlers_message.py - v7.18.59 (FIX-BWM-REAL-PERF)
+handlers_message.py - v7.18.60 (FIX-PERM-AWARE-DELETE)
 (متوافق مع detectors v4.1.3 + banned_words_manager v1.2.0 + group_log v1.4.0)
 =============================================================================
-🆕 v7.18.59 (FIX-BWM-REAL-PERF):
+🆕 v7.18.60 (FIX-PERM-AWARE-DELETE):
 
-    🔴 FIX-BWM-REAL-PERF (CRITICAL):
-        v7.18.58 (FIX-BWM-COLD-CACHE) اكتُشف أنها لا تحل المشكلة فعلياً.
-        في Phase 1.5 كانت تُجمِّع patterns إلى cache، لكن Phase 2 كانت
-        تستدعي `_bwm_contains` الخارجي لكل كلمة، وتلك الدالة تُعيد
-        `_normalize_text(text)` داخلياً → 1904 normalization × نص كامل
-        في كل رسالة → BWM-MATCH >5s.
+    🔴 FIX-PERM-AWARE-DELETE (CRITICAL):
+        في v7.18.59، عندما يفشل الحذف (البوت بلا can_delete_messages)،
+        كان `_delete_and_warn` يعمل `return` فوراً بعد 4s انتظار
+        (محاولة delete على Telegram ستفشل حتماً).
 
-        الحل الحقيقي:
-          - normalize(text) مرة واحدة في Phase 2
-          - استخدام `_get_banned_pattern` (cache LRU الموجود) لكل كلمة
-          - O(words) بدل O(words × text) → ~50ms بدل >5s
-          - Pass 2 اختياري (spaced/compact evasions) فقط عند تفعيل
-            ANTIEVASION_COMPACT_WORDS
+        الأثر:
+          - كل رسالة spam = 5-14s حجب event loop
+          - لا تحذير للمستخدم، لا عقوبة (kick/ban/mute) — توقّف تام
+          - تنبيه متكرر للمطور (rate-limited بـ 1/ساعة لكن لا يظهر)
 
-    ✅ محفوظ من v7.18.58: جميع الإصلاحات السابقة.
+        الحل:
+          - `_check_bot_can_delete(bot, chat_id)` — cache 300s، فحص
+            سريع لـ can_delete_messages مباشرة عبر get_chat_member
+          - `invalidate_bot_delete_perm_cache(chat_id)` — إبطال عند
+            فشل الحذف الفعلي (قد تكون الصلاحيات تغيّرت)
+          - `_delete_and_warn` — إذا `_can_delete=False`: تتخطّى
+            الحذف (<10ms) وتستمر بـ:
+              • add_admin_log + send_user_warning
+              • apply_violation_penalty (kick/ban/mute إن كان
+                البوت مشرفاً بصلاحية can_restrict_members)
+              • _notify_group_log_penalty
+          - `_notify_delete_permission_failure` — log confirmation
+            عند trigger (للتشخيص)
 
-v7.18.58 — محفوظ. v7.18.57 — محفوظ. v7.18.56 — محفوظ.
-v7.18.55 — محفوظ. v7.18.54 — محفوظ. v7.18.53 — محفوظ.
-v7.18.52 — محفوظ. v7.18.51 — محفوظ. v7.18.50 — محفوظ.
+    ✅ محفوظ من v7.18.59: FIX-BWM-REAL-PERF (normalize-once + patterns cached)
+    ✅ محفوظ من v7.18.58: FIX-BWM-COLD-CACHE
+    ✅ محفوظ من v7.18.57: FIX-BWM-ASYNC-DB-SPLIT
+    ✅ محفوظ من v7.18.56: FIX-BWM-LOOP-BLOCKING
+    ✅ محفوظ من v7.18.55: FIX-AUTOREPLY-ASYNCRUN + FIX-TRANSLATE-ASYNC-SAFE
+    ✅ محفوظ من v7.18.54: FIX-AUTOREPLY-DB-THREAD
+    ✅ محفوظ من v7.18.53: FIX-LITE-FALLBACK
+    ✅ محفوظ من v7.18.52: FIX-CONTEXT-BLOCKING
+    ✅ محفوظ من v7.18.51: FIX-POSTBOT-BLOCKING, FIX-TEXT-SCORE-SIZE-GUARD
+    ✅ محفوظ من v7.18.50: FIX-TEXT-SCORE-BLOCKING, FIX-AUTOREPLY-BLOCKING,
+                          FIX-BWM-BLOCKING, FIX-CONSTANTS
 =============================================================================
 """
 
@@ -32,7 +48,7 @@ import asyncio
 import logging
 import time
 import sys
-print(f"██████ HANDLERS_MESSAGE LOADED FROM: {__file__} | v7.18.59-PROOF ██████", file=sys.stderr, flush=True)
+print(f"██████ HANDLERS_MESSAGE LOADED FROM: {__file__} | v7.18.60-PROOF ██████", file=sys.stderr, flush=True)
 import os
 import re
 import inspect
@@ -120,21 +136,14 @@ def _ph_list(count: int) -> str:
 # ═════════════════════════════════════════════════════════════════════
 _SPAM_ASYNC_TIMEOUT: float = 1.0
 
-# v7.18.50 FIX-TEXT-SCORE-BLOCKING
 _TEXT_SCORE_TIMEOUT_SEC: float = 1.5
-# v7.18.50 FIX-AUTOREPLY-BLOCKING
 _AUTOREPLY_DB_TIMEOUT_SEC: float = 3.0
 _AUTOREPLY_FILE_TIMEOUT_SEC: float = 2.0
-# v7.18.58 FIX-BWM-COLD-CACHE: 5.0s للسماح ببناء pattern cache بارد
 _BWM_TIMEOUT_SEC: float = 5.0
 
-# v7.18.51 FIX-POSTBOT-BLOCKING
 _POSTBOT_TEXT_MAX_CHARS: int = 2000
 _POSTBOT_MIN_TEXT_CHARS: int = 20
-# v7.18.51 FIX-TEXT-SCORE-SIZE-GUARD
 _TEXT_SCORE_MAX_CHARS: int = 3000
-# v7.18.52 FIX-CONTEXT-BLOCKING
-# v7.18.53 FIX-LITE-FALLBACK: 5.0s
 _CONTEXT_BUILD_TIMEOUT_SEC: float = 5.0
 
 
@@ -2116,6 +2125,11 @@ async def _notify_delete_permission_failure(context, chat_id):
             if now - last < _DELETE_FAILURE_NOTIFY_COOLDOWN:
                 return
             _delete_failure_notified[chat_id] = now
+            # 🆕 v7.18.60: log confirmation عند trigger الفعلي
+            logger.warning(
+                "🔔 DELETE-PERM-NOTIFY triggered | chat=%s "
+                "(cooldown=%ds)",
+                chat_id, int(_DELETE_FAILURE_NOTIFY_COOLDOWN))
             if len(_delete_failure_notified) > 5000:
                 stale = [
                     k for k, ts in _delete_failure_notified.items()
@@ -2141,6 +2155,85 @@ async def _notify_delete_permission_failure(context, chat_id):
         except Exception as e:
             logger.warning(
                 "_notify_delete_permission_failure: %s", e)
+    except Exception:
+        pass
+
+
+# ═════════════════════════════════════════════════════════════════════
+# 🆕 v7.18.60 FIX-PERM-AWARE-DELETE
+# ═════════════════════════════════════════════════════════════════════
+# cache 300s لصلاحية can_delete_messages — يمنع 4s انتظار في كل
+# رسالة عند البوت بلا صلاحية الحذف (get_chat_member call مكلف).
+_bot_delete_perm_cache: Dict[int, Tuple[bool, float]] = {}
+_BOT_DELETE_PERM_TTL = 300.0
+_BOT_DELETE_PERM_MAX = 2000
+
+
+async def _check_bot_can_delete(bot, chat_id: int) -> bool:
+    """
+    v7.18.60: فحص سريع (مع cache 300s) هل يملك البوت can_delete_messages؟
+    يُوفّر ~4s/رسالة في المجموعات التي لا يملك فيها صلاحية الحذف.
+
+    يستخدم get_chat_member مباشرة (وليس check_bot_permissions لأن الأخيرة
+    تختبر can_delete AND can_restrict معاً — لا نحتاج ذلك هنا).
+    """
+    now = time.monotonic()
+    try:
+        cid = int(chat_id)
+    except (TypeError, ValueError):
+        return False
+
+    entry = _bot_delete_perm_cache.get(cid)
+    if entry is not None:
+        cached_val, cached_at = entry
+        if now - cached_at < _BOT_DELETE_PERM_TTL:
+            return cached_val
+
+    can_delete = False
+    try:
+        me = await asyncio.wait_for(
+            bot.get_chat_member(cid, bot.id),
+            timeout=5.0,
+        )
+        status = getattr(me, 'status', None)
+        if status in ('administrator', 'creator'):
+            can_delete = bool(getattr(me, 'can_delete_messages', False))
+    except asyncio.TimeoutError:
+        logger.debug(
+            "_check_bot_can_delete(%s): timeout 5s", cid)
+        can_delete = False
+    except Exception as _e:
+        logger.debug("_check_bot_can_delete(%s): %s", cid, _e)
+        can_delete = False
+
+    if len(_bot_delete_perm_cache) >= _BOT_DELETE_PERM_MAX:
+        try:
+            oldest = sorted(
+                _bot_delete_perm_cache.items(),
+                key=lambda kv: kv[1][1],
+            )[:max(1, _BOT_DELETE_PERM_MAX // 5)]
+            for k, _ in oldest:
+                _bot_delete_perm_cache.pop(k, None)
+        except Exception:
+            pass
+    _bot_delete_perm_cache[cid] = (can_delete, now)
+    return can_delete
+
+
+def invalidate_bot_delete_perm_cache(
+    chat_id: Optional[int] = None,
+) -> None:
+    """v7.18.60: إبطال cache صلاحيات الحذف (لهذه المجموعة أو الجميع)."""
+    try:
+        if chat_id is None:
+            _bot_delete_perm_cache.clear()
+        else:
+            _bot_delete_perm_cache.pop(int(chat_id), None)
+    except Exception:
+        pass
+    try:
+        from utils import invalidate_bot_perms_cache
+        invalidate_bot_perms_cache(chat_id)
     except Exception:
         pass
 
@@ -3148,10 +3241,7 @@ async def invalidate_auto_reply_cache(chat_id=None):
 # ═════════════════════════════════════════════════════════════════════
 
 async def _translate_safe(text: str, lang: str) -> Optional[str]:
-    """
-    v7.18.49: wraps TranslationManager.translate() — async safe + cache + timeout.
-    v7.18.55 FIX-TRANSLATE-ASYNC-SAFE.
-    """
+    """v7.18.49: wraps TranslationManager.translate() — async safe + cache."""
     if not text or not lang or lang == 'off':
         return None
 
@@ -3696,36 +3786,23 @@ _EXTERNAL_HANDLED_STATES = frozenset({
 
 
 # ═════════════════════════════════════════════════════════════════════
-# 🆕 v7.18.59 FIX-BWM-REAL-PERF: مطابقة سريعة O(words) بدل O(words × text)
+# v7.18.59 FIX-BWM-REAL-PERF: مطابقة سريعة O(words) بدل O(words × text)
 # ═════════════════════════════════════════════════════════════════════
-# السبب الجذري: v7.18.58 كانت تُجمِّع patterns (Phase 1.5) ثم تتجاهلها
-# في Phase 2 وتستدعي `_bwm_contains` الخارجي 1904 مرة. إذا كانت تلك
-# الدالة تُعيد `_normalize_text(text)` داخلياً → 1904 × normalization
-# على نص كامل → >5s timeout.
-#
-# الحل: normalize(text) مرة واحدة، ثم استخدام `_get_banned_pattern`
-# (المُخزَّن مسبقاً) لكل كلمة. هذا يحافظ على نفس سلوك v7.18.15 القديم
-# (word-boundary regex) لكن بدون التكرار المكلف.
 async def _bwm_check_nonblocking(
     text: str, chat_id: int,
 ) -> Optional[str]:
     """
-    v7.18.59 FIX-BWM-REAL-PERF: مطابقة سريعة O(words) بدل O(words × text).
+    v7.18.59 FIX-BWM-REAL-PERF: مطابقة سريعة O(words).
 
-    التسلسل:
-      Phase 1: جلب قائمة الكلمات (asyncpg/cached) — لا يحجب الـ loop
-      Phase 2: مطابقة في executor:
-        - normalize(text) مرة واحدة
-        - لكل كلمة: pattern مسبق التجميع (cache LRU موجود)
-        - 1904 × pattern.search() عادةً < 50ms
-      Phase 2b (اختياري): إذا ANTIEVASION_COMPACT_WORDS مفعّل ولم
-        نجد تطابقاً، نجرب `_bwm_contains` الخارجي للتعامل مع
-        spaced/compact words (بطيء لكنه استثناء نادر).
+    - normalize(text) مرة واحدة
+    - كل كلمة: pattern من cache (LRU) → pattern.search()
+    - Pass 2 (اختياري): _bwm_contains للـ spaced/compact evasions
+      (يعمل فقط إذا ANTIEVASION_COMPACT_WORDS=True)
     """
     if not _HAS_BWM or _bwm_contains is None:
         return None
 
-    # ─── Phase 1: جلب الكلمات (main loop, async-safe) ───
+    # Phase 1: جلب الكلمات
     banned_words: Optional[List[str]] = None
     try:
         banned_words = await asyncio.wait_for(
@@ -3748,11 +3825,10 @@ async def _bwm_check_nonblocking(
     if not banned_words:
         return None
 
-    # ─── Phase 2: مطابقة سريعة في executor ───
+    # Phase 2: مطابقة سريعة في executor
     loop = asyncio.get_running_loop()
     executor = _get_bwm_executor()
 
-    # capture للاستخدام داخل thread (يمنع race على globals)
     _words = list(banned_words)
     _text = text
     _antievasion = ANTIEVASION_COMPACT_WORDS
@@ -3762,7 +3838,6 @@ async def _bwm_check_nonblocking(
 
     def _run_match() -> Optional[str]:
         try:
-            # normalize(text) مرة واحدة فقط
             try:
                 normalized_text = _normalize(_text).lower()
             except Exception:
@@ -4863,17 +4938,46 @@ class MessageHandlers:
                 forward_info = extract_forward_info(message)
             except Exception:
                 pass
+
+        # ═════════════════════════════════════════════════════════════
+        # 🆕 v7.18.60 FIX-PERM-AWARE-DELETE:
+        # فحص صلاحيات الحذف أولاً (cache 300s). إذا البوت بلا
+        # can_delete_messages → نتخطّى الحذف (<10ms) بدل انتظار 4s،
+        # ونستمر بالتحذير والعقوبة (kick/ban/mute قد تنجح).
+        # ═════════════════════════════════════════════════════════════
         delete_ok = False
-        try:
-            if message.message_id:
-                delete_ok = await _safe_delete_message(
-                    context.bot, chat_id, message.message_id,
-                    context=context, notify_owner=True)
-        except Exception as e:
-            logger.error("delete exception: %s", e)
+        delete_attempted = False
+
+        _can_delete = await _check_bot_can_delete(context.bot, chat_id)
+
+        if not _can_delete:
+            logger.warning(
+                "⏭️ SKIP-DELETE-NO-PERM | chat=%s msg=%s | "
+                "violation=%s — البوت لا يملك can_delete_messages",
+                chat_id, message.message_id, violation_type)
             delete_ok = False
-        if not delete_ok:
-            logger.error("⏭️ توقف — الحذف فشل (%s)", violation_type)
+            delete_attempted = False
+        else:
+            delete_attempted = True
+            try:
+                if message.message_id:
+                    delete_ok = await _safe_delete_message(
+                        context.bot, chat_id, message.message_id,
+                        context=context, notify_owner=True)
+            except Exception as e:
+                logger.error("delete exception: %s", e)
+                delete_ok = False
+
+        if delete_attempted and not delete_ok:
+            logger.error(
+                "⚠️ DELETE FAILED | chat=%s msg=%s violation=%s — "
+                "نستمر بالتحذير والعقوبة",
+                chat_id, message.message_id, violation_type)
+            # إبطال cache الصلاحيات — قد تكون تغيّرت منذ آخر فحص
+            try:
+                invalidate_bot_delete_perm_cache(chat_id)
+            except Exception:
+                pass
             try:
                 should_notify = await _record_delete_failure(chat_id)
                 if should_notify:
@@ -4883,7 +4987,8 @@ class MessageHandlers:
                         label="delete-perm-notify")
             except Exception:
                 pass
-            return
+            # 🆕 v7.18.60: لا return — نستمر بالحماية الفعلية
+
         if _HAS_AUTO_BLOCK and violation_type in (
             'postbot_forward', 'forwarded', 'spam_score',
         ):
@@ -5038,19 +5143,10 @@ class MessageHandlers:
         preloaded_ars=None,
     ):
         """
-        🆕 v7.18.55 FIX-AUTOREPLY-ASYNCRUN (CRITICAL):
-            v7.18.54 استخدمت `asyncio.run()` داخل `to_thread` لـ
-            `DB.get_auto_reply`. لكن DB يستخدم asyncpg (غير حاجب أصلاً)،
-            و`asyncio.run` ينشئ حلقة جديدة في thread منفصل، ويترك
-            اتصال asyncpg معلقاً إلى الأبد.
-
-            النتيجة: ThreadPoolExecutor يُستنزف خلال ~8 رسائل → كل
-            `to_thread` لاحق ينتظر timeoutه الكامل → تراكم 15s/رسالة.
-
-            الحل:
-            - asyncpg (async): `await` مباشر + wait_for (يلغي فعلياً).
-            - psycopg2 (sync): `asyncio.to_thread` آمن.
-            - لا `asyncio.run` داخل to_thread أبداً.
+        v7.18.55 FIX-AUTOREPLY-ASYNCRUN (CRITICAL):
+            v7.18.54 استخدمت `asyncio.run()` داخل `to_thread` — خطأ.
+            asyncpg (async) → `await` مباشر + wait_for (يلغي فعلياً).
+            psycopg2 (sync) → `asyncio.to_thread` آمن.
         """
         try:
             if preloaded_ars is not None:
@@ -5069,8 +5165,6 @@ class MessageHandlers:
                         context.bot, chat_id, user_id or 0):
                     return False
 
-            # v7.18.55 FIX-AUTOREPLY-ASYNCRUN:
-            # استدعاء صحيح حسب نوع الدالة — لا asyncio.run في thread.
             reply = None
             try:
                 _get_reply_fn = getattr(DB, 'get_auto_reply', None)
@@ -5079,13 +5173,11 @@ class MessageHandlers:
                         "DB.get_auto_reply غير موجود")
 
                 if inspect.iscoroutinefunction(_get_reply_fn):
-                    # asyncpg (async) → await مباشر (wait_for يلغي فعلياً)
                     reply = await asyncio.wait_for(
                         _get_reply_fn(text, chat_id),
                         timeout=_AUTOREPLY_DB_TIMEOUT_SEC,
                     )
                 else:
-                    # psycopg2 (sync) → to_thread آمن
                     reply = await asyncio.wait_for(
                         asyncio.to_thread(
                             _get_reply_fn, text, chat_id),
@@ -5110,7 +5202,6 @@ class MessageHandlers:
                 await _increment_usage_async(chat_id, text)
                 return True
 
-            # FIX-AUTOREPLY-BLOCKING: get_reply_from_file in to_thread
             file_reply = None
             try:
                 file_reply = await asyncio.wait_for(
@@ -7539,6 +7630,12 @@ async def handle_cache_stats_command(update, context):
             _TRANSLATION_CACHE_MAX,
             _TRANSLATION_CACHE_TTL,
         ),
+        (
+            "bot_delete_perm",
+            _bot_delete_perm_cache,
+            _BOT_DELETE_PERM_MAX,
+            _BOT_DELETE_PERM_TTL,
+        ),
     ]
     for name, cache, max_size, ttl in _cache_specs:
         try:
@@ -7961,16 +8058,21 @@ __all__ = [
     "_BWM_EXECUTOR",
     "_BWM_EXECUTOR_MAX_WORKERS",
     "_bwm_check_nonblocking",
+    "_check_bot_can_delete",
+    "invalidate_bot_delete_perm_cache",
+    "_bot_delete_perm_cache",
+    "_BOT_DELETE_PERM_TTL",
+    "_BOT_DELETE_PERM_MAX",
 ]
 
 
 # ═════════════════════════════════════════════════════════════════════
-# LOAD BEACON — v7.18.59
+# LOAD BEACON — v7.18.60
 # ═════════════════════════════════════════════════════════════════════
 
 try:
     logger.info(
-        "✅ handlers_message v7.18.59 loaded | "
+        "✅ handlers_message v7.18.60 loaded | "
         "BWM=%s | PRIVATE_HANDLERS=%d | "
         "external_handled=%d | "
         "routing-fallback=7-paths-deduped | "
@@ -7981,6 +8083,7 @@ try:
         "AUTOREPLY-SAFE=on (async-run-removed+DB=%.1fs,file=%.1fs) | "
         "BWM-SAFE=on (REAL-PERF:normalize-1×+patterns-cached,"
         "workers=%d,timeout=%.1fs) | "
+        "PERM-AWARE-DELETE=on (cache=%.0fs, no-return-on-fail) | "
         "POSTBOT-SAFE=on (to_thread+timeout=%.1fs,max=%d) | "
         "CONTEXT-SAFE=on (to_thread+timeout=%.1fs) | "
         "LITE-FALLBACK=on (2000ch+btn+fwd, no skip) | "
@@ -7989,7 +8092,8 @@ try:
         "WAIT_LOG_CH=direct-handler | "
         "LOG-CHANNEL-KEY=log_channel_id (CANONICAL, unified) | "
         "detectors-compat=v4.1.3 | "
-        "fixes=(v7.18.59 FIX-BWM-REAL-PERF + "
+        "fixes=(v7.18.60 FIX-PERM-AWARE-DELETE + "
+        "v7.18.59 FIX-BWM-REAL-PERF + "
         "v7.18.58 FIX-BWM-COLD-CACHE + "
         "v7.18.57 FIX-BWM-ASYNC-DB-SPLIT + "
         "v7.18.56 FIX-BWM-LOOP-BLOCKING + "
@@ -8018,6 +8122,7 @@ try:
         _AUTOREPLY_FILE_TIMEOUT_SEC,
         _BWM_EXECUTOR_MAX_WORKERS,
         _BWM_TIMEOUT_SEC,
+        _BOT_DELETE_PERM_TTL,
         _TEXT_SCORE_TIMEOUT_SEC,
         _POSTBOT_TEXT_MAX_CHARS,
         _CONTEXT_BUILD_TIMEOUT_SEC,
