@@ -2,63 +2,80 @@
 # -*- coding: utf-8 -*-
 
 """
-database_tables.py — إنشاء الجداول والفهارس لكل قواعد البيانات (v7.9.14)
+database_tables.py — إنشاء الجداول والفهارس لكل قواعد البيانات (v7.9.15)
 ================================================================================
-🆕 v7.9.14 (MV-ANALYZE-SPLIT-FIX):
-  🟠 FIX-MV-ANALYZE-1: _run_maintenance_postgres — فصل VACUUM و
-      ANALYZE على MV.
-      السبب: `VACUUM (ANALYZE) mv_name` في PostgreSQL لا يُطبِّق
-      ANALYZE على MV نفسه (يوثّق ذلك رسمياً: "VACUUM with ANALYZE
-      on a materialized view only vacuums it; to analyze, call
-      ANALYZE separately"). النتيجة: إحصائيات MV لا تُحدَّث تلقائياً
-      → planner يختار خططاً غير مثالية على الاستعلامات التي تستخدمها.
+🆕 v7.9.15 (FIX-BROKEN-HYPERTABLES + REDUCE-INDEX-LOAD):
 
-      الآن: على MV، نستدعي VACUUM ثم ANALYZE بشكل منفصل، وكل واحد
-      بـ try/except مستقل (فشل ANALYZE لا يُسقط VACUUM والعكس).
+  🔴 FIX-BROKEN-HYPERTABLES (CRITICAL):
+      تحويل 4 جداول شُوِّهت إلى Timescale hypertables بالخطأ إلى جداول
+      عادية مرة واحدة فقط (flag في settings يمنع التكرار).
 
-  🟠 FIX-MV-ANALYZE-2: _vacuum_dirty_mvs_postgres — نفس المبدأ.
-      السبب: نفس المشكلة. على PG >= 14 نُفرِّق بين VACUUM و ANALYZE
-      على MV بدلاً من الاعتماد على `VACUUM (ANALYZE)` الذي يتجاهل
-      ANALYZE على MV.
+      الجداول:
+        • auto_blocked_sources (55+ chunk)  ← is_blocked() في كل رسالة
+        • auto_reply_settings  (62+ chunk)  ← BATCH-SETTINGS في كل رسالة
+        • admin_logs           (منذ إصدار قديم)
+        • bot_addition_log     (11 chunk)
 
-  🟢 FIX-MV-ANALYZE-3: فحص pg_version مرة واحدة (مُخزَّن)
-      السبب: `_vacuum_dirty_mvs_postgres` كان يستعلم
-      `SHOW server_version_num` في كل استدعاء. الآن نستخدمه كمتغير
-      module-level يُقرأ مرة واحدة عند أول استدعاء.
+      السبب: 117+ chunk → planning overhead هائل على كل استعلام.
+      كل SELECT لـ auto_blocked_sources يخطط على 55 chunk، auto_reply_settings
+      على 62 chunk. النتيجة: كل استعلامات DB أثناء الإقلاع بطيئة (1-2.3s)
+      رغم pool فارغ.
 
-  ✅ محفوظ من v7.9.13:
-      - FIX-DSS-CREATE (delete_spam_score في 3 محركات)
-      - FIX-TEXT-HASH-DEFAULT (text_hash TEXT DEFAULT '')
-      - FIX-WELCOME-DEFAULTS (welcome_text/goodbye_text = '')
-      - IMPROVE-VERSION-NOTE
-  ✅ محفوظ من v7.9.12..v7.9.10:
-      BUG-1..6 + M-1,2,4,5,8 + FIX-DSS-1
-  ✅ محفوظ من v7.9.9..v7.9.4:
-      كل التحسينات السابقة.
+      الحل:
+        - _dehypertable_one_postgres(table): decompress → create temp LIKE
+          → copy → verify count → DROP → RENAME (داخل transaction)
+        - _dehypertable_if_needed_postgres(): يفحص timescaledb_information،
+          يتحوّل مرة واحدة، يضع flag = 'done' في settings
+        - يُستدعى من create_tables_postgres + _run_maintenance_postgres
+          (فقط عندما not in_transaction)
+
+  🔴 FIX-IDX-AR-USAGE:
+      حذف idx_ar_usage من auto_replies.
+      السبب: UPDATE auto_replies SET usage_count = usage_count + 1
+      كان 2.31s لأن الفهرس على usage_count يُعاد بناؤه كل مرة.
+      الأثر المتوقع: 2.31s → <30ms.
+
+  🟠 FIX-REDUNDANT-INDEXES (21 فهرس مكرر/prefix):
+      حذف فهارس مكررة أو prefix من فهارس composite أخرى:
+        • idx_uc_user (prefix من idx_user_channels_user_created)
+        • idx_group_admins_user_id (prefix)
+        • idx_hidden_owner_groups_owner_id (prefix)
+        • idx_hidden_admins_admin_id (prefix)
+        • idx_anonymous_admins_user_id (prefix)
+        • idx_anonymous_admins_anonymous_id (prefix)
+        • idx_banned_words_chat (prefix)
+        • idx_ar_chat (prefix)
+        • idx_ar_chat_keyword (مكرر مع idx_auto_replies_lookup)
+        • idx_auto_replies_active_keyword (مكرر)
+        • idx_sub_user, idx_sub_status (prefix)
+        • idx_subscriptions_user_status (prefix)
+        • idx_referrals_referrer (prefix)
+        • idx_contests_status (prefix)
+        • idx_penalties_user, idx_penalties_chat, idx_penalties_status
+          (prefix من idx_penalties_user_chat_status_end)
+        • idx_points_user (prefix = PK)
+        • idx_tickets_status (prefix)
+        • idx_schedule_channel_db_id (prefix = PK)
+
+      الأثر المتوقع: كتابة أسرع 30-40%.
+
+  🟢 EXPECTED_INDEX_COUNT: 82 → 60 (تحديث).
+
+  ✅ محفوظ من v7.9.14:
+      - FIX-MV-ANALYZE-1/2/3 (فصل VACUUM/ANALYZE على MV، pg_version cache)
+  ✅ محفوظ من v7.9.13..v7.9.4:
+      - FIX-DSS-CREATE, FIX-TEXT-HASH-DEFAULT, FIX-WELCOME-DEFAULTS
+      - BUG-1..6, M-1,2,4,5,8
+      - FIX-C10, FIX-C12b, FIX-SW-1
+      - كل التحسينات السابقة
 
 🔴 v7.9.10 (AUDIT-REMEDIATION — 6 BUGs + 5 M-issues) — محفوظ:
-  🔴 BUG-1: حذف idx_settings_key من CRITICAL_SMALL_TABLE_INDEXES.
-  🔴 BUG-2: _create_indexes_postgres — DROP قبل FETCH.
-  🔴 BUG-3: create_tables_sqlite fast-path — إضافة def-check.
-  🔴 BUG-4: _pg_has_active_query_on — regex word-boundaries.
-  🔴 BUG-5: حذف _should_skip_maintenance_bootstrap.
-  🔴 BUG-6: _run_maintenance_postgres — لا كتابة عند in_transaction.
-  🟠 M-1: حذف _verify_critical_indexes_postgres + _ensure_all.
-  🟠 M-2: حذف فحص _is_valid_index_name("bot_groups").
-  🟠 M-4: migrations DEBUG → WARNING.
-  🟠 M-5: create_tables_postgres — إزالة الاستدعاء المزدوج.
-  🟠 M-8: حذف _quick_analyze_mysql + استبدالها.
-
-🆕 v7.9.9 (BOT-GROUPS-INDEX + MAINTENANCE-COOLDOWN-FIX) — محفوظ.
-🆕 v7.9.8 (CORRECTNESS-PERF-HARDENING) — محفوظ.
-🔴 v7.9.7 (FIX-C10-CONCURRENTLY-IN-TX) — محفوظ.
-🆕 v7.9.6 (PERF-STARTUP-COOLDOWN) — محفوظ.
-🆕 v7.9.5 (CONCURRENT-INDEX-FOR-LARGE-TABLES) — محفوظ.
-🆕 v7.9.4 (CRITICAL-FIXES-MV-VACUUM) — محفوظ.
+  🔴 BUG-1..6, M-1,2,4,5,8.
+🆕 v7.9.9, v7.9.8, 🔴 v7.9.7, 🆕 v7.9.6, v7.9.5, v7.9.4 — محفوظ.
 ================================================================================
 """
 
-__version__ = "7.9.14"
+__version__ = "7.9.15"
 
 import asyncio
 import logging
@@ -70,7 +87,7 @@ from datetime import datetime, timezone, timedelta
 # 0. ثوابت
 # =====================================================================
 
-CURRENT_SCHEMA_VERSION = 29
+CURRENT_SCHEMA_VERSION = 30
 
 CLEANUP_ANONYMOUS_BOT_IDS = (1087968824, 136817688)
 
@@ -89,10 +106,18 @@ STARTUP_MAINTENANCE_COOLDOWN_SECONDS = 6 * 3600
 # 🟢 v7.9.14 FIX-MV-ANALYZE-3: pg_version يُقرأ مرة واحدة
 _PG_VERSION_CACHE: dict = {}
 
+# 🆕 v7.9.15 FIX-BROKEN-HYPERTABLES: الجداول التي يجب dehypertable
+_DEHYPERTABLE_TARGETS = (
+    "auto_blocked_sources",
+    "auto_reply_settings",
+    "admin_logs",
+    "bot_addition_log",
+)
+
+_DEHYPERTABLE_FLAG_KEY = "dehypertable_v1_done"
+
 # ═══════════════════════════════════════════════════════════════════════
 # الفهارس الحرجة على الجداول الصغيرة — تُنشأ متزامناً قبل أي شيء
-# 🔴 FIX-C12b: قائمة صغيرة جداً تُنشأ بسرعة (< 100ms) بدون CONCURRENTLY
-# 🟠 BUG-1 (v7.9.10): حُذف idx_settings_key — كان يُنشأ ثم يُحذف فوراً
 # ═══════════════════════════════════════════════════════════════════════
 CRITICAL_SMALL_TABLE_INDEXES = (
     ("bot_groups", "idx_bot_groups_added_by",
@@ -191,9 +216,11 @@ DEFAULT_SETTINGS = (
     ("last_maintenance_at", ""),
 )
 
-EXPECTED_INDEX_COUNT = 82
+# 🆕 v7.9.15: 82 - 22 = 60
+EXPECTED_INDEX_COUNT = 60
 
 COMMON_INDEXES = [
+    # ─── users (6) ───
     ("users", "idx_users_banned", "users(banned)"),
     ("users", "idx_users_active_channel", "users(active_channel)"),
     ("users", "idx_users_auto_publish_banned", "users(auto_publish, banned)"),
@@ -201,14 +228,19 @@ COMMON_INDEXES = [
     ("users", "idx_users_subscription_end", "users(subscription_end)"),
     ("users", "idx_users_auto_recycle", "users(auto_recycle)"),
 
-    ("user_channels", "idx_uc_user", "user_channels(user_id)"),
+    # ─── user_channels (4) ───
     ("user_channels", "idx_user_channels_user_created",
      "user_channels(user_id, created_at DESC)"),
     ("user_channels", "idx_user_channels_user_banned",
      "user_channels(user_id, banned)"),
     ("user_channels", "idx_user_channels_banned_user",
      "user_channels(banned, user_id)"),
+    ("user_channels", "idx_user_channels_removed_at",
+     "user_channels(removed_at) WHERE removed_at IS NOT NULL"),
+    ("user_channels", "idx_user_channels_user_id_only",
+     "user_channels(user_id) WHERE banned = 0"),
 
+    # ─── posts (4) ───
     ("posts", "idx_posts_text_hash", "posts(text_hash)"),
     ("posts", "idx_posts_channel_pub_fail_created",
      "posts(channel_db_id, published, fail_count, created_at)"),
@@ -217,7 +249,10 @@ COMMON_INDEXES = [
     ("posts", "idx_posts_channel_unpub_fresh_created",
      "posts(channel_db_id, id) WHERE published = 0 "
      "AND (fail_count IS NULL OR fail_count < 3)"),
+    ("posts", "idx_posts_channel_published_created",
+     "posts(channel_db_id, published, created_at DESC)"),
 
+    # ─── bot_groups (4) ───
     ("bot_groups", "idx_groups_banned", "bot_groups(banned)"),
     ("bot_groups", "idx_bot_groups_added_by", "bot_groups(added_by)"),
     ("bot_groups", "idx_bot_groups_log_channel",
@@ -225,89 +260,75 @@ COMMON_INDEXES = [
     ("bot_groups", "idx_bot_groups_banned_cover",
      "bot_groups(banned) INCLUDE (chat_id, chat_name, username)"),
 
+    # ─── user_groups_link (1) ───
     ("user_groups_link", "idx_user_groups_link_user_id",
      "user_groups_link(user_id)"),
 
-    ("group_admins", "idx_group_admins_user_id",
-     "group_admins(user_id)"),
+    # ─── group_admins (1) ───
     ("group_admins", "idx_group_admins_user_chat",
      "group_admins(user_id, chat_id)"),
 
-    ("hidden_owner_groups", "idx_hidden_owner_groups_owner_id",
-     "hidden_owner_groups(owner_id)"),
+    # ─── hidden_owner_groups (1) ───
     ("hidden_owner_groups", "idx_hidden_owner_groups_owner_chat",
      "hidden_owner_groups(owner_id, chat_id)"),
 
-    ("hidden_admins", "idx_hidden_admins_admin_id",
-     "hidden_admins(admin_id)"),
+    # ─── hidden_admins (1) ───
     ("hidden_admins", "idx_hidden_admins_admin_chat",
      "hidden_admins(admin_id, chat_id)"),
 
-    ("anonymous_admins", "idx_anonymous_admins_user_id",
-     "anonymous_admins(user_id)"),
-    ("anonymous_admins", "idx_anonymous_admins_anonymous_id",
-     "anonymous_admins(anonymous_id)"),
+    # ─── anonymous_admins (2) ───
     ("anonymous_admins", "idx_anon_user_chat",
      "anonymous_admins(user_id, chat_id)"),
     ("anonymous_admins", "idx_anon_anon_chat",
      "anonymous_admins(anonymous_id, chat_id)"),
 
-    ("banned_words", "idx_banned_words_chat", "banned_words(chat_id)"),
+    # ─── banned_words (1) ───
     ("banned_words", "idx_banned_words_chat_word",
      "banned_words(chat_id, word)"),
 
-    ("auto_replies", "idx_ar_chat", "auto_replies(chat_id)"),
+    # ─── auto_replies (2) ───
     ("auto_replies", "idx_auto_replies_lookup",
      "auto_replies(chat_id, keyword, is_active)"),
-    ("auto_replies", "idx_ar_chat_keyword",
-     "auto_replies(chat_id, keyword)"),
-    ("auto_replies", "idx_ar_usage",
-     "auto_replies(usage_count DESC)"),
     ("auto_replies", "idx_auto_replies_keyword_active",
      "auto_replies(keyword, is_active, chat_id)"),
-    ("auto_replies", "idx_auto_replies_active_keyword",
-     "auto_replies(is_active, keyword, chat_id)"),
 
+    # ─── schedule (2) ───
     ("schedule", "idx_schedule_next_publish",
      "schedule(next_publish_date)"),
     ("schedule", "idx_schedule_channel_next",
      "schedule(channel_db_id, next_publish_date)"),
 
-    ("subscriptions", "idx_sub_user", "subscriptions(user_id)"),
-    ("subscriptions", "idx_sub_status", "subscriptions(status)"),
+    # ─── subscriptions (2) ───
     ("subscriptions", "idx_sub_end", "subscriptions(end_date)"),
     ("subscriptions", "idx_subs_status_end_active",
      "subscriptions(status, end_date)"),
-    ("subscriptions", "idx_subscriptions_user_status",
-     "subscriptions(user_id, status)"),
     ("subscriptions", "idx_subscriptions_user_status_end",
      "subscriptions(user_id, status, end_date)"),
 
+    # ─── invoices (1) ───
     ("invoices", "idx_inv_user", "invoices(user_id)"),
 
-    ("referrals", "idx_referrals_referrer", "referrals(referrer_id)"),
+    # ─── referrals (1) ───
     ("referrals", "idx_referrals_referrer_created",
      "referrals(referrer_id, created_at DESC)"),
 
+    # ─── referral_rewards (1) ───
     ("referral_rewards", "idx_referral_rewards_count",
      "referral_rewards(referral_count)"),
 
-    ("contests", "idx_contests_status", "contests(status)"),
+    # ─── contests (1) ───
     ("contests", "idx_contests_status_end",
      "contests(status, end_date)"),
 
+    # ─── contest_participants (1) ───
     ("contest_participants", "idx_contest_participants_contest",
      "contest_participants(contest_id)"),
 
+    # ─── gift_codes (1) ───
     ("gift_codes", "idx_gift_codes_plan",
      "gift_codes(plan_id)"),
 
-    ("user_penalties", "idx_penalties_user",
-     "user_penalties(user_id)"),
-    ("user_penalties", "idx_penalties_chat",
-     "user_penalties(chat_id)"),
-    ("user_penalties", "idx_penalties_status",
-     "user_penalties(status)"),
+    # ─── user_penalties (3) ───
     ("user_penalties", "idx_penalties_user_chat_status_end",
      "user_penalties(user_id, chat_id, status, end_time)"),
     ("user_penalties", "idx_penalties_status_end",
@@ -316,68 +337,73 @@ COMMON_INDEXES = [
      "user_penalties(id) WHERE status = 'active' "
      "AND end_time IS NOT NULL"),
 
-    ("user_points", "idx_points_user", "user_points(user_id)"),
+    # ─── user_points (1) ───
     ("user_points", "idx_user_points_value", "user_points(points DESC)"),
 
-    ("support_tickets", "idx_tickets_status",
-     "support_tickets(status)"),
+    # ─── support_tickets (1) ───
     ("support_tickets", "idx_tickets_status_created",
      "support_tickets(status, created_at DESC)"),
 
+    # ─── payment_logs (1) ───
     ("payment_logs", "idx_payment_logs_user", "payment_logs(user_id)"),
 
+    # ─── admin_logs (1) ───
     ("admin_logs", "idx_admin_logs_chat",
      "admin_logs(chat_id, id DESC)"),
 
+    # ─── penalty_archive (1) ───
     ("penalty_archive", "idx_penalty_archive_archived",
      "penalty_archive(archived_at)"),
 
+    # ─── sentiment_history (2) ───
     ("sentiment_history", "idx_sentiment_user_chat",
      "sentiment_history(user_id, chat_id)"),
     ("sentiment_history", "idx_sentiment_created",
      "sentiment_history(created_at)"),
 
+    # ─── user_messages (1) ───
     ("user_messages", "idx_user_messages_chat",
      "user_messages(chat_id)"),
 
+    # ─── scheduled_posts (1) ───
     ("scheduled_posts", "idx_scheduled_posts_time",
      "scheduled_posts(publish_time)"),
 
+    # ─── user_reminder_settings (1) ───
     ("user_reminder_settings", "idx_reminder_subscription",
      "user_reminder_settings(subscription_reminder)"),
 
+    # ─── user_violations (1) ───
     ("user_violations", "idx_user_violations_chat",
      "user_violations(chat_id)"),
 
+    # ─── user_warnings (1) ───
     ("user_warnings", "idx_user_warnings_chat",
      "user_warnings(chat_id)"),
 
+    # ─── bot_addition_log (1) ───
     ("bot_addition_log", "idx_bot_addition_log_chat",
      "bot_addition_log(chat_id, added_at DESC)"),
 
-    ("user_channels", "idx_user_channels_removed_at",
-     "user_channels(removed_at) WHERE removed_at IS NOT NULL"),
-
+    # ─── auto_blocked_sources (2) ───
     ("auto_blocked_sources", "idx_auto_blocked_hit_count",
      "auto_blocked_sources(hit_count DESC)"),
     ("auto_blocked_sources", "idx_auto_blocked_last_seen",
      "auto_blocked_sources(last_seen DESC)"),
 
+    # ─── group_security (1) ───
     ("group_security", "idx_group_security_postbot",
      "group_security(delete_postbot_pattern) "
      "WHERE delete_postbot_pattern = 1"),
 
+    # ─── mv_active_user_limits (1) ───
     ("mv_active_user_limits", "idx_mv_active_user_limits_user_id",
      "mv_active_user_limits(user_id)"),
-    ("schedule", "idx_schedule_channel_db_id",
-     "schedule(channel_db_id)"),
-    ("posts", "idx_posts_channel_published_created",
-     "posts(channel_db_id, published, created_at DESC)"),
-    ("user_channels", "idx_user_channels_user_id_only",
-     "user_channels(user_id) WHERE banned = 0"),
 ]
 
+# 🆕 v7.9.15: 22 فهرس مُهمَل إضافي (idx_ar_usage + 21 مكرر/prefix)
 DEPRECATED_INDEXES = [
+    # ─── posts قديمة ───
     "idx_posts_channel",
     "idx_posts_published",
     "idx_posts_channel_published",
@@ -389,14 +415,17 @@ DEPRECATED_INDEXES = [
     "idx_posts_fail_count", "idx_posts_channel_created",
     "idx_posts_channel_fail",
 
+    # ─── subscriptions قديمة ───
     "idx_sub_user_status_end", "idx_subscriptions_active",
     "idx_subscriptions_active_end",
 
+    # ─── user_channels قديمة ───
     "idx_user_channels_user_banned_only",
     "idx_user_channels_user_banned_id",
     "idx_user_channels_id_user", "idx_uc_user_banned",
     "idx_uc_channel_id", "idx_uc_active",
 
+    # ─── user_penalties قديمة ───
     "idx_penalties_user_chat_status", "idx_penalties_user_chat",
     "idx_user_penalties_active_end", "idx_user_penalties_expiry",
     "idx_user_penalties_cleanup", "idx_penalties_chat_status",
@@ -406,45 +435,55 @@ DEPRECATED_INDEXES = [
     "idx_security_chat",
     "idx_group_security_chat",
 
+    # ─── others قديمة ───
     "idx_banned_words_word",
-
     "idx_reminders_subscription", "idx_reminders_user",
-
     "idx_admin_logs_created", "idx_admin_logs_admin",
-
     "idx_anonymous_admins_chat", "idx_anonymous_admins_user",
-
     "idx_hidden_admin_admin",
-
     "idx_group_admins_user", "idx_group_admins_chat",
-
     "idx_sched_next", "idx_schedule_next", "idx_schedule_next_channel",
-
     "idx_contest_participants_user",
-
     "idx_users_updated", "idx_users_trial_used",
     "idx_users_subscription", "idx_users_referral",
     "idx_users_banned_publish",
-
     "idx_referrals_referred", "idx_referrals_created",
-
     "idx_contests_end",
-
     "idx_hidden_owner_owner",
-
     "idx_tickets_user", "idx_tickets_number",
-
     "idx_inv_status", "idx_inv_number",
-
     "idx_auto_replies_keyword", "idx_ar_keyword",
-
     "idx_settings_key",
-
     "idx_user_violations_user",
     "idx_violations_user_chat",
     "idx_user_warnings_user",
-
     "idx_ugl_user",
+
+    # 🆕 v7.9.15: idx_ar_usage — الأهم (2.31s → <30ms)
+    "idx_ar_usage",
+
+    # 🆕 v7.9.15: 21 فهرس مكرر/prefix
+    "idx_uc_user",
+    "idx_group_admins_user_id",
+    "idx_hidden_owner_groups_owner_id",
+    "idx_hidden_admins_admin_id",
+    "idx_anonymous_admins_user_id",
+    "idx_anonymous_admins_anonymous_id",
+    "idx_banned_words_chat",
+    "idx_ar_chat",
+    "idx_ar_chat_keyword",
+    "idx_auto_replies_active_keyword",
+    "idx_sub_user",
+    "idx_sub_status",
+    "idx_subscriptions_user_status",
+    "idx_referrals_referrer",
+    "idx_contests_status",
+    "idx_penalties_user",
+    "idx_penalties_chat",
+    "idx_penalties_status",
+    "idx_points_user",
+    "idx_tickets_status",
+    "idx_schedule_channel_db_id",
 ]
 
 CRITICAL_INDEX_NAMES = frozenset({
@@ -459,10 +498,8 @@ CRITICAL_INDEX_NAMES = frozenset({
     "idx_user_channels_user_banned",
     "idx_subscriptions_user_status_end",
     "idx_schedule_channel_next",
-    "idx_banned_words_chat",
     "idx_banned_words_chat_word",
     "idx_auto_replies_keyword_active",
-    "idx_auto_replies_active_keyword",
     "idx_user_violations_chat",
     "idx_user_warnings_chat",
     "idx_bot_groups_banned_cover",
@@ -470,25 +507,22 @@ CRITICAL_INDEX_NAMES = frozenset({
     "idx_user_channels_removed_at",
     "idx_group_security_postbot",
     "idx_mv_active_user_limits_user_id",
-    "idx_schedule_channel_db_id",
     "idx_posts_channel_published_created",
     "idx_user_channels_user_id_only",
+    "idx_auto_replies_lookup",
 })
-
 
 # ═══════════════════════════════════════════════════════════════════════
 # دوال مساعدة
 # ═══════════════════════════════════════════════════════════════════════
 
 def _is_valid_index_name(name: str) -> bool:
-    """فحص صحة اسم الفهرس/الجدول."""
     if not name or not isinstance(name, str):
         return False
     return bool(re.match(r"^[a-zA-Z_][a-zA-Z0-9_]*$", name))
 
 
 def _is_advanced_index(cols: str) -> bool:
-    """هل الفهرس يحتوي WHERE أو INCLUDE؟"""
     if not cols:
         return False
     s = cols.upper()
@@ -498,7 +532,6 @@ def _is_advanced_index(cols: str) -> bool:
 MYSQL_SKIP_INDEXES = frozenset(
     n for _, n, c in COMMON_INDEXES if _is_advanced_index(c)
 )
-
 
 _STRICT_INDEX_CHECK = os.getenv("DB_STRICT_INDEX_CHECK", "0") == "1"
 
@@ -518,7 +551,6 @@ if _duplicates:
 
 
 def _safe_now_iso(TimeUtils) -> str:
-    """يعيد الطابع الزمني الآن بصيغة SQL (UTC)."""
     if TimeUtils:
         try:
             return TimeUtils.sql_iso()
@@ -528,7 +560,6 @@ def _safe_now_iso(TimeUtils) -> str:
 
 
 def _safe_now_dt(TimeUtils):
-    """يعيد datetime UTC بلا TZinfo."""
     if TimeUtils:
         try:
             return TimeUtils.utc_now()
@@ -538,18 +569,10 @@ def _safe_now_dt(TimeUtils):
 
 
 def _now_utc_iso_aware() -> str:
-    """ISO 8601 بصيغة TZ-aware."""
     return datetime.now(timezone.utc).isoformat()
 
 
 async def _get_pg_version_cached(conn, logger=None) -> int:
-    """
-    🟢 v7.9.14 FIX-MV-ANALYZE-3: pg_version يُقرأ مرة واحدة ويُخزَّن.
-
-    المفتاح = id(conn) — لأن conn تتغيّر في كل استدعاء transaction.
-    لكن في الممارسة، pool asyncpg يعيد استخدام نفس الاتصالات → id
-    ثابت إلى حد كبير. cache على مستوى module يخدم معظم الحالات.
-    """
     key = id(conn)
     cached = _PG_VERSION_CACHE.get(key)
     if cached is not None:
@@ -562,7 +585,6 @@ async def _get_pg_version_cached(conn, logger=None) -> int:
             logger.debug(f"_get_pg_version_cached: {e}")
         ver = 0
     _PG_VERSION_CACHE[key] = ver
-    # نظّف cache إذا كبر كثيراً (pool يتغيّر id بمرور الوقت)
     if len(_PG_VERSION_CACHE) > 64:
         _PG_VERSION_CACHE.clear()
         _PG_VERSION_CACHE[key] = ver
@@ -576,7 +598,6 @@ async def _get_pg_version_cached(conn, logger=None) -> int:
 async def _should_run_startup_maintenance(
     conn, db_type: str, logger=None,
 ) -> bool:
-    """يقرر إن كانت الفحوصات الثقيلة مطلوبة."""
     try:
         if db_type == "postgres":
             val = await conn.fetchval(
@@ -629,7 +650,6 @@ async def _should_run_startup_maintenance(
 async def _mark_startup_maintenance_done(
     conn, db_type: str, logger=None,
 ) -> None:
-    """يسجل وقت آخر فحوصات إقلاع ناجحة."""
     now_iso = _now_utc_iso_aware()
     try:
         if db_type == "postgres":
@@ -702,9 +722,6 @@ def _parse_expected_columns(cols: str) -> str:
 
 
 def _adapt_cols_for_db(cols: str, db_type: str) -> str:
-    """
-    يحوّل تعريف فهرس PostgreSQL إلى SQLite/MySQL.
-    """
     if not cols:
         return cols
     if db_type == "postgres":
@@ -742,7 +759,6 @@ def _get_expected_cols_for_index(
 # =====================================================================
 
 async def _get_table_row_count_postgres(conn, table_name: str) -> int:
-    """تقدير سريع لعدد صفوف الجدول."""
     if not _is_valid_index_name(table_name):
         return 0
     try:
@@ -783,7 +799,6 @@ async def _safe_drop_index_postgres(
     conn, logger, idx_name: str,
     force_non_concurrent: bool = False,
 ) -> bool:
-    """حذف فهرس بأمان."""
     if not _is_valid_index_name(idx_name):
         return False
 
@@ -822,7 +837,6 @@ async def _drop_invalid_indexes_postgres(
     conn, logger,
     force_non_concurrent: bool = False,
 ) -> int:
-    """حذف الفهارس INVALID."""
     try:
         rows = await conn.fetch("""
             SELECT c.relname AS index_name
@@ -865,7 +879,6 @@ async def _create_index_postgres_smart(
     table_row_cache=None,
     force_non_concurrent: bool = False,
 ) -> str:
-    """إنشاء فهرس مع قرار CONCURRENTLY التلقائي."""
     if not _is_valid_index_name(idx_name):
         return "failed"
 
@@ -966,14 +979,178 @@ async def _create_index_postgres_smart(
 
 
 # ═══════════════════════════════════════════════════════════════════════
+# 🆕 v7.9.15 FIX-BROKEN-HYPERTABLES
+# ═══════════════════════════════════════════════════════════════════════
+# تحويل hypertables المشوّهة إلى جداول عادية.
+
+async def _dehypertable_one_postgres(
+    conn, logger, table: str,
+) -> bool:
+    """تحويل hypertable واحد إلى جدول عادي مع الحفاظ على البيانات."""
+    if not _is_valid_index_name(table):
+        return False
+
+    tmp = f"_dehypertable_{table}_tmp"
+
+    try:
+        try:
+            is_ht = await conn.fetchval(
+                "SELECT 1 FROM timescaledb_information.hypertables "
+                "WHERE hypertable_schema = current_schema() "
+                "  AND hypertable_name = $1",
+                table,
+            )
+        except Exception:
+            return False
+
+        if not is_ht:
+            return True
+
+        # فك ضغط chunks (إن كانت مضغوطة)
+        try:
+            await conn.execute(
+                f"SELECT decompress_chunk(c, true) "
+                f"FROM show_chunks('{table}') c"
+            )
+        except Exception as _de:
+            if logger:
+                logger.debug(f"decompress {table}: {_de}")
+
+        # نسخ ونقل داخل transaction واحد
+        async with conn.transaction():
+            await conn.execute(f"DROP TABLE IF EXISTS {tmp}")
+            await conn.execute(
+                f"CREATE TABLE {tmp} (LIKE {table} INCLUDING ALL)"
+            )
+            await conn.execute(
+                f"INSERT INTO {tmp} SELECT * FROM {table}"
+            )
+
+            orig = await conn.fetchval(
+                f"SELECT COUNT(*) FROM {table}"
+            )
+            new = await conn.fetchval(
+                f"SELECT COUNT(*) FROM {tmp}"
+            )
+
+            if int(orig or 0) != int(new or 0):
+                raise RuntimeError(
+                    f"row count mismatch: orig={orig}, new={new}"
+                )
+
+            await conn.execute(f"DROP TABLE {table} CASCADE")
+            await conn.execute(
+                f"ALTER TABLE {tmp} RENAME TO {table}"
+            )
+
+        if logger:
+            logger.warning(
+                f"✅ DEHYPERTABLE {table}: {orig} صف migrated "
+                f"(hypertable → regular table)"
+            )
+        return True
+
+    except Exception as e:
+        if logger:
+            logger.error(f"❌ DEHYPERTABLE {table}: {e}")
+        try:
+            await conn.execute(f"DROP TABLE IF EXISTS {tmp}")
+        except Exception:
+            pass
+        return False
+
+
+async def _dehypertable_if_needed_postgres(conn, logger) -> int:
+    """فحص وإصلاح الجداول المشوّهة — مرة واحدة فقط لكل قاعدة بيانات."""
+    try:
+        has_ts = await conn.fetchval(
+            "SELECT 1 FROM pg_extension WHERE extname = 'timescaledb'"
+        )
+        if not has_ts:
+            return 0
+    except Exception:
+        return 0
+
+    try:
+        done = await conn.fetchval(
+            "SELECT value FROM settings WHERE key = $1",
+            _DEHYPERTABLE_FLAG_KEY,
+        )
+        if done == "done":
+            return 0
+    except Exception:
+        pass
+
+    try:
+        rows = await conn.fetch(
+            "SELECT hypertable_name "
+            "FROM timescaledb_information.hypertables "
+            "WHERE hypertable_schema = current_schema() "
+            "  AND hypertable_name = ANY($1::text[])",
+            list(_DEHYPERTABLE_TARGETS),
+        )
+        actual = [r["hypertable_name"] for r in rows]
+    except Exception:
+        return 0
+
+    if not actual:
+        try:
+            await conn.execute(
+                "INSERT INTO settings (key, value) VALUES ($1, $2) "
+                "ON CONFLICT (key) DO UPDATE "
+                "SET value = EXCLUDED.value",
+                _DEHYPERTABLE_FLAG_KEY, "done",
+            )
+        except Exception:
+            pass
+        return 0
+
+    if logger:
+        logger.warning(
+            f"🚨 DEHYPERTABLE-START: {len(actual)} جدول مشوّه "
+            f"({actual}) — بدء التحويل لجدول عادي..."
+        )
+
+    fixed = 0
+    for table in actual:
+        try:
+            ok = await _dehypertable_one_postgres(conn, logger, table)
+            if ok:
+                fixed += 1
+        except Exception as e:
+            if logger:
+                logger.error(f"dehypertable {table} failed: {e}")
+
+    if fixed == len(actual):
+        try:
+            await conn.execute(
+                "INSERT INTO settings (key, value) VALUES ($1, $2) "
+                "ON CONFLICT (key) DO UPDATE "
+                "SET value = EXCLUDED.value",
+                _DEHYPERTABLE_FLAG_KEY, "done",
+            )
+        except Exception:
+            pass
+        if logger:
+            logger.warning(
+                f"✅ DEHYPERTABLE-DONE: {fixed}/{len(actual)} جدول "
+                f"تم تحويلها بنجاح — لن يُعاد الفحص أبداً"
+            )
+    else:
+        if logger:
+            logger.error(
+                f"⚠️ DEHYPERTABLE-PARTIAL: {fixed}/{len(actual)} نجحت "
+                f"— سيُعاد المحاولة في الإقلاع التالي"
+            )
+
+    return fixed
+
+
+# ═══════════════════════════════════════════════════════════════════════
 # ضمان الفهارس الحرجة على الجداول الصغيرة
 # ═══════════════════════════════════════════════════════════════════════
 
 async def _ensure_critical_small_indexes_postgres(conn, logger) -> int:
-    """
-    ينشئ الفهارس الحرجة على الجداول الصغيرة
-    بشكل متزامن وسريع (< 500ms) قبل maintenance.
-    """
     try:
         created = 0
         skipped = 0
@@ -1034,7 +1211,6 @@ async def _run_combined_index_checks_postgres(
     conn, logger,
     in_transaction: bool = False,
 ) -> None:
-    """استعلام واحد يجلب كل شيء ثم يوزّع الفحوصات على الذاكرة."""
     try:
         _force_nc = bool(in_transaction)
         if _force_nc and logger:
@@ -1240,7 +1416,6 @@ async def _ensure_auto_blocked_table_mysql(conn, logger):
 # =====================================================================
 
 async def _cleanup_old_admin_logs_postgres(conn, logger):
-    """CTE + RETURNING COUNT."""
     total_deleted = 0
 
     try:
@@ -1453,7 +1628,6 @@ async def _cleanup_old_admin_logs_mysql(conn, logger):
 # =====================================================================
 
 async def _tune_autovacuum_postgres(conn, logger):
-    """0.05 للصغيرة، 0.1 للنّامية."""
     all_tables = list(dict.fromkeys(
         list(SMALL_TABLES_FOR_AGGRESSIVE_AUTOVACUUM)
         + list(GROWING_TABLES_FOR_MODERATE_AUTOVACUUM)
@@ -1713,8 +1887,6 @@ async def _quick_analyze_postgres(conn, logger):
 
 # =====================================================================
 # VACUUM ذكي على MVs المتسخة
-# 🟠 v7.9.14 FIX-MV-ANALYZE-2: فصل VACUUM و ANALYZE على MV
-# 🟢 v7.9.14 FIX-MV-ANALYZE-3: pg_version مُخزَّن
 # =====================================================================
 
 async def _vacuum_dirty_mvs_postgres(conn, logger, min_dead: int = 10):
@@ -1768,9 +1940,7 @@ async def _vacuum_dirty_mvs_postgres(conn, logger, min_dead: int = 10):
                     )
                 continue
 
-            # 🟠 v7.9.14 FIX-MV-ANALYZE-2: فصل VACUUM و ANALYZE
             if pg_version >= 14:
-                # VACUUM على MV (PG 12+ يدعم VACUUM على MV بدون ANALYZE)
                 try:
                     await conn.execute(f'VACUUM "{name}"')
                     cleaned += 1
@@ -1791,7 +1961,6 @@ async def _vacuum_dirty_mvs_postgres(conn, logger, min_dead: int = 10):
                         if logger:
                             logger.debug(f"⚠️ VACUUM MV {name}: {e}")
 
-                # ANALYZE منفصل (PostgreSQL لا يطبّقه مع VACUUM على MV)
                 try:
                     await conn.execute(f'ANALYZE "{name}"')
                     analyzed += 1
@@ -1803,7 +1972,6 @@ async def _vacuum_dirty_mvs_postgres(conn, logger, min_dead: int = 10):
                     if logger:
                         logger.debug(f"⚠️ ANALYZE MV {name}: {e}")
             else:
-                # PG < 14: ANALYZE فقط (VACUUM على MV غير مدعوم بنفس الطريقة)
                 try:
                     await conn.execute(f'ANALYZE "{name}"')
                     analyzed += 1
@@ -1843,16 +2011,6 @@ async def _vacuum_dirty_mvs_postgres(conn, logger, min_dead: int = 10):
 # =====================================================================
 
 async def _pg_has_active_query_on(conn, table_name: str) -> bool:
-    """
-    هل يوجد استعلام نشط على الجدول الآن؟
-
-    نستخدم word-boundaries في PostgreSQL regex (\\m..\\M) لتفادي
-    false positives (مثل 'users' المطابق لـ 'user_channels'، أو
-    'posts' المطابق لـ 'scheduled_posts').
-
-    ملاحظة: table_name مُتحقَّق من صيغته بـ _is_valid_index_name
-    (^[a-zA-Z_][a-zA-Z0-9_]*$) لذا لا يحتاج escaping إضافياً.
-    """
     if not _is_valid_index_name(table_name):
         return False
     try:
@@ -1867,9 +2025,6 @@ async def _pg_has_active_query_on(conn, table_name: str) -> bool:
         """, pattern)
         return bool(row)
     except Exception:
-        # 🟠 BUG-4 fallback: إذا فشل الـ regex (نسخة PG قديمة جداً
-        # أو إعدادات خاصة)، نعود إلى ILIKE مع حدود مسافات لتقليل
-        # false positives.
         try:
             row = await conn.fetchval("""
                 SELECT EXISTS(
@@ -1884,20 +2039,21 @@ async def _pg_has_active_query_on(conn, table_name: str) -> bool:
             return False
 
 
-# 🟠 v7.9.14 FIX-MV-ANALYZE-1: فصل VACUUM و ANALYZE على MV
 async def _run_maintenance_postgres(
     conn, logger,
     in_transaction: bool = False,
 ):
-    """
-    VACUUM ANALYZE الدوري.
-
-    - if in_transaction, نتخطى VACUUM.
-    - فحص pg_stat_activity قبل كل VACUUM.
-    - لا نكتب last_maintenance_at إذا in_transaction.
-    - 🟠 v7.9.14: فصل VACUUM و ANALYZE على MV.
-    """
     try:
+        # 🆕 v7.9.15: فحص الـ hypertables المشوّهة (مرة واحدة فقط)
+        if not in_transaction:
+            try:
+                await _dehypertable_if_needed_postgres(conn, logger)
+            except Exception as _dht_e:
+                if logger:
+                    logger.debug(
+                        f"dehypertable check (maintenance): {_dht_e}"
+                    )
+
         pg_version = await _get_pg_version_cached(conn, logger)
 
         try:
@@ -1985,14 +2141,11 @@ async def _run_maintenance_postgres(
             except Exception:
                 is_mv = False
 
-            # 🟠 v7.9.14 FIX-MV-ANALYZE-1: فصل VACUUM و ANALYZE على MV
             try:
                 if in_transaction:
                     await conn.execute(f'ANALYZE "{tbl}"')
                     analyzed += 1
                 elif is_mv:
-                    # MV: PostgreSQL لا يطبّق ANALYZE ضمنياً مع VACUUM
-                    # → نفصلهما
                     if pg_version >= 14:
                         try:
                             await conn.execute(f'VACUUM "{tbl}"')
@@ -2039,7 +2192,6 @@ async def _run_maintenance_postgres(
                 if logger:
                     logger.debug(f"⚠️ _vacuum_dirty_mvs_postgres: {e}")
 
-        # لا نكتب last_maintenance_at إذا في tx
         if not in_transaction:
             try:
                 await conn.execute(
@@ -2816,7 +2968,6 @@ async def _get_current_schema_version_mysql(conn):
 
 
 def _warn_if_schema_ahead(current: int, logger):
-    """إنذار صارخ إذا كانت DB أحدث من الكود (rollback deployment)."""
     if current > CURRENT_SCHEMA_VERSION and logger:
         logger.error(
             f"🚨🚨 DB schema v{current} > code v{CURRENT_SCHEMA_VERSION} — "
@@ -3152,7 +3303,6 @@ async def _ensure_index_definitions_match_postgres(
     conn, logger,
     in_transaction: bool = False,
 ):
-    """دعم in_transaction لتفادي DROP CONCURRENTLY في tx."""
     checked = 0
     dropped = 0
     missing = 0
@@ -3342,7 +3492,6 @@ async def _drop_deprecated_indexes_postgres(
     conn, logger,
     force_non_concurrent: bool = False,
 ):
-    """دعم force_non_concurrent لتفادي DROP CONCURRENTLY في tx."""
     if not DEPRECATED_INDEXES:
         return 0
     dropped = 0
@@ -3517,7 +3666,6 @@ async def _create_indexes_postgres(
     conn, logger,
     in_transaction: bool = False,
 ):
-    """دعم in_transaction لتجنّب CONCURRENTLY داخل tx."""
     await _drop_invalid_indexes_postgres(
         conn, logger,
         force_non_concurrent=in_transaction,
@@ -4335,7 +4483,7 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
             "(version, applied_at, description) "
             "VALUES (?, ?, ?) ON CONFLICT(version) DO NOTHING",
             (CURRENT_SCHEMA_VERSION, _safe_now_iso(TimeUtils),
-             "v7.9.14-mv-analyze-split-fix"),
+             "v7.9.15-fix-broken-hypertables-reduce-index-load"),
         )
         await conn.commit()
     except Exception as e:
@@ -4347,7 +4495,7 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
     if logger:
         logger.info(
             "✅ تم إنشاء جميع جداول SQLite مع الفهارس المحسنة "
-            "(v7.9.14 — MV-ANALYZE-SPLIT-FIX)"
+            "(v7.9.15 — FIX-BROKEN-HYPERTABLES + REDUCE-INDEX-LOAD)"
         )
 
 
@@ -4359,6 +4507,14 @@ async def create_tables_postgres(
     conn, logger, TimeUtils,
     in_transaction: bool = False,
 ):
+    # 🆕 v7.9.15 FIX-BROKEN-HYPERTABLES: إصلاح الجداول المشوّهة أولاً
+    if not in_transaction:
+        try:
+            await _dehypertable_if_needed_postgres(conn, logger)
+        except Exception as _dht_e:
+            if logger:
+                logger.debug(f"dehypertable check: {_dht_e}")
+
     current = await _get_current_schema_version_postgres(conn)
     if current >= CURRENT_SCHEMA_VERSION:
         _warn_if_schema_ahead(current, logger)
@@ -4381,8 +4537,6 @@ async def create_tables_postgres(
                         "(نحن داخل transaction)"
                     )
 
-            # هذا الاستدعاء يمرّ داخلياً بـ
-            # _ensure_critical_small_indexes_postgres أولاً.
             await _run_combined_index_checks_postgres(
                 conn, logger,
                 in_transaction=in_transaction,
@@ -5080,7 +5234,7 @@ async def create_tables_postgres(
             "VALUES ($1, $2, $3) ON CONFLICT (version) DO NOTHING",
             CURRENT_SCHEMA_VERSION,
             _safe_now_dt(TimeUtils),
-            "v7.9.14-mv-analyze-split-fix",
+            "v7.9.15-fix-broken-hypertables-reduce-index-load",
         )
     except Exception as e:
         if logger:
@@ -5091,7 +5245,7 @@ async def create_tables_postgres(
     if logger:
         logger.info(
             "✅ تم إنشاء جميع جداول PostgreSQL مع الفهارس المحسنة "
-            "(v7.9.14 — MV-ANALYZE-SPLIT-FIX)"
+            "(v7.9.15 — FIX-BROKEN-HYPERTABLES + REDUCE-INDEX-LOAD)"
         )
 
 
@@ -5792,7 +5946,7 @@ async def create_tables_mysql(conn, logger, TimeUtils):
                 (
                     CURRENT_SCHEMA_VERSION,
                     _safe_now_iso(TimeUtils),
-                    "v7.9.14-mv-analyze-split-fix",
+                    "v7.9.15-fix-broken-hypertables-reduce-index-load",
                 ),
             )
         except Exception as e:
@@ -5804,7 +5958,7 @@ async def create_tables_mysql(conn, logger, TimeUtils):
         if logger:
             logger.info(
                 "✅ تم إنشاء جميع جداول MySQL مع الفهارس المحسنة "
-                "(v7.9.14 — MV-ANALYZE-SPLIT-FIX)"
+                "(v7.9.15 — FIX-BROKEN-HYPERTABLES + REDUCE-INDEX-LOAD)"
             )
 
     finally:
@@ -5866,22 +6020,27 @@ __all__ = [
     "_ensure_auto_blocked_table_mysql",
     "_BANNED_WORDS_NEW_COLUMNS",
     "_AUTO_REPLIES_NEW_COLUMNS",
-    # 🟢 v7.9.14
     "_get_pg_version_cached",
     "_PG_VERSION_CACHE",
+    # 🆕 v7.9.15
+    "_dehypertable_if_needed_postgres",
+    "_dehypertable_one_postgres",
+    "_DEHYPERTABLE_TARGETS",
+    "_DEHYPERTABLE_FLAG_KEY",
 ]
 
 
 # =====================================================================
-# LOAD BEACON — v7.9.14
+# LOAD BEACON — v7.9.15
 # =====================================================================
 
 try:
     _beacon_parts = [
         f"🛡️ database_tables.py v{__version__} loaded",
-        f"FIX-MV-ANALYZE-1 _run_maintenance_postgres-split=✅",
-        f"FIX-MV-ANALYZE-2 _vacuum_dirty_mvs_postgres-split=✅",
-        f"FIX-MV-ANALYZE-3 pg_version-cache=✅",
+        f"FIX-BROKEN-HYPERTABLES=on (dehypertable 4 tables)",
+        f"FIX-IDX-AR-USAGE=on (removed)",
+        f"FIX-REDUNDANT-INDEXES=on (removed 21)",
+        f"FIX-MV-ANALYZE-1/2/3=✅",
         f"FIX-DSS-CREATE delete_spam_score-added=✅",
         f"FIX-TEXT-HASH-DEFAULT text_hash-DEFAULT-''=✅",
         f"FIX-WELCOME-DEFAULTS welcome/goodbye-DEFAULT-''=✅",
@@ -5890,7 +6049,7 @@ try:
         f"FIX-C12b CRITICAL_SMALL_INDEXES={len(CRITICAL_SMALL_TABLE_INDEXES)}",
         f"BUG-1..6 all-fixed=✅",
         f"M-1,2,4,5,8 all-fixed=✅",
-        f"indexes={len(COMMON_INDEXES)}",
+        f"indexes={len(COMMON_INDEXES)} (was 82, now 60)",
         f"critical={len(CRITICAL_INDEX_NAMES)}",
         f"deprecated={len(DEPRECATED_INDEXES)}",
     ]
