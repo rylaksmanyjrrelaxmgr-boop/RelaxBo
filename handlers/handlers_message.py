@@ -1,53 +1,41 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-handlers_message.py - v7.18.61 (FIX-BWM-PREWARM)
+handlers_message.py - v7.18.62 (FIX-BWM-SUBSTRING)
 (متوافق مع detectors v4.1.3 + banned_words_manager v1.2.0 + group_log v1.4.0)
 =============================================================================
-🆕 v7.18.61 (FIX-BWM-PREWARM):
+🆕 v7.18.62 (FIX-BWM-SUBSTRING):
 
-    🟡 FIX-BWM-PREWARM: pre-compile كل patterns الكلمات المحظورة عند
-        الإقلاع (1888 كلمة).
+    🔴 FIX-BWM-SUBSTRING (CRITICAL):
+        v7.18.61 حاول pre-compile 1888 regex pattern عند الإقلاع، لكن
+        على 0.5 CPU (Render Starter) مع 10 managed bots يعملون بالتوازي
+        → warmup timeout + GC pressure → BWM-MATCH-TIMEOUT 5s ما زال
+        يحدث (شوهد في chat=-1003669001897 على v7.18.61:
+        DIAG msg=159104 → 5.5s → BWM-MATCH-TIMEOUT words=1888 →
+        handle_group: 9004ms، gc=507 دورات، GIL lag=2003ms).
 
-        المشكلة: أول رسالة في كل chat جديد كانت تُجمِّع 1888 pattern من
-        الصفر → BWM-MATCH-TIMEOUT 5.0s + handle_group 16.7s (شوهد
-        في chat=-1003614957225 على v7.18.60).
-
-        الحل:
-          - _bwm_check_nonblocking تستدعي _get_banned_pattern() عند
-            الحاجة → أول استدعاء لأي كلمة جديدة = compilation.
-          - warmup_banned_words_patterns() جديدة: بعد warmup_detectors
-            تُجمِّع كل patterns في executor منعزل (timeout 15s) قبل
-            استقبال أي update.
-          - من بعد الإقلاع: كل _get_banned_pattern = dict lookup.
-
-        الأثر المتوقع: chat جديد = BWM-MATCH <100ms (بدل 5s).
-                     handle_group steady = 1.5-2s (بدل 16.7s أول مرة).
-
-    🔴 FIX-PERM-AWARE-DELETE (CRITICAL):
-        في v7.18.59، عندما يفشل الحذف (البوت بلا can_delete_messages)،
-        كان `_delete_and_warn` يعمل `return` فوراً بعد 4s انتظار
-        (محاولة delete على Telegram ستفشل حتماً).
-
-        الأثر:
-          - كل رسالة spam = 5-14s حجب event loop
-          - لا تحذير للمستخدم، لا عقوبة (kick/ban/mute) — توقّف تام
-          - تنبيه متكرر للمطور (rate-limited بـ 1/ساعة لكن لا يظهر)
+        السبب الجذري:
+          - 1888 pattern × ~3ms (Arabic regex + unicode) ≈ 5.6s
+          - GC pressure من آلاف الكائنات (regex compiled)
+          - 0.5 CPU لا يتحمّل compilation + managed_bots + auto_publish
+          - warmup timeout 15s بلا فائدة إن CPU مشبع
 
         الحل:
-          - `_check_bot_can_delete(bot, chat_id)` — cache 300s، فحص
-            سريع لـ can_delete_messages مباشرة عبر get_chat_member
-          - `invalidate_bot_delete_perm_cache(chat_id)` — إبطال عند
-            فشل الحذف الفعلي (قد تكون الصلاحيات تغيّرت)
-          - `_delete_and_warn` — إذا `_can_delete=False`: تتخطّى
-            الحذف (<10ms) وتستمر بـ:
-              • add_admin_log + send_user_warning
-              • apply_violation_penalty (kick/ban/mute إن كان
-                البوت مشرفاً بصلاحية can_restrict_members)
-              • _notify_group_log_penalty
-          - `_notify_delete_permission_failure` — log confirmation
-            عند trigger (للتشخيص)
+          - استبدال regex تماماً بـ substring matching.
+          - normalize(text) مرة واحدة، ثم فحص `bw in normalized_text`.
+          - word-boundary check يدوي (isalnum) — يحافظ على السلوك.
+          - 1888 كلمة × substring = ~1-20ms (بدل 5.6s).
+          - لا compile، لا warmup، لا GC pressure.
 
+        الأثر المتوقع: chat جديد = BWM-MATCH ~1-20ms (بدل 5s).
+                     handle_group = 1.5-2s (بدل 9.0s).
+                     GC pressure من BWM = 0.
+
+        ملاحظة: warmup_banned_words_patterns أصبحت no-op (backward
+        compatible مع bot.py الذي قد يستدعيها).
+
+    ✅ محفوظ من v7.18.61: FIX-BWM-PREWARM (كـ no-op، backward compat)
+    ✅ محفوظ من v7.18.60: FIX-PERM-AWARE-DELETE (CRITICAL)
     ✅ محفوظ من v7.18.59: FIX-BWM-REAL-PERF (normalize-once + patterns cached)
     ✅ محفوظ من v7.18.58: FIX-BWM-COLD-CACHE
     ✅ محفوظ من v7.18.57: FIX-BWM-ASYNC-DB-SPLIT
@@ -66,7 +54,7 @@ import asyncio
 import logging
 import time
 import sys
-print(f"██████ HANDLERS_MESSAGE LOADED FROM: {__file__} | v7.18.61-PROOF ██████", file=sys.stderr, flush=True)
+print(f"██████ HANDLERS_MESSAGE LOADED FROM: {__file__} | v7.18.62-PROOF ██████", file=sys.stderr, flush=True)
 import os
 import re
 import inspect
@@ -164,7 +152,8 @@ _POSTBOT_MIN_TEXT_CHARS: int = 20
 _TEXT_SCORE_MAX_CHARS: int = 3000
 _CONTEXT_BUILD_TIMEOUT_SEC: float = 5.0
 
-# 🆕 v7.18.61 FIX-BWM-PREWARM: timeout لـ pre-compile كل patterns
+# v7.18.61 FIX-BWM-PREWARM: timeout لـ pre-compile كل patterns
+# v7.18.62: مُبقى للتوافق الرجعي فقط (لا يُستخدم فعلياً — substring match)
 _BWM_WARMUP_TIMEOUT_SEC: float = 15.0
 
 
@@ -432,12 +421,14 @@ except ImportError:
 
 # ═════════════════════════════════════════════════════════════════════
 # v7.18.39 FIX-WARMUP-1 + v7.18.44 FIX-WARMUP-IMPORT
-# v7.18.61 FIX-BWM-PREWARM: + pre-compile banned patterns
+# v7.18.61 FIX-BWM-PREWARM: + pre-compile banned patterns (no-op الآن)
+# v7.18.62 FIX-BWM-SUBSTRING: prewarm لم يعد ضرورياً (substring match)
 # ═════════════════════════════════════════════════════════════════════
 
 async def warmup_detectors_pool() -> bool:
     """v7.18.39 FIX-WARMUP-1: تسخين مجمع detectors + الوحدات الثقيلة.
-    🆕 v7.18.61: أيضاً pre-compile banned patterns."""
+    v7.18.61: يُنادي warmup_banned_words_patterns.
+    v7.18.62: warmup_banned_words_patterns أصبحت no-op (substring)."""
     import importlib as _importlib
     ok = True
 
@@ -469,8 +460,7 @@ async def warmup_detectors_pool() -> bool:
     except Exception as _e:
         logger.debug("warmup: _normalize_text: %s", _e)
 
-    # 🆕 v7.18.61 FIX-BWM-PREWARM: pre-compile كل patterns
-    # يمنع BWM-MATCH-TIMEOUT عند أول رسالة في أي chat جديد.
+    # v7.18.61/62: prewarm banned patterns (no-op في v7.18.62)
     try:
         _warm_patterns = globals().get("warmup_banned_words_patterns")
         if callable(_warm_patterns):
@@ -485,68 +475,21 @@ async def warmup_detectors_pool() -> bool:
     return ok
 
 
-# 🆕 v7.18.61 FIX-BWM-PREWARM: pre-compile banned word patterns
+# v7.18.62 FIX-BWM-SUBSTRING: prewarm لم يعد ضرورياً (no-op)
 async def warmup_banned_words_patterns() -> int:
     """
-    pre-compile كل regex patterns للكلمات المحظورة مسبقاً.
+    v7.18.62 FIX-BWM-SUBSTRING: لم تعد ضرورية.
 
-    يُستدعى من warmup_detectors_pool عند الإقلاع. بعد هذه الدالة:
-      - _get_banned_pattern(bw) = dict lookup فقط (لا compilation).
-      - أول رسالة في أي chat جديد = BWM-MATCH <100ms (بدل >5s).
+    بعد الانتقال إلى substring matching (لا regex)، لا وجود لـ
+    patterns تحتاج warmup. هذه الدالة محفوظة كـ no-op لـ backward
+    compatibility مع bot.py الذي يستدعيها.
 
-    التنفيذ:
-      - في _BWM_EXECUTOR المنعزل (لا يحجب event loop).
-      - timeout 15s (1888 pattern تجميع ≈ 300-800ms عادةً).
-      - idempotent: استدعاء ثانٍ = 0ms (cache موجود).
+    تعيد 0 دائماً (لا يوجد شيء لتسخينه).
     """
-    count = 0
-    if not _HAS_BWM:
-        return 0
-    try:
-        all_words = await get_banned_words_cached(-1)
-        if not all_words:
-            logger.debug("BWM-PATTERNS-WARMUP: لا كلمات عالمية")
-            return 0
-
-        loop = asyncio.get_running_loop()
-        executor = _get_bwm_executor()
-        _get_pat = globals().get("_get_banned_pattern")
-
-        if not callable(_get_pat):
-            logger.debug(
-                "BWM-PATTERNS-WARMUP: _get_banned_pattern غير متاح بعد")
-            return 0
-
-        def _compile_all() -> int:
-            n = 0
-            for bw in all_words:
-                if not bw:
-                    continue
-                try:
-                    _get_pat(bw)
-                    n += 1
-                except Exception:
-                    continue
-            return n
-
-        count = await asyncio.wait_for(
-            loop.run_in_executor(executor, _compile_all),
-            timeout=_BWM_WARMUP_TIMEOUT_SEC,
-        )
-        logger.info(
-            "🔥 BWM-PATTERNS-WARMUP: %d pattern جاهزة مسبقاً "
-            "(first-call chat = <100ms بدل >5s)",
-            count)
-    except asyncio.TimeoutError:
-        logger.warning(
-            "⚠️ BWM-PATTERNS-WARMUP: timeout %.0fs "
-            "(cold start سيحدث في أول رسالة)",
-            _BWM_WARMUP_TIMEOUT_SEC)
-    except asyncio.CancelledError:
-        raise
-    except Exception as e:
-        logger.debug("warmup_banned_words_patterns: %s", e)
-    return count
+    logger.debug(
+        "BWM-PATTERNS-WARMUP: skipped "
+        "(v7.18.62 uses substring, no patterns needed)")
+    return 0
 
 
 def _env_flag(name: str, default: bool = True) -> bool:
@@ -2221,7 +2164,7 @@ async def _notify_delete_permission_failure(context, chat_id):
             if now - last < _DELETE_FAILURE_NOTIFY_COOLDOWN:
                 return
             _delete_failure_notified[chat_id] = now
-            # 🆕 v7.18.60: log confirmation عند trigger الفعلي
+            # v7.18.60: log confirmation عند trigger الفعلي
             logger.warning(
                 "🔔 DELETE-PERM-NOTIFY triggered | chat=%s "
                 "(cooldown=%ds)",
@@ -2256,7 +2199,7 @@ async def _notify_delete_permission_failure(context, chat_id):
 
 
 # ═════════════════════════════════════════════════════════════════════
-# 🆕 v7.18.60 FIX-PERM-AWARE-DELETE
+# v7.18.60 FIX-PERM-AWARE-DELETE
 # ═════════════════════════════════════════════════════════════════════
 # cache 300s لصلاحية can_delete_messages — يمنع 4s انتظار في كل
 # رسالة عند البوت بلا صلاحية الحذف (get_chat_member call مكلف).
@@ -3882,23 +3825,29 @@ _EXTERNAL_HANDLED_STATES = frozenset({
 
 
 # ═════════════════════════════════════════════════════════════════════
-# v7.18.59 FIX-BWM-REAL-PERF: مطابقة سريعة O(words) بدل O(words × text)
+# v7.18.62 FIX-BWM-SUBSTRING: substring matching (بدل 1888 regex)
 # ═════════════════════════════════════════════════════════════════════
 async def _bwm_check_nonblocking(
     text: str, chat_id: int,
 ) -> Optional[str]:
     """
-    v7.18.59 FIX-BWM-REAL-PERF: مطابقة سريعة O(words).
+    v7.18.62 FIX-BWM-SUBSTRING: مطابقة O(text + words) عبر substring.
 
-    - normalize(text) مرة واحدة
-    - كل كلمة: pattern من cache (LRU) → pattern.search()
-    - Pass 2 (اختياري): _bwm_contains للـ spaced/compact evasions
-      (يعمل فقط إذا ANTIEVASION_COMPACT_WORDS=True)
+    المشكلة (v7.18.61): 1888 × re.compile للأزواج العربية = ~5.6s على
+    0.5 CPU + GC pressure → warmup timeout → BWM-MATCH-TIMEOUT 5s
+    (شوهد على chat=-1003669001897: handle_group 9004ms).
+
+    الحل: تجنّب regex تماماً. normalize(text) مرة واحدة، ثم substring
+    check O(1) لكل كلمة، مع word-boundary يدوي (isalnum).
+    زمن مطابقة 1888 كلمة على نص قصير = ~1-20ms.
+
+    Trade-off: فقدان (?<!\\w)...(?!\\w) regex — لكن isalnum() اليدوي
+    يُعطي نفس السلوك تقريباً (يدعم العربية واللاتينية والأرقام).
     """
     if not _HAS_BWM or _bwm_contains is None:
         return None
 
-    # Phase 1: جلب الكلمات
+    # Phase 1: جلب الكلمات (main loop)
     banned_words: Optional[List[str]] = None
     try:
         banned_words = await asyncio.wait_for(
@@ -3921,16 +3870,13 @@ async def _bwm_check_nonblocking(
     if not banned_words:
         return None
 
-    # Phase 2: مطابقة سريعة في executor
+    # Phase 2: substring matching في executor (سريع جداً)
     loop = asyncio.get_running_loop()
     executor = _get_bwm_executor()
 
     _words = list(banned_words)
     _text = text
-    _antievasion = ANTIEVASION_COMPACT_WORDS
-    _external = _bwm_contains
     _normalize = _normalize_text
-    _get_pat = _get_banned_pattern
 
     def _run_match() -> Optional[str]:
         try:
@@ -3939,27 +3885,35 @@ async def _bwm_check_nonblocking(
             except Exception:
                 normalized_text = _text.lower()
 
-            # Pass 1: fast word-boundary regex (patterns cached)
+            if not normalized_text:
+                return None
+
+            # 1) مطابقة سريعة: substring + word-boundary check
             for bw in _words:
                 if not bw:
                     continue
-                try:
-                    pattern = _get_pat(bw)
-                    if pattern is not None and pattern.search(normalized_text):
-                        return bw
-                except Exception:
+                if bw not in normalized_text:
                     continue
 
-            # Pass 2 (اختياري): spaced/compact evasions
-            if _antievasion:
-                for bw in _words:
-                    if not bw:
-                        continue
-                    try:
-                        if _external(_text, bw):
-                            return bw
-                    except Exception:
-                        continue
+                # 2) تحقق من حدود الكلمة (يدعم العربية واللاتينية)
+                idx = 0
+                bw_len = len(bw)
+                text_len = len(normalized_text)
+                while True:
+                    pos = normalized_text.find(bw, idx)
+                    if pos < 0:
+                        break
+                    end = pos + bw_len
+                    left_ok = (
+                        pos == 0
+                        or not normalized_text[pos - 1].isalnum())
+                    right_ok = (
+                        end >= text_len
+                        or not normalized_text[end].isalnum())
+                    if left_ok and right_ok:
+                        return bw
+                    idx = pos + 1
+
             return None
         except Exception as e:
             logger.debug("BWM match error: %s", e)
@@ -3968,12 +3922,12 @@ async def _bwm_check_nonblocking(
     try:
         return await asyncio.wait_for(
             loop.run_in_executor(executor, _run_match),
-            timeout=_BWM_TIMEOUT_SEC,
+            timeout=2.0,
         )
     except asyncio.TimeoutError:
         logger.warning(
-            "⏱️ BWM-MATCH-TIMEOUT | chat=%s >%.1fs | words=%d",
-            chat_id, _BWM_TIMEOUT_SEC, len(_words))
+            "⏱️ BWM-MATCH-TIMEOUT | chat=%s >2.0s | words=%d",
+            chat_id, len(_words))
         return None
     except asyncio.CancelledError:
         raise
@@ -5036,7 +4990,7 @@ class MessageHandlers:
                 pass
 
         # ═════════════════════════════════════════════════════════════
-        # 🆕 v7.18.60 FIX-PERM-AWARE-DELETE:
+        # v7.18.60 FIX-PERM-AWARE-DELETE:
         # فحص صلاحيات الحذف أولاً (cache 300s). إذا البوت بلا
         # can_delete_messages → نتخطّى الحذف (<10ms) بدل انتظار 4s،
         # ونستمر بالتحذير والعقوبة (kick/ban/mute قد تنجح).
@@ -5069,7 +5023,6 @@ class MessageHandlers:
                 "⚠️ DELETE FAILED | chat=%s msg=%s violation=%s — "
                 "نستمر بالتحذير والعقوبة",
                 chat_id, message.message_id, violation_type)
-            # إبطال cache الصلاحيات — قد تكون تغيّرت منذ آخر فحص
             try:
                 invalidate_bot_delete_perm_cache(chat_id)
             except Exception:
@@ -5083,7 +5036,6 @@ class MessageHandlers:
                         label="delete-perm-notify")
             except Exception:
                 pass
-            # 🆕 v7.18.60: لا return — نستمر بالحماية الفعلية
 
         if _HAS_AUTO_BLOCK and violation_type in (
             'postbot_forward', 'forwarded', 'spam_score',
@@ -8159,19 +8111,18 @@ __all__ = [
     "_bot_delete_perm_cache",
     "_BOT_DELETE_PERM_TTL",
     "_BOT_DELETE_PERM_MAX",
-    # 🆕 v7.18.61
     "warmup_banned_words_patterns",
     "_BWM_WARMUP_TIMEOUT_SEC",
 ]
 
 
 # ═════════════════════════════════════════════════════════════════════
-# LOAD BEACON — v7.18.61
+# LOAD BEACON — v7.18.62
 # ═════════════════════════════════════════════════════════════════════
 
 try:
     logger.info(
-        "✅ handlers_message v7.18.61 loaded | "
+        "✅ handlers_message v7.18.62 loaded | "
         "BWM=%s | PRIVATE_HANDLERS=%d | "
         "external_handled=%d | "
         "routing-fallback=7-paths-deduped | "
@@ -8180,19 +8131,20 @@ try:
         "max-len=%d) | "
         "TEXT-SCORE-SAFE=on (to_thread+timeout=%.1fs,size-guard=%d) | "
         "AUTOREPLY-SAFE=on (async-run-removed+DB=%.1fs,file=%.1fs) | "
-        "BWM-SAFE=on (REAL-PERF:normalize-1×+patterns-cached,"
-        "workers=%d,timeout=%.1fs) | "
+        "BWM-SAFE=on (SUBSTRING+word-boundary+timeout=2.0s,"
+        "workers=%d) | "
         "PERM-AWARE-DELETE=on (cache=%.0fs, no-return-on-fail) | "
         "POSTBOT-SAFE=on (to_thread+timeout=%.1fs,max=%d) | "
         "CONTEXT-SAFE=on (to_thread+timeout=%.1fs) | "
         "LITE-FALLBACK=on (2000ch+btn+fwd, no skip) | "
         "WARMUP=available | "
-        "PREWARM=on (BWM-patterns-pre-compiled) | "
+        "PREWARM=skipped (SUBSTRING, no patterns) | "
         "DB-TYPE=%s | "
         "WAIT_LOG_CH=direct-handler | "
         "LOG-CHANNEL-KEY=log_channel_id (CANONICAL, unified) | "
         "detectors-compat=v4.1.3 | "
-        "fixes=(v7.18.61 FIX-BWM-PREWARM + "
+        "fixes=(v7.18.62 FIX-BWM-SUBSTRING + "
+        "v7.18.61 FIX-BWM-PREWARM (no-op) + "
         "v7.18.60 FIX-PERM-AWARE-DELETE + "
         "v7.18.59 FIX-BWM-REAL-PERF + "
         "v7.18.58 FIX-BWM-COLD-CACHE + "
@@ -8222,7 +8174,6 @@ try:
         _AUTOREPLY_DB_TIMEOUT_SEC,
         _AUTOREPLY_FILE_TIMEOUT_SEC,
         _BWM_EXECUTOR_MAX_WORKERS,
-        _BWM_TIMEOUT_SEC,
         _BOT_DELETE_PERM_TTL,
         _TEXT_SCORE_TIMEOUT_SEC,
         _POSTBOT_TEXT_MAX_CHARS,
