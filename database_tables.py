@@ -2,67 +2,46 @@
 # -*- coding: utf-8 -*-
 
 """
-database_tables.py — إنشاء الجداول والفهارس لكل قواعد البيانات (v7.9.15)
+database_tables.py — إنشاء الجداول والفهارس لكل قواعد البيانات (v7.9.16)
 ================================================================================
-🆕 v7.9.15 (FIX-BROKEN-HYPERTABLES + REDUCE-INDEX-LOAD):
+🆕 v7.9.16 (FIX-HYPERTABLE-SERIAL-RESTORE):
 
-  🔴 FIX-BROKEN-HYPERTABLES (CRITICAL):
-      تحويل 4 جداول شُوِّهت إلى Timescale hypertables بالخطأ إلى جداول
-      عادية مرة واحدة فقط (flag في settings يمنع التكرار).
+  🔴 FIX-HYPERTABLE-SERIAL-RESTORE (CRITICAL):
+      إصلاح جذري لثغرة في _dehypertable_one_postgres كانت تسبب
+      NotNullViolationError على admin_logs.id بعد التحويل.
 
-      الجداول:
-        • auto_blocked_sources (55+ chunk)  ← is_blocked() في كل رسالة
-        • auto_reply_settings  (62+ chunk)  ← BATCH-SETTINGS في كل رسالة
-        • admin_logs           (منذ إصدار قديم)
-        • bot_addition_log     (11 chunk)
-
-      السبب: 117+ chunk → planning overhead هائل على كل استعلام.
-      كل SELECT لـ auto_blocked_sources يخطط على 55 chunk، auto_reply_settings
-      على 62 chunk. النتيجة: كل استعلامات DB أثناء الإقلاع بطيئة (1-2.3s)
-      رغم pool فارغ.
+      المشكلة:
+        CREATE TABLE {tmp} (LIKE {table} INCLUDING ALL) ينسخ DEFAULT
+        nextval('{table}_id_seq') لكنه لا ينشئ sequence جديد.
+        ثم DROP TABLE {table} CASCADE يقتل الـ sequence القديم
+        (لأنه OWNED BY العمود). بعد RENAME، الجدول الجديد يشير
+        لتسلسل ميت → DEFAULT لا يعمل → id يصبح NULL عند كل INSERT
+        → asyncpg.exceptions.NotNullViolationError.
 
       الحل:
-        - _dehypertable_one_postgres(table): decompress → create temp LIKE
-          → copy → verify count → DROP → RENAME (داخل transaction)
-        - _dehypertable_if_needed_postgres(): يفحص timescaledb_information،
-          يتحوّل مرة واحدة، يضع flag = 'done' في settings
-        - يُستدعى من create_tables_postgres + _run_maintenance_postgres
-          (فقط عندما not in_transaction)
+        بعد transaction الـ dehypertable، نتحقق من عمود id:
+          ① هل يوجد DEFAULT؟
+          ② هل الـ sequence المُشار إليه حي فعلاً في pg_class؟
+        إن لم يتحقق الشرطان:
+          - CREATE SEQUENCE IF NOT EXISTS {table}_id_seq
+          - ALTER SEQUENCE ... OWNED BY {table}.id
+          - ALTER TABLE ... ALTER COLUMN id SET DEFAULT nextval(...)
+          - SELECT setval(...) بمزامنة MAX(id) لمنع التصادم
 
-  🔴 FIX-IDX-AR-USAGE:
-      حذف idx_ar_usage من auto_replies.
-      السبب: UPDATE auto_replies SET usage_count = usage_count + 1
-      كان 2.31s لأن الفهرس على usage_count يُعاد بناؤه كل مرة.
-      الأثر المتوقع: 2.31s → <30ms.
+      الطبقات الدفاعية:
+        • v7.9.16 (هذا الملف): إصلاح فوري بعد dehypertable
+        • v7.7.75 (database.py): SERIAL-AUDIT على 22 جدول في كل إقلاع
+        • FIX-DB39 (_ensure_serial_columns_postgres): شبكة أمان أخيرة
 
-  🟠 FIX-REDUNDANT-INDEXES (21 فهرس مكرر/prefix):
-      حذف فهارس مكررة أو prefix من فهارس composite أخرى:
-        • idx_uc_user (prefix من idx_user_channels_user_created)
-        • idx_group_admins_user_id (prefix)
-        • idx_hidden_owner_groups_owner_id (prefix)
-        • idx_hidden_admins_admin_id (prefix)
-        • idx_anonymous_admins_user_id (prefix)
-        • idx_anonymous_admins_anonymous_id (prefix)
-        • idx_banned_words_chat (prefix)
-        • idx_ar_chat (prefix)
-        • idx_ar_chat_keyword (مكرر مع idx_auto_replies_lookup)
-        • idx_auto_replies_active_keyword (مكرر)
-        • idx_sub_user, idx_sub_status (prefix)
-        • idx_subscriptions_user_status (prefix)
-        • idx_referrals_referrer (prefix)
-        • idx_contests_status (prefix)
-        • idx_penalties_user, idx_penalties_chat, idx_penalties_status
-          (prefix من idx_penalties_user_chat_status_end)
-        • idx_points_user (prefix = PK)
-        • idx_tickets_status (prefix)
-        • idx_schedule_channel_db_id (prefix = PK)
-
-      الأثر المتوقع: كتابة أسرع 30-40%.
-
-  🟢 EXPECTED_INDEX_COUNT: 82 → 60 (تحديث).
+  ✅ محفوظ من v7.9.15:
+      - FIX-BROKEN-HYPERTABLES (تحويل 4 جداول مشوّهة)
+      - FIX-IDX-AR-USAGE (حذف idx_ar_usage)
+      - FIX-REDUNDANT-INDEXES (حذف 21 فهرس مكرر/prefix)
+      - EXPECTED_INDEX_COUNT=60
 
   ✅ محفوظ من v7.9.14:
       - FIX-MV-ANALYZE-1/2/3 (فصل VACUUM/ANALYZE على MV، pg_version cache)
+
   ✅ محفوظ من v7.9.13..v7.9.4:
       - FIX-DSS-CREATE, FIX-TEXT-HASH-DEFAULT, FIX-WELCOME-DEFAULTS
       - BUG-1..6, M-1,2,4,5,8
@@ -75,7 +54,7 @@ database_tables.py — إنشاء الجداول والفهارس لكل قوا�
 ================================================================================
 """
 
-__version__ = "7.9.15"
+__version__ = "7.9.16"
 
 import asyncio
 import logging
@@ -980,13 +959,19 @@ async def _create_index_postgres_smart(
 
 # ═══════════════════════════════════════════════════════════════════════
 # 🆕 v7.9.15 FIX-BROKEN-HYPERTABLES
+# 🆕 v7.9.16 FIX-HYPERTABLE-SERIAL-RESTORE
 # ═══════════════════════════════════════════════════════════════════════
 # تحويل hypertables المشوّهة إلى جداول عادية.
 
 async def _dehypertable_one_postgres(
     conn, logger, table: str,
 ) -> bool:
-    """تحويل hypertable واحد إلى جدول عادي مع الحفاظ على البيانات."""
+    """تحويل hypertable واحد إلى جدول عادي مع الحفاظ على البيانات.
+
+    🆕 v7.9.16: بعد التحويل، نتحقق من أن عمود id يملك DEFAULT صالحاً
+    (sequence حي)، وإلا ننشئ واحداً جديداً ونزامنه مع MAX(id).
+    هذا يمنع NotNullViolationError على admin_logs.id وغيرها.
+    """
     if not _is_valid_index_name(table):
         return False
 
@@ -1042,6 +1027,66 @@ async def _dehypertable_one_postgres(
             await conn.execute(
                 f"ALTER TABLE {tmp} RENAME TO {table}"
             )
+
+        # ════════════════════════════════════════════════════════════════
+        # 🆕 v7.9.16 FIX-HYPERTABLE-SERIAL-RESTORE
+        # بعد DROP TABLE CASCADE، التسلسل القديم (OWNED BY admin_logs.id)
+        # قد يكون قُتل. هذا الفحص يعيد إنشاء sequence جديد إن لزم.
+        # ════════════════════════════════════════════════════════════════
+        try:
+            default_expr = await conn.fetchval(
+                "SELECT column_default "
+                "FROM information_schema.columns "
+                "WHERE table_name = $1 "
+                "  AND column_name = 'id' "
+                "  AND table_schema = current_schema()",
+                table,
+            )
+
+            has_valid_default = False
+            if default_expr and "nextval(" in str(default_expr).lower():
+                # استخراج اسم التسلسل والتحقق من أنه حي
+                m = re.search(r"nextval\('([^']+)'", str(default_expr))
+                if m:
+                    seq_ref = m.group(1).split(".")[-1].strip('"')
+                    seq_exists = await conn.fetchval(
+                        "SELECT 1 FROM pg_class "
+                        "WHERE relname = $1 AND relkind = 'S'",
+                        seq_ref,
+                    )
+                    has_valid_default = seq_exists is not None
+
+            if not has_valid_default:
+                seq_name = f"{table}_id_seq"
+                await conn.execute(
+                    f"CREATE SEQUENCE IF NOT EXISTS {seq_name}"
+                )
+                await conn.execute(
+                    f"ALTER SEQUENCE {seq_name} "
+                    f"OWNED BY {table}.id"
+                )
+                await conn.execute(
+                    f"ALTER TABLE {table} "
+                    f"ALTER COLUMN id SET DEFAULT "
+                    f"nextval('{seq_name}')"
+                )
+                await conn.execute(
+                    f"SELECT setval('{seq_name}', "
+                    f"COALESCE((SELECT MAX(id) FROM {table}), 0) + 1, "
+                    f"false)"
+                )
+                if logger:
+                    logger.warning(
+                        f"✅ v7.9.16 RESTORED SERIAL on {table}.id "
+                        f"(sequence={seq_name})"
+                    )
+        except Exception as _sr_e:
+            if logger:
+                logger.error(
+                    f"⚠️ v7.9.16: فشل استعادة SERIAL على {table}.id: "
+                    f"{_sr_e} — v7.7.75 SERIAL-AUDIT سيتولى "
+                    f"الإصلاح في الإقلاع التالي"
+                )
 
         if logger:
             logger.warning(
@@ -4483,7 +4528,7 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
             "(version, applied_at, description) "
             "VALUES (?, ?, ?) ON CONFLICT(version) DO NOTHING",
             (CURRENT_SCHEMA_VERSION, _safe_now_iso(TimeUtils),
-             "v7.9.15-fix-broken-hypertables-reduce-index-load"),
+             "v7.9.16-fix-hypertable-serial-restore"),
         )
         await conn.commit()
     except Exception as e:
@@ -4495,7 +4540,7 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
     if logger:
         logger.info(
             "✅ تم إنشاء جميع جداول SQLite مع الفهارس المحسنة "
-            "(v7.9.15 — FIX-BROKEN-HYPERTABLES + REDUCE-INDEX-LOAD)"
+            "(v7.9.16 — FIX-HYPERTABLE-SERIAL-RESTORE)"
         )
 
 
@@ -4508,6 +4553,7 @@ async def create_tables_postgres(
     in_transaction: bool = False,
 ):
     # 🆕 v7.9.15 FIX-BROKEN-HYPERTABLES: إصلاح الجداول المشوّهة أولاً
+    # 🆕 v7.9.16: الآن يستعيد SERIAL تلقائياً بعد التحويل
     if not in_transaction:
         try:
             await _dehypertable_if_needed_postgres(conn, logger)
@@ -5234,7 +5280,7 @@ async def create_tables_postgres(
             "VALUES ($1, $2, $3) ON CONFLICT (version) DO NOTHING",
             CURRENT_SCHEMA_VERSION,
             _safe_now_dt(TimeUtils),
-            "v7.9.15-fix-broken-hypertables-reduce-index-load",
+            "v7.9.16-fix-hypertable-serial-restore",
         )
     except Exception as e:
         if logger:
@@ -5245,7 +5291,7 @@ async def create_tables_postgres(
     if logger:
         logger.info(
             "✅ تم إنشاء جميع جداول PostgreSQL مع الفهارس المحسنة "
-            "(v7.9.15 — FIX-BROKEN-HYPERTABLES + REDUCE-INDEX-LOAD)"
+            "(v7.9.16 — FIX-HYPERTABLE-SERIAL-RESTORE)"
         )
 
 
@@ -5946,7 +5992,7 @@ async def create_tables_mysql(conn, logger, TimeUtils):
                 (
                     CURRENT_SCHEMA_VERSION,
                     _safe_now_iso(TimeUtils),
-                    "v7.9.15-fix-broken-hypertables-reduce-index-load",
+                    "v7.9.16-fix-hypertable-serial-restore",
                 ),
             )
         except Exception as e:
@@ -5958,7 +6004,7 @@ async def create_tables_mysql(conn, logger, TimeUtils):
         if logger:
             logger.info(
                 "✅ تم إنشاء جميع جداول MySQL مع الفهارس المحسنة "
-                "(v7.9.15 — FIX-BROKEN-HYPERTABLES + REDUCE-INDEX-LOAD)"
+                "(v7.9.16 — FIX-HYPERTABLE-SERIAL-RESTORE)"
             )
 
     finally:
@@ -6031,12 +6077,13 @@ __all__ = [
 
 
 # =====================================================================
-# LOAD BEACON — v7.9.15
+# LOAD BEACON — v7.9.16
 # =====================================================================
 
 try:
     _beacon_parts = [
         f"🛡️ database_tables.py v{__version__} loaded",
+        f"FIX-HYPERTABLE-SERIAL-RESTORE=on (restore SERIAL after dehypertable)",
         f"FIX-BROKEN-HYPERTABLES=on (dehypertable 4 tables)",
         f"FIX-IDX-AR-USAGE=on (removed)",
         f"FIX-REDUNDANT-INDEXES=on (removed 21)",
