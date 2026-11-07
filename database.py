@@ -1,52 +1,37 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-database.py - قاعدة البيانات المتكاملة (v7.7.74 — SAFETY-FIXES-AUDIT)
+database.py - قاعدة البيانات المتكاملة (v7.7.75 — SERIAL-AUDIT-FIX)
 ================================================================================
-🆕 v7.7.74 (SAFETY-FIXES-AUDIT):
+🆕 v7.7.75 (SERIAL-AUDIT-FIX):
 
-  🔴 FIX-DB33 (IMPORTANT): USER_EXISTS_CACHE TTL 300s → 60s
-     السبب: cache يحتفظ بـ True فقط. إذا حُذف المستخدم من DB يدوياً
-     أو عبر مسار غير مُبطِل للـ cache، قد نُعيد True خطأً لمدة 5 دقائق.
-     60s توازن أفضل بين الأداء والدقة.
+  🔴 FIX-DB39 (CRITICAL): _ensure_serial_columns_postgres
+     السبب: جدول admin_logs في قاعدة البيانات الحالية فقد DEFAULT على
+     عمود id (بسبب تحويل hypertable قديم أو migration ناقص)، مما
+     يسبب NotNullViolationError عند كل INSERT بدون id.
+     CREATE TABLE IF NOT EXISTS لا يُصلح جدولاً موجوداً، ولذلك بقيت
+     المشكلة رغم صحة تعريف الجدول في database_tables.py.
 
-  🟠 FIX-DB34 (IMPORTANT): CONFLICT_TARGET_CACHE حد أقصى 500
-     السبب: cache غير محدود نظرياً. عملياً صغير (~20-50 صف)، لكن
-     الحد يحمي من استخدام عشوائي أو schema ديناميكي.
+     الحل: فحص دفاعي على كل إقلاع يتأكد أن id يملك DEFAULT nextval
+     في 22 جدولاً حرجاً، ويُصلح تلقائياً أي جدول فَقَدَ sequence —
+     مع مزامنة setval لمنع تصادم IDs.
 
-  🟠 FIX-DB35 (IMPORTANT): TCP-KEEPALIVE status logging
-     السبب: _pg_init_connection صامت عند فشل تطبيق TCP keepalive.
-     الآن نُسجّل الحالة بوضوح في load beacon لتشخيص الكشف البطيء
-     عن اتصالات ميتة.
+     آمن تماماً: إذا كان DEFAULT موجوداً، يتخطى. لا يتدخل في قواعد
+     بيانات سليمة. لا يتدخل في SQLite أو MySQL.
 
-  🟡 FIX-DB36 (MINOR): _compute_tables_hash fallback
-     السبب: إذا فشل inspect.getsource لملف مُجمَّع، كان يُهمل
-     بصمت → hash مختلف → create_tables على كل restart. الآن
-     نستخدم marker ثابت بدلاً من التجاهل.
-
-  🟡 FIX-DB37 (MINOR): إضافة _invalidate_user_exists_cache دالة
-     عامة لإبطال cache المستخدم من خارج الكلاس.
-
-  🟡 FIX-DB38 (MINOR): تحديث LOAD BEACON.
-
-  ✅ محفوظ من v7.7.73:
-      - FIX-DB27 (conflict-target cache)
-      - FIX-DB28 (pool min_size=10)
-      - FIX-DB29 (ensure_user_exists cache)
-      - FIX-DB30 (ping_idle=300s)
-      - FIX-DB31 (add_penalty CTE)
-      - FIX-DB32 (beacon)
-      - FIX-DB23 (fast caller)
-      - FIX-DB24 (tx_alive log diff)
-      - FIX-DB25 (early tables_hash save)
-      - FIX-DB20..DB22 (bootstrap tx protect)
-      - FIX-DB19 (maintenance bg task)
-      - FIX-DB16..DB18 (stmt_cache revert)
+  ✅ محفوظ من v7.7.74:
+      - FIX-DB33..DB38 (user_exists cache, conflict cache, TCP log, ...)
+      - FIX-DB27..DB32 (v7.7.73)
+      - FIX-DB23..DB26 (v7.7.72)
+      - FIX-DB20..DB22 (v7.7.71)
+      - FIX-DB19 (v7.7.70)
+      - FIX-DB16..DB18 (v7.7.69)
       - FIX-DB11..DB15 (v7.7.68)
       - FIX-DB5..DB9 (v7.7.67)
       - FIX-MIXIN-1/2/3 (v7.7.65)
       - FIX-E1..E8 (v7.7.64)
 
+🆕 v7.7.74 (SAFETY-FIXES-AUDIT) — محفوظ.
 🆕 v7.7.73 (HIGH-RTT-N1-OPTIMIZATION) — محفوظ.
 🆕 v7.7.72 (FAST-CALLER-TX-DIAG) — محفوظ.
 🆕 v7.7.71 (BOOTSTRAP-TX-PROTECT) — محفوظ.
@@ -100,6 +85,8 @@ database.py - قاعدة البيانات المتكاملة (v7.7.74 — SAFETY
 #              + add_penalty CTE merge
 # [34] v7.7.74: TTL 300s→60s، cache_max=500، TCP-keepalive log،
 #              hash fallback، invalidate helper
+# [35] v7.7.75: SERIAL-AUDIT — فحص دفاعي على 22 جدول id DEFAULT
+#              في كل إقلاع، إصلاح تلقائي لـ NotNullViolationError
 # =====================================================================
 
 import os
@@ -708,6 +695,32 @@ SMALL_TABLES_FOR_AUTOVACUUM = (
 
 SLOW_QUERY_FULL_STACK = (
     os.getenv("SLOW_QUERY_FULL_STACK", "true").lower() == "true")
+
+# 🆕 v7.7.75 FIX-DB39: جدولات تحتاج id SERIAL
+_SERIAL_AUDIT_TABLES = (
+    "admin_logs",
+    "auto_blocked_sources",
+    "auto_reply_settings",
+    "bot_addition_log",
+    "user_channels",
+    "posts",
+    "banned_words",
+    "support_tickets",
+    "referrals",
+    "contests",
+    "contest_participants",
+    "contest_winners",
+    "scheduled_posts",
+    "sentiment_history",
+    "plans",
+    "subscriptions",
+    "invoices",
+    "payment_logs",
+    "user_penalties",
+    "gift_codes",
+    "penalty_archive",
+    "bot_groups",
+)
 
 KNOWN_UNIQUE_FALLBACK = {
     'users': ['user_id'],
@@ -2324,6 +2337,9 @@ class Database(
             self._db_size_kb_lock = asyncio.Lock()
 
             self._dev_subscription_ensured = False
+
+            # 🆕 v7.7.75 FIX-DB39
+            self._serial_audit_done = False
 
             try:
                 self._conn_last_used = weakref.WeakKeyDictionary()
@@ -5735,6 +5751,118 @@ class Database(
             f"tables_v{CURRENT_SCHEMA_VERSION}".encode("utf-8")
         ).hexdigest()
 
+    # ═════════════════════════════════════════════════════════════════
+    # 🆕 v7.7.75 FIX-DB39 (CRITICAL): SERIAL-AUDIT على كل إقلاع
+    # ═════════════════════════════════════════════════════════════════
+    async def _ensure_serial_columns_postgres(self, conn) -> int:
+        """
+        🆕 v7.7.75 FIX-DB39: يضمن أن أعمدة id في الجداول الرئيسية
+        تملك DEFAULT nextval (SERIAL/IDENTITY).
+
+        يُصلح تلقائياً أي جدول فَقَدَ sequence — كما حدث مع admin_logs
+        بعد تحويل hypertable قديم (رغم صحة CREATE TABLE في
+        database_tables.py، إلا أن CREATE TABLE IF NOT EXISTS لا
+        يُصلح جدولاً موجوداً بشكل خاطئ).
+
+        آمن تماماً:
+          - PG فقط (يتخطى SQLite/MySQL تلقائياً)
+          - إذا كان DEFAULT موجوداً → يتخطى الجدول
+          - لا يتدخل في قواعد بيانات سليمة (idempotent)
+          - يُسجّل warning فقط عند الحاجة الفعلية للإصلاح
+        """
+        if not USE_POSTGRES:
+            return 0
+
+        fixed = 0
+        skipped = 0
+        errors = 0
+
+        try:
+            # فحص جماعي — استعلام واحد لكل الجداول
+            existing_rows = await conn.fetch(
+                "SELECT table_name "
+                "FROM information_schema.columns "
+                "WHERE table_schema = current_schema() "
+                "  AND column_name = 'id' "
+                "  AND (column_default IS NULL OR column_default = '') "
+                "  AND table_name = ANY($1::text[])",
+                list(_SERIAL_AUDIT_TABLES),
+            )
+            broken_tables = [r["table_name"] for r in existing_rows]
+
+            if not broken_tables:
+                logger.debug(
+                    "✅ FIX-SERIAL-AUDIT: كل أعمدة id سليمة "
+                    f"({len(_SERIAL_AUDIT_TABLES)} جدول مفصول)")
+                self._serial_audit_done = True
+                return 0
+
+            logger.warning(
+                f"🚨 FIX-SERIAL-AUDIT: كُشف {len(broken_tables)} جدول "
+                f"بلا DEFAULT على id: {broken_tables} — بدء الإصلاح..."
+            )
+
+            for table in broken_tables:
+                if not re.match(r"^[a-zA-Z_][a-zA-Z0-9_]*$", table):
+                    logger.warning(
+                        f"⚠️ FIX-SERIAL-AUDIT: اسم جدول غير صالح "
+                        f"→ تخطي: {table!r}")
+                    errors += 1
+                    continue
+                seq_name = f"{table}_id_seq"
+                try:
+                    await conn.execute(
+                        f"CREATE SEQUENCE IF NOT EXISTS {seq_name}"
+                    )
+                    await conn.execute(
+                        f"ALTER SEQUENCE {seq_name} "
+                        f"OWNED BY {table}.id"
+                    )
+                    await conn.execute(
+                        f"ALTER TABLE {table} "
+                        f"ALTER COLUMN id SET DEFAULT nextval('{seq_name}')"
+                    )
+                    await conn.execute(
+                        f"SELECT setval('{seq_name}', "
+                        f"COALESCE((SELECT MAX(id) FROM {table}), 0) + 1, "
+                        f"false)"
+                    )
+                    fixed += 1
+                    logger.warning(
+                        f"✅ FIX-SERIAL-AUDIT: استُعيد SERIAL على "
+                        f"{table}.id (sequence={seq_name})"
+                    )
+                except Exception as _fe:
+                    errors += 1
+                    logger.error(
+                        f"❌ FIX-SERIAL-AUDIT: فشل إصلاح {table}.id: "
+                        f"{_fe}"
+                    )
+
+            if fixed:
+                logger.warning(
+                    f"🛡️ FIX-SERIAL-AUDIT: أُصلح {fixed} جدول "
+                    f"كان بلا SERIAL ({errors} فشل, {skipped} تخطي)"
+                )
+                # إبطال cache كشف conflict-target لأنه قد يحتوي بيانات
+                # قديمة حول PK admin_logs وغيرها
+                try:
+                    _CONFLICT_TARGET_CACHE.clear()
+                except Exception:
+                    pass
+
+            if fixed == len(broken_tables):
+                self._serial_audit_done = True
+
+            return fixed
+
+        except Exception as e:
+            logger.error(
+                f"❌ FIX-SERIAL-AUDIT: فشل الفحص الشامل: {e}",
+                exc_info=True,
+            )
+            return 0
+
     async def _upsert_setting(
         self, conn, key: str, value: str,
     ) -> bool:
@@ -6062,6 +6190,27 @@ class Database(
                 logger.error("❌ فشل حفظ tables_hash")
         else:
             logger.info("⏩ الجداول موجودة — تخطي create_tables")
+
+        # 🆕 v7.7.75 FIX-DB39 (CRITICAL):
+        # فحص دفاعي على كل إقلاع — يضمن أن أعمدة id تملك SERIAL
+        # حتى لو كان الجدول موجوداً بشكل خاطئ (hypertable قديم،
+        # migration ناقص، استعادة نسخة، إلخ).
+        if USE_POSTGRES and not self._serial_audit_done:
+            try:
+                async with self.connection() as _ser_conn:
+                    _fixed_count = await self._ensure_serial_columns_postgres(
+                        _ser_conn
+                    )
+                    if _fixed_count:
+                        logger.warning(
+                            f"🛡️ v7.7.75 FIX-DB39: {_fixed_count} جدول "
+                            f"أُصلح قبل bootstrap — id DEFAULT مضمون"
+                        )
+            except Exception as _ser_e:
+                logger.warning(
+                    f"⚠️ v7.7.75 FIX-DB39: فشل الفحص الدفاعي: "
+                    f"{_ser_e} — متابعة bootstrap بأمان"
+                )
 
         current_hash = self._compute_bootstrap_hash()
         stored_hash = await self._fetchval_with_conn(
@@ -8265,6 +8414,7 @@ __all__ = [
     "invalidate_user_cache", "clear_all_caches",
     "get_cache_stats", "cache_cleanup_task", "CACHE_AVAILABLE",
     "KNOWN_UNIQUE_FALLBACK",
+    "_SERIAL_AUDIT_TABLES",  # 🆕 v7.7.75
     "_clone_start_data", "_create_pool_with_retry",
     "_FactoryFailed",
     "_sql_get_setting_value",
@@ -8300,7 +8450,7 @@ __all__ = [
 
 
 # =====================================================================
-# LOAD BEACON — v7.7.74
+# LOAD BEACON — v7.7.75
 # =====================================================================
 
 try:
@@ -8308,7 +8458,7 @@ try:
         "✅" if hasattr(Database, "get_user_growth") else "❌")
     _tcp_status = getattr(DB, "_tcp_keepalive_applied", False)
     logger.info(
-        "🛡️ database.py v7.7.74 SAFETY-FIXES-AUDIT loaded | "
+        "🛡️ database.py v7.7.75 SERIAL-AUDIT-FIX loaded | "
         "DB=%s | Analytics=%s (available=%s) | "
         "Migrations=%s | Refactor=%s | Caches=%s | "
         "Idle-TX-Audit=%s (interval=%.0fs, threshold=%d) | "
@@ -8320,13 +8470,10 @@ try:
         "SLOW_QUERY_FULL_STACK=%s | "
         "USER_EXISTS_CACHE_TTL=%.0fs | "
         "CONFLICT_TARGET_CACHE_MAX=%d | "
+        "SERIAL_AUDIT_TABLES=%d | "
         "Fixes: "
-        "DB33 (user_exists TTL 60s) ← NEW، "
-        "DB34 (conflict cache max=500) ← NEW، "
-        "DB35 (TCP-keepalive log) ← NEW، "
-        "DB36 (tables_hash fallback) ← NEW، "
-        "DB37 (invalidate helper) ← NEW، "
-        "DB38 (beacon update) ← NEW، "
+        "DB39 (serial audit) ← NEW، "
+        "DB33..DB38 (v7.7.74)، "
         "DB27..DB32 (v7.7.73)، "
         "DB23..DB26 (v7.7.72)، "
         "DB20..DB22 (v7.7.71)، "
@@ -8354,6 +8501,7 @@ try:
         "on" if SLOW_QUERY_FULL_STACK else "off (fast path)",
         _USER_EXISTS_CACHE_TTL,
         _CONFLICT_TARGET_CACHE_MAX,
+        len(_SERIAL_AUDIT_TABLES),
         MAX_SQL_IN_PARAMS,
     )
 except Exception:
