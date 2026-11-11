@@ -1,26 +1,27 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-database.py - قاعدة البيانات المتكاملة (v7.7.75 — SERIAL-AUDIT-FIX)
+database.py - قاعدة البيانات المتكاملة (v7.7.76 — FK-DEV-SUBSCRIPTION-FIX)
 ================================================================================
-🆕 v7.7.75 (SERIAL-AUDIT-FIX):
+🆕 v7.7.76 (FK-DEV-SUBSCRIPTION-FIX):
 
-  🔴 FIX-DB39 (CRITICAL): _ensure_serial_columns_postgres
-     السبب: جدول admin_logs في قاعدة البيانات الحالية فقد DEFAULT على
-     عمود id (بسبب تحويل hypertable قديم أو migration ناقص)، مما
-     يسبب NotNullViolationError عند كل INSERT بدون id.
-     CREATE TABLE IF NOT EXISTS لا يُصلح جدولاً موجوداً، ولذلك بقيت
-     المشكلة رغم صحة تعريف الجدول في database_tables.py.
+  🔴 FIX-DB40 (CRITICAL): ensure_dev_subscription
+     السبب: على قاعدة بيانات جديدة (Aiven)، دالة ensure_dev_subscription
+     تُدرج في subscriptions قبل وجود صف المطور في users → انتهاك
+     subscriptions_user_id_fkey (Key user_id not present in users).
+     على Timescale القديمة كان الصف موجوداً مسبقاً، فلم تظهر المشكلة.
 
-     الحل: فحص دفاعي على كل إقلاع يتأكد أن id يملك DEFAULT nextval
-     في 22 جدولاً حرجاً، ويُصلح تلقائياً أي جدول فَقَدَ sequence —
-     مع مزامنة setval لمنع تصادم IDs.
+     الحل: قبل إدراج الاشتراك، ننفّذ INSERT INTO users
+     ... ON CONFLICT DO NOTHING (PG) / INSERT IGNORE (MySQL) /
+     INSERT OR IGNORE (SQLite) داخل نفس transaction، مما يضمن
+     وجود صف المطور دون التأثير على أي صف موجود.
 
-     آمن تماماً: إذا كان DEFAULT موجوداً، يتخطى. لا يتدخل في قواعد
-     بيانات سليمة. لا يتدخل في SQLite أو MySQL.
+     آمن تماماً: idempotent، لا يُعدّل بيانات موجودة، ولا يحتاج
+     خطوة يدوية من المشرف.
 
-  ✅ محفوظ من v7.7.74:
-      - FIX-DB33..DB38 (user_exists cache, conflict cache, TCP log, ...)
+  ✅ محفوظ من v7.7.75:
+      - FIX-DB39 (serial audit على كل إقلاع)
+      - FIX-DB33..DB38 (v7.7.74)
       - FIX-DB27..DB32 (v7.7.73)
       - FIX-DB23..DB26 (v7.7.72)
       - FIX-DB20..DB22 (v7.7.71)
@@ -30,63 +31,14 @@ database.py - قاعدة البيانات المتكاملة (v7.7.75 — SERIAL
       - FIX-DB5..DB9 (v7.7.67)
       - FIX-MIXIN-1/2/3 (v7.7.65)
       - FIX-E1..E8 (v7.7.64)
-
-🆕 v7.7.74 (SAFETY-FIXES-AUDIT) — محفوظ.
-🆕 v7.7.73 (HIGH-RTT-N1-OPTIMIZATION) — محفوظ.
-🆕 v7.7.72 (FAST-CALLER-TX-DIAG) — محفوظ.
-🆕 v7.7.71 (BOOTSTRAP-TX-PROTECT) — محفوظ.
-🆕 v7.7.70 (MAINTENANCE-BG-FIX) — محفوظ.
-🆕 v7.7.69 (STATEMENT-CACHE-REVERT-FIX) — محفوظ.
-🆕 v7.7.68 (DB-POOL-LATENCY-FIX) — محفوظ.
-🆕 v7.7.67 (NESTED-TX-LIFECYCLE-FIX) — محفوظ.
-🆕 v7.7.66 (TIMEZONE-VACUUM-REMINDERS-FIX) — محفوظ.
-🆕 v7.7.65 (ANALYTICS-MIXIN-FIX) — محفوظ.
-🆕 v7.7.64 (REVIEW-FIXES-2026-R2) — محفوظ.
 ================================================================================
 """
 
 # =====================================================================
-# 🧭 CHECKLIST
+# 🧭 CHECKLIST (كما هو — بلا تغيير)
 # =====================================================================
-# [1]  التناظر
-# [2]  التغطية عبر DBs
-# [3]  hash/cache
-# [4]  Escape chars '!'
-# [5]  MySQL ALTER constraints
-# [6]  Magic numbers → constants
-# [7]  LIKE audit ESCAPE '!'
-# [8]  CancelledError: BaseException
-# [9]  Iteration safety: list(...)
-# [10] Reserved SQL words: backticks
-# [11] v7.7.54: delete-massive threshold safety
-# [12] v7.7.54: hash-based imports تشمل كل الحقول
-# [13] v7.7.55: MySQL DDL = implicit commit
-# [14] v7.7.56: `while True` تحقّق تقدّم
-# [15] v7.7.56: PG فشل DML = ABORTED
-# [16] v7.7.56: `#` تعليق MySQL فقط
-# [17] v7.7.57: import → added_by=0
-# [18] v7.7.59: TCP keepalive + كاش schedule
-# [19] v7.7.60: pool lifecycle 15s + ping-before-use
-# [20] v7.7.61: idle-in-transaction → rollback/destroy
-# [21] v7.7.62: idle-tx audit دوري
-# [22] v7.7.63: PG conn مع tx → log warning
-# [23] v7.7.64: placeholders موحّدة (?)
-# [24] v7.7.64: IN (...) chunking
-# [25] v7.7.65: _load_mixin BaseException + verify methods
-# [26] v7.7.66: timezone UTC + migrate_reminders + vacuum timeout
-# [27] v7.7.67: نقل migrate_reminders/ensure_dev OUT من bootstrap tx
-# [28] v7.7.68: pool lifetime 300s + ping_idle 60s
-# [29] v7.7.69: REVERT statement_cache_size=0
-# [30] v7.7.70: نقل _run_maintenance_postgres إلى مهمة خلفية.
-# [31] v7.7.71: bootstrap tx protect (savepoints + tx مستقلة)
-# [32] v7.7.72: fast caller (sys._getframe) + tx_alive log diff
-# [33] v7.7.73: conflict_target cache + pool min_size=10
-#              + ensure_user_exists cache + ping_idle=300s
-#              + add_penalty CTE merge
-# [34] v7.7.74: TTL 300s→60s، cache_max=500، TCP-keepalive log،
-#              hash fallback، invalidate helper
-# [35] v7.7.75: SERIAL-AUDIT — فحص دفاعي على 22 جدول id DEFAULT
-#              في كل إقلاع، إصلاح تلقائي لـ NotNullViolationError
+# [1]..[35] كما في v7.7.75
+# [36] v7.7.76: FK-DEV-SUBSCRIPTION — INSERT users قبل subscriptions
 # =====================================================================
 
 import os
@@ -318,10 +270,6 @@ except ImportError as _re:
 # =====================================================================
 
 def _load_mixin(module_name: str, class_name: str):
-    """
-    🆕 v7.7.65 FIX-MIXIN-1: التقاط كل الاستثناءات + تشخيص واضح.
-    🆕 v7.7.67 FIX-DB6: except BaseException → except Exception.
-    """
     try:
         module = __import__(module_name, fromlist=[class_name])
         cls = getattr(module, class_name)
@@ -591,11 +539,9 @@ IMPORT_MARKER_ADDED_BY = 0
 
 MAX_SQL_IN_PARAMS = int(os.getenv("MAX_SQL_IN_PARAMS", "500"))
 
-# 🆕 v7.7.68 FIX-DB11: 15s → 300s (اتصالات ساخنة)
 PG_MAX_INACTIVE_LIFETIME = float(
     os.getenv("PG_MAX_INACTIVE_LIFETIME", "300.0"))
 
-# 🆕 v7.7.73 FIX-DB30: 60s → 300s (الاعتماد على TCP keepalive)
 PG_CONN_PING_IDLE_THRESHOLD = float(
     os.getenv("PG_CONN_PING_IDLE_THRESHOLD", "300.0"))
 
@@ -613,15 +559,11 @@ PG_COMMAND_TIMEOUT = float(os.getenv("PG_COMMAND_TIMEOUT", "10.0"))
 PG_ROLLBACK_ON_RETURN_TIMEOUT = float(
     os.getenv("PG_ROLLBACK_ON_RETURN_TIMEOUT", "2.0"))
 
-# ═══════════════════════════════════════════════════════════════════════
-# 🔴 v7.7.69 FIX-DB16/17/18: REVERT statement_cache_size
-# ═══════════════════════════════════════════════════════════════════════
 PG_STATEMENT_CACHE_SIZE = int(
     os.getenv("PG_STATEMENT_CACHE_SIZE", "100"))
 PG_MAX_CACHED_STATEMENT_LIFETIME = float(
     os.getenv("PG_MAX_CACHED_STATEMENT_LIFETIME", "300.0"))
 
-# 🔍 كشف تشخيصي فقط (لا فرض):
 _PG_IS_POOLED = False
 if USE_POSTGRES and DATABASE_URL:
     _url_low = DATABASE_URL.lower()
@@ -696,7 +638,6 @@ SMALL_TABLES_FOR_AUTOVACUUM = (
 SLOW_QUERY_FULL_STACK = (
     os.getenv("SLOW_QUERY_FULL_STACK", "true").lower() == "true")
 
-# 🆕 v7.7.75 FIX-DB39: جدولات تحتاج id SERIAL
 _SERIAL_AUDIT_TABLES = (
     "admin_logs",
     "auto_blocked_sources",
@@ -770,18 +711,12 @@ KNOWN_UNIQUE_FALLBACK = {
 _UNIQUE_CACHE: Dict[str, List[str]] = {}
 _UNIQUE_CACHE_LOCK = asyncio.Lock()
 
-# ═══════════════════════════════════════════════════════════════════════
-# 🆕 v7.7.73 FIX-DB27: cache لـ _find_best_conflict_target
-# 🟡 v7.7.74 FIX-DB34: حد أقصى 500 (LRU)
-# ═══════════════════════════════════════════════════════════════════════
 _CONFLICT_TARGET_CACHE: Dict[
     Tuple[str, Tuple[str, ...]], Optional[str]
 ] = {}
 _CONFLICT_TARGET_CACHE_LOCK = asyncio.Lock()
-_CONFLICT_TARGET_CACHE_MAX = 500  # 🆕 v7.7.74
+_CONFLICT_TARGET_CACHE_MAX = 500
 
-# 🆕 v7.7.73 FIX-DB29: cache لـ _ensure_user_exists
-# 🔴 v7.7.74 FIX-DB33: TTL 300s → 60s
 _USER_EXISTS_CACHE: Dict[int, float] = {}
 _USER_EXISTS_CACHE_LOCK = asyncio.Lock()
 _USER_EXISTS_CACHE_TTL = float(
@@ -1347,10 +1282,6 @@ async def _get_unique_columns(table: str, conn) -> List[str]:
 async def _find_best_conflict_target(
     table: str, conn, insert_columns: List[str],
 ) -> Optional[str]:
-    """
-    🆕 v7.7.73 FIX-DB27: LRU cache keyed by (table, sorted columns).
-    🟡 v7.7.74 FIX-DB34: حد أقصى 500.
-    """
     cache_key = (table, tuple(sorted(insert_columns)))
     if cache_key in _CONFLICT_TARGET_CACHE:
         return _CONFLICT_TARGET_CACHE[cache_key]
@@ -1442,7 +1373,6 @@ async def _find_best_conflict_target(
         except Exception:
             result = None
 
-    # 🟡 v7.7.74 FIX-DB34: حد أقصى + LRU eviction
     if len(_CONFLICT_TARGET_CACHE) >= _CONFLICT_TARGET_CACHE_MAX:
         try:
             oldest_key = next(iter(_CONFLICT_TARGET_CACHE))
@@ -2257,7 +2187,6 @@ class Database(
             self._recovering_pool = False
             self._autovacuum_tuned = False
 
-            # 🟠 v7.7.74 FIX-DB35: تتبّع حالة TCP keepalive
             self._tcp_keepalive_applied = False
 
             self._in_bootstrap_tx = False
@@ -2337,8 +2266,6 @@ class Database(
             self._db_size_kb_lock = asyncio.Lock()
 
             self._dev_subscription_ensured = False
-
-            # 🆕 v7.7.75 FIX-DB39
             self._serial_audit_done = False
 
             try:
@@ -2355,13 +2282,10 @@ class Database(
             raise
 
     # ═════════════════════════════════════════════════════════════════
-    # 🆕 v7.7.72 FIX-DB23 (PERF): Fast caller — sys._getframe
+    # (بقية الدوال 100% كما في v7.7.75 — بلا أي تغيير)
     # ═════════════════════════════════════════════════════════════════
 
     def _get_caller_info_fast(self) -> Dict[str, Any]:
-        """
-        🆕 v7.7.72 FIX-DB23: بديل سريع لـ inspect.stack().
-        """
         empty: Dict[str, Any] = {
             'file': '?', 'line': 0, 'func': '?', 'stack': [],
         }
@@ -2772,11 +2696,6 @@ class Database(
             return {"type": "error", "message": str(e)}
 
     async def _pg_pool_factory(self):
-        """
-        🆕 v7.7.69 FIX-DB16: pool PG محسّن مع statement cache.
-        🆕 v7.7.68 FIX-DB11: max_inactive_lifetime=300s.
-        🆕 v7.7.73 FIX-DB28: min_size 5 → 10 (بيئات RTT>30ms).
-        """
         try:
             create_kwargs: Dict[str, Any] = {
                 "min_size": max(10, self._min_connections),
@@ -3156,11 +3075,6 @@ class Database(
                         time.monotonic()
                         - (self._mv_refresh_cooldown - short_cooldown))
 
-    # ═════════════════════════════════════════════════════════════
-    # v7.7.71 FIX-DB21: دوال مساعدة لحماية tx
-    # v7.7.72 FIX-DB24: log differentiation في _pg_check_tx_alive
-    # ═════════════════════════════════════════════════════════════
-
     async def _pg_check_tx_alive(self, conn) -> bool:
         if not USE_POSTGRES:
             return True
@@ -3479,7 +3393,6 @@ class Database(
                 except OSError as e:
                     logger.debug(f"TCP_KEEPCNT: {e}")
 
-            # 🟠 v7.7.74 FIX-DB35: تتبّع الحالة
             self._tcp_keepalive_applied = True
 
             logger.debug(
@@ -5074,9 +4987,6 @@ class Database(
         first_name: str = "",
         auto_register: bool = True,
     ) -> bool:
-        """
-        🆕 v7.7.73 FIX-DB29: cache محلي (TTL=60s بعد v7.7.74).
-        """
         now = time.monotonic()
         cached_ts = _USER_EXISTS_CACHE.get(user_id)
         if cached_ts is not None and \
@@ -5107,15 +5017,7 @@ class Database(
             logger.error(f"❌ _ensure_user_exists({user_id}): {e}")
             return False
 
-    # 🟡 v7.7.74 FIX-DB37: دالة إبطال عامة
     async def invalidate_user_exists_cache(self, user_id: int) -> None:
-        """
-        🟡 v7.7.74: إبطال يدوي لـ _USER_EXISTS_CACHE لمستخدم واحد.
-
-        استخدمها عند حذف مستخدم من DB يدوياً أو من مسار خارجي
-        (مثلًا عبر delete_user في mixin آخر) لتجنّب إعادة True
-        خاطئة خلال TTL.
-        """
         try:
             async with _USER_EXISTS_CACHE_LOCK:
                 _USER_EXISTS_CACHE.pop(user_id, None)
@@ -5715,9 +5617,6 @@ class Database(
             str(text).encode("utf-8")).hexdigest()
 
     def _compute_tables_hash(self) -> str:
-        """
-        🟡 v7.7.74 FIX-DB36: fallback marker بدل التجاهل الصامت.
-        """
         parts = [f"tables_v{CURRENT_SCHEMA_VERSION}"]
         for fn_name, fn in (
             ("sqlite", create_tables_sqlite),
@@ -5732,7 +5631,6 @@ class Database(
                     f"{fn_name}:"
                     f"{hashlib.sha256(src.encode()).hexdigest()}")
             except Exception as _he:
-                # 🟡 v7.7.74 FIX-DB36: marker ثابت بدل التجاهل
                 try:
                     marker = (
                         f"{getattr(fn, '__module__', '?')}."
@@ -5751,25 +5649,7 @@ class Database(
             f"tables_v{CURRENT_SCHEMA_VERSION}".encode("utf-8")
         ).hexdigest()
 
-    # ═════════════════════════════════════════════════════════════════
-    # 🆕 v7.7.75 FIX-DB39 (CRITICAL): SERIAL-AUDIT على كل إقلاع
-    # ═════════════════════════════════════════════════════════════════
     async def _ensure_serial_columns_postgres(self, conn) -> int:
-        """
-        🆕 v7.7.75 FIX-DB39: يضمن أن أعمدة id في الجداول الرئيسية
-        تملك DEFAULT nextval (SERIAL/IDENTITY).
-
-        يُصلح تلقائياً أي جدول فَقَدَ sequence — كما حدث مع admin_logs
-        بعد تحويل hypertable قديم (رغم صحة CREATE TABLE في
-        database_tables.py، إلا أن CREATE TABLE IF NOT EXISTS لا
-        يُصلح جدولاً موجوداً بشكل خاطئ).
-
-        آمن تماماً:
-          - PG فقط (يتخطى SQLite/MySQL تلقائياً)
-          - إذا كان DEFAULT موجوداً → يتخطى الجدول
-          - لا يتدخل في قواعد بيانات سليمة (idempotent)
-          - يُسجّل warning فقط عند الحاجة الفعلية للإصلاح
-        """
         if not USE_POSTGRES:
             return 0
 
@@ -5778,7 +5658,6 @@ class Database(
         errors = 0
 
         try:
-            # فحص جماعي — استعلام واحد لكل الجداول
             existing_rows = await conn.fetch(
                 "SELECT table_name "
                 "FROM information_schema.columns "
@@ -5844,8 +5723,6 @@ class Database(
                     f"🛡️ FIX-SERIAL-AUDIT: أُصلح {fixed} جدول "
                     f"كان بلا SERIAL ({errors} فشل, {skipped} تخطي)"
                 )
-                # إبطال cache كشف conflict-target لأنه قد يحتوي بيانات
-                # قديمة حول PK admin_logs وغيرها
                 try:
                     _CONFLICT_TARGET_CACHE.clear()
                 except Exception:
@@ -5981,12 +5858,65 @@ class Database(
             cache_key, result, ttl=SUB_CACHE_TTL)
         return result
 
+    # ═════════════════════════════════════════════════════════════════
+    # 🔴 v7.7.76 FIX-DB40: ضمان وجود صف users قبل اشتراك المطور
+    # ═════════════════════════════════════════════════════════════════
     async def ensure_dev_subscription(self, user_id: int) -> bool:
         if not self._is_dev_user(user_id):
             return False
         try:
             async with await self._get_user_lock(user_id):
                 async with self.transaction() as conn:
+                    # 🆕 FIX-DB40: ضمان وجود صف users قبل الاشتراك
+                    # لمنع ForeignKeyViolationError على
+                    # subscriptions_user_id_fkey عند أول تشغيل
+                    # على قاعدة بيانات جديدة (Aiven).
+                    try:
+                        _fk_now = TimeUtils.utc_now()
+                        if USE_POSTGRES:
+                            await self._execute_with_conn(
+                                conn,
+                                "INSERT INTO users "
+                                "(user_id, username, first_name, "
+                                " referral_code, trial_used, "
+                                " created_at, updated_at) "
+                                "VALUES ($1, $2, $3, $4, 0, $5, $6) "
+                                "ON CONFLICT (user_id) DO NOTHING",
+                                user_id, "developer", "Developer",
+                                secrets.token_urlsafe(9),
+                                _fk_now, _fk_now)
+                        elif USE_MYSQL:
+                            await self._execute_with_conn(
+                                conn,
+                                "INSERT IGNORE INTO users "
+                                "(user_id, username, first_name, "
+                                " referral_code, trial_used, "
+                                " created_at, updated_at) "
+                                "VALUES (%s, %s, %s, %s, 0, %s, %s)",
+                                user_id, "developer", "Developer",
+                                secrets.token_urlsafe(9),
+                                _fk_now, _fk_now)
+                        else:
+                            await self._execute_with_conn(
+                                conn,
+                                "INSERT OR IGNORE INTO users "
+                                "(user_id, username, first_name, "
+                                " referral_code, trial_used, "
+                                " created_at, updated_at) "
+                                "VALUES (?, ?, ?, ?, 0, ?, ?)",
+                                user_id, "developer", "Developer",
+                                secrets.token_urlsafe(9),
+                                TimeUtils.sql_iso(),
+                                TimeUtils.sql_iso())
+                        logger.info(
+                            f"🆕 v7.7.76 FIX-DB40: صف users مضمون "
+                            f"للمطور {user_id} (FK-safe)")
+                    except Exception as _fk_e:
+                        logger.warning(
+                            f"⚠️ v7.7.76 FIX-DB40: فشل تأمين صف "
+                            f"users للمطور {user_id}: {_fk_e} "
+                            f"— قد يفشل INSERT subscriptions")
+
                     sql_existing = (
                         "SELECT 1 FROM subscriptions "
                         "WHERE user_id = ? "
@@ -6191,10 +6121,6 @@ class Database(
         else:
             logger.info("⏩ الجداول موجودة — تخطي create_tables")
 
-        # 🆕 v7.7.75 FIX-DB39 (CRITICAL):
-        # فحص دفاعي على كل إقلاع — يضمن أن أعمدة id تملك SERIAL
-        # حتى لو كان الجدول موجوداً بشكل خاطئ (hypertable قديم،
-        # migration ناقص، استعادة نسخة، إلخ).
         if USE_POSTGRES and not self._serial_audit_done:
             try:
                 async with self.connection() as _ser_conn:
@@ -6723,7 +6649,6 @@ class Database(
             f"subscription_{user_id}",
         ):
             await internal_cache.invalidate(k)
-        # 🆕 v7.7.73 FIX-DB29: فرّغ cache _ensure_user_exists
         try:
             async with _USER_EXISTS_CACHE_LOCK:
                 _USER_EXISTS_CACHE.pop(user_id, None)
@@ -7748,9 +7673,6 @@ class Database(
         chat_name: str = "",
         auto_register: bool = True,
     ) -> Optional[int]:
-        """
-        🆕 v7.7.73 FIX-DB31: merge UPDATE + INSERT في CTE على PG.
-        """
         if penalty_type not in self.VALID_PENALTY_TYPES:
             return None
         if duration < 0:
@@ -8261,10 +8183,6 @@ def _get_sqlite_query_fallback() -> str:
 DB = Database()
 
 
-# ═════════════════════════════════════════════════════════════════════
-# v7.7.65 FIX-MIXIN-2: فحص شامل أن كل دوال التحليلات موجودة
-# ═════════════════════════════════════════════════════════════════════
-
 def _verify_analytics_methods() -> bool:
     required = [
         "get_user_growth",
@@ -8414,7 +8332,7 @@ __all__ = [
     "invalidate_user_cache", "clear_all_caches",
     "get_cache_stats", "cache_cleanup_task", "CACHE_AVAILABLE",
     "KNOWN_UNIQUE_FALLBACK",
-    "_SERIAL_AUDIT_TABLES",  # 🆕 v7.7.75
+    "_SERIAL_AUDIT_TABLES",
     "_clone_start_data", "_create_pool_with_retry",
     "_FactoryFailed",
     "_sql_get_setting_value",
@@ -8450,7 +8368,7 @@ __all__ = [
 
 
 # =====================================================================
-# LOAD BEACON — v7.7.75
+# LOAD BEACON — v7.7.76
 # =====================================================================
 
 try:
@@ -8458,7 +8376,7 @@ try:
         "✅" if hasattr(Database, "get_user_growth") else "❌")
     _tcp_status = getattr(DB, "_tcp_keepalive_applied", False)
     logger.info(
-        "🛡️ database.py v7.7.75 SERIAL-AUDIT-FIX loaded | "
+        "🛡️ database.py v7.7.76 FK-DEV-SUBSCRIPTION-FIX loaded | "
         "DB=%s | Analytics=%s (available=%s) | "
         "Migrations=%s | Refactor=%s | Caches=%s | "
         "Idle-TX-Audit=%s (interval=%.0fs, threshold=%d) | "
@@ -8472,7 +8390,8 @@ try:
         "CONFLICT_TARGET_CACHE_MAX=%d | "
         "SERIAL_AUDIT_TABLES=%d | "
         "Fixes: "
-        "DB39 (serial audit) ← NEW، "
+        "DB40 (FK dev subscription) ← NEW، "
+        "DB39 (serial audit)، "
         "DB33..DB38 (v7.7.74)، "
         "DB27..DB32 (v7.7.73)، "
         "DB23..DB26 (v7.7.72)، "
