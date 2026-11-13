@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 """
-database_reminders.py - دوال التذكيرات (Mixin) — v1.4
+database_reminders.py - دوال التذكيرات (Mixin) — v1.5
 ================================================================================
 Mixin يُضاف إلى فئة Database في database.py
 
@@ -22,20 +22,42 @@ Mixin يُضاف إلى فئة Database في database.py
   - self._fetchval_with_conn, self._fetchone_with_conn, self._fetchall_with_conn
   - self._execute_with_conn, self._executemany_with_conn
 
-🆕 v1.4 (DOC-QUALITY-IMPROVEMENTS — لا تغيير سلوكي):
+🆕 v1.5 (FILES-VERSION-DETECTION + CROSS-DB-INSERT):
+  🟢 FIX-FILES-VERSION: إضافة VERSION = "v1.5" و __version__ = "v1.5"
+      على مستوى الوحدة. السبب: `/files` command يبحث عن متغيّر VERSION
+      أو __version__ في الوحدة. بدون ذلك، يظهر الملف كـ
+      "🟡 بلا إصدار" حتى لو كان v1.4 في الـ docstring.
+      الأثر: يظهر في /files كـ "✅ database_reminders.py: v1.5".
+
+  🟢 FIX-CROSS-DB-INSERT (CRITICAL): إضافة _ensure_reminder_row()
+      helper يتعامل مع كل قواعد البيانات صراحةً:
+        • PostgreSQL: INSERT ... ON CONFLICT (user_id) DO NOTHING
+        • MySQL:      INSERT IGNORE
+        • SQLite:     INSERT OR IGNORE
+      السبب: v1.4 كان يستخدم `INSERT OR IGNORE` (SQLite-specific)
+      في get_reminder_settings و reset_reminder_settings. على
+      PostgreSQL هذا يفشل (syntax error) → الصف لا يُنشأ →
+      get_reminder_settings يُرجع قيم افتراضية من الذاكرة فقط →
+      المستخدم يفعّل التذكيرات من اللوحة لكن يبقى بدونه في DB →
+      send_daily_reminders/send_weekly_reminders لا تجده.
+
+      الأثر المتوقع:
+        • الصف يُنشأ عند أول get_reminder_settings (بدل الفشل الصامت).
+        • reset_reminder_settings يعمل على PG/MySQL (كان يفشل).
+        • التذكيرات تعمل بشكل موثوق على كل قواعد البيانات.
+
+      ملاحظة: update_reminder_settings لم يكن يحتاج تغييراً — كان
+      يستخدم fetchval ثم INSERT عادي (يعمل على PG).
+
+🆕 v1.4 (DOC-QUALITY-IMPROVEMENTS — لا تغيير سلوكي) — محفوظ:
   🟢 FIX-DOC-TZ-CONVERSION: توضيح أن _now_utc_reminders يُعيد
       datetime (بدون tz)، وأن _adapt_params في database.py يتولى
-      التحويل إلى strftime للـ MySQL/SQLite تلقائياً. لا حاجة لتحويل
-      يدوي هنا.
+      التحويل إلى strftime للـ MySQL/SQLite تلقائياً.
   🟢 FIX-DOC-MIGRATION-TX: توضيح أن migrate_reminders_columns يجب
-      أن يُستدعى **خارج** أي transaction. السبب: ALTER TABLE في
-      PostgreSQL قد يفشل داخل transaction في بعض الإصدارات، وحتى
-      لو نجح، فإنه يفرض قفلاً على الجدول.
+      أن يُستدعى **خارج** أي transaction.
   🟢 FIX-DOC-DAILY-WEEKLY: توضيح صريح في docstrings أن
       send_daily_reminders + send_weekly_reminders **تحتاج استدعاءً
-      من utils.py**. حالياً **لا يوجد مستدعٍ** — الميزة موجودة في
-      DB لكنها غير مُفعَّلة. لوحة الإعدادات تُظهر الخيارات لكن
-      لا يُرسل شيء. راجع BackgroundTasks.reminders في utils.py.
+      من utils.py**. حالياً **لا يوجد مستدعٍ** حتى v7.10.24.
   🟢 IMPROVE-NO-MISLEAD: تعليق داخلي صريح لمنع الالتباس.
 
 🆕 v1.3 (FIX-U26-doc + 2 optional quality) — محفوظ:
@@ -75,6 +97,10 @@ from datetime import datetime, timezone, timedelta
 from typing import Dict, List, Optional, Any, Callable, Awaitable
 
 logger = logging.getLogger(__name__)
+
+# 🆕 v1.5 FIX-FILES-VERSION: version detection for /files command
+VERSION = "v1.5"
+__version__ = "v1.5"
 
 
 # =====================================================================
@@ -134,10 +160,12 @@ class RemindersMixin:
       - دوال fetchone/fetchall/fetchval/execute
       - دوال connection/transaction
 
-    ⚠️ حالة الميزات (v1.4):
+    ⚠️ حالة الميزات (v1.5):
       • ✅ subscription_reminder    — يعمل (يُستدعى من utils.py)
-      • ❌ daily_stats_reminder     — **غير مفعّل** (لا مستدعٍ في utils.py)
-      • ❌ weekly_report            — **غير مفعّل** (لا مستدعٍ في utils.py)
+      • ❌ daily_stats_reminder     — **غير مفعّل** (لا مستدعٍ في utils.py
+                                       حتى v7.10.24 — راجع
+                                       BackgroundTasks.reminders)
+      • ❌ weekly_report            — **غير مفعّل** (نفس السبب)
       التفاصيل في docstring send_daily_reminders/send_weekly_reminders.
     """
 
@@ -191,6 +219,57 @@ class RemindersMixin:
             "notification_lang": "ar",
         }
 
+    async def _ensure_reminder_row(self, user_id: int) -> bool:
+        """
+        🆕 v1.5 FIX-CROSS-DB-INSERT: إنشاء صف تذكيرات متوافق مع كل DBs.
+
+        المشكلة في v1.4:
+          get_reminder_settings و reset_reminder_settings كانا يستخدمان
+          `INSERT OR IGNORE` (SQLite-specific). على PostgreSQL:
+            ERROR: syntax error at or near "OR"
+          النتيجة: الصف لا يُنشأ → get_reminder_settings يُرجع defaults
+          من الذاكرة فقط → المستخدم يفعّل التذكيرات من اللوحة لكن يبقى
+          بدون صف في DB → send_*_reminders لا تجده.
+
+        الحل:
+          • PostgreSQL : INSERT ... ON CONFLICT (user_id) DO NOTHING
+          • MySQL      : INSERT IGNORE
+          • SQLite     : INSERT OR IGNORE
+
+        Returns:
+            True إذا نجح الإنشاء أو كان الصف موجوداً مسبقاً.
+        """
+        try:
+            if self._is_postgres_reminders():
+                await self.execute(
+                    """INSERT INTO user_reminder_settings
+                       (user_id, subscription_reminder, daily_stats_reminder,
+                        weekly_report, reminder_days_before, notification_lang)
+                       VALUES (?, 1, 0, 1, ?, 'ar')
+                       ON CONFLICT (user_id) DO NOTHING""",
+                    (user_id, DEFAULT_REMINDER_DAYS_BEFORE),
+                )
+            elif self._is_mysql_reminders():
+                await self.execute(
+                    """INSERT IGNORE INTO user_reminder_settings
+                       (user_id, subscription_reminder, daily_stats_reminder,
+                        weekly_report, reminder_days_before, notification_lang)
+                       VALUES (?, 1, 0, 1, ?, 'ar')""",
+                    (user_id, DEFAULT_REMINDER_DAYS_BEFORE),
+                )
+            else:  # SQLite
+                await self.execute(
+                    """INSERT OR IGNORE INTO user_reminder_settings
+                       (user_id, subscription_reminder, daily_stats_reminder,
+                        weekly_report, reminder_days_before, notification_lang)
+                       VALUES (?, 1, 0, 1, ?, 'ar')""",
+                    (user_id, DEFAULT_REMINDER_DAYS_BEFORE),
+                )
+            return True
+        except Exception as e:
+            logger.debug(f"_ensure_reminder_row({user_id}): {e}")
+            return False
+
     async def _invalidate_user_reminder_cache(self, user_id: int):
         """
         ✅ v1.2: إبطال كل الكاشات المتعلقة بالمستخدم.
@@ -224,6 +303,9 @@ class RemindersMixin:
     async def get_reminder_settings(self, user_id: int) -> Dict:
         """
         جلب إعدادات التذكير للمستخدم (مع إنشاء افتراضي إن لم يوجد).
+
+        🆕 v1.5: يستخدم _ensure_reminder_row() بدل INSERT OR IGNORE
+        لضمان التوافق الكامل مع PostgreSQL/MySQL/SQLite.
 
         Returns:
             {
@@ -259,18 +341,16 @@ class RemindersMixin:
                 if "last_subscription_sent" not in settings:
                     settings["last_subscription_sent"] = settings.get("last_reminder_sent")
             else:
-                # إنشاء صف افتراضي
-                try:
-                    await self.execute(
-                        """INSERT OR IGNORE INTO user_reminder_settings
-                           (user_id, subscription_reminder, daily_stats_reminder,
-                            weekly_report, reminder_days_before, notification_lang)
-                           VALUES (?, 1, 0, 1, ?, 'ar')""",
-                        (user_id, DEFAULT_REMINDER_DAYS_BEFORE),
+                # 🆕 v1.5: إنشاء صف افتراضي متوافق مع كل DBs
+                created = await self._ensure_reminder_row(user_id)
+                if created:
+                    logger.info(
+                        f"✅ أُنشئ صف تذكيرات للمستخدم {user_id}"
                     )
-                except Exception as e:
+                else:
                     logger.warning(
-                        f"⚠️ فشل إنشاء صف تذكيرات لـ {user_id}: {e}"
+                        f"⚠️ فشل إنشاء صف تذكيرات لـ {user_id} — "
+                        f"سيُستخدم default (from-memory only)"
                     )
                 settings = self._default_settings_reminders(user_id)
 
@@ -332,22 +412,18 @@ class RemindersMixin:
                 else:
                     params_dict[k] = v
 
-            # ضمان وجود الصف
+            # ضمان وجود الصف — 🆕 v1.5: يستخدم _ensure_reminder_row
             exists = await self.fetchval(
                 "SELECT 1 FROM user_reminder_settings WHERE user_id = ?",
                 (user_id,),
             )
             if not exists:
-                try:
-                    await self.execute(
-                        """INSERT INTO user_reminder_settings
-                           (user_id, subscription_reminder, daily_stats_reminder,
-                            weekly_report, reminder_days_before, notification_lang)
-                           VALUES (?, 1, 0, 1, ?, 'ar')""",
-                        (user_id, DEFAULT_REMINDER_DAYS_BEFORE),
+                created = await self._ensure_reminder_row(user_id)
+                if not created:
+                    logger.warning(
+                        f"⚠️ فشل إنشاء صف تذكيرات: {user_id} — "
+                        f"update aborted"
                     )
-                except Exception as e:
-                    logger.warning(f"⚠️ فشل إنشاء صف تذكيرات: {e}")
                     return False
 
             # ✅ v1.1: بناء UPDATE ديناميكي آمن
@@ -370,16 +446,19 @@ class RemindersMixin:
         """
         ✅ v1.1: إعادة تعيين الإعدادات للافتراضي.
         يُنشئ الصف إن لم يكن موجودًا (بدل الفشل الصامت).
+
+        🆕 v1.5: يستخدم _ensure_reminder_row() بدل INSERT OR IGNORE
+        لضمان التوافق مع PostgreSQL/MySQL.
         """
         try:
-            # ✅ v1.1: INSERT OR IGNORE أولاً لضمان وجود الصف
-            await self.execute(
-                """INSERT OR IGNORE INTO user_reminder_settings
-                   (user_id, subscription_reminder, daily_stats_reminder,
-                    weekly_report, reminder_days_before, notification_lang)
-                   VALUES (?, 1, 0, 1, ?, 'ar')""",
-                (user_id, DEFAULT_REMINDER_DAYS_BEFORE),
-            )
+            # 🆕 v1.5: ضمان وجود الصف بشكل متوافق مع كل DBs
+            created = await self._ensure_reminder_row(user_id)
+            if not created:
+                logger.warning(
+                    f"⚠️ reset_reminder_settings: فشل إنشاء الصف لـ {user_id}"
+                )
+                # لا نُعيد False فوراً — UPDATE قد ينجح لو الصف موجود
+                # (created=False قد يعني "already exists" أو "error")
 
             result = await self.execute(
                 """UPDATE user_reminder_settings SET
@@ -408,9 +487,10 @@ class RemindersMixin:
         ✅ v1.1: جلب المستخدمين الذين يريدون تذكيراً يومياً.
         يستخدم last_daily_sent (بدل last_reminder_sent المشترك).
 
-        ⚠️ v1.4: هذه الدالة **جاهزة** لكن لا يوجد مستدعٍ في utils.py
-        حتى v7.10.24. تُستدعى فقط من send_daily_reminders — وهي بدورها
-        غير مستدعاة. لتفعيل الميزة، راجع utils.py BackgroundTasks.reminders.
+        ⚠️ v1.4/v1.5: هذه الدالة **جاهزة** لكن لا يوجد مستدعٍ في
+        utils.py حتى v7.10.24. تُستدعى فقط من send_daily_reminders —
+        وهي بدورها غير مستدعاة. لتفعيل الميزة، راجع utils.py
+        BackgroundTasks.reminders.
         """
         try:
             limit = max(1, min(limit, 1000))
@@ -477,9 +557,10 @@ class RemindersMixin:
         ✅ v1.1: جلب المستخدمين الذين يريدون تقريراً أسبوعياً.
         يستخدم last_weekly_sent (بدل last_reminder_sent المشترك).
 
-        ⚠️ v1.4: هذه الدالة **جاهزة** لكن لا يوجد مستدعٍ في utils.py
-        حتى v7.10.24. تُستدعى فقط من send_weekly_reminders — وهي بدورها
-        غير مستدعاة. لتفعيل الميزة، راجع utils.py BackgroundTasks.reminders.
+        ⚠️ v1.4/v1.5: هذه الدالة **جاهزة** لكن لا يوجد مستدعٍ في
+        utils.py حتى v7.10.24. تُستدعى فقط من send_weekly_reminders —
+        وهي بدورها غير مستدعاة. لتفعيل الميزة، راجع utils.py
+        BackgroundTasks.reminders.
         """
         try:
             limit = max(1, min(limit, 1000))
@@ -760,7 +841,7 @@ class RemindersMixin:
         - يُحدّث last_subscription_sent فقط عند النجاح.
         - يُرجع dict مع sent/skipped/failed.
 
-        ⚠️ v1.4: هذه الدالة **مستدعاة بالفعل** من
+        ⚠️ v1.4/v1.5: هذه الدالة **مستدعاة بالفعل** من
         utils.py::BackgroundTasks.reminders (كل ساعة).
 
         Args:
@@ -879,7 +960,7 @@ class RemindersMixin:
         reminder_func: Callable[[int, str], Awaitable[bool]],
     ) -> Dict[str, int]:
         """
-        ⚠️ v1.4 FIX-DOC-DAILY-WEEKLY: هذه الدالة **غير مُفعَّلة**.
+        ⚠️ v1.4/v1.5 FIX-DOC-DAILY-WEEKLY: هذه الدالة **غير مُفعَّلة**.
 
         لا يوجد مستدعٍ لها في utils.py حتى v7.10.24. الميزة موجودة
         في DB (get_users_for_daily_reminder + mark_reminder_sent)،
@@ -914,7 +995,7 @@ class RemindersMixin:
         reminder_func: Callable[[int, str], Awaitable[bool]],
     ) -> Dict[str, int]:
         """
-        ⚠️ v1.4 FIX-DOC-DAILY-WEEKLY: هذه الدالة **غير مُفعَّلة**.
+        ⚠️ v1.4/v1.5 FIX-DOC-DAILY-WEEKLY: هذه الدالة **غير مُفعَّلة**.
 
         لا يوجد مستدعٍ لها في utils.py حتى v7.10.24. الميزة موجودة
         في DB (get_users_for_weekly_reminder + mark_reminder_sent)،
@@ -1132,6 +1213,8 @@ class RemindersMixin:
 
 __all__ = [
     "RemindersMixin",
+    "VERSION",
+    "__version__",
     "DEFAULT_REMINDER_DAYS_BEFORE",
     "MIN_REMINDER_DAYS_BEFORE",
     "MAX_REMINDER_DAYS_BEFORE",
@@ -1145,18 +1228,22 @@ __all__ = [
 
 
 # ═════════════════════════════════════════════════════════════════════
-# LOAD BEACON — v1.4
+# LOAD BEACON — v1.5
 # ═════════════════════════════════════════════════════════════════════
 
 try:
     logger.info(
-        "🛡️ database_reminders.py v1.4 loaded | "
+        "🛡️ database_reminders.py v1.5 loaded | "
         "RemindersMixin ✅ | "
-        "fixes=(FIX-DOC-TZ-CONVERSION: now_dt-ready-for-adapt_params, "
+        "fixes=(FIX-FILES-VERSION: VERSION+__version__ exported, "
+        "FIX-CROSS-DB-INSERT: _ensure_reminder_row "
+        "handles PG/MySQL/SQLite explicitly, "
+        "FIX-DOC-TZ-CONVERSION: now_dt-ready-for-adapt_params, "
         "FIX-DOC-MIGRATION-TX: call-outside-transaction, "
         "FIX-DOC-DAILY-WEEKLY: send_daily/weekly-NOT-called, "
         "IMPROVE-NO-MISLEAD: explicit-warnings) | "
-        "v1.3-all محفوظ | v1.2-all محفوظ | v1.1-all محفوظ | "
+        "v1.4-all محفوظ | v1.3-all محفوظ | "
+        "v1.2-all محفوظ | v1.1-all محفوظ | "
         "⚠️ status: subscription_reminder=✅-active, "
         "daily_stats_reminder=❌-inactive, "
         "weekly_report=❌-inactive"
