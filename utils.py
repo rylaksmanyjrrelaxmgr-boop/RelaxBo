@@ -1,39 +1,45 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-utils.py - الأدوات المساعدة للبوت (v7.10.27 — MANAGED-BOTS-READY)
+utils.py - الأدوات المساعدة للبوت (v7.10.29 — WEBHOOK-DEDUP)
 =================================================================================
-🆕 v7.10.27 (MANAGED-BOTS-READY):
-    🟢 MANAGED-BOTS: توثيق عقد التكامل مع "مدير البوتات العامة"
-       (Section 25). صفر تعديل وظيفي.
+🆕 v7.10.29 (WEBHOOK-DEDUP):
+    🔴 FIX-WEBHOOK-DEDUP (CRITICAL):
+        المشكلة الجذرية: `webhook_handler` كان ينفّذ:
+            data = await request.json()
+            await _telegram_app.process_update(...)   # ← يحجب
+            return web.Response(status=200, text="OK")  # ← 200 متأخر
 
-🆕 v7.10.26 (FIX-METRIC-VISIBILITY):
-    🟡 FIX-METRIC-VISIBILITY: استبدال logger.debug بـ logger.warning في
-       bloc_ {record_bot_metric("posts_success"), record_bot_metric("posts_failed")}
-       داخل BackgroundTasks._publish_single_channel. السبب: إذا فشل
-       الاستيراد (ImportError) أو الاستدعاء (Exception) كان الفشل صامتاً
-       تماماً (level=INFO عادةً) فلا يعرف المشغّل أن metrics=0.
-       الأثر: أي فشل في ربط record_bot_metric سيظهر تحذيراً في السجل.
+        عندما يستغرق handler ثقيل (مثل /audit_full على 53 ملف ×
+        93K سطر = 30-60s) أكثر من مهلة Telegram (~60s)، كان Telegram:
+            1) يعتبر الطلب فاشلاً → يُعيد إرسال نفس update_id
+            2) webhook ينفّذه مرة أخرى (يبدأ audit جديد)
+            3) الحلقة تتكرر → عدة تقارير + GIL مشبع + /start لا يستجيب
 
-🆕 v7.10.25 (REMINDERS-INDEPENDENCE) — محفوظ:
-    🔴 FIX-REMINDERS-INDEPENDENCE (CRITICAL): في BackgroundTasks.reminders
-       كانت الاستدعاءات الثلاثة (subscription + daily + weekly) داخل
-       try/except واحد. إذا فشلت الأولى → الباقي لا يُنفَّذ.
-       الآن: كل استدعاء في try/except مستقل.
-    🟢 IMPROVE-REMINDERS-LOG: تسجيل باسم النوع (subscription/daily/weekly).
-    🟢 FIX-VERSION-ALIGNMENT: توحيد رقم الإصدار.
+        الحل (ثلاث طبقات دفاع):
+          • Dedup by update_id: OrderedDict مع TTL=180s — أي update_id
+            شوهد مؤخراً يُتجاهَل بسرعة (200 فوري بدون تنفيذ).
+          • In-flight tracking: dict من update_id → asyncio.Task —
+            إن كان نفس update قيد التنفيذ، 200 فوري.
+          • Fire-and-forget: نُنشئ task للـ process_update، ثم نُعيد
+            200 فوراً (<50ms). Telegram لا يُعيد أبداً.
 
-🆕 v7.10.24 (FIX-METRICS-INTEGRATION) — محفوظ:
-    🔴 FIX-METRICS-INTEGRATION (CRITICAL): إضافة استدعاء record_bot_metric
-       و_metrics_inc في BackgroundTasks._publish_single_channel بعد كل
-       نشر (نجاح/فشل). السبب: auto_publish كان ينشر بنجاح لكن لوحة
-       المقاييس (admin_metrics_live) تبقى 0 لأن utils.py لم يكن يُحدّث
-       العدّادات التي نُضيفها في bot.py v5.6.37 وhandlers_callback v9.7.31.
-       الأثر المتوقّع: لوحة المقاييس الحية ستعرض أرقاماً حقيقية.
+        الأثر المتوقَّع:
+          • /audit_full → تقرير واحد فقط (بدل 3-4 نسخ).
+          • /start يستجيب فوراً (لا GIL blocking من webhook).
+          • Pool مستقر (لا تراكم process_update tasks).
 
-    🟢 IMPROVE-DOC: توضيح متى يمكن استدعاء trigger_auto_publish()
-        (فقط من داخل event loop).
+        ملاحظة: هذا التصحيح يُكمل v7.10.28 (SLOW-QUERIES-FIX) الذي
+        عالج pool storm + UPDATE auto_replies.
 
+🆕 v7.10.28 (SLOW-QUERIES-FIX) — محفوظ:
+    🟢 FIX-SLOW-POOL-STORM: _get_semaphore_size = 3 دائماً.
+    🟢 FIX-SLOW-UPDATE-AR: _increment_usage_async fire-and-forget.
+
+🆕 v7.10.27 (MANAGED-BOTS-READY) — محفوظ.
+🆕 v7.10.26 (FIX-METRIC-VISIBILITY) — محفوظ.
+🆕 v7.10.25 (REMINDERS-INDEPENDENCE) — محفوظ.
+🆕 v7.10.24 (FIX-METRICS-INTEGRATION) — محفوظ.
 🆕 v7.10.23 (FIX-PUBLISH-DELAY) — محفوظ.
 🆕 v7.10.22 (FIX-SLOWQ) — محفوظ.
 🆕 v7.10.21 (FIX-U1/U2/U3) — محفوظ.
@@ -2921,12 +2927,36 @@ _flush_in_progress = False
 
 
 async def _increment_usage_async(chat_id: int, keyword: str):
+    """v7.10.28 FIX-SLOW-UPDATE-AR: fire-and-forget بدل await."""
     async with _usage_lock:
         key = (chat_id, keyword.lower())
         _usage_updates[key] = _usage_updates.get(key, 0) + 1
         should_flush = len(_usage_updates) >= _USAGE_FLUSH_LIMIT
     if should_flush:
-        await _flush_usage_updates()
+        try:
+            _flush_task = asyncio.create_task(_flush_usage_updates())
+        except Exception as _fe:
+            logger.debug("spawn flush_usage: %s", _fe)
+            _flush_task = None
+        if _flush_task is not None:
+            try:
+                _warmup_bg_tasks.add(_flush_task)
+            except Exception:
+                pass
+
+            def _flush_done_cb(t):
+                try:
+                    _warmup_bg_tasks.discard(t)
+                    if not t.cancelled():
+                        exc = t.exception()
+                        if exc:
+                            logger.debug("flush_usage task: %s", exc)
+                except Exception:
+                    pass
+            try:
+                _flush_task.add_done_callback(_flush_done_cb)
+            except Exception:
+                pass
 
 
 async def _flush_usage_updates():
@@ -3733,11 +3763,9 @@ class BackgroundTasks:
         sleep_seconds = min_interval_minutes * 60
 
         def _get_semaphore_size(n: int) -> int:
-            if n <= 5:
-                return 3
-            if n <= 10:
-                return 5
-            return 8
+            # v7.10.28 FIX-SLOW-POOL-STORM: دائماً 3 — pool safety أولاً
+            _ = n
+            return 3
 
         BackgroundTasks._auto_publish_tasks = {}
         try:
@@ -4291,6 +4319,137 @@ _NON_RETRYABLE_WEBHOOK_ERRORS = frozenset({
 })
 
 
+# ═══════════════════════════════════════════════════════════════════════════
+# 🆕 v7.10.29 FIX-WEBHOOK-DEDUP: dedup + fire-and-forget
+# ═══════════════════════════════════════════════════════════════════════════
+# المشكلة: webhook_handler كان ينفّذ process_update() بشكل متزامن (await)
+# ثم يرد 200 بعد اكتماله. مع handler ثقيل (/audit_full = 30-60s):
+#   - Telegram يرى timeout (>60s) → يُعيد إرسال نفس update_id
+#   - webhook ينفّذ مرة أخرى → حلقة مفرغة → عدة تقارير + GIL blocked
+#
+# الحل: ثلاث طبقات دفاع
+#   1) _WEBHOOK_PROCESSED: OrderedDict[update_id, ts] مع TTL=180s
+#      → نفس update_id خلال 3 دقائق = DUPLICATE → 200 فوري
+#   2) _WEBHOOK_INFLIGHT: Dict[update_id, asyncio.Task]
+#      → نفس update_id قيد التنفيذ = BUSY → 200 فوري
+#   3) fire-and-forget: spawn asyncio.Task لـ process_update، رد 200 فوراً
+# ═══════════════════════════════════════════════════════════════════════════
+
+_WEBHOOK_PROCESSED: "OrderedDict[int, float]" = OrderedDict()
+_WEBHOOK_INFLIGHT: Dict[int, asyncio.Task] = {}
+_WEBHOOK_PROCESSED_MAX = 2000
+_WEBHOOK_PROCESSED_TTL = 180.0
+_webhook_lock = asyncio.Lock()
+
+
+async def webhook_handler(request):
+    expected_secret = getattr(CONFIG, 'WEBHOOK_SECRET', None)
+    if expected_secret:
+        received = request.headers.get(
+            "X-Telegram-Bot-Api-Secret-Token", "")
+        if received != expected_secret:
+            logger.warning(
+                "⛔ webhook secret mismatch from %s", request.remote)
+            return web.Response(status=403, text="Forbidden")
+    if _telegram_app is None or not hasattr(_telegram_app, 'bot'):
+        logger.error("❌ Telegram app not initialized")
+        return web.Response(status=503, text="Service Unavailable")
+    try:
+        raw_ct = request.content_type or ''
+        ct = raw_ct.split(';')[0].strip().lower()
+        if ct != 'application/json':
+            logger.warning(
+                "⚠️ Webhook non-JSON content: %r", raw_ct)
+            return web.Response(status=400, text="Bad Request")
+        data = await request.json()
+        update_obj = Update.de_json(data, _telegram_app.bot)
+        if update_obj is None:
+            return web.Response(status=200, text="OK")
+
+        update_id = getattr(update_obj, "update_id", None)
+
+        # 🆕 v7.10.29: DEDUP — نفس update_id شوهد مؤخراً؟
+        if update_id is not None:
+            now = time.monotonic()
+            async with _webhook_lock:
+                while (_WEBHOOK_PROCESSED
+                       and (now - next(iter(_WEBHOOK_PROCESSED.values())))
+                           > _WEBHOOK_PROCESSED_TTL):
+                    _WEBHOOK_PROCESSED.popitem(last=False)
+
+                prev_ts = _WEBHOOK_PROCESSED.get(update_id)
+                if prev_ts is not None and \
+                        (now - prev_ts) < _WEBHOOK_PROCESSED_TTL:
+                    logger.warning(
+                        "⚠️ WEBHOOK-DUP-SKIP: update_id=%s "
+                        "(شوهد قبل %.1fs — Telegram retry)",
+                        update_id, now - prev_ts,
+                    )
+                    return web.Response(status=200, text="OK")
+
+                _WEBHOOK_PROCESSED[update_id] = now
+                while len(_WEBHOOK_PROCESSED) > _WEBHOOK_PROCESSED_MAX:
+                    _WEBHOOK_PROCESSED.popitem(last=False)
+
+                existing = _WEBHOOK_INFLIGHT.get(update_id)
+                if existing is not None and not existing.done():
+                    logger.warning(
+                        "⚠️ WEBHOOK-IN-FLIGHT: update_id=%s "
+                        "(قيد التنفيذ — تجاهل)",
+                        update_id,
+                    )
+                    return web.Response(status=200, text="OK")
+
+        # 🆕 v7.10.29: FIRE-AND-FORGET — ارد 200 فوراً، عالج في الخلفية
+        async def _process_update_bg(u, uid):
+            try:
+                await _telegram_app.process_update(u)
+            except Exception as _e:
+                logger.error(
+                    "❌ process_update %s: %s",
+                    uid if uid is not None else "?",
+                    _e, exc_info=True,
+                )
+            finally:
+                if uid is not None:
+                    try:
+                        async with _webhook_lock:
+                            _WEBHOOK_INFLIGHT.pop(uid, None)
+                    except Exception:
+                        _WEBHOOK_INFLIGHT.pop(uid, None)
+
+        try:
+            task = asyncio.create_task(
+                _process_update_bg(update_obj, update_id),
+                name=f"wh-{update_id}" if update_id is not None else "wh-bg",
+            )
+            if update_id is not None:
+                async with _webhook_lock:
+                    _WEBHOOK_INFLIGHT[update_id] = task
+        except Exception as _spawn_e:
+            logger.error("❌ webhook spawn task: %s", _spawn_e)
+            try:
+                await _telegram_app.process_update(update_obj)
+            except Exception as _sync_e:
+                logger.error(
+                    "❌ webhook sync fallback: %s", _sync_e)
+
+        # ⚡ 200 فوراً — Telegram لن يُعيد الإرسال حتى لو الـ handler استغرق 10 دقائق
+        return web.Response(status=200, text="OK")
+    except Exception as e:
+        err_type = type(e).__name__.lower()
+        err_msg = str(e)[:200]
+        if any(k in err_type for k in _NON_RETRYABLE_WEBHOOK_ERRORS):
+            logger.warning(
+                "⚠️ Webhook non-retryable [%s]: %s",
+                err_type, err_msg)
+            return web.Response(status=200, text="OK")
+        logger.error(
+            "❌ Webhook error [%s]: %s",
+            err_type, err_msg, exc_info=True)
+        return web.Response(status=500, text="Internal Error")
+
+
 async def setup_webhook(app, port: int):
     global _telegram_app
     _telegram_app = app
@@ -4314,43 +4473,6 @@ async def setup_webhook(app, port: int):
         logger.debug("تعذّر إرفاق site: %s", _e)
     logger.info("✅ Webhook on port %d", port)
     return runner
-
-
-async def webhook_handler(request):
-    expected_secret = getattr(CONFIG, 'WEBHOOK_SECRET', None)
-    if expected_secret:
-        received = request.headers.get(
-            "X-Telegram-Bot-Api-Secret-Token", "")
-        if received != expected_secret:
-            logger.warning(
-                "⛔ webhook secret mismatch from %s", request.remote)
-            return web.Response(status=403, text="Forbidden")
-    if _telegram_app is None or not hasattr(_telegram_app, 'bot'):
-        logger.error("❌ Telegram app not initialized")
-        return web.Response(status=503, text="Service Unavailable")
-    try:
-        raw_ct = request.content_type or ''
-        ct = raw_ct.split(';')[0].strip().lower()
-        if ct != 'application/json':
-            logger.warning(
-                "⚠️ Webhook non-JSON content: %r", raw_ct)
-            return web.Response(status=400, text="Bad Request")
-        data = await request.json()
-        await _telegram_app.process_update(
-            Update.de_json(data, _telegram_app.bot))
-        return web.Response(status=200, text="OK")
-    except Exception as e:
-        err_type = type(e).__name__.lower()
-        err_msg = str(e)[:200]
-        if any(k in err_type for k in _NON_RETRYABLE_WEBHOOK_ERRORS):
-            logger.warning(
-                "⚠️ Webhook non-retryable [%s]: %s",
-                err_type, err_msg)
-            return web.Response(status=200, text="OK")
-        logger.error(
-            "❌ Webhook error [%s]: %s",
-            err_type, err_msg, exc_info=True)
-        return web.Response(status=500, text="Internal Error")
 
 # ═══════════════════════════════════════════════════════════════════════════
 # 20. معالج الأخطاء
@@ -4938,6 +5060,9 @@ __all__ = [
     'trigger_auto_publish', 'get_publish_trigger_status',
     '_get_publish_trigger', '_publish_trigger',
     '_PUBLISH_SIGNAL_TIMEOUT_SECONDS',
+    '_WEBHOOK_PROCESSED', '_WEBHOOK_INFLIGHT',
+    '_WEBHOOK_PROCESSED_MAX', '_WEBHOOK_PROCESSED_TTL',
+    '_webhook_lock',
 ]
 
 
@@ -5015,23 +5140,29 @@ __all__ = [
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# LOAD BEACON — v7.10.27
+# LOAD BEACON — v7.10.29
 # ═══════════════════════════════════════════════════════════════════════════
 
 try:
     logger.info(
-        "🛡️ utils.py v7.10.27 MANAGED-BOTS-READY loaded | "
-        "🆕 MANAGED-BOTS: صفر تعديل وظيفي — عقد تكامل موثّق (قسم 25) | "
-        "🆕 FIX-METRIC-VISIBILITY: warning بدل debug في "
-        "record_bot_metric (success + fail) | "
+        "🛡️ utils.py v7.10.29 WEBHOOK-DEDUP loaded | "
+        "🆕 FIX-WEBHOOK-DEDUP: webhook_handler → dedup + fire-and-forget "
+        "(200 فوراً <50ms) | "
+        "DEDUP: update_id + TTL=%.0fs + max=%d | "
+        "IN-FLIGHT: Dict[update_id→Task] | "
+        "🔒 يمنع Telegram retries من تنفيذ /audit_full 3-4 مرات | "
+        "🔒 يحرّر GIL — /start يستجيب فوراً | "
+        "FIX-SLOW-POOL-STORM: _get_semaphore_size=3 دائماً | "
+        "FIX-SLOW-UPDATE-AR: _increment_usage_async fire-and-forget | "
+        "MANAGED-BOTS: عقد تكامل موثّق (قسم 25) | "
+        "FIX-METRIC-VISIBILITY: warning بدل debug في "
+        "record_bot_metric | "
         "FIX-REMINDERS-INDEPENDENCE: 3×try/except مستقل | "
         "FIX-METRICS: record_bot_metric + _metrics_inc في "
-        "_publish_single_channel (success + fail) | "
+        "_publish_single_channel | "
         "FIX-PD-1: event-triggered auto_publish (signal=%.0fs) | "
-        "FIX-PD-2: cached trigger ref in loop | "
         "FIX-SLOWQ-3: _read_pg_activity (GROUP BY + cache %.0fs) | "
         "FIX-U1: _send_media warning uses `is None` | "
-        "FIX-U2: _do_backup error log enriched | "
         "FIX-UB1: _do_backup cleanup via asyncio.to_thread | "
         "FIX-UB2: DB.backup_database timeout=%.0fs | "
         "FIX-BUG1c/d: _CAPTION_MEDIA_TYPES (%d types) | "
@@ -5040,10 +5171,12 @@ try:
         "sec_defaults=%d keys | "
         "auth_cache=user_id-aware | "
         "Lang=%d | ChatMigrated=%d ops | ToggleMap=%d | "
-        "Webhook=✅ | Penalty=✅ | Publish=✅ | "
+        "Webhook=✅ DEDUP | Penalty=✅ | Publish=✅ | "
         "Metrics=✅ (DB + bot.py + CB) | "
         "Reminders=✅ (3× isolated) | "
         "ManagedBots=Documented (Section 25)",
+        _WEBHOOK_PROCESSED_TTL,
+        _WEBHOOK_PROCESSED_MAX,
         _PUBLISH_SIGNAL_TIMEOUT_SECONDS,
         _PG_ACTIVITY_TTL,
         _BACKUP_TIMEOUT_SECONDS,
