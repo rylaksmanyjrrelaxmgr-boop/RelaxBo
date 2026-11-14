@@ -1,30 +1,48 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-🌿 Relax Manager – البوت الرئيسي (bot.py v5.7.21-EARLY-HEALTH-BG-MANAGED-BOTS)
+🌿 Relax Manager – البوت الرئيسي (bot.py v5.7.22-STAGGER-BG-INDEX-HINTS)
 ================================================================================
-🆕 v5.7.21 (فوق v5.7.20):
-    🚀 EARLY-HEALTH-SERVER: فتح منفذ Render فوراً بعد signal handlers
-       (مع retry لمدة 10s لتفادي race مع _force_kill_previous_instance).
-       القضاء على "No open ports detected" نهائياً.
-    🛡️ SAFE-CATCHALL: في وضع البوت، POST `/{TOKEN}` يُرَدّ 503 قبل
-       الجاهزية (Telegram يعيد الإرسال) ثم يُفوَّض لـ webhook_handler.
-       منع فقدان updates أثناء الإقلاع.
-    ⚡ BG-MANAGED-BOTS: `start_all_managed_bots` في background task
-       بدل الحجب ~15s. Webhook يفتح فوراً.
-    ⚡ BG-COMMANDS: `delete_my_commands` + `set_my_commands` (عام/مجموعة/
-       لكل أدمن) في background task. مع الحفاظ على `admin_ids` blocking
-       لأنها مستخدمة في `filters.User(...)`.
-    🔗 REUSE-RUNNER: `_early_runner` يُعاد استخدامه لكامل عمر العملية
-       (health + webhook + polling mode). صفر نافذة انقطاع بين إغلاق/فتح.
-    ✅ محفوظ من v5.7.20:
-        - FIX-HTML-CHUNKING
-        - ADD-DB-ERRORS-CMD / ADD-DB-FULL-CHECK-CMD
-        - FIX-RESTART-EXITCODE
-        - FIX-PID / ADD-RESTART-CMD
-        - FIX-ADMIN-SAFE
-        - FIX-POST-STOP
+🆕 v5.7.22 (فوق v5.7.21):
+    🔴 FIX-STAGGER-BG-TASKS (PERF): إنشاء 19 مهمة خلفية **متزامناً**
+       في نفس tick من event loop كان يسبب pool stampede:
+       كل المهام تبدأ queries متزامنة على PG → pool (10/10) مشبع فوراً →
+       PK lookups بسيطة مثل "SELECT 1 FROM users WHERE user_id=$1" تستغرق
+       3-5s (شوهد في تقرير /audit_full 2026-11-14: 10 استعلامات كلها
+       > 3s بسبب contention).
+       
+       الحل: إضافة تأخير _BG_TASK_STAGGER_SEC=0.4s بين كل create_task()
+       → توزيع بداية المهام على ~7.6s → كل مهمة تبدأ وتنتهي من queries
+       الإقلاع قبل أن تبدأ التالية.
+       
+       الأثر المتوقع: PK lookups < 10ms (بدل 3.5s)، تجربة /start فورية.
 
+    🔴 FIX-ADMIN-COLLECT-TIMEOUT (RELIABILITY): `_collect_admin_ids()`
+       كانت قد تعلّق إن كان pool مشبعاً. الإضافة: asyncio.wait_for
+       مع timeout=10s. عند الفشل: fallback إلى CONFIG.DEVELOPER_IDS
+       + PRIMARY_OWNER_ID (بدون DB).
+
+    🟢 ADD-INDEX-HINTS (OBSERVABILITY): تسجيل SQL فهارس موصى بها عند
+       الإقلاع. السبب: استعلامات مثل:
+         • SELECT ... FROM bot_groups WHERE admin_id=...  → 4.80s
+         • SELECT ... FROM user_channels WHERE user_id=... → 3.48s
+         • UPDATE user_penalties WHERE expires_at < NOW()  → 3.71s
+         • WITH post_counts AS (...)  → 3.91s
+       تُظهر أن الفهارس مفقودة على الأعمدة الحرجة. تسجيل SQL في السجل
+       يجعل حل المشكلة فورياً لمشغّل الإنتاج بدون حاجة لتشخيص إضافي.
+
+    🟢 IMPROVE-BG-TASK-LOG: كل مهمة خلفية تُسجّل "task X: started"
+       عند أول تنفيذ فعلي (بعد sleep الأولي). يمكّن من تشخيص
+       "أي مهمة أطلقت استعلاماً بطيئاً" في /audit_full.
+
+    ✅ محفوظ من v5.7.21:
+        - EARLY-HEALTH-SERVER
+        - SAFE-CATCHALL
+        - BG-MANAGED-BOTS
+        - BG-COMMANDS
+        - REUSE-RUNNER
+
+v5.7.21 — محفوظ.
 v5.7.20 — محفوظ.
 v5.7.19 — محفوظ.
 v5.7.18 — محفوظ.
@@ -476,6 +494,67 @@ for _noisy in ("httpx", "httpcore", "telegram.request", "telegram.ext.ExtBot", "
 logger = logging.getLogger("relax_bot")
 
 # ═══════════════════════════════════════════════════════════════════
+# 🆕 v5.7.22: BG-TASK-STAGGER + INDEX-HINTS constants
+# ═══════════════════════════════════════════════════════════════════
+_BG_TASK_STAGGER_SEC: float = 0.4
+_ADMIN_COLLECT_TIMEOUT_SEC: float = 10.0
+
+# 🆕 v5.7.22: توصيات الفهارس (تُسجَّل في السجل عند الإقلاع)
+_INDEX_RECOMMENDATIONS: List[Tuple[str, str]] = [
+    (
+        "bot_groups.admin_id",
+        "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_bot_groups_admin "
+        "ON bot_groups (admin_id) WHERE banned = 0;"
+    ),
+    (
+        "user_penalties.expires_at",
+        "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_user_penalties_expires "
+        "ON user_penalties (expires_at) WHERE expires_at > 0;"
+    ),
+    (
+        "posts(channel_db_id,status,created_at)",
+        "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_posts_channel_status "
+        "ON posts (channel_db_id, status, created_at DESC);"
+    ),
+    (
+        "user_channels.user_id",
+        "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_user_channels_user "
+        "ON user_channels (user_id) WHERE banned = 0;"
+    ),
+]
+
+
+def _log_index_recommendations() -> None:
+    """
+    🆕 v5.7.22 ADD-INDEX-HINTS: تسجيل SQL فهارس موصى بها.
+
+    تُستدعى بعد DB init. السبب: تقرير /audit_full أظهر استعلامات
+    بطيئة (>3s) على bot_groups, user_channels, user_penalties, posts —
+    كلها تُستفيد من فهارس على الأعمدة الحرجة. تسجيل SQL في السجل
+    يجعل الحل فورياً لمشغّل الإنتاج.
+    """
+    try:
+        db_type = str(getattr(DB, "DB_TYPE", "sqlite")).lower().strip()
+        if not db_type.startswith("postgres"):
+            logger.debug(
+                "index-hints: skipped (DB_TYPE=%s — SQL أعلاه لـ PG فقط)",
+                db_type,
+            )
+            return
+        logger.warning(
+            "📋 INDEX-HINTS (v5.7.22): نفّذ هذه الأوامر على PostgreSQL "
+            "لتحسين الاستعلامات البطيئة المُرصَدة في /audit_full:"
+        )
+        for _label, _sql in _INDEX_RECOMMENDATIONS:
+            logger.warning("   • %s\n     %s", _label, _sql)
+        logger.warning(
+            "💡 CONCURRENTLY لا يحجب الجدول — نفّذها وقت التشغيل بأمان."
+        )
+    except Exception as _e:
+        logger.debug("_log_index_recommendations: %s", _e)
+
+
+# ═══════════════════════════════════════════════════════════════════
 # 🆕 v5.7.21: EARLY-HEALTH state
 # ═══════════════════════════════════════════════════════════════════
 
@@ -576,12 +655,12 @@ _FALLBACK_HOSTNAME = (
     os.getenv("FALLBACK_HOSTNAME", "") or "relaxbo-78m4.onrender.com"
 ).strip()
 
-logger.info("🔧 v5.7.21 init: _FALLBACK_HOSTNAME=%r", _FALLBACK_HOSTNAME)
-logger.info("🔧 v5.7.21 init: RENDER_EXTERNAL_HOSTNAME=%r",
+logger.info("🔧 v5.7.22 init: _FALLBACK_HOSTNAME=%r", _FALLBACK_HOSTNAME)
+logger.info("🔧 v5.7.22 init: RENDER_EXTERNAL_HOSTNAME=%r",
             os.getenv("RENDER_EXTERNAL_HOSTNAME", ""))
-logger.info("🔧 v5.7.21 init: RENDER_EXTERNAL_URL=%r",
+logger.info("🔧 v5.7.22 init: RENDER_EXTERNAL_URL=%r",
             os.getenv("RENDER_EXTERNAL_URL", ""))
-logger.info("🔧 v5.7.21 init: ALLOW_POLLING=%r",
+logger.info("🔧 v5.7.22 init: ALLOW_POLLING=%r",
             os.getenv("ALLOW_POLLING", ""))
 
 def _read_pid_file() -> Optional[int]:
@@ -1334,24 +1413,16 @@ async def _shutdown_db_pool(timeout: float = 5.0) -> None:
     except Exception:
         pass
 
-async def _collect_admin_ids() -> List[int]:
-    admin_ids: Set[int] = set()
-    try:
-        owner = int(getattr(CONFIG, "PRIMARY_OWNER_ID", 0) or 0)
-        if owner:
-            admin_ids.add(owner)
-    except (TypeError, ValueError):
-        pass
-    try:
-        for dev in (getattr(CONFIG, "DEVELOPER_IDS", []) or []):
-            try:
-                d = int(dev)
-                if d:
-                    admin_ids.add(d)
-            except (TypeError, ValueError):
-                continue
-    except Exception:
-        pass
+
+# 🆕 v5.7.22: helper داخلي — يقيس كل استدعاء DB.get_admin_list (أو ما شابه)
+async def _collect_admin_ids_from_db() -> List[int]:
+    """
+    استدعاء DB.get_admin_list / get_all_admins / get_admins بدون timeout خارجي.
+    السبب: نفصل هذا كدالة منفصلة لنتمكن من تطبيق asyncio.wait_for فقط
+    على الجزء البطيء (queries على bot_groups/users/user_channels)
+    بدل أن نحتجز الـ whole function.
+    """
+    _admin_ids: Set[int] = set()
     for method_name in ("get_admin_list", "get_all_admins", "get_admins"):
         if not hasattr(DB, method_name):
             continue
@@ -1369,13 +1440,72 @@ async def _collect_admin_ids() -> List[int]:
                 uid = a.get("user_id") if isinstance(a, dict) else a
                 try:
                     if uid:
-                        admin_ids.add(int(uid))
+                        _admin_ids.add(int(uid))
                 except (TypeError, ValueError):
                     continue
             break
-        except Exception:
+        except asyncio.CancelledError:
+            raise
+        except Exception as _e:
+            logger.debug(
+                "_collect_admin_ids_from_db: DB.%s failed: %s",
+                method_name, _e,
+            )
             continue
+    return sorted(_admin_ids)
+
+
+async def _collect_admin_ids() -> List[int]:
+    """
+    🆕 v5.7.22 FIX-ADMIN-COLLECT-TIMEOUT: يضيف timeout=10s على
+    استعلامات DB.get_admin_list. السبب: عندما يكون pool مشبعاً
+    (كما شوهد في /audit_full 2026-11-14: PK lookups > 3s)، يمكن
+    أن يعلق get_admin_list. الآن: عند timeout → fallback فوري إلى
+    CONFIG.DEVELOPER_IDS + PRIMARY_OWNER_ID (بدون DB).
+
+    الأثر: البوت لا يتوقف عن الإقلاع حتى لو كان DB تحت ضغط.
+    """
+    admin_ids: Set[int] = set()
+    # 1) من CONFIG (سريع، لا DB)
+    try:
+        owner = int(getattr(CONFIG, "PRIMARY_OWNER_ID", 0) or 0)
+        if owner:
+            admin_ids.add(owner)
+    except (TypeError, ValueError):
+        pass
+    try:
+        for dev in (getattr(CONFIG, "DEVELOPER_IDS", []) or []):
+            try:
+                d = int(dev)
+                if d:
+                    admin_ids.add(d)
+            except (TypeError, ValueError):
+                continue
+    except Exception:
+        pass
+    # 2) من DB (مع timeout)
+    try:
+        db_ids = await asyncio.wait_for(
+            _collect_admin_ids_from_db(),
+            timeout=_ADMIN_COLLECT_TIMEOUT_SEC,
+        )
+        if db_ids:
+            admin_ids.update(db_ids)
+    except asyncio.TimeoutError:
+        logger.warning(
+            "⏱️ ADMIN-COLLECT-TIMEOUT (>%.0fs) — نستخدم CONFIG فقط (%d)",
+            _ADMIN_COLLECT_TIMEOUT_SEC, len(admin_ids),
+        )
+    except asyncio.CancelledError:
+        raise
+    except Exception as _e:
+        logger.warning(
+            "⚠️ _collect_admin_ids_from_db failed: %s: %s — "
+            "نستخدم CONFIG فقط (%d)",
+            type(_e).__name__, str(_e)[:100], len(admin_ids),
+        )
     return sorted(admin_ids)
+
 
 async def _collect_admin_ids_with_retry(
     max_attempts: int = _ADMIN_COLLECT_MAX_ATTEMPTS,
@@ -1962,9 +2092,17 @@ async def _watch_runner(runner, shutdown_event: asyncio.Event, port: int) -> Non
                 await asyncio.sleep(_WATCHER_INTERVAL)
 
 async def run_task_with_retry(task_func, *args, task_name=""):
+    """
+    🆕 v5.7.22 IMPROVE-BG-TASK-LOG: تسجيل "task X: started" عند أول
+    تنفيذ فعلي. يمكّن من ربط queries بطيئة في /audit_full بـ task معيّن.
+    """
     consecutive_failures = 0
+    _first_start = True
     while True:
         try:
+            if _first_start:
+                logger.info("▶️ BG-TASK: %s — بدأ", task_name or "?")
+                _first_start = False
             await task_func(*args)
             consecutive_failures = 0
             await asyncio.sleep(5)
@@ -2499,13 +2637,14 @@ async def main():
     logger.info("👨‍💼 المالك: %s", CONFIG.PRIMARY_OWNER_ID)
 
     logger.info(
-        "📦 bot.py: v5.7.21 | kill_prev=on | init_retry=on | webhook_force=on | "
+        "📦 bot.py: v5.7.22 | kill_prev=on | init_retry=on | webhook_force=on | "
         "webhook_verify=on | diag_incoming=%r | "
         "detectors=%s | layers=%d | fallback_hostname=%r | "
         "allow_polling_env=%r | alias_fix=on | cmds_reordered=on | "
         "post_stop_fix=on | admin_safe_retry=on(%dx,%.1fs) | admin_restart=on | "
         "restart_exitcode=on | db_errors_cmd=on | html_chunking_fix=on | "
-        "early_health=on | bg_managed_bots=on | bg_commands=on | early_port=%d",
+        "early_health=on | bg_managed_bots=on | bg_commands=on | early_port=%d | "
+        "stagger=%.1fs | admin_collect_timeout=%.0fs | index_hints=on",
         _DIAG_INCOMING,
         _SPAM_DETECTOR_VERSION or "N/A",
         _SPAM_DETECTOR_LAYERS_COUNT,
@@ -2514,6 +2653,8 @@ async def main():
         _ADMIN_COLLECT_MAX_ATTEMPTS,
         _ADMIN_COLLECT_RETRY_DELAY_SEC,
         _early_port,
+        _BG_TASK_STAGGER_SEC,
+        _ADMIN_COLLECT_TIMEOUT_SEC,
     )
 
     if not _verify_command_handlers():
@@ -2529,6 +2670,9 @@ async def main():
     else:
         await initialize_db()
     logger.info("⏱️ DB init: %.2fs", time.monotonic() - t0)
+
+    # 🆕 v5.7.22: تسجيل توصيات الفهارس بعد DB init
+    _log_index_recommendations()
 
     try:
         _ping = await DB.fetchone("SELECT 1 AS ok")
@@ -2699,6 +2843,7 @@ async def main():
 
     # ═════════════════════════════════════════════════════════════════
     # 🆕 v5.7.21: جمع admin_ids blocking (مستخدمة في filters.User)
+    # 🆕 v5.7.22: مع timeout=10s داخل _collect_admin_ids
     # ═════════════════════════════════════════════════════════════════
     _admin_ids, _admin_critical_empty = await _collect_admin_ids_with_retry()
 
@@ -3083,12 +3228,36 @@ async def main():
     else:
         logger.warning("⚠️ periodic_cleanup: skipped (لا callable صالح)")
 
-    for _name, _fn, _args in _bg_task_specs:
+    # 🆕 v5.7.22 FIX-STAGGER-BG-TASKS: إنشاء المهام واحدة تلو الأخرى
+    # مع تأخير _BG_TASK_STAGGER_SEC بين كل مهمة.
+    # السبب: إنشاء 19 task دفعة واحدة كان يسبب pool stampede — كل المهام
+    # تبدأ queries متزامنة على PG → pool مشبع → PK lookups > 3s.
+    # الأثر المتوقع: توزيع بداية المهام على ~7.6s (19 × 0.4s).
+    logger.info(
+        "⏱️ BG-TASKS: إنشاء %d مهمة بتأخير %.1fs بين كل واحدة (%.1fs إجمالي)...",
+        len(_bg_task_specs),
+        _BG_TASK_STAGGER_SEC,
+        len(_bg_task_specs) * _BG_TASK_STAGGER_SEC,
+    )
+    for _idx, (_name, _fn, _args) in enumerate(_bg_task_specs):
+        if _idx > 0:
+            try:
+                await asyncio.sleep(_BG_TASK_STAGGER_SEC)
+            except asyncio.CancelledError:
+                raise
         tasks.append(asyncio.create_task(
             run_task_with_retry(_fn, *_args, task_name=_name)
         ))
+        logger.debug(
+            "  ✓ BG-TASK %d/%d: %s",
+            _idx + 1, len(_bg_task_specs), _name,
+        )
 
     if _MAINTENANCE_AVAILABLE and callable(_maintenance_loop):
+        try:
+            await asyncio.sleep(_BG_TASK_STAGGER_SEC)
+        except asyncio.CancelledError:
+            raise
         try:
             owner_id = int(CONFIG.PRIMARY_OWNER_ID)
         except (TypeError, ValueError):
@@ -3097,7 +3266,11 @@ async def main():
             run_task_with_retry(_maintenance_loop, app.bot, owner_id, task_name="maintenance")
         ))
 
-    logger.info("✅ %d مهمة خلفية", len(tasks))
+    logger.info(
+        "✅ %d مهمة خلفية — اكتمل التوزيع بعد %.1fs",
+        len(tasks),
+        len(tasks) * _BG_TASK_STAGGER_SEC,
+    )
 
     app_shutdown_done = False
     try:
