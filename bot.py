@@ -1,39 +1,41 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-🌿 Relax Manager – البوت الرئيسي (bot.py v5.7.23-FIX-UPDATER-STOP)
+🌿 Relax Manager – البوت الرئيسي (bot.py v5.7.25-HOTFIX-PUBLISHED-TRUE)
 ================================================================================
-🆕 v5.7.23 (فوق v5.7.22):
-    🔴 FIX-UPDATER-STOP (PERF + RELIABILITY):
-       في webhook mode، PTB v20's `app.start()` يُشغّل
-       `updater.start_polling()` **تلقائياً** حتى مع webhook مسجل.
-       التسلسل:
-         1) app.start() → يبدأ polling (getUpdates)
-         2) set_webhook() → يضع webhook على Telegram
-         3) Updater في الخلفية يستمر في polling → Telegram يرفض
-            getUpdates بسبب 409 Conflict (webhook مسجل).
-       
-       الدليل (من سجل v5.7.22):
-         21:04:34 app.start()      → begin polling
-         21:04:41 Conflict         → getUpdates denied
-         21:04:43 set_webhook()    → webhook registered
-         21:04:43+ polling keeps retrying (wasted resources)
-       
-       الحل: بعد set_webhook() بنجاح، أوقف الـ Updater صراحةً:
-           if app.updater and app.updater.running:
-               await app.updater.stop()
-       
-       الأثر:
-         • صفر 409 Conflict خلفي بعد النشر.
-         • توفير CPU/network (لا polling عديم الفائدة).
-         • لا استهلاك من rate limit Telegram.
-         • process_update() يبقى يعمل عبر webhook_handler.
+🆕 v5.7.25 (فوق v5.7.24):
+    🩹 HOTFIX-PUBLISHED-TRUE (SURGICAL FIX):
+       إضافة استيراد `hotfix_published_true` (ملف مستقل) بعد
+       `from database import ...`. السبب: `published = TRUE`
+       موجود في أكثر من ملف (bot.py::cmd_posts_stats،
+       handlers_callback.py::_show_metrics_dashboard، وربما
+       handlers آخر) — بدل تعديل كل ملف، hotfix يُغلّف دوال
+       DB الأساسية (fetchone/fetchall/fetchval/execute/executemany)
+       فيعترض كل SQL قبل التنفيذ ويستبدل تلقائياً:
+           published = TRUE   →   published = 1
+           published = FALSE  →   published = 0
+       هذا يُصلح `admin_metrics_live` + `/posts_stats` + أي
+       استعلام آخر يستخدم `published = TRUE` على PostgreSQL.
 
+       التطبيق:
+         1) أنشئ `hotfix_published_true.py` في جذر المشروع
+         2) السطر في bot.py أدناه يستورده — يطبّق تلقائياً
+         3) Render سيعيد النشر — صفر تعديل على ملفات أخرى
+
+       الأمان:
+         • إذا لم يوجد الملف → try/except يحمي (يعمل البوت عادي)
+         • regex محدد بـ boundaries (لا يلمس TRUE في سياقات أخرى)
+         • idempotent (تشغيله مرتين لا يضاعف التعديل)
+         • disabled عبر HOTFIX_PUBLISHED_TRUE_DISABLED=1
+
+    ✅ محفوظ من v5.7.24:
+        - FIX-PUBLISHED-TRUE (cmd_posts_stats: TRUE → 1)
+    ✅ محفوظ من v5.7.23:
+        - FIX-UPDATER-STOP
     ✅ محفوظ من v5.7.22:
-        - STAGGER-BG-TASKS (18 tasks × 0.4s)
+        - STAGGER-BG-TASKS (0.4s)
         - ADMIN-COLLECT-TIMEOUT (10s)
-        - INDEX-HINTS (SQL recommendations)
-        - IMPROVE-BG-TASK-LOG
+        - INDEX-HINTS
     ✅ محفوظ من v5.7.21:
         - EARLY-HEALTH-SERVER
         - SAFE-CATCHALL
@@ -41,6 +43,8 @@
         - BG-COMMANDS
         - REUSE-RUNNER
 
+v5.7.24 — محفوظ.
+v5.7.23 — محفوظ.
 v5.7.22 — محفوظ.
 v5.7.21 — محفوظ.
 v5.7.20 — محفوظ.
@@ -164,6 +168,42 @@ except Exception:
 
 from config import CONFIG
 from database import DB, initialize_db, TimeUtils
+
+# ═══════════════════════════════════════════════════════════════════════════
+# 🩹 v5.7.25 HOTFIX-PUBLISHED-TRUE: must come AFTER DB import, BEFORE
+# any code that runs SQL. monkey-patches DB methods to auto-correct
+# `published = TRUE` → `published = 1` in all queries.
+# ═══════════════════════════════════════════════════════════════════════════
+_HOTFIX_PUBLISHED_TRUE_AVAILABLE = False
+try:
+    import hotfix_published_true as _hotfix_pt  # noqa: F401
+    _HOTFIX_PUBLISHED_TRUE_AVAILABLE = True
+    try:
+        logging.getLogger(__name__).info(
+            "🩹 HOTFIX published=TRUE → 1 loaded | "
+            "patched_methods=auto | will fix admin_metrics_live + "
+            "/posts_stats + any `published = TRUE` query"
+        )
+    except Exception:
+        pass
+except ImportError as _hpt_ie:
+    _HOTFIX_PUBLISHED_TRUE_AVAILABLE = False
+    try:
+        logging.getLogger(__name__).warning(
+            "⚠️ hotfix_published_true.py missing — "
+            "admin_metrics_live & /posts_stats will fail on PG | "
+            "err=%s", _hpt_ie
+        )
+    except Exception:
+        pass
+except Exception as _hpt_e:
+    _HOTFIX_PUBLISHED_TRUE_AVAILABLE = False
+    try:
+        logging.getLogger(__name__).warning(
+            "⚠️ hotfix_published_true failed: %s", _hpt_e)
+    except Exception:
+        pass
+
 from handlers import CommandHandlers, CallbackHandlers, MessageHandlers, chat_member
 
 register_membership_handlers = None
@@ -532,7 +572,7 @@ def _log_index_recommendations() -> None:
             )
             return
         logger.warning(
-            "📋 INDEX-HINTS (v5.7.23): نفّذ هذه الأوامر على PostgreSQL "
+            "📋 INDEX-HINTS (v5.7.25): نفّذ هذه الأوامر على PostgreSQL "
             "لتحسين الاستعلامات البطيئة المُرصَدة في /audit_full:"
         )
         for _label, _sql in _INDEX_RECOMMENDATIONS:
@@ -635,13 +675,15 @@ _FALLBACK_HOSTNAME = (
     os.getenv("FALLBACK_HOSTNAME", "") or "relaxbo-78m4.onrender.com"
 ).strip()
 
-logger.info("🔧 v5.7.23 init: _FALLBACK_HOSTNAME=%r", _FALLBACK_HOSTNAME)
-logger.info("🔧 v5.7.23 init: RENDER_EXTERNAL_HOSTNAME=%r",
+logger.info("🔧 v5.7.25 init: _FALLBACK_HOSTNAME=%r", _FALLBACK_HOSTNAME)
+logger.info("🔧 v5.7.25 init: RENDER_EXTERNAL_HOSTNAME=%r",
             os.getenv("RENDER_EXTERNAL_HOSTNAME", ""))
-logger.info("🔧 v5.7.23 init: RENDER_EXTERNAL_URL=%r",
+logger.info("🔧 v5.7.25 init: RENDER_EXTERNAL_URL=%r",
             os.getenv("RENDER_EXTERNAL_URL", ""))
-logger.info("🔧 v5.7.23 init: ALLOW_POLLING=%r",
+logger.info("🔧 v5.7.25 init: ALLOW_POLLING=%r",
             os.getenv("ALLOW_POLLING", ""))
+logger.info("🔧 v5.7.25 init: HOTFIX_PUBLISHED_TRUE_AVAILABLE=%r",
+            _HOTFIX_PUBLISHED_TRUE_AVAILABLE)
 
 def _read_pid_file() -> Optional[int]:
     try:
@@ -2392,10 +2434,16 @@ async def cmd_posts_stats(update, context):
     msg = update.effective_message
     if msg is None:
         return
+
     _db_type = str(getattr(DB, "DB_TYPE", "sqlite")).lower().strip()
     if _db_type.startswith("postgres"):
         _interval_24h = "NOW() - INTERVAL '24 hours'"
-        _pub_true = "TRUE"
+        # 🆕 v5.7.24 FIX-PUBLISHED-TRUE: `posts.published` معرّف كـ INTEGER
+        # في database_tables.py. استخدام `published = TRUE` يفشل على
+        # PostgreSQL بـ "operator does not exist: integer = boolean".
+        # الحل: استخدم `1` (INTEGER) بدل `TRUE` (BOOLEAN) — يعمل على
+        # PG/MySQL/SQLite بنفس النتيجة.
+        _pub_true = "1"
     elif _db_type in ("mysql", "mariadb"):
         _interval_24h = "NOW() - INTERVAL 24 HOUR"
         _pub_true = "1"
@@ -2417,8 +2465,13 @@ async def cmd_posts_stats(update, context):
     cnt_p1, err_p1 = await _try_count(
         f"SELECT COUNT(*) AS n FROM posts WHERE published = {_pub_true} AND created_at > {_interval_24h}"
     )
+    # 🆕 v5.7.24: fallback لم يعد مطلوباً (كنا نستخدم TRUE سابقاً).
+    # لكن نُبقيه كطبقة دفاع رخيصة في حال تغيّرت `_interval_24h` مستقبلاً.
     if err_p1 and _db_type.startswith("postgres"):
-        logger.debug("posts_stats: TRUE failed (%s) — fallback to 1", err_p1)
+        logger.debug(
+            "posts_stats: %s failed (%s) — fallback to 1",
+            _pub_true, err_p1,
+        )
         cnt_p1, err_p1 = await _try_count(
             f"SELECT COUNT(*) AS n FROM posts WHERE published = 1 AND created_at > {_interval_24h}"
         )
@@ -2592,14 +2645,17 @@ async def main():
     logger.info("👨‍💼 المالك: %s", CONFIG.PRIMARY_OWNER_ID)
 
     logger.info(
-        "📦 bot.py: v5.7.23 | kill_prev=on | init_retry=on | webhook_force=on | "
-        "webhook_verify=on | updater_stop=on | diag_incoming=%r | "
+        "📦 bot.py: v5.7.25 | kill_prev=on | init_retry=on | webhook_force=on | "
+        "webhook_verify=on | updater_stop=on | published_true_fix=on | "
+        "hotfix_published_true=%r | "
+        "diag_incoming=%r | "
         "detectors=%s | layers=%d | fallback_hostname=%r | "
         "allow_polling_env=%r | alias_fix=on | cmds_reordered=on | "
         "post_stop_fix=on | admin_safe_retry=on(%dx,%.1fs) | admin_restart=on | "
         "restart_exitcode=on | db_errors_cmd=on | html_chunking_fix=on | "
         "early_health=on | bg_managed_bots=on | bg_commands=on | early_port=%d | "
         "stagger=%.1fs | admin_collect_timeout=%.0fs | index_hints=on",
+        _HOTFIX_PUBLISHED_TRUE_AVAILABLE,
         _DIAG_INCOMING,
         _SPAM_DETECTOR_VERSION or "N/A",
         _SPAM_DETECTOR_LAYERS_COUNT,
