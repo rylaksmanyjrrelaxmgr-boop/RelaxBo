@@ -1,40 +1,39 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-🌿 Relax Manager – البوت الرئيسي (bot.py v5.7.22-STAGGER-BG-INDEX-HINTS)
+🌿 Relax Manager – البوت الرئيسي (bot.py v5.7.23-FIX-UPDATER-STOP)
 ================================================================================
-🆕 v5.7.22 (فوق v5.7.21):
-    🔴 FIX-STAGGER-BG-TASKS (PERF): إنشاء 19 مهمة خلفية **متزامناً**
-       في نفس tick من event loop كان يسبب pool stampede:
-       كل المهام تبدأ queries متزامنة على PG → pool (10/10) مشبع فوراً →
-       PK lookups بسيطة مثل "SELECT 1 FROM users WHERE user_id=$1" تستغرق
-       3-5s (شوهد في تقرير /audit_full 2026-11-14: 10 استعلامات كلها
-       > 3s بسبب contention).
+🆕 v5.7.23 (فوق v5.7.22):
+    🔴 FIX-UPDATER-STOP (PERF + RELIABILITY):
+       في webhook mode، PTB v20's `app.start()` يُشغّل
+       `updater.start_polling()` **تلقائياً** حتى مع webhook مسجل.
+       التسلسل:
+         1) app.start() → يبدأ polling (getUpdates)
+         2) set_webhook() → يضع webhook على Telegram
+         3) Updater في الخلفية يستمر في polling → Telegram يرفض
+            getUpdates بسبب 409 Conflict (webhook مسجل).
        
-       الحل: إضافة تأخير _BG_TASK_STAGGER_SEC=0.4s بين كل create_task()
-       → توزيع بداية المهام على ~7.6s → كل مهمة تبدأ وتنتهي من queries
-       الإقلاع قبل أن تبدأ التالية.
+       الدليل (من سجل v5.7.22):
+         21:04:34 app.start()      → begin polling
+         21:04:41 Conflict         → getUpdates denied
+         21:04:43 set_webhook()    → webhook registered
+         21:04:43+ polling keeps retrying (wasted resources)
        
-       الأثر المتوقع: PK lookups < 10ms (بدل 3.5s)، تجربة /start فورية.
+       الحل: بعد set_webhook() بنجاح، أوقف الـ Updater صراحةً:
+           if app.updater and app.updater.running:
+               await app.updater.stop()
+       
+       الأثر:
+         • صفر 409 Conflict خلفي بعد النشر.
+         • توفير CPU/network (لا polling عديم الفائدة).
+         • لا استهلاك من rate limit Telegram.
+         • process_update() يبقى يعمل عبر webhook_handler.
 
-    🔴 FIX-ADMIN-COLLECT-TIMEOUT (RELIABILITY): `_collect_admin_ids()`
-       كانت قد تعلّق إن كان pool مشبعاً. الإضافة: asyncio.wait_for
-       مع timeout=10s. عند الفشل: fallback إلى CONFIG.DEVELOPER_IDS
-       + PRIMARY_OWNER_ID (بدون DB).
-
-    🟢 ADD-INDEX-HINTS (OBSERVABILITY): تسجيل SQL فهارس موصى بها عند
-       الإقلاع. السبب: استعلامات مثل:
-         • SELECT ... FROM bot_groups WHERE admin_id=...  → 4.80s
-         • SELECT ... FROM user_channels WHERE user_id=... → 3.48s
-         • UPDATE user_penalties WHERE expires_at < NOW()  → 3.71s
-         • WITH post_counts AS (...)  → 3.91s
-       تُظهر أن الفهارس مفقودة على الأعمدة الحرجة. تسجيل SQL في السجل
-       يجعل حل المشكلة فورياً لمشغّل الإنتاج بدون حاجة لتشخيص إضافي.
-
-    🟢 IMPROVE-BG-TASK-LOG: كل مهمة خلفية تُسجّل "task X: started"
-       عند أول تنفيذ فعلي (بعد sleep الأولي). يمكّن من تشخيص
-       "أي مهمة أطلقت استعلاماً بطيئاً" في /audit_full.
-
+    ✅ محفوظ من v5.7.22:
+        - STAGGER-BG-TASKS (18 tasks × 0.4s)
+        - ADMIN-COLLECT-TIMEOUT (10s)
+        - INDEX-HINTS (SQL recommendations)
+        - IMPROVE-BG-TASK-LOG
     ✅ محفوظ من v5.7.21:
         - EARLY-HEALTH-SERVER
         - SAFE-CATCHALL
@@ -42,6 +41,7 @@
         - BG-COMMANDS
         - REUSE-RUNNER
 
+v5.7.22 — محفوظ.
 v5.7.21 — محفوظ.
 v5.7.20 — محفوظ.
 v5.7.19 — محفوظ.
@@ -478,7 +478,6 @@ from utils import (
     warmup_all, get_min_publish_interval,
 )
 
-# 🆕 v5.7.21: استيراد وحدة utils لاستخدام webhook_handler و _telegram_app
 import utils as _utils_module
 
 from cache import cache_cleanup_task, user_cache, invalidate_user_cache
@@ -499,7 +498,6 @@ logger = logging.getLogger("relax_bot")
 _BG_TASK_STAGGER_SEC: float = 0.4
 _ADMIN_COLLECT_TIMEOUT_SEC: float = 10.0
 
-# 🆕 v5.7.22: توصيات الفهارس (تُسجَّل في السجل عند الإقلاع)
 _INDEX_RECOMMENDATIONS: List[Tuple[str, str]] = [
     (
         "bot_groups.admin_id",
@@ -525,14 +523,6 @@ _INDEX_RECOMMENDATIONS: List[Tuple[str, str]] = [
 
 
 def _log_index_recommendations() -> None:
-    """
-    🆕 v5.7.22 ADD-INDEX-HINTS: تسجيل SQL فهارس موصى بها.
-
-    تُستدعى بعد DB init. السبب: تقرير /audit_full أظهر استعلامات
-    بطيئة (>3s) على bot_groups, user_channels, user_penalties, posts —
-    كلها تُستفيد من فهارس على الأعمدة الحرجة. تسجيل SQL في السجل
-    يجعل الحل فورياً لمشغّل الإنتاج.
-    """
     try:
         db_type = str(getattr(DB, "DB_TYPE", "sqlite")).lower().strip()
         if not db_type.startswith("postgres"):
@@ -542,7 +532,7 @@ def _log_index_recommendations() -> None:
             )
             return
         logger.warning(
-            "📋 INDEX-HINTS (v5.7.22): نفّذ هذه الأوامر على PostgreSQL "
+            "📋 INDEX-HINTS (v5.7.23): نفّذ هذه الأوامر على PostgreSQL "
             "لتحسين الاستعلامات البطيئة المُرصَدة في /audit_full:"
         )
         for _label, _sql in _INDEX_RECOMMENDATIONS:
@@ -559,19 +549,13 @@ def _log_index_recommendations() -> None:
 # ═══════════════════════════════════════════════════════════════════
 
 _boot_state: Dict[str, Any] = {
-    "app": None,           # يُعيَّن بعد app.start()
-    "webhook_ready": False, # يُعيَّن True بعد تسجيل الـ handlers
-    "port": None,           # يُعيَّن في main()
+    "app": None,
+    "webhook_ready": False,
+    "port": None,
 }
 
 
 async def _early_catchall(request: web.Request) -> web.Response:
-    """
-    🆕 v5.7.21: معالج موحّد للخادم المبكر.
-    - GET: يرد 200 فوراً (فحص Render).
-    - POST /{TOKEN}: قبل الجاهزية → 503 (Telegram يعيد)، بعدها → webhook.
-    - POST آخر: 200 (defensive، Telegram لا يرسل لغير TOKEN).
-    """
     if request.method != "POST":
         return web.Response(text="OK", status=200)
     try:
@@ -591,10 +575,6 @@ async def _early_catchall(request: web.Request) -> web.Response:
 
 
 async def _start_early_health_server(port: int, max_attempts: int = 20):
-    """
-    🆕 v5.7.21: فتح المنفذ فوراً مع retry لتفادي race مع _force_kill_previous_instance.
-    Returns: (web_app, runner, site) أو (None, None, None) عند الفشل.
-    """
     web_app = web.Application()
     web_app.router.add_route('*', '/health', lambda r: web.Response(text="OK"))
     web_app.router.add_get('/', lambda r: web.Response(text="🌿 Relax Manager"))
@@ -655,12 +635,12 @@ _FALLBACK_HOSTNAME = (
     os.getenv("FALLBACK_HOSTNAME", "") or "relaxbo-78m4.onrender.com"
 ).strip()
 
-logger.info("🔧 v5.7.22 init: _FALLBACK_HOSTNAME=%r", _FALLBACK_HOSTNAME)
-logger.info("🔧 v5.7.22 init: RENDER_EXTERNAL_HOSTNAME=%r",
+logger.info("🔧 v5.7.23 init: _FALLBACK_HOSTNAME=%r", _FALLBACK_HOSTNAME)
+logger.info("🔧 v5.7.23 init: RENDER_EXTERNAL_HOSTNAME=%r",
             os.getenv("RENDER_EXTERNAL_HOSTNAME", ""))
-logger.info("🔧 v5.7.22 init: RENDER_EXTERNAL_URL=%r",
+logger.info("🔧 v5.7.23 init: RENDER_EXTERNAL_URL=%r",
             os.getenv("RENDER_EXTERNAL_URL", ""))
-logger.info("🔧 v5.7.22 init: ALLOW_POLLING=%r",
+logger.info("🔧 v5.7.23 init: ALLOW_POLLING=%r",
             os.getenv("ALLOW_POLLING", ""))
 
 def _read_pid_file() -> Optional[int]:
@@ -1416,12 +1396,6 @@ async def _shutdown_db_pool(timeout: float = 5.0) -> None:
 
 # 🆕 v5.7.22: helper داخلي — يقيس كل استدعاء DB.get_admin_list (أو ما شابه)
 async def _collect_admin_ids_from_db() -> List[int]:
-    """
-    استدعاء DB.get_admin_list / get_all_admins / get_admins بدون timeout خارجي.
-    السبب: نفصل هذا كدالة منفصلة لنتمكن من تطبيق asyncio.wait_for فقط
-    على الجزء البطيء (queries على bot_groups/users/user_channels)
-    بدل أن نحتجز الـ whole function.
-    """
     _admin_ids: Set[int] = set()
     for method_name in ("get_admin_list", "get_all_admins", "get_admins"):
         if not hasattr(DB, method_name):
@@ -1456,17 +1430,7 @@ async def _collect_admin_ids_from_db() -> List[int]:
 
 
 async def _collect_admin_ids() -> List[int]:
-    """
-    🆕 v5.7.22 FIX-ADMIN-COLLECT-TIMEOUT: يضيف timeout=10s على
-    استعلامات DB.get_admin_list. السبب: عندما يكون pool مشبعاً
-    (كما شوهد في /audit_full 2026-11-14: PK lookups > 3s)، يمكن
-    أن يعلق get_admin_list. الآن: عند timeout → fallback فوري إلى
-    CONFIG.DEVELOPER_IDS + PRIMARY_OWNER_ID (بدون DB).
-
-    الأثر: البوت لا يتوقف عن الإقلاع حتى لو كان DB تحت ضغط.
-    """
     admin_ids: Set[int] = set()
-    # 1) من CONFIG (سريع، لا DB)
     try:
         owner = int(getattr(CONFIG, "PRIMARY_OWNER_ID", 0) or 0)
         if owner:
@@ -1483,7 +1447,6 @@ async def _collect_admin_ids() -> List[int]:
                 continue
     except Exception:
         pass
-    # 2) من DB (مع timeout)
     try:
         db_ids = await asyncio.wait_for(
             _collect_admin_ids_from_db(),
@@ -2092,10 +2055,6 @@ async def _watch_runner(runner, shutdown_event: asyncio.Event, port: int) -> Non
                 await asyncio.sleep(_WATCHER_INTERVAL)
 
 async def run_task_with_retry(task_func, *args, task_name=""):
-    """
-    🆕 v5.7.22 IMPROVE-BG-TASK-LOG: تسجيل "task X: started" عند أول
-    تنفيذ فعلي. يمكّن من ربط queries بطيئة في /audit_full بـ task معيّن.
-    """
     consecutive_failures = 0
     _first_start = True
     while True:
@@ -2564,7 +2523,6 @@ async def main():
     t_start = time.monotonic()
     _shutdown_event = asyncio.Event()
 
-    # 🆕 v5.7.21: مراجع للـ background tasks للتنظيف الآمن
     _early_web_app = None
     _early_runner = None
     _early_site = None
@@ -2590,9 +2548,6 @@ async def main():
     except Exception:
         pass
 
-    # ═════════════════════════════════════════════════════════════════
-    # 🆕 v5.7.21: EARLY HEALTH SERVER — يُفتح فوراً لـ Render
-    # ═════════════════════════════════════════════════════════════════
     _early_port = _resolve_port()
     _boot_state["port"] = _early_port
     try:
@@ -2637,8 +2592,8 @@ async def main():
     logger.info("👨‍💼 المالك: %s", CONFIG.PRIMARY_OWNER_ID)
 
     logger.info(
-        "📦 bot.py: v5.7.22 | kill_prev=on | init_retry=on | webhook_force=on | "
-        "webhook_verify=on | diag_incoming=%r | "
+        "📦 bot.py: v5.7.23 | kill_prev=on | init_retry=on | webhook_force=on | "
+        "webhook_verify=on | updater_stop=on | diag_incoming=%r | "
         "detectors=%s | layers=%d | fallback_hostname=%r | "
         "allow_polling_env=%r | alias_fix=on | cmds_reordered=on | "
         "post_stop_fix=on | admin_safe_retry=on(%dx,%.1fs) | admin_restart=on | "
@@ -2671,7 +2626,6 @@ async def main():
         await initialize_db()
     logger.info("⏱️ DB init: %.2fs", time.monotonic() - t0)
 
-    # 🆕 v5.7.22: تسجيل توصيات الفهارس بعد DB init
     _log_index_recommendations()
 
     try:
@@ -2746,7 +2700,6 @@ async def main():
     app = _app_builder.build()
     app.bot_data['start_time'] = time.monotonic()
 
-    # 🆕 v5.7.21: اربط app في _boot_state للـ catchall
     _boot_state["app"] = app
 
     if hostname:
@@ -2771,6 +2724,26 @@ async def main():
     except RuntimeError as _e:
         if "already running" not in str(_e).lower():
             raise
+
+    # ════════════════════════════════════════════════════════════════
+    # 🆕 v5.7.23 FIX-UPDATER-STOP:
+    # في webhook mode، app.start() يبدأ Updater.start_polling() تلقائياً
+    # (PTB v20 design). هذا يسبب 409 Conflict من Telegram كل مرة يحاول
+    # getUpdates (webhook مسجل). الحل: أوقف الـ updater صراحةً.
+    # ════════════════════════════════════════════════════════════════
+    if hostname and app.updater is not None:
+        try:
+            _upd_running = getattr(app.updater, "running", False)
+            if _upd_running:
+                await app.updater.stop()
+                logger.info(
+                    "🛑 updater.stop() — polling disabled (webhook mode) "
+                    "| صفر Conflict بعد الآن"
+                )
+            else:
+                logger.debug("updater not running — nothing to stop")
+        except Exception as _us_e:
+            logger.warning("⚠️ updater.stop() failed: %s", _us_e)
 
     try:
         _BOT_METRICS["started_at"] = time.monotonic()
@@ -2804,9 +2777,6 @@ async def main():
     except Exception:
         pass
 
-    # ═════════════════════════════════════════════════════════════════
-    # 🆕 v5.7.21: start_all_managed_bots في BACKGROUND (لا يحجب webhook)
-    # ═════════════════════════════════════════════════════════════════
     async def _start_managed_bots_bg():
         try:
             from managed_bots_runner import start_all_managed_bots
@@ -2841,10 +2811,6 @@ async def main():
     if _GROUP_LOG_INIT_AVAILABLE and _GROUP_LOG_AVAILABLE:
         _init_group_log_instance(app)
 
-    # ═════════════════════════════════════════════════════════════════
-    # 🆕 v5.7.21: جمع admin_ids blocking (مستخدمة في filters.User)
-    # 🆕 v5.7.22: مع timeout=10s داخل _collect_admin_ids
-    # ═════════════════════════════════════════════════════════════════
     _admin_ids, _admin_critical_empty = await _collect_admin_ids_with_retry()
 
     if _admin_critical_empty:
@@ -2858,9 +2824,6 @@ async def main():
         logger.info("👥 الأدمن: %d (%s)", len(_admin_ids), _admin_ids)
     app.bot_data["admin_ids"] = set(_admin_ids)
 
-    # ═════════════════════════════════════════════════════════════════
-    # 🆕 v5.7.21: set_my_commands في BACKGROUND (لا يحجب webhook)
-    # ═════════════════════════════════════════════════════════════════
     async def _register_commands_bg():
         try:
             for _scope in (
@@ -3228,11 +3191,6 @@ async def main():
     else:
         logger.warning("⚠️ periodic_cleanup: skipped (لا callable صالح)")
 
-    # 🆕 v5.7.22 FIX-STAGGER-BG-TASKS: إنشاء المهام واحدة تلو الأخرى
-    # مع تأخير _BG_TASK_STAGGER_SEC بين كل مهمة.
-    # السبب: إنشاء 19 task دفعة واحدة كان يسبب pool stampede — كل المهام
-    # تبدأ queries متزامنة على PG → pool مشبع → PK lookups > 3s.
-    # الأثر المتوقع: توزيع بداية المهام على ~7.6s (19 × 0.4s).
     logger.info(
         "⏱️ BG-TASKS: إنشاء %d مهمة بتأخير %.1fs بين كل واحدة (%.1fs إجمالي)...",
         len(_bg_task_specs),
@@ -3302,11 +3260,7 @@ async def main():
             except Exception as _wbv_e:
                 logger.warning("⚠️ Webhook verification failed: %s", _wbv_e)
 
-            # ═════════════════════════════════════════════════════════════
-            # 🆕 v5.7.21: نستخدم _early_web_app المُشغّل مسبقاً
-            # ═════════════════════════════════════════════════════════════
             if _early_runner is not None:
-                # فعّل webhook على الخادم المبكر (route موجود في _early_catchall)
                 _utils_module._telegram_app = app
                 _boot_state["webhook_ready"] = True
                 logger.info(
@@ -3314,7 +3268,6 @@ async def main():
                     "(صفر نافذة انقطاع)", port)
                 runner = _early_runner
             else:
-                # Fallback: افتح الخادم متأخراً (سلوك v5.7.20 الأصلي)
                 logger.warning(
                     "⚠️ early_runner غير متاح — فتح webhook عبر setup_webhook")
                 runner = await setup_webhook(app, port)
@@ -3356,7 +3309,6 @@ async def main():
                         pass
         else:
             logger.warning("⚠️ POLLING mode (ALLOW_POLLING=1)")
-            # 🆕 v5.7.21: نستخدم _early_runner إن وُجد، وإلا fallback
             runner = _early_runner if _early_runner is not None else None
             if runner is None:
                 logger.warning("⚠️ early_runner غير متاح — setup_webhook fallback")
@@ -3412,7 +3364,6 @@ async def main():
             except Exception:
                 pass
 
-        # 🆕 v5.7.21: أوقف _commands_task بأمان
         if _commands_task is not None and not _commands_task.done():
             try:
                 _commands_task.cancel()
@@ -3423,7 +3374,6 @@ async def main():
             except Exception:
                 pass
 
-        # 🆕 v5.7.21: انتظر _managed_bots_task قبل stop_all
         if _managed_bots_task is not None and not _managed_bots_task.done():
             try:
                 await asyncio.wait_for(_managed_bots_task, timeout=5.0)
@@ -3507,7 +3457,6 @@ async def main():
         except Exception:
             pass
 
-        # 🆕 v5.7.21: أغلق _early_runner في النهاية
         if _early_runner is not None:
             try:
                 await _early_runner.cleanup()
