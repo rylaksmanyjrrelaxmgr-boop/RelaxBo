@@ -4,74 +4,23 @@
 ╔══════════════════════════════════════════════════════════════════════════╗
 ║                                                                          ║
 ║   🌿  Relax Manager — البوت الرئيسي                                      ║
-║   bot.py  ·  v7.0.0-FINAL                                                ║
+║   bot.py  ·  v7.0.2-FINAL                                                ║
 ║                                                                          ║
 ║   أعلى ما يُمكن الوصول إليه في ملف واحد — 9.4/10 إجمالي                  ║
 ║                                                                          ║
 ╚══════════════════════════════════════════════════════════════════════════╝
 
-╔══════════════════════════════════════════════════════════════════════════╗
-║  🎯 ما يجعله 10/10 في كل بُعد (فيما عدا Maintainability/Testability)    ║
-╠══════════════════════════════════════════════════════════════════════════╣
-║                                                                          ║
-║  ✅ Reliability 10/10                                                    ║
-║     • كل سيناريوهات الفشل مُعالَجة (init, webhook, DB, payment)         ║
-║     • Circuit breaker على Telegram API                                   ║
-║     • Read-only mode عند فشل DB (graceful degradation)                   ║
-║     • Health check يفحص DB فعلياً                                        ║
-║     • Proper shutdown ordering (managed_bots → DB → PID)                 ║
-║     • Startup self-test قبل قبول أي traffic                              ║
-║     • No silent exceptions — كل استثناء له logger                        ║
-║                                                                          ║
-║  ✅ Security 10/10                                                       ║
-║     • Rate limiting على كل أمر أدمن (TokenBucket)                        ║
-║     • Payment validation (currency + amount + idempotency)               ║
-║     • Token redaction في كل السجلات                                      ║
-║     • Webhook secret verification                                        ║
-║     • No secrets in logs (regex-redacted)                                ║
-║     • Decimal-safe amount comparison                                     ║
-║                                                                          ║
-║  ✅ Performance 9.5/10                                                   ║
-║     • HTTPX pools محسّنة (16 general / 8 updates)                        ║
-║     • Debounced metrics save (30s, not blocking)                         ║
-║     • Cached pg_stat_activity (5 min TTL)                                ║
-║     • Async-first throughout                                             ║
-║                                                                          ║
-║  ✅ Observability 10/10                                                  ║
-║     • /metrics endpoint (Prometheus format)                              ║
-║     • /health endpoint (with DB probe)                                   ║
-║     • GIL lag monitor with p50/p90/p99                                   ║
-║     • Handler timing with stack hints                                    ║
-║     • Persistent metrics (survive restart)                               ║
-║     • Structured logging (JSON optional)                                 ║
-║                                                                          ║
-║  ✅ Code Quality 10/10                                                   ║
-║     • Full type hints (from __future__ import annotations)               ║
-║     • Doctests على كل pure function                                      ║
-║     • No dead code                                                       ║
-║     • Consistent naming                                                  ║
-║     • All constants centralized                                          ║
-║                                                                          ║
-║  ⚠️ Maintainability 8.5/10 (سقف الملف الواحد)                            ║
-║  ⚠️ Testability 9.0/10 (doctests ممتازة، لكن لا integration tests)       ║
-║                                                                          ║
-╚══════════════════════════════════════════════════════════════════════════╝
+🩹 إصلاحات v7.0.2 (فوق v7.0.1):
+    • P0: _wait_for_polling_release — انتظار انتهاء poller قديم (حد 5د)
+    • P0: main() يُجهض البدء إذا لم يتحرر التوكن (Render يعيد التشغيل)
+    • P0: GIL >10s freeze → CRITICAL مع اسم handler المسؤول
 
-📦 كل إصلاحات v5.7.11 → v6.0.0 محفوظة + جديد في v7.0.0:
-
-🔴 جديد (هذه النسخة):
-    • Circuit breaker على Telegram API
-    • Prometheus /metrics endpoint
-    • Health endpoint يفحص DB + read-only mode
-    • Rate limiting على كل الأوامر الإدارية
-    • Debounced metrics save (30s)
-    • Startup self-test قبل قبول traffic
-    • Structured logging (JSON أو text)
-    • إشعار المطور عند فشل mark_invoice_paid
-    • Decimal-safe amount matching
-    • _BOT_METRICS removed (كان alias خطر)
-
-════════════════════════════════════════════════════════════════════════════
+🩹 إصلاحات v7.0.1 (فوق v7.0.0):
+    • P0: cmd_posts_stats — _pub = "1" بدل "TRUE" (integer = boolean)
+    • P0: _pid_write_lock يرفض البدء عند فشل القفل
+    • P0: _force_kill_previous_instance يرفع SystemExit عند عدم الحصول على القفل
+    • P0: _assert_no_polling_conflict — يكشف poller منافس قبل set_webhook
+    • P1: _GIL_LAG_WARN_MS رُفع إلى 1500ms
 """
 
 from __future__ import annotations
@@ -603,6 +552,10 @@ _PENDING_TASKS_SHUTDOWN_TIMEOUT = 10.0
 _INIT_MAX_ATTEMPTS = 4
 _INIT_TIMEOUT_SEC = 15.0
 
+# v7.0.2: how long to wait for the old poller to release the token
+_POLLING_RELEASE_MAX_WAIT_SEC = 300.0
+_POLLING_RELEASE_PROBE_INTERVAL_SEC = 10.0
+
 # Watcher
 _WATCHER_INTERVAL = 30.0
 _WATCHER_HEALTH_TIMEOUT = 5.0
@@ -626,7 +579,8 @@ _TG_WARMUP_TIMEOUT = 10.0
 # GIL monitoring
 _GIL_LAG_SAMPLES_MAX = 300
 _GIL_LAG_HISTORY_WINDOW_SEC = 60.0
-_GIL_LAG_WARN_MS = 1000.0
+_GIL_LAG_WARN_MS = 1500.0
+_GIL_LAG_CRITICAL_MS = 10000.0  # v7.0.2: escalate to CRITICAL above this
 _GIL_LAG_ALERT_INTERVAL_SEC = 30.0
 _GIL_LAG_BLOCKED_CUMULATIVE_WARN_MS = 5000.0
 _HANDLER_SLOW_WARN_MS = 3000.0
@@ -660,8 +614,8 @@ ALLOWED_UPDATES = [
     "pre_checkout_query", "chat_member", "my_chat_member",
 ]
 
-logger.info("🔧 v7.0.0 init: fallback_hostname=%r", _FALLBACK_HOSTNAME)
-logger.info("🔧 v7.0.0 init: LOG_FORMAT=%r", _LOG_FORMAT)
+logger.info("🔧 v7.0.2 init: fallback_hostname=%r", _FALLBACK_HOSTNAME)
+logger.info("🔧 v7.0.2 init: LOG_FORMAT=%r", _LOG_FORMAT)
 
 # ═══════════════════════════════════════════════════════════════════════════
 # SECTION 20 · PURE FUNCTIONS (doctested)
@@ -1047,7 +1001,7 @@ def _get_bot_token() -> str:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# SECTION 26 · PID MANAGEMENT (with flock)
+# SECTION 26 · PID MANAGEMENT (with flock — rejects on lock failure)
 # ═══════════════════════════════════════════════════════════════════════════
 def _read_pid_file() -> Optional[int]:
     try:
@@ -1083,12 +1037,19 @@ def _remove_pid_file() -> None:
 
 
 @contextmanager
-def _pid_write_lock(timeout: float = 10.0) -> Iterator[None]:
-    """Exclusive flock on PID file — prevents start race."""
+def _pid_write_lock(timeout: float = 10.0) -> Iterator[bool]:
+    """
+    Exclusive flock on PID file — prevents start race.
+
+    Yields True if lock acquired, False otherwise.
+    Caller MUST treat False as "another instance is active — abort startup".
+    """
     if not _HAS_FCNTL:
-        yield
+        # Platform without fcntl (Windows) — no PID safety
+        yield True
         return
     lock_fd: Optional[int] = None
+    acquired = False
     try:
         os.makedirs(os.path.dirname(_PID_LOCK_PATH), exist_ok=True)
         lock_fd = os.open(_PID_LOCK_PATH, os.O_CREAT | os.O_RDWR, 0o644)
@@ -1096,19 +1057,26 @@ def _pid_write_lock(timeout: float = 10.0) -> Iterator[None]:
         while time.monotonic() < deadline:
             try:
                 _fcntl.flock(lock_fd, _fcntl.LOCK_EX | _fcntl.LOCK_NB)
+                acquired = True
                 break
             except (IOError, OSError):
                 time.sleep(0.1)
-        yield
+        if not acquired:
+            logger.error(
+                "❌ لم أستطع الحصول على PID lock خلال %.1fs "
+                "— نسخة أخرى نشطة على نفس المجلد", timeout,
+            )
+        yield acquired
     except (IOError, OSError) as e:
-        logger.warning("_pid_write_lock: %s", e)
-        yield
+        logger.error("_pid_write_lock: %s", e)
+        yield acquired
     finally:
         if lock_fd is not None:
-            try:
-                _fcntl.flock(lock_fd, _fcntl.LOCK_UN)
-            except Exception:
-                pass
+            if acquired:
+                try:
+                    _fcntl.flock(lock_fd, _fcntl.LOCK_UN)
+                except Exception:
+                    pass
             try:
                 os.close(lock_fd)
             except Exception:
@@ -1183,8 +1151,19 @@ def _find_bot_processes() -> List[int]:
 
 
 async def _force_kill_previous_instance() -> int:
+    """
+    Refuse to start if we cannot obtain the PID lock.
+    This prevents "phantom duplicate instance" races on PaaS restarts.
+    """
     killed_total = 0
-    with _pid_write_lock():
+    with _pid_write_lock() as got_lock:
+        if not got_lock:
+            logger.critical(
+                "🚨 لا يمكن بدء التشغيل: نسخة أخرى من bot.py تملك PID lock. "
+                "أوقف الـ container القديم يدوياً (Render Dashboard → Service → Suspend)."
+            )
+            raise SystemExit(1)
+
         targets: Set[int] = set()
         old_pid = _read_pid_file()
         if old_pid and old_pid != os.getpid() and _is_process_alive(old_pid):
@@ -1225,7 +1204,7 @@ async def _force_kill_previous_instance() -> int:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# SECTION 28 · TELEGRAM RELEASE WAIT
+# SECTION 28 · TELEGRAM RELEASE WAIT + POLLING CONFLICT ASSERT
 # ═══════════════════════════════════════════════════════════════════════════
 async def _wait_for_telegram_release(
     app: Optional[Application] = None,
@@ -1268,6 +1247,102 @@ async def _wait_for_telegram_release(
                 await bot.close()
             except Exception:
                 pass
+
+
+async def _assert_no_polling_conflict(
+    app: Application,
+    retries: int = 6,
+) -> bool:
+    """
+    v7.0.2: Verify no other poller uses the same token.
+
+    Returns True if getUpdates succeeds without Conflict.
+    Returns False if Conflict persists after retries.
+    """
+    try:
+        import telegram
+        _Conflict = telegram.error.Conflict
+    except Exception:
+        return True
+
+    last_error = ""
+    for attempt in range(1, retries + 1):
+        try:
+            # offset=-1 fetches last update without consuming it (side-effect-free)
+            await asyncio.wait_for(
+                app.bot.get_updates(offset=-1, limit=1, timeout=0),
+                timeout=10.0,
+            )
+            logger.info("✅ لا يوجد poller منافس (attempt %d/%d)",
+                        attempt, retries)
+            return True
+        except _Conflict as _e:
+            last_error = str(_e)
+            # If the conflict is caused by OUR pending webhook, ignore — no poller
+            if "webhook is active" in last_error.lower():
+                logger.info("ℹ️ webhook خاصتنا مُفعّل — لا poller منافس")
+                return True
+            logger.warning("⚠️ Conflict نشط (attempt %d/%d): %s",
+                           attempt, retries, last_error[:100])
+            if attempt < retries:
+                await asyncio.sleep(2.0)
+        except asyncio.CancelledError:
+            raise
+        except asyncio.TimeoutError:
+            logger.warning("⚠️ get_updates timeout (attempt %d/%d)",
+                           attempt, retries)
+            if attempt < retries:
+                await asyncio.sleep(1.0)
+        except Exception as _e:
+            logger.warning("⚠️ get_updates check failed: %s", _e)
+            return True   # unrelated failure — don't block startup
+
+    logger.error("❌ Conflict ما زال نشطاً بعد %d محاولات — %s",
+                 retries, last_error[:120])
+    return False
+
+
+async def _wait_for_polling_release(
+    app: Application,
+    max_wait_s: float = _POLLING_RELEASE_MAX_WAIT_SEC,
+    probe_interval_s: float = _POLLING_RELEASE_PROBE_INTERVAL_SEC,
+) -> bool:
+    """
+    v7.0.2: Wait until the old polling instance releases the token.
+
+    Rationale: during PaaS redeploys (Render, Fly, etc.) the old container
+    receives SIGTERM but may take up to ~60s to fully stop long-polling.
+    If we immediately set_webhook, Telegram rejects BOTH sides with
+    "Conflict: terminated by other getUpdates request" until the old
+    container dies — poisoning logs and potentially dropping updates.
+
+    Behavior:
+      • Probe every `probe_interval_s` seconds.
+      • After `max_wait_s` — return False (caller MUST abort startup).
+        Render will retry deployment; by then old container is definitely dead.
+    """
+    start = time.monotonic()
+    attempt = 0
+    while True:
+        attempt += 1
+        elapsed = time.monotonic() - start
+        if elapsed > max_wait_s:
+            logger.critical(
+                "🚨 Old instance STILL polling after %.0fs — aborting startup.\n"
+                "   Action: Render Dashboard → Service → Suspend the old "
+                "instance, OR run in Render Shell: pkill -9 -f bot.py",
+                max_wait_s,
+            )
+            return False
+        if await _assert_no_polling_conflict(app, retries=1):
+            if attempt > 1:
+                logger.info("✅ Polling released after %.0fs (%d attempts)",
+                            elapsed, attempt)
+            return True
+        logger.warning("⏳ Waiting for old poller to die — "
+                       "elapsed %.0fs/%.0fs, retry in %.0fs",
+                       elapsed, max_wait_s, probe_interval_s)
+        await asyncio.sleep(probe_interval_s)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -1402,8 +1477,9 @@ def _wrap_handler_with_timing(handler: Callable, name: str) -> Callable:
 # SECTION 32 · GIL LAG MONITOR
 # ═══════════════════════════════════════════════════════════════════════════
 async def _gil_lag_monitor() -> None:
-    logger.info("🔍 GIL-MONITOR: warn=%.0fms, cooldown=%.0fs",
-                _GIL_LAG_WARN_MS, _GIL_LAG_ALERT_INTERVAL_SEC)
+    logger.info("🔍 GIL-MONITOR: warn=%.0fms critical=%.0fms cooldown=%.0fs",
+                _GIL_LAG_WARN_MS, _GIL_LAG_CRITICAL_MS,
+                _GIL_LAG_ALERT_INTERVAL_SEC)
     history: List[Tuple[float, float]] = []
     last_alert_ts = 0.0
     cumulative_blocked_ms = 0.0
@@ -1459,6 +1535,15 @@ async def _gil_lag_monitor() -> None:
                     active_name, active_elapsed, _mem_mb, _task_count,
                     cumulative_blocked_ms, _GIL_LAG_HISTORY_WINDOW_SEC,
                 )
+                # v7.0.2: catastrophic freeze — escalate to CRITICAL
+                if lag_ms >= _GIL_LAG_CRITICAL_MS:
+                    logger.critical(
+                        "🚨🚨 EVENT LOOP FROZEN %.0fms during handler='%s' "
+                        "(running %.1fs). This blocks ALL updates. "
+                        "Investigate handlers.handlers_message for blocking "
+                        "sync I/O (time.sleep, requests, PIL, heavy SQL, etc.).",
+                        lag_ms, active_name, active_elapsed,
+                    )
                 if cumulative_blocked_ms > _GIL_LAG_BLOCKED_CUMULATIVE_WARN_MS:
                     logger.error("🚨 GIL-MONITOR: تراكم %.0fms خلال %.0fs",
                                  cumulative_blocked_ms, _GIL_LAG_HISTORY_WINDOW_SEC)
@@ -2625,6 +2710,10 @@ async def cmd_ping(update, context):
 
 
 async def cmd_posts_stats(update, context):
+    """
+    `published` column is INTEGER on all backends.
+    Uses `1` which works uniformly on Postgres, MySQL, and SQLite.
+    """
     user = update.effective_user
     if user is None:
         return
@@ -2639,13 +2728,12 @@ async def cmd_posts_stats(update, context):
     _db_type = str(getattr(DB, "DB_TYPE", "sqlite")).lower().strip()
     if _db_type.startswith("postgres"):
         _interval = "NOW() - INTERVAL '24 hours'"
-        _pub = "TRUE"
     elif _db_type in ("mysql", "mariadb"):
         _interval = "NOW() - INTERVAL 24 HOUR"
-        _pub = "1"
     else:
         _interval = "datetime('now', '-24 hours')"
-        _pub = "1"
+    # `published` is INTEGER on every supported backend
+    _pub = "1"
 
     async def _try_count(sql):
         try:
@@ -2662,15 +2750,10 @@ async def cmd_posts_stats(update, context):
         f"SELECT COUNT(*) AS n FROM posts "
         f"WHERE published = {_pub} AND created_at > {_interval}"
     )
-    if err_p1 and _db_type.startswith("postgres"):
-        cnt_p1, err_p1 = await _try_count(
-            f"SELECT COUNT(*) AS n FROM posts "
-            f"WHERE published = 1 AND created_at > {_interval}"
-        )
     lines = ["📊 <b>إحصائيات النشر</b>", ""]
     lines.append(f"✅ total: <b>{cnt_total or 0}</b>")
     if err_p1:
-        lines.append("⚠️ published (24h): <i>تعذّر</i>")
+        lines.append(f"⚠️ published (24h): <i>تعذّر ({err_p1})</i>")
     else:
         lines.append(f"✅ published (24h): <b>{cnt_p1 or 0}</b>")
     uptime_s = int(time.monotonic() - _metrics.get("started_at", time.monotonic()))
@@ -2726,12 +2809,14 @@ async def main():
     except Exception:
         pass
 
-    # Kill previous
+    # Kill previous — raises SystemExit(1) if PID lock can't be acquired
     logger.info("🔪 FORCE-KILL-PREVIOUS")
     try:
         killed = await _force_kill_previous_instance()
         if killed > 0:
             logger.warning("🔪 قتلت %d نسخة", killed)
+    except SystemExit:
+        raise
     except Exception as _e:
         logger.warning("⚠️ kill-previous: %s", _e)
 
@@ -2755,9 +2840,10 @@ async def main():
     logger.info("🌿 %s", CONFIG.BOT_NAME)
     logger.info("👨‍💼 المالك: %s", CONFIG.PRIMARY_OWNER_ID)
     logger.info(
-        "📦 v7.0.0 | kill_prev=on | init_retry=%dx%.0fs | webhook_force=on | "
-        "diag_incoming=%r | detectors=%s | layers=%d",
+        "📦 v7.0.2 | kill_prev=on | init_retry=%dx%.0fs | "
+        "polling_wait=%.0fs | diag_incoming=%r | detectors=%s | layers=%d",
         _INIT_MAX_ATTEMPTS, _INIT_TIMEOUT_SEC,
+        _POLLING_RELEASE_MAX_WAIT_SEC,
         _DIAG_INCOMING, _SPAM_DETECTOR_VERSION or "N/A",
         _SPAM_DETECTOR_LAYERS_COUNT,
     )
@@ -2980,7 +3066,7 @@ async def main():
     except Exception as _e:
         logger.error("❌ handle_service: %s", _e)
 
-    # Command handlers (P0-1: getattr)
+    # Command handlers
     for _cmd, _attr in [
         ("start", "start"), ("help", "help_command"),
         ("trial", "trial"), ("subscribe", "subscribe"),
@@ -3245,6 +3331,24 @@ async def main():
             webhook_url = f"https://{hostname}/{bot_token}"
             logger.info("🔗 Webhook: %s", _safe_url(webhook_url))
             await app.bot.delete_webhook(drop_pending_updates=True)
+
+            # v7.0.2: wait for old poller (up to 5min). Abort if still active.
+            if not await _wait_for_polling_release(app):
+                logger.critical(
+                    "❌ Old instance still polling — aborting startup. "
+                    "Render will retry; if it persists, suspend the old service."
+                )
+                try:
+                    await app.stop()
+                except Exception:
+                    pass
+                try:
+                    await app.shutdown()
+                    app_shutdown_done = True
+                except Exception:
+                    pass
+                raise SystemExit(1)
+
             await app.bot.set_webhook(
                 url=webhook_url,
                 drop_pending_updates=True,
@@ -3338,7 +3442,7 @@ async def main():
                 except Exception:
                     pass
     finally:
-        # Shutdown ordering (P0-4)
+        # Shutdown ordering
         try:
             from managed_bots_runner import stop_all_managed_bots
             await stop_all_managed_bots(timeout=15.0)
