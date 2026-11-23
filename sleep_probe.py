@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-sleep_probe.py — كاشف تأخيرات asyncio.sleep (v1.0.2)
+sleep_probe.py — كاشف تأخيرات asyncio.sleep (v1.0.3)
 ================================================================================
 الغرض:
     كشف تأخيرات event loop الناتجة عن استدعاءات asyncio.sleep التي تنتظر
@@ -16,7 +16,23 @@ sleep_probe.py — كاشف تأخيرات asyncio.sleep (v1.0.2)
     3. يُسجَّل الـ traceback للوصول لمكان الاستدعاء الأصلي.
     4. get_stats() يُرجع ملخص (للتكامل مع /fullhealth أو /cache_stats).
 
-🆕 v1.0.2 — FULL-POLISHED:
+🆕 v1.0.3 — DEDUP-PER-LOCATION:
+    🟢 FIX-STARTUP-NOISE: التحذيرات كانت تُولَّد مئات المرات من نفس
+        الموقع (مثلاً _gil_lag_monitor يحلِق في `await asyncio.sleep(0.1)`
+        و BG-TASK stagger `await asyncio.sleep(0.4)`). كل دورة تُنتج تحذيراً
+        منفصلاً → ضوضاء تغمر السجل بلا قيمة تشخيصية.
+    🟢 FIX-DEDUP: لكل موقع (`file:line in func`) لا نُسجِّل أكثر من مرة
+        واحدة كل SLEEP_PROBE_DEDUP_SEC (افتراضي 60s). أول تجاوز للـthreshold
+        يُسجَّل فوراً، ثم نكتفي بتحديث الإحصاءات صامتةً حتى انتهاء النافذة.
+    🟢 FIX-DEFAULT-THRESHOLD: رفع الافتراضي 100ms → 150ms لأن أحداث
+        100-150ms شائعة على Render free tier تحت ضغط البوت ولا تُشير لخلل.
+        الإعداد القابل للضبط عبر env يبقى سارياً إن حُدِّد صراحةً.
+    🟢 FIX-STARTUP-GRACE: فترة سماح SLEEP_PROBE_GRACE_SEC (افتراضي 30s)
+        بعد install لا تُسجَّل فيها تحذيرات إطلاقاً. السبب: استنزاف عادي
+        أثناء بدء التشغيل (DB init, handlers register, managed_bots spawn)
+        يُولِّد overshoot مؤقت لا يعكس مشكلة دائمة. الإحصاءات تُحدَّث.
+
+🆕 v1.0.2 — FULL-POLISHED (محفوظ):
     🔴 FIX-UNINSTALL-REDUNDANT: تبسيط uninstall_sleep_probe().
         الفرعان كانا يفعلان نفس السطر — تم توحيدهما في سطر واحد.
     🟡 FIX-UNINSTALL-DETECT: كشف الحالة الفعلية عبر السمة
@@ -39,9 +55,12 @@ sleep_probe.py — كاشف تأخيرات asyncio.sleep (v1.0.2)
 
 متغيرات البيئة الاختيارية:
     SLEEP_PROBE_ENABLED=1            # تفعيل تلقائي (افتراضي: 0)
-    SLEEP_PROBE_THRESHOLD_MS=100     # حد الـovershoot بالمللي ثانية
-    SLEEP_PROBE_MAX_LOGS=50          # أقصى عدد WARNING
+    SLEEP_PROBE_THRESHOLD_MS=150     # حد الـovershoot بالمللي ثانية
+    SLEEP_PROBE_MAX_LOGS=50          # أقصى عدد WARNING إجمالي
     SLEEP_PROBE_LOG_LEVEL=WARNING    # WARNING/INFO/DEBUG
+    SLEEP_PROBE_DEDUP_SEC=60         # لا تكرر نفس الموقع قبل هذه المدة
+    SLEEP_PROBE_GRACE_SEC=30         # فترة سماح بعد install بلا تحذيرات
+    SLEEP_PROBE_MAX_LOGS_PER_LOC=3   # أقصى تحذيرات لكل موقع (طوال العمر)
 ================================================================================
 """
 
@@ -82,9 +101,19 @@ _ORIG_SLEEP = _get_true_orig_sleep()
 _INSTALLED = False
 
 # الإعدادات (تُحدَّث عند install)
-_THRESHOLD_MS: float = 100.0
+_THRESHOLD_MS: float = 150.0
 _MAX_LOGS: int = 50
 _LOG_LEVEL: int = logging.WARNING
+_DEDUP_SEC: float = 60.0          # 🆕 v1.0.3: لا تكرر نفس الموقع قبل هذه المدة
+_GRACE_SEC: float = 30.0          # 🆕 v1.0.3: فترة سماح بعد install بلا تحذيرات
+_MAX_LOGS_PER_LOC: int = 3        # 🆕 v1.0.3: أقصى تحذيرات لكل موقع (طوال العمر)
+
+# 🆕 v1.0.3: تتبع آخر تسجيل لكل موقع + عداد لكل موقع
+# البنية: { hint: {"last_ts": float, "count": int} }
+_LAST_LOG_PER_LOC: Dict[str, Dict[str, Any]] = {}
+
+# 🆕 v1.0.3: لحظة التثبيت (لحساب فترة السماح)
+_INSTALL_TS: float = 0.0
 
 # إحصاءات
 _STATS: Dict[str, Any] = {
@@ -210,16 +239,44 @@ async def _wrapped_sleep(delay, result=None):
             except Exception:
                 pass
 
-            # 🟡 FIX-SHOULD-LOG: تحديد مستقل — لا يعتمد على try/except
+            # نحفظ hint فقط إذا كنا سنُسجِّل — احسبه الآن لأن dedup يعتمد عليه
+            hint = _traceback_hint()
+
+            # 🟢 v1.0.3 FIX-DEDUP: للكل موقع لا نُسجِّل أكثر من مرة كل _DEDUP_SEC،
+            # وأيضاً نحترم سقف _MAX_LOGS_PER_LOC لكل موقع (طوال العمر).
+            # الإحصاءات تُحدَّث دائماً (للرصد عبر /fullhealth) — الصمت هنا على
+            # التسجيل فقط، لا على الرصد.
+            now_ts = time.monotonic()
+            should_log = False
             try:
-                should_log = (
-                    _STATS["overshoot_count"] <= _MAX_LOGS
-                )
+                # 🟢 v1.0.3 FIX-STARTUP-GRACE: فترة سماح بعد install
+                if _INSTALL_TS == 0.0 or (now_ts - _INSTALL_TS) >= _GRACE_SEC:
+                    # السقف الإجمالي
+                    if _STATS["overshoot_count"] <= _MAX_LOGS:
+                        loc_entry = _LAST_LOG_PER_LOC.get(hint)
+                        if loc_entry is None:
+                            # أول مرة لهذا الموقع → سجّل فوراً
+                            should_log = True
+                            _LAST_LOG_PER_LOC[hint] = {
+                                "last_ts": now_ts,
+                                "count": 1,
+                            }
+                        else:
+                            within_dedup = (
+                                now_ts - loc_entry["last_ts"]
+                            ) < _DEDUP_SEC
+                            under_loc_cap = (
+                                loc_entry["count"] < _MAX_LOGS_PER_LOC
+                            )
+                            if under_loc_cap and not within_dedup:
+                                should_log = True
+                                loc_entry["last_ts"] = now_ts
+                                loc_entry["count"] = (
+                                    loc_entry["count"] + 1
+                                )
             except Exception:
                 should_log = False
 
-            # نحفظ hint فقط إذا كنا سنُسجِّل
-            hint = _traceback_hint() if should_log else "?"
             try:
                 _STATS["top_slow"].append((
                     round(overshoot_ms, 1),
@@ -258,20 +315,31 @@ def install_sleep_probe(
     threshold_ms: Optional[float] = None,
     max_logs: Optional[int] = None,
     log_level: Optional[int] = None,
+    dedup_sec: Optional[float] = None,
+    grace_sec: Optional[float] = None,
+    max_logs_per_loc: Optional[int] = None,
 ) -> bool:
     """
     يُثبِّت المُلفِّف. آمن للتكرار (idempotent).
 
     Args:
-        threshold_ms: الحد الأدنى للـovershoot لتسجيله. افتراضي 100ms.
-        max_logs:     أقصى عدد WARNING قبل التوقف. افتراضي 50.
-        log_level:    مستوى التسجيل. افتراضي WARNING.
+        threshold_ms:     الحد الأدنى للـovershoot لتسجيله. افتراضي 150ms.
+        max_logs:         أقصى عدد WARNING إجمالي. افتراضي 50.
+        log_level:        مستوى التسجيل. افتراضي WARNING.
+        dedup_sec:        🆕 v1.0.3 لا تكرر نفس الموقع قبل هذه المدة.
+                          افتراضي 60s.
+        grace_sec:        🆕 v1.0.3 فترة سماح بعد install بلا تحذيرات.
+                          افتراضي 30s.
+        max_logs_per_loc: 🆕 v1.0.3 أقصى تحذيرات لكل موقع (طوال العمر).
+                          افتراضي 3.
 
     Returns:
         True   إذا ثُبِّت الآن.
         False  إذا كان مُثبَّتاً سابقاً.
     """
     global _INSTALLED, _THRESHOLD_MS, _MAX_LOGS, _LOG_LEVEL
+    global _DEDUP_SEC, _GRACE_SEC, _MAX_LOGS_PER_LOC, _INSTALL_TS
+    global _LAST_LOG_PER_LOC
 
     if _INSTALLED:
         logger.debug("sleep_probe: already installed — skipped")
@@ -281,7 +349,7 @@ def install_sleep_probe(
         _THRESHOLD_MS = max(10.0, float(threshold_ms))
     else:
         _THRESHOLD_MS = max(
-            10.0, _env_float("SLEEP_PROBE_THRESHOLD_MS", 100.0)
+            10.0, _env_float("SLEEP_PROBE_THRESHOLD_MS", 150.0)
         )
 
     if max_logs is not None:
@@ -296,16 +364,42 @@ def install_sleep_probe(
             "SLEEP_PROBE_LOG_LEVEL", logging.WARNING
         )
 
+    # 🆕 v1.0.3
+    if dedup_sec is not None:
+        _DEDUP_SEC = max(0.0, float(dedup_sec))
+    else:
+        _DEDUP_SEC = max(0.0, _env_float("SLEEP_PROBE_DEDUP_SEC", 60.0))
+
+    if grace_sec is not None:
+        _GRACE_SEC = max(0.0, float(grace_sec))
+    else:
+        _GRACE_SEC = max(0.0, _env_float("SLEEP_PROBE_GRACE_SEC", 30.0))
+
+    if max_logs_per_loc is not None:
+        _MAX_LOGS_PER_LOC = max(1, int(max_logs_per_loc))
+    else:
+        _MAX_LOGS_PER_LOC = max(
+            1, _env_int("SLEEP_PROBE_MAX_LOGS_PER_LOC", 3)
+        )
+
+    # 🆕 v1.0.3: تصفير تتبع المواقع + لحظة التثبيت
+    _LAST_LOG_PER_LOC = {}
+    _INSTALL_TS = time.monotonic()
+
     asyncio.sleep = _wrapped_sleep
     _INSTALLED = True
 
     try:
         logger.info(
             "🔍 sleep_probe: INSTALLED | "
-            "threshold=%.0fms | max_logs=%d | log_level=%s",
+            "threshold=%.0fms | max_logs=%d | log_level=%s | "
+            "dedup=%.0fs | grace=%.0fs | max_per_loc=%d",
             _THRESHOLD_MS,
             _MAX_LOGS,
             logging.getLevelName(_LOG_LEVEL),
+            _DEDUP_SEC,
+            _GRACE_SEC,
+            _MAX_LOGS_PER_LOC,
         )
     except Exception:
         pass
@@ -352,12 +446,16 @@ def get_stats() -> Dict[str, Any]:
             "installed": _INSTALLED,
             "threshold_ms": _THRESHOLD_MS,
             "max_logs": _MAX_LOGS,
+            "dedup_sec": _DEDUP_SEC,
+            "grace_sec": _GRACE_SEC,
+            "max_logs_per_loc": _MAX_LOGS_PER_LOC,
             "total_sleeps": total,
             "overshoot_count": over,
             "overshoot_rate_pct": (
                 round(over / total * 100.0, 2) if total > 0 else 0.0
             ),
             "max_overshoot_ms": round(_STATS["max_overshoot_ms"], 1),
+            "tracked_locations": len(_LAST_LOG_PER_LOC),
             "top_slow": [
                 {
                     "overshoot_ms": item[0],
@@ -405,6 +503,8 @@ def reset_stats() -> None:
     _STATS["overshoot_count"] = 0
     _STATS["max_overshoot_ms"] = 0.0
     _STATS["top_slow"].clear()
+    # 🆕 v1.0.3: تصفية تتبع المواقع ليُسمح بتسجيلها مجدداً
+    _LAST_LOG_PER_LOC.clear()
 
 def auto_install() -> bool:
     """
@@ -443,12 +543,12 @@ __all__ = [
 ]
 
 # ═══════════════════════════════════════════════════════════════════════
-# LOAD BEACON — v1.0.2
+# LOAD BEACON — v1.0.3
 # ═══════════════════════════════════════════════════════════════════════
 
 try:
     logger.info(
-        "🛡️ sleep_probe.py v1.0.2 loaded | "
+        "🛡️ sleep_probe.py v1.0.3 loaded | "
         "install/uninstall ✅ | "
         "idempotent ✅ | "
         "cancel-safe ✅ | "
@@ -458,6 +558,8 @@ try:
         "signature-preserved ✅ | "
         "lazy-hint ✅ | "
         "uninstall-detect ✅ | "
+        "dedup-per-loc ✅ | "
+        "grace-period ✅ | "
         "auto_install=%s",
         "on" if os.getenv("SLEEP_PROBE_ENABLED", "0") == "1" else "off",
     )
