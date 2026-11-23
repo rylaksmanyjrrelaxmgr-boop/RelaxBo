@@ -2,8 +2,19 @@
 # -*- coding: utf-8 -*-
 """
 database_subscriptions.py - وحدة الباقات والاشتراكات والفواتير والإحالات
-v7.7.32 — دعم كامل لـ SQLite + PostgreSQL + MySQL
+v7.7.33 — دعم كامل لـ SQLite + PostgreSQL + MySQL
 =====================================================================
+🆕 v7.7.33 (FIX-U14):
+    🔴 FIX-U14: إصلاح الباگ في ensure_dev_subscription — كان يستخدم
+        '?' hardcoded بدل {_ph(1)}، فيفشل على PostgreSQL/MySQL
+        بـ syntax error (يُبتلع في except: debug).
+        الأثر: إصلاح FIX-U13 نفسه لا يعمل على PG → FK violation
+        يستمر عند أول تشغيل.
+        الإصلاح:
+          - استبدال "?": بـ {_ph(1)} (placeholder محمول)
+          - رفع مستوى تسجيل الفشل من debug إلى warning
+          - تحسين نص رسالة الخطأ لتوضيح الأثر المتوقع
+
 🆕 v7.7.32 (FIX-U13):
     🔴 FIX-U13: ensure_dev_subscription يفشل عند أول تشغيل (FK violation).
         السبب: bot.py يستدعي pre_initialize() قبل register_user().
@@ -500,6 +511,13 @@ class SubscriptionMixin:
             بـ FK violation (subscriptions.user_id REFERENCES users).
             الأثر: على أول تشغيل، لا يُنشَأ الاشتراك الدائم.
 
+        🔴 FIX-U14 (v7.7.33):
+            كان فحص وجود المستخدم يستخدم '?' hardcoded بدل {_ph(1)}،
+            فيعمل على SQLite فقط ويفشل على PostgreSQL/MySQL
+            بـ syntax error يُبتلع في except: debug.
+            الأثر: إصلاح FIX-U13 لم يكن يعمل فعلياً على PG.
+            الإصلاح: استخدام {_ph(1)} + رفع مستوى التسجيل إلى warning.
+
         Returns:
             True: الاشتراك الدائم موجود (سواء أنشأه الآن أو مسبقاً)
             False: المستخدم ليس مطوراً، أو لا توجد خطط، أو خطأ
@@ -512,9 +530,12 @@ class SubscriptionMixin:
         # السبب: bot.py يستدعي pre_initialize() قبل register_user().
         # ensure_all_dev_subscriptions() تُستدعى داخل bootstrap
         # (قبل register_user) → المستخدم غير موجود → FK violation.
+        #
+        # 🔴 FIX-U14 (v7.7.33): استخدام {_ph(1)} بدل '?' hardcoded
+        # — '?' صالح في SQLite فقط، ويفشل على PostgreSQL/MySQL.
         try:
             user_exists = await self.fetchval(
-                "SELECT 1 FROM users WHERE user_id = ?",
+                f"SELECT 1 FROM users WHERE user_id = {_ph(1)}",
                 (user_id,),
             )
             if not user_exists:
@@ -532,8 +553,13 @@ class SubscriptionMixin:
                     )
                     return False
         except Exception as _e:
-            logger.debug(
-                "ensure_dev_subscription: user check failed: %s", _e,
+            # 🔴 FIX-U14: رفع المستوى من debug إلى warning —
+            # فشل هذا الفحص يعني أن INSERT القادم سيفشل بـ FK
+            # violation، فيجب أن يظهر في السجلات لا أن يختفي.
+            logger.warning(
+                "⚠️ ensure_dev_subscription: فشل فحص وجود المستخدم "
+                "%s: %s — المتابعة قد تُفشل INSERT بـ FK",
+                user_id, _e,
             )
 
         try:
