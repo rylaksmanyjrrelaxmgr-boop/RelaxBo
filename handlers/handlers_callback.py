@@ -888,10 +888,14 @@ async def _read_posts_count_from_db(hours: int = 24) -> Optional[int]:
     db_type = str(getattr(DB, "DB_TYPE", "sqlite")).lower()
     h = int(max(1, hours))
     if db_type == "postgres":
+        # 🆕 FIX-PUBLISHED-TRUE (v9.7.32): حذف خيار `published = TRUE`
+        # لأنه يفشل دائماً على PostgreSQL بـ:
+        #   ERROR: operator does not exist: integer = boolean
+        # (العمود `posts.published` معرّف كـ INTEGER في database_tables.py).
+        # كان هذا الخيار يُولّد تحذيراً في السجل عند كل استدعاء قبل
+        # السقوط على fallback `published = 1` الذي يعمل على كل DBs.
+        # `published = 1` يعمل على PG/MySQL/SQLite بنفس النتيجة.
         variants = [
-            f"SELECT COUNT(*) AS n FROM posts "
-            f"WHERE published = TRUE "
-            f"AND created_at > NOW() - INTERVAL '{h} hours'",
             f"SELECT COUNT(*) AS n FROM posts "
             f"WHERE published = 1 "
             f"AND created_at > NOW() - INTERVAL '{h} hours'",

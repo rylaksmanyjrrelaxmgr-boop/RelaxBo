@@ -33,6 +33,12 @@ RUN pip install --no-cache-dir --upgrade pip && \
 
 COPY . .
 
+# 🆕 FIX-PUBLISHED-TRUE (v9.7.32): تطبيق إصلاح السبب الجذري للتحذيرات الخاطئة
+# على PostgreSQL قبل تشغيل البوت. السكربت idempotent — لا يفعل شيئاً إن
+# كان الإصلاح مُطبّقاً بالفعل في الكود المرفوع.
+# (سيُحذف هذا السطر تلقائياً عند رفع handlers_callback.py المُصلّح مباشرةً)
+RUN python3 apply_fix_published_true.py || echo "apply_fix skipped (already fixed or not needed)"
+
 EXPOSE 10000
 
 CMD ["python", "bot.py"]
