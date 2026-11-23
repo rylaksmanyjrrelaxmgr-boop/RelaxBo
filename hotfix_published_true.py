@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-hotfix_published_true.py — إصلاح شامل لـ `published = TRUE` (v1.0)
+hotfix_published_true.py — إصلاح شامل لـ `published = TRUE` (v1.1)
 ================================================================================
 🎯 الغرض:
     اعتراض كل استعلامات SQL قبل تنفيذها، واستبدال:
@@ -25,12 +25,18 @@ hotfix_published_true.py — إصلاح شامل لـ `published = TRUE` (v1.0)
 🛡️ الأمان:
     • regex محدد بـ boundaries (لا يلمس TRUE في سياقات أخرى).
     • idempotent (تشغيله مرتين لا يضاعف التعديل).
-    • يطبع log تحذيري عند كل استبدال (للتشخيص).
     • يعمل على PG/MySQL/SQLite.
 
 🔄 للتراجع:
     احذف السطر من bot.py، أو عطّل بـ:
         HOTFIX_PUBLISHED_TRUE_DISABLED=1
+
+🆕 v1.1 (FIX-WARNINGS):
+    تغيير مستوى تسجيل الاستبدال من WARNING إلى DEBUG.
+    السبب: WARNING كان يُولّد تحذيراً في السجل عند كل استدعاء
+    لـ _read_posts_count_from_db()، رغم أن الإصلاح ناجح والاستعلام
+    يعمل بشكل صحيح. هذا كان مصدر "التحذيرات الخاطئة" التي اشتكى
+    منها المستخدم.
 
 ================================================================================
 """
@@ -42,7 +48,7 @@ import functools
 
 logger = logging.getLogger(__name__)
 
-_VERSION = "v1.0"
+_VERSION = "v1.1"
 _DISABLED = os.getenv("HOTFIX_PUBLISHED_TRUE_DISABLED", "0") == "1"
 
 # عدّاد داخلي للتشخيص
@@ -99,7 +105,13 @@ def _patch_sql(query: str) -> str:
         total = n_true + n_false
         if total > 0:
             _STATS["replacements_made"] += total
-            logger.warning(
+            # 🆕 v1.1: تغيير المستوى من WARNING إلى DEBUG
+            # السبب: هذا السطر كان يُولّد تحذيراً (WARNING) في السجل
+            # عند كل استدعاء لـ _read_posts_count_from_db()، رغم أن
+            # الإصلاح ناجح والاستعلام يعمل بشكل صحيح بعد إعادة الكتابة.
+            # هذا كان مصدر "التحذيرات الخاطئة" التي اشتكى منها المستخدم.
+            # DEBUG يبقي المعلومة متاحة للتشخيص دون إزعاج في السجلات.
+            logger.debug(
                 "🔧 HOTFIX published=TRUE→1 | "
                 "replacements=%d (true=%d, false=%d) | "
                 "preview=%r",
