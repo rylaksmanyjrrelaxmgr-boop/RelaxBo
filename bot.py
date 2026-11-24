@@ -1,33 +1,26 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-🌿 Relax Manager – البوت الرئيسي (bot.py v5.7.25-HOTFIX-PUBLISHED-TRUE)
+🌿 Relax Manager – البوت الرئيسي (bot.py v5.7.26-REMOVE-HOTFIX)
 ================================================================================
-🆕 v5.7.25 (فوق v5.7.24):
-    🩹 HOTFIX-PUBLISHED-TRUE (SURGICAL FIX):
-       إضافة استيراد `hotfix_published_true` (ملف مستقل) بعد
-       `from database import ...`. السبب: `published = TRUE`
-       موجود في أكثر من ملف (bot.py::cmd_posts_stats،
-       handlers_callback.py::_show_metrics_dashboard، وربما
-       handlers آخر) — بدل تعديل كل ملف، hotfix يُغلّف دوال
-       DB الأساسية (fetchone/fetchall/fetchval/execute/executemany)
-       فيعترض كل SQL قبل التنفيذ ويستبدل تلقائياً:
-           published = TRUE   →   published = 1
-           published = FALSE  →   published = 0
-       هذا يُصلح `admin_metrics_live` + `/posts_stats` + أي
-       استعلام آخر يستخدم `published = TRUE` على PostgreSQL.
-
-       التطبيق:
-         1) أنشئ `hotfix_published_true.py` في جذر المشروع
-         2) السطر في bot.py أدناه يستورده — يطبّق تلقائياً
-         3) Render سيعيد النشر — صفر تعديل على ملفات أخرى
+🆕 v5.7.26 (فوق v5.7.25):
+    🔴 REMOVE-HOTFIX-PUBLISHED-TRUE:
+       أُزيل استيراد `hotfix_published_true` نهائياً. الإصلاح الدائم
+       نُشر في handlers/handlers_callback.py (commit f8f3846) فأصبح
+       الـ hotfix كوداً ميتاً. لكن المشكلة الأهم: كان يُغلِّف كل دوال
+       DB (fetchone/fetchall/fetchval/execute/executemany) فيظهر موقع
+       `hotfix_published_true.py:160` في كل SQL trace بدل الموقع الحقيقي
+       للاستعلام البطيء — مما أعاق تشخيص الأداء. بعد الإزالة، تُظهر
+       التحذيرات المواقع الفعلية (handlers_message.py, utils.py, ...).
 
        الأمان:
-         • إذا لم يوجد الملف → try/except يحمي (يعمل البوت عادي)
-         • regex محدد بـ boundaries (لا يلمس TRUE في سياقات أخرى)
-         • idempotent (تشغيله مرتين لا يضاعف التعديل)
-         • disabled عبر HOTFIX_PUBLISHED_TRUE_DISABLED=1
+         • grep أكد عدم وجود أي `published = TRUE` فعلي في الكود
+           (كل النتائج تعليقات/docstrings فقط)
+         • apply_fix_published_true.py يبقى في Dockerfile كحزام أمان
+           idempotent (لا يفعل شيئاً إن كان الإصلاح مُطبَّقاً)
 
+    ✅ محفوظ من v5.7.25:
+        - FIX-PUBLISHED-TRUE (الإصلاح الدائم في handlers_callback.py)
     ✅ محفوظ من v5.7.24:
         - FIX-PUBLISHED-TRUE (cmd_posts_stats: TRUE → 1)
     ✅ محفوظ من v5.7.23:
@@ -43,6 +36,7 @@
         - BG-COMMANDS
         - REUSE-RUNNER
 
+v5.7.25 — محفوظ.
 v5.7.24 — محفوظ.
 v5.7.23 — محفوظ.
 v5.7.22 — محفوظ.
@@ -170,39 +164,16 @@ from config import CONFIG
 from database import DB, initialize_db, TimeUtils
 
 # ═══════════════════════════════════════════════════════════════════════════
-# 🩹 v5.7.25 HOTFIX-PUBLISHED-TRUE: must come AFTER DB import, BEFORE
-# any code that runs SQL. monkey-patches DB methods to auto-correct
-# `published = TRUE` → `published = 1` in all queries.
+# 🆕 v5.7.26 REMOVE-HOTFIX-PUBLISHED-TRUE:
+# hotfix_published_true.py كان يُغلِّف كل دوال DB (fetchone/fetchall/
+# fetchval/execute/executemany) لاستبدال `published = TRUE` → `published = 1`
+# تلقائياً. الإصلاح الدائم نُشر في handlers/handlers_callback.py (commit
+# f8f3846) فأصبح الـ hotfix كوداً ميتاً. لكن الأخطر: كان يُخفي موقع
+# الاستعلام الحقيقي في الـ SQL trace (كل الاستعلامات تُظهر
+# hotfix_published_true.py:160 بدل الموقع الفعلي)، مما أعاق تشخيص
+# الاستعلامات البطيئة. أُزيل الآن — لا يوجد أي `published = TRUE` فعلي
+# في الكود (verified via grep، كلها تعليقات توضيحية فقط).
 # ═══════════════════════════════════════════════════════════════════════════
-_HOTFIX_PUBLISHED_TRUE_AVAILABLE = False
-try:
-    import hotfix_published_true as _hotfix_pt  # noqa: F401
-    _HOTFIX_PUBLISHED_TRUE_AVAILABLE = True
-    try:
-        logging.getLogger(__name__).info(
-            "🩹 HOTFIX published=TRUE → 1 loaded | "
-            "patched_methods=auto | will fix admin_metrics_live + "
-            "/posts_stats + any `published = TRUE` query"
-        )
-    except Exception:
-        pass
-except ImportError as _hpt_ie:
-    _HOTFIX_PUBLISHED_TRUE_AVAILABLE = False
-    try:
-        logging.getLogger(__name__).warning(
-            "⚠️ hotfix_published_true.py missing — "
-            "admin_metrics_live & /posts_stats will fail on PG | "
-            "err=%s", _hpt_ie
-        )
-    except Exception:
-        pass
-except Exception as _hpt_e:
-    _HOTFIX_PUBLISHED_TRUE_AVAILABLE = False
-    try:
-        logging.getLogger(__name__).warning(
-            "⚠️ hotfix_published_true failed: %s", _hpt_e)
-    except Exception:
-        pass
 
 from handlers import CommandHandlers, CallbackHandlers, MessageHandlers, chat_member
 
@@ -682,8 +653,7 @@ logger.info("🔧 v5.7.25 init: RENDER_EXTERNAL_URL=%r",
             os.getenv("RENDER_EXTERNAL_URL", ""))
 logger.info("🔧 v5.7.25 init: ALLOW_POLLING=%r",
             os.getenv("ALLOW_POLLING", ""))
-logger.info("🔧 v5.7.25 init: HOTFIX_PUBLISHED_TRUE_AVAILABLE=%r",
-            _HOTFIX_PUBLISHED_TRUE_AVAILABLE)
+# 🆕 v5.7.26 REMOVE-HOTFIX-PUBLISHED-TRUE: hotfix أُزيل — لا حاجة لهذا السجل
 
 def _read_pid_file() -> Optional[int]:
     try:
@@ -2645,9 +2615,9 @@ async def main():
     logger.info("👨‍💼 المالك: %s", CONFIG.PRIMARY_OWNER_ID)
 
     logger.info(
-        "📦 bot.py: v5.7.25 | kill_prev=on | init_retry=on | webhook_force=on | "
+        "📦 bot.py: v5.7.26 | kill_prev=on | init_retry=on | webhook_force=on | "
         "webhook_verify=on | updater_stop=on | published_true_fix=on | "
-        "hotfix_published_true=%r | "
+        "hotfix_removed=on | "
         "diag_incoming=%r | "
         "detectors=%s | layers=%d | fallback_hostname=%r | "
         "allow_polling_env=%r | alias_fix=on | cmds_reordered=on | "
@@ -2655,7 +2625,6 @@ async def main():
         "restart_exitcode=on | db_errors_cmd=on | html_chunking_fix=on | "
         "early_health=on | bg_managed_bots=on | bg_commands=on | early_port=%d | "
         "stagger=%.1fs | admin_collect_timeout=%.0fs | index_hints=on",
-        _HOTFIX_PUBLISHED_TRUE_AVAILABLE,
         _DIAG_INCOMING,
         _SPAM_DETECTOR_VERSION or "N/A",
         _SPAM_DETECTOR_LAYERS_COUNT,

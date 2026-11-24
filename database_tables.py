@@ -370,7 +370,12 @@ COMMON_INDEXES = [
     ("auto_blocked_sources", "idx_auto_blocked_last_seen",
      "auto_blocked_sources(last_seen DESC)"),
 
-    # ─── group_security (1) ───
+    # ─── group_security (2) ───
+    # 🆕 v7.9.16: idx_group_security_chat أُعيد كـ PRIMARY لأن كل
+    # استعلامات group_security تستخدم WHERE chat_id = $1. حذفه الخاطئ
+    # إلى DEPRECATED_INDEXES تسبب 8/10 من أبطأ الاستعلامات في /audit_full.
+    ("group_security", "idx_group_security_chat",
+     "group_security(chat_id)"),
     ("group_security", "idx_group_security_postbot",
      "group_security(delete_postbot_pattern) "
      "WHERE delete_postbot_pattern = 1"),
@@ -411,8 +416,10 @@ DEPRECATED_INDEXES = [
     "idx_penalties_expiry",
     "idx_penalties_cleanup",
     "idx_penalties_end_time",
-    "idx_security_chat",
-    "idx_group_security_chat",
+    # 🆕 v7.9.16: أُزيل idx_security_chat و idx_group_security_chat من
+    # DEPRECATED_INDEXES — هذان الفهرسان حيويان لاستعلامات
+    # `WHERE chat_id = $1` على group_security (الاستعلامات الأبطأ في
+    # /audit_full). حذفهما الخاطئ كان سبب بطء 8/10 من الاستعلامات الأعلى.
 
     # ─── others قديمة ───
     "idx_banned_words_word",
