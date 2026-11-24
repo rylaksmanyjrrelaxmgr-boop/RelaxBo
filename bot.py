@@ -16,8 +16,9 @@
        الأمان:
          • grep أكد عدم وجود أي `published = TRUE` فعلي في الكود
            (كل النتائج تعليقات/docstrings فقط)
-         • apply_fix_published_true.py يبقى في Dockerfile كحزام أمان
-           idempotent (لا يفعل شيئاً إن كان الإصلاح مُطبَّقاً)
+         • 🆕 v5.7.28: apply_fix_published_true.py حُذف نهائياً + سطر
+           Dockerfile المُستدعِي له. الإصلاح مُطبَّق مباشرةً في
+           handlers/handlers_callback.py:891 (FIX-PUBLISHED-TRUE v9.7.32).
 
     ✅ محفوظ من v5.7.25:
         - FIX-PUBLISHED-TRUE (الإصلاح الدائم في handlers_callback.py)

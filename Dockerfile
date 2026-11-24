@@ -33,11 +33,10 @@ RUN pip install --no-cache-dir --upgrade pip && \
 
 COPY . .
 
-# 🆕 FIX-PUBLISHED-TRUE (v9.7.32): تطبيق إصلاح السبب الجذري للتحذيرات الخاطئة
-# على PostgreSQL قبل تشغيل البوت. السكربت idempotent — لا يفعل شيئاً إن
-# كان الإصلاح مُطبّقاً بالفعل في الكود المرفوع.
-# (سيُحذف هذا السطر تلقائياً عند رفع handlers_callback.py المُصلّح مباشرةً)
-RUN python3 apply_fix_published_true.py || echo "apply_fix skipped (already fixed or not needed)"
+# 🆕 v9.7.33 CLEANUP: حُذف `RUN python3 apply_fix_published_true.py`
+# نهائياً. الإصلاح مُطبَّق مباشرةً في handlers/handlers_callback.py:891
+# (FIX-PUBLISHED-TRUE v9.7.32). السكربت كان idempotent ويطبع
+# "Fix already applied — no changes needed" في كل بناء — بلا قيمة.
 
 EXPOSE 10000
 
