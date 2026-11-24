@@ -286,6 +286,8 @@ _count_text_urls = _get_det_attr("_count_text_urls")
 _compute_spam_score = _get_det_attr("_compute_spam_score")
 _is_postbot_pattern = _get_det_attr("_is_postbot_pattern")
 _postbot_pattern_confidence = _get_det_attr("_postbot_pattern_confidence")
+# 🆕 v7.9.18 PERF-POSTBOT-MERGE: confidence + match في استدعاء واحد
+_postbot_analyze_full = _get_det_attr("_postbot_analyze_full")
 analyze_message = _get_det_attr("analyze_message")
 get_spam_diagnostics = _get_det_attr("get_spam_diagnostics")
 is_spam = _get_det_attr("is_spam")
@@ -4506,56 +4508,51 @@ class MessageHandlers:
             _spam_enabled and _spam_score >= SPAM_SCORE_THRESHOLD)
 
         _postbot_hard_conf = 0
+        _postbot_match = False
+        # 🆕 v7.9.18: تهيئة مسبقة لمنع NameError لو كان النص قصيراً جداً
+        # أو لو حدث استثناء قبل الإسناد (الحفاظ على السلوك الآمن).
+        _postbot_match_raw = False
         try:
             _text_for_postbot = (ctx.analysis_text or "")[:_POSTBOT_TEXT_MAX_CHARS]
             if len(_text_for_postbot) >= _POSTBOT_MIN_TEXT_CHARS:
-                _postbot_hard_conf = await asyncio.wait_for(
-                    asyncio.to_thread(
-                        _postbot_pattern_confidence,
-                        _text_for_postbot,
-                        button_count=ctx.button_count,
-                        button_urls=ctx.button_urls,
-                    ),
-                    timeout=_TEXT_SCORE_TIMEOUT_SEC,
+                # 🆕 v7.9.18 PERF-POSTBOT-MERGE: استدعاء واحد بدل اثنين.
+                # سابقاً: _postbot_pattern_confidence (~150ms) ثم
+                #         _is_postbot_pattern (~100ms) الذي يُعيد حساب
+                #         confidence داخلياً = تكرار ~100ms.
+                # الآن: _postbot_analyze_full يُعيد (confidence, match)
+                #       في استدعاء واحد — توفير ~100ms لكل رسالة.
+                _postbot_hard_conf, _postbot_match_raw = (
+                    await asyncio.wait_for(
+                        asyncio.to_thread(
+                            _postbot_analyze_full,
+                            _text_for_postbot,
+                            button_count=ctx.button_count,
+                            button_urls=ctx.button_urls,
+                        ),
+                        timeout=_TEXT_SCORE_TIMEOUT_SEC,
+                    )
                 )
         except asyncio.TimeoutError:
             logger.warning(
-                "⏱️ POSTBOT-CONF-TIMEOUT | chat=%s user=%s >%.1fs",
+                "⏱️ POSTBOT-TIMEOUT | chat=%s user=%s >%.1fs",
                 chat_id, user_id, _TEXT_SCORE_TIMEOUT_SEC)
             _postbot_hard_conf = 0
+            # _postbot_match_raw يبقى False (مهيّأ مسبقاً)
         except asyncio.CancelledError:
             raise
         except Exception as e:
-            logger.debug("postbot confidence: %s", e)
+            logger.debug("postbot analyze: %s", e)
             _postbot_hard_conf = 0
+            # _postbot_match_raw يبقى False (مهيّأ مسبقاً)
         _postbot_hard_block = (
             _postbot_hard_conf >= POSTBOT_AUTO_BLOCK_CONFIDENCE)
-        _postbot_match = False
+        # 🆕 v7.9.18: match مُحسوب بالفعل من _postbot_analyze_full.
+        # فقط لو _postbot_enabled=False نُلغي الـ match (تحافظ على السلوك
+        # السابق حيث كان _postbot_match يُحسب فقط إذا enabled).
         if _postbot_enabled:
-            if _postbot_hard_block:
-                _postbot_match = True
-            else:
-                try:
-                    _text_for_postbot2 = (ctx.analysis_text or "")[:_POSTBOT_TEXT_MAX_CHARS]
-                    if len(_text_for_postbot2) >= _POSTBOT_MIN_TEXT_CHARS:
-                        _postbot_match = await asyncio.wait_for(
-                            asyncio.to_thread(
-                                _is_postbot_pattern,
-                                _text_for_postbot2,
-                                button_count=ctx.button_count,
-                                button_urls=ctx.button_urls,
-                            ),
-                            timeout=_TEXT_SCORE_TIMEOUT_SEC,
-                        )
-                except asyncio.TimeoutError:
-                    logger.warning(
-                        "⏱️ POSTBOT-MATCH-TIMEOUT | chat=%s user=%s",
-                        chat_id, user_id)
-                    _postbot_match = False
-                except asyncio.CancelledError:
-                    raise
-                except Exception:
-                    _postbot_match = False
+            _postbot_match = bool(_postbot_match_raw)
+        else:
+            _postbot_match = False
 
         if _postbot_hard_block:
             logger.warning(
@@ -7983,7 +7980,7 @@ __all__ = [
     "_extract_spam_words", "_count_unique_matches",
     "_count_text_urls",
     "_compute_spam_score", "_is_postbot_pattern",
-    "_postbot_pattern_confidence",
+    "_postbot_pattern_confidence", "_postbot_analyze_full",
     "analyze_message", "get_spam_diagnostics", "is_spam",
     "is_high_confidence_spam", "is_critical_spam",
     "should_ignore_as_low_signal",

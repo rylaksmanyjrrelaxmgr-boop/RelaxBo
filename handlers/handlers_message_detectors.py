@@ -2873,6 +2873,42 @@ def _is_postbot_pattern(
     return any(pattern.search(merged) for pattern in _POSTBOT_REGEXES)
 
 
+def _postbot_analyze_full(
+    text: str,
+    *,
+    button_count: int = 0,
+    button_urls: Optional[Sequence[str]] = None,
+    already_normalized: bool = False,
+) -> "Tuple[int, bool]":
+    """🆕 v7.9.18 PERF-POSTBOT-MERGE: يجمع confidence + match في استدعاء واحد.
+
+    لماذا؟ `_is_postbot_pattern` يستدعي `_postbot_pattern_confidence` داخلياً،
+    فلو استُدعيا بشكل منفصل في handlers_message.py فإن confidence يُحسب مرتين
+    على نفس النص (تكرار ~100ms). هذه الدالة تُعيد الاثنين معاً بحساب واحد.
+
+    Returns:
+        (confidence: int, is_match: bool)
+        - confidence: نتيجة _postbot_pattern_confidence (0..10)
+        - is_match: True إذا confidence >= POSTBOT_AUTO_BLOCK_CONFIDENCE
+                    أو طابق أحد _POSTBOT_REGEXES
+    """
+    if not text:
+        return (0, False)
+    normalized = text if already_normalized else _normalize_text(text)
+    merged = _merge_split_urls(normalized)
+    confidence = _postbot_pattern_confidence(
+        normalized,
+        button_count=button_count,
+        button_urls=button_urls,
+        already_normalized=True,
+        merged=merged,
+    )
+    if confidence >= POSTBOT_AUTO_BLOCK_CONFIDENCE:
+        return (confidence, True)
+    is_match = any(pattern.search(merged) for pattern in _POSTBOT_REGEXES)
+    return (confidence, is_match)
+
+
 def _count_text_urls(text: str, *, already_normalized: bool = False) -> int:
     if not text:
         return 0
@@ -6742,6 +6778,7 @@ __all__ = [
     "_count_text_urls", "_compute_spam_score",
     "_looks_like_normal_conversation",
     "_is_postbot_pattern", "_postbot_pattern_confidence",
+    "_postbot_analyze_full",
     "_detect_split_spam_words", "_detect_url_obfuscation",
     "_detect_unicode_evasion", "_detect_structural_evasion",
     "_detect_phone_or_contact_evasion", "_text_density_signals",
