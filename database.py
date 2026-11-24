@@ -5576,27 +5576,24 @@ class Database(
             logger.error(f"❌ auto_replies: {e}", exc_info=True)
 
     def _get_secondary_indexes(self) -> List[Tuple[str, str, str]]:
+        # 🆕 v5.7.26 PERF-CLEANUP: حُذف 3 فهارس زائدة (subset من PRIMARY):
+        #   - idx_user_penalties_user_status (user_id, status)
+        #       ⊂ idx_penalties_user_chat_status_end (user_id, chat_id, status, end_time)
+        #   - idx_auto_replies_chat_keyword (chat_id, keyword)
+        #       ⊂ idx_auto_replies_lookup (chat_id, keyword, is_active)
+        #   - idx_posts_channel_published_partial (channel_db_id) WHERE published=0
+        #       ⊂ idx_posts_channel_unpub_fresh_created (channel_db_id, id) WHERE published=0
+        # PostgreSQL يستخدم prefix matching، فالفهرس الأطول يخدم الاستعلامات
+        # الأقصر. الفهارس المحذوفة كانت تُؤجَّل دائماً ثم تظهر ⏭️4 (skipped)
+        # لأنها موجودة فعلاً بأسماء أخرى — عمل بلا نتيجة + كتابة زائدة.
+        # المتبقي (idx_user_violations_user_chat) مفيد فعلاً لأن لا يوجد
+        # فهرس PRIMARY بادئته (user_id, ...).
         return [
-            ("user_penalties",
-             "idx_user_penalties_user_status",
-             "CREATE INDEX CONCURRENTLY IF NOT EXISTS "
-             "idx_user_penalties_user_status "
-             "ON user_penalties(user_id, status)"),
-            ("auto_replies",
-             "idx_auto_replies_chat_keyword",
-             "CREATE INDEX CONCURRENTLY IF NOT EXISTS "
-             "idx_auto_replies_chat_keyword "
-             "ON auto_replies(chat_id, keyword)"),
             ("user_violations",
              "idx_user_violations_user_chat",
              "CREATE INDEX CONCURRENTLY IF NOT EXISTS "
              "idx_user_violations_user_chat "
              "ON user_violations(user_id, chat_id)"),
-            ("posts",
-             "idx_posts_channel_published_partial",
-             "CREATE INDEX CONCURRENTLY IF NOT EXISTS "
-             "idx_posts_channel_published_partial "
-             "ON posts(channel_db_id) WHERE published = 0"),
         ]
 
     def _compute_bootstrap_hash(self) -> str:

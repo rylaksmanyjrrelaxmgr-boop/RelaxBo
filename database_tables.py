@@ -196,7 +196,11 @@ DEFAULT_SETTINGS = (
 )
 
 # 🆕 v7.9.15: 82 - 22 = 60
-EXPECTED_INDEX_COUNT = 60
+# 🆕 v7.9.16: 60 → 61 (صافي +1):
+#   +1 إعادة idx_group_security_chat (سبب أبطأ الاستعلامات)
+#   -1 حذف idx_user_channels_user_id_only (subset زائد)
+#   +1 إضافة idx_admin_logs_created (تسريع تنظيف admin_logs الدوري)
+EXPECTED_INDEX_COUNT = 61
 
 COMMON_INDEXES = [
     # ─── users (6) ───
@@ -216,8 +220,12 @@ COMMON_INDEXES = [
      "user_channels(banned, user_id)"),
     ("user_channels", "idx_user_channels_removed_at",
      "user_channels(removed_at) WHERE removed_at IS NOT NULL"),
-    ("user_channels", "idx_user_channels_user_id_only",
-     "user_channels(user_id) WHERE banned = 0"),
+    # 🆕 v7.9.16: حُذف idx_user_channels_user_id_only (user_id WHERE banned=0)
+    # كان subset من فهرسين أطول:
+    #   - idx_user_channels_user_banned (user_id, banned) — يخدم WHERE user_id=? AND banned=?
+    #   - idx_user_channels_user_created (user_id, created_at DESC) — يخدم ORDER BY
+    # PostgreSQL prefix matching يجعل الفهرس الأطول كافياً. نُقل إلى
+    # DEPRECATED_INDEXES ليُحذف بأمان من PostgreSQL عبر _drop_deprecated.
 
     # ─── posts (4) ───
     ("posts", "idx_posts_text_hash", "posts(text_hash)"),
@@ -326,9 +334,15 @@ COMMON_INDEXES = [
     # ─── payment_logs (1) ───
     ("payment_logs", "idx_payment_logs_user", "payment_logs(user_id)"),
 
-    # ─── admin_logs (1) ───
+    # ─── admin_logs (2) ───
     ("admin_logs", "idx_admin_logs_chat",
      "admin_logs(chat_id, id DESC)"),
+    # 🆕 v7.9.16: idx_admin_logs_created — يخدم استعلامات التنظيف الدوري
+    # `DELETE FROM admin_logs WHERE created_at < ?` (utils.py:4214)
+    # التي كانت تعمل Seq Scan على الجدول كاملاً. كما يدعم
+    # `WHERE chat_id = ? AND created_at >= ?` (utils.py:1602).
+    ("admin_logs", "idx_admin_logs_created",
+     "admin_logs(created_at)"),
 
     # ─── penalty_archive (1) ───
     ("penalty_archive", "idx_penalty_archive_archived",
@@ -408,6 +422,9 @@ DEPRECATED_INDEXES = [
     "idx_user_channels_user_banned_id",
     "idx_user_channels_id_user", "idx_uc_user_banned",
     "idx_uc_channel_id", "idx_uc_active",
+    # 🆕 v7.9.16: أُضيف idx_user_channels_user_id_only — كان subset
+    # زائداً من idx_user_channels_user_banned و idx_user_channels_user_created.
+    "idx_user_channels_user_id_only",
 
     # ─── user_penalties قديمة ───
     "idx_penalties_user_chat_status", "idx_penalties_user_chat",
@@ -492,9 +509,16 @@ CRITICAL_INDEX_NAMES = frozenset({
     "idx_bot_addition_log_chat",
     "idx_user_channels_removed_at",
     "idx_group_security_postbot",
+    # 🆕 v7.9.16: idx_group_security_chat — حيوي لاستعلامات
+    # WHERE chat_id = $1 على group_security (أبطأ الاستعلامات في /audit_full).
+    "idx_group_security_chat",
     "idx_mv_active_user_limits_user_id",
     "idx_posts_channel_published_created",
-    "idx_user_channels_user_id_only",
+    # 🆕 v7.9.16: idx_admin_logs_created — يخدم تنظيف admin_logs الدوري
+    # (DELETE WHERE created_at < ?) الذي كان Seq Scan.
+    "idx_admin_logs_created",
+    # 🆕 v7.9.16: حُذف idx_user_channels_user_id_only — subset زائد
+    # (نُقل إلى DEPRECATED_INDEXES). الفهرس الأطول يغطيه.
     "idx_auto_replies_lookup",
 })
 
