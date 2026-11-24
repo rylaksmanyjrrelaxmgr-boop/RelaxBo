@@ -28,7 +28,8 @@
     ✅ محفوظ من v5.7.22:
         - STAGGER-BG-TASKS (0.4s)
         - ADMIN-COLLECT-TIMEOUT (10s)
-        - INDEX-HINTS
+    ✅ مُزال في v5.7.27:
+        - INDEX-HINTS (كانت توصيات خاطئة — أعمدة غير موجودة)
     ✅ محفوظ من v5.7.21:
         - EARLY-HEALTH-SERVER
         - SAFE-CATCHALL
@@ -504,55 +505,25 @@ for _noisy in ("httpx", "httpcore", "telegram.request", "telegram.ext.ExtBot", "
 logger = logging.getLogger("relax_bot")
 
 # ═══════════════════════════════════════════════════════════════════
-# 🆕 v5.7.22: BG-TASK-STAGGER + INDEX-HINTS constants
+# 🆕 v5.7.22: BG-TASK-STAGGER constants
 # ═══════════════════════════════════════════════════════════════════
 _BG_TASK_STAGGER_SEC: float = 0.4
 _ADMIN_COLLECT_TIMEOUT_SEC: float = 10.0
 
-_INDEX_RECOMMENDATIONS: List[Tuple[str, str]] = [
-    (
-        "bot_groups.admin_id",
-        "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_bot_groups_admin "
-        "ON bot_groups (admin_id) WHERE banned = 0;"
-    ),
-    (
-        "user_penalties.expires_at",
-        "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_user_penalties_expires "
-        "ON user_penalties (expires_at) WHERE expires_at > 0;"
-    ),
-    (
-        "posts(channel_db_id,status,created_at)",
-        "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_posts_channel_status "
-        "ON posts (channel_db_id, status, created_at DESC);"
-    ),
-    (
-        "user_channels.user_id",
-        "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_user_channels_user "
-        "ON user_channels (user_id) WHERE banned = 0;"
-    ),
-]
-
-
-def _log_index_recommendations() -> None:
-    try:
-        db_type = str(getattr(DB, "DB_TYPE", "sqlite")).lower().strip()
-        if not db_type.startswith("postgres"):
-            logger.debug(
-                "index-hints: skipped (DB_TYPE=%s — SQL أعلاه لـ PG فقط)",
-                db_type,
-            )
-            return
-        logger.warning(
-            "📋 INDEX-HINTS (v5.7.25): نفّذ هذه الأوامر على PostgreSQL "
-            "لتحسين الاستعلامات البطيئة المُرصَدة في /audit_full:"
-        )
-        for _label, _sql in _INDEX_RECOMMENDATIONS:
-            logger.warning("   • %s\n     %s", _label, _sql)
-        logger.warning(
-            "💡 CONCURRENTLY لا يحجب الجدول — نفّذها وقت التشغيل بأمان."
-        )
-    except Exception as _e:
-        logger.debug("_log_index_recommendations: %s", _e)
+# 🆕 v5.7.27 PERF-CLEANUP: حُذف _INDEX_RECOMMENDATIONS + _log_index_recommendations()
+# نهائياً. السبب: نصف الاقتراحات كان خاطئاً (يشير لأعمدة غير موجودة):
+#   - idx_user_penalties_expires ON user_penalties(expires_at) → العمود
+#     الصحيح هو `end_time TEXT` (لا يوجد expires_at)
+#   - idx_posts_channel_status ON posts(channel_db_id, status, created_at) →
+#     العمود الصحيح هو `published INTEGER` (لا يوجد status)
+# الاقتراحان الآخران زائدان عن الحاجة:
+#   - idx_bot_groups_admin → لا يوجد استعلام WHERE admin_id (الموجود:
+#     added_by + chat_id)، و PRIMARY KEY (chat_id, admin_id) يغطيه.
+#   - idx_user_channels_user → idx_user_channels_user_banned(user_id, banned)
+#     يغطيه بالكامل عبر prefix matching.
+# الفهارس الحقيقية مُدارة تلقائياً في database_tables.py (COMMON_INDEXES)
+# و database.py (_get_secondary_indexes + _create_indexes_postgres) — لا حاجة
+# لتوصيات يدوية قد تُضلّل المستخدم لتنفيذ SQL مكسور.
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -2624,7 +2595,7 @@ async def main():
         "post_stop_fix=on | admin_safe_retry=on(%dx,%.1fs) | admin_restart=on | "
         "restart_exitcode=on | db_errors_cmd=on | html_chunking_fix=on | "
         "early_health=on | bg_managed_bots=on | bg_commands=on | early_port=%d | "
-        "stagger=%.1fs | admin_collect_timeout=%.0fs | index_hints=on",
+        "stagger=%.1fs | admin_collect_timeout=%.0fs | index_hints=off(auto)",
         _DIAG_INCOMING,
         _SPAM_DETECTOR_VERSION or "N/A",
         _SPAM_DETECTOR_LAYERS_COUNT,
@@ -2651,7 +2622,9 @@ async def main():
         await initialize_db()
     logger.info("⏱️ DB init: %.2fs", time.monotonic() - t0)
 
-    _log_index_recommendations()
+    # 🆕 v5.7.27: حُذف _log_index_recommendations() — كان يطبع توصيات
+    # فهارس خاطئة (أعمدة غير موجودة: expires_at, posts.status). الفهارس
+    # الحقيقية تُنشأ تلقائياً عبر DB._create_indexes_postgres.
 
     try:
         _ping = await DB.fetchone("SELECT 1 AS ok")
