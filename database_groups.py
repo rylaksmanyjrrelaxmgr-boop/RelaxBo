@@ -441,13 +441,28 @@ class GroupsMixin:
         """
 
         try:
-            rows1 = await self.fetchall(
-                self._prepare_query(query1), (user_id,)
+            # 🆕 v7.9.17 PERF-UG-1: تشغيل query1 و query2 بالتوازي عبر
+            # asyncio.gather. الاستعلامان مستقلان تماماً (لا يعتمد أحدهما
+            # على ناتج الآخر) — تشغيلهما بالتوازي يقلّل زمن get_user_groups
+            # من (t1 + t2) إلى max(t1, t2). كل نتيجة تُعالج بشكل مستقل
+            # حتى لو فشلت الأخرى (return_exceptions=True).
+            results = await asyncio.gather(
+                self.fetchall(
+                    self._prepare_query(query1), (user_id,)
+                ),
+                self.fetchall(
+                    self._prepare_query(query2),
+                    (user_id, user_id, user_id, user_id, user_id, user_id),
+                ),
+                return_exceptions=True,
             )
-            rows2 = await self.fetchall(
-                self._prepare_query(query2),
-                (user_id, user_id, user_id, user_id, user_id, user_id),
-            )
+            r1, r2 = results
+            rows1 = r1 if not isinstance(r1, BaseException) else []
+            rows2 = r2 if not isinstance(r2, BaseException) else []
+            if isinstance(r1, BaseException):
+                logger.warning(f"⚠️ get_user_groups query1 فشل: {r1}")
+            if isinstance(r2, BaseException):
+                logger.warning(f"⚠️ get_user_groups query2 فشل: {r2}")
         except Exception as e:
             logger.warning(f"⚠️ get_user_groups fetch فشل: {e}")
             rows1 = []

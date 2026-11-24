@@ -2587,7 +2587,7 @@ async def main():
     logger.info("👨‍💼 المالك: %s", CONFIG.PRIMARY_OWNER_ID)
 
     logger.info(
-        "📦 bot.py: v5.7.26 | kill_prev=on | init_retry=on | webhook_force=on | "
+        "📦 bot.py: v5.7.27 | kill_prev=on | init_retry=on | webhook_force=on | "
         "webhook_verify=on | updater_stop=on | published_true_fix=on | "
         "hotfix_removed=on | "
         "diag_incoming=%r | "
@@ -2596,7 +2596,8 @@ async def main():
         "post_stop_fix=on | admin_safe_retry=on(%dx,%.1fs) | admin_restart=on | "
         "restart_exitcode=on | db_errors_cmd=on | html_chunking_fix=on | "
         "early_health=on | bg_managed_bots=on | bg_commands=on | early_port=%d | "
-        "stagger=%.1fs | admin_collect_timeout=%.0fs | index_hints=off(auto)",
+        "stagger=%.1fs | admin_collect_timeout=%.0fs | index_hints=off(auto) | "
+        "perf_sd1=on(uc_active_idx)",
         _DIAG_INCOMING,
         _SPAM_DETECTOR_VERSION or "N/A",
         _SPAM_DETECTOR_LAYERS_COUNT,

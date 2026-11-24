@@ -54,7 +54,7 @@ database_tables.py — إنشاء الجداول والفهارس لكل قوا�
 ================================================================================
 """
 
-__version__ = "7.9.16"
+__version__ = "7.9.17"
 
 import asyncio
 import logging
@@ -200,7 +200,11 @@ DEFAULT_SETTINGS = (
 #   +1 إعادة idx_group_security_chat (سبب أبطأ الاستعلامات)
 #   -1 حذف idx_user_channels_user_id_only (subset زائد)
 #   +1 إضافة idx_admin_logs_created (تسريع تنظيف admin_logs الدوري)
-EXPECTED_INDEX_COUNT = 61
+# 🆕 v7.9.17: 61 → 63 (+2):
+#   +2 فهارس جزئية لـ user_channels WHERE removed_at IS NULL
+#   (idx_user_channels_user_active_created + idx_user_channels_user_banned_active)
+#   تُسرّع استعلامات "القنوات النشطة" بعد تفعيل soft-delete.
+EXPECTED_INDEX_COUNT = 63
 
 COMMON_INDEXES = [
     # ─── users (6) ───
@@ -211,7 +215,7 @@ COMMON_INDEXES = [
     ("users", "idx_users_subscription_end", "users(subscription_end)"),
     ("users", "idx_users_auto_recycle", "users(auto_recycle)"),
 
-    # ─── user_channels (4) ───
+    # ─── user_channels (6) ───
     ("user_channels", "idx_user_channels_user_created",
      "user_channels(user_id, created_at DESC)"),
     ("user_channels", "idx_user_channels_user_banned",
@@ -220,6 +224,22 @@ COMMON_INDEXES = [
      "user_channels(banned, user_id)"),
     ("user_channels", "idx_user_channels_removed_at",
      "user_channels(removed_at) WHERE removed_at IS NOT NULL"),
+    # 🆕 v7.9.17 PERF-SD-1: فهرسان جزئيان لـ WHERE removed_at IS NULL
+    # يخدمان استعلامات "القنوات النشطة" التي أصبحت Seq Scan بعد تفعيل
+    # عمود removed_at. الفهرس الجزئي أصغر وأسرع لأنه يستثني الصفوف
+    # المحذوفة ناعماً (الأغلبية الساحقة صفوف نشطة).
+    #   - idx_user_channels_user_active_created:
+    #       WHERE user_id=? AND removed_at IS NULL [ORDER BY created_at DESC]
+    #       (database_channels_posts.py:668-672, 897-900, وغيرها)
+    #   - idx_user_channels_user_banned_active:
+    #       WHERE user_id=? AND banned=0 AND removed_at IS NULL
+    #       (database_channels_posts.py:606-608, 1208, 1468, 1853)
+    ("user_channels", "idx_user_channels_user_active_created",
+     "user_channels(user_id, created_at DESC) "
+     "WHERE removed_at IS NULL"),
+    ("user_channels", "idx_user_channels_user_banned_active",
+     "user_channels(user_id, banned) "
+     "WHERE removed_at IS NULL"),
     # 🆕 v7.9.16: حُذف idx_user_channels_user_id_only (user_id WHERE banned=0)
     # كان subset من فهرسين أطول:
     #   - idx_user_channels_user_banned (user_id, banned) — يخدم WHERE user_id=? AND banned=?
@@ -508,6 +528,10 @@ CRITICAL_INDEX_NAMES = frozenset({
     "idx_bot_groups_banned_cover",
     "idx_bot_addition_log_chat",
     "idx_user_channels_removed_at",
+    # 🆕 v7.9.17: فهارس جزئية لـ WHERE removed_at IS NULL — حيوية
+    # لكل استعلامات "القنوات النشطة" (الأغلبية الساحقة).
+    "idx_user_channels_user_active_created",
+    "idx_user_channels_user_banned_active",
     "idx_group_security_postbot",
     # 🆕 v7.9.16: idx_group_security_chat — حيوي لاستعلامات
     # WHERE chat_id = $1 على group_security (أبطأ الاستعلامات في /audit_full).
