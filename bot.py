@@ -1950,6 +1950,66 @@ async def pool_health_monitor() -> None:
         except asyncio.CancelledError:
             raise
 
+
+# 🆕 v7.9.19 PERF-MV-REFRESH: تحديث mv_active_user_limits بشكل دوري.
+#
+# المشكلة: MV mv_active_user_limits (database.py:2985) تُقرأ في كل دورة
+# نشر تلقائي (CHANNELS_TO_PUBLISH_SQL_PG في database_refactor_mixin.py:295)
+# لكنها لا تُحدَّث تلقائياً. النتيجة: بيانات قديمة + Seq Scan عند الـ
+# refresh اليدوي. الاستعلام #7 في /slow_queries (5.4s) سببه MV غير محدّثة
+# تجبر الـ planner على خطة سيئة.
+#
+# الحل: REFRESH CONCURRENTLY كل 30 دقيقة. CONCURRENTLY متاح لأن الـ MV
+# لها unique index (idx_mv_active_user_limits_user_id). هذا لا يحجب
+# القراءة (عكس REFRESH العادي).
+#
+# SAFETY:
+#   - PostgreSQL فقط (SQLite/MySQL لا يدعمان MATERIALIZED VIEW)
+#   - لو فشل REFRESH (مثلاً MV غير موجودة)، نُسجّل تحذيراً ونُكمل
+#   - first run بعد 5 دقائق من الإقلاع (ليس فوراً — يعطي وقت للإقلاع)
+_MV_REFRESH_INTERVAL_SEC = 1800  # 30 دقيقة
+_MV_REFRESH_INITIAL_DELAY_SEC = 300  # 5 دقائق بعد الإقلاع
+
+
+async def refresh_active_user_limits_mv() -> None:
+    """تحديث mv_active_user_limits كل 30 دقيقة عبر REFRESH CONCURRENTLY."""
+    try:
+        await asyncio.sleep(_MV_REFRESH_INITIAL_DELAY_SEC)
+    except asyncio.CancelledError:
+        raise
+    while True:
+        try:
+            db_type = str(getattr(DB, "DB_TYPE", "sqlite")).lower().strip()
+            if not db_type.startswith("postgres"):
+                # SQLite/MySQL لا يدعمان MATERIALIZED VIEW
+                await asyncio.sleep(3600)
+                continue
+            # REFRESH CONCURRENTLY: لا يحجب القراءة (يتطلب unique index
+            # الذي أنشأناه في database.py:2998).
+            await DB.execute(
+                "REFRESH MATERIALIZED VIEW CONCURRENTLY "
+                "mv_active_user_limits"
+            )
+            logger.info(
+                "🔄 mv_active_user_limits: REFRESH CONCURRENTLY OK"
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            err_lower = str(e).lower()
+            if "does not exist" in err_lower or "concurrently" in err_lower:
+                # MV غير موجودة بعد أو لا unique index — تخطّي بصمت
+                logger.debug(
+                    "mv_refresh: تخطّي (%s)", str(e)[:80])
+            else:
+                logger.warning(
+                    "⚠️ mv_refresh: فشل REFRESH: %s", str(e)[:120])
+        try:
+            await asyncio.sleep(_MV_REFRESH_INTERVAL_SEC)
+        except asyncio.CancelledError:
+            raise
+
+
 def _resolve_hostname() -> Optional[str]:
     for var in (
         "RENDER_EXTERNAL_HOSTNAME", "RENDER_EXTERNAL_URL",
@@ -2587,7 +2647,7 @@ async def main():
     logger.info("👨‍💼 المالك: %s", CONFIG.PRIMARY_OWNER_ID)
 
     logger.info(
-        "📦 bot.py: v5.7.27 | kill_prev=on | init_retry=on | webhook_force=on | "
+        "📦 bot.py: v5.7.28 | kill_prev=on | init_retry=on | webhook_force=on | "
         "webhook_verify=on | updater_stop=on | published_true_fix=on | "
         "hotfix_removed=on | "
         "diag_incoming=%r | "
@@ -2597,7 +2657,7 @@ async def main():
         "restart_exitcode=on | db_errors_cmd=on | html_chunking_fix=on | "
         "early_health=on | bg_managed_bots=on | bg_commands=on | early_port=%d | "
         "stagger=%.1fs | admin_collect_timeout=%.0fs | index_hints=off(auto) | "
-        "perf_sd1=on(uc_active_idx)",
+        "perf_sd1=on(uc_active_idx) | perf_sd2=on(mv_refresh+batch_flush)",
         _DIAG_INCOMING,
         _SPAM_DETECTOR_VERSION or "N/A",
         _SPAM_DETECTOR_LAYERS_COUNT,
@@ -3185,6 +3245,8 @@ async def main():
         ("pool_health_monitor", pool_health_monitor, ()),
         ("admin_logs_cleanup", cleanup_admin_logs_periodically, ()),
         ("removed_channels_cleanup", cleanup_removed_channels_periodically, ()),
+        # 🆕 v7.9.19: تحديث mv_active_user_limits كل 30 دقيقة (REFRESH CONCURRENTLY)
+        ("mv_refresh", refresh_active_user_limits_mv, ()),
     ]
     if _periodic_cleanup_callable is not None:
         _bg_task_specs.append(("periodic_cleanup", _periodic_cleanup_callable, ()))

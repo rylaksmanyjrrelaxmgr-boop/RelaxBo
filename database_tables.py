@@ -204,7 +204,11 @@ DEFAULT_SETTINGS = (
 #   +2 فهارس جزئية لـ user_channels WHERE removed_at IS NULL
 #   (idx_user_channels_user_active_created + idx_user_channels_user_banned_active)
 #   تُسرّع استعلامات "القنوات النشطة" بعد تفعيل soft-delete.
-EXPECTED_INDEX_COUNT = 63
+# 🆕 v7.9.19: 63 → 65 (+2):
+#   +1 idx_bot_groups_added_by_cover (covering — #9,#10 في /slow_queries)
+#   +1 idx_posts_counts_partial (فهرس جزئي — #3 في /slow_queries)
+#   كلاهما يُسرّع استعلامات كانت 5.3s و 7.1s على التوالي.
+EXPECTED_INDEX_COUNT = 65
 
 COMMON_INDEXES = [
     # ─── users (6) ───
@@ -247,7 +251,7 @@ COMMON_INDEXES = [
     # PostgreSQL prefix matching يجعل الفهرس الأطول كافياً. نُقل إلى
     # DEPRECATED_INDEXES ليُحذف بأمان من PostgreSQL عبر _drop_deprecated.
 
-    # ─── posts (4) ───
+    # ─── posts (5) ───
     ("posts", "idx_posts_text_hash", "posts(text_hash)"),
     ("posts", "idx_posts_channel_pub_fail_created",
      "posts(channel_db_id, published, fail_count, created_at)"),
@@ -258,14 +262,34 @@ COMMON_INDEXES = [
      "AND (fail_count IS NULL OR fail_count < 3)"),
     ("posts", "idx_posts_channel_published_created",
      "posts(channel_db_id, published, created_at DESC)"),
+    # 🆕 v7.9.19 PERF-POSTS-COUNTS: فهرس مخصص لـ CTE post_counts في
+    # CHANNELS_TO_PUBLISH_SQL_PG (database_refactor_mixin.py:274).
+    # الاستعلام #3 (7.1s): WITH post_counts AS (SELECT channel_db_id,
+    # COUNT(*) FILTER (WHERE published=0 AND fail_count<3),
+    # COUNT(*) FILTER (WHERE published=1) FROM posts WHERE published IN (0,1)
+    # GROUP BY channel_db_id)
+    # الفهرس الجزئي على (channel_db_id) WHERE published IN (0,1) يسمح
+    # بـ Index-Only Scan أصغر بكثير (يتجاهل published=2,3,...) + GROUP BY
+    # مرتب مسبقاً. النتيجة: Aggregate مباشر من الفهرس دون Heap scan.
+    ("posts", "idx_posts_counts_partial",
+     "posts(channel_db_id) WHERE published IN (0, 1)"),
 
-    # ─── bot_groups (4) ───
+    # ─── bot_groups (5) ───
     ("bot_groups", "idx_groups_banned", "bot_groups(banned)"),
     ("bot_groups", "idx_bot_groups_added_by", "bot_groups(added_by)"),
     ("bot_groups", "idx_bot_groups_log_channel",
      "bot_groups(log_channel_id)"),
     ("bot_groups", "idx_bot_groups_banned_cover",
      "bot_groups(banned) INCLUDE (chat_id, chat_name, username)"),
+    # 🆕 v7.9.19 PERF-BOT-GROUPS-ADMIN: covering index لاستعلامات
+    # "SELECT chat_id, chat_name, username, banned FROM bot_groups
+    #  WHERE added_by = ?" (#9, #10 في /slow_queries — 5.3s لكل استعلام).
+    # الفهرس الحالي idx_bot_groups_added_by يخدم WHERE لكنه يتطلب
+    # Heap fetch لكل صف. هذا الـ covering index يتجنب الـ Heap fetch
+    # تماماً (Index-Only Scan) → ~10x-50x أسرع.
+    # INCLUDE(banned) يخدم SELECT banned أيضاً.
+    ("bot_groups", "idx_bot_groups_added_by_cover",
+     "bot_groups(added_by) INCLUDE (chat_id, chat_name, username, banned)"),
 
     # ─── user_groups_link (1) ───
     ("user_groups_link", "idx_user_groups_link_user_id",
@@ -544,6 +568,12 @@ CRITICAL_INDEX_NAMES = frozenset({
     # 🆕 v7.9.16: حُذف idx_user_channels_user_id_only — subset زائد
     # (نُقل إلى DEPRECATED_INDEXES). الفهرس الأطول يغطيه.
     "idx_auto_replies_lookup",
+    # 🆕 v7.9.19: covering index لاستعلامات bot_groups WHERE added_by=?
+    # (#9, #10 في /slow_queries — 5.3s). Index-Only Scan بدل Heap fetch.
+    "idx_bot_groups_added_by_cover",
+    # 🆕 v7.9.19: فهرس جزئي لـ CTE post_counts (#3 في /slow_queries — 7.1s).
+    # WHERE published IN (0,1) → Aggregate أصغر بكثير.
+    "idx_posts_counts_partial",
 })
 
 # ═══════════════════════════════════════════════════════════════════════

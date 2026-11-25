@@ -2984,26 +2984,52 @@ async def _flush_usage_updates():
 
     try:
         failed: Dict[Tuple[int, str], int] = {}
-        for (chat_id, keyword), count in data:
-            try:
-                await DB.execute(
-                    "UPDATE auto_replies SET usage_count = usage_count + ? "
-                    "WHERE chat_id=? AND keyword=?",
-                    (count, chat_id, keyword))
+        # 🆕 v7.9.19 PERF-BATCH-FLUSH: تحويل N UPDATE متسلسلة إلى
+        # executemany واحد (round-trip واحد بدل N). كان الكود القديم
+        # ينفّذ UPDATE لكل (chat_id, keyword) على حدة في حلقة، فلو كان
+        # هناك 100 عنصر → 100 round-trip × ~60ms = 6s (الاستعلام #5
+        # الأبطأ في /slow_queries). executemany يُنفّذها في transaction
+        # واحد على اتصال واحد → ~100ms فقط بغض النظر عن العدد.
+        # الحفاظ على error handling: لو فشل الـ batch ككل، نرجع للوضع
+        # التسلسلي (backward-compat) ثم نُعيد إدراج الفاشلة فقط.
+        batch_params = [
+            (count, chat_id, keyword)
+            for (chat_id, keyword), count in data
+        ]
+        try:
+            await DB.executemany(
+                "UPDATE auto_replies SET usage_count = usage_count + ? "
+                "WHERE chat_id=? AND keyword=?",
+                batch_params,
+            )
+            # نجح الـ batch كله — أزل كل مفاتيح الفشل السابقة
+            for (chat_id, keyword), _count in data:
                 _usage_failure_counts.pop((chat_id, keyword), None)
-            except Exception as e:
-                logger.error(
-                    "❌ فشل usage_count (%s, %s): %s",
-                    chat_id, keyword, e)
-                fk = (chat_id, keyword)
-                fails = _usage_failure_counts.get(fk, 0) + 1
-                _usage_failure_counts[fk] = fails
-                if fails <= _USAGE_FAILURE_MAX_RETRIES:
-                    failed[fk] = count
-                else:
-                    logger.warning(
-                        "⚠️ التخلي عن usage_count (%s, %s) بعد %d محاولات",
-                        chat_id, keyword, fails)
+        except Exception as batch_err:
+            # الـ batch فشل — ارجع للوضع التسلسلي لمعرفة أي عنصر فشل
+            logger.debug(
+                "batch flush_usage فشل (%s) — الرجوع للتسلسلي",
+                batch_err)
+            for (chat_id, keyword), count in data:
+                try:
+                    await DB.execute(
+                        "UPDATE auto_replies SET usage_count = "
+                        "usage_count + ? WHERE chat_id=? AND keyword=?",
+                        (count, chat_id, keyword))
+                    _usage_failure_counts.pop((chat_id, keyword), None)
+                except Exception as e:
+                    logger.error(
+                        "❌ فشل usage_count (%s, %s): %s",
+                        chat_id, keyword, e)
+                    fk = (chat_id, keyword)
+                    fails = _usage_failure_counts.get(fk, 0) + 1
+                    _usage_failure_counts[fk] = fails
+                    if fails <= _USAGE_FAILURE_MAX_RETRIES:
+                        failed[fk] = count
+                    else:
+                        logger.warning(
+                            "⚠️ التخلي عن usage_count (%s, %s) "
+                            "بعد %d محاولات", chat_id, keyword, fails)
         if failed:
             async with _usage_lock:
                 for key, count in failed.items():
