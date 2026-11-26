@@ -33,6 +33,11 @@ RUN pip install --no-cache-dir --upgrade pip && \
 
 COPY . .
 
+# 🆕 v5.7.31: طبّق إصلاحات الأداء (RateLimiter release + warn-parallel +
+# penalty-msg-bg) وقت البناء. السكربت idempotent — يخطّي لو الإصلاحات
+# مُطبَّقة بالفعل في الملفات. يُسهّل تطبيق الـ fixes دون دفع ملفات 233KB.
+RUN python3 apply_v5731_fixes.py || echo "⚠️ apply_v5731_fixes.py failed — continuing with unpatched files"
+
 # 🆕 v9.7.33 CLEANUP: حُذف `RUN python3 apply_fix_published_true.py`
 # نهائياً. الإصلاح مُطبَّق مباشرةً في handlers/handlers_callback.py:891
 # (FIX-PUBLISHED-TRUE v9.7.32). السكربت كان idempotent ويطبع
