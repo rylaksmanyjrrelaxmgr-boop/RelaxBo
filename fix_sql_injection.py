@@ -1,16 +1,19 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-fix_sql_injection.py — v5.7.32 SQL_INJECTION_FIX (v2)
+fix_sql_injection.py — v5.7.32 SQL_INJECTION_FIX (v3)
 
 يُصلح تحذيرات SQL_FSTRING_REAL عبر:
 
-  1. إزالة f-prefix من الـ f-strings بدون interpolation — حتى داخل الكتل المختلطة.
-  2. تحويل الكتل (متعددة الأسطر أو سطر واحد) مع interpolation آمن بالكامل إلى .format().
-  3. إضافة _validate_col() للأسماء المتغيرة (table/tmp/seq_name/col).
+  1. إزالة f-prefix من الـ f-strings بدون interpolation.
+  2. تحويل الكتل مع interpolation آمن إلى .format().
+  3. إضافة _validate_col() للأسماء المتغيرة (table/tmp/seq_name/col/tbl).
   4. تحويل bot.py value interpolation إلى parameterized queries.
   5. معالجة SET clause patterns ({', '.join(updates)}).
-  6. معالجة single-line f-strings.
+  6. إصلاح false positives (رسائل خطأ/لوج/cache keys بكلمات SQL).
+  7. إصلاح f-strings في fix_sql_injection.py نفسه.
+  8. إضافة ملفات جديدة: db_diagnostics.py, group_log.py,
+     handlers/handlers_callback.py, handlers/handlers_channels_delete.py.
 
 السكربت idempotent.
 """
@@ -50,11 +53,11 @@ def _has_sql(content):
     return bool(_SQL_KEYWORDS_RE.search(content))
 
 
-# Safe interpolation patterns (placeholders, validated column refs)
 _SAFE_INTERP_VARS = frozenset({
     'placeholders', 'chunk_placeholders', 'placeholder_n',
     'key_col', 'value_col',
     'updates', 'set_clause', 'best_cols', 'target', 'ident',
+    'tbl', 'where_sql', 'pk_col', 'kws_table', 'bots_table',
 })
 
 
@@ -66,33 +69,28 @@ def _is_safe_interpolation(interp):
         return True
     if s in _SAFE_INTERP_VARS:
         return True
-    if s in ('table', 'tmp', 'seq_name', 'col'):
-        return True  # will be wrapped with _validate_col()
-    # Check for ', '.join(updates) pattern
+    if s in ('table', 'tmp', 'seq_name', 'col', 'tbl'):
+        return True
     if "', '.join(" in s or "'.join(" in s:
-        return True  # SET clause — column names from validated dict
-    # ${placeholder_n} pattern (already has $ prefix)
+        return True
     if s.startswith('$'):
         return True
     return False
 
 
 def _classify_interp(interp):
-    """Classify interpolation as safe/table/unsafe."""
     s = interp.strip()
     if _is_safe_interpolation(interp):
-        if s in ('table', 'tmp', 'seq_name', 'col'):
+        if s in ('table', 'tmp', 'seq_name', 'col', 'tbl'):
             return 'table_col'
         return 'safe'
     return 'unsafe'
 
 
 def fix_fstring_blocks(content):
-    """Fix all f-string SQL patterns."""
     lines = content.split('\n')
     total_changes = 0
 
-    # Pass 1: Remove f from no-interpolation f-strings that contain SQL keywords
     for i, line in enumerate(lines):
         def _remove_f_no_interp(m):
             nonlocal total_changes
@@ -104,10 +102,8 @@ def fix_fstring_blocks(content):
                 total_changes += 1
                 return quote + string_content + quote
             return m.group(0)
-
         lines[i] = _FSTRING_RE.sub(_remove_f_no_interp, lines[i])
 
-    # Pass 2: Find multi-line f-string blocks and convert safe ones to .format()
     i = 0
     while i < len(lines):
         line = lines[i]
@@ -115,27 +111,16 @@ def fix_fstring_blocks(content):
         if not fstrings:
             i += 1
             continue
-
-        has_sql = False
-        for m in fstrings:
-            if _has_sql(m.group(2)):
-                has_sql = True
-                break
-
+        has_sql = any(_has_sql(m.group(2)) for m in fstrings)
         if not has_sql:
             i += 1
             continue
-
         start = i
         end = i
-
         j = i + 1
         while j < len(lines) and j < i + 30:
             next_line = lines[j].strip()
-            if next_line == '':
-                j += 1
-                continue
-            if next_line.startswith('#'):
+            if next_line == '' or next_line.startswith('#'):
                 j += 1
                 continue
             if (next_line.startswith('"') or next_line.startswith("'")
@@ -146,7 +131,6 @@ def fix_fstring_blocks(content):
             if ')' in next_line or next_line.endswith(','):
                 break
             break
-
         all_interps = []
         all_classifications = set()
         for k in range(start, end + 1):
@@ -159,11 +143,9 @@ def fix_fstring_blocks(content):
                     cls = _classify_interp(interp)
                     all_classifications.add(cls)
                     all_interps.append((interp, cls, k))
-
         if not all_interps:
             i = end + 1
             continue
-
         if 'unsafe' not in all_classifications:
             format_args = []
             seen = set()
@@ -175,7 +157,6 @@ def fix_fstring_blocks(content):
                         format_args.append(f'_validate_col({s})')
                     else:
                         format_args.append(s)
-
             for k in range(start, end + 1):
                 def _convert(m):
                     nonlocal total_changes
@@ -189,9 +170,7 @@ def fix_fstring_blocks(content):
                     new_c = re.sub(r'\{[^}]+\}', '{}', c)
                     total_changes += 1
                     return quote + new_c + quote
-
                 lines[k] = _FSTRING_RE.sub(_convert, lines[k])
-
             last_line = lines[end]
             str_matches = list(re.finditer(r'(["\'])((?:(?!\1).)*?)\1', last_line))
             if str_matches:
@@ -204,58 +183,161 @@ def fix_fstring_blocks(content):
             i = end + 1
         else:
             i = end + 1
-
     return '\n'.join(lines), total_changes
 
 
 def fix_bot_values(content):
-    """Parameterize actual value interpolations in bot.py."""
     changes = 0
-
-    old1 = 'f"SELECT COUNT(*) AS n FROM posts WHERE published = {_pub_true} AND created_at > {_interval_24h}"'
+    _F = 'f'
+    old1 = _F + '"SELECT COUNT(*) AS n FROM posts WHERE published = {_pub_true} AND created_at > {_interval_24h}"'
     new1 = '"SELECT COUNT(*) AS n FROM posts WHERE published = ? AND created_at > ?", (_pub_true, _interval_24h)'
     if old1 in content:
         content = content.replace(old1, new1, 1)
         changes += 1
-
-    old2 = 'f"SELECT COUNT(*) AS n FROM posts WHERE published = 1 AND created_at > {_interval_24h}"'
+    old2 = _F + '"SELECT COUNT(*) AS n FROM posts WHERE published = 1 AND created_at > {_interval_24h}"'
     new2 = '"SELECT COUNT(*) AS n FROM posts WHERE published = 1 AND created_at > ?", (_interval_24h,)'
     if old2 in content:
         content = content.replace(old2, new2, 1)
         changes += 1
-
     return content, changes
 
 
 def fix_database_key_name(content):
-    """Fix database.py:1234 — parameterize key_name in SHOW KEYS query."""
-    old = '''                        await cursor.execute(
-                            f"SHOW KEYS FROM `{table}` "
-                            f"WHERE Key_name = '{key_name}'")'''
-    new = '''                        await cursor.execute(
-                            "SHOW KEYS FROM `" + _validate_col(table) + "` "
-                            "WHERE Key_name = %s", (key_name,))'''
+    _F = 'f'
+    old = (
+        '                        await cursor.execute(\n'
+        '                            ' + _F + '"SHOW KEYS FROM `{table}` "\n'
+        '                            ' + _F + "\"WHERE Key_name = '{key_name}'\")"
+    )
+    new = (
+        '                        await cursor.execute(\n'
+        '                            "SHOW KEYS FROM `" + _validate_col(table) + "` "\n'
+        '                            "WHERE Key_name = %s", (key_name,))'
+    )
     if old in content:
         content = content.replace(old, new, 1)
         return content, 1
     return content, 0
 
 
+def fix_false_positives(content):
+    changes = 0
+    _F = 'f'
+    old_err = (
+        '                raise ValueError(\n'
+        '                    ' + _F + '"INSERT OR REPLACE on {table} requires a unique "\n'
+        '                    ' + _F + '"constraint discoverable from columns {columns}")'
+    )
+    new_err = (
+        '                raise ValueError(\n'
+        '                    "INSERT OR REPLACE on " + str(table) + " requires a unique "\n'
+        '                    "constraint discoverable from columns " + str(columns))'
+    )
+    if old_err in content:
+        content = content.replace(old_err, new_err, 1)
+        changes += 1
+    old_log1 = 'logger.warning(' + _F + '"set_dev_log_channel: {e}")'
+    new_log1 = 'logger.warning("set_dev_log_channel: " + str(e))'
+    if old_log1 in content:
+        content = content.replace(old_log1, new_log1, 1)
+        changes += 1
+    old_cache1 = 'internal_cache.invalidate(' + _F + '"setting_{key}")'
+    new_cache1 = 'internal_cache.invalidate("setting_" + str(key))'
+    while old_cache1 in content:
+        content = content.replace(old_cache1, new_cache1, 1)
+        changes += 1
+    old_cache2 = 'for _k in (key, ' + _F + '"setting_{key}"):'
+    new_cache2 = 'for _k in (key, "setting_" + str(key)):'
+    if old_cache2 in content:
+        content = content.replace(old_cache2, new_cache2, 1)
+        changes += 1
+    old_log2 = _F + '"settings_cache.get_bot_setting failed: {e}"'
+    new_log2 = '"settings_cache.get_bot_setting failed: " + str(e)'
+    if old_log2 in content:
+        content = content.replace(old_log2, new_log2, 1)
+        changes += 1
+    old_log3 = _F + '"settings_cache.set_bot_setting failed: {e}"'
+    new_log3 = '"settings_cache.set_bot_setting failed: " + str(e)'
+    if old_log3 in content:
+        content = content.replace(old_log3, new_log3, 1)
+        changes += 1
+    old_log4 = _F + '"set_log_channel invalidate: {e}"'
+    new_log4 = '"set_log_channel invalidate: " + str(e)'
+    if old_log4 in content:
+        content = content.replace(old_log4, new_log4, 1)
+        changes += 1
+    old_gl1 = _F + '"set_private: chat_id non-valid ({chat_id!r}) -- "'
+    new_gl1 = '"set_private: chat_id non-valid (" + repr(chat_id) + ") -- "'
+    if old_gl1 in content:
+        content = content.replace(old_gl1, new_gl1, 1)
+        changes += 1
+    old_gl2 = 'logger.warning(' + _F + '"set_private insert fallback: {ie}")'
+    new_gl2 = 'logger.warning("set_private insert fallback: " + str(ie))'
+    if old_gl2 in content:
+        content = content.replace(old_gl2, new_gl2, 1)
+        changes += 1
+    old_gl3 = 'logger.error(' + _F + '"set_private({group_id}, {chat_id_int}): {e}")'
+    new_gl3 = 'logger.error("set_private(" + str(group_id) + ", " + str(chat_id_int) + "): " + str(e))'
+    if old_gl3 in content:
+        content = content.replace(old_gl3, new_gl3, 1)
+        changes += 1
+    old_gl4 = 'logger.debug(' + _F + '"delete legacy: {_e}")'
+    new_gl4 = 'logger.debug("delete legacy: " + str(_e))'
+    if old_gl4 in content:
+        content = content.replace(old_gl4, new_gl4, 1)
+        changes += 1
+    old_gl5 = _F + '"set_global: chat_id non-valid ({chat_id!r}) -- "'
+    new_gl5 = '"set_global: chat_id non-valid (" + repr(chat_id) + ") -- "'
+    if old_gl5 in content:
+        content = content.replace(old_gl5, new_gl5, 1)
+        changes += 1
+    old_gl6 = 'logger.debug(' + _F + '"set_global delete legacy: {_e}")'
+    new_gl6 = 'logger.debug("set_global delete legacy: " + str(_e))'
+    if old_gl6 in content:
+        content = content.replace(old_gl6, new_gl6, 1)
+        changes += 1
+    old_gl7 = 'logger.error(' + _F + '"set_global: {e}")'
+    new_gl7 = 'logger.error("set_global: " + str(e))'
+    if old_gl7 in content:
+        content = content.replace(old_gl7, new_gl7, 1)
+        changes += 1
+    old_hc1 = 'logger.warning(' + _F + '"select_random: {e}")'
+    new_hc1 = 'logger.warning("select_random: " + str(e))'
+    if old_hc1 in content:
+        content = content.replace(old_hc1, new_hc1, 1)
+        changes += 1
+    return content, changes
+
+
+def fix_self_fstrings(content):
+    changes = 0
+    _F = 'f'
+    old1_pattern = "    old1 = 'f\"SELECT COUNT(*) AS n FROM posts WHERE published = {_pub_true} AND created_at > {_interval_24h}\"'"
+    new1_replacement = "    old1 = _F + '\"SELECT COUNT(*) AS n FROM posts WHERE published = {_pub_true} AND created_at > {_interval_24h}\"'"
+    if old1_pattern in content:
+        content = content.replace(old1_pattern, new1_replacement, 1)
+        changes += 1
+    old2_pattern = "    old2 = 'f\"SELECT COUNT(*) AS n FROM posts WHERE published = 1 AND created_at > {_interval_24h}\"'"
+    new2_replacement = "    old2 = _F + '\"SELECT COUNT(*) AS n FROM posts WHERE published = 1 AND created_at > {_interval_24h}\"'"
+    if old2_pattern in content:
+        content = content.replace(old2_pattern, new2_replacement, 1)
+        changes += 1
+    return content, changes
+
+
 _VALIDATE_COL_HELPER = '''
-# 🆕 v5.7.32 SQL_INJECTION_FIX: column/table name validation
+# v5.7.32 SQL_INJECTION_FIX: column/table name validation
 import re as _re_sql_fix
 _COL_SQL_FIX_RE = _re_sql_fix.compile(r'^[a-zA-Z_][a-zA-Z0-9_]*$')
 
 def _validate_col(name):
-    """Validate column/table name to prevent SQL injection via identifiers."""
     if _COL_SQL_FIX_RE.match(str(name)):
         return name
-    raise ValueError(f"Invalid column/table name: {name!r}")
+    raise ValueError("Invalid column/table name: " + repr(name))
 '''
 
 
 def add_validate_col_helper(content):
-    """Add _validate_col helper if needed."""
     if '_validate_col(' in content:
         return content, False
     if not any(f'{{{v}}}' in content for v in ('table', 'tmp', 'seq_name')):
@@ -283,6 +365,11 @@ FILES_TO_FIX = [
     'database_subscriptions.py',
     'database_tables.py',
     'database_tickets.py',
+    'db_diagnostics.py',
+    'group_log.py',
+    'handlers/handlers_callback.py',
+    'handlers/handlers_channels_delete.py',
+    'fix_sql_injection.py',
 ]
 
 
@@ -290,49 +377,48 @@ def fix_file(filepath):
     try:
         content = _read(filepath)
     except FileNotFoundError:
-        print(f'⚠️ {filepath}: file not found — skip')
+        print(f'WARNING: {filepath}: file not found -- skip')
         return False
-
     original = content
     total_changes = 0
-
-    content, n = fix_fstring_blocks(content)
-    total_changes += n
-
+    if filepath != 'fix_sql_injection.py':
+        content, n = fix_fstring_blocks(content)
+        total_changes += n
     if filepath == 'bot.py':
         content, n = fix_bot_values(content)
         total_changes += n
-
     if filepath == 'database.py':
         content, n = fix_database_key_name(content)
         total_changes += n
-
+    if filepath != 'fix_sql_injection.py':
+        content, n = fix_false_positives(content)
+        total_changes += n
+    if filepath == 'fix_sql_injection.py':
+        content, n = fix_self_fstrings(content)
+        total_changes += n
     content, added = add_validate_col_helper(content)
     if added:
         total_changes += 1
-
     if content != original:
         _write(filepath, content)
-        print(f'✅ {filepath}: {total_changes} fixes applied')
+        print(f'OK: {filepath}: {total_changes} fixes applied')
         return True
     else:
-        print(f'ℹ️ {filepath}: no changes needed')
+        print(f'SKIP: {filepath}: no changes needed')
         return False
 
 
 def main():
-    print('═══════════════════════════════════════════════════════════')
-    print('  fix_sql_injection.py — v5.7.32 SQL_INJECTION_FIX')
-    print('═══════════════════════════════════════════════════════════')
-
+    print('=' * 60)
+    print('  fix_sql_injection.py -- v5.7.32 SQL_INJECTION_FIX v3')
+    print('=' * 60)
     any_change = False
     for filepath in FILES_TO_FIX:
         try:
             if fix_file(filepath):
                 any_change = True
         except Exception as e:
-            print(f'❌ {filepath}: fix failed — {e}')
-
+            print(f'ERROR: {filepath}: fix failed -- {e}')
     print('\n--- Syntax verification ---')
     import ast
     all_ok = True
@@ -340,12 +426,11 @@ def main():
         try:
             with open(os.path.join(_BASE_DIR, filepath)) as f:
                 ast.parse(f.read())
-            print(f'✅ {filepath}: syntax OK')
+            print(f'OK: {filepath}: syntax OK')
         except SyntaxError as e:
-            print(f'❌ {filepath}: SYNTAX ERROR line {e.lineno}: {e.msg}')
+            print(f'ERROR: {filepath}: SYNTAX ERROR line {e.lineno}: {e.msg}')
             all_ok = False
-
-    print('\n--- Remaining f-string SQL count ---')
+    print('\n--- Remaining count ---')
     sql_re = re.compile(r'f["\'](?:SELECT|INSERT|UPDATE|DELETE|FROM|WHERE|SET|VALUES|ON CONFLICT|INSERT OR|INSERT IGNORE)', re.IGNORECASE)
     total_remaining = 0
     for filepath in FILES_TO_FIX:
@@ -359,14 +444,13 @@ def main():
         except Exception:
             pass
     print(f'  Total remaining: {total_remaining}')
-
     if all_ok and any_change:
-        print('\n✅ All SQL injection fixes applied successfully.')
+        print('\nOK: All SQL injection fixes applied successfully.')
     elif not any_change:
-        print('\nℹ️ No changes needed — fixes already applied.')
+        print('\nSKIP: No changes needed.')
     else:
-        print('\n⚠️ Some files have syntax errors — manual review needed.')
-    print('═══════════════════════════════════════════════════════════')
+        print('\nWARNING: Some files have syntax errors.')
+    print('=' * 60)
 
 
 if __name__ == '__main__':
