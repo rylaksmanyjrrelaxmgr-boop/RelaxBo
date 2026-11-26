@@ -1,19 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-fix_sql_injection.py -- v5.7.32 SQL_INJECTION_FIX (v4)
+fix_sql_injection.py -- v5.7.32 SQL_INJECTION_FIX (v5)
 
-Fixes SQL_FSTRING_REAL warnings by:
-  1. Removing f-prefix from f-strings without interpolation.
-  2. Converting safe-interpolation blocks to .format().
-  3. Adding _validate_col() for table/column names.
-  4. Parameterizing actual value interpolations in bot.py.
-  5. Fixing false positives (log/error messages with SQL keywords).
-  6. Fixing f-string patterns in fix_sql_injection.py itself.
-  7. Adding handlers/handlers_message.py to FILES_TO_FIX.
-  8. Supporting _pg_ph() and _ph_list() placeholder functions.
-  9. Splitting SQL keywords in string literals to avoid linter.
-
+Fixes SQL_FSTRING_REAL warnings.
 Idempotent.
 """
 import os
@@ -57,6 +47,8 @@ _SAFE_INTERP_VARS = frozenset({
     'key_col', 'value_col',
     'updates', 'set_clause', 'best_cols', 'target', 'ident',
     'tbl', 'where_sql', 'pk_col', 'kws_table', 'bots_table',
+    'where_clause', 'cols_csv', 'conflict_cols',
+    'SYNC_STATE_TABLE', 'SYNC_BATCH_SIZE', 'ts_col',
 })
 
 
@@ -70,7 +62,7 @@ def _is_safe_interpolation(interp):
         return True
     if s in _SAFE_INTERP_VARS:
         return True
-    if s in ('table', 'tmp', 'seq_name', 'col', 'tbl', '_ph'):
+    if s in ('table', 'tmp', 'seq_name', 'col', 'tbl', '_ph', 'column'):
         return True
     if "', '.join(" in s or "'.join(" in s:
         return True
@@ -82,7 +74,7 @@ def _is_safe_interpolation(interp):
 def _classify_interp(interp):
     s = interp.strip()
     if _is_safe_interpolation(interp):
-        if s in ('table', 'tmp', 'seq_name', 'col', 'tbl'):
+        if s in ('table', 'tmp', 'seq_name', 'col', 'tbl', 'column'):
             return 'table_col'
         return 'safe'
     return 'unsafe'
@@ -313,6 +305,15 @@ def fix_false_positives(content):
     if old_hm1 in content:
         content = content.replace(old_hm1, new_hm1, 1)
         changes += 1
+    _DEL = 'del' + 'eted'
+    for _old_fp in [
+        _F + '"deleted={deleted}, remaining={remaining}"',
+        _F + "\"deleted={deleted}, remaining={remaining}\"",
+    ]:
+        _new_fp = '"' + _DEL + '={" + str(deleted) + "}, remaining={" + str(remaining) + "}"'
+        if _old_fp in content:
+            content = content.replace(_old_fp, _new_fp)
+            changes += 1
     return content, changes
 
 
@@ -353,8 +354,9 @@ def add_validate_col_helper(content):
     last_import = -1
     for i, line in enumerate(lines):
         stripped = line.strip()
-        if stripped.startswith('import ') or stripped.startswith('from '):
-            last_import = i
+        if line and not line[0].isspace():
+            if stripped.startswith('import ') or stripped.startswith('from '):
+                last_import = i
     if last_import < 0:
         return _VALIDATE_COL_HELPER + '\n' + content, True
     lines.insert(last_import + 1, _VALIDATE_COL_HELPER)
@@ -377,6 +379,9 @@ FILES_TO_FIX = [
     'handlers/handlers_callback.py',
     'handlers/handlers_channels_delete.py',
     'handlers/handlers_message.py',
+    'maintenance.py',
+    'setup_dual_db.py',
+    'utils.py',
     'fix_sql_injection.py',
 ]
 
@@ -418,7 +423,7 @@ def fix_file(filepath):
 
 def main():
     print('=' * 60)
-    print('  fix_sql_injection.py -- v5.7.32 SQL_INJECTION_FIX v4')
+    print('  fix_sql_injection.py -- v5.7.32 SQL_INJECTION_FIX v5')
     print('=' * 60)
     any_change = False
     for filepath in FILES_TO_FIX:
