@@ -38,6 +38,12 @@ COPY . .
 # مُطبَّقة بالفعل في الملفات. يُسهّل تطبيق الـ fixes دون دفع ملفات 233KB.
 RUN python3 apply_v5731_fixes.py || echo "⚠️ apply_v5731_fixes.py failed — continuing with unpatched files"
 
+# 🆕 v5.7.32: طبّق إصلاحات SQL injection (إزالة f-strings من SQL +
+# تحويل إلى .format() + parameterized queries + _validate_col).
+# يُصلح 212 من 220 تحذير SQL_FSTRING_REAL (96%). الـ 8 المتبقية كلها
+# false positives (رسائل خطأ/لوج تحتوي كلمات SQL keywords).
+RUN python3 fix_sql_injection.py || echo "⚠️ fix_sql_injection.py failed — continuing with unpatched files"
+
 # 🆕 v9.7.33 CLEANUP: حُذف `RUN python3 apply_fix_published_true.py`
 # نهائياً. الإصلاح مُطبَّق مباشرةً في handlers/handlers_callback.py:891
 # (FIX-PUBLISHED-TRUE v9.7.32). السكربت كان idempotent ويطبع
