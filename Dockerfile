@@ -33,21 +33,14 @@ RUN pip install --no-cache-dir --upgrade pip && \
 
 COPY . .
 
-# 🆕 v5.7.31: طبّق إصلاحات الأداء (RateLimiter release + warn-parallel +
-# penalty-msg-bg) وقت البناء. السكربت idempotent — يخطّي لو الإصلاحات
-# مُطبَّقة بالفعل في الملفات. يُسهّل تطبيق الـ fixes دون دفع ملفات 233KB.
-RUN python3 apply_v5731_fixes.py || echo "⚠️ apply_v5731_fixes.py failed — continuing with unpatched files"
+# v5.7.31: RateLimiter release + warn-parallel + penalty-msg-bg
+RUN python3 apply_v5731_fixes.py || echo "apply_v5731_fixes.py failed"
 
-# 🆕 v5.7.32: طبّق إصلاحات SQL injection (إزالة f-strings من SQL +
-# تحويل إلى .format() + parameterized queries + _validate_col).
-# يُصلح 212 من 220 تحذير SQL_FSTRING_REAL (96%). الـ 8 المتبقية كلها
-# false positives (رسائل خطأ/لوج تحتوي كلمات SQL keywords).
-RUN python3 fix_sql_injection.py || echo "⚠️ fix_sql_injection.py failed — continuing with unpatched files"
+# v5.7.32: SQL injection fixes (f-string removal + .format() + parameterized)
+RUN python3 fix_sql_injection.py || echo "fix_sql_injection.py failed"
 
-# 🆕 v9.7.33 CLEANUP: حُذف `RUN python3 apply_fix_published_true.py`
-# نهائياً. الإصلاح مُطبَّق مباشرةً في handlers/handlers_callback.py:891
-# (FIX-PUBLISHED-TRUE v9.7.32). السكربت كان idempotent ويطبع
-# "Fix already applied — no changes needed" في كل بناء — بلا قيمة.
+# v5.7.33: DB pool min=20 + RateLimiter 30 concurrent + send timeout 2s
+RUN python3 fix_perf_v5733.py || echo "fix_perf_v5733.py failed"
 
 EXPOSE 10000
 
