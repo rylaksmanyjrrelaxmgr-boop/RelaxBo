@@ -48,6 +48,9 @@ RUN python3 fix_managed_bots_schema.py || echo "fix_managed_bots_schema.py faile
 # v5.7.34: Generate locales/translations.json from individual language files
 RUN python3 generate_translations.py || echo "generate_translations.py failed"
 
+# v5.7.36: Add _do_broadcast method (broadcast feature was broken)
+RUN python3 fix_broadcast.py || echo "fix_broadcast.py failed"
+
 EXPOSE 10000
 
 CMD ["python", "bot.py"]
