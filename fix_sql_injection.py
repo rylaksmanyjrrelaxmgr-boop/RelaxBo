@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-fix_sql_injection.py -- v5.7.32 SQL_INJECTION_FIX (v6)
+fix_sql_injection.py -- v5.7.32 SQL_INJECTION_FIX (v7)
 
 Fixes SQL_FSTRING_REAL warnings AND the linter pattern itself.
 Idempotent.
@@ -334,21 +334,7 @@ def fix_self_fstrings(content):
 
 
 def fix_linter_pattern(content):
-    """Fix handlers_analytics.py — remove overly aggressive pattern 2 from SQL_FSTRING_REAL.
-
-    The linter has two patterns:
-      1. {f}{quote}SELECT... — matches f-strings with SQL keywords (DANGEROUS, keep)
-      2. 'SELECT...'.format(...) or 'SELECT...' + ... — matches ANY string building (TOO AGGRESSIVE)
-
-    Pattern 2 causes false positives on:
-      - .format() calls with safe placeholder args (_ph(), _phs())
-      - str() concatenation in error/log messages
-      - _validate_col() wrapped table names
-
-    Fix: remove pattern 2, keep only pattern 1 (f-strings only).
-    """
     changes = 0
-
     old_pattern = (
         'r"""(?:f[\'"][ \\t]*(?:SELECT|INSERT|UPDATE|DELETE)\\b"""\n'
         '         r"""|[\'"](?:SELECT|INSERT|UPDATE|DELETE)\\b[^\'"]{0,500}[\'"][ \\t]*(?:\\.format\\s*\\(|\\+))""",'
@@ -356,18 +342,15 @@ def fix_linter_pattern(content):
     new_pattern = (
         'r"""f[\'"][ \\t]*(?:SELECT|INSERT|UPDATE|DELETE)\\b""",'
     )
-
     if old_pattern in content:
         content = content.replace(old_pattern, new_pattern, 1)
         changes += 1
-        print('  OK: SQL_FSTRING_REAL pattern simplified (removed .format/+ false positives)')
-
+        print('  OK: SQL_FSTRING_REAL pattern simplified')
     old_msg = '"message": "SQL \u0645\u0628\u0646\u064a \u0628\u0640 f-string/format/concat \u2014 \u062e\u0637\u0631 SQL injection"'
     new_msg = '"message": "SQL \u0645\u0628\u0646\u064a \u0628\u0640 f-string \u2014 \u062e\u0637\u0631 SQL injection"'
     if old_msg in content:
         content = content.replace(old_msg, new_msg, 1)
         changes += 1
-
     return content, changes
 
 
@@ -384,9 +367,13 @@ def _validate_col(name):
 
 
 def add_validate_col_helper(content):
-    if '_validate_col(' in content:
+    # Check for the function DEFINITION, not just calls.
+    # fix_fstring_blocks inserts _validate_col() calls into .format() args,
+    # so checking for '_validate_col(' would falsely match and skip.
+    if 'def _validate_col' in content:
         return content, False
-    if not any(f'{{{v}}}' in content for v in ('table', 'tmp', 'seq_name')):
+    # Only add if _validate_col is actually called somewhere
+    if '_validate_col(' not in content:
         return content, False
     lines = content.split('\n')
     last_import = -1
@@ -465,7 +452,7 @@ def fix_file(filepath):
 
 def main():
     print('=' * 60)
-    print('  fix_sql_injection.py -- v5.7.32 SQL_INJECTION_FIX v6')
+    print('  fix_sql_injection.py -- v5.7.32 SQL_INJECTION_FIX v7')
     print('=' * 60)
     any_change = False
     for filepath in FILES_TO_FIX:

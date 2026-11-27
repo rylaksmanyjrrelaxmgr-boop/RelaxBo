@@ -3,17 +3,12 @@
 """
 fix_perf_v5733.py -- v5.7.33 PERF-DB-POOL + RATELIMITER-EXPAND + SEND-TIMEOUT
 
-Fixes critical performance issues from logs:
-  1. Slow DB queries (2.70s): SELECT settings -- pool exhaustion
-  2. Slow DB queries (2.20s): INSERT last_publish -- pool exhaustion
-  3. RateLimiter internal timeout -- max_concurrent=15 too tight after v5.7.31
-  4. handle_group: 16055ms -- DB pool contention from auto_publish (20 channels)
-
 Fixes:
   1. RATE_LIMITER max_concurrent: 15 -> 30
   2. PUBLISH_RATE_LIMITER max_concurrent: 5 -> 10
-  3. DB pool: enforce minimum=20 even if DB_POOL_SIZE=10 in env
+  3. DB pool: enforce minimum=20
   4. safe_send acquire timeout: 5.0s -> 2.0s
+  5. _try_count() signature: accept params tuple (fixes TypeError)
 
 Idempotent.
 """
@@ -81,6 +76,40 @@ def fix_database():
     return changes
 
 
+def fix_bot_try_count():
+    """Fix bot.py -- _try_count() signature to accept params tuple.
+
+    fix_bot_values() in fix_sql_injection.py converts f-strings to
+    parameterized queries: (sql, params). But _try_count() only accepts
+    1 arg (sql). This causes:
+      TypeError: _try_count() takes 1 positional argument but 2 were given
+
+    Fix: change _try_count(sql) to _try_count(sql, params=None) and
+    pass params to DB.fetchone().
+    """
+    path = 'bot.py'
+    content = _read(path)
+    changes = 0
+
+    old_def = 'async def _try_count(sql: str):'
+    new_def = 'async def _try_count(sql: str, params=None):'
+    if old_def in content:
+        content = content.replace(old_def, new_def, 1)
+        changes += 1
+        print('  OK: _try_count() signature: added params=None')
+
+    old_call = 'row = await DB.fetchone(sql)'
+    new_call = 'row = await DB.fetchone(sql, params)'
+    if old_call in content:
+        content = content.replace(old_call, new_call, 1)
+        changes += 1
+        print('  OK: DB.fetchone(sql) -> DB.fetchone(sql, params)')
+
+    if changes > 0:
+        _write(path, content)
+    return changes
+
+
 def fix_bot_version():
     path = 'bot.py'
     content = _read(path)
@@ -116,6 +145,8 @@ def main():
         any_change = True
 
     print('\nbot.py:')
+    if fix_bot_try_count() > 0:
+        any_change = True
     if fix_bot_version() > 0:
         any_change = True
 
