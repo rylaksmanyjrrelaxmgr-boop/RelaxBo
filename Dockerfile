@@ -51,6 +51,9 @@ RUN python3 generate_translations.py || echo "generate_translations.py failed"
 # v5.7.36: Add _do_broadcast method (broadcast feature was broken)
 RUN python3 fix_broadcast.py || echo "fix_broadcast.py failed"
 
+# v5.7.37: /health command + weekly perf report + improvements
+RUN python3 fix_improvements.py || echo "fix_improvements.py failed"
+
 EXPOSE 10000
 
 CMD ["python", "bot.py"]
