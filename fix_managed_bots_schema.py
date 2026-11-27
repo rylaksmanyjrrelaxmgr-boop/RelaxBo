@@ -6,9 +6,14 @@ fix_managed_bots_schema.py -- v5.7.34
 Fixes db_diagnostics.py queries that use id/username instead of
 bot_id/name in the managed_bots table.
 
+IMPORTANT: This script runs AFTER fix_sql_injection.py which converts
+f-strings to .format(). So we need to match BOTH versions:
+  - Original: {bots_table} (f-string)
+  - Converted: {} (.format)
+
 Problem:
-  - db_diagnostics.py L816: b.id = k.bot_id -> error: column b.id does not exist
-  - db_diagnostics.py L835: SELECT id, username -> error: column "id" does not exist
+  - db_diagnostics.py: b.id = k.bot_id -> error: column b.id does not exist
+  - db_diagnostics.py: SELECT id, username -> error: column "id" does not exist
 
 Cause:
   managed_bots table uses bot_id as PRIMARY KEY (not id).
@@ -41,20 +46,36 @@ def fix_db_diagnostics():
     content = _read(path)
     changes = 0
 
-    old1 = 'WHERE NOT EXISTS (SELECT 1 FROM {bots_table} b WHERE b.id = k.bot_id)'
-    new1 = 'WHERE NOT EXISTS (SELECT 1 FROM {bots_table} b WHERE b.bot_id = k.bot_id)'
-    if old1 in content:
-        content = content.replace(old1, new1, 1)
+    # Fix 1: b.id -> b.bot_id (orphan FK check)
+    # Match BOTH original f-string and post-fix_sql_injection .format() versions
+    old1a = 'WHERE NOT EXISTS (SELECT 1 FROM {bots_table} b WHERE b.id = k.bot_id)'
+    old1b = 'WHERE NOT EXISTS (SELECT 1 FROM {} b WHERE b.id = k.bot_id)'
+    new1a = 'WHERE NOT EXISTS (SELECT 1 FROM {bots_table} b WHERE b.bot_id = k.bot_id)'
+    new1b = 'WHERE NOT EXISTS (SELECT 1 FROM {} b WHERE b.bot_id = k.bot_id)'
+    if old1a in content:
+        content = content.replace(old1a, new1a, 1)
         changes += 1
-        print('  OK: fixed b.id -> b.bot_id (orphan FK check)')
-
-    old2 = 'f"SELECT id, username FROM {bots_table} ORDER BY id ASC")'
-    new2 = 'f"SELECT bot_id, name FROM {bots_table} ORDER BY bot_id ASC")'
-    if old2 in content:
-        content = content.replace(old2, new2, 1)
+        print('  OK: fixed b.id -> b.bot_id (orphan FK, f-string version)')
+    elif old1b in content:
+        content = content.replace(old1b, new1b, 1)
         changes += 1
-        print('  OK: fixed SELECT id, username -> SELECT bot_id, name')
+        print('  OK: fixed b.id -> b.bot_id (orphan FK, .format version)')
 
+    # Fix 2: SELECT id, username -> SELECT bot_id, name
+    old2a = 'SELECT id, username FROM {bots_table} ORDER BY id ASC'
+    old2b = 'SELECT id, username FROM {} ORDER BY id ASC'
+    new2a = 'SELECT bot_id, name FROM {bots_table} ORDER BY bot_id ASC'
+    new2b = 'SELECT bot_id, name FROM {} ORDER BY bot_id ASC'
+    if old2a in content:
+        content = content.replace(old2a, new2a, 1)
+        changes += 1
+        print('  OK: fixed SELECT id, username -> SELECT bot_id, name (f-string version)')
+    elif old2b in content:
+        content = content.replace(old2b, new2b, 1)
+        changes += 1
+        print('  OK: fixed SELECT id, username -> SELECT bot_id, name (.format version)')
+
+    # Fix 3: b.get("id") -> b.get("bot_id")
     old3 = 'bid = b.get("id")'
     new3 = 'bid = b.get("bot_id")'
     if old3 in content:
