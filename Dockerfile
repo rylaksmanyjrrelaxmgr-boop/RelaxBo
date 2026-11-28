@@ -54,11 +54,14 @@ RUN python3 fix_broadcast.py || echo "fix_broadcast.py failed"
 # v5.7.37: /health command + weekly perf report
 RUN python3 fix_improvements.py || echo "fix_improvements.py failed"
 
-# v5.7.38: Add Health button to admin panel
+# v5.7.38: Add Health button to admin panel (full menu)
 RUN python3 fix_admin_health_button.py || echo "fix_admin_health_button.py failed"
 
 # v5.7.39: Complete missing translations
 RUN python3 fix_complete_translations.py || echo "fix_complete_translations.py failed"
+
+# v5.7.40: Add Health button to admin short menu too
+RUN python3 fix_admin_health_both_menus.py || echo "fix_admin_health_both_menus.py failed"
 
 EXPOSE 10000
 
