@@ -36,26 +36,29 @@ COPY . .
 # v5.7.31: RateLimiter release + warn-parallel + penalty-msg-bg
 RUN python3 apply_v5731_fixes.py || echo "apply_v5731_fixes.py failed"
 
-# v5.7.32: SQL injection fixes (f-string removal + .format() + parameterized)
+# v5.7.32: SQL injection fixes
 RUN python3 fix_sql_injection.py || echo "fix_sql_injection.py failed"
 
 # v5.7.33: DB pool min=20 + RateLimiter 30 concurrent + send timeout 2s
 RUN python3 fix_perf_v5733.py || echo "fix_perf_v5733.py failed"
 
-# v5.7.34: Fix managed_bots schema (id->bot_id, username->name)
+# v5.7.34: Fix managed_bots schema
 RUN python3 fix_managed_bots_schema.py || echo "fix_managed_bots_schema.py failed"
 
-# v5.7.34: Generate locales/translations.json from individual language files
+# v5.7.34: Generate translations.json
 RUN python3 generate_translations.py || echo "generate_translations.py failed"
 
-# v5.7.36: Add _do_broadcast method (broadcast feature was broken)
+# v5.7.36: Broadcast feature
 RUN python3 fix_broadcast.py || echo "fix_broadcast.py failed"
 
-# v5.7.37: /health command + weekly perf report + improvements
+# v5.7.37: /health command + weekly perf report
 RUN python3 fix_improvements.py || echo "fix_improvements.py failed"
 
 # v5.7.38: Add Health button to admin panel
 RUN python3 fix_admin_health_button.py || echo "fix_admin_health_button.py failed"
+
+# v5.7.39: Complete missing translations
+RUN python3 fix_complete_translations.py || echo "fix_complete_translations.py failed"
 
 EXPOSE 10000
 
