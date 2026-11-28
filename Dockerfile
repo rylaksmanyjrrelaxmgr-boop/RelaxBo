@@ -54,6 +54,9 @@ RUN python3 fix_broadcast.py || echo "fix_broadcast.py failed"
 # v5.7.37: /health command + weekly perf report + improvements
 RUN python3 fix_improvements.py || echo "fix_improvements.py failed"
 
+# v5.7.38: Add Health button to admin panel
+RUN python3 fix_admin_health_button.py || echo "fix_admin_health_button.py failed"
+
 EXPOSE 10000
 
 CMD ["python", "bot.py"]
